@@ -301,7 +301,7 @@ private:
     // calls) -- a window during which the worker thread already existed but
     // these were still null. Now constructor-injected: this fills the
     // SessionParams fields Session's ctor reads, before Session exists.
-    void ApplyConstructorWiring(SessionParams& params, bool has_parent);
+    void ApplyConstructorWiring(SessionParams& params);
     // The locked "findable" section: signal subscriptions, then the sessions_
     // insertion, in the same critical section (see the call site for why).
     void PublishSession(const std::string& session_id, const std::shared_ptr<Session>& session,

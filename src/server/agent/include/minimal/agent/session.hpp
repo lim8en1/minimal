@@ -275,12 +275,15 @@ struct SessionParams {
     // existed but these were still null. All four borrowed, process-wide;
     // unset in tests that never exercise /agent or a provider rebuild.
     const AgentPresetRegistry* presets = nullptr;
-    // Null for a subagent: commands are a user control channel a child has
-    // none of (see WireSession's reasoning at the call site).
+    // Wired for every session, subagents included; a child's surface is
+    // READ-ONLY -- the subagent guard (SessionServiceImpl::DispatchCommand
+    // reader-side, Session::ExecuteCommand as defense in depth) refuses
+    // anything else, which is what keeps /agent's preset re-resolution from
+    // reopening the recursion (see ApplyConstructorWiring's reasoning).
     const commands::CommandRegistry* commands = nullptr;
-    // Same subagent rule as `commands` above (a child gets neither or both);
-    // null also degrades cleanly for tests that never exercise a project
-    // command. Owned by the registry/main, process-wide, like `presets`.
+    // Wired alongside `commands` (a child gets both or neither); null also
+    // degrades cleanly for tests that never exercise a project command.
+    // Owned by the registry/main, process-wide, like `presets`.
     const commands::ProjectCommandSource* project_commands = nullptr;
     const llm::ProviderFactoryRegistry* provider_factories = nullptr;
     ProviderInstanceCache* provider_instance_cache = nullptr;

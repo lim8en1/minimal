@@ -151,6 +151,7 @@ ftxui::Component MakePromptEditor(
     const MentionSuggestor& suggest,
     CommandCatalogSource command_catalog,
     std::function<bool()> session_available,
+    std::function<bool()> subagent_read_only,
     std::shared_ptr<bool> pasting) {
     using namespace ftxui;
 
@@ -513,6 +514,7 @@ ftxui::Component MakePromptEditor(
     return Renderer(with_events,
                     [=, &state, &theme, cached_command_prefix = std::string(),
                      cached_command_session_ok = false,
+                     cached_command_subagent = false,
                      cached_command_suggestions = std::vector<std::string>(),
                      has_cached_command = false, cached_mention_prefix = std::string(),
                      has_cached_mention = false]() mutable {
@@ -530,8 +532,11 @@ ftxui::Component MakePromptEditor(
             // The focused tab's session presence, probed once per frame this
             // runs: entries marked requires_session are offered only when a
             // session exists (a sessionless tab never offers a command that
-            // would only refuse).
+            // would only refuse). The subagent probe likewise: on a child
+            // tab only UsableOnSubagent entries are offered, because the
+            // server refuses everything else there.
             const bool session_ok = !session_available || session_available();
+            const bool subagent_only = subagent_read_only && subagent_read_only();
 
             // Skip the catalog scan (and its per-entry string concatenation)
             // when nothing that could change the result has: same prefix,
@@ -549,6 +554,7 @@ ftxui::Component MakePromptEditor(
             // had actually changed.
             const bool cache_hit = has_cached_command && command_prefix == cached_command_prefix &&
                                    session_ok == cached_command_session_ok &&
+                                   subagent_only == cached_command_subagent &&
                                    state.suggestions == cached_command_suggestions;
             if (!cache_hit) {
                 std::vector<std::string> suggestions;
@@ -559,6 +565,11 @@ ftxui::Component MakePromptEditor(
                     // exists; /agent and /model always are (their forms
                     // never refuse for want of one).
                     if (!UsableWithoutSession(entry) && !session_ok) continue;
+                    // The subagent gate (see UsableOnSubagent): a child's
+                    // command surface is read-only server-side, so a
+                    // mutating entry is never offered where it would only
+                    // be refused.
+                    if (subagent_only && !UsableOnSubagent(entry)) continue;
                     if (entry.name.rfind(command_prefix, 0) != 0) continue;
                     std::string display = "/" + entry.name + "  ·  " + entry.summary;
                     if (entry.submits_prompt) display += "  (submits a prompt as your turn)";
@@ -578,6 +589,7 @@ ftxui::Component MakePromptEditor(
                 has_cached_command = true;
                 cached_command_prefix = command_prefix;
                 cached_command_session_ok = session_ok;
+                cached_command_subagent = subagent_only;
                 cached_command_suggestions = state.suggestions;
             }
             state.list_open = !state.suggestions.empty();

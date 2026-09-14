@@ -122,6 +122,21 @@ inline bool UsableWithoutSession(const CommandCatalogEntry& entry) {
     return !entry.requires_session || entry.name == "agent" || entry.name == "model";
 }
 
+// True when the command is usable on a SUBAGENT tab. A child's command
+// surface is READ-ONLY server-side (SessionServiceImpl::DispatchCommand
+// refuses everything else), so the palette offers only what would not be
+// refused there: read-only catalog entries (/cost, /sessions, ...), plus the
+// two client-intercepted commands that work on a child (/new opens a tab of
+// its own; /detach-session closes the focused child). /agent and /model are
+// deliberately NOT usable: their bare forms open pickers and their named
+// forms stage desired state, all aimed at the focused tab's session -- and
+// choosing what a CHILD runs on is the parent preset's business, not the
+// observer's. ONE rule gates the /-autocomplete and the /help overlay, the
+// same pattern as UsableWithoutSession above.
+inline bool UsableOnSubagent(const CommandCatalogEntry& entry) {
+    return entry.read_only || entry.name == "new" || entry.name == "detach-session";
+}
+
 // The @-mention query seam (T2: async). `nullopt` means "still waiting --
 // call again next frame"; a present (possibly empty) vector is the resolved
 // answer. The shipped implementation (RunTui's `suggest` lambda) submits
@@ -150,6 +165,10 @@ ftxui::Component MakePromptEditor(
     // true (a sessionless tab never offers a command that cannot run on
     // one). Null = always available.
     std::function<bool()> session_available = nullptr,
+    // Cheap, loop-thread probe for "the focused tab is a SUBAGENT". While it
+    // returns true, only UsableOnSubagent entries are offered (a child's
+    // command surface is read-only server-side). Null = no filter.
+    std::function<bool()> subagent_read_only = nullptr,
     // Bracketed-paste (DECSET 2004) in-progress flag: null (the default)
     // makes the factory own a private one, exactly as before. RunTui passes
     // its own so HandleGlobalKey (keybinding_dispatch.cpp) can read the

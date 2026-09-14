@@ -2654,7 +2654,7 @@ TEST_CASE("commands help overlay: Enter hands the command to on_pick, then close
     bool closed = false;
     std::string picked;
     auto view = MakeCommandsHelpView(catalog, theme, [&] { closed = true; }, nullptr, nullptr,
-                                     [&](const std::string& name) { picked = name; });
+                                     nullptr, [&](const std::string& name) { picked = name; });
     CHECK(RenderFrame(view).find("enter: insert") != std::string::npos);
     REQUIRE(SendEvent(view, ftx::Event::Return));
     CHECK(picked == "compact");   // the first row

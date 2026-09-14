@@ -1127,6 +1127,12 @@ public:
     // valid whether or not a session exists yet.
     std::string FocusedTabId() const;
 
+    // True when the focused tab shows a SUBAGENT session (a parent_session_id
+    // on its tab info). Gates the /-palette's read-only filter: a child's
+    // command surface is read-only server-side, so the client offers only
+    // what would not be refused there.
+    bool FocusedTabIsSubagent() const;
+
     // True while the focused tab has a tool mid-call. The render pump polls
     // this every tick (see app.cpp's pump lambda) to force a repaint even
     // with no wire event to bump UiVersion -- a foreground tool that goes

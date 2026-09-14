@@ -8,13 +8,14 @@ namespace minimal::client {
 ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& catalog,
                                       const Theme& theme, std::function<void()> on_close,
                                       std::function<bool()> session_available,
+                                      std::function<bool()> subagent_read_only,
                                       std::function<void()>* reset_state,
                                       std::function<void(const std::string&)> on_pick) {
     // BY VALUE, not by reference: `catalog` is this factory's OWN parameter,
     // and the returned Component (and its closures) outlive this call -- the
     // exact "closures outlive the factory" trap keymap_help.cpp documents for
     // `bindings`.
-    auto build_rows = [catalog, session_available](const std::string& filter) {
+    auto build_rows = [catalog, session_available, subagent_read_only](const std::string& filter) {
         std::vector<MenuRow> rows;
         // The sessionless gate shared with the /-autocomplete
         // (UsableWithoutSession): a session-bound command is hidden while
@@ -24,8 +25,14 @@ ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& ca
         // the tab's desired state -- choosing what a session starts on is
         // exactly what a sessionless tab is FOR.
         const bool session_ok = !session_available || session_available();
+        // The subagent gate shared with the /-autocomplete
+        // (UsableOnSubagent): a child's command surface is read-only
+        // server-side, so the overlay never advertises a mutating command
+        // the child would only refuse.
+        const bool subagent_only = subagent_read_only && subagent_read_only();
         for (const auto& entry : catalog) {
             if (!UsableWithoutSession(entry) && !session_ok) continue;
+            if (subagent_only && !UsableOnSubagent(entry)) continue;
             std::string label = "/" + entry.name + "  " + entry.summary;
             if (entry.submits_prompt) label += "  (submits a prompt as your turn)";
             if (entry.read_only) label += "  (read-only)";

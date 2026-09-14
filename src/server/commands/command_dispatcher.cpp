@@ -22,6 +22,10 @@ std::string SessionRequiredMessage(const std::string& name) {
     return "/" + name + " needs a session; send a message to start one first";
 }
 
+std::string SubagentRefusalMessage(const std::string& name) {
+    return "/" + name + " cannot run in a subagent session; only read-only commands work here";
+}
+
 namespace {
 
 // The shared execute-and-shape tail of both dispatch paths: run the command,

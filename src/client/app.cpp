@@ -1430,7 +1430,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // The requires_session filter's probe (cheap: one locked read in
         // AppState). An empty FocusedSessionId means no tab, or a tab whose
         // session does not exist yet -- both hide the session-bound entries.
+        // The subagent probe feeds the read-only gate (UsableOnSubagent):
+        // a child's command surface is read-only server-side, so a subagent
+        // tab is offered only what would not be refused there.
         [&app]() { return !app->FocusedSessionId().empty(); },
+        [&app]() { return app->FocusedTabIsSubagent(); },
         pasting);
 
     // --- permission modal (inner swapped per outstanding request) -------------
@@ -1610,8 +1614,10 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // Same requires_session exclusion the autocomplete applies: while the
         // focused tab has no session, the overlay lists only sessionless
         // commands (the overlay rebuilds its rows on every open, so the probe
-        // is fresh each time).
+        // is fresh each time). The subagent probe likewise: on a child tab,
+        // only read-only commands are listed.
         [&app]() { return !app->FocusedSessionId().empty(); },
+        [&app]() { return app->FocusedTabIsSubagent(); },
         &commands_help_reset,
         // Enter inserts "/name " with the caret after it, ready for args.
         [&prompt_state](const std::string& name) {

@@ -526,6 +526,22 @@ void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
     // to invalidate.
     const commands::CommandRegistry* project_registry =
         project_commands_ != nullptr ? &project_commands_->For(info_.project_root) : nullptr;
+    // SUBAGENT GUARD, defense in depth: the reader (SessionServiceImpl::
+    // DispatchCommand) already refuses non-read-only commands for a child, but
+    // this is the one place every dispatch path converges, so the invariant
+    // "a subagent never executes a mutating command" holds even if a future
+    // call site bypasses the reader. Answered, never dropped: a client waiting
+    // on a CommandResult would otherwise hang.
+    if (!params_.parent_session_id.empty()) {
+        const commands::Command* resolved =
+            commands::FindEffective(*commands_, project_registry, command.name);
+        if (resolved != nullptr && !resolved->ReadOnly()) {
+            EmitCommandResult(commands::CommandResult::Error(
+                                  commands::SubagentRefusalMessage(command.name)),
+                              command);
+            return;
+        }
+    }
     commands::CommandContext context(this, *presets_, *confirmations_, logger_, mcp_manager_);
     auto outcome =
         commands::Dispatch(*commands_, command.name, command.args, context, busy, project_registry);

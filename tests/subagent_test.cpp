@@ -1552,20 +1552,23 @@ TEST_CASE("a malformed settings default_subagent_model behaves as unset",
     CHECK(TextOf(block) == "inherited child result");
 }
 
-TEST_CASE("a subagent gets no /-command surface", "[subagent][commands][invariant]") {
+TEST_CASE("a subagent's /-command surface is read-only", "[subagent][commands][invariant]") {
     // CROSS-FEATURE, and neither branch could have seen it: subagents and the
     // command system were built in parallel, and a child is constructed through
     // the same registry path that wires the command registry.
     //
-    // Leaving it open is an ESCAPE. /agent re-resolves a preset from disk, and a
-    // freshly resolved preset has is_subagent = false and its own full
-    // allowed_tools -- so `/agent build` inside a child would hand back
-    // spawn_subagent and reopen the recursion ARCHITECTURE.md calls a hard rule,
-    // and would drop the intersected allowed lists the parent handed down.
+    // The registry IS wired for a child now -- /help or /cost beside a live
+    // turn is harmless and useful to the client observing the child -- but the
+    // MUTATING half stays closed, and that is the escape-hatch closure: /agent
+    // re-resolves a preset from disk, and a freshly resolved preset has
+    // is_subagent = false and its own full allowed_tools -- so `/agent build`
+    // inside a child would hand back spawn_subagent and reopen the recursion
+    // ARCHITECTURE.md calls a hard rule, and would drop the intersected
+    // allowed lists the parent handed down. /agent is not ReadOnly(), so the
+    // subagent guard refuses it with the whole class it belongs to.
     //
-    // Commands are a user control channel and a child has no user: its client
-    // attaches to observe. Closing the surface removes the class rather than
-    // patching the one command that reaches it today.
+    // Everything ANSWERS -- a dropped invocation would hang a client either
+    // way -- but only the read-only half can act.
     SubagentFixture fixture;
     commands::CommandRegistry registry;
     for (auto& command : commands_core::MakeCoreCommands()) registry.Register(std::move(command));
@@ -1591,10 +1594,11 @@ TEST_CASE("a subagent gets no /-command surface", "[subagent][commands][invarian
     REQUIRE(child != nullptr);
     REQUIRE(child->WaitForIdleForTesting(10s));
 
-    const auto answer = [&fixture](const std::shared_ptr<agent::Session>& session) {
+    const auto answer = [&fixture](const std::shared_ptr<agent::Session>& session,
+                                   const std::string& name) {
         agent::QueuedCommand command;
         command.request_id = "probe";
-        command.name = "help";
+        command.name = name;
         session->RunCommandNow(command);
         for (const auto& event : fixture.DrainQueue(session)) {
             if (event.has_command_result() && event.command_result().request_id() == "probe") {
@@ -1604,11 +1608,19 @@ TEST_CASE("a subagent gets no /-command surface", "[subagent][commands][invarian
         return std::string("<no answer>");
     };
 
-    // The parent answers /help with its listing; the child answers that it has
-    // no command subsystem at all. Both ANSWER -- a dropped invocation would
-    // hang a client either way -- but only one of them can act.
-    CHECK(answer(parent).find("/agent") != std::string::npos);
-    CHECK(answer(child).find("not available") != std::string::npos);
+    // Read-only commands work on BOTH: the parent answers /help with its
+    // listing, and so does the child -- the surface a child gets.
+    CHECK(answer(parent, "help").find("/agent") != std::string::npos);
+    CHECK(answer(child, "help").find("/agent") != std::string::npos);
+
+    // The mutating half is refused on the child, with the message -- not the
+    // old blanket "not available", and never silence. /agent specifically is
+    // the escape hatch the guard exists for; /compact rides the same refusal.
+    CHECK(answer(child, "agent").find("only read-only commands") != std::string::npos);
+    CHECK(answer(child, "compact").find("only read-only commands") != std::string::npos);
+
+    // ...and the parent still runs its mutating commands.
+    CHECK(answer(parent, "agent").find("only read-only commands") == std::string::npos);
 }
 
 // --- advisor inheritance ----------------------------------------------------------

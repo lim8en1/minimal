@@ -3102,6 +3102,14 @@ std::string AppState::FocusedTabId() const {
     return focused_id_;
 }
 
+bool AppState::FocusedTabIsSubagent() const {
+    std::lock_guard lk(mtx_);
+    for (const auto& tab : tabs_) {
+        if (tab.info.tab_id == focused_id_) return tab.info.parent_session_id.has_value();
+    }
+    return false;
+}
+
 bool AppState::FocusedTabHasRunningTool() const {
     // GetStateByTab takes mtx_ itself: resolve the tab id first, then release
     // before that lookup, same ordering FocusedTabId's callers already use.

@@ -27,6 +27,10 @@ namespace minimal::client {
 ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& catalog,
                                       const Theme& theme, std::function<void()> on_close,
                                       std::function<bool()> session_available = nullptr,
+                                      // While true (the focused tab is a subagent), only
+                                      // UsableOnSubagent entries are listed -- the same
+                                      // gate the /-autocomplete applies.
+                                      std::function<bool()> subagent_read_only = nullptr,
                                       std::function<void()>* reset_state = nullptr,
                                       std::function<void(const std::string&)> on_pick = nullptr);
 

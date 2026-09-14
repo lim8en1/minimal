@@ -58,5 +58,9 @@ CommandResult DispatchSessionless(const CommandRegistry& registry, const std::st
 std::string UnknownCommandMessage(const std::string& name);
 std::string BusyRefusalMessage(const std::string& name);
 std::string SessionRequiredMessage(const std::string& name);
+// A subagent's surface is read-only; the subagent guard (reader-side in
+// SessionServiceImpl::DispatchCommand, defense-in-depth in
+// Session::ExecuteCommand) refuses everything else verbatim with this.
+std::string SubagentRefusalMessage(const std::string& name);
 
 }  // namespace minimal::commands

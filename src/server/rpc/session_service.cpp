@@ -736,6 +736,22 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
     const commands::Command* command =
         commands_ != nullptr ? commands::FindEffective(*commands_, project_registry, queued.name)
                              : nullptr;
+    // THE SUBAGENT GUARD, answered reader-side: a child's command surface is
+    // read-only (see SessionRegistry::ApplyConstructorWiring for why the
+    // registry is still wired -- /cost beside a live turn is fine, /agent's
+    // preset re-resolution is not). Refusing HERE rather than queueing is the
+    // whole point: a subagent's life is one turn, and the worker drain drops
+    // everything queued after it finishes -- a mutating command typed on a
+    // subagent tab mid-turn would otherwise vanish in silence. ReadOnly() is
+    // the command object's own answer, so any future read-only command works
+    // on a child for free and any mutating one is refused without a new
+    // table. (Session::ExecuteCommand repeats the check as defense in depth
+    // for dispatch paths that bypass this reader.)
+    if (!session.info().parent_session_id.empty() && command != nullptr &&
+        !command->ReadOnly()) {
+        session.RejectCommand(queued, commands::SubagentRefusalMessage(queued.name));
+        return;
+    }
     if (command != nullptr && command->ReadOnly()) {
         // On the bounded command pool, not a detached thread: a detached task
         // per command made a flood of read-only commands an unbounded pile of

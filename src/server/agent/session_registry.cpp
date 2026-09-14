@@ -165,7 +165,6 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     } guard{*this, session_id};
 
     // Read before params is moved from.
-    const bool has_parent = !params.parent_session_id.empty();
     SignalRouter* const signal_router = params.signal_router;
     const std::vector<std::string> signal_selectors = std::move(params.signal_selectors);
     const bool resume = params.resume;
@@ -254,7 +253,7 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // factories/instance cache reach Session's ctor on `params`, closing the
     // window a post-construction set_* call used to leave open between the
     // worker thread starting and these becoming non-null.
-    ApplyConstructorWiring(params, has_parent);
+    ApplyConstructorWiring(params);
 
     ResumeSeed seed = resume ? LoadResumeSeed(session_id) : ResumeSeed{};
 
@@ -405,23 +404,28 @@ ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id) {
     return seed;
 }
 
-void SessionRegistry::ApplyConstructorWiring(SessionParams& params, bool has_parent) {
+void SessionRegistry::ApplyConstructorWiring(SessionParams& params) {
     params.presets = &presets_;
-    // A SUBAGENT GETS NO COMMAND SURFACE. Commands are a user control channel,
-    // and a child has no user: its client attaches to observe, and the spawn was
-    // driven by the parent's model rather than by a person with a prompt.
+    // A SUBAGENT GETS A READ-ONLY COMMAND SURFACE. Commands are a user control
+    // channel, and a child has no user: its client attaches to observe, and the
+    // spawn was driven by the parent's model rather than by a person with a
+    // prompt. But the observing client still benefits from the harmless half of
+    // the registry (/cost, /help <cmd>) -- commands that touch no session state
+    // and may run beside a live turn by definition.
     //
-    // It is also an escape hatch if left open. /agent re-resolves a preset from
-    // disk, and a freshly resolved preset has is_subagent = false and its own
-    // full allowed_tools -- so a child running `/agent build` would get
-    // spawn_subagent back and reopen the recursion ARCHITECTURE.md calls a hard
-    // rule. Closing the surface removes the whole class rather than patching the
-    // one command that happens to reach it today.
-    params.commands = has_parent ? nullptr : commands_;
-    // Same subagent rule as commands, and for the same reason (§ its own
-    // comment above): a child gets no command channel, project-scoped or
-    // otherwise.
-    params.project_commands = has_parent ? nullptr : project_commands_;
+    // The registry is therefore wired for children too; what a child never gets
+    // is a MUTATING dispatch. That is the escape hatch closure: /agent re-
+    // resolves a preset from disk, and a freshly resolved preset has
+    // is_subagent = false and its own full allowed_tools -- so a child running
+    // `/agent build` would get spawn_subagent back and reopen the recursion
+    // ARCHITECTURE.md calls a hard rule. /agent is not ReadOnly(), so the
+    // subagent guard (SessionServiceImpl::DispatchCommand reader-side, and
+    // Session::ExecuteCommand as defense in depth) refuses it and its whole
+    // class. The guard is derived from the command object's own ReadOnly()
+    // answer, so a future read-only command works on a child for free and a
+    // future mutating one is refused without this file learning about it.
+    params.commands = commands_;
+    params.project_commands = project_commands_;
     params.provider_factories = &providers_;
     params.provider_instance_cache = &provider_cache_;
 }
