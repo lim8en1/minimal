@@ -500,6 +500,88 @@ TEST_CASE("an incomplete disclosure always prompts, whatever is held",
     CHECK(checker.seen.size() == 3);
 }
 
+TEST_CASE("a prompt offers only the keys the operator does not already hold",
+          "[tool_executor][grants]") {
+    // `cd x; ls a | wc -l`, then `cd x; ls a | grep something`: the second
+    // prompt used to re-list cd and ls -- already granted, idempotent to
+    // re-confirm, pure prompt-fatigue noise. The conjunction keeps running on
+    // the unfiltered disclosure (the prompt still fires while grep is
+    // missing); only what is SHOWN gets filtered down to the new keys.
+    Fixture f;
+    auto& tool = f.AddTool("bash", ToolCategory::Execute);
+    tool.set_disclosure(
+        Disclosing({"bash:/usr/bin/cd", "bash:/bin/ls", "bash:/usr/bin/wc"}));
+    GrantingPermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AskExecutePolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu1", "bash", {{"command", "cd x; ls a | wc -l"}}, ctx).is_error);
+    REQUIRE(checker.seen.size() == 1);
+    CHECK(checker.seen[0].disclosure.grants.size() == 3);  // nothing held yet
+    REQUIRE(executor.granted_count() == 3);
+
+    tool.set_disclosure(
+        Disclosing({"bash:/usr/bin/cd", "bash:/bin/ls", "bash:/usr/bin/grep"}));
+    CHECK_FALSE(
+        executor.Run("tu2", "bash", {{"command", "cd x; ls a | grep something"}}, ctx).is_error);
+    REQUIRE(checker.seen.size() == 2);
+    REQUIRE(checker.seen[1].disclosure.grants.size() == 1);  // grep only
+    CHECK(checker.seen[1].disclosure.grants[0].key == "bash:/usr/bin/grep");
+
+    // Every key already held: no prompt at all -- the conjunction decides,
+    // not the filtered offer list.
+    tool.set_disclosure(Disclosing({"bash:/usr/bin/cd", "bash:/bin/ls"}));
+    CHECK_FALSE(executor.Run("tu3", "bash", {{"command", "cd x; ls"}}, ctx).is_error);
+    CHECK(checker.seen.size() == 2);
+    CHECK(f.tool->calls.size() == 3);
+}
+
+TEST_CASE("two offers for the same binary collapse to one prompt row",
+          "[tool_executor][grants]") {
+    // Different words, same binary: `ls` and `/bin/ls` both resolve to
+    // bash:/bin/ls. They mint the same key, so showing two "allow /bin/ls *"
+    // rows for one command was noise (and two ticks for one grant).
+    Fixture f;
+    auto& tool = f.AddTool("bash", ToolCategory::Execute);
+    tool.set_disclosure(Disclosing({"bash:/bin/ls", "bash:/usr/bin/git", "bash:/bin/ls"}));
+    GrantingPermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AskExecutePolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu1", "bash", {{"command", "ls; git status; /bin/ls"}}, ctx).is_error);
+
+    REQUIRE(checker.seen.size() == 1);
+    REQUIRE(checker.seen[0].disclosure.grants.size() == 2);
+    CHECK(checker.seen[0].disclosure.grants[0].key == "bash:/bin/ls");   // first wins
+    CHECK(checker.seen[0].disclosure.grants[1].key == "bash:/usr/bin/git");
+    CHECK(executor.granted_count() == 2);
+}
+
+TEST_CASE("an incomplete disclosure with all nameable keys held prompts with no offers",
+          "[tool_executor][grants]") {
+    // `eval x; ls` with ls already granted: the held key cannot be re-offered,
+    // and the unnameable part never could be. The prompt still fires (the
+    // incomplete rule) -- with zero grant checkboxes, allow-once/deny only.
+    Fixture f;
+    auto& tool = f.AddTool("bash", ToolCategory::Execute);
+    tool.set_disclosure(Disclosing({"bash:/bin/ls"}));
+    GrantingPermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AskExecutePolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu1", "bash", {{"command", "ls"}}, ctx).is_error);
+    REQUIRE(executor.granted_count() == 1);
+
+    tool.set_disclosure(Disclosing({"bash:/bin/ls"}, /*complete=*/false));
+    CHECK_FALSE(executor.Run("tu2", "bash", {{"command", "eval x; ls"}}, ctx).is_error);
+    REQUIRE(checker.seen.size() == 2);
+    CHECK(checker.seen[1].disclosure.grants.empty());
+    CHECK(executor.granted_count() == 1);  // allow-once minted nothing new
+}
+
 TEST_CASE("a checker cannot grant a key it was never shown", "[tool_executor][grants]") {
     Fixture f;
     auto& tool = f.AddTool("bash", ToolCategory::Execute);

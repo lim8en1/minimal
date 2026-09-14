@@ -1,6 +1,7 @@
 #include "minimal/tools/tool_executor.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 #include <utility>
 
 #include "minimal/mcp/naming.hpp"
@@ -355,7 +356,26 @@ PreparedInvocation ToolExecutor::PrepareGuarded(const std::string& tool_use_id,
             request.category = tool->category_for(input).value_or(tool->spec().category);
             request.tool_input = input;
             request.summary = disclosure.summary;
-            request.disclosure = disclosure;
+            // The prompt offers only what the operator does NOT already hold:
+            // a compound command sharing binaries with an earlier one
+            // (`cd x; ls a | wc -l`, then `cd x; ls a | grep something`)
+            // re-listed every already-granted binary on every prompt --
+            // prompt-fatigue noise, since a held key is an idempotent insert.
+            // The conjunction above keeps running on the UNFILTERED
+            // disclosure, so the prompt/no-prompt decision is unchanged; and
+            // two words resolving to the same binary (`ls` and `/bin/ls` in
+            // one command) dedupe to the first offer -- they mint the same
+            // key anyway. The granted-subset-of-offered filter downstream
+            // still bounds the answer, now to what THIS prompt showed.
+            PermissionDisclosure shown = disclosure;
+            shown.grants.clear();
+            std::unordered_set<std::string> shown_keys;
+            for (const auto& offer : disclosure.grants) {
+                if (session_grants_.count(offer.key) != 0) continue;
+                if (!shown_keys.insert(offer.key).second) continue;
+                shown.grants.push_back(offer);
+            }
+            request.disclosure = std::move(shown);
 
             const PermissionResponse response = checker_.check(request);
             if (response.decision == PermissionDecision::Deny) {
