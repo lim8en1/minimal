@@ -10,6 +10,7 @@
 #include "minimal/client/view/mcp_picker.hpp"
 #include "minimal/client/view/model_picker.hpp"
 #include "minimal/client/view/session_picker.hpp"
+#include "minimal/client/view/subagent_picker.hpp"
 
 namespace minimal::client {
 
@@ -433,6 +434,101 @@ void PickerController::RebuildMcpPickerComponent() {
         MakeMcpPicker(mcp_picker_servers_, deps_.theme,
                      {.on_toggle = [this](const std::string& name) { ToggleMcpServer(name); },
                       .on_close = [this] { deps_.show_mcp_picker = false; }});
+}
+
+// The /subagents picker (see the header). One bounded fetch per open, like
+// the agent picker; the parent filter runs in the apply closure so a
+// session's rows are the only ones this picker ever holds.
+void PickerController::OpenSubagentsPicker(const std::string& parent_session_id) {
+    deps_.show_subagent_picker = true;
+    subagent_include_ended_ = false;
+    subagent_parent_ = parent_session_id;
+    subagent_children_.clear();
+    RebuildSubagentPickerComponent();
+    deps_.app.RunOnRpcQueue([this, parent_session_id] {
+        // include_all_dirs: the GROUP's own project root governs where its
+        // children live, not this client's cwd -- the same rule
+        // AttachSessionGroup's child scan uses.
+        SessionClient::ListSessionsOptions opts;
+        opts.include_all_dirs = true;
+        opts.include_subagents = true;
+        opts.limit = 200;   // AttachSessionGroup's bound; one page, no load-more
+        const auto result = deps_.client.ListSessions(opts);
+        if (!result.status.ok()) {
+            minimal::common::DefaultLogger().warn("subagent picker fetch failed: {}",
+                                                  result.status.error_message());
+            return;
+        }
+        std::vector<v1::SessionSummary> children;
+        for (const auto& row : result.response.sessions()) {
+            if (row.parent_session_id() == parent_session_id) children.push_back(row);
+        }
+        QueueApply([this, children = std::move(children)]() mutable {
+            subagent_children_ = std::move(children);
+            RebuildSubagentPickerComponent();
+        });
+    });
+}
+
+void PickerController::RebuildSubagentPickerComponent() {
+    *deps_.subagent_picker_slot =
+        MakeSubagentPicker(subagent_children_, subagent_include_ended_, deps_.theme,
+                           {.on_select =
+                                [this](const std::string& session_id, bool is_live) {
+                                    deps_.show_subagent_picker = false;
+                                    const std::string parent = subagent_parent_;
+                                    deps_.app.RunOnRpcQueue([this, session_id, is_live, parent] {
+                                        // Already open -> focus it. Everything
+                                        // downstream (AttachTab's duplicate rule,
+                                        // OpenTranscriptTab's) agrees: one tab per
+                                        // session, the existing one is the answer.
+                                        for (const auto& tab : deps_.app.GetAllTabs()) {
+                                            if (tab.session_id == session_id) {
+                                                deps_.app.SetFocusedTab(tab.tab_id);
+                                                return;
+                                            }
+                                        }
+                                        if (is_live) {
+                                            // Group under the parent's root -- the
+                                            // same ordinal lookup OnSubagentSpawned
+                                            // does, so the attached child takes its
+                                            // "↳" place in the group.
+                                            int64_t root_ordinal = -1;
+                                            for (const auto& tab : deps_.app.GetAllTabs()) {
+                                                if (tab.session_id == parent) {
+                                                    root_ordinal = tab.root_ordinal;
+                                                    break;
+                                                }
+                                            }
+                                            if (std::string attached =
+                                                    deps_.app.AttachTab(session_id, root_ordinal);
+                                                !attached.empty()) {
+                                                deps_.app.SetFocusedTab(attached);
+                                                return;
+                                            }
+                                            // is_live went stale between the fetch
+                                            // and this click (the child's turn just
+                                            // ended): the stored transcript is
+                                            // what remains to show -- fall through.
+                                        }
+                                        if (std::string opened =
+                                                deps_.app.OpenTranscriptTab(session_id, parent);
+                                            !opened.empty()) {
+                                            deps_.app.SetFocusedTab(opened);
+                                        }
+                                    });
+                                },
+                            .on_close = [this] { deps_.show_subagent_picker = false; },
+                            .on_toggle_ended =
+                                [this] {
+                                    subagent_include_ended_ = !subagent_include_ended_;
+                                    // Pure display toggle: the list was fetched
+                                    // whole, only the row filter changes -- no
+                                    // re-fetch, exactly like the session picker's
+                                    // local Tab sort (and unlike its ctrl+a, which
+                                    // changes what the SERVER would send).
+                                    RebuildSubagentPickerComponent();
+                                }});
 }
 
 }  // namespace minimal::client

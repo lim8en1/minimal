@@ -249,6 +249,19 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
             }
         };
 
+    // Durable half of a USER rename (/rename, see SessionParams::rename_session):
+    // unconditional -- no IsExplicitlyNamed guard, that is titler policy -- and
+    // stamped 'explicit' so a later titler pass skips the session. Returns
+    // false on failure so the command can surface the error.
+    params.rename_session = [this, session_id](const std::string& name) {
+        try {
+            return db_.UpdateSessionName(session_id, name, "explicit");
+        } catch (const std::exception& e) {
+            logger_.warn("session {}: renaming failed: {}", session_id, e.what());
+            return false;
+        }
+    };
+
     // Constructor-injected (Phase 5 step 3): presets/commands/provider
     // factories/instance cache reach Session's ctor on `params`, closing the
     // window a post-construction set_* call used to leave open between the

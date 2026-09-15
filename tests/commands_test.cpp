@@ -735,3 +735,56 @@ TEST_CASE("/connect merges into an existing provider entry rather than replacing
     CHECK(stored.at("anthropic").at("refresh") == "r-token");
     CHECK(stored.at("anthropic").at("access") == "a-token");
 }
+
+// /rename takes the name from the RAW tail (a name may contain spaces), so
+// these tests bypass the fixture's positional-only Run() helper and build the
+// args the wire actually carries.
+namespace {
+commands::CommandResult RunRename(CommandFixture& fixture, const std::string& raw) {
+    commands::CommandArgs args;
+    args.raw = raw;
+    commands::CommandContext context(&fixture, fixture.registry_presets_for_test(),
+                                     fixture.confirmations, common::DefaultLogger());
+    return commands::Dispatch(fixture.registry, "rename", args, context, /*busy=*/false);
+}
+}  // namespace
+
+TEST_CASE("/rename trims the raw tail and hands the whole name to the session", "[commands]") {
+    CommandFixture fixture;
+    const auto result = RunRename(fixture, "  fix the login bug  ");
+    REQUIRE(result.status == Status::kOk);
+    REQUIRE(fixture.renamed_to().has_value());
+    CHECK(*fixture.renamed_to() == "fix the login bug");
+}
+
+TEST_CASE("/rename with a blank name refuses with the usage, touching nothing", "[commands]") {
+    // The raw tail is ALL whitespace -- no name to speak of. The session must
+    // never see an empty name (SessionControl::RenameSession refuses those
+    // anyway; the usage line is the better answer).
+    CommandFixture fixture;
+    const auto result = RunRename(fixture, "   \t ");
+    CHECK(result.status == Status::kError);
+    CHECK(result.message.find("/rename") != std::string::npos);
+    CHECK_FALSE(fixture.renamed_to().has_value());
+}
+
+TEST_CASE("/rename surfaces a refused rename as a command error", "[commands]") {
+    // A failed persistence (unknown session, database error) must not read as
+    // success: the client's notice line is the only acknowledgment there is.
+    CommandFixture fixture;
+    fixture.rename_ok = false;
+    const auto result = RunRename(fixture, "new name");
+    CHECK(result.status == Status::kError);
+    CHECK(fixture.renamed_to().has_value());   // the session was asked
+    CHECK(*fixture.renamed_to() == "new name");
+}
+
+TEST_CASE("bare /subagents opens the subagent picker rather than erroring", "[commands]") {
+    // The /sessions shape: no data carried, the client fetches the parent's
+    // children itself over ListSessions(include_subagents).
+    CommandFixture fixture;
+    const auto result = fixture.Run("subagents");
+    CHECK(result.status == Status::kOk);
+    CHECK(result.display == commands::CommandDisplay::kView);
+    CHECK(result.view_hint == "subagents");
+}

@@ -384,6 +384,17 @@ ftxui::Element FrameRenderer::Render() {
         values["session"] = !focused_details.display_name.empty()
                                 ? focused_details.display_name
                                 : std::string("new session");
+        // A read-only transcript tab (OpenTranscriptTab) says so right in the
+        // session segment -- the one place the user looks before typing. The
+        // tab IS sessioned (its transcript renders); it just cannot be sent
+        // to, which has_session's stream-derived false already encodes for
+        // every consumer that acts on it.
+        for (const auto& tab : tabs) {
+            if (tab.tab_id == focused && tab.view_only) {
+                values["session"] += "  (read-only)";
+                break;
+            }
+        }
         // {tokens} is used/max now that the metadata emission carries the
         // window (E5a); max unknown (0) renders used-only, the E4 behavior.
         // Cache tokens ARE occupancy: providers report input_tokens as the

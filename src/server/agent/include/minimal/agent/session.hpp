@@ -175,6 +175,15 @@ struct SessionParams {
     // /subagent-model choice survives a server restart; null means
     // memory-only.
     std::function<void(const std::optional<config::ModelRef>&)> subagent_model_persist;
+    // Persistence hook for a USER rename (/rename), wired by the registry
+    // (which owns the database) with the session_id bound. Fired by
+    // RenameSession BEFORE SetName -- rename-then-notify, the same order the
+    // titler seam uses, so a client that learns of the rename from the
+    // metadata event can trust it as the durable record. Null (plain test
+    // sessions) means the rename is memory-only. Unlike the titler's seam
+    // this is unconditional: a user rename clobbers any name and stamps
+    // name_source='explicit'.
+    std::function<bool(const std::string& name)> rename_session;
     // The rendered project-context section (AGENTS.md/CLAUDE.md), loaded by the
     // registry from project_root -- a SESSION property, not a preset one, so a
     // mid-session /agent switch cannot drop the project's instructions. The
@@ -568,6 +577,18 @@ public:
         // Same best-effort durability as set_model_override: /subagent-model
         // must survive a restart the same way /model does.
         if (params_.subagent_model_persist) params_.subagent_model_persist(subagent_model_override_);
+    }
+    // /rename: persist first (rename-then-notify -- the database row is the
+    // authoritative record), then SetName for the partial metadata event.
+    // Unconditional, unlike the titler's seam: the user's choice wins. With
+    // no persistence hook (test sessions) the rename is memory-only.
+    // Thread-safe: SetName takes mutex_; a read-only command may call this
+    // from the RPC pool.
+    bool RenameSession(const std::string& name) override {
+        if (name.empty()) return false;
+        if (params_.rename_session && !params_.rename_session(name)) return false;
+        SetName(name);
+        return true;
     }
 
 

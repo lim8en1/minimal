@@ -185,6 +185,18 @@ public:
         return submitted_agents_;
     }
 
+    // Records rather than renames: a /rename test asserts the name that
+    // reached the session and the refusal path, and there is no database
+    // behind this fake control to persist into.
+    bool RenameSession(const std::string& name) override {
+        renamed_to_ = name;
+        return rename_ok;
+    }
+    const std::optional<std::string>& renamed_to() const { return renamed_to_; }
+    // Flipped by a test to exercise the failure path (empty name / write
+    // error surfaced as a command error).
+    bool rename_ok = true;
+
     // Replaces providers.json wholesale -- for tests that exercise discover
     // entries beside the static fixture. Call ReloadPresets() afterwards.
     void WriteProviders(const std::string& contents) {
@@ -238,6 +250,7 @@ private:
     std::unique_ptr<agent::AgentLoop> loop_;
     std::optional<common::ModelRef> override_;
     std::optional<common::ModelRef> subagent_override_;
+    std::optional<std::string> renamed_to_;
     std::vector<std::string> submitted_turns_;
     std::vector<std::string> submitted_models_;
     std::vector<std::string> submitted_agents_;

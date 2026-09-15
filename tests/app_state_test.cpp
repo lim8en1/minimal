@@ -1198,6 +1198,96 @@ TEST_CASE("ResumeTab of an unknown session registers a visible error tab",
     }));
 }
 
+TEST_CASE("OpenTranscriptTab opens a read-only view of a finished session's transcript",
+          "[app_state][transcript]") {
+    // A finished subagent's transcript: the session row and its messages live
+    // in SQLite, but the server refuses a resume ("its life was one turn").
+    // The transcript tab must render from GetMessages WITHOUT creating a
+    // session -- and must never let a submission mint one over itself.
+    ClientFixture fixture;
+    fixture.Script("first reply");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("transcript-me"));
+    REQUIRE_FALSE(tab.empty());
+    app.SubmitChatTurn(tab, "first message");
+    REQUIRE(WaitForSession(app, tab));
+    const auto sid = SessionIdOf(app, tab);
+
+    // The transcript is durable (user + assistant rows) before the teardown.
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        app.RequestScrollback(sid, /*newest=*/true);
+        std::this_thread::sleep_for(50ms);
+        if (app.GetDetails(tab).scrollback_page->size() >= 2) break;
+    }
+    REQUIRE(app.GetDetails(tab).scrollback_page->size() >= 2);
+
+    app.CloseTab(tab);
+    fixture.sessions->Terminate(sid);
+    const auto gone = std::chrono::steady_clock::now() + 5s;
+    while (fixture.sessions->Find(sid) != nullptr && std::chrono::steady_clock::now() < gone) {
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(fixture.sessions->Find(sid) == nullptr);
+
+    // Open the read-only view: a real session id, NO stream.
+    const auto view = app.OpenTranscriptTab(sid);
+    REQUIRE_FALSE(view.empty());
+    REQUIRE(app.HasTab(view));
+    for (const auto& t : app.GetAllTabs()) {
+        if (t.tab_id == view) {
+            CHECK(t.session_id == sid);
+            CHECK(t.view_only);
+            // Stream-derived, deliberately: has_session means "can send on
+            // this tab", and a view-only tab cannot.
+            CHECK_FALSE(t.has_session);
+        }
+    }
+
+    // The transcript renders through the ordinary scrollback machine -- the
+    // unary GetMessages path needs no stream at all.
+    const auto rows_deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < rows_deadline) {
+        app.RequestScrollback(sid, /*newest=*/true);
+        std::this_thread::sleep_for(50ms);
+        if (app.GetDetails(view).scrollback_page->size() >= 2) break;
+    }
+    REQUIRE(app.GetDetails(view).scrollback_page->size() >= 2);
+
+    // The stored row's name seeds the label (GetSession on the RPC worker --
+    // this tab receives no metadata events, so that fetch is the only source).
+    CHECK(WaitFor(app, view, [](const AppState::TabSnapshot& t) {
+        return t.display_name == "transcript-me";
+    }));
+
+    // Submissions are refused VISIBLY -- the failure mode this tab's guard
+    // exists to prevent is EnsureSession minting a fresh session and
+    // repointing the tab over the transcript being viewed.
+    app.SubmitChatTurn(view, "hello?");
+    CHECK(WaitForDetails(app, view, [](const SessionState::Snapshot& s) {
+        return s.latest_notice.has_value() &&
+               s.latest_notice->message.find("read-only") != std::string::npos;
+    }));
+    app.SubmitCommand(view, "/rename nope");
+    CHECK(WaitForDetails(app, view, [](const SessionState::Snapshot& s) {
+        return s.latest_notice.has_value() &&
+               s.latest_notice->message.find("read-only") != std::string::npos;
+    }));
+
+    // Nothing was minted and the transcript is untouched.
+    REQUIRE(app.GetAllTabs().size() == 1);
+    CHECK(SessionIdOf(app, view) == sid);
+    const auto page = fixture.client->GetMessages(sid, std::nullopt, 10);
+    REQUIRE(page.status.ok());
+    CHECK(page.response.messages_size() == 2);
+
+    // One tab per session: a second open is a no-op (the caller focuses the
+    // existing tab).
+    CHECK(app.OpenTranscriptTab(sid).empty());
+}
+
 TEST_CASE("ResumeTab on an already-open tab focuses it instead of duplicating",
           "[app_state][resume]") {
     ClientFixture fixture;

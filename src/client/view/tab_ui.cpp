@@ -239,6 +239,11 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
         deps_.open_subagent_model_picker();   // core mapping: bare `/subagent-model`
     } else if (notice.view_hint == "mcp") {
         deps_.open_mcp_picker();   // core mapping: bare `/mcp`
+    } else if (notice.view_hint == "subagents") {
+        // core mapping: `/subagents` -- the picker lists the FOCUSED
+        // session's own children (a read-only command, so it fires just as
+        // well from a nested subagent's tab, whose children these are).
+        if (!snap.session_id.empty()) deps_.open_subagents_picker(snap.session_id);
     } else if (auto* view = deps_.view_registry.Find(notice.view_hint)) {
         for (auto& entry : deps_.plugin_views) {
             if (entry.view != view) continue;

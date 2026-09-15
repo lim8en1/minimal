@@ -756,14 +756,17 @@ bool SessionDatabase::SetDefaultName(const std::string& session_id, const std::s
     return sqlite3_changes(db_) == 1;
 }
 
-bool SessionDatabase::UpdateSessionName(const std::string& session_id, const std::string& name) {
+bool SessionDatabase::UpdateSessionName(const std::string& session_id, const std::string& name,
+                                        std::string_view name_source) {
     std::lock_guard lock(mu_);
-    Stmt update(db_, "UPDATE sessions SET name = ?, name_source = 'observer', updated_at = ?"
+    Stmt update(db_, "UPDATE sessions SET name = ?, name_source = ?, updated_at = ?"
                      " WHERE id = ?;",
-                "failed to rename session");
+               "failed to rename session");
     sqlite3_bind_text(update.stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(update.stmt, 2, NextTimestamp());
-    sqlite3_bind_text(update.stmt, 3, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(update.stmt, 2, name_source.data(),
+                      static_cast<int>(name_source.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int64(update.stmt, 3, NextTimestamp());
+    sqlite3_bind_text(update.stmt, 4, session_id.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(update.stmt) != SQLITE_DONE) {
         ThrowSqliteError(db_, "failed to rename session");
     }

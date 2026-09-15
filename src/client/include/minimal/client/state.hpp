@@ -926,6 +926,13 @@ struct TabInfo {
     std::optional<std::string> parent_session_id;   // nullopt => root session
     int64_t root_ordinal = 0;         // when its ROOT tab was created (groups children)
     uint32_t spawn_seq = 0;           // global monotonic counter: stable sort key
+    // True for a read-only transcript tab (OpenTranscriptTab): a real session
+    // id, NO stream, and every submission path refused. Exists so the
+    // stream-derived "sessionless" reading a null stream normally produces
+    // never triggers EnsureSession -- which would otherwise mint a brand-new
+    // session and repoint this tab's session_id over the transcript being
+    // viewed.
+    bool view_only = false;
 };
 
 // TEMPORARY DEBUG globals removed -- see git history for the deadlock diagnosis.
@@ -948,6 +955,12 @@ public:
         std::string display_name;      // for tab bar / picker
         SessionStateKind state = SessionStateKind::Idle;
         bool is_subagent = false;
+        // Read-only transcript tab (OpenTranscriptTab): a session id with no
+        // stream. Note has_session stays STREAM-derived (false here) -- every
+        // consumer of has_session means "can send on this tab", which is
+        // exactly what a view-only tab cannot do; view_only is the
+        // display-side complement for UI that wants to SAY so.
+        bool view_only = false;
         int64_t root_ordinal = 0;
         uint32_t spawn_seq = 0;
 
@@ -1018,6 +1031,24 @@ public:
     // when the main attach failed (e.g. the session ended between the
     // caller's probe and this call -- the caller falls back to ResumeTab).
     std::string AttachSessionGroup(const std::string& session_id);
+
+    // Opens a READ-ONLY transcript tab for a STORED session -- a finished
+    // subagent, whose resume the server refuses ("its life was one turn of
+    // its parent"): no stream is opened and no CreateSession is sent. The
+    // transcript renders through the ordinary scrollback machine (a fresh
+    // tab fetches its newest page on its first frame; GetMessages is keyed
+    // by session id and checks database existence only), load-older pages
+    // back, and focus/close need nothing stream-shaped (a null-stream close
+    // is already a safe no-op). `view_only` is set so the submission paths
+    // refuse instead of minting a new session over the viewed transcript.
+    //   Grouping: when `parent_session_id` names a tab open here, its root
+    //   ordinal is inherited (the transcript appears as a "↳" child and
+    //   group-closes with the parent); otherwise the tab stands as its own
+    //   root. The display name is seeded from GetSession on the RPC worker
+    //   it lands). Returns the tab's tab_id ("" only if the session was
+    //   already open -- the existing tab is the answer then).
+    std::string OpenTranscriptTab(const std::string& session_id,
+                                  const std::string& parent_session_id = {});
 
     // Called by the reader thread for every ServerEvent whose payload is not bound to
     // a tab the client already owns (e.g. SubagentStarted on the PARENT's stream).

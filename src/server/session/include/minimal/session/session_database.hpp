@@ -217,7 +217,14 @@ public:
     // "just named" without a second query.
     bool SetDefaultName(const std::string& session_id, const std::string& name);
 
-    bool UpdateSessionName(const std::string& session_id, const std::string& name);
+    // Renames the session row unconditionally -- no IsExplicitlyNamed guard
+    // here; callers own their guard policy (the titler checks it, a user
+    // rename does not). `name_source` records who renamed: 'observer' (the
+    // titler seam) or 'explicit' (a user's /rename -- also what makes the
+    // titler skip the session afterwards). Touches updated_at, like any
+    // session edit. Returns false for an unknown id.
+    bool UpdateSessionName(const std::string& session_id, const std::string& name,
+                           std::string_view name_source = "observer");
 
     // Persists (or, with nullopt, clears) the session's model override. The
     // runtime half of the same record creation writes: /model goes through

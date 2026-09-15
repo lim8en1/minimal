@@ -411,6 +411,61 @@ public:
     }
 };
 
+// /rename <name>: renames THIS session (works on a subagent tab too -- ReadOnly
+// means it runs on the command pool, past the subagent guard, and beside a live
+// turn). The name is the raw tail verbatim, so it may contain spaces. The
+// session persists the name first (name_source='explicit' -- a USER rename
+// wins over any previous name and makes a later titler pass skip the session),
+// then notifies attached clients via a partial SessionMetadataEvent; the tab
+// label refresh needs nothing from this result beyond the acknowledgement.
+class RenameCommand : public HarnessCommand {
+public:
+    std::string_view Name() const override { return "rename"; }
+    std::string_view Summary() const override { return "Rename this session's tab"; }
+    std::string_view Usage() const override { return "/rename <name>"; }
+    bool ReadOnly() const override { return true; }
+
+    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
+        // raw is everything after the command name, verbatim (CommandArgs):
+        // splitting positional tokens would collapse the whitespace a name may
+        // legitimately contain. Trim the edges only.
+        const char* whitespace = " \t";
+        const std::string& raw = args.raw;
+        const auto first = raw.find_first_not_of(whitespace);
+        if (first == std::string::npos) {
+            return CommandResult::Error("usage: /rename <name>");
+        }
+        const auto last = raw.find_last_not_of(whitespace);
+        const std::string name = raw.substr(first, last - first + 1);
+        if (!context.session().RenameSession(name)) {
+            return CommandResult::Error("rename failed (the session may be gone -- see the log)");
+        }
+        return CommandResult::Ok("renamed to: " + name);
+    }
+};
+
+// Bare /subagents opens the client's subagent picker (display=View, view_hint
+// "subagents"), the same shape as /sessions: the command carries no data, the
+// client fetches the FOCUSED session's children over
+// ListSessions(include_subagents) filtered to that parent. ReadOnly so it
+// answers beside a live turn and on a nested subagent's tab (listing that
+// child's own spawns).
+class SubagentsCommand : public HarnessCommand {
+public:
+    std::string_view Name() const override { return "subagents"; }
+    std::string_view Summary() const override { return "List this session's subagents"; }
+    std::string_view Usage() const override { return "/subagents"; }
+    bool ReadOnly() const override { return true; }
+    minimal::commands::CommandDisplay Display() const override {
+        return minimal::commands::CommandDisplay::kView;
+    }
+    std::string_view ViewHint() const override { return "subagents"; }
+
+    CommandResult Execute(CommandContext&, const CommandArgs&) override {
+        return CommandResult::Ok("subagent list requested");
+    }
+};
+
 }  // namespace
 
 // /connect <provider> <api-key> -- stores a credential in the data dir's
@@ -530,6 +585,8 @@ std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     out.push_back(std::make_unique<ModelCommand>());
     out.push_back(std::make_unique<SubagentModelCommand>());
     out.push_back(std::make_unique<SessionsCommand>());
+    out.push_back(std::make_unique<SubagentsCommand>());
+    out.push_back(std::make_unique<RenameCommand>());
     out.push_back(std::make_unique<ConnectCommand>());
     out.push_back(std::make_unique<McpCommand>());
     return out;

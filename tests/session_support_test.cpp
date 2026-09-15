@@ -231,3 +231,51 @@ TEST_CASE("RenameSession survives a terminated (unfindable) session",
     CHECK(fixture.support->RenameSession(id, "named after the fact"));
     CHECK(fixture.db->GetSession(id)->name == "named after the fact");
 }
+
+// --- the USER rename seam (SessionControl::RenameSession, /rename) ----------
+
+TEST_CASE("a user rename persists as 'explicit' and notifies, unconditionally",
+          "[session_support][naming]") {
+    // Unlike the titler's seam, a USER rename clobbers anything -- including
+    // a name the user chose at creation -- and stamps name_source='explicit',
+    // which is what makes a later titler pass skip the session.
+    SupportFixture fixture;
+    auto session = fixture.CreateSession("chosen by the user");
+    REQUIRE(session != nullptr);
+
+    CHECK(session->RenameSession("my own tab name"));
+
+    CHECK(fixture.db->GetSession(session->session_id())->name == "my own tab name");
+    CHECK(fixture.db->GetSession(session->session_id())->name_source == "explicit");
+    CHECK(session->info().name == "my own tab name");
+    CHECK(QueueHasRename(*session, "my own tab name"));
+}
+
+TEST_CASE("a user rename over an observer-set name also lands as 'explicit'",
+          "[session_support][naming]") {
+    // The titler renamed first; the user overrides. After this the titler
+    // must never fire again for the session -- IsExplicitlyNamed now reads
+    // true, exactly the guard the titler's own seam consults.
+    SupportFixture fixture;
+    auto session = fixture.CreateSession("");
+    REQUIRE(session != nullptr);
+    REQUIRE(fixture.support->RenameSession(session->session_id(), "a generated title"));
+
+    CHECK(session->RenameSession("user wins"));
+
+    CHECK(fixture.db->GetSession(session->session_id())->name == "user wins");
+    CHECK(fixture.db->GetSession(session->session_id())->name_source == "explicit");
+    CHECK(fixture.db->IsExplicitlyNamed(session->session_id()));
+}
+
+TEST_CASE("a user rename of an unknown name is refused, and an empty one never "
+          "reaches the database",
+          "[session_support][naming]") {
+    SupportFixture fixture;
+    auto session = fixture.CreateSession("");
+    REQUIRE(session != nullptr);
+
+    CHECK_FALSE(session->RenameSession(""));
+    CHECK(session->info().name.empty());
+    CHECK(testing::DrainEvents(*session).empty());
+}

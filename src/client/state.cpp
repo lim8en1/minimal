@@ -2052,6 +2052,85 @@ std::string AppState::AttachSessionGroup(const std::string& session_id) {
     return root_tab;
 }
 
+// A READ-ONLY transcript tab for a stored session (see the header): the
+// refused-resume configuration -- TabInfo + SessionState with a REAL session
+// id and a null stream -- which the scrollback machine already renders
+// (AdvanceScrollbackRefresh fetches a fresh tab's newest page on its first
+// frame; GetMessages is a unary RPC keyed by session id with a database-only
+// existence check, so a finished subagent's transcript pages exactly like a
+// live one's). What this method adds is the guard rail: `view_only` keeps
+// every submission path from treating the tab as sessionless and minting a
+// new session over the transcript being viewed.
+std::string AppState::OpenTranscriptTab(const std::string& session_id,
+                                        const std::string& parent_session_id) {
+    {
+        std::lock_guard lk(mtx_);
+        // Duplicate rule (AttachTab/ResumeTab): one tab per session -- two
+        // tabs would both page the same transcript, and DispatchToTab routes
+        // events to the first match anyway.
+        if (FindTabBySession(session_id) != nullptr) return "";
+    }
+
+    std::string registered;
+    {
+        std::lock_guard lk(mtx_);
+        if (FindTabBySession(session_id) != nullptr) return "";   // race window re-check
+        TabEntry entry;
+        entry.stream = nullptr;   // the whole point: no stream, no CreateSession
+        entry.info.state = std::make_shared<SessionState>(session_id);
+        ApplyUiBounds(*entry.info.state);
+        entry.info.tab_id = "t" + std::to_string(++next_tab_seq_);
+        entry.info.session_id = session_id;
+        entry.info.view_only = true;
+        // Group with the parent when it is open here (the subagent view
+        // shows as a "↳" child and closes with the group, matching every
+        // other child tab); a closed parent must not fail the open, so the
+        // transcript then stands as its own root.
+        bool grouped = false;
+        if (!parent_session_id.empty()) {
+            for (const auto& tab : tabs_) {
+                if (tab.info.session_id == parent_session_id) {
+                    entry.info.parent_session_id = parent_session_id;
+                    entry.info.root_ordinal = tab.info.root_ordinal;
+                    grouped = true;
+                    break;
+                }
+            }
+        }
+        if (!grouped) {
+            entry.info.parent_session_id = std::nullopt;
+            entry.info.root_ordinal = ++next_root_ordinal_;
+        }
+        entry.info.spawn_seq = next_spawn_seq_++;
+        if (focused_id_.empty()) focused_id_ = entry.info.tab_id;   // OpenTab's rule
+        registered = entry.info.tab_id;
+        tabs_.push_back(std::move(entry));
+    }
+    BumpUiVersion();
+
+    // Seed the label from the stored row, off the loop thread: a subagent
+    // row is created nameless server-side, but a renamed one (or one a
+    // titler named) should show its stored name, and GetSession also
+    // validates the row exists. Before it lands the tab reads "new session",
+    // the same placeholder every unnamed tab shows. This tab receives no
+    // metadata events (no stream), so this fetch is the only name source.
+    RunOnRpcQueue([this, session_id] {
+        const auto found = client_->GetSession(session_id);
+        if (!found.status.ok()) {
+            common::DefaultLogger().warn("transcript tab {}: row lookup failed: {}", session_id,
+                                         found.status.error_message());
+            return;
+        }
+        if (!found.summary.name().empty()) {
+            if (auto state = GetState(session_id)) {
+                state->OnSessionCreated(found.summary.name());
+                BumpUiVersion();
+            }
+        }
+    });
+    return registered;
+}
+
 bool AppState::HasTab(const std::string& tab_id) const {
     std::lock_guard lk(mtx_);
     for (const auto& tab : tabs_) {
@@ -2461,10 +2540,18 @@ void AppState::SubmitChatTurn(const std::string& tab_id, const std::string& text
     // senders take mtx_ themselves (GetStream/GetState), and this mutex is
     // not recursive.
     std::string sessioned;
+    bool view_only = false;
     {
         std::lock_guard lk(mtx_);
         if (TabEntry* tab = FindTab(tab_id); tab != nullptr) {
-            if (tab->stream != nullptr) {
+            if (tab->info.view_only) {
+                // A read-only transcript tab (OpenTranscriptTab). Falling
+                // through here would enqueue the text on tab->pending and
+                // EnsureSession would MINT A NEW SESSION, repointing this
+                // tab's session_id over the transcript being viewed -- the
+                // one hole a null-stream tab had. Refuse visibly instead.
+                view_only = true;
+            } else if (tab->stream != nullptr) {
                 sessioned = tab->info.session_id;
             } else {
                 tab->pending.push_back([this, text](const std::string& sid) {
@@ -2472,6 +2559,10 @@ void AppState::SubmitChatTurn(const std::string& tab_id, const std::string& text
                 });
             }
         }
+    }
+    if (view_only) {
+        TabNotice(tab_id, "read-only transcript: nothing can be sent to a finished subagent");
+        return;
     }
     if (!sessioned.empty()) {
         // DESIRED-STATE CONVERGENCE. The user's last /agent //model choice
@@ -2502,10 +2593,15 @@ void AppState::SubmitCommand(const std::string& tab_id, const std::string& line)
     // locked block below, not after: GetStateByTab takes mtx_ itself.
     if (auto state = GetStateByTab(tab_id)) state->ClearNotice();
     std::string sessioned;
+    bool view_only = false;
     {
         std::lock_guard lk(mtx_);
         if (TabEntry* tab = FindTab(tab_id); tab != nullptr) {
-            if (tab->stream != nullptr) {
+            // Same refusal as SubmitChatTurn: a view-only tab must never
+            // reach RunEnsure (the session-minting path).
+            if (tab->info.view_only) {
+                view_only = true;
+            } else if (tab->stream != nullptr) {
                 sessioned = tab->info.session_id;
             } else {
                 tab->pending.push_back([this, line](const std::string& sid) {
@@ -2513,6 +2609,10 @@ void AppState::SubmitCommand(const std::string& tab_id, const std::string& line)
                 });
             }
         }
+    }
+    if (view_only) {
+        TabNotice(tab_id, "read-only transcript: nothing can be sent to a finished subagent");
+        return;
     }
     if (!sessioned.empty()) {
         SendCommand(sessioned, line);
@@ -2532,15 +2632,22 @@ void AppState::OnTabEnsureSession(const std::string& tab_id,
     // Like SubmitChatTurn: the sessioned inline run must happen OUTSIDE the
     // lock (actions may re-enter AppState's own locked methods).
     std::string sessioned;
+    bool view_only = false;
     {
         std::lock_guard lk(mtx_);
         TabEntry* tab = FindTab(tab_id);
         if (tab == nullptr) return;
-        if (tab->stream != nullptr) {
+        if (tab->info.view_only) {
+            view_only = true;   // same refusal as SubmitChatTurn/SubmitCommand
+        } else if (tab->stream != nullptr) {
             sessioned = tab->info.session_id;
         } else {
             tab->pending.push_back(std::move(action));
         }
+    }
+    if (view_only) {
+        TabNotice(tab_id, "read-only transcript: nothing can be sent to a finished subagent");
+        return;
     }
     if (!sessioned.empty()) {
         action(sessioned);   // sessioned: inline, no queue hop
@@ -3231,6 +3338,7 @@ std::vector<AppState::TabSnapshot> AppState::GetAllTabs(bool include_tool_output
         snap.display_name = ss.display_name.empty() ? std::string("new session") : ss.display_name;
         snap.state = ss.state;
         snap.is_subagent = tab.info.parent_session_id.has_value();
+        snap.view_only = tab.info.view_only;
         snap.root_ordinal = tab.info.root_ordinal;
         snap.spawn_seq = tab.info.spawn_seq;
         snap.cancel_requested = ss.cancel_requested;

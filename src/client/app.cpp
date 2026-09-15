@@ -938,6 +938,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     bool show_agent_picker = false;
     bool show_model_picker = false;
     bool show_mcp_picker = false;
+    bool show_subagent_picker = false;
     bool show_theme_picker = false;
     bool show_keymap_help = false;
     bool show_commands_help = false;
@@ -1569,6 +1570,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto mcp_picker_host_interactive =
         minimal::client::MakeModalHost(mcp_picker_child, show_mcp_picker);
 
+    // --- subagent picker (the /subagents view_hint) -------------------------------
+    auto subagent_picker_child = std::make_shared<Component>();
+    auto subagent_picker_host_interactive =
+        minimal::client::MakeModalHost(subagent_picker_child, show_subagent_picker);
+
     // --- theme picker ------------------------------------------------------------
     // Like the pickers above: a stable host whose inner component is rebuilt
     // on each open (open_theme_picker, below) -- themes are read from disk per
@@ -1597,8 +1603,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     minimal::client::PickerController picker_controller(
         minimal::client::PickerController::Dependencies{
             *client, *app, theme, picker_child, agent_picker_child, model_picker_child,
-            mcp_picker_child, show_picker, show_agent_picker, show_model_picker,
-            show_mcp_picker, staged_delete_id,
+            mcp_picker_child, subagent_picker_child, show_picker, show_agent_picker,
+            show_model_picker, show_mcp_picker, show_subagent_picker, staged_delete_id,
             show_delete_confirm, open_new_session,
             // The desired-state pickers stage onto this -- the focused tab,
             // or (the empty startup app, zero tabs) a fresh sessionless one,
@@ -1610,6 +1616,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto open_model_picker = [&] { picker_controller.OpenModelPicker(/*refresh=*/false); };
     auto open_subagent_model_picker = [&] { picker_controller.OpenSubagentModelPicker(); };
     auto open_mcp_picker = [&] { picker_controller.OpenMcpPicker(); };
+    auto open_subagents_picker = [&picker_controller](const std::string& parent) {
+        picker_controller.OpenSubagentsPicker(parent);
+    };
     // Bind the submit_command intercepts (declared before, assigned now --
     // they run only on user input, long after this line).
     open_picker_fn = open_picker;
@@ -1731,7 +1740,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     minimal::client::TabMaintenance tab_maintenance(minimal::client::TabMaintenance::Dependencies{
         *app, engine, view_registry, plugin_views, plugin_modal_child,
         show_plugin_modal, open_picker, open_agent_picker, open_model_picker,
-        open_subagent_model_picker, open_mcp_picker,
+        open_subagent_model_picker, open_mcp_picker, open_subagents_picker,
         [&picker_controller] { picker_controller.Poll(); }, tab_ui, theme,
         message_registry, renderer_registry, display_registry, permission_child, show_permission,
         confirmation_child, show_confirmation, ask_child, show_ask,
@@ -1978,6 +1987,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     tree = Modal(tree, agent_picker_host_interactive, &show_agent_picker);
     tree = Modal(tree, model_picker_host_interactive, &show_model_picker);
     tree = Modal(tree, mcp_picker_host_interactive, &show_mcp_picker);
+    tree = Modal(tree, subagent_picker_host_interactive, &show_subagent_picker);
     tree = Modal(tree, theme_picker_host_interactive, &show_theme_picker);
     tree = Modal(tree, keymap_help_view, &show_keymap_help);
     tree = Modal(tree, commands_help_view, &show_commands_help);
@@ -2021,7 +2031,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // show_* flag by the time this check runs.
         if (*pasting && (show_plugin_modal || show_delete_confirm || show_picker ||
                          show_agent_picker || show_model_picker || show_mcp_picker ||
-                         show_theme_picker ||
+                         show_subagent_picker || show_theme_picker ||
                          show_keymap_help || show_commands_help || show_quit_confirm ||
                          show_ask || show_confirmation || show_permission)) {
             *pasting = false;

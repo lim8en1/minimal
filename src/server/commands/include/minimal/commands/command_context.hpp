@@ -94,6 +94,22 @@ public:
         (void)ref;  // a control surface that never grew the feature ignores it
     }
 
+    // Renames this session (/rename): persists the name and notifies every
+    // attached client via a partial SessionMetadataEvent, so tab labels
+    // refresh. Returns false when the name is empty or the write failed; the
+    // caller surfaces that as a command error. Unlike the titler's rename
+    // seam, a USER rename is unconditional -- it clobbers any previous name
+    // and stamps name_source='explicit', which is what makes a later titler
+    // pass skip the session.
+    //
+    // Safe from any thread (read-only commands run on the RPC pool): the
+    // in-memory half synchronizes on the session mutex and the database
+    // serializes its own writers.
+    virtual bool RenameSession(const std::string& name) {
+        (void)name;
+        return false;  // a control surface that never grew the feature refuses
+    }
+
     // Submits a user turn on this session -- the ONE sanctioned path by which a
     // PromptShorthandCommand's content reaches the model (docs/EXTENSIBILITY.md
     // 4.4): as the submitted turn itself, appended to history and answered like
