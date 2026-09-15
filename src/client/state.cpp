@@ -2566,7 +2566,10 @@ void AppState::SubmitChatTurn(const std::string& tab_id, const std::string& text
                 // tab's session_id over the transcript being viewed -- the
                 // one hole a null-stream tab had. Refuse visibly instead.
                 view_only = true;
-            } else if (tab->stream != nullptr) {
+            } else if (tab->stream != nullptr && !tab->draining) {
+                // `draining` keeps the fast path closed until the create-time
+                // backlog is on the wire -- a send racing the drain would
+                // reorder FIFO submission order (see TabEntry::draining).
                 sessioned = tab->info.session_id;
             } else {
                 tab->pending.push_back([this, text](const std::string& sid) {
@@ -2616,7 +2619,7 @@ void AppState::SubmitCommand(const std::string& tab_id, const std::string& line)
             // reach RunEnsure (the session-minting path).
             if (tab->info.view_only) {
                 view_only = true;
-            } else if (tab->stream != nullptr) {
+            } else if (tab->stream != nullptr && !tab->draining) {
                 sessioned = tab->info.session_id;
             } else {
                 tab->pending.push_back([this, line](const std::string& sid) {
@@ -2654,7 +2657,10 @@ void AppState::OnTabEnsureSession(const std::string& tab_id,
         if (tab == nullptr) return;
         if (tab->info.view_only) {
             view_only = true;   // same refusal as SubmitChatTurn/SubmitCommand
-        } else if (tab->stream != nullptr) {
+        } else if (tab->stream != nullptr && !tab->draining) {
+            // The `draining` gate, same as SubmitChatTurn/SubmitCommand: an
+            // action must not overtake the create-time backlog still being
+            // drained onto the wire.
             sessioned = tab->info.session_id;
         } else {
             tab->pending.push_back(std::move(action));
@@ -2733,6 +2739,12 @@ std::string AppState::EnsureSession(const std::string& tab_id) {
                 tab->stream = stream;
                 tab->info.session_id = *sid;
                 tab->info.state->SetSessionId(*sid);
+                // Close the fast path BEFORE the backlog drains: a submit
+                // landing between this unlock and the drained sends would
+                // otherwise overtake them (reordered FIFO submissions -- the
+                // server would start the LATER message's turn first and steer
+                // the backlog into it). Reopened when pending runs dry, below.
+                tab->draining = true;
                 drained.swap(tab->pending);
             }
         }
@@ -2750,7 +2762,26 @@ std::string AppState::EnsureSession(const std::string& tab_id) {
 
     WireOnClosed(*stream, *sid);
     stream->Resume();   // start threads AFTER unlock — a dispatched event must find this entry
-    for (auto& action : drained) action(*sid);
+    // The drain LOOPS: anything submitted while `draining` is set lands on
+    // tab->pending instead of overtaking the backlog, and each pass sweeps it
+    // in arrival order. The flag only clears under mtx_ once a pass found
+    // pending empty -- from that instant, direct sends cannot reorder against
+    // anything (the queue is gone).
+    for (bool more = true; more;) {
+        for (auto& action : drained) action(*sid);
+        drained.clear();
+        {
+            std::lock_guard lk(mtx_);
+            TabEntry* tab = FindTab(tab_id);
+            if (tab == nullptr) break;   // closed mid-drain: pending dies with the tab
+            more = !tab->pending.empty();
+            if (more) {
+                drained.swap(tab->pending);
+            } else {
+                tab->draining = false;
+            }
+        }
+    }
     return *sid;
 }
 

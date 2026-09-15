@@ -1434,6 +1434,16 @@ private:
         // failure always had.
         bool ensuring = false;
         std::vector<std::function<void(const std::string& session_id)>> pending;
+
+        // True from the moment the create resolves (the stream becomes
+        // visible) until the drained backlog is on the wire. Gates the
+        // sessioned fast paths: a submit landing in the attach window would
+        // otherwise overtake the still-pending backlog, and the server --
+        // receiving the LATER-queued message first -- starts ITS turn, so the
+        // backlog entries arrive mid-turn and are STEERED (injected) instead
+        // of running their own turns. FIFO submission order is the contract
+        // the stacked-sends guarantee rests on.
+        bool draining = false;
     };
 
     // Routes a ServerEvent to its owned tab (by event.session_id()). Handles derived
