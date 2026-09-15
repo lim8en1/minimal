@@ -2748,12 +2748,11 @@ TEST_CASE("chat view: windowing elides off-viewport rows and marks the cut") {
     CHECK(view.scroll_state_for_test()->applied_offset_from_bottom == 0);
 
     // Parked mid-transcript the viewport has elided rows on BOTH sides: the
-    // view reports the cut through RowsElidedAbove (the frame renderer turns
-    // that into the floating hint -- an in-content marker would sit above
-    // the viewport), and neither transcript end may leak in.
+    // cut is visible on the vscroll indicator (the head/tail fillers keep the
+    // thumb on the full transcript's track), and neither transcript end may
+    // leak in.
     view.ScrollBy(15);
     const auto parked = RenderElement(view.Render(snapshot), 40, 10);
-    CHECK(view.RowsElidedAbove());
     CHECK(parked.find("row-39") == std::string::npos);
     CHECK(parked.find("row-0") == std::string::npos);
     CHECK(view.scroll_state_for_test()->content_height == 121);

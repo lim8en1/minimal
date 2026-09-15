@@ -148,13 +148,6 @@ public:
     // render hits nothing. True when a row was toggled.
     bool ToggleCollapseAt(int screen_y);
 
-    // True when the LAST windowed frame elided rows above the viewport
-    // (nullopt/false on the full-assembly path, which elides nothing): the
-    // frame renders a floating "earlier rows above" hint from this -- an
-    // in-content marker at the cut point would sit above the viewport
-    // whenever the elided region is taller than one screen.
-    bool RowsElidedAbove() const { return rows_elided_above_; }
-
     // Test seam: the shared ScrollState the ScrollRegion node writes its
     // measurements into. Read-only; scroll-accounting assertions read the
     // applied offset and measured heights the same way the production
@@ -370,7 +363,6 @@ private:
     bool last_assembly_full_ = true;
     std::size_t last_window_first_ = 0;
     std::size_t last_window_last_ = 0;
-    bool rows_elided_above_ = false;   // last windowed frame elided rows above
 
     // QUEUED message rows (Snapshot::pending_user_messages): the boxes the
     // last Render() recorded, one per row (a single slot per row -- the

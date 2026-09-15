@@ -644,10 +644,9 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         // window's first row -- top slack, boundary markers, elided rows and
         // their spacers, all measured geometry. No top flex filler: rows are
         // elided only when content already overflows the viewport. The cut
-        // itself is announced by the frame's floating hint
-        // (RowsElidedAbove, frame_renderer.cpp) -- an in-content marker here
-        // would sit at the cut, lines above the viewport whenever the
-        // elided region is taller than one screen, which is almost always.
+        // itself is visible on the vscroll indicator: the head/tail fillers
+        // below reproduce the elided geometry, so the thumb rides the full
+        // transcript's track, not the window's.
         column.push_back(filler() | size(HEIGHT, EQUAL,
                                          std::max(0, window->above_lines)));
     } else {
@@ -758,7 +757,6 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         last_assembly_full_ = false;
         last_window_first_ = window->first;
         last_window_last_ = window->last;
-        rows_elided_above_ = window->rows_elided_above;
     } else {
     const bool assembly_stale =
         !assembly_valid_ || assembled_version_ != rendered_version_ ||
@@ -867,7 +865,6 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         assembled_focused_row_ = focused_row_;
         assembly_valid_ = true;
         last_assembly_full_ = true;
-        rows_elided_above_ = false;
     }
     column.insert(column.end(), assembled_column_rows_.begin(), assembled_column_rows_.end());
     }
