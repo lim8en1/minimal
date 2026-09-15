@@ -2,13 +2,34 @@
 // ComputeTabBarWindow decides which contiguous slice of tabs to show and how
 // many are hidden on each side, with no FTXUI involved (ARCHITECTURE.md
 // "Testing": render output itself is not unit-tested, the logic behind it is).
+// ComputeTabBarBadge -- the tab filter's trailing badge, including the
+// hidden-'!' count -- is the same tier: pure over TabSnapshot lists.
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "minimal/client/state.hpp"
 #include "minimal/client/view/tab_bar.hpp"
 
+using minimal::client::AppState;
+using minimal::client::ComputeTabBarBadge;
 using minimal::client::ComputeTabBarWindow;
+using minimal::client::TabBarBadge;
 using minimal::client::TabBarWindow;
+using minimal::client::TabFilter;
+
+namespace {
+
+AppState::TabSnapshot FilterTab(std::string id, bool is_subagent, int64_t root_ordinal,
+                                char attention_glyph = '\0') {
+    AppState::TabSnapshot tab;
+    tab.tab_id = std::move(id);
+    tab.is_subagent = is_subagent;
+    tab.root_ordinal = root_ordinal;
+    tab.attention_glyph = attention_glyph;
+    return tab;
+}
+
+}  // namespace
 
 TEST_CASE("everything fits: no hidden tabs, no markers reserved", "[tab_bar]") {
     // 5 tabs of width 10 each == 50; well under a generous budget.
@@ -103,4 +124,65 @@ TEST_CASE("an empty tab list produces an empty window", "[tab_bar]") {
     CHECK(window.visible_end == 0);
     CHECK(window.hidden_before == 0);
     CHECK(window.hidden_after == 0);
+}
+
+// --- ComputeTabBarBadge (the tab filter's trailing badge) --------------------
+
+TEST_CASE("ComputeTabBarBadge: no filter, no badge", "[tab_bar][tab_filter]") {
+    const std::vector<AppState::TabSnapshot> tabs = {FilterTab("root1", false, 0)};
+    const auto badge = ComputeTabBarBadge(tabs, tabs, TabFilter::All);
+    CHECK_FALSE(badge.active);
+}
+
+TEST_CASE("ComputeTabBarBadge: counts what the filter hides, names the filter",
+          "[tab_bar][tab_filter]") {
+    const std::vector<AppState::TabSnapshot> all = {
+        FilterTab("root1", false, 0),
+        FilterTab("child1", true, 0),
+        FilterTab("root2", false, 1),
+        FilterTab("child2", true, 1),
+    };
+
+    // Agents hides the two children.
+    const auto agents = ComputeTabBarBadge(all, {all[0], all[2]}, TabFilter::Agents);
+    CHECK(agents.active);
+    CHECK(agents.label == "agents");
+    CHECK(agents.hidden == 2);
+    CHECK(agents.attention == 0);
+
+    // Group hides the other group entirely.
+    const auto group = ComputeTabBarBadge(all, {all[0], all[1]}, TabFilter::Group);
+    CHECK(group.active);
+    CHECK(group.label == "group");
+    CHECK(group.hidden == 2);
+}
+
+TEST_CASE("ComputeTabBarBadge: hidden tabs carrying '!' are counted, visible ones are not",
+          "[tab_bar][tab_filter]") {
+    // child1 (hidden by the Agents filter) waits; root2 (visible) waits too.
+    const std::vector<AppState::TabSnapshot> all = {
+        FilterTab("root1", false, 0),
+        FilterTab("child1", true, 0, '!'),
+        FilterTab("root2", false, 1, '!'),
+        FilterTab("child2", true, 1),
+    };
+    const auto badge = ComputeTabBarBadge(all, {all[0], all[2]}, TabFilter::Agents);
+    CHECK(badge.hidden == 2);
+    // Exactly one hidden '!' (child1): root2's attention is VISIBLE, so it
+    // must not inflate the badge -- the badge's only job is the attention
+    // the bar can no longer show.
+    CHECK(badge.attention == 1);
+}
+
+TEST_CASE("ComputeTabBarBadge: identical lists stay inactive regardless of filter",
+          "[tab_bar][tab_filter]") {
+    // A filter that hides nothing (Agents over an all-roots app) is still
+    // labeled -- the user did press a filter key and the bar should say so.
+    const std::vector<AppState::TabSnapshot> all = {FilterTab("root1", false, 0),
+                                                    FilterTab("root2", false, 1)};
+    const auto badge = ComputeTabBarBadge(all, all, TabFilter::Agents);
+    CHECK(badge.active);
+    CHECK(badge.label == "agents");
+    CHECK(badge.hidden == 0);
+    CHECK(badge.attention == 0);
 }

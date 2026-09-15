@@ -22,16 +22,21 @@
 #include "minimal/client/keybindings.hpp"
 
 using minimal::client::AnyWorkInFlight;
+using minimal::client::ApplyTabFilterToggle;
 using minimal::client::AppState;
 using minimal::client::ClosePluginModal;
 using minimal::client::CyclePanelFocus;
+using minimal::client::FilterTabs;
 using minimal::client::FocusPanelOnClose;
 using minimal::client::FocusPanelOnOpen;
 using minimal::client::Keybindings;
 using minimal::client::NextAttentionTab;
 using minimal::client::NextRootGroup;
+using minimal::client::NextVisibleTab;
 using minimal::client::ResolvedKeymap;
+using minimal::client::ResolveGroupRoot;
 using minimal::client::SessionStateKind;
+using minimal::client::TabFilter;
 using minimal::client::TabsToClose;
 using minimal::client::TabBusyForInterrupt;
 
@@ -210,6 +215,135 @@ TEST_CASE("TabsToClose on an unknown session id closes nothing", "[keybinding_di
     CHECK(TabsToClose(tabs, "no-such-id").empty());
 }
 
+// --- Tab-bar filter (tab.filter_group / tab.filter_agents) -------------------
+
+// Two roots, each with a child -- the shape every filter test below works on.
+namespace {
+std::vector<AppState::TabSnapshot> TwoGroups() {
+    return {
+        Tab("root1", /*is_subagent=*/false, /*root_ordinal=*/0),
+        Tab("child1", /*is_subagent=*/true, /*root_ordinal=*/0),
+        Tab("root2", /*is_subagent=*/false, /*root_ordinal=*/1),
+        Tab("child2", /*is_subagent=*/true, /*root_ordinal=*/1),
+    };
+}
+}  // namespace
+
+TEST_CASE("FilterTabs: All returns every tab, Agents keeps roots only",
+          "[keybinding_dispatch][tab_filter]") {
+    const auto tabs = TwoGroups();
+
+    const auto all = FilterTabs(tabs, TabFilter::All, "root1");
+    REQUIRE(all.size() == 4);
+
+    const auto agents = FilterTabs(tabs, TabFilter::Agents, "child1");
+    REQUIRE(agents.size() == 2);
+    CHECK(agents[0].tab_id == "root1");
+    CHECK(agents[1].tab_id == "root2");
+}
+
+TEST_CASE("FilterTabs: Group keeps the focused tab's group and contains the focused tab",
+          "[keybinding_dispatch][tab_filter]") {
+    const auto tabs = TwoGroups();
+
+    // Focused on group 1's child: the whole group 1 survives, group 2 does
+    // not, and the focused tab itself is always in view.
+    const auto group = FilterTabs(tabs, TabFilter::Group, "child1");
+    REQUIRE(group.size() == 2);
+    CHECK(group[0].tab_id == "root1");
+    CHECK(group[1].tab_id == "child1");
+
+    // Focused on a root: same group, same result.
+    const auto from_root = FilterTabs(tabs, TabFilter::Group, "root2");
+    REQUIRE(from_root.size() == 2);
+    CHECK(from_root[0].tab_id == "root2");
+    CHECK(from_root[1].tab_id == "child2");
+}
+
+TEST_CASE("FilterTabs: Group on an unknown focused handle falls back to the full list",
+          "[keybinding_dispatch][tab_filter]") {
+    const auto tabs = TwoGroups();
+    // "" on an empty app, or a stale handle after a close: an empty bar
+    // reads as "the app lost my tabs", not as a filter.
+    CHECK(FilterTabs(tabs, TabFilter::Group, "").size() == 4);
+    CHECK(FilterTabs(tabs, TabFilter::Group, "no-such-tab").size() == 4);
+}
+
+TEST_CASE("ResolveGroupRoot: a subagent resolves to its root, a root to itself",
+          "[keybinding_dispatch][tab_filter]") {
+    const auto tabs = TwoGroups();
+    CHECK(ResolveGroupRoot(tabs, "child1") == "root1");
+    CHECK(ResolveGroupRoot(tabs, "root1") == "root1");
+    CHECK(ResolveGroupRoot(tabs, "child2") == "root2");
+    CHECK(ResolveGroupRoot(tabs, "no-such-tab").empty());
+}
+
+TEST_CASE("NextVisibleTab cycles within the filtered set and wraps",
+          "[keybinding_dispatch][tab_filter]") {
+    const auto tabs = TwoGroups();
+
+    // Agents filter: only the roots cycle.
+    CHECK(NextVisibleTab(tabs, TabFilter::Agents, "root1", /*forward=*/true) == "root2");
+    CHECK(NextVisibleTab(tabs, TabFilter::Agents, "root2", true) == "root1");       // wraps
+    CHECK(NextVisibleTab(tabs, TabFilter::Agents, "root2", /*forward=*/false) == "root1");
+
+    // Group filter: the cycle stays inside the visible group.
+    CHECK(NextVisibleTab(tabs, TabFilter::Group, "root1", true) == "child1");
+    CHECK(NextVisibleTab(tabs, TabFilter::Group, "child1", true) == "root1");       // wraps
+
+    // All filter: unchanged cycle over everything.
+    CHECK(NextVisibleTab(tabs, TabFilter::All, "child1", true) == "root2");
+}
+
+TEST_CASE("NextVisibleTab: a focused tab outside the visible set starts at the edge",
+          "[keybinding_dispatch][tab_filter]") {
+    const auto tabs = TwoGroups();
+    // Defensive (the toggle's refocus should prevent this): forward starts
+    // at the first visible tab, backward at the last.
+    CHECK(NextVisibleTab(tabs, TabFilter::Agents, "child1", true) == "root1");
+    CHECK(NextVisibleTab(tabs, TabFilter::Agents, "child1", false) == "root2");
+    CHECK(NextVisibleTab(tabs, TabFilter::Agents, "child1", true) != "child1");
+
+    // Nothing visible at all: empty, never a crash.
+    CHECK(NextVisibleTab({}, TabFilter::All, "", true).empty());
+}
+
+TEST_CASE("ApplyTabFilterToggle: the active filter toggles back to All",
+          "[keybinding_dispatch][tab_filter]") {
+    const auto tabs = TwoGroups();
+    const auto off = ApplyTabFilterToggle(TabFilter::Group, TabFilter::Group, tabs, "root1");
+    CHECK(off.filter == TabFilter::All);
+    CHECK(off.focus_tab_id.empty());   // unfiltering hides nothing
+}
+
+TEST_CASE("ApplyTabFilterToggle: the other filter replaces the active one",
+          "[keybinding_dispatch][tab_filter]") {
+    const auto tabs = TwoGroups();
+    const auto swapped =
+        ApplyTabFilterToggle(TabFilter::Group, TabFilter::Agents, tabs, "root1");
+    CHECK(swapped.filter == TabFilter::Agents);
+    // "root1" is a root: hidden by nothing, focus stays.
+    CHECK(swapped.focus_tab_id.empty());
+}
+
+TEST_CASE("ApplyTabFilterToggle: Agents over a focused subagent refocuses the group root",
+          "[keybinding_dispatch][tab_filter]") {
+    const auto tabs = TwoGroups();
+    const auto decision =
+        ApplyTabFilterToggle(TabFilter::All, TabFilter::Agents, tabs, "child1");
+    CHECK(decision.filter == TabFilter::Agents);
+    CHECK(decision.focus_tab_id == "root1");
+}
+
+TEST_CASE("ApplyTabFilterToggle: Group over a focused subagent needs no refocus",
+          "[keybinding_dispatch][tab_filter]") {
+    // Group always contains the focused tab, so focus never has to move.
+    const auto tabs = TwoGroups();
+    const auto decision = ApplyTabFilterToggle(TabFilter::All, TabFilter::Group, tabs, "child2");
+    CHECK(decision.filter == TabFilter::Group);
+    CHECK(decision.focus_tab_id.empty());
+}
+
 // --- NextPermissionRunMode (permission.cycle) -------------------------------
 
 TEST_CASE("NextPermissionRunMode walks the cycle and treats unknown as normal",
@@ -300,6 +434,7 @@ TEST_CASE("ResolvedKeymap: every core default binds to something", "[keybinding_
     CHECK(ResolvedKeymap::Build(Keybindings::Parse(R"({
         "tab.next": "alt+down", "tab.previous": "alt+up",
         "group.previous": "alt+left", "group.next": "alt+right",
+        "tab.filter_group": "alt+f", "tab.filter_agents": "alt+o",
         "jump.attention": "alt+a", "session.picker": "ctrl+o",
         "agent.picker": "alt+g", "panel.toggle": "ctrl+t",
         "panel.focus.next": "ctrl+g", "panel.focus.prev": "ctrl+e",

@@ -52,6 +52,8 @@ constexpr KnownAction kKnown[] = {
     {"tab.close", "close the tab"},
     {"group.next", "next tab group"},
     {"group.previous", "previous tab group"},
+    {"tab.filter_group", "show only the focused tab's group"},
+    {"tab.filter_agents", "show only agent tabs (hide subagents)"},
     {"jump.attention", "jump to the tab that needs you"},
     {"chat.scroll_up", "scroll up"},
     {"chat.scroll_down", "scroll down"},

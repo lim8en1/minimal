@@ -935,6 +935,18 @@ struct TabInfo {
     bool view_only = false;
 };
 
+// The tab bar's filter state (tab.filter_group / tab.filter_agents): which
+// subset of tabs the bar and every tab-keyed navigation action (tab.next/
+// previous, tab.goto.N, group.next/previous) act on. The filtering itself is
+// keybinding_dispatch.hpp's FilterTabs -- pure over TabSnapshot, unit-tested
+// there; AppState only HOLDS the state, the same way focused_id_ does. Two
+// views, mutually exclusive, each toggling back to All when re-pressed:
+enum class TabFilter {
+    All,     // every tab (the default; per-run only, never persisted)
+    Group,   // the focused tab's group only (its root + its subagent children)
+    Agents,  // root tabs only -- subagent children hidden
+};
+
 // TEMPORARY DEBUG globals removed -- see git history for the deadlock diagnosis.
 class AppState {
 public:
@@ -1190,6 +1202,14 @@ public:
     void CycleFocusBackward();
     void SetFocusedTab(const std::string& tab_id);
 
+    // --- Tab-bar filter (tab.filter_group / tab.filter_agents) --------------
+    // Which tabs the bar and tab-keyed navigation show (TabFilter above).
+    // SetTabFilter is a no-op when the value is unchanged (no pointless
+    // repaint); any real change bumps UiVersion so the pump redraws the bar.
+    // Per-run only: a fresh launch starts unfiltered.
+    void SetTabFilter(TabFilter filter);
+    TabFilter ActiveTabFilter() const;
+
     // --- Desired agent/model state (/agent, /model on ANY tab) ---
 
     // Sets the tab's desired agent/model (unresolved refs; validated by the
@@ -1428,6 +1448,11 @@ private:
     int64_t next_root_ordinal_ = 0;
     uint32_t next_spawn_seq_ = 0;
     std::string focused_id_;     // active tab ("" => none)
+
+    // The tab-bar filter (TabFilter / ActiveTabFilter). Under mtx_ with
+    // focused_id_: written by the loop thread's dispatch, read by the frame
+    // -- the same single-threaded-plus-lock shape focused_id_ has.
+    TabFilter tab_filter_ = TabFilter::All;
 
     // ui.json bounds (0 = built-in default), applied to every new SessionState.
     int scrollback_max_messages_ = 0;

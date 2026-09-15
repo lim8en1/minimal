@@ -3,6 +3,7 @@
 #include <string_view>
 
 #include "minimal/client/render/markdown_renderer.hpp"
+#include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/view/chat_view.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/view/tab_bar.hpp"
@@ -86,6 +87,16 @@ ftxui::Element FrameRenderer::Render() {
     // state change).
     const auto tabs = deps_.app.GetAllTabs(/*include_tool_output=*/false);
 
+    // The tab bar renders the FILTERED list (state.hpp's TabFilter -- the
+    // user's tab.filter_group/tab.filter_agents choice), while `tabs` above
+    // stays the FULL list: the status-bar lookups below, the tools panel's
+    // cache key, and the panel itself are cross-session by design. The
+    // badge (tab_bar.hpp) surfaces what the filter hides -- most importantly
+    // how many hidden tabs carry '!'.
+    const TabFilter tab_filter = deps_.app.ActiveTabFilter();
+    const auto visible_tabs = FilterTabs(tabs, tab_filter, deps_.focused);
+    const auto badge = ComputeTabBarBadge(tabs, visible_tabs, tab_filter);
+
     // The snapshot (and everything derived from it) was taken by
     // TabMaintenance::Run() on this loop iteration's event, BEFORE Render --
     // never here: this method must stay side-effect-free and non-blocking
@@ -103,8 +114,12 @@ ftxui::Element FrameRenderer::Render() {
 
     Elements rows;
     // One tab: the bar would only repeat what the status bar and the chat
-    // already say, for a whole row. It appears with the second tab.
-    if (!space_critical && tabs.size() > 1) rows.push_back(RenderTabBar(tabs, deps_.theme));
+    // already say, for a whole row. It appears with the second tab -- unless
+    // a tab filter is active, when the badge alone justifies the row (it
+    // names the filter and counts the hidden '!' tabs).
+    if (!space_critical && (visible_tabs.size() > 1 || badge.active)) {
+        rows.push_back(RenderTabBar(visible_tabs, deps_.theme, badge));
+    }
 
     const std::string& focused = deps_.focused;
     const SessionState::Snapshot& focused_details = deps_.focused_details;

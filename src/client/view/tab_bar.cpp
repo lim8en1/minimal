@@ -197,7 +197,29 @@ ftxui::Element RenderTabCell(const AppState::TabSnapshot& tab, const std::string
 
 }  // namespace
 
-ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, const Theme& theme) {
+TabBarBadge ComputeTabBarBadge(const std::vector<AppState::TabSnapshot>& all,
+                               const std::vector<AppState::TabSnapshot>& visible,
+                               TabFilter filter) {
+    if (filter == TabFilter::All) return {};
+    TabBarBadge badge;
+    badge.active = true;
+    badge.label = filter == TabFilter::Group ? "group" : "agents";
+    badge.hidden = all.size() >= visible.size() ? all.size() - visible.size() : 0;
+    // Hidden ATTENTION: the '!' tabs of `all` that `visible` does not carry.
+    // Glyph, not state: Waiting and a plugin raise are the same signal here,
+    // exactly as they render as the same '!' on a visible tab.
+    for (const auto& tab : all) {
+        if (tab.attention_glyph == '\0') continue;
+        const bool shown =
+            std::any_of(visible.begin(), visible.end(),
+                        [&](const auto& v) { return v.tab_id == tab.tab_id; });
+        if (!shown) ++badge.attention;
+    }
+    return badge;
+}
+
+ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, const Theme& theme,
+                            const TabBarBadge& badge) {
     using namespace ftxui;
     if (tabs.empty()) return emptyElement();
 
@@ -225,8 +247,24 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
     // extreme nobody hits in practice, and overrunning a text row by one
     // column is a cosmetic non-event, not a functional break.
     constexpr int kMarkerWidth = 5;
-    const auto window = ComputeTabBarWindow(widths, Terminal::Size().dimx, focused_index,
-                                            kMarkerWidth);
+    // The filter badge (see the header) rides the bar's trailing edge; its
+    // width comes out of the overflow window's budget FIRST, so visible
+    // cells + markers + badge always fit together. Two strings: the muted
+    // "label ·N" and the attention-colored " !N" suffix, kept separate only
+    // for their colors -- the width is the sum.
+    std::string badge_text;
+    std::string badge_attention;
+    int badge_width = 0;
+    if (badge.active) {
+        badge_text = badge.label;
+        if (badge.hidden > 0) badge_text += " ·" + std::to_string(badge.hidden);
+        if (badge.attention > 0) badge_attention = " !" + std::to_string(badge.attention);
+        badge_width = static_cast<int>(Utf8ColumnWidth(badge_text) +
+                                       Utf8ColumnWidth(badge_attention)) +
+                      kSeparatorWidth;   // plus the separator that joins it
+    }
+    const auto window = ComputeTabBarWindow(widths, Terminal::Size().dimx - badge_width,
+                                            focused_index, kMarkerWidth);
 
     Elements cells;
     if (window.hidden_before > 0) {
@@ -238,6 +276,15 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
     }
     if (window.hidden_after > 0) {
         cells.push_back(text(" " + std::to_string(window.hidden_after) + "»") | Muted(theme));
+    }
+    if (badge.active) {
+        if (!cells.empty()) cells.push_back(text(" │ ") | Muted(theme));
+        Element badge_el = text(badge_text) | Muted(theme);
+        if (!badge_attention.empty()) {
+            badge_el = hbox({std::move(badge_el),
+                             text(badge_attention) | color(theme.ColorFor("attention")) | bold});
+        }
+        cells.push_back(std::move(badge_el));
     }
     return hbox(std::move(cells));
 }

@@ -33,6 +33,13 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"tab.goto.9", "alt+9"},
         {"group.previous", "alt+left"},
         {"group.next", "alt+right"},
+        // Tab-bar filters (keybinding_dispatch.hpp's FilterTabs): alt+f
+        // shows only the focused tab's group, alt+o only the agent (root)
+        // tabs. The active filter pressed again returns to all. Plain
+        // alt+letters: single-candidate encodings, unclaimed by any other
+        // core action.
+        {"tab.filter_group", "alt+f"},
+        {"tab.filter_agents", "alt+o"},
         {"jump.attention", "alt+a"},
         {"session.picker", "ctrl+o"},
         {"agent.picker", "alt+g"},

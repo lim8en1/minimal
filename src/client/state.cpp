@@ -2448,6 +2448,18 @@ void AppState::SetFocusedTab(const std::string& tab_id) {
 void AppState::CycleFocusForward() { FocusWithWrap(true); }
 void AppState::CycleFocusBackward() { FocusWithWrap(false); }
 
+void AppState::SetTabFilter(TabFilter filter) {
+    std::lock_guard lk(mtx_);
+    if (tab_filter_ == filter) return;   // same value: no repaint churn
+    tab_filter_ = filter;
+    BumpUiVersion();
+}
+
+TabFilter AppState::ActiveTabFilter() const {
+    std::lock_guard lk(mtx_);
+    return tab_filter_;
+}
+
 void AppState::FocusWithWrap(bool forward) {
     std::vector<std::string> order;
     // focused_id_ copied under the SAME lock as order: a reader thread can

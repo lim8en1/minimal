@@ -62,6 +62,55 @@ bool AnyWorkInFlight(const std::vector<AppState::TabSnapshot>& tabs,
 std::vector<std::string> TabsToClose(const std::vector<AppState::TabSnapshot>& tabs,
                                      const std::string& sid);
 
+// --- Tab-bar filter (tab.filter_group / tab.filter_agents) -------------------
+//
+// The pure half of the tab-bar filter: which tabs are visible, what
+// navigation does among them, and what toggling a filter does to focus.
+// All pure over TabSnapshot -- no AppState, no FTXUI (the same tier as
+// NextRootGroup above); HandleGlobalKey applies the results through
+// SetTabFilter/SetFocusedTab.
+
+// The tabs `filter` keeps, in render order. All: unchanged. Agents: root
+// tabs only. Group: the focused tab's group -- its root (matched by
+// root_ordinal) plus the children sharing it -- which contains the focused
+// tab itself by construction. When `focused` names no tab at all ("" on an
+// empty app, a stale handle after a close), Group falls back to the FULL
+// list rather than an empty bar: an empty bar reads as "the app lost my
+// tabs", not as a filter.
+std::vector<AppState::TabSnapshot> FilterTabs(const std::vector<AppState::TabSnapshot>& tabs,
+                                              TabFilter filter, const std::string& focused);
+
+// The group's root for `focused`: `focused` itself when it is a root tab,
+// otherwise its group's root (the group's first non-subagent tab, by
+// root_ordinal -- the root precedes its children in render order). "" when
+// `focused` names no tab. This is the refocus target when a filter toggle
+// would hide the focused tab.
+std::string ResolveGroupRoot(const std::vector<AppState::TabSnapshot>& tabs,
+                             const std::string& focused);
+
+// tab.next/previous within the VISIBLE set: cycles the filtered list from
+// the focused tab, wrapping. A focused tab outside the list (not expected
+// after the toggle's refocus, but defensive) starts at the first (forward)
+// or last (backward) visible tab. "" when nothing is visible.
+std::string NextVisibleTab(const std::vector<AppState::TabSnapshot>& tabs, TabFilter filter,
+                           const std::string& focused, bool forward);
+
+// What toggling `requested` does given the current filter: the ACTIVE filter
+// pressed again returns to All; the other one replaces it (they are two
+// views of one list, not a stack). `focus_tab_id` is non-empty when the
+// focused tab would be hidden by the new filter and focus must move in the
+// same press (Agents over a subagent: to its group's root -- the agent that
+// owns the child being hidden), so focus is never left on a tab the bar
+// does not show. Only Agents can hide the focused tab: Group always
+// contains it, All hides nothing.
+struct TabFilterDecision {
+    TabFilter filter = TabFilter::All;
+    std::string focus_tab_id;   // "" = keep the current focus
+};
+TabFilterDecision ApplyTabFilterToggle(TabFilter current, TabFilter requested,
+                                       const std::vector<AppState::TabSnapshot>& tabs,
+                                       const std::string& focused);
+
 // The parsed form of a Keybindings document, built ONCE after keybindings.json
 // (plus every plugin view's EnsureDefault) has settled, rather than re-parsed
 // per event. `with_keys` (app.cpp's global-keybinding CatchEvent) used to do

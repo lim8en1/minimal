@@ -12,6 +12,8 @@
   "tab.goto.9": "alt+9",
   "group.previous": "alt+left",
   "group.next": "alt+right",
+  "tab.filter_group": "alt+f",
+  "tab.filter_agents": "alt+o",
   "jump.attention": "alt+a",
   "session.picker": "ctrl+o",
   "agent.picker": "alt+g",

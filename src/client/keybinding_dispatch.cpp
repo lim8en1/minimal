@@ -1,6 +1,8 @@
 #include "minimal/client/keybinding_dispatch.hpp"
 
+#include <algorithm>
 #include <array>
+#include <optional>
 #include <string>
 
 #include "minimal/client/key_event_parser.hpp"
@@ -21,6 +23,97 @@ std::string NextRootGroup(const std::vector<AppState::TabSnapshot>& tabs,
         if (roots[i] == focused) idx = i;
     }
     return roots[(idx + (forward ? 1 : roots.size() - 1)) % roots.size()];
+}
+
+// --- Tab-bar filter (see the header for the contract) ------------------------
+
+std::vector<AppState::TabSnapshot> FilterTabs(const std::vector<AppState::TabSnapshot>& tabs,
+                                              TabFilter filter, const std::string& focused) {
+    if (filter == TabFilter::All) return tabs;
+    if (filter == TabFilter::Group) {
+        // The focused tab's group only. An unknown focused handle falls back
+        // to everything -- see the header.
+        std::optional<int64_t> group;
+        for (const auto& tab : tabs) {
+            if (tab.tab_id == focused) {
+                group = tab.root_ordinal;
+                break;
+            }
+        }
+        if (!group.has_value()) return tabs;
+        std::vector<AppState::TabSnapshot> out;
+        for (const auto& tab : tabs) {
+            if (tab.root_ordinal == *group) out.push_back(tab);
+        }
+        return out;
+    }
+    // Agents: roots only.
+    std::vector<AppState::TabSnapshot> out;
+    for (const auto& tab : tabs) {
+        if (!tab.is_subagent) out.push_back(tab);
+    }
+    return out;
+}
+
+std::string ResolveGroupRoot(const std::vector<AppState::TabSnapshot>& tabs,
+                             const std::string& focused) {
+    std::optional<int64_t> group;
+    for (const auto& tab : tabs) {
+        if (tab.tab_id == focused) {
+            group = tab.root_ordinal;
+            break;
+        }
+    }
+    if (!group.has_value()) return "";
+    // The group's first non-subagent tab is its root (render order puts the
+    // root before its children), so a focused ROOT resolves to itself here.
+    for (const auto& tab : tabs) {
+        if (tab.root_ordinal == *group && !tab.is_subagent) return tab.tab_id;
+    }
+    return "";
+}
+
+std::string NextVisibleTab(const std::vector<AppState::TabSnapshot>& tabs, TabFilter filter,
+                           const std::string& focused, bool forward) {
+    const auto visible = FilterTabs(tabs, filter, focused);
+    if (visible.empty()) return "";
+    std::size_t idx = 0;
+    bool found = false;
+    for (std::size_t i = 0; i < visible.size(); ++i) {
+        if (visible[i].tab_id == focused) {
+            idx = i;
+            found = true;
+            break;
+        }
+    }
+    // The old CycleFocus rule kept: nothing focused yet starts the cycle at
+    // the first tab (forward) -- backward starts at the last.
+    if (!found) return forward ? visible.front().tab_id : visible.back().tab_id;
+    const std::size_t next =
+        forward ? (idx + 1) % visible.size() : (idx + visible.size() - 1) % visible.size();
+    return visible[next].tab_id;
+}
+
+TabFilterDecision ApplyTabFilterToggle(TabFilter current, TabFilter requested,
+                                       const std::vector<AppState::TabSnapshot>& tabs,
+                                       const std::string& focused) {
+    TabFilterDecision d;
+    d.filter = (requested == current) ? TabFilter::All : requested;
+    if (d.filter == TabFilter::All) return d;   // unfiltering hides nothing
+
+    // Only Agents can hide the focused tab (Group always contains it): land
+    // focus on the group's root in the same press.
+    if (d.filter == TabFilter::Agents) {
+        bool focused_hidden = false;
+        for (const auto& tab : tabs) {
+            if (tab.tab_id == focused) {
+                focused_hidden = tab.is_subagent;
+                break;
+            }
+        }
+        if (focused_hidden) d.focus_tab_id = ResolveGroupRoot(tabs, focused);
+    }
+    return d;
 }
 
 // --- Panel focus rules (see the header for the contract) ---------------------
@@ -224,18 +317,46 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
 
     const std::string& sid = ctx.focused;
 
+    // The ACTIVE tab filter (TabFilter): every tab-keyed navigation below
+    // acts on the VISIBLE set. A filter that hid tabs from the bar but not
+    // from alt+down/up would cycle focus through tabs the user cannot see;
+    // tab.goto.N's index contract is "the number the bar prints", which is
+    // the filtered list's numbering. jump.attention is the one exception
+    // (its own branch, below): it scans everything, deliberately.
+    const TabFilter filter = ctx.app.ActiveTabFilter();
+
     if (ctx.keymap.Matches("tab.next", event)) {
-        ctx.app.CycleFocusForward();
+        const auto target = NextVisibleTab(ctx.app.GetAllTabs(), filter, sid, /*forward=*/true);
+        if (!target.empty()) ctx.app.SetFocusedTab(target);
         return true;
     }
     if (ctx.keymap.Matches("tab.previous", event)) {
-        ctx.app.CycleFocusBackward();
+        const auto target = NextVisibleTab(ctx.app.GetAllTabs(), filter, sid, /*forward=*/false);
+        if (!target.empty()) ctx.app.SetFocusedTab(target);
+        return true;
+    }
+    // tab.filter_group / tab.filter_agents: two toggles over the ONE shared
+    // filter state (TabFilter). The active filter pressed again returns to
+    // All; the other replaces it. When the new filter would hide the focused
+    // tab (Agents over a subagent), ApplyTabFilterDecision moves focus to
+    // the group's root in the same press, so focus never sits on a tab the
+    // bar does not show. Unfiltering (back to All) touches no focus.
+    if (ctx.keymap.Matches("tab.filter_group", event) ||
+        ctx.keymap.Matches("tab.filter_agents", event)) {
+        const auto tabs = ctx.app.GetAllTabs();
+        const auto decision = ApplyTabFilterToggle(
+            ctx.app.ActiveTabFilter(),
+            ctx.keymap.Matches("tab.filter_group", event) ? TabFilter::Group : TabFilter::Agents,
+            tabs, sid);
+        if (!decision.focus_tab_id.empty()) ctx.app.SetFocusedTab(decision.focus_tab_id);
+        ctx.app.SetTabFilter(decision.filter);
         return true;
     }
     // tab.goto.1..9: straight to the Nth tab, in tab-bar order (the number the
-    // bar prints before each name). A number past the last tab is consumed
-    // and ignored, like tab.next at an edge. The names are built once, not
-    // per event.
+    // bar prints before each name) -- the FILTERED list when a tab filter is
+    // active, per the ActiveTabFilter note above. A number past the last tab
+    // is consumed and ignored, like tab.next at an edge. The names are built
+    // once, not per event.
     static const std::array<std::string, 9> kGotoActions = [] {
         std::array<std::string, 9> names;
         for (std::size_t i = 0; i < names.size(); ++i) {
@@ -245,8 +366,8 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     }();
     for (std::size_t i = 0; i < kGotoActions.size(); ++i) {
         if (!ctx.keymap.Matches(kGotoActions[i], event)) continue;
-        const auto tabs = ctx.app.GetAllTabs();
-        if (i < tabs.size()) ctx.app.SetFocusedTab(tabs[i].tab_id);
+        const auto visible = FilterTabs(ctx.app.GetAllTabs(), filter, sid);
+        if (i < visible.size()) ctx.app.SetFocusedTab(visible[i].tab_id);
         return true;
     }
     const bool group_next = ctx.keymap.Matches("group.next", event);
@@ -255,21 +376,39 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         // Between root groups: focus the next (or previous) ROOT tab. The
         // index math is NextRootGroup, above -- this is the same shape of
         // "find my index among a filtered subset" bug that jump.attention
-        // had (below).
-        const auto tabs = ctx.app.GetAllTabs();
-        const auto target = NextRootGroup(tabs, sid, group_next);
+        // had (below). Runs over the VISIBLE set: under the Agents filter
+        // that is the roots themselves; under Group the cycle stays inside
+        // the visible group.
+        const auto visible = FilterTabs(ctx.app.GetAllTabs(), filter, sid);
+        const auto target = NextRootGroup(visible, sid, group_next);
         if (!target.empty()) ctx.app.SetFocusedTab(target);
         return true;
     }
     if (ctx.keymap.Matches("jump.attention", event)) {
-        // Crosses groups; wraps. Only Waiting tabs qualify (the ! glyph).
+        // Crosses groups; wraps. Only tabs carrying the ! glyph qualify.
         // Scans starting just AFTER the focused tab -- not a fixed index,
         // which ignored which tab was actually focused and could "jump" to
         // the focused tab itself, a visible no-op exactly when Waiting is
         // the reason someone pressed the key. See NextAttentionTab, which
         // this bug is now a unit test of.
-        const auto target = NextAttentionTab(ctx.app.GetAllTabs(), sid);
-        if (!target.empty()) ctx.app.SetFocusedTab(target);
+        //
+        // Scans ALL tabs, filtered or not: this is the cross-group RESCUE
+        // verb, and a '!' hidden by the tab filter is exactly when it is
+        // needed most (the tab bar's filter badge shows the hidden count).
+        // When the target IS filtered out, the filter clears first so the
+        // jump is actually visible -- one keypress always lands on the
+        // prompt, never on nothing.
+        const auto tabs = ctx.app.GetAllTabs();
+        const auto target = NextAttentionTab(tabs, sid);
+        if (!target.empty()) {
+            const auto visible = FilterTabs(tabs, filter, sid);
+            const bool target_visible = std::any_of(visible.begin(), visible.end(),
+                                                    [&](const auto& tab) {
+                                                        return tab.tab_id == target;
+                                                    });
+            if (!target_visible) ctx.app.SetTabFilter(TabFilter::All);
+            ctx.app.SetFocusedTab(target);
+        }
         return true;
     }
     // INTERRUPT -- the interactive loop's missing verb. Escape and ctrl+c on
