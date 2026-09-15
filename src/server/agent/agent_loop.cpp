@@ -854,6 +854,10 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
 TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
     TurnResult result;
     compaction_failed_this_turn_ = false;
+    // A stale open flag from a turn that exited via exception (RunTurnLoop's
+    // rethrows skip the trailing lower) must not outlive it: steering
+    // eligibility is re-derived for THIS turn.
+    turn_open_to_steering_.store(false, std::memory_order_release);
     // TURN START, before the seed and the first BuildChatRequest: anything
     // queued out-of-band while the session was idle -- a non-blocking
     // subagent's completion, a background task's result -- enters the history
@@ -864,21 +868,37 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
     // user typed the seed.
     FlushInjectedMessages();
     AppendAndPersist(std::move(seed_message));
+    // THE STEERING BOUNDARY. Only past this point may Session route a
+    // mid-turn submission onto the injection queue: before the seed is in the
+    // history, the turn-start flush above would splice the submission in
+    // FRONT of the seed it was submitted after -- reversing the user's
+    // submission order on the durable transcript. A submission landing in
+    // that window queues on the work queue instead (Session's SubmitTurn
+    // polls OpenToSteering), and runs its own turn.
+    turn_open_to_steering_.store(true, std::memory_order_release);
     RunTurnLoop(result, /*flush_first=*/false);
+    turn_open_to_steering_.store(false, std::memory_order_release);
     return result;
 }
 
 TurnResult AgentLoop::RunTurn() {
     TurnResult result;
     compaction_failed_this_turn_ = false;
+    turn_open_to_steering_.store(false, std::memory_order_release);
     // The wake path: no seed of its own -- the injected messages ARE the user
-    // turn, flushed at the top of the loop body.
+    // turn, flushed at the top of the loop body. Steering opens only after
+    // that flush (RunTurnLoop), so a submission can never precede the content
+    // this turn exists to answer.
     RunTurnLoop(result, /*flush_first=*/true);
+    turn_open_to_steering_.store(false, std::memory_order_release);
     return result;
 }
 
 void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
-    if (flush_first) FlushInjectedMessages();
+    if (flush_first) {
+        FlushInjectedMessages();
+        turn_open_to_steering_.store(true, std::memory_order_release);
+    }
     int turns = 0;
     while (true) {
         if (Cancelled()) {

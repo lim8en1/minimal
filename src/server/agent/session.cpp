@@ -411,7 +411,19 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
         // the running loop cannot absorb, so those ride the work queue as
         // today. The steering gate (core.user_prompt_submit) fires at flush
         // time on the worker.
-        if (in_turn_ && turn.model.empty() && turn.agent_preset.empty()) {
+        //
+        // OpenToSteering() closes the window between the turn's POP and its
+        // seed landing in the history: a submission there is ahead of the
+        // seed on the clock but behind it in submission order, and steering
+        // it would flush it BEFORE the seed (RunTurn's turn-start flush
+        // precedes AppendAndPersist) -- reversing on the durable transcript
+        // the order the user actually typed. Such a submission queues on the
+        // work queue and runs its own turn. (Out-of-band injections --
+        // subagent completions, background results -- keep the turn-start
+        // flush's before-the-seed position: they are not user submissions
+        // and their chronology genuinely precedes the seed's turn.)
+        if (in_turn_ && loop_->OpenToSteering() && turn.model.empty() &&
+            turn.agent_preset.empty()) {
             // The id is assigned for steered submissions too: TurnQueuedEvent's
             // per-session monotonicity holds, and the id is what the client
             // correlates its optimistic echo against even though there is

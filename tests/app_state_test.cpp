@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -1565,6 +1566,35 @@ TEST_CASE("sends stacked before the create resolves land on ONE session",
             settled = true;
             break;
         }
+    }
+    if (!settled) {
+        // Stall forensics: the client window vs the SERVER-side durable
+        // transcript. If the server also holds < 4 rows, the second turn
+        // never completed (a dropped send -- product bug); if the server
+        // has 4 but the window lags, the fetch/apply path stalled.
+        const auto snap = app.GetDetails(tab);
+        std::cerr << "[stall-diag] client page=" << snap.scrollback_page->size()
+                  << " state=" << static_cast<int>(snap.state)
+                  << " turn_in_flight=" << snap.turn_in_flight
+                  << " turn_seq=" << snap.turn_seq
+                  << " has_streaming=" << snap.has_streaming_text
+                  << " pending_user=" << snap.pending_user_messages.size()
+                  << " transcript_version=" << snap.transcript_version
+                  << " last_loaded_seq=" << snap.last_loaded_seq
+                  << " has_earlier=" << snap.has_earlier_messages;
+        if (snap.latest_notice)
+            std::cerr << " notice='" << snap.latest_notice->message << "'";
+        std::cerr << "\n[stall-diag] client seqs:";
+        for (const auto& row : *snap.scrollback_page) std::cerr << ' ' << row.seq();
+        std::cerr << "\n";
+        const auto server = fixture.db->GetMessagesPage(sid, std::nullopt, 100);
+        std::cerr << "[stall-diag] server rows=" << server.messages.size() << " seqs:";
+        for (const auto& row : server.messages) {
+            std::cerr << ' ' << row.seq << ':'
+                      << (row.message.role == llm::Role::User ? "U'" : "A'")
+                      << llm::TextOf(row.message.content) << "'";
+        }
+        std::cerr << std::endl;
     }
     REQUIRE(settled);
     CHECK(fixture.sessions->size() == 1);

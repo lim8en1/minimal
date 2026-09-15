@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -351,6 +352,18 @@ public:
     // durable record is the transcript; "ends in user text" is exactly
     // "the model owes a reply". Worker-thread-only (history_ mutates there).
     bool HistoryEndsWithUnansweredUserText() const;
+
+    // Whether the running turn has passed the point a mid-turn user
+    // submission may steer from: its own user-visible content (the seed, or
+    // the wake turn's top-of-loop flush) is in the history. Session's
+    // SubmitTurn keys its steering routing on this -- before the seed lands,
+    // a submission is a QUEUED turn, not steering: steering it would flush
+    // ahead of the seed (RunTurn's turn-start flush precedes AppendAndPersist),
+    // reversing the submission order the user typed. Atomic: the reader
+    // thread's SubmitTurn polls it while the worker is inside RunTurn.
+    bool OpenToSteering() const {
+        return turn_open_to_steering_.load(std::memory_order_acquire);
+    }
     llm::ChatRequest BuildChatRequest() const;
 
     // Occupancy estimate covering what a request will actually carry: the
@@ -529,6 +542,11 @@ private:
     std::string project_context_;
     std::vector<std::string> mcp_servers_;
     tools::CancelTokenPtr cancel_token_;
+    // See OpenToSteering(). Raised once the turn's user-visible content is in
+    // the history (after the seed append, or after the wake turn's top flush);
+    // lowered when the turn loop exits. The reader thread's SubmitTurn polls
+    // it mid-turn, hence the atomic.
+    std::atomic<bool> turn_open_to_steering_{false};
     LoopConfig config_;
     SessionContext session_;
     std::function<bool()> is_cancelled_;
