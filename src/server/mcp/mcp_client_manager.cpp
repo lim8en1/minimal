@@ -60,7 +60,11 @@ public:
                             const tools::CancelTokenPtr& cancel) override {
         std::shared_ptr<ServerHandle> handle = handle_.lock();
         if (handle == nullptr) {
-            return {false, "MCP server is no longer configured", nlohmann::json()};
+            // Designated initializers: the positional form silently bound the
+            // trailing json() onto caller_cancelled (bool), leaving `result`
+            // unmentioned -- the -Wmissing-field-initializers that is exactly
+            // the point of naming every field on a multi-flag outcome.
+            return {.ok = false, .error = "MCP server is no longer configured"};
         }
         bool need_restart;
         {
@@ -77,8 +81,8 @@ public:
         if (need_restart) {
             std::string error;
             if (!manager_->EnsureAlive(handle->entry.name, error)) {
-                return {false, "MCP server '" + handle->entry.name + "' is not connected: " + error,
-                        nlohmann::json()};
+                return {.ok = false,
+                        .error = "MCP server '" + handle->entry.name + "' is not connected: " + error};
             }
         }
         std::shared_ptr<McpConnection> connection;
@@ -86,8 +90,8 @@ public:
             std::lock_guard<std::mutex> lock(handle->mu);
             connection = handle->connection;
             if (!handle->alive || !connection) {
-                return {false, "MCP server '" + handle->entry.name + "' is not connected",
-                        nlohmann::json()};
+                return {.ok = false,
+                        .error = "MCP server '" + handle->entry.name + "' is not connected"};
             }
         }
         McpCallOutcome outcome = connection->CallTool(tool_name, arguments, cancel);

@@ -1543,10 +1543,13 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp, bool
             if (text_bearing) user_text_seqs.push_back(stored.seq());
         }
         std::sort(user_text_seqs.begin(), user_text_seqs.end());
-        for (const auto seq : user_text_seqs) {
-            if (pending_user_messages_.empty()) break;
-            pending_user_messages_.erase(pending_user_messages_.begin());
-        }
+        // Each persisted user row retires exactly one echo, oldest first; the
+        // seqs themselves were only the count's source, so the loop walks the
+        // count.
+        const auto retire_count = std::min(user_text_seqs.size(), pending_user_messages_.size());
+        pending_user_messages_.erase(pending_user_messages_.begin(),
+                                     pending_user_messages_.begin() +
+                                         static_cast<std::ptrdiff_t>(retire_count));
     }
     ++transcript_version_;
     ++refresh_seq_;

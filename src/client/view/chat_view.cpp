@@ -1138,7 +1138,6 @@ std::optional<int> ChatView::RowCursorOffsetFromBottom() const {
     const int top_applied = scroll_state_->content_height - viewport -
                             scroll_state_->applied_offset_from_bottom;
     const int row_top = y_min - scroll_state_->viewport_top_screen;
-    const int row_bottom = y_max - scroll_state_->viewport_top_screen;
     // Reveal the row's HEAD (its top edge -- the label line a chat row is
     // recognized by): scroll until the top edge is on screen, at the
     // viewport's top when the row sits above, at its bottom when below; no

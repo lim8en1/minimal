@@ -1576,14 +1576,6 @@ bool WaitForToolStarted(std::atomic<bool>& started, std::chrono::milliseconds ti
     return started.load(std::memory_order_acquire);
 }
 
-std::optional<v1::StopReason> LastTurnCompletedStopReason(SessionFixture& fixture) {
-    std::optional<v1::StopReason> observed;
-    for (const auto& event : fixture.DrainQueue()) {
-        if (event.has_turn_completed()) observed = event.turn_completed().stop_reason();
-    }
-    return observed;
-}
-
 }  // namespace
 
 TEST_CASE("pause ends the turn at the tool-call return with real results persisted",
@@ -1737,7 +1729,6 @@ TEST_CASE("cancel beats pause", "[session][pause]") {
     SessionFixture fixture;
     std::atomic<bool> started{false};
     auto tool = std::make_unique<testing::GatedTool>("gate", started);
-    auto* tool_ptr = tool.get();
     fixture.tools_registry.Register(std::move(tool));
     fixture.Script(testing::ToolUseResponse("call-1", "gate"));
     fixture.Script(testing::TextResponse("must not be consumed"));
