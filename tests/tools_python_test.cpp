@@ -909,9 +909,14 @@ TEST_CASE("consecutive idle interrupts are each reported as idle, never as a res
 
     // The SECOND idle interrupt must read as idle too -- a sticky flag would
     // misreport it as "the running request failed with KeyboardInterrupt".
+    // The grace is deliberately generous: under a parallel ctest run the
+    // python child can still be BOOTING when the first SIGINT lands (imports
+    // crawling under CPU contention), and a tight bound flaked as kNoReaction.
+    // This test pins the outcome CLASSIFICATION, not the delivery latency --
+    // a genuinely wedged interpreter still fails here, just slower.
     for (int round = 0; round < 2; ++round) {
         interp->SoftInterrupt();
-        CHECK(interp->WaitForInterrupt(std::chrono::seconds(5), nullptr) ==
+        CHECK(interp->WaitForInterrupt(std::chrono::seconds(30), nullptr) ==
               Interpreter::InterruptOutcome::kIdleInterrupt);
         CHECK(interp->alive());
     }
