@@ -666,17 +666,22 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
         }
 
         case v1::ClientEvent::kSetRunMode: {
-            // Queued for the worker like a rewind: SetRunMode is
-            // worker-thread-only, so a mid-turn press applies at the turn
-            // boundary. UNSPECIFIED carries no mode -- ignored with a warning
-            // rather than silently flipping the session to the enum's default.
+            // Applied on the READER, like kSetPaused: the executor's run mode
+            // is a single atomic enum read lock-free by every tool dispatch,
+            // so an immediate flip is safe -- and a mid-turn press takes
+            // effect at the very next gated tool call of the running turn,
+            // instead of at the turn boundary a queued work item would wait
+            // for. UNSPECIFIED carries no mode -- ignored with a warning
+            // rather than silently flipping the session to the enum's
+            // default. False (terminated session) needs no wire answer: the
+            // stream is ending anyway.
             const auto mode = FromProto(event.set_run_mode().run_mode());
             if (!mode.has_value()) {
                 logger_.warn("session {}: set_run_mode with no mode; ignored",
                              session.info().session_id);
                 return;
             }
-            session.SubmitRunMode(agent::QueuedRunMode{*mode});
+            session.SetRunMode(*mode);
             return;
         }
 

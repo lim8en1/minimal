@@ -327,12 +327,12 @@ struct QueuedRewind {
     bool redo = false;
 };
 
-// One client-driven run-mode change (shift+tab's direct switch). Queued to
-// the worker like a rewind because SetRunMode is worker-thread-only (the
-// executor reads it lock-free during tool dispatch).
-struct QueuedRunMode {
-    tools::PermissionRunMode mode = tools::PermissionRunMode::Normal;
-};
+// One client-driven run-mode change (shift+tab) is NOT a work item: like
+// pause (SetPausedEvent), it is applied on the reader thread by flipping the
+// executor's atomic. It was queued to the worker once, on the theory that
+// SetRunMode was worker-thread-only -- but the state is a single atomic enum
+// whose reads are lock-free from any thread, so the queue bought a
+// turn-boundary delay and no safety. See Session::SetRunMode.
 
 // The explicit-resume kick (SetPausedEvent{paused=false} with a turn that
 // ended STOP_REASON_PAUSED and nothing else queued). Runs the seedless wake
@@ -359,7 +359,7 @@ struct QueuedTurn {
     std::uint64_t turn_id = 0;
 };
 
-using WorkItem = std::variant<std::string, QueuedTurn, QueuedCommand, QueuedRewind, QueuedRunMode,
+using WorkItem = std::variant<std::string, QueuedTurn, QueuedCommand, QueuedRewind,
                               QueuedResume>;  // string = a plain user turn
 
 class Session : public commands::SessionControl {
@@ -434,12 +434,24 @@ public:
     // on a rewind that was silently dropped.
     bool SubmitRewind(QueuedRewind request);
 
-    // Reader thread. Queues a permission run-mode change (shift+tab) for the
-    // worker, which applies it at a turn boundary -- the same
-    // worker-thread-only contract SetRunMode has. False means refused
-    // (terminated, or the work queue is full); a SessionError event answers
-    // the refusal on the wire, so the press is never silently dropped.
-    bool SubmitRunMode(QueuedRunMode request);
+    // Reader thread. Applies a permission run-mode change (shift+tab)
+    // IMMEDIATELY, like SetPaused flips the pause state: the executor's run
+    // mode is a single atomic enum whose every read (tool dispatch, spawner
+    // clamps, metadata) is lock-free, so the write is as safe from the reader
+    // as from the worker -- and unlike a queued work item, the new posture
+    // gates the VERY NEXT tool call of an in-flight turn. A permission Ask
+    // already on the wire is not retroactively answered; the operator still
+    // answers that prompt, and every later gate of the turn sees the new mode.
+    // False means refused (terminated); nothing is emitted on refusal -- the
+    // session is gone and there is no client stream worth answering on.
+    bool SetRunMode(tools::PermissionRunMode mode);
+    // The durable record of the user's run-mode choice, kept in sync with the
+    // executor by every writer (SetRunMode, ApplyPreset, the per-turn borrow).
+    // What a /agent re-resolution and a borrow's restore read -- neither
+    // params_ (a session-creation default) nor preset_.run_mode (what the
+    // preset resolves to) tracks a runtime shift+tab. mutex_-guarded: written
+    // by the reader (SetRunMode) and the worker (preset paths).
+    tools::PermissionRunMode desired_run_mode() const;
     // Cross-session splice point: a non-blocking subagent's worker queues its
     // completion here when it finishes; the session's own worker flushes it at
     // a turn boundary. False means the session is already terminating and the
@@ -678,7 +690,6 @@ private:
     void RunOneTurn(std::optional<std::string> text, const QueuedTurn* overrides = nullptr);
     void RunOneCommand(const QueuedCommand& command);
     void RunOneRewind(const QueuedRewind& request);
-    void RunOneRunMode(const QueuedRunMode& request);
     // The full E-additions metadata set (name, preset, model, run mode,
     // context window) as one SessionMetadataEvent. Called after anything
     // mutates what it carries -- ApplyPreset, a run-mode switch -- so every
@@ -835,6 +846,13 @@ private:
     // beats pause); Terminate need not bother -- terminated_ dominates every
     // reader.
     std::atomic<bool> paused_{false};
+    // The user's runtime run-mode choice (shift+tab), mirrored from the
+    // executor's atomic at every write. The executor's value IS the live one;
+    // this is the sticky record PresetRestore and /agent re-resolutions need
+    // -- neither params_.run_mode_override nor preset_.run_mode tracks a
+    // runtime switch. Guarded by mutex_: the reader writes it in SetRunMode,
+    // the worker in ApplyPreset and the borrow path.
+    tools::PermissionRunMode desired_run_mode_;
     // Set on the worker when a turn ends STOP_REASON_PAUSED, cleared when any
     // turn starts or a resume kick is enqueued: the record that an explicit
     // unpause has something to continue INTO. mutex_-guarded (worker and the

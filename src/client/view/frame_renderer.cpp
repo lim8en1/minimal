@@ -457,10 +457,11 @@ ftxui::Element FrameRenderer::Render() {
             values["agent"] = (agent_pending ? "→ " : "") + agent_value;
         }
         {
-            // The desired-state rule for the run mode: a queued shift+tab
-            // (the server applies it at a turn boundary) renders the
-            // requested value with the pending marker until the apply-time
-            // metadata event confirms it. See PermissionModeSegmentValue.
+            // The desired-state rule for the run mode: a shift+tab sent
+            // but not yet confirmed renders the requested value with the
+            // pending marker until the confirming metadata event lands
+            // (the server applies the change immediately). See
+            // PermissionModeSegmentValue.
             const std::string permission_value = PermissionModeSegmentValue(
                 focused_details.permission_mode, focused_details.desired_permission_mode,
                 !focused_details.session_id.empty());

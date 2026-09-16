@@ -175,6 +175,15 @@ int CountStreamEvents(const std::vector<v1::ServerEvent>& events) {
     return n;
 }
 
+bool WaitForCallCount(testing::FakeLlmProvider& provider, std::size_t expected,
+                      std::chrono::milliseconds timeout = 5s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (provider.call_count() < expected && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    return provider.call_count() == expected;
+}
+
 }  // namespace
 
 
@@ -1413,20 +1422,20 @@ TEST_CASE("the injection queue is bounded; over the limit is a refusal, not a qu
     CHECK(queue.Push(llm::Message{llm::Role::User, {llm::TextBlock{"after drain"}}}));
 }
 
-TEST_CASE("SubmitRunMode applies at a turn boundary and announces the new mode",
-          "[session][run_mode]") {
-    // shift+tab's wire path: the event queues for the worker (SetRunMode is
-    // worker-thread-only), the executor flips, and a full SessionMetadataEvent
-    // is what every attached client's {permission_mode} segment refreshes
-    // from -- without it the press LOOKED like a no-op.
+TEST_CASE("SetRunMode applies immediately and announces the mode", "[session][run_mode]") {
+    // shift+tab's wire path: the flip is reader-side now (Session::SetRunMode,
+    // the same contract as SetPaused), so the executor's mode moves the moment
+    // the event lands -- no queued work item, no waiting for a turn boundary.
+    // The SessionMetadataEvent it publishes is what every attached client's
+    // {permission_mode} segment refreshes from -- without it the press LOOKED
+    // like a no-op.
     SessionFixture fixture;
     fixture.Script(testing::TextResponse("done"));
     fixture.Start();
 
-    REQUIRE(
-        fixture.session->SubmitRunMode(agent::QueuedRunMode{tools::PermissionRunMode::Bypass}));
-    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    REQUIRE(fixture.session->SetRunMode(tools::PermissionRunMode::Bypass));
     CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Bypass);
+    CHECK(fixture.session->desired_run_mode() == tools::PermissionRunMode::Bypass);
 
     bool announced = false;
     for (const auto& event : fixture.DrainQueue()) {
@@ -1438,45 +1447,137 @@ TEST_CASE("SubmitRunMode applies at a turn boundary and announces the new mode",
     CHECK(announced);
 }
 
-TEST_CASE("a borrowed turn does not revert a SubmitRunMode switch",
-          "[session][run_mode]") {
-    // The regression: PresetRestore recomputed the executor's run mode from
-    // params_/preset_ -- neither of which a shift+tab change writes -- so the
-    // next turn carrying a per-turn override silently reverted the user's
-    // switch, and the borrowed turn itself ran at the session's default
-    // posture. Both now key off a snapshot of what the executor held.
+TEST_CASE("a mid-turn run-mode switch gates the turn's very next tool call",
+          "[session][run_mode][invariant]") {
+    // THE BUG THIS FIXES: the switch used to queue a work item, so a shift+tab
+    // pressed while the agent sat on a gated tool call applied only at the turn
+    // boundary -- the operator's "let it through" did nothing for the turn they
+    // pressed it during, and the SAME turn re-prompted for the next call. The
+    // flip must be visible to the executor while the worker is parked on the
+    // prompt, so the next round's gate sees Bypass and does not ask.
+    SessionFixture fixture;
+    fixture.preset.permission_mode = testing::AllowAllPolicy();
+    fixture.preset.permission_mode.execute = tools::PermissionMode::Ask;
+    auto tool = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran");
+    auto* tool_ptr = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+
+    fixture.Script(testing::ToolUseResponse("call-1", "bash"));  // parks the worker on the Ask
+    fixture.Script(testing::ToolUseResponse("call-2", "bash"));  // the SAME turn's next round
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("go");
+    const auto request_id = WaitForPermissionRequest(fixture);
+    REQUIRE(request_id.has_value());  // worker parked on the prompt
+
+    // Reader-side flip, exactly what the SetRunModeEvent handler does.
+    REQUIRE(fixture.session->SetRunMode(tools::PermissionRunMode::Bypass));
+    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Bypass);
+
+    // An open Ask is NOT retroactively answered by the switch: the operator
+    // still answers this one; every later gate sees the new mode.
+    REQUIRE(testing::Transport(*fixture.session)
+                .pending()
+                .Resolve(*request_id, rpc::PermissionAnswer{tools::PermissionDecision::Allow, {}}));
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    // The second call of the SAME turn ran unasked: two rounds + the closing
+    // text against two tool executions, and no second PermissionRequest on the
+    // wire. Under the old queued switch this turn would have prompted again.
+    CHECK(fixture.provider->call_count() == 3);
+    // Post-idle read: the worker joined the wait predicate, so its writes are
+    // visible (the same happens-before edge every other post-turn check uses).
+    CHECK(tool_ptr->calls.size() == 2);
+    int asks = 0;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_permission_request()) ++asks;
+    }
+    CHECK(asks == 0);
+    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Bypass);
+}
+
+TEST_CASE("a borrowed turn does not revert a SetRunMode switch", "[session][run_mode]") {
+    // The regression, twice over: PresetRestore first recomputed the executor's
+    // run mode from params_/preset_ -- neither of which a shift+tab change
+    // writes -- so the next borrowed turn silently reverted the user's switch.
+    // It then snapshot-at-pop, which a reader-side flip landing DURING a
+    // borrowed turn would race the same way. The restore now reads
+    // desired_run_mode_ at restore time: the user's latest word outranks the
+    // borrow, whenever it landed.
     testing::TempDir dir;
-    std::ofstream(dir.path() / "settings.json") << "{}\n";
+    std::ofstream(dir.path() / "settings.json")
+        << "{\"default_model\": \"main/test-model\"}\n";
     std::ofstream(dir.path() / "permissions.json") << "{}\n";
-    std::ofstream(dir.path() / "providers.json") << "{\"providers\":{}}\n";
+    // One provider + one model, so the borrow's model resolution succeeds and
+    // the turn reaches the scripted provider (an empty providers.json throws
+    // at resolve time and the turn fails before the borrow applies).
+    std::ofstream(dir.path() / "providers.json")
+        << R"({"providers":{"main":{"backend":"openai",)"
+           R"("url":"http://localhost/v1","models":{"test-model":{}}}}})"
+        << "\n";
     std::filesystem::create_directories(dir.path() / "agents");
+    // Same provider/model as the fixture's preset: a PURE borrow, so the
+    // provider-rebind path stays out of it and the test isolates the run-mode
+    // restore.
     std::ofstream(dir.path() / "agents" / "test.md")
-        << "---\nname: test\n---\nborrow body\n";
+        << "---\nname: test\nmodel: main/test-model\n---\nborrow body\n";
     config::SkillRegistry skills = config::SkillRegistry::Load(dir.path());
     agent::AgentPresetRegistry registry(
         dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
 
     SessionFixture fixture(dir.path());
     fixture.preset_registry = &registry;
+    // Run the session on the registry's OWN resolved preset: the pop-time
+    // transient is registry.Resolve("test") verbatim, so a session preset that
+    // matches it keeps the provider-rebind path out of the test and isolates
+    // the run-mode restore. The fixture's tool/policy fields are re-applied on
+    // top, as the default fixture preset would have carried them.
+    fixture.preset = registry.Resolve("test");
+    fixture.preset.allowed_tools = {"*"};
+    fixture.preset.permission_mode = testing::AllowAllPolicy();
+    fixture.preset.run_mode = tools::PermissionRunMode::Normal;
     fixture.Script(testing::TextResponse("borrowed"));
     fixture.Start();
 
-    REQUIRE(
-        fixture.session->SubmitRunMode(agent::QueuedRunMode{tools::PermissionRunMode::AllowOnly}));
-    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    REQUIRE(fixture.session->SetRunMode(tools::PermissionRunMode::AllowOnly));
     REQUIRE(fixture.session->run_mode() == tools::PermissionRunMode::AllowOnly);
 
     agent::QueuedTurn borrowed;
     borrowed.text = "run under the override";
     borrowed.agent_preset = "test";  // the same preset: a pure borrow
     REQUIRE(fixture.session->SubmitTurnWithOverrides(borrowed));
+    // Mid-borrow: the provider call is in flight, the borrow's transient state
+    // is live on the worker. A flip landing NOW is the race the pop-time
+    // snapshot lost.
+    REQUIRE(WaitForCallCount(*fixture.provider, 1));
+
+    REQUIRE(fixture.session->SetRunMode(tools::PermissionRunMode::Bypass));
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
-    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::AllowOnly);
+    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Bypass);
+    CHECK(fixture.session->desired_run_mode() == tools::PermissionRunMode::Bypass);
 
     // And a plain turn keeps it too -- the restore must not have leaked the
     // borrow's bookkeeping into the session's sticky state.
+    fixture.Script(testing::TextResponse("plain"));
     fixture.session->SubmitTurn("plain");
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Bypass);
+}
+
+TEST_CASE("SetRunMode is refused on a terminated session and changes nothing",
+          "[session][run_mode][invariant]") {
+    // The one refusal SetRunMode has (there is no backlog to fill anymore): a
+    // terminated session accepts no mode change, and the executor's mode is
+    // untouched -- the call cannot half-apply.
+    SessionFixture fixture;
+    fixture.Start();
+
+    REQUIRE(fixture.session->SetRunMode(tools::PermissionRunMode::AllowOnly));
+    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::AllowOnly);
+
+    fixture.session->Terminate();
+    CHECK_FALSE(fixture.session->SetRunMode(tools::PermissionRunMode::Bypass));
     CHECK(fixture.session->run_mode() == tools::PermissionRunMode::AllowOnly);
 }
 
@@ -1504,50 +1605,6 @@ TEST_CASE("ApplyPreset refreshes info_ and announces the new metadata", "[sessio
     CHECK(fixture.session->info().agent_preset == "switched");
 }
 
-TEST_CASE("SubmitRunMode is refused when the backlog is full, and answers on the wire",
-          "[session][run_mode][invariant]") {
-    // Same contract as SubmitTurn/SubmitRewind: a refusal is EMITTED (a
-    // SessionError), never dropped -- a keypress that did nothing silently is
-    // the exact failure the wire-answer rule exists to prevent. The worker is
-    // parked on a permission prompt so it consumes nothing while the flood
-    // fills the queue.
-    SessionFixture fixture;
-    fixture.preset.permission_mode = testing::AllowAllPolicy();
-    fixture.preset.permission_mode.execute = tools::PermissionMode::Ask;
-    fixture.tools_registry.Register(
-        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran"));
-    fixture.Script(testing::ToolUseResponse("call-1", "bash"));  // parks on the prompt
-    fixture.Start();
-
-    fixture.session->SubmitTurn("go");
-    REQUIRE(WaitForPermissionRequest(fixture).has_value());  // worker parked; consumes nothing
-
-    int accepted = 0;
-    int refused = 0;
-    for (int i = 0; i < 1000; ++i) {
-        if (fixture.session->SubmitRunMode(
-                agent::QueuedRunMode{tools::PermissionRunMode::AllowOnly})) {
-            ++accepted;
-        } else {
-            ++refused;
-        }
-    }
-    CHECK(accepted > 0);
-    CHECK(refused > 0);
-
-    int refusal_events = 0;
-    for (const auto& event : fixture.DrainQueue()) {
-        if (event.has_error() &&
-            event.error().message().find("backlog") != std::string::npos) {
-            ++refusal_events;
-        }
-    }
-    CHECK(refusal_events == refused);
-
-    fixture.session->Cancel();  // unpark the worker from the prompt
-    fixture.session->Terminate();
-}
-
 // --- pause (SetPausedEvent) and real-time steering ----------------------------
 //
 // The fence semantics: pause fences NEW work only. The tool round in flight
@@ -1557,15 +1614,6 @@ TEST_CASE("SubmitRunMode is refused when the backlog is full, and answers on the
 // from the paired transcript.
 
 namespace {
-
-bool WaitForCallCount(testing::FakeLlmProvider& provider, std::size_t expected,
-                      std::chrono::milliseconds timeout = 5s) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (provider.call_count() < expected && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(1ms);
-    }
-    return provider.call_count() == expected;
-}
 
 bool WaitForToolStarted(std::atomic<bool>& started, std::chrono::milliseconds timeout = 5s) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;

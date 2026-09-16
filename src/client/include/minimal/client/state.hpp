@@ -402,11 +402,13 @@ public:
         std::string desired_model;
         std::string desired_agent_preset;
         // Same desired-state pattern for the run mode (shift+tab): the mode
-        // the client asked for that the server has queued but not yet applied
-        // (the worker lands it at a turn boundary). The status bar shows it
-        // with the pending marker and the shift+tab cycle advances from it,
-        // so two mid-turn presses walk the cycle instead of repeating it.
-        // Empty = none pending / equal to effective.
+        // the client asked for that has not yet been confirmed by the
+        // server's metadata event (the server applies it immediately -- an
+        // atomic flip -- but the confirming event still arrives on a later
+        // read). The status bar shows it with the pending marker and the
+        // shift+tab cycle advances from it, so two rapid presses walk the
+        // cycle instead of repeating it. Empty = none pending / equal to
+        // effective.
         std::string desired_permission_mode;
 
         // True when the LAST turn ended (TurnCompleted / Error) and no new
@@ -853,7 +855,7 @@ private:
     std::string desired_model_;
     std::string desired_agent_;
     std::string permission_mode_;
-    std::string desired_permission_mode_;  // queued shift+tab, unapplied
+    std::string desired_permission_mode_;  // shift+tab, sent but not yet confirmed
     bool paused_ = false;
     int64_t context_window_tokens_ = 0;
 

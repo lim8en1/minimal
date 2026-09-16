@@ -115,12 +115,15 @@ public:
 
     std::size_t granted_count() const { return session_grants_.size(); }
 
-    // shift+tab's run-mode switch (SetRunModeEvent). The change is queued to
-    // the session worker, so it runs between turns rather than beside one --
-    // which is what makes a tool dispatch safe without a lock while reading
-    // it. The write stays worker-side; the ATOMIC exists because reads are
-    // not: EmitSessionMetadata reports it from the RPC pool, and a spawner
-    // clamps its child's ceiling against it (clamp_run_mode).
+    // shift+tab's run-mode switch (SetRunModeEvent), applied by
+    // Session::SetRunMode on the READER thread the moment the event arrives
+    // -- the mode must be able to land mid-turn, at the very next gated tool
+    // call, and a queued work item would wait out the whole turn for nothing.
+    // The write is as safe cross-thread as the reads it serves: this is a
+    // single atomic enum with no dependent data, and every reader (tool
+    // dispatch, a spawner's clamp, metadata emission) already loads it
+    // lock-free. `relaxed` is deliberate -- the value has no ordering
+    // relationship with any other write.
     void SetRunMode(PermissionRunMode mode) {
         run_mode_.store(mode, std::memory_order_relaxed);
     }

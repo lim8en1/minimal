@@ -241,10 +241,10 @@ void SessionState::OnSessionMetadata(const v1::SessionMetadataEvent& metadata) {
     if (!metadata.agent_preset().empty()) agent_preset_ = metadata.agent_preset();
     if (!metadata.permission_mode().empty()) {
         permission_mode_ = metadata.permission_mode();
-        // The apply-time confirmation of a queued shift+tab: retire the
-        // desired state ONLY when the wire mode matches it. Racing presses
-        // queue two changes; the first apply's metadata (the intermediate
-        // mode) must not clear the pending marker for the second.
+        // The metadata confirmation of a shift+tab: retire the desired
+        // state ONLY when the wire mode matches it. Racing presses send two
+        // changes; the first confirmation (the intermediate mode) must not
+        // clear the pending marker for the second.
         if (!desired_permission_mode_.empty() &&
             desired_permission_mode_ == permission_mode_) {
             desired_permission_mode_.clear();
@@ -3120,10 +3120,11 @@ void AppState::SendSetRunMode(const std::string& session_id, v1::PermissionRunMo
         }
         return;
     }
-    // The server queues the change for its worker and applies it at a turn
-    // boundary; until the apply-time metadata event confirms, the requested
-    // mode is the tab's desired state -- what the status bar renders with a
-    // pending marker and what the next shift+tab advances from.
+    // The server applies the change immediately (an atomic flip, like
+    // SetPaused) and confirms with a metadata event; until that lands, the
+    // requested mode is the tab's desired state -- what the status bar
+    // renders with a pending marker and what the next shift+tab advances
+    // from.
     if (auto state = GetState(session_id)) {
         state->SetDesiredPermissionMode(PermissionModeName(mode));
         BumpUiVersion();

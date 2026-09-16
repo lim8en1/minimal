@@ -91,7 +91,11 @@ Session::Session(SessionParams params, AgentPreset preset,
       // grants as seed -- the whole inheritance lands in this one call.
       executor_(registry, *checker_, preset_.permission_mode, preset_.mcp_permissions,
                 params_.run_mode_override.value_or(preset_.run_mode), params_.policy_ceiling,
-                params_.mcp_policy_ceiling, params_.seed_grants, loop_config.hooks) {
+                params_.mcp_policy_ceiling, params_.seed_grants, loop_config.hooks),
+      // The sticky record starts where the executor starts; every later
+      // writer (SetRunMode, ApplyPreset, the borrow path) keeps the two in
+      // sync.
+      desired_run_mode_(params_.run_mode_override.value_or(preset_.run_mode)) {
     // An advised checker was composed before this Session existed. The
     // producer shares the cancel HOLDER between the checker and these params;
     // the Session's only job is to keep the flag and fire it on Cancel/
@@ -542,7 +546,12 @@ void Session::ApplyPreset(AgentPreset preset) {
         // kept showing the session's original preset after /agent until re-attach.
         if (!preset_.name.empty()) info_.agent_preset = preset_.name;
     }
-    executor_.SetRunMode(params_.run_mode_override.value_or(preset_.run_mode));
+    // The sticky record follows the executor, never the reverse: a runtime
+    // shift+tab outranks what any preset resolves to, so an /agent switch
+    // keeps the user's mode (params_.run_mode_override -- the client's
+    // session-creation choice -- still wins overall).
+    desired_run_mode_ = params_.run_mode_override.value_or(preset_.run_mode);
+    executor_.SetRunMode(desired_run_mode_);
     loop_->SetPreset(preset_);
     // The new preset may allow different MCP servers. Runs on the worker at a
     // turn boundary (the same blocking contract as a preset swap): a dead
@@ -703,31 +712,38 @@ bool Session::SubmitRewind(QueuedRewind request) {
     return true;
 }
 
-bool Session::SubmitRunMode(QueuedRunMode request) {
-    // Same shape as SubmitRewind: one shared queue, one answer contract. No
-    // subagent refusal -- a child session's shift+tab is as legitimate as its
-    // parent's, bounded by clamp_run_mode only at spawn time.
-    bool refused = false;
+bool Session::SetRunMode(tools::PermissionRunMode mode) {
+    // THE READER-THREAD control event, like SetPaused: the mode must be able
+    // to land MID-TURN (a shift+tab pressed while the agent sits on a gated
+    // tool call is exactly the operator's "let it through"), and queueing it
+    // for the worker would apply it only at the turn boundary -- precisely
+    // the delay the switch exists to avoid. Safe because the executor's run
+    // mode is a single atomic enum: every read (ResolveMode's apply_run_mode,
+    // a spawner's clamp, metadata emission) is a lock-free load, so the
+    // cross-thread store adds no race the reads did not already cover. This
+    // used to be a queued work item on the theory that SetRunMode was
+    // worker-thread-only; the queue bought a turn-boundary delay and no
+    // safety.
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminated_.load(std::memory_order_acquire)) return false;
-        if (work_.size() >= kMaxWorkItems) {
-            refused = true;
-        } else {
-            work_.push_back(std::move(request));
-        }
+        desired_run_mode_ = mode;
     }
-    if (refused) {
-        if (!EmitEvent(
-                SessionEvent{SessionError{"session backlog is full; run-mode change refused"}})) {
-            logger_.warn("session {}: run-mode change refused and the queue is full; client "
-                         "will not see it",
-                         params_.session_id);
-        }
-        return false;
-    }
-    turn_cv_.notify_one();
+    // The executor's own atomic; the sticky record is already updated. A
+    // permission Ask already on the wire is NOT retroactively answered by
+    // this -- the operator still answers that prompt, and every LATER gate
+    // (the same turn's next tool call included) sees the new mode.
+    executor_.SetRunMode(mode);
+    // What every attached client's {permission_mode} refreshes from. The sink
+    // never blocks -- the same contract SetPaused's reader-side emission
+    // already relies on.
+    EmitMetadataChanged();
     return true;
+}
+
+tools::PermissionRunMode Session::desired_run_mode() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return desired_run_mode_;
 }
 
 // A rewind target must be a REAL user turn: role User carrying text. This
@@ -762,14 +778,6 @@ void Session::RunOneRewind(const QueuedRewind& request) {
         logger_.warn("session {}: rewind failed: {}", params_.session_id, e.what());
         EmitRewindRefusal(e.what());
     }
-}
-
-void Session::RunOneRunMode(const QueuedRunMode& request) {
-    // Worker thread, between turns -- SetRunMode's only safe calling context
-    // (the executor reads it lock-free during tool dispatch). The metadata
-    // event is what every attached client's {permission_mode} refreshes from.
-    executor_.SetRunMode(request.mode);
-    EmitMetadataChanged();
 }
 
 void Session::EmitMetadataChanged() {
@@ -997,10 +1005,10 @@ void Session::CancelAllQueuedTurns() {
                 dropped.push_back(turn->turn_id);
                 it = work_.erase(it);
             } else {
-                // Commands, rewinds, run-mode changes: the flush is about
-                // PENDING MESSAGES, and the current turn is untouched either
-                // way. A queued /model the user asked for one submission ago
-                // is not silently undone by cancelling the queue's messages.
+                // Commands, rewinds: the flush is about PENDING MESSAGES, and
+                // the current turn is untouched either way. A queued /model
+                // the user asked for one submission ago is not silently undone
+                // by cancelling the queue's messages.
                 ++it;
             }
         }
@@ -1162,12 +1170,14 @@ void Session::WorkerMain() {
                 if (terminated_.load(std::memory_order_acquire)) return true;
                 if (!work_.empty()) {
                     // PAUSE HOLD: while paused, only non-turn work may run --
-                    // commands, rewinds, run-mode changes, the resume kick.
-                    // This is the "pause to reconfigure" affordance: /agent,
-                    // /model, shift+tab and a rewind all execute against a
-                    // paused session, while its held turns wait for unpause
-                    // (auto-resume via a new submission, or SetPaused(false)).
-                    // Turns are LEFT IN PLACE, not reordered around.
+                    // commands, rewinds, the resume kick. This is the "pause
+                    // to reconfigure" affordance: /agent, /model and a rewind
+                    // all execute against a paused session, while its held
+                    // turns wait for unpause (auto-resume via a new
+                    // submission, or SetPaused(false)). Turns are LEFT IN
+                    // PLACE, not reordered around. (A run-mode change is not
+                    // here by design: it applies on the reader, immediately --
+                    // see SetRunMode.)
                     if (!paused_.load(std::memory_order_acquire)) return true;
                     for (const auto& candidate : work_) {
                         if (!std::holds_alternative<std::string>(candidate) &&
@@ -1296,8 +1306,6 @@ void Session::WorkerMain() {
                     RunOneTurn(std::nullopt);
                 } else if (auto* rewind = std::get_if<QueuedRewind>(&item)) {
                     RunOneRewind(*rewind);
-                } else if (auto* run_mode = std::get_if<QueuedRunMode>(&item)) {
-                    RunOneRunMode(*run_mode);
                 } else {
                     RunOneCommand(std::get<QueuedCommand>(item));
                 }
@@ -1417,22 +1425,24 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
     // (clamp_run_mode) -- a per-turn switch is a borrow, never an escalation.
     // Restore is a scope guard so EVERY exit path -- LlmError, cancellation,
     // a non-standard exception out of RunTurn -- puts back exactly what the
-    // loop held before; a leaked borrow would silently run every later turn
+    // session holds; a leaked borrow would silently run every later turn
     // on the wrong model. (A local class inside a member function sees the
     // member's access.)
     struct PresetRestore {
         Session* session = nullptr;
         bool active = false;
-        // The executor's run mode as the loop held it BEFORE the borrow.
-        // Recomputing the restore from params_/preset_ was wrong: a shift+tab
-        // run-mode change (RunOneRunMode) writes the executor without touching
-        // either, so the next borrowed turn silently reverted the user's
-        // switch. The snapshot is what was actually there.
-        std::optional<tools::PermissionRunMode> run_mode;
+        // The restore target is desired_run_mode_, read AT RESTORE TIME, not
+        // a snapshot of the executor taken at pop. A snapshot races the
+        // reader-side switch in both directions: the queued shift+tab of the
+        // original bug wrote the executor behind the snapshot's back and the
+        // restore silently reverted the user's mode -- and a reader-side
+        // SetRunMode landing DURING a borrowed turn (the mode can now change
+        // mid-turn) would be reverted by a pop-time snapshot the same way.
+        // The user's latest word outranks the borrow.
         ~PresetRestore() {
             if (!active || session == nullptr) return;
             session->loop_->SetPreset(session->preset_);
-            if (run_mode) session->executor_.SetRunMode(*run_mode);
+            session->executor_.SetRunMode(session->desired_run_mode());
             // provider_ is what the loop held before the borrow by
             // construction; rebind unconditionally so a borrowed provider can
             // never leak into the next turn.
@@ -1443,12 +1453,11 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
 
     if (overrides && (!overrides->model.empty() || !overrides->agent_preset.empty())) {
         try {
-            // Snapshot before ANY mutation, and keep active set through the
-            // catch below: a borrow that throws mid-way (after SetRunMode/
+            // active before ANY mutation, and kept set through the catch
+            // below: a borrow that throws mid-way (after SetRunMode/
             // SetPreset, during provider construction) must still unwind to
             // the pre-borrow state, not leave a half-applied borrow behind.
             // On a fully-failed borrow the restore is a harmless no-op rebind.
-            preset_restore.run_mode = executor_.run_mode();
             preset_restore.active = true;
             AgentPreset transient = preset_;
             if (!overrides->agent_preset.empty()) {
@@ -1481,16 +1490,13 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
                 ApplyModel(transient, *resolved);
             }
             // The borrowed turn's run mode can only narrow the session's
-            // CURRENT posture -- the executor's mode, which a shift+tab
-            // change writes without touching params_ or preset_. Basing the
-            // clamp on params_/preset_ here (as this once did) let a borrowed
-            // turn run at the session's DEFAULT posture, ignoring the user's
-            // switch for the turn's duration, and the old restore then
-            // re-computed it away afterwards.
-            executor_.SetRunMode(tools::clamp_run_mode(
-                preset_restore.run_mode.value_or(
-                    params_.run_mode_override.value_or(preset_.run_mode)),
-                transient.run_mode));
+            // CURRENT posture -- desired_run_mode_, the sticky record every
+            // writer (reader-side SetRunMode included) keeps in sync with the
+            // executor. Basing the clamp on params_/preset_ here (as this once
+            // did) let a borrowed turn run at the session's DEFAULT posture,
+            // ignoring the user's switch for the turn's duration, and the old
+            // restore then re-computed it away afterwards.
+            executor_.SetRunMode(tools::clamp_run_mode(desired_run_mode(), transient.run_mode));
             loop_->SetPreset(transient);
             // Rebind whenever the borrowed preset resolves through a different
             // provider ENTRY or connection identity. The instance cache shares

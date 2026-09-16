@@ -405,6 +405,78 @@ TEST_CASE("a turn round-trips over a real channel", "[session_service]") {
     CHECK(saw_stream_event);
 }
 
+TEST_CASE("set_run_mode applies without a turn boundary", "[session_service][run_mode]") {
+    // The wire path end to end: the event must NOT queue for the worker --
+    // a mid-turn press has to gate the running turn's next tool call. The
+    // turn here is parked on a permission prompt (the state a shift+tab to
+    // bypass is usually pressed in); the mode flip must land while the
+    // worker is parked, so the SAME turn's next gated call runs unasked --
+    // and the confirming SessionMetadataEvent reaches the stream without a
+    // TurnCompleted in between.
+    ServiceFixture fixture;
+    auto tool =
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran it");
+    fixture.tools.Register(std::move(tool));
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "make"}}));
+    fixture.Script(testing::ToolUseResponse("call-2", "bash", {{"command", "make"}}));
+    fixture.Script(testing::TextResponse("built"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "build it")));
+
+    std::string request_id;
+    v1::ServerEvent event;
+    while (stream->Read(&event)) {
+        if (event.has_permission_request()) {
+            request_id = event.permission_request().request_id();
+            break;
+        }
+    }
+    REQUIRE_FALSE(request_id.empty());  // the worker is parked on the prompt
+
+    // The press, as a raw wire event.
+    v1::ClientEvent press;
+    press.set_session_id(session_id);
+    press.mutable_set_run_mode()->set_run_mode(v1::PERMISSION_RUN_MODE_BYPASS);
+    REQUIRE(stream->Write(press));
+
+    // The confirming metadata event arrives while the turn is STILL RUNNING
+    // -- the old queued switch would have emitted nothing until the turn
+    // ended.
+    bool confirmed = false;
+    while (stream->Read(&event)) {
+        if (event.has_session_metadata()) {
+            if (event.session_metadata().permission_mode() == "bypass") confirmed = true;
+            break;
+        }
+        if (event.has_turn_completed()) break;  // must NOT be the trigger
+    }
+    CHECK(confirmed);
+
+    // Answer the one open prompt; the turn's second gated call must not ask.
+    v1::ClientEvent answer;
+    answer.set_session_id(session_id);
+    auto* response = answer.mutable_permission_response();
+    response->set_request_id(request_id);
+    response->set_decision(v1::PERMISSION_DECISION_ALLOW);
+    REQUIRE(stream->Write(answer));
+
+    v1::ServerEvent terminal;
+    bool second_ask = false;
+    while (stream->Read(&terminal)) {
+        if (terminal.has_permission_request()) second_ask = true;
+        if (terminal.has_stream_event() && terminal.stream_event().has_message_stop()) break;
+        if (terminal.has_error()) break;
+    }
+    (void)DrainAndFinish(stream);
+    CHECK_FALSE(second_ask);
+}
+
 TEST_CASE("an unknown session id is refused", "[session_service]") {
     ServiceFixture fixture;
     fixture.Start();

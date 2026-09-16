@@ -488,21 +488,22 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     if (ctx.keymap.Matches("permission.cycle", event)) {
         // shift+tab cycles normal -> bypass -> allow-only -> normal as a
         // DIRECT wire event (SendSetRunMode) -- no command, no confirmation
-        // modal: the keybinding IS the confirmation. The server queues the
-        // change for its worker (applies at a turn boundary) and announces
-        // it back via SessionMetadataEvent, which is what the status bar's
-        // {permission_mode} segment refreshes from. An unknown/absent mode
-        // string counts as normal (the server default a fresh session
-        // starts on).
+        // modal: the keybinding IS the confirmation. The server applies the
+        // change immediately (an atomic flip, like SetPaused), so a mid-turn
+        // press gates the running turn's very next tool call; the metadata
+        // event it publishes is what the status bar's {permission_mode}
+        // segment refreshes from. An unknown/absent mode string counts as
+        // normal (the server default a fresh session starts on).
         if (!sid.empty()) {
             // GetDetails is TAB-keyed (the focused handle may be a
             // sessionless tab); the mode switch itself is a session-keyed
             // wire event, so a sessionless tab simply has nothing to cycle.
             const auto details = ctx.app.GetDetails(sid);
             // The cycle advances from the QUEUED mode when one is pending:
-            // the status bar's applied value only updates at the apply-time
-            // metadata event, and cycling from it would make two mid-turn
-            // presses repeat the first transition instead of walking
+            // the event is now applied server-side within microseconds, but
+            // the round-trip metadata event still lands on a later read, and
+            // cycling from the not-yet-refreshed applied value would make two
+            // rapid presses repeat the first transition instead of walking
             // normal -> bypass -> allow-only.
             const std::string& current = details.desired_permission_mode.empty()
                                              ? details.permission_mode
@@ -517,11 +518,11 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         // alt+p toggles the session's pause state as a DIRECT wire event
         // (SendSetPaused) -- no command, no confirmation modal: the
         // keybinding IS the confirmation, the same contract shift+tab's
-        // run-mode cycle has. Unlike the run-mode change, the server applies
-        // this on its reader thread (an atomic flip), so a mid-turn press
-        // takes effect at the next tool-call return of the running turn
-        // rather than at a turn boundary. A sessionless tab has nothing to
-        // pause.
+        // run-mode cycle has. The server applies this on its reader thread
+        // (an atomic flip), so a mid-turn press takes effect at the next
+        // tool-call return of the running turn rather than at a turn
+        // boundary -- exactly the contract the run-mode switch now shares.
+        // A sessionless tab has nothing to pause.
         if (!sid.empty()) {
             const std::string session = ctx.app.FocusedSessionId();
             if (session.empty()) return true;

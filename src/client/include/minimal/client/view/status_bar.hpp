@@ -65,8 +65,8 @@ std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& fo
 std::string FormatTokenUsage(std::int64_t used, std::int64_t max);
 
 // The {permission_mode} segment's displayed value, pure and independently
-// testable. A queued shift+tab (the server applies it at a turn boundary)
-// is the tab's DESIRED state: while it differs from the applied mode -- and
+// testable. A shift+tab sent but not yet confirmed by the server's metadata
+// event is the tab's DESIRED state: while it differs from the applied mode -- and
 // the tab has a session to apply into -- the desired value renders with the
 // "→ " pending marker, the same desired-state convention {model}/{agent}
 // follow. Empty `desired` (nothing pending) renders `applied`; both empty
