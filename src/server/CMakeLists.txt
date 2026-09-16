@@ -144,10 +144,16 @@ set_target_properties(minimal_server_core PROPERTIES
 
 # Same treatment as minimal_client_core: the core's own @rpath dependency on
 # libminimal_proto resolves against this dylib's rpaths, not the executable's.
+# Its other dependencies -- curl, sqlite, spdlog -- are gathered into
+# lib/minimal/runtime (MINIMAL_RUNTIME_DEP_INSTALL_DIR, top-level
+# CMakeLists.txt), so the second hop reaches them from lib/ where this core
+# installs.
 if(APPLE)
-    set_property(TARGET minimal_server_core PROPERTY INSTALL_RPATH "@loader_path")
+    set_property(TARGET minimal_server_core PROPERTY INSTALL_RPATH
+        "@loader_path;@loader_path/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
 else()
-    set_property(TARGET minimal_server_core PROPERTY INSTALL_RPATH "$ORIGIN")
+    set_property(TARGET minimal_server_core PROPERTY INSTALL_RPATH
+        "$ORIGIN;$ORIGIN/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
 endif()
 
 add_executable(minimal-server main.cpp)
@@ -163,11 +169,17 @@ target_link_libraries(minimal-server PRIVATE minimal::server_core)
 add_dependencies(minimal-server bundled_plugins)
 
 # Find libminimal_server_core next to us both in the build tree and once
-# installed. Plugins get the same treatment in plugins/CMakeLists.txt.
+# installed. Plugins get the same treatment in plugins/CMakeLists.txt. The
+# second hop reaches the gathered dependencies in lib/minimal/runtime -- the
+# executable loads them through the core (DT_RPATH on Linux covers a
+# dependency's own dependencies; macOS consults the executable's full rpath
+# list for every @rpath lookup).
 if(APPLE)
-    set_target_properties(minimal-server PROPERTIES INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+    set_target_properties(minimal-server PROPERTIES INSTALL_RPATH
+        "@loader_path/../${CMAKE_INSTALL_LIBDIR};@loader_path/../${CMAKE_INSTALL_LIBDIR}/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
 else()
-    set_target_properties(minimal-server PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+    set_target_properties(minimal-server PROPERTIES INSTALL_RPATH
+        "$ORIGIN/../${CMAKE_INSTALL_LIBDIR};$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
 endif()
 
 install(TARGETS minimal-server minimal_server_core

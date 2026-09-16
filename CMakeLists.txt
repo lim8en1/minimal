@@ -139,6 +139,20 @@ option(MINIMAL_BUILD_TESTS  "Build the test suite"       ON)
 # sign-compare lines, so this costs nothing to turn on and something to leave off.
 set(MINIMAL_WARNING_FLAGS -Wall -Wextra)
 
+# Old-style DT_RPATH on Linux, not DT_RUNPATH: glibc consults DT_RPATH (of the
+# loaded object and its loaders) for a dependency's OWN dependencies, but
+# DT_RUNPATH only for the object's direct ones. The gathered libraries
+# (lib/minimal/runtime) carry no RUNPATH of their own, so under new-dtags
+# libgrpc++.so.54's NEEDED libprotobuf.so.53 would fall off our RPATH chain and
+# only the ld.so cache could save it. Appending preserves what the configure
+# preset or the caller passed (the sanitizer presets put -fsanitize here).
+# macOS has no such tag -- its linker would reject the flag -- so the gate.
+if(NOT APPLE)
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,--disable-new-dtags")
+    string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--disable-new-dtags")
+    string(APPEND CMAKE_MODULE_LINKER_FLAGS " -Wl,--disable-new-dtags")
+endif()
+
 # --- Platform gate -----------------------------------------------------------
 # Windows is out of scope until 2.x: the bash tool is posix_spawn/setrlimit/killpg
 # and plugin loading is dlopen. WSL is the interim answer. See ARCHITECTURE.md.
@@ -181,6 +195,22 @@ set(MINIMAL_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins/server"
 # client resolves it relative to its own executable (bundled_assets).
 set(MINIMAL_CLIENT_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins/client"
     CACHE STRING "Install location for bundled client plugins")
+
+# Where the GATHERED third-party shared libraries install (the
+# minimal_runtime_deps set: libcurl, libgrpc, libssl, ...). Under lib/, but
+# never IN it: ldconfig indexes <prefix>/lib itself (Debian/Ubuntu's libc.conf
+# lists it) without recursing into subdirectories, so a library whose soname
+# collides with a system one -- libcurl.so.4, the name every distro binary
+# requests -- would win the ld.so cache and be loaded by EVERY program on the
+# machine. With vcpkg's curl built without symbol versioning that surfaces as
+# "/usr/local/lib/libcurl.so.4: no version information available" from any
+# distro curl consumer, and the worse part is silent: that program now runs
+# against vcpkg's curl and OpenSSL instead of the OS's. From
+# lib/minimal/runtime ldconfig never sees them, and the RPATH hops computed in
+# cmake/MinimalPlugins.cmake are what resolve them for our binaries. Our own
+# cores stay in lib/ proper -- no distro ships libminimal_*.
+set(MINIMAL_RUNTIME_DEP_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/runtime"
+    CACHE STRING "Install location for the gathered third-party runtime libraries")
 
 # Bundled + user plugin construction helpers (minimal_add_plugin,
 # minimal_add_client_plugin, minimal_add_user_plugin). Included here so the
@@ -437,13 +467,19 @@ endif()
 # --- Runtime dependencies ------------------------------------------------------
 #
 # The dependencies are shared libraries (see the triplet selection at the top),
-# so an installed tree needs them in lib/ next to the cores, where the binaries',
-# cores' and plugins' $ORIGIN / @loader_path RPATHs already point. Every
-# install(TARGETS) above joins the minimal_runtime_deps set; this installs what
-# the set resolves to. Only files from the vcpkg installed tree ship: system
-# libraries belong to the OS, and our own libminimal_* are installed by their
-# install(TARGETS). Without vcpkg (Homebrew, system packages) nothing matches
-# the include, so nothing is copied -- the package manager owns those.
+# so an installed tree needs them available to the binaries, cores and plugins.
+# They install into MINIMAL_RUNTIME_DEP_INSTALL_DIR (lib/minimal/runtime), NOT
+# into lib/ itself: ldconfig indexes lib/ non-recursively, and a soname that
+# collides with a system library there would be loaded by every program on the
+# machine (the libcurl.so.4 case -- see the variable's comment above). The
+# binaries', cores' and plugins' RPATHs carry an extra hop to the runtime dir,
+# computed in cmake/MinimalPlugins.cmake and applied next to each install().
+# Every install(TARGETS) above joins the minimal_runtime_deps set; this
+# installs what the set resolves to. Only files from the vcpkg installed tree
+# ship: system libraries belong to the OS, and our own libminimal_* are
+# installed by their install(TARGETS). Without vcpkg (Homebrew, system
+# packages) nothing matches the include, so nothing is copied -- the package
+# manager owns those.
 set(_minimal_runtime_dep_dirs "")
 set(_minimal_runtime_dep_include "")
 if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
@@ -458,7 +494,7 @@ if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
     set(_minimal_runtime_dep_include "^${_minimal_runtime_dep_include}/")
 endif()
 install(RUNTIME_DEPENDENCY_SET minimal_runtime_deps
-    DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    DESTINATION "${MINIMAL_RUNTIME_DEP_INSTALL_DIR}"
     DIRECTORIES ${_minimal_runtime_dep_dirs}
     # macOS system libraries live in the dyld shared cache, not on disk, so
     # they cannot resolve; they are the OS's regardless. (Linux sonames never
@@ -466,3 +502,11 @@ install(RUNTIME_DEPENDENCY_SET minimal_runtime_deps
     PRE_EXCLUDE_REGEXES "^/usr/lib/" "^/System/"
     POST_INCLUDE_REGEXES ${_minimal_runtime_dep_include}
     POST_EXCLUDE_REGEXES ".*")
+
+# The dependency copy emits the versioned FILE only (libcurl.so.4.8.0), but on
+# Linux our objects record DT_NEEDED as the SONAME (libcurl.so.4), so the link
+# needs the soname symlink sitting beside it. cmake/InstallSonameLinks.cmake
+# creates it at install time; on macOS it is a no-op (LC_LOAD_DYLIB records
+# the full versioned name, which is exactly what gets copied).
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallSonameLinks.cmake")
+minimal_install_soname_links("${MINIMAL_RUNTIME_DEP_INSTALL_DIR}")

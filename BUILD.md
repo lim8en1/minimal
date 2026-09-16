@@ -63,6 +63,22 @@ cores, every plugin, the tests. On Linux those copies share one descriptor
 pool, and the server aborts at startup with `File already exists in database`.
 macOS survives only because its two-level namespace keeps the copies apart.
 
+And they install **outside `<prefix>/lib` itself** -- into
+`<libdir>/minimal/runtime` (`MINIMAL_RUNTIME_DEP_INSTALL_DIR`) -- for the same
+class of reason. `ldconfig` indexes `<prefix>/lib` (Debian/Ubuntu's `libc.conf`
+lists it) but not its subdirectories, and our gathered libraries keep distro
+sonames: vcpkg's curl installs as `libcurl.so.4.8.0`, the exact name every
+distro binary requests. In `lib/` itself it would win the ld.so cache and be
+loaded machine-wide: every distro curl consumer would then print
+`/usr/local/lib/libcurl.so.4: no version information available`, and -- the
+dangerous part, because the warning is only cosmetic -- silently run against
+vcpkg's curl and OpenSSL instead of the OS's. From `minimal/runtime/` no
+loader's default search can ever pick them up; the binaries, cores and plugins
+reach them through an extra RPATH hop (`minimal/runtime`), and the curl overlay
+(above) gives our copy the `CURL_OPENSSL_4` version node so a mistaken foreign
+bind fails loudly instead of substituting. Our own cores stay in `lib/`
+proper -- no distro ships `libminimal_*`.
+
 - Configure **fails** if protobuf or gRPC resolves to a static library,
   including when you pass `-DVCPKG_TARGET_TRIPLET=<static triplet>`.
 - A build tree that cached the old static default is migrated automatically on
@@ -84,6 +100,13 @@ macOS survives only because its two-level namespace keeps the copies apart.
   shutdown then waits forever on a CondVar belonging to one copy while another
   copy signals it. When bumping `builtin-baseline`, refresh the overlay from the
   new baseline's `ports/abseil/` and keep the one-line portfile change.
+- curl comes from an overlay port too, `cmake/ports/curl/`: the baseline port
+  plus, on Linux only, `-DCURL_LIBCURL_VERSIONED_SYMBOLS=ON`. Upstream's CMake
+  build defaults to unversioned symbols, so vcpkg's `libcurl.so.4` would carry
+  no `CURL_OPENSSL_4` node -- distro libcurls have one, and every binary they
+  link records it. See "Dependency linkage" below. When bumping
+  `builtin-baseline`, refresh the overlay from the new baseline's `ports/curl/`
+  and keep the guarded `list(APPEND OPTIONS ...)` splice.
 - ftxui comes from an overlay port too, `cmake/ports/ftxui/`: the stock 7.0.3
   port plus three patches (applied in this order):
   - `minimal-ftxui-frame-diff.patch` — one requirement pass per frame
@@ -146,6 +169,7 @@ Every preset inherits `default`, so all of them need a vcpkg checkout — via
 | `MINIMAL_BUILD_TESTS` | `ON` | Build the Catch2 test suite |
 | `MINIMAL_PLUGIN_INSTALL_DIR` | `<libdir>/minimal/plugins/server` | Install location for bundled server plugins |
 | `MINIMAL_CLIENT_PLUGIN_INSTALL_DIR` | `<libdir>/minimal/plugins/client` | Install location for bundled client plugins |
+| `MINIMAL_RUNTIME_DEP_INSTALL_DIR` | `<libdir>/minimal/runtime` | Install location for the gathered vcpkg runtime libraries (never `<libdir>` itself -- see "Dependency linkage") |
 
 ## Tests
 
@@ -178,7 +202,7 @@ Seed on the target machine by running the server once, or by hand.
 <prefix>/lib/libminimal_server_core.0.dylib|.so.0   shared core, plugins link it
 <prefix>/lib/libminimal_client_core.0.dylib|.so.0
 <prefix>/lib/libminimal_proto.0.dylib|.so.0         generated protobuf/gRPC bindings
-<prefix>/lib/lib{protobuf,grpc++,absl_*,...}        vcpkg dependencies (shared, see above)
+<prefix>/lib/minimal/runtime/                       vcpkg dependencies (shared, see above)
 <prefix>/lib/minimal/plugins/server/                bundled server plugins (*.so|*.dylib)
 <prefix>/lib/minimal/plugins/client/              bundled client plugins
 ```
@@ -188,6 +212,16 @@ their own location (`@loader_path` / `$ORIGIN`), so the installed tree is
 relocatable — no `ldconfig`, no install-name fixing. The dependency libraries
 are gathered by the `minimal_runtime_deps` runtime-dependency set. Only files
 from the vcpkg installed tree are copied; system libraries are never bundled.
+
+One-time cleanup on a machine that ran an install of a tree older than the
+`minimal/runtime` split: `cmake --install` never uninstalls, so the libraries
+the old layout dropped into `<prefix>/lib` are still there and still shadow the
+system ones once `ldconfig` runs. Remove them by hand, then refresh the cache:
+
+```sh
+sudo rm /usr/local/lib/libcurl.so.4*   # and any other vcpkg-era lib* leftovers
+sudo ldconfig                          # Linux only
+```
 
 ## Config seeding
 

@@ -26,13 +26,17 @@ set_target_properties(minimal_proto PROPERTIES
 # @rpath/libminimal_proto.0.dylib; once installed, that resolves against THIS
 # dylib's own LC_RPATH, not the loading executable's (macOS rpaths are not
 # inherited). Proto sits in lib/ next to them, so its own directory is the
-# answer -- and the same answer covers its grpc/protobuf/absl deps, which are
-# SHARED (the top-level dependency guard enforces it) and installed into lib/
-# beside it through the minimal_runtime_deps set.
+# answer -- and the second hop reaches the GATHERED dependencies one level
+# down in lib/minimal/runtime (MINIMAL_RUNTIME_DEP_INSTALL_DIR), whose grpc/
+# protobuf/absl/ssl libraries this dylib's gRPC::grpc++ dependency needs.
+# Shared vcpkg libraries land there through the minimal_runtime_deps set; see
+# the top-level CMakeLists.txt for why they must not sit in lib/ itself.
 if(APPLE)
-    set_property(TARGET minimal_proto PROPERTY INSTALL_RPATH "@loader_path")
+    set_property(TARGET minimal_proto PROPERTY INSTALL_RPATH
+        "@loader_path;@loader_path/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
 else()
-    set_property(TARGET minimal_proto PROPERTY INSTALL_RPATH "$ORIGIN")
+    set_property(TARGET minimal_proto PROPERTY INSTALL_RPATH
+        "$ORIGIN;$ORIGIN/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
 endif()
 
 # Generated headers are included as "minimal/v1/....pb.h", so the generation root

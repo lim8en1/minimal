@@ -99,11 +99,15 @@ set_target_properties(minimal_client_core PROPERTIES
 
 # The core itself depends on @rpath/libminimal_proto.0.dylib, and a dylib's
 # @rpath deps resolve with the DYLIB's rpaths, not the executable's. It lives
-# in lib/ next to libminimal_proto, so its own directory suffices.
+# in lib/ next to libminimal_proto, so its own directory suffices; the second
+# hop reaches the gathered dependencies in lib/minimal/runtime
+# (MINIMAL_RUNTIME_DEP_INSTALL_DIR).
 if(APPLE)
-    set_property(TARGET minimal_client_core PROPERTY INSTALL_RPATH "@loader_path")
+    set_property(TARGET minimal_client_core PROPERTY INSTALL_RPATH
+        "@loader_path;@loader_path/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
 else()
-    set_property(TARGET minimal_client_core PROPERTY INSTALL_RPATH "$ORIGIN")
+    set_property(TARGET minimal_client_core PROPERTY INSTALL_RPATH
+        "$ORIGIN;$ORIGIN/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
 endif()
 
 # The TUI client and the headless -p mode are one binary: `minimal` dispatches on
@@ -112,14 +116,16 @@ add_executable(minimal app.cpp)
 target_link_libraries(minimal PRIVATE minimal::client_core)
 
 # Find libminimal_client_core next to the binary, in the build tree and once
-# installed -- the same treatment minimal-server gets.
+# installed -- the same treatment minimal-server gets. The second hop reaches
+# the gathered dependencies in lib/minimal/runtime
+# (MINIMAL_RUNTIME_DEP_INSTALL_DIR).
 if(APPLE)
     set_target_properties(minimal PROPERTIES
-        INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}"
+        INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR};@loader_path/../${CMAKE_INSTALL_LIBDIR}/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}"
         BUILD_RPATH "${CMAKE_BINARY_DIR}/src/client")
 else()
     set_target_properties(minimal PROPERTIES
-        INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+        INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR};$ORIGIN/../${CMAKE_INSTALL_LIBDIR}/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}"
         BUILD_RPATH "${CMAKE_BINARY_DIR}/src/client")
 endif()
 

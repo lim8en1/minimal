@@ -38,6 +38,25 @@ _minimal_plugin_rpath_to_libdir(MINIMAL_PLUGIN_INSTALL_DIR MINIMAL_PLUGIN_RPATH_
 _minimal_plugin_rpath_to_libdir(MINIMAL_CLIENT_PLUGIN_INSTALL_DIR
                                  MINIMAL_CLIENT_PLUGIN_RPATH_TO_LIBDIR)
 
+# The twin hop from lib/ DOWN into the GATHERED third-party libraries' install
+# location (MINIMAL_RUNTIME_DEP_INSTALL_DIR, lib/minimal/runtime). Appended to
+# every INSTALL_RPATH in the tree: a gathered library's own @rpath dependency
+# (libgrpc++ -> libprotobuf, libcurl -> libssl) must be reachable from every
+# object that links it -- DT_RPATH on Linux covers a dependency's own
+# dependencies; macOS consults the loading object's full rpath list.
+#
+# Computed, not hardcoded, for the same multiarch reason as the helper above
+# (libdir may be lib/x86_64-linux-gnu; the hop is a downward RELATIVE_PATH
+# from CMAKE_INSTALL_FULL_LIBDIR into MINIMAL_RUNTIME_DEP_INSTALL_DIR).
+function(_minimal_libdir_to_runtime_dep_rpath out_var)
+    file(RELATIVE_PATH _rel
+         "${CMAKE_INSTALL_FULL_LIBDIR}"
+         "${CMAKE_INSTALL_PREFIX}/${MINIMAL_RUNTIME_DEP_INSTALL_DIR}")
+    set(${out_var} "${_rel}" PARENT_SCOPE)
+endfunction()
+
+_minimal_libdir_to_runtime_dep_rpath(MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH)
+
 # --- Bundled -----------------------------------------------------------------
 
 function(minimal_add_plugin name)
@@ -57,10 +76,10 @@ function(minimal_add_plugin name)
 
     if(APPLE)
         set_target_properties(${name} PROPERTIES
-            INSTALL_RPATH "@loader_path/${MINIMAL_PLUGIN_RPATH_TO_LIBDIR}")
+            INSTALL_RPATH "@loader_path/${MINIMAL_PLUGIN_RPATH_TO_LIBDIR};@loader_path/${MINIMAL_PLUGIN_RPATH_TO_LIBDIR}/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
     else()
         set_target_properties(${name} PROPERTIES
-            INSTALL_RPATH "$ORIGIN/${MINIMAL_PLUGIN_RPATH_TO_LIBDIR}")
+            INSTALL_RPATH "$ORIGIN/${MINIMAL_PLUGIN_RPATH_TO_LIBDIR};$ORIGIN/${MINIMAL_PLUGIN_RPATH_TO_LIBDIR}/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
     endif()
 
     # The runtime-dependency set: a plugin may link a shared dependency the
@@ -87,10 +106,10 @@ function(minimal_add_client_plugin name)
 
     if(APPLE)
         set_target_properties(${name} PROPERTIES
-            INSTALL_RPATH "@loader_path/${MINIMAL_CLIENT_PLUGIN_RPATH_TO_LIBDIR}")
+            INSTALL_RPATH "@loader_path/${MINIMAL_CLIENT_PLUGIN_RPATH_TO_LIBDIR};@loader_path/${MINIMAL_CLIENT_PLUGIN_RPATH_TO_LIBDIR}/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
     else()
         set_target_properties(${name} PROPERTIES
-            INSTALL_RPATH "$ORIGIN/${MINIMAL_CLIENT_PLUGIN_RPATH_TO_LIBDIR}")
+            INSTALL_RPATH "$ORIGIN/${MINIMAL_CLIENT_PLUGIN_RPATH_TO_LIBDIR};$ORIGIN/${MINIMAL_CLIENT_PLUGIN_RPATH_TO_LIBDIR}/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
     endif()
 
     install(TARGETS ${name}
