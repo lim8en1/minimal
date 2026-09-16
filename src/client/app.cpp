@@ -1230,31 +1230,25 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             // Client-native, like shift+tab's run-mode cycle: both send the
             // SetPausedEvent wire message directly (a /-command would queue
             // for the worker and only land at a turn boundary -- precisely
-            // the delay pause exists to avoid). The current state comes from
-            // the tab's metadata snapshot; the confirming metadata event
-            // refreshes the status bar's paused segment. Explicit /resume
-            // with nothing queued kicks the seedless continuation server-side
-            // (Session::SetPaused).
-            if (!has_session) {
-                if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+            // the delay pause exists to avoid). RequestPaused reads the
+            // focused TAB's snapshot and targets the focused SESSION; the
+            // confirming metadata event refreshes the status bar's paused
+            // segment. Explicit /resume with nothing queued kicks the
+            // seedless continuation server-side (Session::SetPaused).
+            const bool want_paused = line == "/pause";
+            const auto toggled = app->RequestPaused(want_paused);
+            if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                if (toggled == AppState::PauseToggle::NoSession) {
                     app->TabNotice(tab, line.substr(1) + " needs a session; send a message to "
                                             "start one first");
-                }
-                return;
-            }
-            const bool paused = app->GetDetails(sid).paused;
-            const bool want_paused = line == "/pause";
-            if (paused == want_paused) {
-                if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                } else if (toggled == AppState::PauseToggle::AlreadyPaused ||
+                           toggled == AppState::PauseToggle::AlreadyRunning) {
                     app->TabNotice(tab, want_paused ? "already paused" : "not paused");
+                } else {
+                    app->TabNotice(tab, want_paused ? "pausing -- the agent stops after its current "
+                                                      "tool call"
+                                                    : "resumed");
                 }
-                return;
-            }
-            app->SendSetPaused(sid, want_paused);
-            if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
-                app->TabNotice(tab, want_paused ? "pausing -- the agent stops after its current "
-                                                  "tool call"
-                                                : "resumed");
             }
             return;
         }

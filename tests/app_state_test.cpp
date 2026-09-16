@@ -445,6 +445,56 @@ TEST_CASE("AttachTab does not itself steal focus; callers must SetFocusedTab", "
     CHECK(resumed_focused);
 }
 
+TEST_CASE("RequestPaused toggles the focused session's pause state", "[app_state][pause]") {
+    // The /pause // /resume guard. The state lookup must be TAB-keyed
+    // (GetDetails matches tab.info.tab_id): the typed command used to feed it
+    // FocusedSessionId(), whose ULID can never equal a "t<n>" tab id, so the
+    // guard always read paused=false -- typed /resume on a paused session
+    // answered "not paused" and never sent the unpause. This test regresses
+    // on the lookup itself: a sessioned tab is attached (AttachTab), paused
+    // out-of-band, and the SECOND RequestPaused must see paused=true and send
+    // the resume rather than reporting AlreadyRunning.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    const auto created = fixture.client->CreateSession(fixture.Options("pausable"));
+    REQUIRE(created.status.ok());
+
+    AppState app(fixture.client);
+    const auto tab = app.AttachTab(created.session_id);
+    REQUIRE_FALSE(tab.empty());
+    app.SetFocusedTab(tab);
+    REQUIRE(SessionIdOf(app, tab) == created.session_id);
+
+    // Nothing to continue into yet: an idle, unpaused session.
+    CHECK(app.RequestPaused(true) == AppState::PauseToggle::SentPause);
+    // The confirming SessionMetadataEvent rides the wire async; every
+    // emission carries `paused`, so poll the tab's snapshot for it.
+    REQUIRE(WaitFor(app, tab, [](const AppState::TabSnapshot& t) { return t.paused; }));
+
+    // The regression: on the wrong key this returned AlreadyRunning (the
+    // lookup read unpaused) and the resume never reached the server.
+    CHECK(app.RequestPaused(false) == AppState::PauseToggle::SentResume);
+    REQUIRE(WaitFor(app, tab, [](const AppState::TabSnapshot& t) { return !t.paused; }));
+
+    // Idempotence, now that the snapshot is live on both branches: toggling
+    // to the state the session is already in sends nothing.
+    CHECK(app.RequestPaused(false) == AppState::PauseToggle::AlreadyRunning);
+    CHECK(app.RequestPaused(true) == AppState::PauseToggle::SentPause);
+    REQUIRE(WaitFor(app, tab, [](const AppState::TabSnapshot& t) { return t.paused; }));
+    CHECK(app.RequestPaused(true) == AppState::PauseToggle::AlreadyPaused);
+
+    // A sessionless tab has nothing to pause -- and focus is what selects
+    // the target, so a sessionless tab focused INSTEAD changes the answer.
+    const auto bare = app.OpenTab(fixture.Options("sessionless"));
+    REQUIRE_FALSE(bare.empty());
+    app.SetFocusedTab(bare);
+    CHECK(app.RequestPaused(true) == AppState::PauseToggle::NoSession);
+    CHECK(app.RequestPaused(false) == AppState::PauseToggle::NoSession);
+}
+
+
 TEST_CASE("FindRewindTargetSeq resolves the Nth user turn back", "[app_state][rewind]") {
     // Rewind has no other way to let a user target it -- raw transcript seq
     // numbers are never surfaced in the UI, so /rewind <n> resolves "n user

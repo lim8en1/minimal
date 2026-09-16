@@ -3192,6 +3192,26 @@ void AppState::SendRewind(const std::string& session_id, std::optional<int64_t> 
     }
 }
 
+// The /pause // /resume guard. The lookup is TAB-keyed (GetDetails matches
+// tab.info.tab_id): the state of the session the user is LOOKING at, which is
+// what "already paused" means. It used to be fed FocusedSessionId() -- a ULID
+// can never equal a "t<n>" tab id, so the lookup always returned a default
+// snapshot reading paused=false, making typed /resume on a paused session
+// answer "not paused" and never send the unpause (alt+p was unaffected: its
+// dispatcher passes the focused TAB id). The wire event itself is SESSION-
+// keyed, like every other send.
+AppState::PauseToggle AppState::RequestPaused(bool want_paused) {
+    const std::string tab_id = FocusedTabId();
+    if (tab_id.empty()) return PauseToggle::NoSession;
+    const std::string session = FocusedSessionId();
+    if (session.empty()) return PauseToggle::NoSession;
+    if (GetDetails(tab_id).paused == want_paused) {
+        return want_paused ? PauseToggle::AlreadyPaused : PauseToggle::AlreadyRunning;
+    }
+    SendSetPaused(session, want_paused);
+    return want_paused ? PauseToggle::SentPause : PauseToggle::SentResume;
+}
+
 std::optional<int64_t> AppState::FindRewindTargetSeq(const std::string& session_id, int n) {
     const auto state = GetState(session_id);
     if (!state || n <= 0) return std::nullopt;
@@ -3388,6 +3408,7 @@ std::vector<AppState::TabSnapshot> AppState::GetAllTabs(bool include_tool_output
         snap.root_ordinal = tab.info.root_ordinal;
         snap.spawn_seq = tab.info.spawn_seq;
         snap.cancel_requested = ss.cancel_requested;
+        snap.paused = ss.paused;
         snap.turn_in_flight = ss.turn_in_flight;
         // The glyph merge (docs/EXTENSIBILITY.md 4.2, "Attention sink"): core
         // event derivation is the default source; a plugin raise wins until

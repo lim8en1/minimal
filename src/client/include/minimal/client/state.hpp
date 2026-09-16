@@ -988,6 +988,11 @@ public:
         // The focused tab's interrupt request still awaiting its turn end.
         bool cancel_requested = false;
 
+        // The tab's session pause state (SessionMetadataEvent.paused -- the
+        // confirming event for SetPausedEvent). The status bar's paused
+        // segment renders from the same source.
+        bool paused = false;
+
         // The interrupt probe's turn-liveness signal (SessionState's
         // turn_in_flight, copied through GetAllTabs): the display state above
         // reads Idle in the silent windows between message stops, so the
@@ -1134,6 +1139,26 @@ public:
     // state marker: the confirming SessionMetadataEvent lands within
     // milliseconds and the status bar's paused segment refreshes from it.
     void SendSetPaused(const std::string& session_id, bool paused);
+
+    // What RequestPaused did with the focused tab's pause state.
+    enum class PauseToggle {
+        SentPause,        // SetPaused(true) went out; the turn stops at its
+                          // next tool-call return
+        SentResume,       // SetPaused(false) went out; the server enqueues the
+                          // seedless continuation iff the last turn ended
+                          // Paused (Session::SetPaused's resume kick)
+        AlreadyPaused,    // /pause on a paused session -- nothing sent
+        AlreadyRunning,   // /resume on an unpaused session -- nothing sent
+        NoSession         // the focused tab has no session; nothing sent
+    };
+
+    // The /pause // /resume decision, extracted so its guard is testable:
+    // the current state comes from the FOCUSED TAB's snapshot (GetDetails is
+    // tab-id keyed -- the typed command must not look it up by session id,
+    // which can never match a tab and always reads unpaused), while the wire
+    // event targets the focused SESSION. Idempotent: a toggle whose wanted
+    // state matches the current one sends nothing.
+    PauseToggle RequestPaused(bool want_paused);
 
     // Rewind is a client-native wire event (a oneof sibling of cancel/attach),
     // not a routed command -- sent directly like SendCancel, never through
