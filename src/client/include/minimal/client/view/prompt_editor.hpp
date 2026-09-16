@@ -91,8 +91,14 @@ struct PromptEditorState {
     std::atomic<bool> query_pending_hint{false};
     // PER-TAB note: one PromptEditorState lives in each TabUi (tab_ui.hpp);
     // RunTui's single app-wide instance predates per-tab editors. The recall
-    // timeline deliberately did NOT follow: it is app-scoped (PromptHistory
-    // below).
+    // TIMELINE deliberately did NOT follow: it is app-scoped (PromptHistory
+    // below). The browse POSITION into that timeline, and the draft it
+    // interrupted, live here instead -- they read/write this state's own
+    // `content`, so a position/draft shared across tabs (as PromptHistory
+    // once held them) let switching tabs mid-browse clobber another tab's
+    // unsaved draft with a stale recall.
+    std::optional<std::size_t> history_cursor;
+    std::string history_draft;
 };
 
 // Submitted-line recall (up/down arrow, readline-like). APP-scoped by design
@@ -106,12 +112,6 @@ struct PromptEditorState {
 struct PromptHistory {
     void Record(const std::string& line);
     std::vector<std::string> entries;
-    // nullopt = editing fresh content, not browsing. An index into `entries`
-    // while browsing.
-    std::optional<std::size_t> cursor;
-    // The content that was live when browsing started, restored on arrowing
-    // DOWN past the newest history entry.
-    std::string draft;
 };
 
 // One /-command the editor may offer. From ListCommands, fetched once at
@@ -305,6 +305,12 @@ public:
     // query is dropped). Empty on the NEXT Poll after a match.
     void Complete(const std::string& tab, const std::string& prefix,
                   std::vector<std::string> paths);
+
+    // Drops `tab`'s slot, if any. Called from tab close (app.cpp's
+    // close_tab) so a closed tab's in-flight query bookkeeping does not
+    // outlive it -- the same per-tab-cache cleanup PerTabPromptEditors::
+    // ForgetTab does for the editor state.
+    void Forget(const std::string& tab);
 
 private:
     struct Slot {

@@ -151,6 +151,50 @@ TEST_CASE("PerTabPromptEditors: the shared history is app-scoped, the cursor per
     CHECK(h.tabs.CurrentState("B").content == "o");
 }
 
+TEST_CASE("PerTabPromptEditors: browsing in one tab does not clobber another "
+          "tab's draft",
+          "[prompt_editor][per_tab][regression]") {
+    // THE BUG: PromptHistory's cursor/draft used to live on the shared
+    // PromptHistory instance itself, even though it is read/written against
+    // a per-tab PromptEditorState::content. Browsing in A, switching to B,
+    // and typing a fresh draft there used to leave A's browse cursor armed --
+    // arrowing in B then overwrote B's untouched draft with A's history
+    // state instead of B's own.
+    Harness h(TestTheme());
+    PromptHistory hist;
+    auto own = MakePerTabPromptEditor(
+        h.tabs, [&h] { return h.focused; },
+        [&](PromptEditorState& state) {
+            return MakePromptEditor(h.theme, state, [](const std::string&) {},
+                                    [](const std::string&) {},
+                                    [](const std::string&) {
+                                        return std::vector<std::string>{};
+                                    },
+                                    nullptr, nullptr, nullptr, nullptr, &hist);
+        });
+
+    h.focused = "A";
+    own->OnEvent(ftx::Event::Character("o"));
+    REQUIRE(own->OnEvent(ftx::Event::Return));   // seed the shared timeline
+    REQUIRE(own->OnEvent(ftx::Event::ArrowUp));  // A starts browsing
+    CHECK(h.tabs.CurrentState("A").content == "o");
+
+    h.focused = "B";   // switch tabs mid-browse, without arrowing back down
+    own->OnEvent(ftx::Event::Character("b"));
+    REQUIRE(h.tabs.CurrentState("B").content == "b");
+
+    // B never browsed: Up/Down here must walk B's own (fresh) browse state,
+    // not resume A's -- and must never discard "b".
+    REQUIRE(own->OnEvent(ftx::Event::ArrowUp));
+    CHECK(h.tabs.CurrentState("B").content == "o");   // recalls the shared entry
+    REQUIRE(own->OnEvent(ftx::Event::ArrowDown));
+    CHECK(h.tabs.CurrentState("B").content == "b");   // restores B's own draft
+
+    // A's browse state is untouched by B's activity.
+    h.focused = "A";
+    CHECK(h.tabs.CurrentState("A").content == "o");
+}
+
 TEST_CASE("PerTabPromptEditors: ForgetTab drops the state and the editor together",
           "[prompt_editor][per_tab]") {
     Harness h(TestTheme());

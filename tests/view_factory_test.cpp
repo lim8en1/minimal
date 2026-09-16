@@ -811,7 +811,8 @@ TEST_CASE("ask modal: long option descriptions wrap instead of clipping") {
     CHECK(frame.find("ENDMARKTWO") != std::string::npos);
 }
 
-TEST_CASE("ask modal: the free-text input exists only while its toggle is checked") {
+TEST_CASE("ask modal: the free-text input exists only while \"Type your own "
+          "answer\" is the current pick") {
     const auto theme = TestTheme();
     const auto request = MakeAskRequest(
         {MakeAskQuestion("Approach", "which approach?", {"one", "two"})});
@@ -819,9 +820,11 @@ TEST_CASE("ask modal: the free-text input exists only while its toggle is checke
     auto modal = MakeAskModal(
         request, theme, [&](v1::AskUserResponse r) { submitted = std::move(r); });
 
-    // Unchecked: no input row at all -- an invisible-but-focusable input is
-    // the "hidden choice" bug class, and the always-on input spent a modal
-    // row most asks never use.
+    // "Type your own answer" is the trailing THIRD radio entry (not a
+    // separate toggle) -- always rendered as a row, hence the "your own
+    // answer" label text is on screen from the start; the free-text input is
+    // what must not exist yet. Its placeholder ("your answer", no "own") is
+    // the search string below, distinct from the row label.
     CHECK(RenderFrame(modal).find("your answer") == std::string::npos);
 
     // Navigation notes (ftxui v7 semantics, worth writing down because the
@@ -830,11 +833,11 @@ TEST_CASE("ask modal: the free-text input exists only while its toggle is checke
     // space commits; Tab is eaten by the radiobox too, so widget traversal
     // happens with arrows when the widget does not consume them (the last
     // ArrowDown bubbles out of the radiobox to the container).
-    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));    // hover option 2
-    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));    // hover is last: bubbles to the toggle
-    REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));   // check "Type your own answer"
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));    // hover option 2 ("two")
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));    // hover option 3 ("Type your own answer")
+    REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));   // commit: pick "Type your own answer"
     CHECK(RenderFrame(modal).find("your answer") != std::string::npos);
-    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));    // the toggle: bubbles to the input
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));    // hover is last: bubbles to the input
     REQUIRE(SendEvent(modal, ftx::Event::Character("h")));
     REQUIRE(SendEvent(modal, ftx::Event::Character("i")));
     CHECK(RenderFrame(modal).find("hi") != std::string::npos);
@@ -846,6 +849,85 @@ TEST_CASE("ask modal: the free-text input exists only while its toggle is checke
     REQUIRE(submitted.has_value());
     REQUIRE(submitted->answers_size() == 1);
     CHECK(submitted->answers(0).other() == "hi");
+}
+
+TEST_CASE("ask modal: picking a real option clears an already-picked \"other\" answer") {
+    // Regression: "Type your own answer" used to be an independent sibling
+    // checkbox, so a real radio pick and a checked "other" (with typed text)
+    // could both read as marked at once -- CollectAnswer silently preferred
+    // "other" with no visual warning. It is now the Radiobox's own trailing
+    // entry, so picking a different entry structurally cannot leave it
+    // selected too.
+    const auto theme = TestTheme();
+    const auto request = MakeAskRequest(
+        {MakeAskQuestion("Approach", "which approach?", {"one", "two"})});
+    std::optional<v1::AskUserResponse> submitted;
+    auto modal = MakeAskModal(
+        request, theme, [&](v1::AskUserResponse r) { submitted = std::move(r); });
+
+    // Pick "Type your own answer" (3rd entry) and type something.
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));
+    REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));
+    CHECK(RenderFrame(modal).find("your answer") != std::string::npos);   // placeholder
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));   // bubbles to the input
+    REQUIRE(SendEvent(modal, ftx::Event::Character("h")));   // placeholder now replaced by "h"
+
+    // Move hover back up onto a real option and pick it instead. Three
+    // ArrowUps, not two: the first is consumed by the Input itself (moving
+    // its cursor to column 0, per HandleArrowUp), the second only transfers
+    // focus back to the Radiobox at its unchanged hover position ("other"),
+    // and the third is the one the (now-focused) Radiobox itself consumes to
+    // actually move its hover.
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));   // input: cursor to column 0
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));   // focus back to the radiobox
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));   // hover "two"
+    REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));   // commit "two"
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // -> review
+    const auto review = RenderFrame(modal);
+    CHECK(review.find("-> two") != std::string::npos);
+    CHECK(review.find("your answer") == std::string::npos);
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // -> submit
+    REQUIRE(submitted.has_value());
+    REQUIRE(submitted->answers(0).selected_size() == 1);
+    CHECK(submitted->answers(0).selected(0) == "two");
+    CHECK(submitted->answers(0).other().empty());
+}
+
+TEST_CASE("ask modal: checking \"other\" clears real checkbox picks, and vice versa") {
+    const auto theme = TestTheme();
+    v1::AskQuestion multi;
+    multi.set_header("Zones");
+    multi.set_question("which zones?");
+    multi.set_multiple(true);
+    multi.set_allow_other(true);
+    multi.add_options()->set_label("zone A");
+    multi.add_options()->set_label("zone B");
+    const auto request = MakeAskRequest({multi});
+    std::optional<v1::AskUserResponse> submitted;
+    auto modal = MakeAskModal(
+        request, theme, [&](v1::AskUserResponse r) { submitted = std::move(r); });
+
+    // Check "zone A" first (hover starts at the first checkbox).
+    REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));
+    // Move down to the trailing "Type your own answer" checkbox and check it
+    // -- must clear zone A, since the wire contract never accepts a
+    // selection alongside free text.
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));
+    REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));   // bubbles to the input
+    REQUIRE(SendEvent(modal, ftx::Event::Character("x")));
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // -> review
+    const auto review = RenderFrame(modal);
+    CHECK(review.find("your answer: x") != std::string::npos);
+    CHECK(review.find("zone A") == std::string::npos);
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // -> submit
+    REQUIRE(submitted.has_value());
+    CHECK(submitted->answers(0).other() == "x");
+    CHECK(submitted->answers(0).selected_size() == 0);
 }
 
 TEST_CASE("ask modal: Enter reviews before submitting; Escape peels one level") {
@@ -2613,7 +2695,7 @@ TEST_CASE("prompt editor: up-arrow recalls the last submitted line, down-arrow "
 
     REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
     CHECK(state.content == "unsent draft");   // the draft survives the round trip
-    CHECK_FALSE(hist.cursor.has_value());
+    CHECK_FALSE(state.history_cursor.has_value());
 }
 
 TEST_CASE("prompt editor: up-arrow walks further back through older entries, "
@@ -2698,7 +2780,7 @@ TEST_CASE("prompt editor: history recall walks THROUGH a recalled command line "
     REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
     CHECK(state.content == "plain message");
     CHECK(state.suggestion_selected == 0);   // the list was not navigated
-    CHECK(hist.entries[*hist.cursor] == "plain message");
+    CHECK(hist.entries[*state.history_cursor] == "plain message");
 
     // Down returns to "/pause" (still browsing), then further down past the
     // newest restores the draft -- the full walk stays intact.
@@ -2706,13 +2788,13 @@ TEST_CASE("prompt editor: history recall walks THROUGH a recalled command line "
     CHECK(state.content == "/pause");
     REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
     CHECK(state.content.empty());
-    CHECK_FALSE(hist.cursor.has_value());
+    CHECK_FALSE(state.history_cursor.has_value());
 }
 
 TEST_CASE("prompt editor: an open suggestion list still owns the arrows while "
           "typing a command name", "[prompt_editor]") {
     // The other half of the contract: history-owns-the-arrows applies ONLY
-    // while browsing (hist.cursor set). Typing /pa fresh opens the list and
+    // while browsing (state.history_cursor set). Typing /pa fresh opens the list and
     // Up/Down must still navigate it -- this is what the /-autocomplete is
     // FOR -- and Enter still accepts the highlighted entry.
     const auto theme = TestTheme();
@@ -2739,7 +2821,7 @@ TEST_CASE("prompt editor: an open suggestion list still owns the arrows while "
 
     REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
     CHECK(state.suggestion_selected == 1);      // list navigates: not browsing
-    CHECK_FALSE(hist.cursor.has_value());
+    CHECK_FALSE(state.history_cursor.has_value());
     REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
     CHECK(state.suggestion_selected == 0);
 
@@ -2774,7 +2856,7 @@ TEST_CASE("prompt editor: up-arrow inside a multi-line draft does not recall "
 
     SendEvent(editor, ftx::Event::ArrowUp);
     CHECK(state.content == "line one\nline two");   // draft untouched, not recalled
-    CHECK_FALSE(hist.cursor.has_value());
+    CHECK_FALSE(state.history_cursor.has_value());
 }
 
 TEST_CASE("prompt editor: a consecutive duplicate submission does not grow history",
@@ -2807,10 +2889,10 @@ TEST_CASE("prompt editor: typing while browsing history exits browse mode",
     Type(editor, "old entry");
     REQUIRE(SendEvent(editor, ftx::Event::Return));
     REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
-    REQUIRE(hist.cursor.has_value());
+    REQUIRE(state.history_cursor.has_value());
 
     REQUIRE(SendEvent(editor, ftx::Event::Character("!")));
-    CHECK_FALSE(hist.cursor.has_value());
+    CHECK_FALSE(state.history_cursor.has_value());
     CHECK(state.content == "old entry!");   // the edit itself is preserved
 }
 

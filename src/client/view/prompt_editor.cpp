@@ -152,7 +152,6 @@ void PromptHistory::Record(const std::string& line) {
     // submitting the same line, or repeating what recall just brought back,
     // should not grow the list every time.
     if (!entries.empty() && entries.back() == line) {
-        cursor.reset();
         return;
     }
     entries.push_back(line);
@@ -164,7 +163,6 @@ void PromptHistory::Record(const std::string& line) {
         entries.erase(entries.begin(),
                       entries.begin() + static_cast<long>(entries.size() - kMaxHistoryEntries));
     }
-    cursor.reset();
 }
 
 ftxui::Component MakePromptEditor(
@@ -397,8 +395,11 @@ ftxui::Component MakePromptEditor(
             // editors share ONE app-scoped instance (RunTui passes the same
             // pointer to every tab's editor), so up-arrow continuity holds
             // across tab switches; dedup and the 500-entry bound are
-            // Record's.
+            // Record's. The browse position is per-tab (state.history_cursor,
+            // not PromptHistory), so submitting always exits browsing for
+            // THIS tab only.
             hist.Record(line);
+            state.history_cursor.reset();
             if (line.front() == '/') {
                 on_command(line);
             } else {
@@ -411,19 +412,20 @@ ftxui::Component MakePromptEditor(
             return true;   // consumed
         }
         // The suggestion list claims Up/Down ONLY while the user is picking
-        // from it -- not while a history browse is in progress (hist.cursor
-        // set): a browse must be walkable in both directions even though a
-        // recalled `/cmd` line legitimately re-arms the command list on the
-        // next render (the render gate rebuilds it from the typed name).
-        // Browsing arrows are history's (the arms below); the list itself
-        // stays visible and Tab still completes from it.
-        if (!hist.cursor.has_value() && state.list_open && event == Event::ArrowDown &&
+        // from it -- not while a history browse is in progress
+        // (state.history_cursor set): a browse must be walkable in both
+        // directions even though a recalled `/cmd` line legitimately re-arms
+        // the command list on the next render (the render gate rebuilds it
+        // from the typed name). Browsing arrows are history's (the arms
+        // below); the list itself stays visible and Tab still completes from
+        // it.
+        if (!state.history_cursor.has_value() && state.list_open && event == Event::ArrowDown &&
             !state.suggestions.empty()) {
             state.suggestion_selected =
                 (state.suggestion_selected + 1) % static_cast<int>(state.suggestions.size());
             return true;
         }
-        if (!hist.cursor.has_value() && state.list_open && event == Event::ArrowUp &&
+        if (!state.history_cursor.has_value() && state.list_open && event == Event::ArrowUp &&
             !state.suggestions.empty()) {
             state.suggestion_selected = (state.suggestion_selected +
                                          static_cast<int>(state.suggestions.size()) - 1) %
@@ -435,15 +437,15 @@ ftxui::Component MakePromptEditor(
             return true;   // consumed
         }
         // Submitted-line recall (readline-like). HISTORY OWNS THE ARROW KEYS
-        // WHILE BROWSING -- the guard is `!hist.cursor.has_value()`, not
-        // `!state.list_open`: a recalled `/cmd` line opens the command
+        // WHILE BROWSING -- the guard is `!state.history_cursor.has_value()`,
+        // not `!state.list_open`: a recalled `/cmd` line opens the command
         // suggestion list on the NEXT RENDER (IsCommandNameInProgress is
         // true; the render gate at the bottom of this file sets list_open),
         // and with the old guard every further ArrowUp/ArrowDown was eaten
         // by the list-navigation branches above -- history could not be
         // walked past the first '/'-leading entry ("history can't go up
-        // once you get to the first / command"). While hist.cursor is set,
-        // the user is BROWSING, not picking a completion: Up/Down walk the
+        // once you get to the first / command"). While state.history_cursor
+        // is set, the user is BROWSING, not picking a completion: Up/Down walk the
         // timeline, and a suggestion list armed on the recalled line is
         // stale by construction (it described the content before the
         // recall) -- dismissed here, on the same keypress. Any list the
@@ -461,17 +463,17 @@ ftxui::Component MakePromptEditor(
             // Entering browse mode dismisses whatever suggestion list is
             // showing (see the guard comment above). Walking OLDER while
             // already browsing keeps going from the current position.
-            if (!hist.cursor.has_value()) {
+            if (!state.history_cursor.has_value()) {
                 state.list_open = false;
                 state.suggestions.clear();
                 state.completions.clear();
                 state.suggestion_selected = 0;
-                hist.draft = state.content;
-                hist.cursor = hist.entries.size() - 1;
-            } else if (*hist.cursor > 0) {
-                --*hist.cursor;
+                state.history_draft = state.content;
+                state.history_cursor = hist.entries.size() - 1;
+            } else if (*state.history_cursor > 0) {
+                --*state.history_cursor;
             }
-            state.content = hist.entries[*hist.cursor];
+            state.content = hist.entries[*state.history_cursor];
             // FTXUI's Input only CLAMPS cursor_position into content's new
             // bounds after an external splice -- it never MOVES it -- so
             // without this the caret stayed wherever it was in the PREVIOUS
@@ -481,13 +483,13 @@ ftxui::Component MakePromptEditor(
             state.cursor_position = static_cast<int>(state.content.size());
             return true;
         }
-        if (event == Event::ArrowDown && hist.cursor.has_value()) {
-            if (*hist.cursor + 1 < hist.entries.size()) {
-                ++*hist.cursor;
-                state.content = hist.entries[*hist.cursor];
+        if (event == Event::ArrowDown && state.history_cursor.has_value()) {
+            if (*state.history_cursor + 1 < hist.entries.size()) {
+                ++*state.history_cursor;
+                state.content = hist.entries[*state.history_cursor];
             } else {
-                hist.cursor.reset();
-                state.content = hist.draft;
+                state.history_cursor.reset();
+                state.content = state.history_draft;
             }
             state.cursor_position = static_cast<int>(state.content.size());
             return true;
@@ -510,7 +512,7 @@ ftxui::Component MakePromptEditor(
             // Editing a recalled line exits browsing -- it is no longer the
             // same text as history[cursor], so further up/down should not
             // silently discard what was just typed.
-            hist.cursor.reset();
+            state.history_cursor.reset();
         }
 
         // Click-to-position, re-implemented from the render pass's geometry
@@ -984,6 +986,11 @@ void MentionQuerySlots::Complete(const std::string& tab, const std::string& pref
     it->second.result = std::move(paths);
     it->second.ready = true;
     it->second.in_flight = false;
+}
+
+void MentionQuerySlots::Forget(const std::string& tab) {
+    std::lock_guard lock(mtx_);
+    slots_.erase(tab);
 }
 
 // --- MakeMentionSuggestor ----------------------------------------------------

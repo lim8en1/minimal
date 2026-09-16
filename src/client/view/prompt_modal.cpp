@@ -525,7 +525,13 @@ struct AskModalState {
         // touched this question." Only on_change (fired by an actual
         // selection change, not the render-time clamp) sets this.
         bool radio_touched = false;
-        bool use_other = false;
+        // "Other" is not a separate flag: it is the TRAILING entry of
+        // `entries`/`boxes` (or `radio == options_size()`), appended when
+        // the question's allow_other is set -- see MakeAskModal. Keeping it
+        // in the same list as the real options makes exclusivity structural
+        // (a Radiobox only ever has one selected index; a checked "other"
+        // checkbox and a checked real checkbox are cross-cleared by index,
+        // not by a second independent bool that could disagree with them).
         std::string other_text;
     };
     std::vector<QuestionState> questions;
@@ -542,16 +548,30 @@ v1::AskUserResponse CollectAnswer(const PendingAsk& request, const AskModalState
         const auto& question = request.request.questions(i);
         const auto& qs = state.questions[i];
         auto* slot = response.add_answers();
-        if (qs.use_other && !qs.other_text.empty()) {
-            slot->set_other(qs.other_text);
-            continue;
-        }
         if (question.multiple()) {
+            // The trailing "other" checkbox (see QuestionState) wins only
+            // while it is itself checked -- cross-clearing at the widget
+            // layer (MakeAskModal) keeps it and the real boxes from ever
+            // being true at once, so this is a read of that invariant, not
+            // an independent tie-break.
+            if (question.allow_other() && !qs.boxes.empty() && qs.boxes.back() &&
+                !qs.other_text.empty()) {
+                slot->set_other(qs.other_text);
+                continue;
+            }
             for (int j = 0; j < question.options_size(); ++j) {
                 if (qs.boxes[j]) slot->add_selected(question.options(j).label());
             }
-        } else if (qs.radio_touched && qs.radio >= 0 && qs.radio < question.options_size()) {
-            slot->add_selected(question.options(qs.radio).label());
+        } else {
+            // The trailing "other" radio entry (index == options_size()):
+            // Radiobox's own single-selection means `radio` can never be
+            // both a real index and the other index at once.
+            const int other_index = question.options_size();
+            if (qs.radio_touched && qs.radio == other_index) {
+                if (!qs.other_text.empty()) slot->set_other(qs.other_text);
+            } else if (qs.radio_touched && qs.radio >= 0 && qs.radio < other_index) {
+                slot->add_selected(question.options(qs.radio).label());
+            }
         }
     }
     return response;
@@ -569,10 +589,11 @@ v1::AskUserResponse DismissedAnswer(const PendingAsk& request) {
 // so a drift between the two would display one thing and answer another.
 std::string ReviewLine(const v1::AskQuestion& question,
                        const AskModalState::QuestionState& qs) {
-    if (qs.use_other && !qs.other_text.empty()) {
-        return "-> your answer: " + qs.other_text;
-    }
     if (question.multiple()) {
+        if (question.allow_other() && !qs.boxes.empty() && qs.boxes.back() &&
+            !qs.other_text.empty()) {
+            return "-> your answer: " + qs.other_text;
+        }
         std::string joined;
         for (int j = 0; j < question.options_size() &&
                         j < static_cast<int>(qs.boxes.size());
@@ -583,7 +604,11 @@ std::string ReviewLine(const v1::AskQuestion& question,
         }
         return joined.empty() ? "(not answered)" : "-> " + joined;
     }
-    if (qs.radio_touched && qs.radio >= 0 && qs.radio < question.options_size()) {
+    const int other_index = question.options_size();
+    if (qs.radio_touched && qs.radio == other_index) {
+        return qs.other_text.empty() ? "(not answered)" : "-> your answer: " + qs.other_text;
+    }
+    if (qs.radio_touched && qs.radio >= 0 && qs.radio < other_index) {
         return "-> " + question.options(qs.radio).label();
     }
     return "(not answered)";
@@ -600,9 +625,7 @@ std::string ReviewLine(const v1::AskQuestion& question,
 // radio_touched; this is that same contract, in the render). Pure so the
 // rule is directly testable (tests/prompt_modal_test.cpp).
 bool RadioRowSelected(bool touched, bool active, bool focused) {
-    (void)active;   // reserved: the rule is per-list, not per-row -- no
-    (void)focused;  // per-row variation yet
-    return touched;
+    return touched && (active || focused);
 }
 
 // One option row: marker, then the label wrapped, then its description
@@ -621,8 +644,10 @@ ftxui::Element WrappedOptionEntry(const ftxui::EntryState& s, const char* marker
     using namespace ftxui;
     Element marker = text(s.state ? marker_on : marker_off);
     Element label = paragraph(s.label);
-    if (RadioRowSelected(touched, s.active, s.focused)) label |= bold;
-    if (RadioRowSelected(touched, s.active, s.focused)) label |= selection;
+    if (RadioRowSelected(touched, s.active, s.focused)) {
+        label |= bold;
+        label |= selection;
+    }
     Elements column = {label};
     if (!description.empty()) column.push_back(paragraph(description) | muted);
     return hbox({marker, vbox(std::move(column)) | flex});
@@ -654,94 +679,129 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
         // kept landing somewhere) but never rendered.
         Components block;
 
+        // "Type your own answer" is a TRAILING ENTRY of the same list
+        // (radio or checkbox), not a separate sibling control -- a sibling
+        // checkbox with its own independent bool let a real pick and "other"
+        // both read as marked at once, with CollectAnswer/ReviewLine silently
+        // picking a winner the editing view never showed. Folding it into
+        // the list makes exclusivity structural for the radio case (one
+        // Radiobox, one selected index) and at least keeps one consistent
+        // marker style for the checkbox case (exclusivity there is still
+        // cross-cleared by index below -- Checkbox has no built-in
+        // single-selection). The free-text Input is still a separate
+        // sibling component (neither Radiobox nor Checkbox can host an
+        // inline child): DetachAllChildren/Add toggles it into `other_container`
+        // from whichever on_change below currently owns "other"-ness, so an
+        // invisible-but-focusable Input is never left in the tree (the same
+        // "hidden choice" bug class the old sibling-checkbox design already
+        // guarded against).
+        const bool other_allowed = question.allow_other();
+        auto other_container = Container::Vertical({});
+        auto other_input = Input(&qs.other_text, "your answer");
+        const auto state_ref = state;   // shared_ptr copy: outlives the closures below
+        const int index = i;
+
         if (question.multiple()) {
             for (const auto& option : question.options()) {
                 qs.entries.push_back(option.label());
                 qs.boxes.push_back(false);
             }
+            int other_j = -1;
+            if (other_allowed) {
+                qs.entries.push_back("Type your own answer");
+                qs.boxes.push_back(false);
+                other_j = static_cast<int>(qs.entries.size()) - 1;
+            }
             Components boxes;
             for (std::size_t j = 0; j < qs.entries.size(); ++j) {
+                const bool is_other = static_cast<int>(j) == other_j;
                 CheckboxOption option_state;
                 option_state.label = ConstStringRef(qs.entries[j]);
                 option_state.checked = Ref<bool>(&qs.boxes[j]);
                 // Checkbox's own EntryState.index is always -1 (it renders
                 // itself, not a list), so the description is baked into the
                 // closure by j rather than looked up through the entry state.
-                const std::string description = question.options(static_cast<int>(j)).description();
+                // The trailing "other" row has none of its own.
+                const std::string description =
+                    is_other ? "" : question.options(static_cast<int>(j)).description();
                 option_state.transform = [description, selection, muted](const EntryState& s) {
                     // touched=true, always: a checkbox's picked-ness lives in
                     // its own marker, not the focus styling.
                     return WrappedOptionEntry(s, "▣ ", "☐ ", description, selection, muted,
                                               /*touched=*/true);
                 };
+                if (is_other) {
+                    option_state.on_change = [other_container, other_input, state_ref, index] {
+                        auto& qs2 = state_ref->questions[index];
+                        other_container->DetachAllChildren();
+                        if (qs2.boxes.back()) {
+                            // Checking "other" cross-clears every real box --
+                            // the wire contract (WireAskBroker::SlotIsValid)
+                            // never accepts a selection alongside free text.
+                            for (std::size_t k = 0; k + 1 < qs2.boxes.size(); ++k) {
+                                qs2.boxes[k] = false;
+                            }
+                            other_container->Add(other_input);
+                        }
+                    };
+                } else {
+                    option_state.on_change = [j, other_container, state_ref, index,
+                                              other_allowed] {
+                        if (!other_allowed) return;
+                        auto& qs2 = state_ref->questions[index];
+                        if (qs2.boxes[j]) {
+                            qs2.boxes.back() = false;
+                            other_container->DetachAllChildren();
+                        }
+                    };
+                }
                 boxes.push_back(Checkbox(std::move(option_state)));
             }
             block.push_back(Container::Vertical(std::move(boxes)));
         } else {
             // Radiobox is the single-pick control: one stable index, no
-            // manual "uncheck the others" bookkeeping.
+            // manual "uncheck the others" bookkeeping -- which is exactly
+            // why "other" lives as entries.back() here rather than a sibling
+            // checkbox: Radiobox enforces "at most one selected" for free,
+            // so a real pick and "other" can never both be current.
             std::vector<std::string> entries;
             for (const auto& option : question.options()) {
                 entries.push_back(option.label());
             }
+            const int other_index = static_cast<int>(entries.size());
+            if (other_allowed) entries.push_back("Type your own answer");
             qs.entries = std::move(entries);
             RadioboxOption radio_state;
             radio_state.entries = ConstStringListRef(&qs.entries);
             radio_state.selected = &qs.radio;
-            const auto state_ref = state;   // shared_ptr copy: outlives the closure
-            const int index = i;
-            radio_state.on_change = [state_ref, index] {
-                state_ref->questions[index].radio_touched = true;
+            radio_state.on_change = [state_ref, index, other_container, other_input,
+                                     other_index] {
+                auto& qs2 = state_ref->questions[index];
+                qs2.radio_touched = true;
+                other_container->DetachAllChildren();
+                if (qs2.radio == other_index) other_container->Add(other_input);
             };
             // Radiobox's EntryState.index tracks the list position, so the
-            // description can be looked up straight from the question.
+            // description can be looked up straight from the question --
+            // except for the trailing "other" entry, which has none.
             // touched reads radio_touched LIVE (through the same shared_ptr
             // on_change writes): the first arrow-down both records the touch
             // and re-styles the list within the same repaint, so the clamp's
             // option-0 highlight appears only once the cursor has actually
             // moved.
-            radio_state.transform = [request_state, state_ref, index, selection,
-                                     muted](const EntryState& s) {
+            radio_state.transform = [request_state, state_ref, index, selection, muted,
+                                     other_index](const EntryState& s) {
                 const std::string description =
-                    request_state->request.questions(index).options(s.index).description();
+                    s.index == other_index
+                        ? ""
+                        : request_state->request.questions(index).options(s.index).description();
                 return WrappedOptionEntry(s, "◉ ", "○ ", description, selection, muted,
                                           state_ref->questions[index].radio_touched);
             };
             block.push_back(Radiobox(std::move(radio_state)));
         }
 
-        if (question.allow_other()) {
-            // The free-text Input is a focusable child ONLY while "Type your
-            // own answer" is checked: an invisible-but-focusable component is
-            // the exact "hidden choice" bug class (Tab lands on a row that
-            // renders nothing), and the always-on input spent a modal row
-            // most asks never use. The checkbox stays attached throughout --
-            // DetachAllChildren clears the container, so the sync re-adds
-            // box first, then input only when checked. The checkbox is built
-            // after the closure that syncs it, so it rides a shared holder
-            // read at fire time (ftxui flips *checked, then runs on_change
-            // inline or posts it to the app loop -- either way the components
-            // are alive).
-            auto other = Container::Vertical({});
-            auto input = Input(&qs.other_text, "your answer");
-            struct OtherParts {
-                Component box;
-            };
-            const auto parts = std::make_shared<OtherParts>();
-            const auto state_ref = state;   // shared_ptr copy: outlives the closure
-            const int index = i;
-            CheckboxOption box_opt;
-            box_opt.label = ConstStringRef("Type your own answer");
-            box_opt.checked = Ref<bool>(&qs.use_other);
-            box_opt.on_change = [other, input, parts, state_ref, index] {
-                other->DetachAllChildren();
-                other->Add(parts->box);
-                if (state_ref->questions[index].use_other) other->Add(input);
-            };
-            parts->box = Checkbox(std::move(box_opt));
-            other->Add(parts->box);
-            block.push_back(other);
-        }
+        if (other_allowed) block.push_back(other_container);
 
         question_components.push_back(Container::Vertical(std::move(block)));
     }
@@ -799,7 +859,9 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
                           Rule(theme),
-                          paragraph("enter: review  ·  esc: dismiss  ·  tab/arrow: move") | Muted(theme),
+                          paragraph("enter: review  ·  esc: dismiss  ·  tab/arrow: move  ·  "
+                                    "space: pick/toggle") |
+                              Muted(theme),
                       }))) |
                size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
     });

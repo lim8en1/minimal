@@ -141,8 +141,13 @@ ftxui::Component MakeFilterableMenuModal(
 
     auto interactive = CatchEvent(menu, [state, callbacks, rebuild](const Event& event) {
         if (event == Event::Return) {
-            if (!state->rows.empty() && !state->rows[state->selected].header &&
-                callbacks.on_select) {
+            // Bounds-checked like the render pass's normalizer below:
+            // ResolveSelectableRow returns -1 when the list has no
+            // selectable row at all, and `!rows.empty()` alone does not rule
+            // that out.
+            if (state->selected >= 0 &&
+                state->selected < static_cast<int>(state->rows.size()) &&
+                !state->rows[state->selected].header && callbacks.on_select) {
                 callbacks.on_select(state->rows[state->selected]);
             }
             return true;   // consumed either way: no double-submit on empty list

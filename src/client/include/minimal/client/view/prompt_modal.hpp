@@ -68,9 +68,12 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
 
 // The model's structured questions (tool-ask plugin): one modal, up to four
 // question blocks. `multiple` questions render checkboxes, single-pick
-// questions a radio list; `allow_other` questions get a "Type your own
-// answer" toggle whose input line exists (and is focusable) only while
-// checked. Enter first freezes the answers into a review list (one line per
+// questions a radio list; `allow_other` questions get a trailing "Type your
+// own answer" entry IN THAT SAME LIST (not a separate control) -- so a real
+// pick and "other" can never both read as marked, and picking one always
+// visibly clears the other. Its free-text input line exists (and is
+// focusable) only while that entry is the current answer. Enter first
+// freezes the answers into a review list (one line per
 // question); Enter again submits whatever was answered (a question left
 // blank is simply not answered), Escape from review goes back to editing,
 // and Escape while editing dismisses -- the on_answer callback receives an

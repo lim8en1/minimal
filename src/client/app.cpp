@@ -943,6 +943,10 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // old single-editor behavior).
     minimal::client::PerTabPromptEditors prompt_editors;
     minimal::client::PromptHistory prompt_history;
+    // Declared here (not beside `suggest` below, which is its only other
+    // reader) so close_tab -- defined before the rest of the editor wiring
+    // exists -- can erase a closed tab's slot and not leak it.
+    minimal::client::MentionQuerySlots mention_slots;
     bool show_panel = false;
     bool show_picker = false;
     bool show_agent_picker = false;
@@ -982,6 +986,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // the component's closures captured the state's address; neither may
         // outlive the other). The "" pre-tab entry is never forgotten.
         prompt_editors.ForgetTab(id);
+        mention_slots.Forget(id);
     };
 
     // Picker-open lambdas, assigned after PickerController exists (below):
@@ -1019,7 +1024,6 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // working", intermittently. Sessioned tabs query by session id (the
     // server resolves the root); a sessionless tab scopes to the TUI's cwd,
     // the root its first message would create the session with.
-    minimal::client::MentionQuerySlots mention_slots;
     auto suggest = minimal::client::MakeMentionSuggestor(
         app.get(), mention_slots, [](const std::string&) {
             return minimal::client::CurrentProjectRootOrEmpty();

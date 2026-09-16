@@ -20,12 +20,16 @@ TEST_CASE("RadioRowSelected: an untouched question styles no row", "[prompt_moda
     CHECK(RadioRowSelected(false, false, false) == false);
 }
 
-TEST_CASE("RadioRowSelected: a touched question styles the current row", "[prompt_modal]") {
+TEST_CASE("RadioRowSelected: a touched question styles only the active-or-focused row",
+          "[prompt_modal]") {
     // After the first arrow-down (on_change fired, radio_touched set), the
-    // clamped/current row renders as the choice it now genuinely is.
+    // active/focused row renders as the choice it now genuinely is -- but a
+    // row that is neither must not, or every row in the list would render
+    // identically once the list is touched.
     CHECK(RadioRowSelected(/*touched=*/true, /*active=*/true, /*focused=*/true) == true);
     CHECK(RadioRowSelected(true, true, false) == true);
-    CHECK(RadioRowSelected(true, false, false) == true);
+    CHECK(RadioRowSelected(true, false, true) == true);
+    CHECK(RadioRowSelected(true, false, false) == false);
 }
 
 TEST_CASE("WrappedOptionEntry: the touched flag is the only styling gate",
