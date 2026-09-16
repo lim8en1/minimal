@@ -10,6 +10,9 @@
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/prompt_wrap.hpp"
 
+#include <string>
+#include <vector>
+
 namespace minimal::client {
 
 namespace {
@@ -407,13 +410,21 @@ ftxui::Component MakePromptEditor(
             state.completions.clear();
             return true;   // consumed
         }
-        if (state.list_open && event == Event::ArrowDown &&
+        // The suggestion list claims Up/Down ONLY while the user is picking
+        // from it -- not while a history browse is in progress (hist.cursor
+        // set): a browse must be walkable in both directions even though a
+        // recalled `/cmd` line legitimately re-arms the command list on the
+        // next render (the render gate rebuilds it from the typed name).
+        // Browsing arrows are history's (the arms below); the list itself
+        // stays visible and Tab still completes from it.
+        if (!hist.cursor.has_value() && state.list_open && event == Event::ArrowDown &&
             !state.suggestions.empty()) {
             state.suggestion_selected =
                 (state.suggestion_selected + 1) % static_cast<int>(state.suggestions.size());
             return true;
         }
-        if (state.list_open && event == Event::ArrowUp && !state.suggestions.empty()) {
+        if (!hist.cursor.has_value() && state.list_open && event == Event::ArrowUp &&
+            !state.suggestions.empty()) {
             state.suggestion_selected = (state.suggestion_selected +
                                          static_cast<int>(state.suggestions.size()) - 1) %
                                         static_cast<int>(state.suggestions.size());
@@ -423,19 +434,38 @@ ftxui::Component MakePromptEditor(
             accept_suggestion();
             return true;   // consumed
         }
-        // Submitted-line recall (readline-like), only when the suggestion
-        // list isn't already claiming these keys. ArrowUp walks toward
-        // older entries; ArrowDown walks back toward newer ones and, past
-        // the newest, restores whatever was being typed before recall
-        // started.
+        // Submitted-line recall (readline-like). HISTORY OWNS THE ARROW KEYS
+        // WHILE BROWSING -- the guard is `!hist.cursor.has_value()`, not
+        // `!state.list_open`: a recalled `/cmd` line opens the command
+        // suggestion list on the NEXT RENDER (IsCommandNameInProgress is
+        // true; the render gate at the bottom of this file sets list_open),
+        // and with the old guard every further ArrowUp/ArrowDown was eaten
+        // by the list-navigation branches above -- history could not be
+        // walked past the first '/'-leading entry ("history can't go up
+        // once you get to the first / command"). While hist.cursor is set,
+        // the user is BROWSING, not picking a completion: Up/Down walk the
+        // timeline, and a suggestion list armed on the recalled line is
+        // stale by construction (it described the content before the
+        // recall) -- dismissed here, on the same keypress. Any list the
+        // recalled line genuinely deserves re-arms from the render gate on
+        // the first edit (prefix change re-derives the match). Tab still
+        // completes while browsing (its branch at the top is not
+        // history-gated) -- completing a recalled line is a reasonable edit.
         // Single-line drafts only: a multi-line draft (built with Alt+Enter)
         // has its own use for Up -- moving the cursor up a line -- and
         // recalling history over it silently discarded the draft. Falling
         // through hands the event to the wrapped Input, which already moves
         // the cursor up a visual line for multi-line content.
-        if (!state.list_open && event == Event::ArrowUp && !hist.entries.empty() &&
+        if (event == Event::ArrowUp && !hist.entries.empty() &&
             state.content.find('\n') == std::string::npos) {
+            // Entering browse mode dismisses whatever suggestion list is
+            // showing (see the guard comment above). Walking OLDER while
+            // already browsing keeps going from the current position.
             if (!hist.cursor.has_value()) {
+                state.list_open = false;
+                state.suggestions.clear();
+                state.completions.clear();
+                state.suggestion_selected = 0;
                 hist.draft = state.content;
                 hist.cursor = hist.entries.size() - 1;
             } else if (*hist.cursor > 0) {
@@ -451,7 +481,7 @@ ftxui::Component MakePromptEditor(
             state.cursor_position = static_cast<int>(state.content.size());
             return true;
         }
-        if (!state.list_open && event == Event::ArrowDown && hist.cursor.has_value()) {
+        if (event == Event::ArrowDown && hist.cursor.has_value()) {
             if (*hist.cursor + 1 < hist.entries.size()) {
                 ++*hist.cursor;
                 state.content = hist.entries[*hist.cursor];
@@ -909,6 +939,115 @@ void PerTabPromptEditors::ForgetTab(const std::string& tab) {
         states_.erase(tab);
         editors_.erase(tab);
     }
+}
+
+// --- MentionQuerySlots -------------------------------------------------------
+
+std::optional<std::vector<std::string>> MentionQuerySlots::Poll(const std::string& tab,
+                                                                const std::string& prefix) {
+    std::lock_guard lock(mtx_);
+    Slot& slot = slots_[tab];
+    if (slot.prefix == prefix) {
+        if (slot.ready) {
+            // Consume: this answer belongs to exactly the query the caller
+            // just asked about, and the MentionSuggestor contract is
+            // deliver-once (the render gate stops polling after a present
+            // result).
+            slot.ready = false;
+            slot.in_flight = false;
+            return std::move(slot.result);
+        }
+        if (slot.in_flight) return std::nullopt;   // still waiting; poll again next frame
+    }
+    // A new (tab, prefix) pair: arm it. Whatever was in flight for this tab
+    // under a different prefix is superseded -- its completion, if it arrives
+    // late, fails Complete's prefix guard below and is dropped rather than
+    // clobbering the newer query. An answer that landed but was never
+    // consumed (the caller re-armed before the next frame) is discarded the
+    // same way: ready/result are overwritten here.
+    slot.prefix = prefix;
+    slot.in_flight = true;
+    slot.ready = false;
+    slot.result.clear();
+    return std::nullopt;
+}
+
+void MentionQuerySlots::Complete(const std::string& tab, const std::string& prefix,
+                                 std::vector<std::string> paths) {
+    std::lock_guard lock(mtx_);
+    const auto it = slots_.find(tab);
+    // No slot: the query died with the tab (ForgetTab) -- nothing to deliver.
+    // A different prefix: the worker's answer is for a query the user has
+    // already moved past -- the staleness drop the shared-slot design could
+    // not make per-tab, which is what let one tab's answer poison another's.
+    if (it == slots_.end() || it->second.prefix != prefix) return;
+    it->second.result = std::move(paths);
+    it->second.ready = true;
+    it->second.in_flight = false;
+}
+
+// --- MakeMentionSuggestor ----------------------------------------------------
+
+MentionSuggestor MakeMentionSuggestor(
+    AppState* app, MentionQuerySlots& slots,
+    std::function<std::string(const std::string& session_id)> session_root_fallback) {
+    // `session_root_fallback` maps a session id to the project root a
+    // SESSIONLESS-flavored query would use. Production passes the empty
+    // function (sessioned tabs query BY SESSION -- the server resolves the
+    // root); tests pass a table so no RPC worker is needed. Kept a parameter
+    // rather than a AppState method probe because the fallback's correct
+    // answer differs per caller and the seam documents that in one place.
+    return [app, &slots, session_root_fallback = std::move(session_root_fallback)](
+               const std::string& prefix) -> std::optional<std::vector<std::string>> {
+        if (app == nullptr) return std::vector<std::string>{};
+        const std::string tab = app->FocusedTabId();
+        const std::string sid = app->FocusedSessionId();
+
+        // Per-tab slot, keyed by the tab id the scope used to embed. The
+        // slot handoff (nullopt = armed-and-waiting) comes FIRST: the
+        // subscription is what makes a later Complete() deliverable, so it
+        // must be registered before the RPC can answer, whatever the
+        // submission path below does.
+        auto armed = slots.Poll(tab, prefix);
+        if (armed.has_value()) return armed;   // consume the resolved answer
+
+        // Submission. Empty prefix INCLUDED: a bare `@` is a live query whose
+        // empty prefix asks the server for the project-root listing (the
+        // resolver answers "" with the root's entries, directories
+        // '/'-suffixed -- bash-completion shape). The old client-side
+        // `if (prefix.empty()) return {}` short-circuit made a bare `@` a
+        // permanent no-op -- the list could never open. The server scopes
+        // every request (session id or project root, validated & clamped
+        // server-side), so nothing here is unscoped even for "".
+        if (!sid.empty()) {
+            app->RequestSuggestPaths(sid, prefix, 20, [&slots, tab, prefix](
+                                                          std::vector<std::string> paths) {
+                slots.Complete(tab, prefix, std::move(paths));
+            });
+        } else {
+            // Sessionless tab: scope to the project root the tab's first
+            // message would create the session with. Production passes
+            // CurrentProjectRootOrEmpty(); a test's fallback answers from
+            // its table.
+            const std::string root =
+                session_root_fallback ? session_root_fallback(sid) : std::string();
+            if (root.empty()) {
+                // No project context at all (a stray cwd failure): the
+                // historical empty answer. Complete() is deliberately NOT
+                // called: Poll armed the slot, so feeding it an empty answer
+                // would open-then-close the list on the next frame; leaving
+                // it in-flight keeps the armed state honest (nothing is
+                // coming, but nothing was asked either) and the next prefix
+                // change re-arms cleanly.
+                return std::nullopt;
+            }
+            app->RequestSuggestPathsForRoot(root, prefix, 20, [&slots, tab, prefix](
+                                                                  std::vector<std::string> paths) {
+                slots.Complete(tab, prefix, std::move(paths));
+            });
+        }
+        return std::nullopt;
+    };
 }
 
 }  // namespace minimal::client

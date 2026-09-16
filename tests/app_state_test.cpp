@@ -31,6 +31,7 @@
 #include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/state.hpp"
+#include "minimal/client/view/prompt_editor.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/rpc/server.hpp"
@@ -1827,4 +1828,105 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Tab before a "
 
     suggestions_open_value = false;
     CHECK(minimal::client::HandleGlobalKey(ctx, ftxui::Event::Tab));   // the panel claims it
+}
+
+TEST_CASE("MakeMentionSuggestor: a bare @ queries the root listing, and tabs "
+          "do not clobber each other's answers",
+          "[app_state][mention][regression]") {
+    // TWO regressions in one e2e case, both from the suggestor's old shape:
+    //
+    // 1. BARE '@' NEVER LISTED ANYTHING. The lambda short-circuited an empty
+    //    prefix to a synchronous empty vector ("nothing after @ yet"), so the
+    //    list could never open -- while the SERVER's resolver already answers
+    //    "" with the project-root entries (bash-completion shape; see
+    //    mention_resolver_test.cpp "an empty fragment lists the project
+    //    root"). Dropped: "" goes over the wire like any prefix.
+    //
+    // 2. ONE SHARED SLOT. The old in-flight tracking was a single struct for
+    //    the whole app: tab A's answer was dropped whenever tab B (or A
+    //    re-armed on refocus) superseded the slot before the answer was
+    //    consumed -- "@ works sometimes". MakeMentionSuggestor keys a slot
+    //    PER TAB, so two tabs can each hold an unanswered query.
+    //
+    // Through the real AppState + ClientFixture server (no seam around
+    // RequestSuggestPaths), so the wire format and callback threading are
+    // the production ones.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    // Root listing fodder for BOTH tabs' queries.
+    { std::ofstream out(fixture.dir / "work" / "README.md"); out << "y"; }
+    std::filesystem::create_directories(fixture.dir / "work" / "src");
+    { std::ofstream out(fixture.dir / "work" / "main.cpp"); out << "int main() {}"; }
+
+    AppState app(fixture.client);
+    const auto tab_a = app.OpenTab(fixture.Options("a"));
+    const auto tab_b = app.OpenTab(fixture.Options("b"));
+    REQUIRE(app.HasTab(tab_a));
+    REQUIRE(app.HasTab(tab_b));
+
+    minimal::client::MentionQuerySlots slots;
+    auto suggest = minimal::client::MakeMentionSuggestor(
+        &app, slots, [&](const std::string&) {
+            return (fixture.dir / "work").string();   // sessionless scope
+        });
+
+    // --- bare '@' on tab A: empty prefix must reach the server -----------
+    app.SetFocusedTab(tab_a);
+    const auto first = suggest("");
+    if (first.has_value()) {
+        // A present result is only legal when it is the answer; the old code
+        // returned an empty vector here, which is exactly what this case
+        // forbids for a non-empty root.
+        REQUIRE_FALSE(first->empty());
+    }
+    // Poll until the answer lands (the RPC runs on the async worker).
+    std::optional<std::vector<std::string>> answer;
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        answer = suggest("");
+        if (answer.has_value()) break;
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(answer.has_value());
+    REQUIRE(answer->size() == 3);
+    CHECK((*answer)[0] == "README.md");
+    CHECK((*answer)[1] == "main.cpp");
+    CHECK((*answer)[2] == "src/");
+
+    // --- tab B's query must not supersede A's unanswered one -------------
+    // Arm a DIFFERENT prefix for B while A's "src" query is in flight, then
+    // let A's answer arrive: with the shared slot it was dropped (the slot
+    // now belonged to B) and A polled forever.
+    app.SetFocusedTab(tab_b);
+    CHECK_FALSE(suggest("R").has_value());   // B arms "R"; nothing yet
+    app.SetFocusedTab(tab_a);
+    CHECK_FALSE(suggest("src").has_value());   // A arms "src"; nothing yet
+    // B polls ITS prefix -- must not consume A's eventual answer.
+    app.SetFocusedTab(tab_b);
+    std::optional<std::vector<std::string>> b_answer;
+    const auto b_deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < b_deadline) {
+        b_answer = suggest("R");
+        if (b_answer.has_value()) break;
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(b_answer.has_value());
+    REQUIRE(b_answer->size() == 1);
+    CHECK((*b_answer)[0] == "README.md");
+
+    // A's own query still resolves under the per-tab slot: back on A, poll
+    // the SAME "src" prefix and expect src/'s listing, not B's answer.
+    app.SetFocusedTab(tab_a);
+    std::optional<std::vector<std::string>> a_answer;
+    const auto a_deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < a_deadline) {
+        a_answer = suggest("src");
+        if (a_answer.has_value()) break;
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(a_answer.has_value());
+    REQUIRE(a_answer->size() == 1);
+    CHECK((*a_answer)[0] == "src/");
 }

@@ -2636,6 +2636,11 @@ TEST_CASE("prompt editor: up-arrow walks further back through older entries, "
 
     REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
     CHECK(state.content == "three");
+    // A RENDER happens between keystrokes in the real app. The recalled
+    // lines here are not commands, so the command gate never opens a list;
+    // the plain walk must be unaffected by the history-owns-the-arrows rule.
+    // Rendering between the arrows proves it at the same tier.
+    REQUIRE(minimal_test::RenderFrame(editor).find("three") != std::string::npos);
     REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
     CHECK(state.content == "two");
     REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
@@ -2650,6 +2655,99 @@ TEST_CASE("prompt editor: up-arrow walks further back through older entries, "
     CHECK(state.content == "three");
     REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
     CHECK(state.content.empty());   // past the newest: back to the (empty) draft
+}
+
+TEST_CASE("prompt editor: history recall walks THROUGH a recalled command line "
+          "whose suggestion list opened",
+          "[prompt_editor][regression]") {
+    // THE REPORTED BUG: submit /pause, ArrowUp again -- the recalled "/pause"
+    // line makes the command gate (render pass) open the suggestion list, and
+    // the list-navigation branches used to eat every further arrow (they ran
+    // above the recall arms behind a !list_open guard). History could not be
+    // walked past the first /-leading entry. Needs the interleaved RENDER:
+    // list_open is a render-gate write, so an event-only harness never sees
+    // the interception (why the suite stayed green).
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    PromptHistory hist;
+    std::vector<std::string> texts;
+    const std::vector<CommandCatalogEntry> catalog = {
+        {"pause", "pause the session", true, false}};
+    auto editor = MakePromptEditor(
+        theme, state, [&](const std::string& t) { texts.push_back(t); },
+        [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; },
+        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; },
+        nullptr, nullptr, nullptr, &hist);
+
+    Type(editor, "plain message");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    Type(editor, "/pause");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    CHECK(hist.entries.size() == 2);
+
+    // Recall lands on "/pause", the next frame opens the command list.
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
+    CHECK(state.content == "/pause");
+    RenderFrame(editor);
+    REQUIRE(state.list_open);
+    REQUIRE_FALSE(state.suggestions.empty());
+
+    // The list is open, but the user is BROWSING: Up keeps walking the
+    // timeline instead of moving the list's selection.
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
+    CHECK(state.content == "plain message");
+    CHECK(state.suggestion_selected == 0);   // the list was not navigated
+    CHECK(hist.entries[*hist.cursor] == "plain message");
+
+    // Down returns to "/pause" (still browsing), then further down past the
+    // newest restores the draft -- the full walk stays intact.
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
+    CHECK(state.content == "/pause");
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
+    CHECK(state.content.empty());
+    CHECK_FALSE(hist.cursor.has_value());
+}
+
+TEST_CASE("prompt editor: an open suggestion list still owns the arrows while "
+          "typing a command name", "[prompt_editor]") {
+    // The other half of the contract: history-owns-the-arrows applies ONLY
+    // while browsing (hist.cursor set). Typing /pa fresh opens the list and
+    // Up/Down must still navigate it -- this is what the /-autocomplete is
+    // FOR -- and Enter still accepts the highlighted entry.
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    PromptHistory hist;
+    std::vector<std::string> commands;
+    const std::vector<CommandCatalogEntry> catalog = {
+        {"pause", "pause the session", true, false},
+        {"perm", "show permissions", true, false}};
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {},
+        [&](const std::string& c) { commands.push_back(c); },
+        [](const std::string&) { return std::vector<std::string>{}; },
+        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; },
+        nullptr, nullptr, nullptr, &hist);
+
+    Type(editor, "seed");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    Type(editor, "/p");
+    RenderFrame(editor);
+    REQUIRE(state.list_open);
+    REQUIRE(state.suggestions.size() == 2);
+    CHECK(state.suggestion_selected == 0);
+
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
+    CHECK(state.suggestion_selected == 1);      // list navigates: not browsing
+    CHECK_FALSE(hist.cursor.has_value());
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
+    CHECK(state.suggestion_selected == 0);
+
+    REQUIRE(SendEvent(editor, ftx::Event::Tab));   // accept -> "/pause "
+    CHECK(state.content == "/pause ");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    REQUIRE(commands.size() == 1);                 // submitted as a command
+    CHECK(commands.back() == "/pause");
 }
 
 TEST_CASE("prompt editor: up-arrow inside a multi-line draft does not recall "

@@ -50,6 +50,7 @@
 #include <ftxui/component/component.hpp>
 
 #include "minimal/client/render/theme.hpp"
+#include "minimal/client/state.hpp"
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::client {
@@ -268,5 +269,62 @@ private:
 ftxui::Component MakePerTabPromptEditor(PerTabPromptEditors& tabs,
                                         std::function<std::string()> focused_tab,
                                         std::function<ftxui::Component(PromptEditorState&)> build_editor);
+
+// Per-tab in-flight slots for the @-mention suggest RPC. THE REGRESSION IT
+// FIXES: the suggestor used ONE shared MentionQuery struct for every tab
+// (app.cpp), so a second tab's query -- or the same tab re-firing after a
+// refocus -- overwrote the slot before the first answer was consumed, and the
+// completion callback's staleness guard then DROPPED that answer: the first
+// tab's list never filled ("@ suggestions stopped working", intermittently --
+// it worked exactly as long as no second query superseded the first).
+//
+// One slot per tab, keyed by the same tab id the scope string embeds. The
+// contract is the MentionSuggestor's (above): nullopt = still waiting, poll
+// again next frame; a present (possibly empty) vector = the resolved answer,
+// consumed once.
+//
+// Cross-thread by design: the FTXUI loop thread calls Poll (from the render
+// gate), AppState's RPC worker calls Complete (the RequestSuggestPaths
+// callback); one mutex guards the map and every slot's fields. Loop
+// re-entrancy note: Complete runs on the worker with NO loop-side lock held
+// (Poll returns before the RPC is submitted), so the lock order is trivially
+// acyclic.
+class MentionQuerySlots {
+public:
+    // The (prefix-keyed) query slot for `tab`. First call for a (tab, prefix)
+    // arms the slot (in_flight=true) and returns nullopt; later calls with
+    // the SAME prefix return nullopt while the answer is in flight, then
+    // consume and return the answer once Complete(tab, same prefix) ran. A
+    // DIFFERENT prefix supersedes the slot's in-flight bookkeeping (its late
+    // answer is dropped by Complete's guard) and arms anew.
+    std::optional<std::vector<std::string>> Poll(const std::string& tab,
+                                                 const std::string& prefix);
+
+    // The RPC worker's answer for `tab`'s most recent query: recorded only
+    // when the slot's prefix still matches (a stale answer for a superseded
+    // query is dropped). Empty on the NEXT Poll after a match.
+    void Complete(const std::string& tab, const std::string& prefix,
+                  std::vector<std::string> paths);
+
+private:
+    struct Slot {
+        std::string prefix;
+        bool in_flight = false;
+        bool ready = false;
+        std::vector<std::string> result;
+    };
+
+    mutable std::mutex mtx_;
+    std::map<std::string, Slot> slots_;
+};
+
+// The TUI's MentionSuggestor: per-tab slots (above) in front of AppState's
+// async SuggestPaths RPCs. Extracted from RunTui's local `suggest` lambda so
+// the slot mechanics are unit-testable without a running app loop, and so the
+// sessioned/sessionless scoping has ONE home (app.cpp builds it with the
+// probes it already owns; see the definition for the seam contract).
+MentionSuggestor MakeMentionSuggestor(
+    AppState* app, MentionQuerySlots& slots,
+    std::function<std::string(const std::string& session_id)> session_root_fallback);
 
 }  // namespace minimal::client

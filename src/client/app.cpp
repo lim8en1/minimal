@@ -1009,101 +1009,22 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // T2: @-mention suggestions used to run SuggestPaths synchronously here,
     // on the loop thread, from inside the prompt editor's own Renderer --
     // a merely slow server stalled every keystroke after '@' for up to the
-    // RPC's 250 ms deadline. This lambda's contract (prompt_editor.hpp's
-    // MentionSuggestor) is now "nullopt = still waiting, poll again next
-    // frame": the FIRST call for a given (session, prefix) submits the
-    // request onto AppState's async RPC worker and returns nullopt; later
-    // calls for the SAME (session, prefix) keep returning nullopt until the
-    // worker's completion callback (below) records the answer, at which
-    // point this call consumes and returns it. A prefix change supersedes
-    // whatever was in flight -- the completion for the OLD request still
-    // arrives eventually, but by then `query` no longer names it, so it is
-    // dropped rather than clobbering the newer one (see the guard inside the
-    // callback).
-    struct MentionQuery {
-        std::mutex mtx;
-        // The query scope, "session:<id>" or "root:<path>" -- keyed by scope
-        // rather than raw session id so a tab that mints its session
-        // mid-query (sessionless -> sessioned) supersedes its own root-scoped
-        // answer instead of consuming it under a changed meaning.
-        std::string scope;
-        std::string prefix;
-        bool in_flight = false;
-        bool ready = false;
-        std::vector<std::string> result;
-    };
-    auto mention_query = std::make_shared<MentionQuery>();
-    auto suggest = [app, mention_query](
-                       const std::string& prefix) -> std::optional<std::vector<std::string>> {
-        // The query slot is ONE shared struct, so the tab id rides the scope
-        // key: per-tab editors mean two tabs can each have an '@' query
-        // armed, and a stale answer for the other tab must be dropped by the
-        // scope/prefix mismatch guards (here and in the callbacks below)
-        // rather than spliced into the wrong editor.
-        const std::string tab = app->FocusedTabId();
-        const std::string sid = app->FocusedSessionId();
-        if (prefix.empty()) return std::vector<std::string>{};
+    // RPC's 250 ms deadline. The suggestor's contract (prompt_editor.hpp's
+    // MentionSuggestor) is "nullopt = still waiting, poll again next frame";
+    // the mechanics now live in MakeMentionSuggestor (prompt_editor.cpp) so
+    // they are unit-testable: one in-flight slot PER TAB (MentionQuerySlots)
+    // -- the single shared slot this lambda used before let a second tab's
+    // query (or this tab re-firing on refocus) supersede the first, whose
+    // answer the staleness guard then dropped -- "@ suggestions stopped
+    // working", intermittently. Sessioned tabs query by session id (the
+    // server resolves the root); a sessionless tab scopes to the TUI's cwd,
+    // the root its first message would create the session with.
+    minimal::client::MentionQuerySlots mention_slots;
+    auto suggest = minimal::client::MakeMentionSuggestor(
+        app, mention_slots, [](const std::string&) {
+            return minimal::client::CurrentProjectRootOrEmpty();
+        });
 
-        // Sessioned tabs query by session; a SESSIONLESS tab owns no session
-        // row yet (one is minted on its first message), so its query scopes
-        // to the project root that first message's session will be created
-        // with (DefaultCreateOptions) -- the suggestions then match what the
-        // eventual session would see, instead of the sid.empty() guard
-        // silently killing '@' on every fresh tab. No project context at all
-        // (a stray cwd failure) still answers empty.
-        std::string scope;
-        bool session_scoped = false;
-        std::string root;
-        if (!sid.empty()) {
-            scope = "tab:" + tab + ";session:" + sid;
-            session_scoped = true;
-        } else {
-            root = minimal::client::CurrentProjectRootOrEmpty();
-            if (root.empty()) return std::vector<std::string>{};
-            scope = "tab:" + tab + ";root:" + root;
-        }
-
-        std::lock_guard lk(mention_query->mtx);
-        if (mention_query->scope == scope && mention_query->prefix == prefix) {
-            if (mention_query->ready) {
-                mention_query->in_flight = false;
-                mention_query->ready = false;
-                return std::move(mention_query->result);
-            }
-            if (mention_query->in_flight) return std::nullopt;   // still waiting
-        }
-
-        // A new (scope, prefix) pair: submit it, superseding whatever this
-        // slot previously tracked (its completion, if it arrives late, will
-        // no longer match scope/prefix and will be dropped -- see
-        // RequestSuggestPaths's callback below).
-        mention_query->scope = scope;
-        mention_query->prefix = prefix;
-        mention_query->in_flight = true;
-        mention_query->ready = false;
-        if (session_scoped) {
-            app->RequestSuggestPaths(sid, prefix, 20, [mention_query, scope, prefix](
-                                                          std::vector<std::string> paths) {
-                std::lock_guard cb_lk(mention_query->mtx);
-                if (mention_query->scope != scope || mention_query->prefix != prefix) {
-                    return;   // superseded by a newer request; drop the stale answer
-                }
-                mention_query->result = std::move(paths);
-                mention_query->ready = true;
-            });
-        } else {
-            app->RequestSuggestPathsForRoot(root, prefix, 20, [mention_query, scope, prefix](
-                                                                  std::vector<std::string> paths) {
-                std::lock_guard cb_lk(mention_query->mtx);
-                if (mention_query->scope != scope || mention_query->prefix != prefix) {
-                    return;   // superseded by a newer request; drop the stale answer
-                }
-                mention_query->result = std::move(paths);
-                mention_query->ready = true;
-            });
-        }
-        return std::nullopt;
-    };
     // --- tabs are sessionless until the first message ---------------------------
     // OpenTab mints a TAB (a client-side container, no RPC, no server row);
     // the session comes into existence only when a message is submitted
