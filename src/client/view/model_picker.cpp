@@ -35,9 +35,10 @@ ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
             [callbacks](const MenuRow& row) {
                 // A provider header is a label, not a choice: Enter on one is
                 // a no-op (the shell guarantees on_select only fires with a
-                // row highlighted; headers ARE highlightable -- skipping them
-                // in Menu's own navigation would mean forgoing FTXUI's Menu
-                // for a hand-rolled list).
+                // row highlighted). The cursor never RESTS on a header either
+                // -- the shell walks the selection to the nearest selectable
+                // row on every rebuild and render pass -- so this guard is
+                // for the one transient frame a move can pass through.
                 if (row.header || row.id.empty()) return;
                 if (callbacks.on_select) callbacks.on_select(row.id);
             },

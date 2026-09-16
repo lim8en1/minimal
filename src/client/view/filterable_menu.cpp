@@ -48,6 +48,32 @@ std::optional<ftxui::Color> RowColor(const std::string& value, ColorDepth depth)
 
 }  // namespace
 
+// The index the cursor should occupy, given `from` and the direction the user
+// last moved (+1 down, -1 up): `from` itself when it is selectable (in bounds,
+// non-header); otherwise the nearest selectable row scanning in `direction`,
+// falling back to the opposite side when that side is exhausted, and -1 when
+// the list has no selectable row at all (or is empty). Pure so the
+// header-skipping rules are directly testable (tests/filterable_menu_test.cpp).
+int ResolveSelectableRow(const std::vector<MenuRow>& rows, int from, int direction) {
+    // In bounds and selectable: stay.
+    if (from >= 0 && from < static_cast<int>(rows.size()) && !rows[from].header) {
+        return from;
+    }
+    // Scan from `from` in the travel direction, then the opposite side (a
+    // down-past-the-end filter rebuild lands on the last selectable row, not
+    // the first), so the cursor always has a home when one exists. Each scan
+    // starts clamped into range: `from` itself may sit outside the list
+    // (Menu's clamp runs after its move; a rebuild can shrink the list first).
+    const int size = static_cast<int>(rows.size());
+    for (int probe : {direction, -direction}) {
+        const int start = probe > 0 ? std::max(from, 0) : std::min(from, size - 1);
+        for (int i = start; i >= 0 && i < size; i += probe) {
+            if (!rows[i].header) return i;
+        }
+    }
+    return -1;
+}
+
 ftxui::Component MakeFilterableMenuModal(
     std::function<std::vector<MenuRow>(const std::string& filter)> build_rows,
     const FilterableMenuSpec& spec, FilterableMenuCallbacks callbacks, const Theme& theme) {
@@ -63,6 +89,7 @@ ftxui::Component MakeFilterableMenuModal(
         std::vector<std::string> labels;   // Menu's own label list, rebuilt on filter change
         std::vector<MenuRow> rows;          // parallel to labels
         int selected = 0;
+        int direction = 1;   // last travel direction: +1 down, -1 up (see ResolveSelectableRow)
         std::string filter;
     };
     auto state = std::make_shared<MenuState>();
@@ -74,6 +101,8 @@ ftxui::Component MakeFilterableMenuModal(
         for (const auto& row : state->rows) state->labels.push_back(row.label);
         const int last = static_cast<int>(state->labels.size()) - 1;
         state->selected = std::clamp(state->selected, 0, std::max(last, 0));
+        state->selected =
+            ResolveSelectableRow(state->rows, state->selected, state->direction);
     };
     rebuild();
 
@@ -144,6 +173,22 @@ ftxui::Component MakeFilterableMenuModal(
             rebuild();
             return true;
         }
+        // Everything below is a key Menu will act on itself (arrow keys, the
+        // vim letters are unreachable here -- every character is eaten by the
+        // filter above -- but page/home/end/tab are not). Record the
+        // direction of the move so a render-pass normalize (below) knows
+        // which side to land the cursor on when the move ends on a header.
+        if (event == Event::ArrowDown || event == Event::PageDown ||
+            event == Event::Tab) {
+            state->direction = 1;
+        } else if (event == Event::ArrowUp || event == Event::PageUp ||
+                   event == Event::TabReverse) {
+            state->direction = -1;
+        } else if (event == Event::Home) {
+            state->direction = 1;   // Home lands on row 0: scan forward from there
+        } else if (event == Event::End) {
+            state->direction = -1;  // End lands on the last row: scanning backward
+        }
         return false;   // arrow keys go to Menu
     });
 
@@ -153,12 +198,36 @@ ftxui::Component MakeFilterableMenuModal(
         *spec.reset_state = [state, rebuild] {
             state->filter.clear();
             state->selected = 0;
+            state->direction = 1;
             rebuild();
         };
     }
 
     return Renderer(interactive, [interactive, state, spec, theme] {
         using namespace ftxui;
+        // The cursor never rests on a header. Menu's own navigation clamps
+        // into bounds but knows nothing of headers (it walks labels), so a
+        // move can END on one -- and the transform renders headers with no
+        // cursor or highlight, which read as "the selection vanished".
+        // Normalizing here (after Menu has applied the move, before the
+        // frame is drawn) covers every path that lands on a header: arrows,
+        // page/home/end, a mouse-wheel-driven rebuild, and the very first
+        // render of a list whose row 0 is a header (the model picker's
+        // provider groups). rebuild()'s own call (above) covers the
+        // filter-keystroke paths; both read the same last-travel direction.
+        if (state->selected >= 0 && state->selected < static_cast<int>(state->rows.size()) &&
+            state->rows[state->selected].header) {
+            const int resolved =
+                ResolveSelectableRow(state->rows, state->selected, state->direction);
+            if (resolved >= 0) {
+                state->selected = resolved;
+                // Menu clamps and takes focus on its next render (its Clamp()
+                // runs at the top of OnRender, and SelectedTakeFocus keeps
+                // the highlight and vscroll aligned) -- writing its selected
+                // ref here is the one sanctioned mutation, the same one
+                // on_extra_key handlers already make through rebuild().
+            }
+        }
         Elements rows;
         // No separate header row here: it used to repeat window_title's own
         // text right below it ("resume a session" / " sessions ") -- the

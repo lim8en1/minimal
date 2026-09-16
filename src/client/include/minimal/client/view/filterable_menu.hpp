@@ -25,15 +25,25 @@ struct MenuRow {
     std::string label;
     std::string id;
     // A header row is a group label (the model picker's provider names):
-    // rendered bold and never prefixed with the cursor, and Enter on it is
-    // swallowed. It IS highlightable -- Menu owns arrow-key navigation, and
-    // hand-rolling a skipping list for one picker's sake was not worth it.
+    // rendered bold and never prefixed with the cursor, Enter on it is
+    // swallowed, and the cursor never RESTS on one -- ResolveSelectableRow
+    // (below) walks the selection to the nearest selectable row after every
+    // filter change and before every render, so FTXUI's Menu can keep owning
+    // the arrow keys without a header ever wearing (or hiding) the cursor.
     bool header = false;
     // Optional "#rrggbb" for the label (the agent picker's preset.color).
     // Anything unparseable renders as the theme default -- a picker row must
     // never throw over cosmetics.
     std::string color = {};
 };
+
+// The index the cursor should occupy, given `from` and the direction the user
+// last moved (+1 down, -1 up): `from` itself when it is selectable (in bounds,
+// non-header); otherwise the nearest selectable row scanning in `direction`,
+// falling back to the opposite side when that side is exhausted, and -1 when
+// the list has no selectable row at all (or is empty). Pure so the
+// header-skipping rules are directly testable (tests/filterable_menu_test.cpp).
+int ResolveSelectableRow(const std::vector<MenuRow>& rows, int from, int direction);
 
 // What on_extra_key needs to answer a key the generic handler doesn't
 // recognize: the session picker's ctrl+d (delete the highlighted row) and

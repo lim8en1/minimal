@@ -145,6 +145,7 @@ add_executable(minimal_tests
     subagent_picker_model_test.cpp
     keymap_help_model_test.cpp
     model_picker_model_test.cpp
+    filterable_menu_test.cpp
     model_ref_test.cpp
     tui_bootstrap_test.cpp
     chat_model_test.cpp
