@@ -26,6 +26,17 @@
       }
     },
     {
+      "name": "gcc",
+      "inherits": "default",
+      "displayName": "GCC (vcpkg, RelWithDebInfo)",
+      "description": "Catches libstdc++-vs-libc++ portability gaps (e.g. missing <optional>/<mutex> pulled in transitively under libc++) that a Clang-only build won't surface.",
+      "binaryDir": "${sourceDir}/build-gcc",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
       "name": "debug",
       "inherits": "default",
       "displayName": "Debug",
@@ -73,6 +84,7 @@
   "buildPresets": [
     { "name": "default", "configurePreset": "default" },
     { "name": "clang", "configurePreset": "clang" },
+    { "name": "gcc", "configurePreset": "gcc" },
     { "name": "debug", "configurePreset": "debug" },
     { "name": "server-only", "configurePreset": "server-only" },
     { "name": "asan", "configurePreset": "asan" },
@@ -82,6 +94,17 @@
     {
       "name": "default",
       "configurePreset": "default",
+      "output": { "outputOnFailure": true },
+      "execution": {
+        "jobs": 8,
+        "timeout": 120,
+        "noTestsAction": "default",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "gcc",
+      "configurePreset": "gcc",
       "output": { "outputOnFailure": true },
       "execution": {
         "jobs": 8,

@@ -3,6 +3,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <sys/resource.h>
+#include <unistd.h>
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -40,6 +43,24 @@ TEST_CASE("ReadFileOrEmpty throws past the size cap instead of truncating") {
 }
 
 TEST_CASE("ReadFileOrEmpty rejects an over-cap file without reading it whole") {
+    // Needs a file past the cap that the bounded read then refuses -- 4 GiB,
+    // sparse. The resize itself is a write, so a sandbox whose RLIMIT_FSIZE
+    // sits below it (some CI containers pin it at 1 GiB) kills the test with
+    // SIGXFSZ before the case can test anything. A low soft cap can be raised
+    // unprivileged as long as the hard cap allows, so try raising it to
+    // exactly what this case needs; if the OS refuses, the environment
+    // genuinely cannot host the resize and the case says so instead of dying.
+    const rlim_t kSparseResize = 4ull << 30;
+    rlimit fsize{};
+    REQUIRE(::getrlimit(RLIMIT_FSIZE, &fsize) == 0);
+    if (fsize.rlim_cur < kSparseResize) {
+        fsize.rlim_cur = kSparseResize;
+        if (::setrlimit(RLIMIT_FSIZE, &fsize) != 0) {
+            SKIP("RLIMIT_FSIZE below the 4 GiB sparse resize -- "
+                 "environment cap, not the code under test");
+        }
+    }
+
     // The cap used to be checked AFTER `buffer << in.rdbuf()` had already
     // slurped the entire file, so it bounded nothing: a huge (or hostile)
     // file was fully allocated before the throw. A sparse multi-gigabyte file

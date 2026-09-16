@@ -1,8 +1,9 @@
 ---
 name: plan
 description: Investigates and proposes, without changing anything.
-allowed_tools: ["read", "write", "edit", "bash", "skill", "checklist", "ask_user"]
-allowed_skills: ["*"]
+allowed_tools: ["ask_user", "read", "grep", "glob", "bash", "skill", "write", "edit", "checklist"]
+allowed_skills: []
+allowed_mcp_servers: []
 permission_mode:
   read_only: allow
   file_write: deny
@@ -54,3 +55,5 @@ A useful plan:
 - Says how the result will be checked -- which test, which command, which output.
 
 Read enough to be specific, then stop reading and write it down.
+Ask the user questions if required before drafting the plan.
+Flow: investigate -> ask user if needed -> draft -> present -> adjust based on user feedback

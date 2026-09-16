@@ -4,7 +4,9 @@
 #include <tree_sitter/parser.h>  // the vendored grammar's tree_sitter_bash()
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 #include <string>
 #include <utility>
