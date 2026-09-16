@@ -1021,7 +1021,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // the root its first message would create the session with.
     minimal::client::MentionQuerySlots mention_slots;
     auto suggest = minimal::client::MakeMentionSuggestor(
-        app, mention_slots, [](const std::string&) {
+        app.get(), mention_slots, [](const std::string&) {
             return minimal::client::CurrentProjectRootOrEmpty();
         });
 
