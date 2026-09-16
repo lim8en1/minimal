@@ -1749,6 +1749,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // the same two).
         env.keybindings.KeyFor("chat.toggle_collapse", "alt+c"),
         env.keybindings.KeyFor("chat.load_older", "pageup"),
+        // ui.json's startup fold defaults (kFoldDefaultAuto when unset).
+        env.ui.fold_thinking,
+        env.ui.fold_tools,
         // Click-to-cancel for QUEUED message rows: resolve the tab's session
         // at click time (a tab's ChatView may predate its session).
         [app](const std::string& tab_id, std::uint64_t turn_id) {
@@ -1876,7 +1879,10 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         env.keybindings.KeyFor("chat.toggle_collapse", "alt+c"),
         env.keybindings.KeyFor("session.picker", "ctrl+o"),
         env.keybindings.KeyFor("chat.load_older", "pageup"),
-        env.keybindings.KeyFor("chat.scroll_bottom", "pagedown")});
+        env.keybindings.KeyFor("chat.scroll_bottom", "pagedown"),
+        // ui.json's startup fold defaults (kFoldDefaultAuto when unset).
+        env.ui.fold_thinking,
+        env.ui.fold_tools});
     auto session_view = Renderer(editor, [&] { return frame_renderer.Render(); });
 
     // --- global keybindings -----------------------------------------------------
@@ -1957,6 +1963,32 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         [&](const std::string& session_id) {
             if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
                 it->second.chat->ToggleTimestamps();
+            }
+        },
+        // The fold toggles are session-wide preferences, unlike the
+        // per-tab actions above: EVERY open tab's ChatView flips, and the
+        // new state persists to ui.json (SaveFoldDefaults) so the next
+        // launch starts there. Tabs opened AFTER a toggle are covered too:
+        // TabMaintenance builds fresh ChatViews from app's per-session
+        // seed, which SetFoldDefaults re-seeds from the persisted value on
+        // the next session (see AppState::StoreFoldDefaults' comment). The
+        // toggles return the same value from every view, so one write.
+        [&](const std::string& session_id) {
+            std::optional<int> next;
+            for (auto& [tab, ui] : tab_ui) {
+                if (ui.chat) next = ui.chat->ToggleThinkingFold();
+            }
+            if (next.has_value()) {
+                minimal::client::SaveFoldDefaults(env.config_dir, next, std::nullopt);
+            }
+        },
+        [&](const std::string& session_id) {
+            std::optional<int> next;
+            for (auto& [tab, ui] : tab_ui) {
+                if (ui.chat) next = ui.chat->ToggleToolFold();
+            }
+            if (next.has_value()) {
+                minimal::client::SaveFoldDefaults(env.config_dir, std::nullopt, next);
             }
         },
         *pasting,

@@ -412,6 +412,7 @@ number the tab bar shows), `group.previous`, `group.next`, `jump.attention`,
 `tab.close`, `chat.load_older`,
 `chat.scroll_up`, `chat.scroll_down`, `chat.scroll_bottom`, `chat.row_up`,
 `chat.row_down`, `chat.toggle_collapse`, `chat.toggle_collapse_all`,
+`chat.toggle_thinking_fold`, `chat.toggle_tool_fold`,
 `chat.toggle_timestamps`, `turn.cancel`, `app.quit`.
 
 Modifiers: `ctrl` (or `control`), `alt` (or `option`/`opt`/`meta` — the
@@ -445,9 +446,14 @@ in-app binding can catch it.
 | `scrollback_window_max_messages` | int | `0` (= built-in) | must be positive if set |
 | `tool_output_buffer_bytes` | int | `0` | |
 | `tools_panel_stdout_buffer_lines` | int | `0` | distinct from the server's `tools_view.stdout_buffer_lines` |
+| `fold_thinking` | string | `"auto"` | the startup auto-fold default for thinking rows: `auto` (built-in default), `expanded` or `collapsed`; anything else → warning + `auto`. `chat.toggle_thinking_fold` (`ctrl+alt+t`) flips it for every open tab and persists the new value back here |
+| `fold_tools` | string | `"auto"` | same for tool-activity rows; `chat.toggle_tool_fold` (`ctrl+alt+o`). `collapsed` also folds `ask_user` results — the explicit setting outranks the built-in "always show answers" default |
 | `theme` | string | `""` (= `"dark"`) | names `themes/<name>.json`; unknown name → terminal defaults + warning |
 
-Unknown keys ignored; the file is never rewritten (it is yours).
+Unknown keys ignored; the file is never rewritten (it is yours) — the only
+exceptions are the managed writes: `theme` (`/theme`), and `fold_thinking` /
+`fold_tools` (their `ctrl+alt+` toggles), each of which round-trips every
+other key verbatim and refuses to touch a malformed file.
 
 ### themes/&lt;name&gt;.json
 

@@ -1645,6 +1645,8 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Escape before "
         [](const std::string&, int) -> bool { return false; },
         [](const std::string&, int) -> bool { return false; },
         [](const std::string&) {},
+        [](const std::string&) {},   // chat.toggle_thinking_fold
+        [](const std::string&) {},   // chat.toggle_tool_fold
         pasting,
         [&] { return suggestions_open_value; }};
 
@@ -1705,6 +1707,8 @@ TEST_CASE("HandleGlobalKey: an idle Escape clears a lingering notice, but only "
         [](const std::string&, int) -> bool { return false; },
         [](const std::string&, int) -> bool { return false; },
         [](const std::string&) {},
+        [](const std::string&) {},   // chat.toggle_thinking_fold
+        [](const std::string&) {},   // chat.toggle_tool_fold
         pasting,
         [] { return false; }};   // no suggestion list open
 
@@ -1762,6 +1766,8 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Tab before a "
         [](const std::string&, int) -> bool { return false; },
         [](const std::string&, int) -> bool { return false; },
         [](const std::string&) {},
+        [](const std::string&) {},   // chat.toggle_thinking_fold
+        [](const std::string&) {},   // chat.toggle_tool_fold
         pasting,
         [&] { return suggestions_open_value; }};
 

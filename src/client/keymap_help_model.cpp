@@ -63,6 +63,8 @@ constexpr KnownAction kKnown[] = {
     {"chat.row_down", "row cursor down"},
     {"chat.toggle_collapse", "expand / collapse the row"},
     {"chat.toggle_collapse_all", "expand / collapse every row"},
+    {"chat.toggle_thinking_fold", "auto-fold / unfold thinking rows"},
+    {"chat.toggle_tool_fold", "auto-fold / unfold tool rows"},
     {"chat.toggle_timestamps", "show / hide timestamps"},
     {"turn.cancel", "interrupt the turn"},
     {"permission.cycle", "cycle the permission mode"},

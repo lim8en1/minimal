@@ -2128,6 +2128,167 @@ TEST_CASE("chat view: clicking a tool-activity row toggles its collapse",
     CHECK(expanded.find("▾") != std::string::npos);
 }
 
+TEST_CASE("chat view: ui.json fold defaults set the startup collapse tier",
+          "[chat_view][fold]") {
+    const auto theme = TestTheme();
+    plugins::MarkdownEngineRegistry engine_registry;
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+    plugins::DisplayRendererRegistry display_renderers;
+
+    SessionState::Snapshot snap;
+    snap.session_id = "fold-defaults";
+    snap.transcript_version = 1;
+    snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
+        StoredToolCallAndResult(1, "bash", "ls output line"));
+
+    // kFoldExpanded: the tool row STARTS expanded with no toggle at all.
+    {
+        ChatView view(theme, messages, tool_renderers, display_renderers);
+        view.SetFoldDefaults(kFoldDefaultAuto, kFoldExpanded);
+        const auto rendered = RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
+        CHECK(rendered.find("ls output line") != std::string::npos);
+    }
+    // kFoldCollapsed: the ask_user expanded exception is OVERridden by the
+    // explicit user choice.
+    {
+        ChatView view(theme, messages, tool_renderers, display_renderers);
+        view.SetFoldDefaults(kFoldDefaultAuto, kFoldCollapsed);
+        const auto rendered = RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
+        CHECK(rendered.find("ls output line") == std::string::npos);
+        CHECK(rendered.find("▸") != std::string::npos);
+    }
+    // kFoldDefaultAuto: the built-in default stands (tool rows collapsed).
+    {
+        ChatView view(theme, messages, tool_renderers, display_renderers);
+        const auto rendered = RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
+        CHECK(rendered.find("ls output line") == std::string::npos);
+    }
+}
+
+TEST_CASE("chat view: the kind fold toggles flip the tier and yield to per-row "
+          "and collapse-all choices",
+          "[chat_view][fold]") {
+    const auto theme = TestTheme();
+    plugins::MarkdownEngineRegistry engine_registry;
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+    plugins::DisplayRendererRegistry display_renderers;
+
+    SessionState::Snapshot snap;
+    snap.session_id = "fold-toggle";
+    snap.transcript_version = 1;
+    snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
+        StoredToolCallAndResult(1, "bash", "ls output line"));
+
+    ChatView view(theme, messages, tool_renderers, display_renderers);
+    // Tool rows are collapsed by the built-in default, so the first toggle
+    // expands the kind.
+    CHECK(view.ToggleToolFold() == kFoldExpanded);
+    CHECK(RenderElement(view.Render(snap), 60, 24).find("ls output line") !=
+          std::string::npos);
+    // ...and the second re-collapses it (never back to auto in-session).
+    CHECK(view.ToggleToolFold() == kFoldCollapsed);
+    CHECK(RenderElement(view.Render(snap), 60, 24).find("ls output line") ==
+          std::string::npos);
+
+    // A per-row override WINS over the kind default (most specific tier).
+    view.ToggleToolFold();                       // kind: expanded again
+    const int header_y =
+        ScreenLineOf(RenderElement(view.Render(snap), 60, 24), "\u2713 bash");
+    REQUIRE(header_y >= 0);
+    CHECK(view.ToggleCollapseAt(header_y));      // per-row: collapsed
+    CHECK(RenderElement(view.Render(snap), 60, 24).find("ls output line") ==
+          std::string::npos);
+
+    // A kind toggle clears per-row overrides (the newer intent wins).
+    CHECK(view.ToggleToolFold() == kFoldCollapsed);
+    CHECK(RenderElement(view.Render(snap), 60, 24).find("ls output line") ==
+          std::string::npos);
+}
+
+TEST_CASE("chat view: a kind fold toggle clears the global collapse choice",
+          "[chat_view][fold]") {
+    const auto theme = TestTheme();
+    plugins::MarkdownEngineRegistry engine_registry;
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+    plugins::DisplayRendererRegistry display_renderers;
+
+    SessionState::Snapshot snap;
+    snap.session_id = "fold-vs-all";
+    snap.transcript_version = 1;
+    snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
+        StoredToolCallAndResult(1, "bash", "ls output line"));
+
+    ChatView view(theme, messages, tool_renderers, display_renderers);
+    // First ToggleCollapseAll flips the global choice to COLLAPSED
+    // (IsCollapsed returns it verbatim): every row, tool rows included,
+    // hides.
+    view.ToggleCollapseAll();
+    CHECK(RenderElement(view.Render(snap), 60, 24).find("ls output line") ==
+          std::string::npos);
+    // The kind toggle flips from what the kind currently SHOWS (globally
+    // collapsed) to expanded -- and clears the global choice, which is the
+    // only way the row can actually appear.
+    CHECK(view.ToggleToolFold() == kFoldExpanded);
+    CHECK(RenderElement(view.Render(snap), 60, 24).find("ls output line") !=
+          std::string::npos);
+    // And the next toggle re-collapses the kind (never back to auto).
+    CHECK(view.ToggleToolFold() == kFoldCollapsed);
+    CHECK(RenderElement(view.Render(snap), 60, 24).find("ls output line") ==
+          std::string::npos);
+}
+
+TEST_CASE("chat view: thinking fold toggle flips thinking rows only",
+          "[chat_view][fold]") {
+    const auto theme = TestTheme();
+    plugins::MarkdownEngineRegistry engine_registry;
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+    plugins::DisplayRendererRegistry display_renderers;
+
+    // One thinking row persisted (the wire shape chat_model.cpp's
+    // block.has_thinking() branch turns into a Thinking row).
+    v1::StoredMessage stored;
+    stored.set_seq(1);
+    stored.mutable_message()->set_role(v1::ROLE_ASSISTANT);
+    stored.mutable_message()->add_content()->mutable_thinking()->set_text(
+        "pondering the fold");
+    const std::vector<v1::StoredMessage> page{std::move(stored)};
+
+    SessionState::Snapshot snap;
+    snap.session_id = "fold-thinking";
+    snap.transcript_version = 1;
+    snap.scrollback_page =
+        std::make_shared<const std::vector<v1::StoredMessage>>(std::move(page));
+
+    ChatView view(theme, messages, tool_renderers, display_renderers);
+    // Thinking is collapsed by default, so the toggle expands the kind.
+    CHECK(view.ToggleThinkingFold() == kFoldExpanded);
+    CHECK(RenderElement(view.Render(snap), 60, 24).find("pondering the fold") !=
+          std::string::npos);
+    CHECK(view.ToggleThinkingFold() == kFoldCollapsed);
+    CHECK(RenderElement(view.Render(snap), 60, 24).find("pondering the fold") ==
+          std::string::npos);
+}
+
 // ---------------------------------------------------------------------------
 // @-mention completion (R5)
 // ---------------------------------------------------------------------------

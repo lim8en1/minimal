@@ -32,6 +32,8 @@
   "chat.row_down": "alt+j",
   "chat.toggle_collapse": "alt+c",
   "chat.toggle_collapse_all": "ctrl+alt+c",
+  "chat.toggle_thinking_fold": "ctrl+alt+t",
+  "chat.toggle_tool_fold": "ctrl+alt+o",
   "chat.toggle_timestamps": "alt+t",
   "turn.cancel": "escape",
   "session.pause": "alt+p",

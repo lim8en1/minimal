@@ -250,6 +250,13 @@ struct KeyContext {
     std::function<bool(const std::string& session_id, int screen_y)> cancel_pending_at;
     // chat.toggle_timestamps: ChatView::ToggleTimestamps.
     std::function<void(const std::string& session_id)> toggle_timestamps;
+    // chat.toggle_thinking_fold / chat.toggle_tool_fold: flip the kind's
+    // fold default on EVERY open tab's ChatView (the toggles are
+    // session-wide preferences) and persist the new state to ui.json.
+    // Unbound keys never reach these -- no null check needed on the call
+    // sites, matching every handler above.
+    std::function<void(const std::string& session_id)> toggle_thinking_fold;
+    std::function<void(const std::string& session_id)> toggle_tool_fold;
 
     // True while a bracketed paste (DECSET 2004) is in progress -- kept live
     // by the prompt editor's own CatchEvent (prompt_editor.cpp), shared here

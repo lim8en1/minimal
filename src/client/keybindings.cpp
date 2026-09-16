@@ -82,6 +82,14 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         // alt it silently drops shift and collides with plain alt+c.
         // ctrl+alt+c is an actually distinct encoding (CtrlAltLetter).
         {"chat.toggle_collapse_all", "ctrl+alt+c"},
+        // The per-kind fold toggles: ctrl+alt+<letter>, the encoding family
+        // toggle_collapse_all already uses -- CtrlAltLetter is a single
+        // distinct event, and plain alt+t/alt+o stay free for tab-bar /
+        // filter actions. These flip the kind's STARTUP fold default
+        // (ui.json fold_thinking/fold_tools) and persist it back through
+        // SaveFoldDefaults, so the choice survives a restart.
+        {"chat.toggle_thinking_fold", "ctrl+alt+t"},
+        {"chat.toggle_tool_fold", "ctrl+alt+o"},
         {"chat.toggle_timestamps", "alt+t"},
         {"turn.cancel", "escape"},
         {"app.quit", "ctrl+q"},

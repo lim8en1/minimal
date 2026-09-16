@@ -221,6 +221,8 @@ ftxui::Element FrameRenderer::Render() {
                                                          deps_.display_registry,
                                                          deps_.toggle_collapse_hint,
                                                          deps_.load_older_hint);
+                    ui.chat->SetFoldDefaults(deps_.fold_thinking_default,
+                                             deps_.fold_tool_default);
                 }
                 // ChatView::Render wraps its own ScrollRegion + vscroll_
                 // indicator (explicit line-offset scrolling -- see

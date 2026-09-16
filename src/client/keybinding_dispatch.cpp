@@ -617,6 +617,14 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         if (!sid.empty()) ctx.toggle_timestamps(sid);
         return true;
     }
+    if (ctx.keymap.Matches("chat.toggle_thinking_fold", event)) {
+        if (!sid.empty()) ctx.toggle_thinking_fold(sid);
+        return true;
+    }
+    if (ctx.keymap.Matches("chat.toggle_tool_fold", event)) {
+        if (!sid.empty()) ctx.toggle_tool_fold(sid);
+        return true;
+    }
     if (ctx.keymap.Matches("tab.close", event)) {
         if (!sid.empty()) {
             // Closing a ROOT tab takes its whole group: TabsToClose stages

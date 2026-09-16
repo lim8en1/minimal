@@ -31,6 +31,7 @@
 #include <ftxui/dom/elements.hpp>
 
 #include "minimal/client/render/theme.hpp"
+#include "minimal/client/ui_config.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/status_format.hpp"
 #include "minimal/client/view/tab_ui.hpp"
@@ -80,6 +81,11 @@ public:
         std::string session_picker_hint = "ctrl+o";
         std::string load_older_hint = "pageup";
         std::string scroll_bottom_hint = "pagedown";   // the "new output below" line
+        // ui.json's fold_thinking/fold_tools (kFoldDefaultAuto when unset),
+        // seeded into the fallback ChatView built here -- the startup fold
+        // tier IsCollapsed consults below the global collapse choice.
+        int fold_thinking_default = kFoldDefaultAuto;
+        int fold_tool_default = kFoldDefaultAuto;
     };
 
     explicit FrameRenderer(Dependencies deps);

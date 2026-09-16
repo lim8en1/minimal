@@ -31,6 +31,7 @@
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/scrollback_refresh.hpp"
 #include "minimal/client/state.hpp"
+#include "minimal/client/ui_config.hpp"
 #include "minimal/client/view/chat_view.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
 
@@ -165,6 +166,11 @@ public:
         // name these keys).
         std::string toggle_collapse_hint = "alt+c";
         std::string load_older_hint = "pageup";
+        // ui.json's fold_thinking/fold_tools (kFoldDefaultAuto when unset),
+        // seeded into every ChatView built here -- the startup fold tier
+        // IsCollapsed consults below the global collapse choice.
+        int fold_thinking_default = kFoldDefaultAuto;
+        int fold_tool_default = kFoldDefaultAuto;
         // Click-to-cancel for a QUEUED message row: sends CancelQueuedTurn
         // for (this tab's session, turn_id). Null when unset -- queued rows
         // then render without the cancel affordance. `tab_id` (not session

@@ -32,17 +32,32 @@
 //     "dark" or "light". A name Theme::Load cannot find falls back to the
 //     terminal-default theme with a startup warning, the same degrade rule
 //     as everything else here.
+//   fold_thinking / fold_tools -- the STARTUP auto-fold default for thinking
+//     and tool-activity rows: "auto" (the built-in kind default),
+//     "expanded" or "collapsed". Anything else is warned about and ignored,
+//     the same degrade rule as everything else here. Runtime toggles
+//     (chat.toggle_thinking_fold / chat.toggle_tool_fold) persist back
+//     through SaveFoldDefaults -- part of the ONE managed write below.
 //
 // THE ONE MANAGED WRITE. ui.json is otherwise user-owned and never rewritten
-// by the client -- the single exception is SaveThemePreference below, which
-// /theme uses to persist a runtime switch. It round-trips the whole document
-// (every other key survives verbatim) and refuses to touch a file it cannot
-// parse, the same rule client-plugins.json's writer follows.
+// by the client -- the exceptions are SaveThemePreference (which /theme uses
+// to persist a runtime switch) and SaveFoldDefaults (which the fold toggles
+// use to persist theirs). Both round-trip the whole document (every other
+// key survives verbatim) and refuse to touch a file they cannot parse, the
+// same rule client-plugins.json's writer follows.
 
 #include <filesystem>
+#include <optional>
 #include <string>
 
 namespace minimal::client {
+
+// The fold-default vocabulary: 0 = "auto" (the built-in kind default,
+// CollapsedByDefault), 1 = "expanded", 2 = "collapsed". Strings in ui.json,
+// ints in memory.
+inline constexpr int kFoldDefaultAuto = 0;
+inline constexpr int kFoldExpanded = 1;
+inline constexpr int kFoldCollapsed = 2;
 
 struct UiConfig {
     // Empty = use the built-in default. A non-string or missing key means the
@@ -54,6 +69,13 @@ struct UiConfig {
     int scrollback_window_max_messages = 0;
     int tool_output_buffer_bytes = 0;
     int tools_panel_stdout_buffer_lines = 0;
+
+    // The startup auto-fold default for Thinking / ToolActivity rows:
+    // kFoldDefaultAuto = built-in kind default (CollapsedByDefault),
+    // kFoldExpanded = start expanded, kFoldCollapsed = start collapsed.
+    // Anything unparsable in the file is warned and left at auto.
+    int fold_thinking = kFoldDefaultAuto;
+    int fold_tools = kFoldDefaultAuto;
 
     // Empty = "dark" (the built-in default).
     std::string theme;
@@ -67,5 +89,14 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir);
 // the in-session theme switch has already applied, this only records it for
 // the next launch. Creates the config dir when missing.
 void SaveThemePreference(const std::filesystem::path& config_dir, const std::string& name);
+
+// The fold-toggle counterpart: sets "fold_thinking"/"fold_tools" to
+// "expanded"/"collapsed" (kFoldDefaultAuto round-trips as "auto"), preserving
+// every other key. A nullopt argument leaves that key untouched -- the OTHER
+// fold toggle did not run this session. Same best-effort discipline as
+// SaveThemePreference: the in-session toggles have already applied, this only
+// records them for the next launch. Creates the config dir when missing.
+void SaveFoldDefaults(const std::filesystem::path& config_dir,
+                      std::optional<int> thinking, std::optional<int> tools);
 
 }  // namespace minimal::client

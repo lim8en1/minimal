@@ -163,6 +163,17 @@ bool ChatView::IsCollapsed(const RowKey& key, const ChatRow& row) const {
         return it->second;
     }
     if (global_collapse_.has_value()) return *global_collapse_;
+    // The ui.json kind defaults sit BELOW the global choice (an explicit
+    // collapse-all outranks them) and ABOVE the built-in kind defaults.
+    if (row.kind == ChatRowKind::Thinking && fold_thinking_default_ != kFoldDefaultAuto) {
+        return fold_thinking_default_ == kFoldCollapsed;
+    }
+    if (row.kind == ChatRowKind::ToolActivity && fold_tool_default_ != kFoldDefaultAuto) {
+        // Including ask_user results: the expanded exception lives in the
+        // BUILT-IN default alone -- an explicit user choice ("collapsed")
+        // outranks it.
+        return fold_tool_default_ == kFoldCollapsed;
+    }
     return CollapsedByDefault(row);
 }
 
@@ -1198,6 +1209,50 @@ void ChatView::ToggleCollapseAll() {
     global_collapse_ = !global_collapse_.value_or(false);
     collapse_overrides_.clear();
     ++collapse_epoch_;
+}
+
+namespace {
+// Shared body of ToggleThinkingFold/ToggleToolFold: the kind's default flips
+// to the OPPOSITE concrete state of what the kind currently SHOWS as -- the
+// global collapse choice when one is set (otherwise the toggle would be
+// invisible under it), else the kind's default tier: the ui.json value when
+// set, else the built-in kind default (Thinking collapsed; ToolActivity
+// whatever CollapsedByDefault says). Per-row overrides are not consulted --
+// they vary per row and are cleared right after anyway. kFoldDefaultAuto is
+// never assigned in-session: "auto" is a ui.json-only reading, restored at
+// the next launch.
+bool KindShowsCollapsed(const std::optional<bool>& global_collapse, int kind_default,
+                        bool builtin_collapsed) {
+    if (global_collapse.has_value()) return *global_collapse;
+    if (kind_default != kFoldDefaultAuto) return kind_default == kFoldCollapsed;
+    return builtin_collapsed;
+}
+}  // namespace
+
+int ChatView::ToggleThinkingFold() {
+    const int next = KindShowsCollapsed(global_collapse_, fold_thinking_default_,
+                                        /*builtin_collapsed=*/true)
+                         ? kFoldExpanded
+                         : kFoldCollapsed;
+    fold_thinking_default_ = next;
+    collapse_overrides_.clear();
+    global_collapse_.reset();
+    ++collapse_epoch_;
+    return next;
+}
+
+int ChatView::ToggleToolFold() {
+    const int next =
+        KindShowsCollapsed(
+            global_collapse_, fold_tool_default_,
+            CollapsedByDefault(ChatRow{.kind = ChatRowKind::ToolActivity}))
+            ? kFoldExpanded
+            : kFoldCollapsed;
+    fold_tool_default_ = next;
+    collapse_overrides_.clear();
+    global_collapse_.reset();
+    ++collapse_epoch_;
+    return next;
 }
 
 bool ChatView::ToggleCollapseAt(int screen_y) {

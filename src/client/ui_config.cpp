@@ -1,7 +1,9 @@
 #include "minimal/client/ui_config.hpp"
 
 #include <fstream>
+#include <functional>
 #include <iterator>
+#include <optional>
 #include <system_error>
 
 #include <nlohmann/json.hpp>
@@ -60,46 +62,77 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
     // on the first delta past the cap.
     bounded_int("tool_output_buffer_bytes", config.tool_output_buffer_bytes, 4096);
     bounded_int("tools_panel_stdout_buffer_lines", config.tools_panel_stdout_buffer_lines, 1);
+
+    // The fold defaults: an enum-as-string ("auto"/"expanded"/"collapsed"),
+    // not a bare int -- users hand-edit this file, and "expanded" is
+    // self-describing where 1 is not. Unparsable values are warned and left
+    // at auto, the same degrade rule as every other bad value here.
+    const auto fold_value = [&parsed](const char* key, int& out) {
+        if (auto it = parsed.find(key); it != parsed.end()) {
+            if (it->is_string()) {
+                const auto name = it->get<std::string>();
+                if (name == "auto") out = kFoldDefaultAuto;
+                else if (name == "expanded") out = kFoldExpanded;
+                else if (name == "collapsed") out = kFoldCollapsed;
+                else {
+                    common::DefaultLogger().warn(
+                        "ui.json: \"{}\" must be \"auto\", \"expanded\" or "
+                        "\"collapsed\" -- ignored", key);
+                }
+            } else {
+                common::DefaultLogger().warn(
+                    "ui.json: \"{}\" must be a string (\"auto\", \"expanded\" or "
+                    "\"collapsed\") -- ignored", key);
+            }
+        }
+    };
+    fold_value("fold_thinking", config.fold_thinking);
+    fold_value("fold_tools", config.fold_tools);
     return config;
 }
 
-void SaveThemePreference(const std::filesystem::path& config_dir, const std::string& name) {
+namespace {
+
+// The ONE managed write's shared core: loads ui.json (if present and
+// parseable), hands the parsed document to `mutate`, and writes it back
+// atomically. Every key the mutator does not touch survives verbatim -- the
+// file is the user's, and rewriting it from a default struct would silently
+// drop status_format and the bounded-int knobs.
+//
+// Refuses to run on a file we cannot READ (permission, transient I/O) or
+// cannot PARSE: bytes we cannot understand are the user's, and silently
+// replacing them would destroy their config. Returns false (warned) instead
+// -- the caller's in-session change has already applied; only the restart
+// persistence is skipped.
+bool UpdateUiJson(const std::filesystem::path& config_dir, const char* what,
+                  const std::function<void(nlohmann::json&)>& mutate) {
     const auto path = config_dir / "ui.json";
-    // Round-trip the WHOLE document, not a synthetic {theme: ...}: every other
-    // key in the file is the user's, and rewriting ui.json from a default
-    // struct would silently drop status_format and the bounded-int knobs.
     nlohmann::json doc = nlohmann::json::object();
     std::string existing;
     {
         std::error_code ec;
         if (std::filesystem::exists(path, ec) && !TryReadConfigFile(path, &existing)) {
-            // Exists but could not be read (permission, a transient I/O
-            // error): never treat that as "empty" -- the write below would
-            // otherwise replace the user's real (merely unreadable) file
-            // with a fresh, near-empty document, dropping every key but
-            // theme. Same discipline as the malformed-JSON branch just
-            // below: warn, leave it untouched.
+            // Exists but could not be read: never treat that as "empty" --
+            // the write below would otherwise replace the user's real
+            // (merely unreadable) file with a fresh, near-empty document.
             common::DefaultLogger().warn(
-                "ui.json exists but could not be read -- theme preference NOT persisted; "
-                "fix its permissions to enable persistence");
-            return;
+                "ui.json exists but could not be read -- {} NOT persisted; "
+                "fix its permissions to enable persistence", what);
+            return false;
         }
     }
     if (!existing.empty()) {
         auto parsed = nlohmann::json::parse(existing, nullptr, /*allow_exceptions=*/false);
         if (parsed.is_discarded() || !parsed.is_object()) {
-            // Same discipline as client-plugins.json's malformed handling: the
-            // file exists but we cannot understand it, so we must not replace
-            // the user's bytes with ours. The in-session theme still applied;
-            // only the restart persistence is skipped.
+            // Same discipline as client-plugins.json's malformed handling.
             common::DefaultLogger().warn(
-                "ui.json is malformed -- theme preference NOT persisted; fix or remove "
-                "the file to enable persistence");
-            return;
+                "ui.json is malformed -- {} NOT persisted; fix or remove "
+                "the file to enable persistence", what);
+            return false;
         }
         doc = std::move(parsed);
     }
-    doc["theme"] = name;
+    mutate(doc);
 
     // Atomic write: serialize to a sibling tmp file, then rename over the
     // original. A crash mid-write leaves ui.json.tmp behind (harmless) rather
@@ -107,9 +140,36 @@ void SaveThemePreference(const std::filesystem::path& config_dir, const std::str
     // dropping the user's other keys).
     std::filesystem::create_directories(config_dir);
     if (!WriteConfigFileAtomic(path, doc.dump(2) + "\n")) {
-        common::DefaultLogger().warn("could not write {} -- theme preference not persisted",
-                                     path.string());
+        common::DefaultLogger().warn("could not write {} -- {} not persisted",
+                                     path.string(), what);
+        return false;
     }
+    return true;
+}
+
+// "expanded"/"collapsed"/"auto" for kFoldExpanded/kFoldCollapsed/kFoldDefaultAuto.
+std::string FoldName(int value) {
+    switch (value) {
+        case kFoldExpanded: return "expanded";
+        case kFoldCollapsed: return "collapsed";
+        default: return "auto";
+    }
+}
+
+}  // namespace
+
+void SaveThemePreference(const std::filesystem::path& config_dir, const std::string& name) {
+    UpdateUiJson(config_dir, "theme preference", [&](nlohmann::json& doc) {
+        doc["theme"] = name;
+    });
+}
+
+void SaveFoldDefaults(const std::filesystem::path& config_dir,
+                      std::optional<int> thinking, std::optional<int> tools) {
+    UpdateUiJson(config_dir, "fold defaults", [&](nlohmann::json& doc) {
+        if (thinking.has_value()) doc["fold_thinking"] = FoldName(*thinking);
+        if (tools.has_value()) doc["fold_tools"] = FoldName(*tools);
+    });
 }
 
 }  // namespace minimal::client
