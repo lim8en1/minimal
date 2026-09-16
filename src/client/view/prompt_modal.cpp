@@ -564,25 +564,6 @@ v1::AskUserResponse DismissedAnswer(const PendingAsk& request) {
     return response;
 }
 
-// One option row: marker, then the label wrapped, then its description
-// wrapped and dimmed beneath it -- both hanging under the label column
-// instead of running off the modal's fixed width like a bare text() would.
-// Mirrors RadioboxOption::Simple()/CheckboxOption::Simple() styling (bold
-// when active, highlighted when focused) so the only visible change is wrapping.
-ftxui::Element WrappedOptionEntry(const ftxui::EntryState& s, const char* marker_on,
-                                  const char* marker_off, const std::string& description,
-                                  const ftxui::Decorator& selection,
-                                  const ftxui::Decorator& muted) {
-    using namespace ftxui;
-    Element marker = text(s.state ? marker_on : marker_off);
-    Element label = paragraph(s.label);
-    if (s.active) label |= bold;
-    if (s.focused) label |= selection;
-    Elements column = {label};
-    if (!description.empty()) column.push_back(paragraph(description) | muted);
-    return hbox({marker, vbox(std::move(column)) | flex});
-}
-
 // One review-screen line for ONE question, mirroring CollectAnswer's slot
 // logic exactly -- whatever the review shows is what submission will send,
 // so a drift between the two would display one thing and answer another.
@@ -609,6 +590,43 @@ std::string ReviewLine(const v1::AskQuestion& question,
 }
 
 }  // namespace
+
+// Whether ONE option row of a single-pick (radio) question wears the
+// "current choice" styling (bold label + selection highlight). An untouched
+// question wears it NOWHERE: FTXUI's Radiobox clamps its selected index from
+// -1 to 0 at first render, so without this gate option 0 renders
+// bold/highlighted before any interaction -- which reads as a pre-picked
+// answer the submission would not send (CollectAnswer/ReviewLine gate on
+// radio_touched; this is that same contract, in the render). Pure so the
+// rule is directly testable (tests/prompt_modal_test.cpp).
+bool RadioRowSelected(bool touched, bool active, bool focused) {
+    (void)active;   // reserved: the rule is per-list, not per-row -- no
+    (void)focused;  // per-row variation yet
+    return touched;
+}
+
+// One option row: marker, then the label wrapped, then its description
+// wrapped and dimmed beneath it -- both hanging under the label column
+// instead of running off the modal's fixed width like a bare text() would.
+// Mirrors RadioboxOption::Simple()/CheckboxOption::Simple() styling (bold
+// when active, highlighted when focused) so the only visible change is wrapping.
+// `touched` gates the choice styling through RadioRowSelected: a radio list
+// the user has never interacted with wears no "current choice" look (see the
+// header doc); checkbox lists always pass true -- their markers, not the
+// focus, are what says "picked".
+ftxui::Element WrappedOptionEntry(const ftxui::EntryState& s, const char* marker_on,
+                                  const char* marker_off, const std::string& description,
+                                  const ftxui::Decorator& selection,
+                                  const ftxui::Decorator& muted, bool touched) {
+    using namespace ftxui;
+    Element marker = text(s.state ? marker_on : marker_off);
+    Element label = paragraph(s.label);
+    if (RadioRowSelected(touched, s.active, s.focused)) label |= bold;
+    if (RadioRowSelected(touched, s.active, s.focused)) label |= selection;
+    Elements column = {label};
+    if (!description.empty()) column.push_back(paragraph(description) | muted);
+    return hbox({marker, vbox(std::move(column)) | flex});
+}
 
 ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                               std::function<void(v1::AskUserResponse response)> on_answer) {
@@ -651,7 +669,10 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                 // closure by j rather than looked up through the entry state.
                 const std::string description = question.options(static_cast<int>(j)).description();
                 option_state.transform = [description, selection, muted](const EntryState& s) {
-                    return WrappedOptionEntry(s, "▣ ", "☐ ", description, selection, muted);
+                    // touched=true, always: a checkbox's picked-ness lives in
+                    // its own marker, not the focus styling.
+                    return WrappedOptionEntry(s, "▣ ", "☐ ", description, selection, muted,
+                                              /*touched=*/true);
                 };
                 boxes.push_back(Checkbox(std::move(option_state)));
             }
@@ -674,11 +695,17 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
             };
             // Radiobox's EntryState.index tracks the list position, so the
             // description can be looked up straight from the question.
-            radio_state.transform = [request_state, index, selection,
+            // touched reads radio_touched LIVE (through the same shared_ptr
+            // on_change writes): the first arrow-down both records the touch
+            // and re-styles the list within the same repaint, so the clamp's
+            // option-0 highlight appears only once the cursor has actually
+            // moved.
+            radio_state.transform = [request_state, state_ref, index, selection,
                                      muted](const EntryState& s) {
                 const std::string description =
                     request_state->request.questions(index).options(s.index).description();
-                return WrappedOptionEntry(s, "◉ ", "○ ", description, selection, muted);
+                return WrappedOptionEntry(s, "◉ ", "○ ", description, selection, muted,
+                                          state_ref->questions[index].radio_touched);
             };
             block.push_back(Radiobox(std::move(radio_state)));
         }

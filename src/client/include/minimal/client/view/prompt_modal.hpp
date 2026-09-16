@@ -81,4 +81,21 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
 ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                               std::function<void(v1::AskUserResponse response)> on_answer);
 
+// Whether ONE option row of a single-pick (radio) question wears the
+// "current choice" styling (bold label + selection highlight). An untouched
+// question wears it NOWHERE: FTXUI's Radiobox clamps its selected index from
+// -1 to 0 at first render, so without this gate option 0 renders
+// bold/highlighted before any interaction -- which reads as a pre-picked
+// answer the submission would not send (CollectAnswer/ReviewLine gate on
+// radio_touched; this is that same contract, in the render). Pure so the
+// rule is directly testable (tests/prompt_modal_test.cpp).
+bool RadioRowSelected(bool touched, bool active, bool focused);
+
+// One option row of an ask-modal question (radio or checkbox list). See the
+// RadioRowSelected comment for what `touched` gates.
+ftxui::Element WrappedOptionEntry(const ftxui::EntryState& s, const char* marker_on,
+                                  const char* marker_off, const std::string& description,
+                                  const ftxui::Decorator& selection,
+                                  const ftxui::Decorator& muted, bool touched);
+
 }  // namespace minimal::client

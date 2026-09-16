@@ -136,6 +136,7 @@ add_executable(minimal_tests
     prompt_wrap_test.cpp
     prompt_editor_test.cpp
     modal_host_test.cpp
+    prompt_modal_test.cpp
     keybindings_test.cpp
     keybinding_dispatch_test.cpp
     key_event_parser_test.cpp
