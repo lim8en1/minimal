@@ -63,6 +63,58 @@ PermissionMode PermissionPolicy::mode_for(std::string_view tool_name, ToolCatego
     return mode_for(tool_name, category);
 }
 
+PermissionMode PermissionPolicy::mode_for(std::string_view tool_name, ToolCategory category,
+                                          const PatternSubjects& subjects,
+                                          bool subject_is_path) const {
+    if (subjects.stages.empty()) {
+        // No staged view of this invocation: exactly the old behavior.
+        return mode_for(tool_name, category, subjects.whole, subject_is_path);
+    }
+
+    // The restrictive half: ask/deny rules match the whole line or ANY stage.
+    // A rule the operator wrote against the raw line keeps its meaning, and a
+    // per-stage deny (`"rm *": deny`) catches a stage hiding mid-pipeline.
+    std::optional<PermissionMode> folded;
+    auto fold = [&](const std::optional<std::string>& subject) {
+        if (!subject) return;
+        if (auto it = pattern_overrides.find(std::string(tool_name));
+            it != pattern_overrides.end()) {
+            if (auto mode = FoldPatterns(it->second, *subject, subject_is_path);
+                mode && *mode != PermissionMode::AlwaysAllow) {
+                // Allow never folds here: its reach is the conjunction below
+                // only. A stage matching an allow rule must not vouch for the
+                // stages that do not -- folded allow would bypass the
+                // all-stages-covered check and silently widen the policy.
+                folded = folded ? most_restrictive(*folded, *mode) : *mode;
+            }
+        }
+    };
+    fold(subjects.whole);
+    for (const auto& stage : subjects.stages) fold(stage);
+
+    // The permissive half: allow is a CONJUNCTION over stages. Every stage
+    // must match some allow rule; any unmatched stage leaves the fold below in
+    // charge. This is the one place the whole-line subject is NOT consulted --
+    // an allow rule's reach is per program, never the unstructured line.
+    if (auto it = pattern_overrides.find(std::string(tool_name)); it != pattern_overrides.end()) {
+        bool all_allowed = true;
+        for (const auto& stage : subjects.stages) {
+            const auto mode = FoldPatterns(it->second, stage, subject_is_path);
+            if (!mode || *mode != PermissionMode::AlwaysAllow) {
+                all_allowed = false;
+                break;
+            }
+        }
+        if (all_allowed) {
+            const PermissionMode allow = PermissionMode::AlwaysAllow;
+            return folded ? most_restrictive(*folded, allow) : allow;
+        }
+    }
+
+    if (folded) return *folded;
+    return mode_for(tool_name, category);
+}
+
 PermissionMode McpPermissionPolicy::mode_for(std::string_view server_name) const {
     if (auto it = per_server.find(std::string(server_name)); it != per_server.end()) {
         return it->second;

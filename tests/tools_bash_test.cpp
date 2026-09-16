@@ -89,6 +89,10 @@ bool Names(const tools_bash::ScanResult& result, const std::string& word) {
            result.command_words.end();
 }
 
+bool HasStage(const tools_bash::ScanResult& result, const std::string& stage) {
+    return std::find(result.stages.begin(), result.stages.end(), stage) != result.stages.end();
+}
+
 bool Offers(const tools::PermissionDisclosure& disclosure, const std::string& suffix) {
     return std::any_of(disclosure.grants.begin(), disclosure.grants.end(),
                        [&suffix](const tools::GrantOffer& offer) {
@@ -334,6 +338,109 @@ TEST_CASE("quoted programs are named unquoted", "[tools_bash][scanner]") {
 }
 
 // --- settings ----------------------------------------------------------------------
+
+TEST_CASE("scanner stages: one per command node, whole stage text", "[tools_bash][scanner][stages]") {
+    const auto result = ScanCommand("git status | wc -l | head -5");
+    CHECK(result.complete);
+    REQUIRE(result.stages.size() == 3);
+    CHECK(HasStage(result, "git status"));
+    CHECK(HasStage(result, "wc -l"));
+    CHECK(HasStage(result, "head -5"));
+}
+
+TEST_CASE("scanner stages: env-prefix assignments are not part of the stage",
+          "[tools_bash][scanner][stages]") {
+    const auto result = ScanCommand("MINIMAL_CONFIG_DIR=/tmp/x ./server --listen s");
+    REQUIRE(result.stages.size() == 1);
+    CHECK(HasStage(result, "./server --listen s"));
+    // A quoted reserved-word spelling stays in the stage.
+    const auto quoted = ScanCommand("'time' make all");
+    CHECK(HasStage(quoted, "'time' make all"));
+    // `time`/`coproc` in the command slot are demoted, as for command_words.
+    const auto timed = ScanCommand("time make all");
+    REQUIRE(timed.stages.size() == 1);
+    CHECK(HasStage(timed, "make all"));
+}
+
+TEST_CASE("scanner stages: substitutions and bodies contribute their stages too",
+          "[tools_bash][scanner][stages]") {
+    // The conjunction must cover every program the parse names, wherever it
+    // sits -- the same rule the grant conjunction follows.
+    const auto subst = ScanCommand("make -j$(nproc) all");
+    CHECK(HasStage(subst, "make -j$(nproc) all"));
+    CHECK(HasStage(subst, "nproc"));
+    const auto assign = ScanCommand("X=$(rm -rf /) ls");
+    CHECK(HasStage(assign, "ls"));
+    CHECK(HasStage(assign, "rm -rf /"));
+}
+
+TEST_CASE("allow eligibility: output redirects disqualify, inert ones do not",
+          "[tools_bash][scanner][stages]") {
+    CHECK_FALSE(ScanCommand("git diff > /tmp/x.txt").allow_eligible);
+    CHECK_FALSE(ScanCommand("make >> build.log").allow_eligible);
+    CHECK_FALSE(ScanCommand("make &> build.log").allow_eligible);
+    CHECK_FALSE(ScanCommand("make 2> err.log").allow_eligible);
+    CHECK_FALSE(ScanCommand("git diff 2>/tmp/err.log").allow_eligible);
+    CHECK_FALSE(ScanCommand("echo hi > out.txt && ls").allow_eligible);
+    CHECK_FALSE(ScanCommand("tee >(gzip > f.gz) < in").allow_eligible);
+    // Input-only or inert output: still eligible.
+    CHECK(ScanCommand("git diff < in.txt").allow_eligible);
+    CHECK(ScanCommand("cat foo 2>/dev/null").allow_eligible);
+    CHECK(ScanCommand("make 2>&1 | head").allow_eligible);
+    CHECK(ScanCommand("cat f 2>&-").allow_eligible);
+    CHECK(ScanCommand("make all | tee build.log > /dev/null").allow_eligible);
+    // Input-only redirects compose with compound forms and stay eligible: the
+    // whole `while` loop reads, nothing writes, and every stage is named.
+    CHECK(ScanCommand("make < input.txt").allow_eligible);
+    const auto body = ScanCommand("while read l; do echo $l; done < input.txt");
+    CHECK(body.allow_eligible);
+    CHECK(HasStage(body, "read l"));
+    CHECK(HasStage(body, "echo $l"));
+}
+
+TEST_CASE("allow eligibility follows completeness", "[tools_bash][scanner][stages]") {
+    CHECK_FALSE(ScanCommand("eval \"$CMD\"").allow_eligible);
+    CHECK_FALSE(ScanCommand("$X args").allow_eligible);
+    CHECK_FALSE(ScanCommand("").allow_eligible);
+}
+
+TEST_CASE("staged pattern allow runs a pipeline unprompted through the real gate",
+          "[tools_bash][disclosure][stages][integration]") {
+    // The end-to-end seam: real BashTool stages x real executor fold. The
+    // allow rules cover every stage of `ls | wc -l`, so it must run without a
+    // prompt; `ls | sort | wc -l` names an uncovered program and must ask.
+    Fixture f;
+    tools::ToolRegistry registry;
+    registry.Register(tools_bash::MakeBashTool(f.settings, f.store, f.background));
+
+    testing::GrantingPermissionChecker checker;
+    tools::PermissionPolicy policy;
+    policy.execute = tools::PermissionMode::Ask;
+    auto& rules = policy.pattern_overrides["bash"];
+    rules.push_back({"ls", tools::PermissionMode::AlwaysAllow});
+    rules.push_back({"wc -l", tools::PermissionMode::AlwaysAllow});
+    rules.push_back({"sort", tools::PermissionMode::AlwaysAllow});
+    rules.push_back({"rm *", tools::PermissionMode::AlwaysDeny});
+    tools::ToolExecutor executor(registry, checker, policy, {}, tools::PermissionRunMode::Normal);
+
+    tools::ToolContext ctx{common::DefaultLogger()};
+    ctx.session_id = "s1";
+    ctx.project_root = f.dir.path();
+
+    const auto piped = executor.Run("t1", "bash", {{"command", "ls | wc -l"}}, ctx);
+    CHECK_FALSE(piped.is_error);
+    CHECK(checker.seen.empty());  // every stage allow-covered: no prompt
+
+    // A stage with no allow rule: prompted.
+    const auto uncovered = executor.Run("t2", "bash", {{"command", "ls | head -3"}}, ctx);
+    CHECK_FALSE(uncovered.is_error);
+    CHECK(checker.seen.size() == 1);
+
+    // A deny rule matches a stage: denied outright, never a prompt.
+    const auto denied = executor.Run("t3", "bash", {{"command", "ls | rm -rf /"}}, ctx);
+    CHECK(denied.is_error);
+    CHECK(checker.seen.size() == 1);
+}
 
 TEST_CASE("bash settings take defaults when absent or nonsensical", "[tools_bash][settings]") {
     const auto defaults = tools_bash::ParseBashSettings(nlohmann::json::object());

@@ -37,6 +37,11 @@ std::optional<std::string> AliasedTool::PatternSubject(const nlohmann::json& inp
     return inner_->PatternSubject(input);
 }
 
+std::optional<std::vector<std::string>> AliasedTool::PatternStages(
+    const nlohmann::json& input) const {
+    return inner_->PatternStages(input);
+}
+
 std::string_view AliasedTool::config_namespace() const { return inner_->config_namespace(); }
 
 bool AliasedTool::parallel_safe() const { return inner_->parallel_safe(); }

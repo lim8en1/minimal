@@ -83,7 +83,7 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     // child whose own preset declared no patterns). A canonical path anchors
     // patterns like "**/.env" at "/" for confinement tools; the raw subject
     // stands for everything else (bash's command line).
-    std::optional<std::string> pattern_subject;
+    PatternSubjects subjects;
     bool subject_is_path = false;
     const bool needs_pattern_subject =
         !policy_.pattern_overrides.empty() ||
@@ -94,17 +94,21 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
         if (auto raw = tool.PatternSubject(input)) {
             if (tool.path_confinement_supported()) {
                 const ConfineResult canonical = confine(ctx.project_root, *raw, false);
-                pattern_subject = canonical.ok ? canonical.absolute_path.string() : *raw;
+                subjects.whole = canonical.ok ? canonical.absolute_path.string() : *raw;
                 subject_is_path = true;
             } else {
-                pattern_subject = std::move(*raw);
+                subjects.whole = std::move(*raw);
             }
         }
+        // Stages ride along when the tool can decompose the subject. Only a
+        // pattern-carrying policy pays for the decomposition (the same gate as
+        // the subject above); a pattern-free pair never sees this work.
+        subjects.stages = tool.PatternStages(input).value_or(std::vector<std::string>{});
     }
 
     PermissionMode mode =
         mcp_server.empty()
-            ? policy_.mode_for(permission_key, category, pattern_subject, subject_is_path)
+            ? policy_.mode_for(permission_key, category, subjects, subject_is_path)
             : mcp_policy_.mode_for(mcp_server);
 
     // The confinement verdict of THIS invocation, consumed by the ceiling fold
@@ -169,7 +173,7 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
                 // most_restrictive keeps the ceiling one-directional -- its
                 // pattern-allows can never widen the child.
                 mode = most_restrictive(
-                    mode, policy_ceiling_->mode_for(permission_key, category, pattern_subject,
+                    mode, policy_ceiling_->mode_for(permission_key, category, subjects,
                                                     subject_is_path));
                 // out_of_workdir and network are dimension FIELDS, not
                 // categories, so mode_for() never consults them: without this
@@ -177,11 +181,11 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
                 // Same conditions as this executor's own folds in 2/2a.
                 if (checked && !inside) {
                     PermissionMode ceiling_ood = policy_ceiling_->out_of_workdir;
-                    if (!policy_ceiling_->out_of_workdir_patterns.empty() && pattern_subject &&
+                    if (!policy_ceiling_->out_of_workdir_patterns.empty() && subjects.whole &&
                         subject_is_path) {
                         std::optional<PermissionMode> folded;
                         for (const auto& rule : policy_ceiling_->out_of_workdir_patterns) {
-                            if (GlobMatch(rule.glob, *pattern_subject,
+                            if (GlobMatch(rule.glob, *subjects.whole,
                                           /*slash_terminates=*/true)) {
                                 folded =
                                     folded ? most_restrictive(*folded, rule.mode) : rule.mode;

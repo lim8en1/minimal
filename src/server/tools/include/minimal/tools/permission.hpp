@@ -74,6 +74,16 @@ struct PermissionPatternRule {
     PermissionMode mode = PermissionMode::Ask;
 };
 
+// The subject set an invocation presents to pattern rules: the tool's
+// whole-line subject (`bash: git status | wc -l`) plus, when the tool can
+// decompose it, its per-stage subjects (`git status`, `wc -l`). Default-
+// constructible: the "no stages" state reproduces the pre-stage semantics
+// exactly, which is what path tools and stage-free tests want.
+struct PatternSubjects {
+    std::optional<std::string> whole;
+    std::vector<std::string> stages;  // empty = no staged matching
+};
+
 struct PermissionPolicy {
     PermissionMode read_only = PermissionMode::AlwaysAllow;
     PermissionMode file_write = PermissionMode::Ask;
@@ -130,6 +140,17 @@ struct PermissionPolicy {
     PermissionMode mode_for(std::string_view tool_name, ToolCategory category,
                             const std::optional<std::string>& subject,
                             bool subject_is_path) const;
+    // Staged overload. Matching per mode:
+    //   Ask / Deny -- the MOST RESTRICTIVE rule matching the whole line OR any
+    //     stage. Deny coverage only grows ("rm *" catches `ls | rm -rf /`).
+    //   Allow -- requires stages, and EVERY stage must match some allow rule
+    //     (the grant conjunction: a compound runs unprompted only when each
+    //     named program is covered). An allow rule matching only the whole
+    //     line no longer allows -- "git diff *" once allowed `git diff; make
+    //     install`, because the subject was the raw line. No stages (or no
+    //     allow match) -> the fold below decides as usual.
+    PermissionMode mode_for(std::string_view tool_name, ToolCategory category,
+                            const PatternSubjects& subjects, bool subject_is_path) const;
 };
 
 struct McpPermissionPolicy {

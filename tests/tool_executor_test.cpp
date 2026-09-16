@@ -1123,3 +1123,129 @@ TEST_CASE("the ceiling's patterns match even when the child's own policy has non
     CHECK_FALSE(executor.Run("t2", "bash", {{"command", "ls -la"}}, ctx).is_error);
     CHECK(checker.seen.size() == 1);
 }
+
+// --- staged pattern rules (bash: per-stage matching) -------------------------------
+
+TEST_CASE("an allow pattern requires every stage to match one (pipeline)",
+          "[tool_executor][patterns][stages]") {
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    AlwaysAllowPermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.pattern_overrides["bash"].push_back({"git status", PermissionMode::AlwaysAllow});
+    policy.pattern_overrides["bash"].push_back({"wc *", PermissionMode::AlwaysAllow});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    // Both stages covered: runs unprompted.
+    CHECK_FALSE(executor.Run("t1", "bash", {{"command", "git status | wc -l"},
+                                            {"stages", {"git status", "wc -l"}}},
+                             ctx).is_error);
+    CHECK(checker.seen.empty());
+    // One stage uncovered: the Ask default stands.
+    CHECK_FALSE(executor.Run("t2", "bash", {{"command", "git status | tee out"},
+                                            {"stages", {"git status", "tee out"}}},
+                             ctx).is_error);
+    CHECK(checker.seen.size() == 1);
+}
+
+TEST_CASE("an allow pattern never matches through a whole-line prefix",
+          "[tool_executor][patterns][stages][invariant]") {
+    // The old shape: the subject was the raw line, so "git diff *" matched
+    // `git diff; make install` -- the stage conjunction closes exactly that.
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    AlwaysAllowPermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.pattern_overrides["bash"].push_back({"git diff *", PermissionMode::AlwaysAllow});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    CHECK_FALSE(executor.Run("t1", "bash", {{"command", "git diff; make install"},
+                                            {"stages", {"git diff", "make install"}}},
+                             ctx).is_error);
+    REQUIRE(checker.seen.size() == 1);  // prompted: `make install` matched nothing
+}
+
+TEST_CASE("ask and deny rules match any stage, not just the whole line",
+          "[tool_executor][patterns][stages]") {
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    UnreachablePermissionChecker deny_checker;
+
+    tools::PermissionPolicy deny;
+    deny.execute = PermissionMode::AlwaysAllow;  // only the pattern can deny
+    deny.pattern_overrides["bash"].push_back({"rm *", PermissionMode::AlwaysDeny});
+    tools::ToolExecutor deny_executor(f.registry, deny_checker, deny, {},
+                                      PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    // The deny rule matches a stage hiding mid-pipeline: outright denial.
+    CHECK(deny_executor.Run("t1", "bash", {{"command", "ls | rm -rf /"},
+                                           {"stages", {"ls", "rm -rf /"}}},
+                           ctx).is_error);
+    CHECK_FALSE(deny_checker.called);  // denied before any prompt could exist
+
+    // Ask: a stage-level ask rule forces the prompt despite a whole-line allow.
+    AlwaysAllowPermissionChecker ask_checker;
+    tools::PermissionPolicy ask;
+    ask.execute = PermissionMode::AlwaysAllow;
+    ask.pattern_overrides["bash"].push_back({"git push --force *", PermissionMode::Ask});
+    tools::ToolExecutor ask_executor(f.registry, ask_checker, ask, {},
+                                     PermissionRunMode::Normal);
+    CHECK_FALSE(ask_executor.Run("t2", "bash",
+                                 {{"command", "git status && git push --force origin"},
+                                  {"stages", {"git status", "git push --force origin"}}},
+                                 ctx).is_error);
+    REQUIRE(ask_checker.seen.size() == 1);
+}
+
+TEST_CASE("staged allow does not override a matching ask or deny rule",
+          "[tool_executor][patterns][stages][invariant]") {
+    // Allow and ask both match the same stage: most_restrictive keeps ask.
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    AlwaysAllowPermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    auto& rules = policy.pattern_overrides["bash"];
+    rules.push_back({"git *", PermissionMode::AlwaysAllow});
+    rules.push_back({"git push --force *", PermissionMode::Ask});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    CHECK_FALSE(executor.Run("t1", "bash", {{"command", "git status"},
+                                            {"stages", {"git status"}}}, ctx).is_error);
+    CHECK(checker.seen.empty());
+    CHECK_FALSE(executor.Run("t2", "bash", {{"command", "git push --force origin"},
+                                            {"stages", {"git push --force origin"}}},
+                             ctx).is_error);
+    CHECK(checker.seen.size() == 1);
+}
+
+TEST_CASE("a tool without stages keeps whole-line pattern semantics",
+          "[tool_executor][patterns][stages]") {
+    // The default PatternStages returns nullopt: the path-tool tests above and
+    // any stage-free bash look-alike must be unchanged.
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.execute = PermissionMode::Ask;  // the allow pattern below must NOT apply
+    policy.pattern_overrides["bash"].push_back({"git *", PermissionMode::AlwaysAllow});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    // `rm -rf /` matches nothing: plain Ask. Whole-line "git *"-shape behavior
+    // for ask/deny is covered by the pre-existing cases above; here the point
+    // is that stage-free matching still resolves and never allows silently.
+    CHECK_FALSE(executor.Run("t1", "bash", {{"command", "rm -rf /"}}, ctx).is_error);
+    REQUIRE(checker.called);
+}

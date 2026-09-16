@@ -269,6 +269,19 @@ public:
     }
     void set_command_subject(bool value) { command_subject_ = value; }
 
+    // Stage support, mirroring the command-subject split: when set, stages
+    // come from a fixed list (or input["stages"] when present, per-call).
+    std::optional<std::vector<std::string>> PatternStages(
+        const nlohmann::json& input) const override {
+        if (!command_subject_) return tools::Tool::PatternStages(input);
+        if (input.contains("stages") && input.at("stages").is_array()) {
+            return input.at("stages").get<std::vector<std::string>>();
+        }
+        if (stages_.has_value()) return *stages_;
+        return std::nullopt;
+    }
+    void set_stages(std::optional<std::vector<std::string>> value) { stages_ = std::move(value); }
+
     bool network_access_required() const override { return network_access_required_; }
 
     tools::PermissionDisclosure Disclose(const nlohmann::json& input,
@@ -292,6 +305,7 @@ private:
     std::string result_text_;
     std::optional<std::string> path_key_;
     bool command_subject_ = false;
+    std::optional<std::vector<std::string>> stages_;
     std::optional<tools::PermissionDisclosure> disclosure_;
     bool network_access_required_ = false;
     bool is_error_ = false;

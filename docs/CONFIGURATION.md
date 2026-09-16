@@ -284,7 +284,7 @@ Mode vocabulary:
 | `default_run_mode` | string | `"normal"` | one of the run modes |
 | `fallback` | object | harness defaults | five categories, each a permission mode: `read_only`, `file_write`, `execute`, `out_of_workdir`, `network`. Unset categories keep the harness default (bundled: `read_only=allow`, rest `ask`) |
 | `per_tool_overrides` | object | `{}` | tool permission key (bare tool name or `plugin.tool`) → permission mode. Keys that resolve to no registered tool → warning. Aliased tools keep their **original** name here (see docs/PLUGINS.md) |
-| `pattern_overrides` | object | `{}` | tool permission key → **glob → mode** rules matched against the tool's subject (bash: the command line; `read`/`write`/`edit`/`grep`/`glob`: the canonical path). Semantics: an exact `per_tool_overrides` entry still wins; otherwise the **most restrictive matching rule replaces the category default** when any rule matches, and zero matches leave the category default. Downstream folds (out-of-workdir, network, subagent ceilings, run modes) apply as always — a pattern can never bypass the substrate. What most-restrictive folding cannot express: a strict default rule plus a more-specific allow (`"git *": ask` + `"git status": allow` stays ask) — use an exact override instead |
+| `pattern_overrides` | object | `{}` | tool permission key → **glob → mode** rules matched against the tool's subject (bash: the command line **and its stages** — see below; `read`/`write`/`edit`/`grep`/`glob`: the canonical path). Semantics: an exact `per_tool_overrides` entry still wins; otherwise the **most restrictive matching rule replaces the category default** when any rule matches, and zero matches leave the category default. Downstream folds (out-of-workdir, network, subagent ceilings, run modes) apply as always — a pattern can never bypass the substrate. What most-restrictive folding cannot express: a strict default rule plus a more-specific allow (`"git *": ask` + `"git status": allow` stays ask) — use an exact override instead |
 | `external_directory_patterns` | object | `{}` | glob → mode rules on the `out_of_workdir` dimension, matched against the canonical **absolute** path of an invocation that resolved outside the project root; the most restrictive matching rule replaces the scalar `out_of_workdir` for that invocation |
 | `mcp_default_mode` | string | `"ask"` | default permission mode for MCP tools |
 | `advisor` | string | — | plugin name of a permission advisor; unknown name → warning |
@@ -295,7 +295,27 @@ Glob rules (`pattern_overrides` / `external_directory_patterns`): `*` and `?`
 stay within one path component, `**` crosses them, `\` escapes, and a pattern
 matches the whole subject. For bash command lines `/` is an ordinary character
 (so `git *` covers `git status src/x.cpp`); for paths it is a component
-boundary. **Built-in defaults**: `read`, `write` and `edit` deny `**/.env` and
+boundary.
+
+**Bash stages.** The scanner (tree-sitter-bash) decomposes the command line
+into one subject per `command` node — pipeline stages, `;`/`&&`/`||` list
+members, subshell and `$(...)` bodies, `env-prefix` command after the
+assignments. Rules apply per mode:
+
+- **allow**: a conjunction — *every* stage must match some allow rule, or no
+  rule applies at all. `"git status" + "wc *"` covers `git status | wc -l`;
+  `git status | tee out` prompts (the `tee` stage is uncovered). An allow rule
+  can no longer match through a whole-line prefix: `git diff; make install`
+  never rides `git diff *`.
+- **ask / deny**: match the whole line **or any stage** — `"rm *": deny`
+  denies `ls | rm -rf /` even though `ls` matches nothing.
+
+Inert output (`2>/dev/null`, `2>&1`, `2>&-`) does not affect stages; a real
+output redirect (`>`, `>>`, `&>`, `2>` to a path) does not block matching, but
+an **incomplete** parse (`$X args`, `eval "$CMD"`) yields no stages, so allow
+rules cannot fire and only ask/deny whole-line rules apply. `time`/`coproc` in
+the command slot are demoted (their real program is the stage); a quoted
+spelling (`'time' make`) is not a keyword and stays in the stage. **Built-in defaults**: `read`, `write` and `edit` deny `**/.env` and
 `**/.env.*` — living in the default layer, any operator `pattern_overrides`
 entry for that tool replaces them wholesale (write your own deny back in if
 you also allow something).

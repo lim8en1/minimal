@@ -12,7 +12,10 @@ registering `bash`.
 - **Tool**: `bash` — commands run through `/bin/sh -c` (operator-swappable via
   `shell`). Category Execute, Ask by default: the permission gate IS the
   boundary; there is no allowlist. Invocations disclose the binaries they name,
-  by resolved path, and the operator may grant them for the session.
+  by resolved path, and the operator may grant them for the session. Config-level
+  `pattern_overrides` for bash match per **stage** (see docs/CONFIGURATION.md):
+  an allow rule must cover every stage of the command line, ask/deny rules
+  match any stage.
 - **Background bash**: the same command string through the same gate, but the
   call returns immediately. Tasks are killable (`kill -- -PID` from a later
   call) and killed when the session ends; a process-global SIGKILL sweep at

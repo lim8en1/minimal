@@ -59,6 +59,53 @@ std::string_view NodeText(TSNode node, std::string_view src) {
     return src.substr(start, ts_node_end_byte(node) - start);
 }
 
+std::string_view Trim(std::string_view text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) return {};
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+// A redirect that WRITES, vs one inert to a file-permission model. The
+// operator is an ANONYMOUS child of file_redirect, so it is invisible to
+// named-child iteration: `2>&1`/`>&-` name only file descriptors; `< f` is
+// input-only; `2>/dev/null` names the one file nobody wants a rule about.
+// Everything else -- `> f`, `>> f`, `&> f`, `2> f` -- is treated as a write.
+// An expansion target or unknown shape is a write too: this is best-effort
+// classification feeding the safe direction.
+bool RedirectWrites(TSNode redirect, std::string_view src) {
+    const std::uint32_t all = ts_node_child_count(redirect);
+    // First pass over ALL children (the operator is anonymous): find the
+    // operator and, for output ops, the destination word next to it.
+    std::optional<std::string_view> output_op;
+    for (std::uint32_t i = 0; i < all; ++i) {
+        const TSNode child = ts_node_child(redirect, i);
+        if (ts_node_is_named(child)) continue;
+        const std::string_view op = NodeText(child, src);
+        if (op == "<") {
+            return false;  // input redirect: opens for reading, writes nothing
+        }
+        if (op == ">&" || op == ">&-") continue;  // fd-dup / fd-close: inert
+        if (op == ">" || op == ">>" || op == "&>" || op == "&>>" || op == ">|") {
+            output_op = op;
+            break;
+        }
+    }
+    if (!output_op) return false;  // no redirect operator at all (or fd-only)
+    // Output operator: inert only when the destination is /dev/null. The
+    // destination is the next named child after the operator (word/expansion);
+    // an fd-dup NUMBER target was excluded above by the operator set.
+    const std::uint32_t n = ts_node_named_child_count(redirect);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        const TSNode child = ts_node_named_child(redirect, i);
+        const std::string type = ts_node_type(child);
+        if (type == "file_descriptor") continue;
+        if (type == "word" && NodeText(child, src) == "/dev/null") return false;
+        return true;  // destination exists and is a real file (or unreadable shape)
+    }
+    return true;  // operator with no recognizable destination: assume a write
+}
+
 // The node kinds a command_name (or one of its children) may be built from
 // while still spelling a literal program. Anything else -- simple_expansion,
 // command_substitution, variable_name, ... -- means the program is computed,
@@ -121,6 +168,8 @@ public:
             stack.pop_back();
             const std::string type = ts_node_type(node);
             const std::uint32_t n = ts_node_named_child_count(node);
+            if (type == "command") RecordStage(node);
+            if (type == "file_redirect" && RedirectWrites(node, src_)) out_.allow_eligible = false;
             if (type == "command_name") {
                 if (HandleCommandName(node)) continue;
                 // The program is computed, not named ($X args, foo$(nproc)
@@ -136,6 +185,51 @@ public:
             // Pushed in reverse so children are VISITED in order: disclosure
             // order is the command's order, and tests assert on it.
             for (std::uint32_t i = n; i-- > 0;) stack.push_back(ts_node_named_child(node, i));
+        }
+    }
+
+    // One stage per `command` node, wherever the grammar puts one -- top level,
+    // pipeline stage, subshell, do-group, command substitution. Stage text is
+    // the node's raw text with leading variable_assignments stripped (an env
+    // prefix is not part of the program a rule names) and a reserved word in
+    // the command slot (`time`, `coproc`) dropped the same way command_words
+    // demotes it. Substitution stages included: the allow conjunction must
+    // cover EVERY program the parse names, which is exactly the grant model.
+    void RecordStage(TSNode node) {
+        const std::uint32_t n = ts_node_named_child_count(node);
+        std::uint32_t first = 0;
+        while (first < n &&
+               std::string_view(ts_node_type(ts_node_named_child(node, first))) ==
+                   "variable_assignment") {
+            ++first;
+        }
+        if (first < n &&
+            std::string_view(ts_node_type(ts_node_named_child(node, first))) ==
+                "command_name") {
+            // A quoted spelling ('time' make) is NOT the reserved word -- trim
+            // before comparing, or a quoted program name would be demoted.
+            const std::string_view name = Trim(NodeText(ts_node_named_child(node, first), src_));
+            if (name.find_first_of("'\"") != std::string_view::npos) {
+                // Quoted: treat as a program argument word, never a keyword.
+            } else if (IsReservedWord(name)) {
+                ++first;  // `time`/`coproc`: not the program
+            }
+        }
+        if (first >= n) return;  // bare assignments: no stage to speak of
+        // The stage is the WHOLE remainder of the command node -- program and
+        // arguments -- not just the program word: "git status" must come out
+        // of `git status -C x`, or argument-bearing rules could never match.
+        // Named children only, so inter-child trivia (the space between words)
+        // is skipped and the span starts at the first meaningful child.
+        const TSNode first_child = ts_node_named_child(node, first);
+        const TSNode last_child = ts_node_named_child(node, n - 1);
+        const std::string_view span(
+            src_.substr(ts_node_start_byte(first_child),
+                        ts_node_end_byte(last_child) - ts_node_start_byte(first_child)));
+        const std::string_view trimmed = Trim(span);
+        if (trimmed.empty()) return;
+        if (std::find(out_.stages.begin(), out_.stages.end(), trimmed) == out_.stages.end()) {
+            out_.stages.emplace_back(trimmed);
         }
     }
 
@@ -233,6 +327,12 @@ ScanResult ScanCommand(std::string_view command) {
     // Either way there is nothing to grant, and a complete disclosure with
     // nothing in it would satisfy the conjunction vacuously.
     if (result.command_words.empty()) result.complete = false;
+
+    // Allow rules act on stages only when the parse named every program and
+    // nothing writes a file. Anything shakier degrades to whole-line matching
+    // for ask/deny and to the category default for allow -- never to a wider
+    // allow than the operator wrote.
+    if (!result.complete || result.stages.empty()) result.allow_eligible = false;
     return result;
 }
 

@@ -196,6 +196,18 @@ public:
         return path_confinement_supported() ? ExtractPath(input) : std::nullopt;
     }
 
+    // Per-stage subjects for tools whose single subject is a compound of
+    // independently-ruleable parts (bash: the pipeline/list stages). Default:
+    // none -- the executor then matches PatternSubject alone. Stages ride the
+    // SAME glob rules as the whole-line subject; the executor decides how a
+    // rule interacts with the set (see permission.hpp PatternSubjects). A
+    // wrapper must forward this like every other declarative virtual.
+    virtual std::optional<std::vector<std::string>> PatternStages(
+        const nlohmann::json& input) const {
+        (void)input;
+        return std::nullopt;
+    }
+
     // Declarative opt-in, same shape as path_confinement_supported(): a tool
     // that reaches the network (S3's web_fetch/web_search) sets this true so
     // ToolExecutor folds in PermissionPolicy::network via most_restrictive.

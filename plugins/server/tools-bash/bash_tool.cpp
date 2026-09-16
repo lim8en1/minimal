@@ -240,6 +240,22 @@ public:
         return command;
     }
 
+    // Stages: what the scanner already parses out of the command string (one
+    // per `command` node -- pipeline stages, subshells, substitutions), handed
+    // to the pattern layer. Eligibility is the scanner's call: when the parse
+    // is shaky or a stage writes a file, the fold keeps allow rules off and
+    // this list is inert extra matching surface for ask/deny rules.
+    std::optional<std::vector<std::string>> PatternStages(
+        const nlohmann::json& input) const override {
+        if (!input.is_object() || !input.contains("command") ||
+            !input.at("command").is_string()) {
+            return std::nullopt;
+        }
+        const auto command = input.at("command").get<std::string>();
+        if (command.find_first_not_of(" \t\r\n") == std::string::npos) return std::nullopt;
+        return ScanCommand(command).stages;
+    }
+
     // Bash keeps the interface default for path confinement: there is no sound
     // way to know which paths an arbitrary command touches. A background
     // command is the same command string through the same shell, so disclosure

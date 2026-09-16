@@ -57,6 +57,24 @@ namespace minimal::tools_bash {
 // anything about a program that was never disclosed.
 struct ScanResult {
     std::vector<std::string> command_words;  // in first-appearance order, deduplicated
+    // One entry per `command` node the tree contains (top level and nested:
+    // subshells, substitutions, do-groups), in tree order -- the trimmed text
+    // of the whole simple command, leading `variable_assignment`s stripped and
+    // `time`/`coproc` in the command slot demoted to what follows them. This
+    // is what per-stage pattern matching runs over: "git *" should match the
+    // stage `git status` of `git status | wc -l`, not the whole line.
+    std::vector<std::string> stages;
+    // Whether an `allow` pattern rule may act on `stages`. This is the PERMIT
+    // direction of the old reject-the-metacharacters scanner: it does not gate
+    // execution, only whether a config allow can skip the prompt, so failure
+    // is always the safe direction (the Ask default stands). Ineligible when
+    // the parse was not complete, no stages were found, or ANY stage writes to
+    // a file -- an output redirect is a write the pattern layer has no rules
+    // for (`git diff > /tmp/x` is not what "allow git diff" said). An inert
+    // redirect stays eligible: fd dups (`2>&1`, `2>&-`) carry no path, and a
+    // target of `/dev/null` writes nothing anyone wants a rule about.
+    bool allow_eligible = true;
+
     bool complete = true;
 };
 
