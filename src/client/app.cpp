@@ -1979,7 +1979,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 if (ui.chat) next = ui.chat->ToggleThinkingFold();
             }
             if (next.has_value()) {
-                minimal::client::SaveFoldDefaults(env.config_dir, next, std::nullopt);
+                // Same feedback shape /theme uses: a transient tab notice,
+                // not a status-bar segment -- the rows just flipped visibly;
+                // the notice names the state and whether it persisted.
+                const bool saved =
+                    minimal::client::SaveFoldDefaults(env.config_dir, next, std::nullopt);
+                app->TabNotice(session_id,
+                               std::string("thinking rows: ") +
+                                   (*next == kFoldCollapsed ? "collapsed" : "expanded") +
+                                   (saved ? " (saved)" : " -- ui.json NOT updated"));
             }
         },
         [&](const std::string& session_id) {
@@ -1988,7 +1996,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 if (ui.chat) next = ui.chat->ToggleToolFold();
             }
             if (next.has_value()) {
-                minimal::client::SaveFoldDefaults(env.config_dir, std::nullopt, next);
+                const bool saved =
+                    minimal::client::SaveFoldDefaults(env.config_dir, std::nullopt, next);
+                app->TabNotice(session_id,
+                               std::string("tool rows: ") +
+                                   (*next == kFoldCollapsed ? "collapsed" : "expanded") +
+                                   (saved ? " (saved)" : " -- ui.json NOT updated"));
             }
         },
         *pasting,

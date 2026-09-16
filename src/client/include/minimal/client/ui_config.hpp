@@ -96,7 +96,10 @@ void SaveThemePreference(const std::filesystem::path& config_dir, const std::str
 // fold toggle did not run this session. Same best-effort discipline as
 // SaveThemePreference: the in-session toggles have already applied, this only
 // records them for the next launch. Creates the config dir when missing.
-void SaveFoldDefaults(const std::filesystem::path& config_dir,
+// Returns whether the file was written -- the toggle's feedback notice says
+// "(saved)" only when this landed (a malformed/unreadable ui.json is warned
+// about and left untouched).
+bool SaveFoldDefaults(const std::filesystem::path& config_dir,
                       std::optional<int> thinking, std::optional<int> tools);
 
 }  // namespace minimal::client

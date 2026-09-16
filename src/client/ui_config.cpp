@@ -164,9 +164,9 @@ void SaveThemePreference(const std::filesystem::path& config_dir, const std::str
     });
 }
 
-void SaveFoldDefaults(const std::filesystem::path& config_dir,
+bool SaveFoldDefaults(const std::filesystem::path& config_dir,
                       std::optional<int> thinking, std::optional<int> tools) {
-    UpdateUiJson(config_dir, "fold defaults", [&](nlohmann::json& doc) {
+    return UpdateUiJson(config_dir, "fold defaults", [&](nlohmann::json& doc) {
         if (thinking.has_value()) doc["fold_thinking"] = FoldName(*thinking);
         if (tools.has_value()) doc["fold_tools"] = FoldName(*tools);
     });
