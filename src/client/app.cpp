@@ -933,7 +933,16 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto quit = screen.ExitLoopClosure();
 
     // --- frame state (loop thread only) --------------------------------------
-    PromptEditorState prompt_state;
+    // Per-tab prompt editors (prompt_editor.hpp): one PromptEditorState per
+    // tab -- a draft, its @-mention list and debounce are THAT tab's, and a
+    // tab switch keeps the other tab's draft intact -- plus the ONE shared
+    // recall timeline (up-arrow history is app-scoped by design). The host
+    // component swaps the focused tab's editor in live, at render and event
+    // time; the pre-tab "" entry serves the empty-app frame (typing there
+    // submits through focused_or_new_tab, which opens a tab -- exactly the
+    // old single-editor behavior).
+    minimal::client::PerTabPromptEditors prompt_editors;
+    minimal::client::PromptHistory prompt_history;
     bool show_panel = false;
     bool show_picker = false;
     bool show_agent_picker = false;
@@ -969,6 +978,10 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto close_tab = [&](const std::string& id) {
         app->CloseTab(id);
         tab_ui.erase(id);
+        // The tab's editor dies WITH the tab (state AND component together --
+        // the component's closures captured the state's address; neither may
+        // outlive the other). The "" pre-tab entry is never forgotten.
+        prompt_editors.ForgetTab(id);
     };
 
     // Picker-open lambdas, assigned after PickerController exists (below):
@@ -1022,6 +1035,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto mention_query = std::make_shared<MentionQuery>();
     auto suggest = [app, mention_query](
                        const std::string& prefix) -> std::optional<std::vector<std::string>> {
+        // The query slot is ONE shared struct, so the tab id rides the scope
+        // key: per-tab editors mean two tabs can each have an '@' query
+        // armed, and a stale answer for the other tab must be dropped by the
+        // scope/prefix mismatch guards (here and in the callbacks below)
+        // rather than spliced into the wrong editor.
+        const std::string tab = app->FocusedTabId();
         const std::string sid = app->FocusedSessionId();
         if (prefix.empty()) return std::vector<std::string>{};
 
@@ -1036,12 +1055,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         bool session_scoped = false;
         std::string root;
         if (!sid.empty()) {
-            scope = "session:" + sid;
+            scope = "tab:" + tab + ";session:" + sid;
             session_scoped = true;
         } else {
             root = minimal::client::CurrentProjectRootOrEmpty();
             if (root.empty()) return std::vector<std::string>{};
-            scope = "root:" + root;
+            scope = "tab:" + tab + ";root:" + root;
         }
 
         std::lock_guard lk(mention_query->mtx);
@@ -1454,10 +1473,16 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // key it would otherwise bind, so HandleGlobalKey needs to know a paste
     // is in progress to defer to the editor instead of firing the action.
     const auto pasting = std::make_shared<bool>(false);
-    auto editor = minimal::client::MakePromptEditor(
-        theme, prompt_state,
-        submit_chat,
-        submit_command,
+    // The factory closure RunTui owned for the single editor, unchanged
+    // except for taking the per-tab state as its argument. Invoked at most
+    // once per tab (prompt_editor.cpp's Resolve), on the FTXUI loop thread,
+    // so capturing RunTui locals by reference is as safe as it was before --
+    // they all outlive the frame loop.
+    auto build_prompt_editor = [&](minimal::client::PromptEditorState& state) {
+        return minimal::client::MakePromptEditor(
+            theme, state,
+            submit_chat,
+            submit_command,
         suggest,
         // Explicit trailing return type: a bare `{ return command_catalog; }`
         // deduces BY VALUE (auto return-type deduction never deduces a
@@ -1476,7 +1501,17 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // tab is offered only what would not be refused there.
         [&app]() { return !app->FocusedSessionId().empty(); },
         [&app]() { return app->FocusedTabIsSubagent(); },
-        pasting);
+        pasting,
+        // Recall is app-scoped: every tab's editor records into and recalls
+        // from the ONE timeline (see prompt_editor.hpp's PromptHistory).
+        &prompt_history);
+    };
+    // The stable FTXUI tree node: resolves the FOCUSED tab's editor at
+    // render AND event time (a key in the same frame as a tab switch lands
+    // in the tab focused at event time -- the same rule the submit paths
+    // follow via focused_or_new_tab).
+    auto editor = minimal::client::MakePerTabPromptEditor(
+        prompt_editors, [&app] { return app->FocusedTabId(); }, build_prompt_editor);
 
     // --- permission modal (inner swapped per outstanding request) -------------
     // The host is a STABLE component in the tree; its inner component is
@@ -1669,9 +1704,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         [&app]() { return app->FocusedTabIsSubagent(); },
         &commands_help_reset,
         // Enter inserts "/name " with the caret after it, ready for args.
-        [&prompt_state](const std::string& name) {
-            prompt_state.content = "/" + name + " ";
-            prompt_state.cursor_position = static_cast<int>(prompt_state.content.size());
+        // The overlay is app-wide; the insert lands in whatever tab is
+        // focused when the user picks a command (CurrentState("" on an
+        // empty app = the pre-tab editor, the same resolution the host
+        // itself uses).
+        [&prompt_editors, &app](const std::string& name) {
+            minimal::client::PromptEditorState& state =
+                prompt_editors.CurrentState(app->FocusedTabId());
+            state.content = "/" + name + " ";
+            state.cursor_position = static_cast<int>(state.content.size());
         });
 
     // --- plugin views (panel region + modal layer) -----------------------------
@@ -2000,7 +2041,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
         },
         *pasting,
-        [&] { return prompt_state.list_open; }};
+        [&prompt_editors, &app] { return prompt_editors.CurrentState(app->FocusedTabId()).list_open; }};
     auto with_keys = CatchEvent(session_view, [&](const Event& event) {
         return minimal::client::HandleGlobalKey(key_ctx, event);
     });
@@ -2156,7 +2197,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 }
             }
             const bool debounce_pending =
-                prompt_state.query_pending_hint.load(std::memory_order_acquire) ||
+                prompt_editors.QueryPendingHint(app->FocusedTabId()) ||
                 minimal::client::StreamingMarkdownView::PendingReparseHint().load(
                     std::memory_order_acquire) ||
                 running_tool_redraw_due;

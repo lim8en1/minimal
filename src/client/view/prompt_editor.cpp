@@ -144,6 +144,26 @@ std::string CommandPrefixOf(const std::string& text) {
 
 }  // namespace
 
+void PromptHistory::Record(const std::string& line) {
+    // Skip a consecutive duplicate of the last entry -- repeatedly
+    // submitting the same line, or repeating what recall just brought back,
+    // should not grow the list every time.
+    if (!entries.empty() && entries.back() == line) {
+        cursor.reset();
+        return;
+    }
+    entries.push_back(line);
+    // Bounded: a long-lived TUI session otherwise kept every submitted line
+    // for the process's whole life. 500 recent entries is far past what
+    // arrow-up recall is used for.
+    constexpr std::size_t kMaxHistoryEntries = 500;
+    if (entries.size() > kMaxHistoryEntries) {
+        entries.erase(entries.begin(),
+                      entries.begin() + static_cast<long>(entries.size() - kMaxHistoryEntries));
+    }
+    cursor.reset();
+}
+
 ftxui::Component MakePromptEditor(
     const Theme& theme, PromptEditorState& state,
     std::function<void(const std::string&)> on_text,
@@ -152,8 +172,16 @@ ftxui::Component MakePromptEditor(
     CommandCatalogSource command_catalog,
     std::function<bool()> session_available,
     std::function<bool()> subagent_read_only,
-    std::shared_ptr<bool> pasting) {
+    std::shared_ptr<bool> pasting, PromptHistory* history) {
     using namespace ftxui;
+    // Null (every pre-existing call site): a private timeline, same behavior
+    // as before, no cross-editor sharing. OWNED BY THE CLOSURES (a shared_ptr
+    // captured below), never a factory stack local -- the component outlives
+    // this call, and a reference to a dangled local is exactly the trap the
+    // capture-list comment below documents for on_text/on_command.
+    std::shared_ptr<PromptHistory> owned_history =
+        history != nullptr ? nullptr : std::make_shared<PromptHistory>();
+    PromptHistory& hist = history != nullptr ? *history : *owned_history;
 
     // Multiline ON: Return-as-newline is the Input's default, so the submit
     // decision is ours -- CatchEvent sees every event first. cursor_position
@@ -242,7 +270,7 @@ ftxui::Component MakePromptEditor(
     // binding to an object the caller (RunTui) owns for the app's lifetime,
     // which outlives this component.
     auto with_events = CatchEvent(
-        input, [&state, accept_suggestion, on_text, on_command,
+        input, [&state, &hist, owned_history, accept_suggestion, on_text, on_command,
                 command_catalog, pasting, mouse_map](const Event& event) {
         // Bracketed paste (DECSET 2004): the terminal wraps a paste in
         // \x1b[200~ ... \x1b[201~ and every line break inside it arrives as
@@ -362,23 +390,12 @@ ftxui::Component MakePromptEditor(
             }
             if (line.empty()) return true;
             // Recall history (no arrow-up-to-recall was one of the editor's
-            // named gaps): skip a consecutive duplicate of the last entry --
-            // repeatedly submitting the same line, or repeating what recall
-            // just brought back, should not grow the list every time.
-            if (state.history.empty() || state.history.back() != line) {
-                state.history.push_back(line);
-                // Bounded: a long-lived TUI session otherwise kept every
-                // submitted line for the process's whole life. 500 recent
-                // entries is far past what arrow-up recall is used for.
-                constexpr std::size_t kMaxHistoryEntries = 500;
-                if (state.history.size() > kMaxHistoryEntries) {
-                    state.history.erase(state.history.begin(),
-                                        state.history.begin() +
-                                            static_cast<long>(state.history.size() -
-                                                              kMaxHistoryEntries));
-                }
-            }
-            state.history_cursor.reset();
+            // named gaps). The timeline lives in PromptHistory -- per-tab
+            // editors share ONE app-scoped instance (RunTui passes the same
+            // pointer to every tab's editor), so up-arrow continuity holds
+            // across tab switches; dedup and the 500-entry bound are
+            // Record's.
+            hist.Record(line);
             if (line.front() == '/') {
                 on_command(line);
             } else {
@@ -416,15 +433,15 @@ ftxui::Component MakePromptEditor(
         // recalling history over it silently discarded the draft. Falling
         // through hands the event to the wrapped Input, which already moves
         // the cursor up a visual line for multi-line content.
-        if (!state.list_open && event == Event::ArrowUp && !state.history.empty() &&
+        if (!state.list_open && event == Event::ArrowUp && !hist.entries.empty() &&
             state.content.find('\n') == std::string::npos) {
-            if (!state.history_cursor.has_value()) {
-                state.history_draft = state.content;
-                state.history_cursor = state.history.size() - 1;
-            } else if (*state.history_cursor > 0) {
-                --*state.history_cursor;
+            if (!hist.cursor.has_value()) {
+                hist.draft = state.content;
+                hist.cursor = hist.entries.size() - 1;
+            } else if (*hist.cursor > 0) {
+                --*hist.cursor;
             }
-            state.content = state.history[*state.history_cursor];
+            state.content = hist.entries[*hist.cursor];
             // FTXUI's Input only CLAMPS cursor_position into content's new
             // bounds after an external splice -- it never MOVES it -- so
             // without this the caret stayed wherever it was in the PREVIOUS
@@ -434,13 +451,13 @@ ftxui::Component MakePromptEditor(
             state.cursor_position = static_cast<int>(state.content.size());
             return true;
         }
-        if (!state.list_open && event == Event::ArrowDown && state.history_cursor.has_value()) {
-            if (*state.history_cursor + 1 < state.history.size()) {
-                ++*state.history_cursor;
-                state.content = state.history[*state.history_cursor];
+        if (!state.list_open && event == Event::ArrowDown && hist.cursor.has_value()) {
+            if (*hist.cursor + 1 < hist.entries.size()) {
+                ++*hist.cursor;
+                state.content = hist.entries[*hist.cursor];
             } else {
-                state.history_cursor.reset();
-                state.content = state.history_draft;
+                hist.cursor.reset();
+                state.content = hist.draft;
             }
             state.cursor_position = static_cast<int>(state.content.size());
             return true;
@@ -463,7 +480,7 @@ ftxui::Component MakePromptEditor(
             // Editing a recalled line exits browsing -- it is no longer the
             // same text as history[cursor], so further up/down should not
             // silently discard what was just typed.
-            state.history_cursor.reset();
+            hist.cursor.reset();
         }
 
         // Click-to-position, re-implemented from the render pass's geometry
@@ -791,6 +808,107 @@ ftxui::Component MakePromptEditor(
         }
         return vbox(std::move(lines));
     });
+}
+
+// The per-tab editor host. A ComponentBase subclass, NOT a
+// Renderer+CatchEvent composition -- for the reason modal_host.cpp
+// documents at length: a plain composition never registers the swapped-in
+// child as a real ftxui child, so Focusable()/ActiveChild() fall back to
+// ComponentBase's defaults (no children), Focused() is false along the whole
+// container chain above, and every keystroke is dropped before it can reach
+// the editor. Overriding the pair to defer to the LIVE slot is what keeps
+// the host (and therefore the editor, and therefore the Input) visible to
+// ftxui's own focus machinery.
+class PerTabEditorHost : public ftxui::ComponentBase {
+public:
+    PerTabEditorHost(PerTabPromptEditors& tabs, std::function<std::string()> focused_tab,
+                     std::function<ftxui::Component(PromptEditorState&)> build_editor)
+        : tabs_(tabs), focused_tab_(std::move(focused_tab)), build_editor_(std::move(build_editor)) {}
+
+private:
+    ftxui::Component resolve() { return tabs_.Resolve(focused_tab_(), build_editor_); }
+
+    ftxui::Element OnRender() override {
+        ftxui::Component editor = resolve();
+        // emptyElement (not a default-constructed Element): the frame always
+        // reserves the editor's row (kCriticalHeight), so the no-editor
+        // frame must render an empty node, not hand ftxui a null pointer.
+        return editor ? editor->Render() : ftxui::emptyElement();
+    }
+
+    bool OnEvent(ftxui::Event event) override {
+        // Resolved LIVE: a key arriving in the same frame as a tab switch
+        // lands in the tab focused at event time -- the same rule the submit
+        // paths follow via focused_or_new_tab. Unhandled events return false
+        // and keep propagating up (to with_keys' HandleGlobalKey and the
+        // outer containers), the same posture as any leaf component.
+        ftxui::Component editor = resolve();
+        return editor != nullptr && editor->OnEvent(std::move(event));
+    }
+
+    // The ModalHost contract: being the focused tab's editor IS being the
+    // active thing. Both defer to the live slot, so Focused()'s walk from
+    // the root (through the modal stack, with_keys, session_view) terminates
+    // in the Input that should hold the keyboard.
+    bool Focusable() const override {
+        std::lock_guard lock(tabs_.mtx_);
+        const auto it = tabs_.editors_.find(focused_tab_());
+        return it != tabs_.editors_.end() && it->second != nullptr;
+    }
+
+    ftxui::Component ActiveChild() override { return resolve(); }
+
+    PerTabPromptEditors& tabs_;
+    std::function<std::string()> focused_tab_;
+    std::function<ftxui::Component(PromptEditorState&)> build_editor_;
+};
+
+ftxui::Component MakePerTabPromptEditor(
+    PerTabPromptEditors& tabs, std::function<std::string()> focused_tab,
+    std::function<ftxui::Component(PromptEditorState&)> build_editor) {
+    return Make<PerTabEditorHost>(tabs, std::move(focused_tab), std::move(build_editor));
+}
+
+// --- PerTabPromptEditors -----------------------------------------------------
+
+ftxui::Component PerTabPromptEditors::Resolve(
+    const std::string& tab,
+    const std::function<ftxui::Component(PromptEditorState&)>& build) {
+    std::lock_guard lock(mtx_);
+    auto& slot = editors_[tab];
+    if (slot == nullptr) {
+        // build() runs under the mutex: build_editor_ captures RunTui locals
+        // by reference and only ever runs on the FTXUI loop thread (this and
+        // OnEvent), so the lock is uncontended in practice -- it exists for
+        // the pump's QueryPendingHint, not for reentrancy.
+        slot = build(states_[tab]);
+    }
+    return slot;
+}
+
+PromptEditorState& PerTabPromptEditors::CurrentState(const std::string& tab) {
+    std::lock_guard lock(mtx_);
+    return states_[tab];
+}
+
+bool PerTabPromptEditors::QueryPendingHint(const std::string& tab) const {
+    std::lock_guard lock(mtx_);
+    const auto it = states_.find(tab);
+    // find, not operator[]: a tab the pump peeked at must not have a state
+    // minted for it from another thread; absent means "nothing armed".
+    return it != states_.end() && it->second.query_pending_hint.load(std::memory_order_acquire);
+}
+
+void PerTabPromptEditors::ForgetTab(const std::string& tab) {
+    std::lock_guard lock(mtx_);
+    // The editor dies WITH its state: its closures captured the state's
+    // address, so erasing one without the other is the exact dangling bug
+    // class filterable_menu's lifetime guards document. The "" (pre-tab)
+    // entry is deliberately never forgotten -- it IS the app's no-tab editor.
+    if (!tab.empty()) {
+        states_.erase(tab);
+        editors_.erase(tab);
+    }
 }
 
 }  // namespace minimal::client

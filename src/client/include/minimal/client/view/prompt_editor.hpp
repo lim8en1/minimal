@@ -40,7 +40,9 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -79,19 +81,36 @@ struct PromptEditorState {
     // timer never actually elapses). A plain bool read cross-thread here
     // would be a data race (TSan-visible); this field exists solely to make
     // that read well-defined.
+    //
+    // PER-TAB now that the editor state itself is per-tab -- and the pump
+    // must read the FOCUSED tab's copy only: a background tab's debounce
+    // cannot fire (it fires from a render pass, and background tabs do not
+    // render), so ORing every tab's hint would read "armed" forever once any
+    // tab had typed an '@'.
     std::atomic<bool> query_pending_hint{false};
+    // PER-TAB note: one PromptEditorState lives in each TabUi (tab_ui.hpp);
+    // RunTui's single app-wide instance predates per-tab editors. The recall
+    // timeline deliberately did NOT follow: it is app-scoped (PromptHistory
+    // below).
+};
 
-    // Submitted-line recall (up/down arrow, readline-like), scoped to the
-    // whole app rather than per-tab -- one editor Component is shared across
-    // tabs, so one history is the simplest model that matches "what did I
-    // just type", regardless of which tab it went to.
-    std::vector<std::string> history;
-    // nullopt = editing fresh content, not browsing. An index into `history`
+// Submitted-line recall (up/down arrow, readline-like). APP-scoped by design
+// -- "what did I just type", regardless of which tab it went to -- unlike the
+// per-tab draft/suggestion state above: a timeline is the wrong thing to fork
+// per tab, and one shared instance is what keeps up-arrow continuity when a
+// user habitually fires the same command across sessions. One PromptHistory
+// is created by RunTui and passed to every editor (host-built or standalone);
+// a null `history` argument to MakePromptEditor gives that editor a private
+// one (every existing test call site), which behaves identically in-editor.
+struct PromptHistory {
+    void Record(const std::string& line);
+    std::vector<std::string> entries;
+    // nullopt = editing fresh content, not browsing. An index into `entries`
     // while browsing.
-    std::optional<std::size_t> history_cursor;
+    std::optional<std::size_t> cursor;
     // The content that was live when browsing started, restored on arrowing
     // DOWN past the newest history entry.
-    std::string history_draft;
+    std::string draft;
 };
 
 // One /-command the editor may offer. From ListCommands, fetched once at
@@ -175,6 +194,79 @@ ftxui::Component MakePromptEditor(
     // same flag and defer to this editor -- rather than firing a bound
     // action -- while a macOS Option-glyph byte arrives mid-paste (see
     // key_event_parser.cpp's IsOptionGlyphEvent).
-    std::shared_ptr<bool> pasting = nullptr);
+    std::shared_ptr<bool> pasting = nullptr,
+    // Submitted-line recall (up/down arrow). Null (the default) gives the
+    // editor a PRIVATE one -- same behavior, no cross-editor sharing -- so
+    // every pre-existing call site is unchanged. RunTui passes ONE shared
+    // instance to every tab's editor: recall is app-scoped by design (see
+    // PromptHistory).
+    PromptHistory* history = nullptr);
+
+// THE PER-TAB PROMPT EDITOR. A stable outer component in the FTXUI tree that
+// owns one PromptEditorState + one editor Component PER TAB, built lazily on
+// first use and swapped in at Render()/OnEvent() time by resolving the
+// focused tab LIVE -- the MakeModalHost mechanics (a stable shell whose
+// inner slot swaps per request) applied to the editor, for the same reason:
+// FTXUI's InputOption binds `content`/`cursor_position` by POINTER at
+// construction, so one shared editor can never follow tab switches, and the
+// draft/mention state must die with the tab (TabUi) the way every other
+// per-tab UI cache does.
+//
+// The states/editors live in PerTabPromptEditors (below) rather than inside
+// the host component because three consumers resolve the CURRENT tab's state
+// from OUTSIDE the component tree: KeyContext::suggestions_open (busy-tab
+// Escape deferral), the /help overlay's insert-into-prompt callback, and
+// RunTui's redraw pump (query_pending_hint, read from the pump THREAD --
+// hence the mutex). The host references the same store; Render/OnEvent and
+// the outer readers all key by the same resolution rule.
+
+// Owns one PromptEditorState + one editor Component per tab. Loop-thread for
+// everything except QueryPendingHint (the pump; the mutex exists for it).
+// A missing entry for a tab the host resolves CREATES it lazily -- a tab
+// that never showed a prompt never pays for one.
+class PerTabPromptEditors {
+public:
+    // The editor for `tab`, built by `build` on first resolution. An empty
+    // `tab` is the PRE-TAB editor (the frame before any tab exists): typing
+    // there goes through the same submit paths, which open a tab on submit
+    // (app.cpp's focused_or_new_tab) -- exactly the old single-editor
+    // behavior. Loop-thread only (build may capture caller locals).
+    ftxui::Component Resolve(
+        const std::string& tab,
+        const std::function<ftxui::Component(PromptEditorState&)>& build);
+
+    // The state behind `tab` (same keying as Resolve), created if missing.
+    // Loop-thread only: the /help overlay's insert and suggestions_open use
+    // it; the reference stays valid until ForgetTab erases that tab.
+    PromptEditorState& CurrentState(const std::string& tab);
+
+    // The pump thread's read of the focused tab's debounce hint. find() only
+    // (no insert -- a tab the pump peeked at needs no state), false when
+    // absent. Safe against concurrent Resolve/ForgetTab.
+    bool QueryPendingHint(const std::string& tab) const;
+
+    // Tab close: drops the tab's state AND editor together (the editor's
+    // closures capture the state's address; neither may outlive the other).
+    // The "" pre-tab entry is never forgotten.
+    void ForgetTab(const std::string& tab);
+
+private:
+    // Guards both maps (structure AND node lifetime). Everything on the FTXUI
+    // loop thread takes it briefly to resolve; the pump takes it to read one
+    // atomic. State FIELD writes stay lock-free after resolution: they are
+    // loop-thread-only (prompt_editor.cpp), and the one cross-thread field,
+    // query_pending_hint, is itself atomic.
+    mutable std::mutex mtx_;
+    std::map<std::string, PromptEditorState> states_;
+    std::map<std::string, ftxui::Component> editors_;
+
+    // The host's Focusable() override peeks at editors_ without going through
+    // Resolve (a peek must not build). Same module, one line, kept deliberate.
+    friend class PerTabEditorHost;
+};
+
+ftxui::Component MakePerTabPromptEditor(PerTabPromptEditors& tabs,
+                                        std::function<std::string()> focused_tab,
+                                        std::function<ftxui::Component(PromptEditorState&)> build_editor);
 
 }  // namespace minimal::client

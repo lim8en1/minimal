@@ -2592,10 +2592,12 @@ TEST_CASE("prompt editor: up-arrow recalls the last submitted line, down-arrow "
          "[prompt_editor]") {
     const auto theme = TestTheme();
     PromptEditorState state;
+    PromptHistory hist;   // explicit: the assertions below read the timeline
     std::vector<std::string> texts;
     auto editor = MakePromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
-        [](const std::string&) {}, [](const std::string&) { return std::vector<std::string>{}; });
+        [](const std::string&) {}, [](const std::string&) { return std::vector<std::string>{}; },
+        nullptr, nullptr, nullptr, nullptr, &hist);
 
     Type(editor, "first message");
     REQUIRE(SendEvent(editor, ftx::Event::Return));
@@ -2611,7 +2613,7 @@ TEST_CASE("prompt editor: up-arrow recalls the last submitted line, down-arrow "
 
     REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
     CHECK(state.content == "unsent draft");   // the draft survives the round trip
-    CHECK_FALSE(state.history_cursor.has_value());
+    CHECK_FALSE(hist.cursor.has_value());
 }
 
 TEST_CASE("prompt editor: up-arrow walks further back through older entries, "
@@ -2619,9 +2621,11 @@ TEST_CASE("prompt editor: up-arrow walks further back through older entries, "
          "[prompt_editor]") {
     const auto theme = TestTheme();
     PromptEditorState state;
+    PromptHistory hist;   // explicit: the assertions below read the timeline
     auto editor = MakePromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
-        [](const std::string&) { return std::vector<std::string>{}; });
+        [](const std::string&) { return std::vector<std::string>{}; },
+        nullptr, nullptr, nullptr, nullptr, &hist);
 
     Type(editor, "one");
     REQUIRE(SendEvent(editor, ftx::Event::Return));
@@ -2656,9 +2660,11 @@ TEST_CASE("prompt editor: up-arrow inside a multi-line draft does not recall "
     // recall the last history entry over it instead of moving the cursor.
     const auto theme = TestTheme();
     PromptEditorState state;
+    PromptHistory hist;   // explicit: the assertions below read the timeline
     auto editor = MakePromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
-        [](const std::string&) { return std::vector<std::string>{}; });
+        [](const std::string&) { return std::vector<std::string>{}; },
+        nullptr, nullptr, nullptr, nullptr, &hist);
 
     Type(editor, "first message");
     REQUIRE(SendEvent(editor, ftx::Event::Return));   // seed history
@@ -2670,39 +2676,43 @@ TEST_CASE("prompt editor: up-arrow inside a multi-line draft does not recall "
 
     SendEvent(editor, ftx::Event::ArrowUp);
     CHECK(state.content == "line one\nline two");   // draft untouched, not recalled
-    CHECK_FALSE(state.history_cursor.has_value());
+    CHECK_FALSE(hist.cursor.has_value());
 }
 
 TEST_CASE("prompt editor: a consecutive duplicate submission does not grow history",
          "[prompt_editor]") {
     const auto theme = TestTheme();
     PromptEditorState state;
+    PromptHistory hist;   // explicit: the assertions below read the timeline
     auto editor = MakePromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
-        [](const std::string&) { return std::vector<std::string>{}; });
+        [](const std::string&) { return std::vector<std::string>{}; },
+        nullptr, nullptr, nullptr, nullptr, &hist);
 
     Type(editor, "same line");
     REQUIRE(SendEvent(editor, ftx::Event::Return));
     Type(editor, "same line");
     REQUIRE(SendEvent(editor, ftx::Event::Return));
-    CHECK(state.history.size() == 1);
+    CHECK(hist.entries.size() == 1);
 }
 
 TEST_CASE("prompt editor: typing while browsing history exits browse mode",
          "[prompt_editor]") {
     const auto theme = TestTheme();
     PromptEditorState state;
+    PromptHistory hist;   // explicit: the assertions below read the timeline
     auto editor = MakePromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
-        [](const std::string&) { return std::vector<std::string>{}; });
+        [](const std::string&) { return std::vector<std::string>{}; },
+        nullptr, nullptr, nullptr, nullptr, &hist);
 
     Type(editor, "old entry");
     REQUIRE(SendEvent(editor, ftx::Event::Return));
     REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
-    REQUIRE(state.history_cursor.has_value());
+    REQUIRE(hist.cursor.has_value());
 
     REQUIRE(SendEvent(editor, ftx::Event::Character("!")));
-    CHECK_FALSE(state.history_cursor.has_value());
+    CHECK_FALSE(hist.cursor.has_value());
     CHECK(state.content == "old entry!");   // the edit itself is preserved
 }
 
