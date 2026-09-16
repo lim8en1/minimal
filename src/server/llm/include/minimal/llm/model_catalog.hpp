@@ -47,6 +47,23 @@ struct DiscoveredModel {
     std::optional<int> max_tokens;
 };
 
+// The effort ladder a catalog entry advertises, from its metadata's
+// `reasoning` object -- OpenRouter's live /models spelling (e.g.
+// {"mandatory": true, "supported_efforts": ["max","high","low"]}), which
+// ParseModelList stores verbatim in DiscoveredModel::metadata. The observed
+// shapes: supported_efforts present (a list of effort words), or only
+// mandatory/default_enabled (a reasoning toggle, no ladder), or nothing
+// reasoning-shaped at all. Returns the advertised effort words (unvalidated;
+// callers intersect with the known vocabulary); empty = no ladder, which is
+// also the answer for a toggle-only model. Tolerates every malformed shape by
+// degrading to empty -- the MaxCompletionTokens posture: a hostile or foreign
+// metadata body yields "no variants", never a guess.
+//
+// models.dev's normalized `reasoning_options` spelling
+// ([{"type":"effort","values":[...]}]) is ALSO read, so a Models.dev-style
+// catalog plugin (docs/EXTENSIBILITY.md deferred table) feeds this unchanged.
+std::vector<std::string> AdvertisedEfforts(const nlohmann::json& metadata);
+
 class ModelCatalog {
 public:
     virtual ~ModelCatalog() = default;

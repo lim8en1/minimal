@@ -87,7 +87,30 @@
               "only": ["anthropic"]
             }
           }
-        }
+        },
+
+        "//variants": "\"variants\" turns one model into several addressable effort variants: <model>@<name>. The LIST form names effort levels (known: low, medium, high, xhigh, max, minimal, none) and derives the wire parameters per backend -- anthropic entries get thinking:{type:enabled,budget_tokens:N} with a per-name budget (clamped to fit max_tokens), openai-shape entries get reasoning_effort. The MAP form (see below) writes the request fields explicitly instead. Variant refs appear in /model and --model like any model; the @suffix is never sent on the wire.",
+        "z-ai/glm-5.3-flash": {
+          "//2": "The list form: three one-word variants. Wire ids stay 'z-ai/glm-5.3-flash'.",
+          "context_window_tokens": 1310720,
+          "variants": ["low", "medium", "xhigh"]
+        },
+        "z-ai/glm-5.3-flash2": {
+          "//3": "The map form (opencode-style passthrough): a named variant body -- parameters verbatim, plus optional variant-scoped max_tokens / context_window_tokens. Unknown keys inside a body are a parse error.",
+          "context_window_tokens": 1310720,
+          "variants": {
+            "deep": {
+              "parameters": { "reasoning": { "effort": "high", "max_tokens": 32768 } }
+            },
+            "lean": {
+              "parameters": { "reasoning_effort": "low" },
+              "max_tokens": 16384
+            }
+          }
+        },
+
+        "//4": "A provider-level \"variants\" (either form) applies to EVERY model under the entry -- for a \"discover\": true entry it IS the autodiscovery recipe: models whose catalog advertises reasoning efforts get exactly these variants. With no recipe, discovery adds '@high' alone to every model that advertises an effort ladder (one picker row per reasoning model, not a flood).",
+        "variants": ["high"]
       }
     }
   },

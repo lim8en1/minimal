@@ -10,7 +10,9 @@
 #include "minimal/commands/command_context.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/file_lock.hpp"
+#include "minimal/common/model_ref.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/config/providers_config.hpp"
 #include "minimal/tools/atomic_write.hpp"
 #include "minimal/tools/permission.hpp"
 
@@ -332,6 +334,102 @@ public:
     }
 };
 
+// The effort-variant switcher (docs/CONFIGURATION.md's "reasoning-effort
+// variants"): `<model>@<name>` siblings are declared in providers.json or
+// synthesized by discovery, and /think flips the CURRENT session between them
+// without re-picking a model. Reads the session's current model ref, strips any
+// existing @suffix at the LAST '@' (SplitVariantSuffix -- the same rule Resolve
+// applies), and rebuilds the ref against the base. "/think off" drops the
+// suffix entirely (back to the base model); "/think <name>" resolves
+// <provider>/<base>@<name>, which is a MISS for an undeclared name -- reported
+// with the declared list, the DescribeModels habit, never a guess.
+//
+// Persistence follows ModelCommand exactly: set_model_override (survives /agent
+// re-resolve, visible to spawn inheritance) + ApplyModel + ApplyPreset. There
+// is deliberately no picker form: the bare /think answer is the list, and a
+// session's variants are a short hand-written set -- a client picker would be
+// surface ahead of need.
+class ThinkCommand : public HarnessCommand {
+public:
+    std::string_view Name() const override { return "think"; }
+    std::string_view Summary() const override {
+        return "Switch reasoning-effort variant of the current model";
+    }
+    std::string_view Usage() const override { return "/think [variant|off]"; }
+
+    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
+        const config::ModelRef current = context.session().preset_snapshot().model_ref;
+        if (current.provider.empty() || current.model.empty()) {
+            return CommandResult::Error("no model is active for this session yet");
+        }
+
+        const auto [base_id, current_variant] =
+            config::SplitVariantSuffix(current.model);
+        const std::vector<std::string> declared =
+            context.providers().VariantsOf(config::ModelRef{current.provider, base_id});
+
+        if (args.positional.empty()) {
+            if (declared.empty()) {
+                return CommandResult::Ok(
+                    "model '" + current.str() +
+                    "' declares no reasoning variants; declare them with a \"variants\" "
+                    "block in providers.json (or discovery may supply them)");
+            }
+            std::string list;
+            for (const auto& name : declared) {
+                list += std::string(name == current_variant ? " *" : "  ") + name;
+                list += name == current_variant ? " (current)" : "";
+                list += "\n";
+            }
+            return CommandResult::Ok("variants of " + current.provider + "/" + base_id +
+                                     ":\n" + list + "/think <variant> to switch, /think off "
+                                     "for the base model");
+        }
+
+        const std::string& wanted = args.positional.front();
+        if (wanted == "off") {
+            if (current_variant.empty()) {
+                return CommandResult::Ok("reasoning variant: none (base model already active)");
+            }
+            return SwitchTo(context, config::ModelRef{current.provider, base_id},
+                            "reasoning variant: off (base model " + base_id + ")");
+        }
+
+        if (!declared.empty() &&
+            std::find(declared.begin(), declared.end(), wanted) == declared.end()) {
+            std::string list;
+            for (const auto& name : declared) list += " " + name;
+            return CommandResult::Error("unknown variant '" + wanted + "' for " +
+                                        current.provider + "/" + base_id +
+                                        " (declared:" + list + ")");
+        }
+        // An undeclared name on a model with no declared variants at all still
+        // goes through Resolve: the error comes back from the config with the
+        // model-listing suggestion, which is honest for a discover-entry whose
+        // variants live behind a lazy fetch.
+        return SwitchTo(context, config::ModelRef{current.provider, base_id + "@" + wanted},
+                        "reasoning variant: " + wanted);
+    }
+
+private:
+    // The ModelCommand switch path, verbatim in effect: session-owned override
+    // first, then ApplyModel + ApplyPreset (which rebuilds the provider when
+    // the connection changed). Resolve errors surface as command errors.
+    static CommandResult SwitchTo(CommandContext& context, const config::ModelRef& ref,
+                                  const std::string& ok_message) {
+        const auto model = context.providers().Resolve(ref);
+        if (model == nullptr) {
+            return CommandResult::Error("unknown model '" + ref.str() +
+                                        "' (run /model with no arguments for the list)");
+        }
+        context.session().set_model_override(ref);
+        auto preset = context.session().preset();
+        minimal::agent::ApplyModel(preset, *model);
+        context.session().ApplyPreset(std::move(preset));
+        return CommandResult::Ok(ok_message);
+    }
+};
+
 // The result is the interface: display=View with view_hint="sessions" tells the
 // client to open its session picker, which fetches its own list over
 // ListSessions -- the command itself carries no data to show. ReadOnly because
@@ -584,6 +682,7 @@ std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     out.push_back(std::make_unique<AgentCommand>());
     out.push_back(std::make_unique<ModelCommand>());
     out.push_back(std::make_unique<SubagentModelCommand>());
+    out.push_back(std::make_unique<ThinkCommand>());
     out.push_back(std::make_unique<SessionsCommand>());
     out.push_back(std::make_unique<SubagentsCommand>());
     out.push_back(std::make_unique<RenameCommand>());

@@ -788,3 +788,97 @@ TEST_CASE("bare /subagents opens the subagent picker rather than erroring", "[co
     CHECK(result.display == commands::CommandDisplay::kView);
     CHECK(result.view_hint == "subagents");
 }
+
+// --- /think: the effort-variant switcher -------------------------------------
+
+TEST_CASE("/think lists the active model's declared variants and marks the current one",
+          "[commands][think]") {
+    CommandFixture fixture;
+    // Rebuild the config dir's providers.json with a variant-bearing model and
+    // re-resolve, exactly like the fixture's refresh tests do.
+    fixture.WriteProviders(
+        R"({"providers":{"main":{"backend":"openai","url":"http://x/v1",
+             "models":{"fast":{"context_window_tokens":1000,
+                               "variants":["low","high"]}}}}})");
+    fixture.ReloadPresets();
+
+    const auto listing = fixture.Run("think");
+    REQUIRE(listing.status == Status::kOk);
+    CHECK(listing.message.find("main/fast") != std::string::npos);
+    CHECK(listing.message.find("low") != std::string::npos);
+    CHECK(listing.message.find("high") != std::string::npos);
+    // The session is on the BASE model here (the fixture default), so nothing
+    // carries the current-variant marker yet.
+    CHECK(listing.message.find("(current)") == std::string::npos);
+}
+
+TEST_CASE("/think switches to a declared variant and persists like /model",
+          "[commands][think][invariant]") {
+    // THE PERSISTENCE RULE: a /think choice is a session-owned model override,
+    // so it must survive /agent re-resolving the preset -- the same invariant
+    // /model is tested against above.
+    CommandFixture fixture;
+    fixture.WriteProviders(
+        R"({"providers":{"main":{"backend":"openai","url":"http://x/v1",
+             "models":{"fast":{"context_window_tokens":1000,
+                               "variants":["high"]},
+                       "slow":{"context_window_tokens":2000}}}}})");
+    fixture.ReloadPresets();
+
+    const auto switched = fixture.Run("think", {"high"});
+    REQUIRE(switched.status == Status::kOk);
+    CHECK(switched.message.find("high") != std::string::npos);
+    CHECK(fixture.preset().model_ref.str() == "main/fast@high");
+    // The wire id is the BASE's: the suffix never reaches the provider.
+    CHECK(fixture.preset().provider.model_name == "fast");
+    // The derived parameter rides.
+    CHECK(fixture.preset().parameters.at("reasoning_effort") == "high");
+
+    // Survives an agent switch.
+    REQUIRE(fixture.Run("agent", {"other"}).status == Status::kOk);
+    CHECK(fixture.preset().model_ref.str() == "main/fast@high");
+
+    // And the override was recorded on the session.
+    REQUIRE(fixture.model_override().has_value());
+    CHECK(fixture.model_override()->str() == "main/fast@high");
+}
+
+TEST_CASE("/think off returns to the base model", "[commands][think]") {
+    CommandFixture fixture;
+    fixture.WriteProviders(
+        R"({"providers":{"main":{"backend":"openai","url":"http://x/v1",
+             "models":{"fast":{"context_window_tokens":1000,
+                               "variants":["high"]}}}}})");
+    fixture.ReloadPresets();
+    REQUIRE(fixture.Run("think", {"high"}).status == Status::kOk);
+
+    const auto off = fixture.Run("think", {"off"});
+    REQUIRE(off.status == Status::kOk);
+    CHECK(fixture.preset().model_ref.str() == "main/fast");
+    CHECK(fixture.preset().parameters.find("reasoning_effort") ==
+          fixture.preset().parameters.end());
+}
+
+TEST_CASE("/think refuses an undeclared variant by name, listing what exists",
+          "[commands][think]") {
+    CommandFixture fixture;
+    fixture.WriteProviders(
+        R"({"providers":{"main":{"backend":"openai","url":"http://x/v1",
+             "models":{"fast":{"context_window_tokens":1000,
+                               "variants":["low"]}}}}})");
+    fixture.ReloadPresets();
+
+    const auto unknown = fixture.Run("think", {"max"});
+    CHECK(unknown.status == Status::kError);
+    CHECK(unknown.message.find("max") != std::string::npos);
+    CHECK(unknown.message.find("low") != std::string::npos);
+
+    // A model with no variants at all says so instead of pretending.
+    fixture.WriteProviders(
+        R"({"providers":{"main":{"backend":"openai","url":"http://x/v1",
+             "models":{"fast":{"context_window_tokens":1000}}}}})");
+    fixture.ReloadPresets();
+    const auto none = fixture.Run("think");
+    REQUIRE(none.status == Status::kOk);
+    CHECK(none.message.find("declares no reasoning variants") != std::string::npos);
+}

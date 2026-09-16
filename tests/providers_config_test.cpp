@@ -1210,3 +1210,312 @@ TEST_CASE("small_model parses from settings.json", "[settings][compat]") {
     std::ofstream(dir.path() / "empty.json") << "{}";
     CHECK(LoadSettingsConfig(dir.path() / "empty.json").small_model.empty());
 }
+
+// --- Reasoning-effort variants -----------------------------------------------
+
+TEST_CASE("a variant name outside the known efforts is refused where the mistake is",
+          "[providers][variants]") {
+    try {
+        ParseProvidersConfig(nlohmann::json::parse(R"({
+          "providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                              "models": {"m": {"variants": ["hight"]}}}}
+        })"));
+        FAIL("expected the unknown effort name to be refused");
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        CHECK(message.find("hight") != std::string::npos);
+        CHECK(message.find("not a known effort") != std::string::npos);
+        // The valid vocabulary is in the message -- the file's own rule that a
+        // refusal teaches the schema.
+        CHECK(message.find("low") != std::string::npos);
+        CHECK(message.find("xhigh") != std::string::npos);
+    }
+}
+
+TEST_CASE("a variants value that is neither array nor object is refused by name",
+          "[providers][variants]") {
+    try {
+        ParseProvidersConfig(nlohmann::json::parse(R"({
+          "providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                              "variants": true,
+                              "models": {"m": {}}}}
+        })"));
+        FAIL("expected the boolean variants to be refused");
+    } catch (const std::runtime_error& error) {
+        CHECK(std::string(error.what()).find("\"variants\" must be an array of effort names "
+                                             "or an object") != std::string::npos);
+    }
+}
+
+TEST_CASE("list-form variants synthesize addressable siblings with backend-derived parameters",
+          "[providers][variants]") {
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {
+        "anthropic": {"backend": "anthropic", "url": "https://api.anthropic.com",
+                      "max_tokens": 32000,
+                      "models": {"claude": {"context_window_tokens": 200000,
+                                            "variants": ["low", "xhigh"]}}},
+        "openai": {"backend": "openai", "url": "http://x/v1",
+                   "models": {"gpt": {"variants": ["medium"]}}}
+      }
+    })"));
+
+    // The base still resolves, and each declared name became a sibling.
+    const auto base = Require(config, "anthropic/claude");
+    CHECK(base.provider.model_name == "claude");
+
+    const auto& low = Require(config, "anthropic/claude@low");
+    // THE WIRE ID STAYS THE BASE'S: agent_loop sends provider.model_name
+    // verbatim, so a suffixed one would 400 everywhere.
+    CHECK(low.provider.model_name == "claude");
+    REQUIRE(low.parameters.contains("thinking"));
+    CHECK(low.parameters.at("thinking").at("type") == "enabled");
+    CHECK(low.parameters.at("thinking").at("budget_tokens") == 4096);
+    // Variant-scoped fields the variant did not carry ride through from the base.
+    REQUIRE(low.context_window_tokens.has_value());
+    CHECK(*low.context_window_tokens == 200000);
+    REQUIRE(low.max_tokens.has_value());
+    CHECK(*low.max_tokens == 32000);
+
+    // xhigh maps to the top budget tier of the anthropic scale.
+    const auto& xhigh = Require(config, "anthropic/claude@xhigh");
+    CHECK(xhigh.parameters.at("thinking").at("budget_tokens") == 16384);
+
+    // The openai backend derives the effort word; xhigh/max normalize to high.
+    const auto& medium = Require(config, "openai/gpt@medium");
+    CHECK(medium.parameters.at("reasoning_effort") == "medium");
+    CHECK_FALSE(medium.parameters.contains("thinking"));
+}
+
+TEST_CASE("the anthropic thinking budget is clamped to fit the model's max_tokens",
+          "[providers][variants][invariant]") {
+    // The API rejects budget_tokens >= max_tokens; the parser sees both
+    // numbers and must not let a guaranteed-400 config past load.
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "anthropic", "url": "https://api.anthropic.com",
+                          "max_tokens": 4096,
+                          "models": {"m": {"variants": ["xhigh"]}}}}
+    })"));
+    const auto& model = Require(config, "p/m@xhigh");
+    // 16384 wanted, 4096 - 1024 available.
+    CHECK(model.parameters.at("thinking").at("budget_tokens") == 3072);
+}
+
+TEST_CASE("map-form variants carry full bodies; unknown keys are refused",
+          "[providers][variants]") {
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                          "models": {"m": {"parameters": {"temperature": 0.5},
+                                           "variants": {
+                                             "deep": {"parameters": {"reasoning": {"effort": "high",
+                                                                                   "max_tokens": 32768}}},
+                                             "lean": {"parameters": {"reasoning_effort": "low"},
+                                                      "max_tokens": 16384,
+                                                      "context_window_tokens": 65536}}}}}}
+    })"));
+
+    const auto& deep = Require(config, "p/m@deep");
+    // The variant's parameters overlay the base's per key.
+    CHECK(deep.parameters.at("temperature") == 0.5);
+    CHECK(deep.parameters.at("reasoning").at("effort") == "high");
+    const auto& lean = Require(config, "p/m@lean");
+    REQUIRE(lean.max_tokens.has_value());
+    CHECK(*lean.max_tokens == 16384);
+    REQUIRE(lean.context_window_tokens.has_value());
+    CHECK(*lean.context_window_tokens == 65536);
+
+    try {
+        ParseProvidersConfig(nlohmann::json::parse(R"({
+          "providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                              "models": {"m": {"variants": {"bad": {"temp": 1}}}}}}
+        })"));
+        FAIL("expected the unknown variant key to be refused");
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        CHECK(message.find("bad") != std::string::npos);
+        CHECK(message.find("temp") != std::string::npos);
+    }
+}
+
+TEST_CASE("a model's own variants replace the provider-level recipe",
+          "[providers][variants]") {
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                          "variants": ["low"],
+                          "models": {"m": {"variants": ["high"]},
+                                     "n": {}}}}
+    })"));
+    // m: its own list only.
+    CHECK(config.Resolve(ModelRef{"p", "m@high"}) != nullptr);
+    CHECK(config.Resolve(ModelRef{"p", "m@low"}) == nullptr);
+    // n: inherits the provider's.
+    CHECK(config.Resolve(ModelRef{"p", "n@low"}) != nullptr);
+    // Variant names must not collide across the inheritance boundary: a
+    // model-level recipe REPLACES, so the provider's names are gone for m.
+}
+
+TEST_CASE("a variant ref with an unknown base resolves to nothing, and a literal '@' id wins",
+          "[providers][variants]") {
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                          "models": {"m": {"variants": ["low"]},
+                                     "we@ird": {}}}}
+    })"));
+    CHECK(config.Resolve(ModelRef{"p", "ghost@low"}) == nullptr);
+    CHECK(config.Resolve(ModelRef{"p", "m@high"}) == nullptr);  // undeclared variant: a miss
+    // A hand-written id containing '@' (no live catalog serves one, but the
+    // file may carry it) resolves verbatim -- the suffix split is attempted
+    // first, and the literal-id fallback keeps it honest.
+    CHECK(config.Resolve(ModelRef{"p", "we@ird"}) != nullptr);
+}
+
+TEST_CASE("VariantsOf lists declared siblings; a variant ref lists nothing",
+          "[providers][variants]") {
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                          "models": {"m": {"variants": ["low", "medium", "xhigh"]}}}}
+    })"));
+    const auto names = config.VariantsOf(ModelRef{"p", "m"});
+    REQUIRE(names.size() == 3);
+    CHECK(names[0] == "low");
+    CHECK(names[1] == "medium");
+    CHECK(names[2] == "xhigh");
+    CHECK(config.VariantsOf(ModelRef{"p", "m@low"}).empty());
+    CHECK(config.VariantsOf(ModelRef{"p", "ghost"}).empty());
+}
+
+TEST_CASE("whitelist and blacklist match a variant ref by its BASE id",
+          "[providers][variants][invariant]") {
+    // THE LISTING RULE: hiding a model hides its variants; whitelisting a
+    // model keeps them. Otherwise a variants-heavy config would need to list
+    // every sibling by hand in the filters.
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {
+        "w": {"backend": "openai", "url": "http://x/v1", "whitelist": ["m"],
+              "models": {"m": {"variants": ["low"]}, "other": {}}},
+        "b": {"backend": "openai", "url": "http://x/v1", "blacklist": ["m"],
+              "models": {"m": {"variants": ["low"]}, "other": {}}}
+      }
+    })"));
+    const auto refs = config.ModelRefs();
+    // whitelist ["m"]: m and its variant stay, everything else on the entry is
+    // hidden from the LISTING (resolution is untouched -- the filter's own doc).
+    CHECK(std::find(refs.begin(), refs.end(), "w/m") != refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), "w/m@low") != refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), "w/other") == refs.end());
+    // blacklist ["m"]: m and its variant are hidden, the sibling stays.
+    CHECK(std::find(refs.begin(), refs.end(), "b/m") == refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), "b/m@low") == refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), "b/other") != refs.end());
+}
+
+TEST_CASE("discovery applies the entry recipe to models that advertise an effort ladder",
+          "[providers][variants][discover]") {
+    // glm-5.3-flash's live OpenRouter shape (2025-09): a reasoning object with
+    // supported_efforts, riding DiscoveredModel::metadata verbatim.
+    CountingHook hook;
+    hook.models = {
+        {"z-ai/glm-5.3-flash", 1310720,
+         nlohmann::json::parse(
+             R"({"reasoning": {"mandatory": true, "default_enabled": true,
+                                "supported_efforts": ["max", "high", "low"]}})"),
+         131072},
+        {"no-reasoning", 8192, nlohmann::json::object(), std::nullopt},
+        {"toggle-only", 8192, nlohmann::json::parse(R"({"reasoning": {"mandatory": true}})"),
+         std::nullopt}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    // Default recipe: @high alone, and only where a ladder is advertised.
+    const auto& base = config.Resolve(ModelRef{"local", "z-ai/glm-5.3-flash"});
+    REQUIRE(base != nullptr);
+    CHECK(base->provider.model_name == "z-ai/glm-5.3-flash");  // wire id unsuffixed
+    const auto& high = config.Resolve(ModelRef{"local", "z-ai/glm-5.3-flash@high"});
+    REQUIRE(high != nullptr);
+    CHECK(high->provider.model_name == "z-ai/glm-5.3-flash");
+    CHECK(high->parameters.at("reasoning_effort") == "high");
+    // The openai backend's default recipe names the openai spelling.
+    CHECK(config.Resolve(ModelRef{"local", "z-ai/glm-5.3-flash@max"}) == nullptr);
+    CHECK(config.Resolve(ModelRef{"local", "no-reasoning@high"}) == nullptr);
+    CHECK(config.Resolve(ModelRef{"local", "toggle-only@high"}) == nullptr);
+
+    // The listing (VariantsOf, cold-cache-safe after the resolves above warmed
+    // it) names exactly the default sibling.
+    const auto names = config.VariantsOf(ModelRef{"local", "z-ai/glm-5.3-flash"});
+    REQUIRE(names.size() == 1);
+    CHECK(names[0] == "high");
+    CHECK(config.VariantsOf(ModelRef{"local", "no-reasoning"}).empty());
+}
+
+TEST_CASE("an entry-level variants recipe replaces the discovery default",
+          "[providers][variants][discover]") {
+    CountingHook hook;
+    hook.models = {{"m1", 8192,
+                    nlohmann::json::parse(R"({"reasoning": {"supported_efforts":
+                                             ["max", "high", "low"]}})"),
+                    std::nullopt}};
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"local": {"backend": "openai", "url": "http://localhost:8000/v1",
+                              "discover": true, "variants": ["low", "max"]}}
+    })"));
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    CHECK(config.Resolve(ModelRef{"local", "m1@low"}) != nullptr);
+    CHECK(config.Resolve(ModelRef{"local", "m1@max"}) != nullptr);
+    CHECK(config.Resolve(ModelRef{"local", "m1@high"}) == nullptr);  // not in the recipe
+}
+
+TEST_CASE("a recipe name the catalog does not advertise still resolves -- the recipe is the operator's",
+          "[providers][variants][discover]") {
+    // The recipe is a statement about the BACKEND's spelling; the catalog
+    // gates whether the knob exists at all, not which rungs an operator may
+    // name. A model advertising a ladder with any efforts takes the recipe as
+    // written.
+    CountingHook hook;
+    hook.models = {{"m1", 8192,
+                    nlohmann::json::parse(R"({"reasoning": {"supported_efforts": ["low"]}})"),
+                    std::nullopt}};
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"local": {"backend": "openai", "url": "http://localhost:8000/v1",
+                              "discover": true, "variants": ["xhigh"]}}
+    })"));
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+    CHECK(config.Resolve(ModelRef{"local", "m1@xhigh"}) != nullptr);
+    CHECK(config.Resolve(ModelRef{"local", "m1@xhigh"})->parameters.at("reasoning_effort") ==
+          "high");
+}
+
+TEST_CASE("a cold discovery cache contributes no variants to VariantsOf",
+          "[providers][variants][discover]") {
+    auto config = DiscoverConfig();  // hook never set: discovery would fail
+    CHECK(config.VariantsOf(ModelRef{"local", "anything"}).empty());
+}
+
+TEST_CASE("known-effort helpers and the suffix split behave", "[providers][variants]") {
+    CHECK(IsKnownEffortName("low"));
+    CHECK(IsKnownEffortName("xhigh"));
+    CHECK_FALSE(IsKnownEffortName("hight"));
+    CHECK_FALSE(IsKnownEffortName(""));
+
+    const auto [plain, empty] = SplitVariantSuffix("claude");
+    CHECK(plain == "claude");
+    CHECK(empty.empty());
+    const auto [base, suffix] = SplitVariantSuffix("anthropic/claude@high");
+    CHECK(base == "anthropic/claude");
+    CHECK(suffix == "high");
+    const auto [last, wins] = SplitVariantSuffix("a@b@low");
+    CHECK(last == "a@b");
+    CHECK(wins == "low");
+    const auto [no_tail, none] = SplitVariantSuffix("m@");
+    CHECK(no_tail == "m@");  // an empty tail is not a variant name
+    CHECK(none.empty());
+    const auto [no_head, _] = SplitVariantSuffix("@high");
+    (void)_;
+    CHECK(no_head == "@high");  // an empty base is not a variant address
+}

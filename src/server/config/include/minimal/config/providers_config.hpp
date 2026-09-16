@@ -80,6 +80,71 @@ using common::ModelRef;
 using common::ParseModelRef;
 using common::SplitModelRef;
 
+// One effort VARIANT of a base model: `<provider>/<model>@<name>` resolves to a
+// sibling ResolvedModel -- same connection, same WIRE model id (the `@name`
+// suffix is addressing only and never sent -- agent_loop sends
+// provider.model_name verbatim), with the variant's `parameters` overlaid on the
+// base's and optional variant-scoped output cap / context window.
+//
+// Two config spellings share one `variants` key (the allowed_skills
+// list-or-map convention; JSON's array/object distinction makes the forms
+// unambiguous):
+//
+//   "variants": ["low", "medium", "xhigh"]     -- effort names; the parameters
+//                                                 are derived per backend kind
+//                                                 (see VariantParametersFor)
+//   "variants": {                              -- full opencode-style bodies
+//     "deep": { "parameters": { "reasoning": {"effort": "high"} },
+//               "max_tokens": 16384 }
+//   }
+//
+// A variant body's known keys: parameters, max_tokens, context_window_tokens;
+// anything else is a named parse error. Effort names outside the known
+// vocabulary are refused where the mistake is, for the same reason InheritNumber
+// refuses 4096.7.
+struct ModelVariant {
+    std::string name;             // the `@name` suffix, e.g. "high"
+    nlohmann::json parameters = nlohmann::json::object();  // overlaid ONTO the base's
+    std::optional<int> max_tokens;
+    std::optional<std::int64_t> context_window_tokens;
+};
+
+// The effort vocabulary and the derived parameters, per backend kind. Pure;
+// shared by the static parse, discovery synthesis, and (via the same constants)
+// the variant-name validation.
+//
+//   openai backend: `reasoning_effort: "<name>"` -- OpenAI's own words;
+//     "xhigh"/"max" normalize to "high" (OpenAI's ladder tops out there), and
+//     "none"/"minimal" normalize to "minimal".
+//   anthropic backend: `thinking: {"type": "enabled", "budget_tokens": N}` from
+//     a fixed per-name budget scale, clamped to max_tokens - 1024 when the
+//     base's output cap is known (the API rejects budget >= max_tokens).
+//
+// Any other backend kind: names pass through as `reasoning_effort` too -- the
+// OpenAI-compatible-proxy spelling is the closest thing to a lingua franca, and
+// a backend that rejects it fails the turn with the API's own message rather
+// than silently doing nothing.
+//
+// `max_tokens` is the base model's resolved output cap (nullopt = unknown),
+// used only for the anthropic budget clamp. The second element of the pair is
+// false when the clamp fired, so the caller can warn.
+std::pair<nlohmann::json, bool> VariantParametersFor(const std::string& backend,
+                                                     const std::string& effort,
+                                                     std::optional<int> max_tokens);
+
+// The known effort names, for validation and error messages. Sorted.
+const std::vector<std::string>& KnownEffortNames();
+
+// True when `name` is a known effort name (the R2 list form is validated
+// against this; the R3 map form's names are free-form).
+bool IsKnownEffortName(const std::string& name);
+
+// Splits a model id at the LAST '@': "x@high" -> ("x", "high"), "x" -> ("x", "").
+// The model half may itself contain '/' (OpenRouter ids); '@' appears in no live
+// catalog id (checked against OpenRouter's 443-entry catalog, 2025-09), and a
+// tail that matches no declared variant falls back to treating the whole half
+// as the id (see Resolve) -- so this split is always safe to attempt.
+std::pair<std::string, std::string> SplitVariantSuffix(const std::string& model_id);
 // One PROVIDER -- the connection an entry defines, kept even when it declares
 // no static models (a discover-entry is addressable through its catalog).
 // Provider-level values are the inheritance base for discovered models exactly
@@ -97,6 +162,15 @@ struct ProviderEntry {
     nlohmann::json parameters = nlohmann::json::object();
     std::optional<int> max_tokens;
     std::optional<std::int64_t> context_window_tokens;
+    // The entry's `variants` recipe, in either spelling (see ModelVariant):
+    // list form = effort names (validated against KnownEffortNames at parse),
+    // map form = named full bodies. On the PROVIDER these apply to every model
+    // under the entry -- including discovered ones, where they double as the
+    // autodiscovery recipe (an entry with no variants of its own gets the
+    // built-in "@high" default for models whose catalog metadata advertises
+    // efforts). A model's own `variants` replaces the provider's wholesale, the
+    // same per-model-beats-per-provider precedence InheritParameters applies.
+    std::vector<ModelVariant> variants;
     // Model-picker filters (opencode compat). whitelist keeps ONLY the listed
     // model ids; blacklist removes the listed ones from whatever remains.
     // Resolution is unaffected: a blacklisted model is still addressable by
@@ -224,6 +298,15 @@ public:
     void Add(const ModelRef& ref, ResolvedModel resolved);
     void AddProvider(ProviderEntry entry);
 
+    // The variant NAMES declared for `ref`'s base model -- from the model's own
+    // entry recipe (static) or the provider-level recipe filtered by what the
+    // catalog advertised (discovered; cold cache contributes nothing, the same
+    // rule ModelRefs applies). The base ref itself is NOT included: the base is
+    // always addressable, and callers that want "base plus variants" concatenate.
+    // Read-only, mutex-guarded, safe from the command pool; never triggers a
+    // discovery fetch.
+    std::vector<std::string> VariantsOf(const ModelRef& ref) const;
+
 private:
     // Immutable once parsed: written only at insertion (Add/AddProvider,
     // parse-time), never mutated in place, no lock needed. Ordered, so
@@ -261,6 +344,12 @@ private:
             bool ok = false;
             std::string error;
             std::map<std::string, llm::DiscoveredModel> models;  // by model id
+            // The variant recipe applied per discovered model, computed ONCE at
+            // publish (entry recipe, or the "@high" default, intersected with
+            // the model's catalog-advertised efforts) -- ResolveVariant looks
+            // the declared variant up here instead of re-deriving the
+            // recipe-precedence rules a second time beside the publish path.
+            std::map<std::string, std::vector<ModelVariant>> variants_by_model;
         };
 
         // Guards gates_, discovery_, overlay_, hook_ and generation_.
@@ -293,6 +382,19 @@ private:
                                                            const std::string& model_id,
                                                            const std::string& ref_key,
                                                            std::unique_lock<std::mutex>& lock) const;
+    // Resolves `<base>@<variant>` -- strips the suffix, resolves the base (any
+    // path: static, enriched, or discovered), rebuilds the sibling via
+    // MakeVariantResolved, and serves it from overlay_ so the rebuild happens
+    // at most once per ref per process. `lock` holds mutex_ on entry; released
+    // only inside ResolveDiscovered's fetch, as today. Null when the base is
+    // unknown or the variant name was never declared for it (an unknown variant
+    // is a MISS -- the caller reports "unknown model", the honest outcome for a
+    // typo -- never a synthesized guess).
+    std::shared_ptr<const ResolvedModel> ResolveVariant(const ProviderEntry& entry,
+                                                        const std::string& base_id,
+                                                        const std::string& variant_name,
+                                                        const std::string& ref_key,
+                                                        std::unique_lock<std::mutex>& lock) const;
 };
 
 // What providers.json actually offers, for a "no such model" error. A miss is

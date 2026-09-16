@@ -179,3 +179,63 @@ TEST_CASE("ParseModelList refuses bodies that are not a model list", "[model_cat
     CHECK_THROWS_AS(ParseModelList(R"({"object": "list"})"), std::runtime_error);
     CHECK_THROWS_AS(ParseModelList(R"({"data": {"id": "x"}})"), std::runtime_error);
 }
+
+// --- AdvertisedEfforts: the reasoning-ladder reader --------------------------
+
+TEST_CASE("AdvertisedEfforts reads OpenRouter's reasoning.supported_efforts",
+          "[model_catalog][variants]") {
+    // glm-5.3-flash's live shape (fetched 2025-09-15): full reasoning object.
+    const auto efforts = minimal::llm::AdvertisedEfforts(nlohmann::json::parse(
+        R"({"reasoning": {"mandatory": true, "default_enabled": true,
+                           "supported_efforts": ["max", "high", "low"]}})"));
+    REQUIRE(efforts.size() == 3);
+    CHECK(efforts[0] == "max");
+    CHECK(efforts[1] == "high");
+    CHECK(efforts[2] == "low");
+}
+
+TEST_CASE("AdvertisedEfforts: a toggle-only reasoning object is no ladder",
+          "[model_catalog][variants]") {
+    // 102 of 443 live OpenRouter entries carry {"mandatory": ...} with no
+    // supported_efforts -- reasoning exists, effort does not.
+    CHECK(minimal::llm::AdvertisedEfforts(
+              nlohmann::json::parse(R"({"reasoning": {"mandatory": false}})"))
+              .empty());
+    CHECK(minimal::llm::AdvertisedEfforts(nlohmann::json::parse(
+              R"({"reasoning": {"mandatory": false, "default_enabled": true}})"))
+              .empty());
+}
+
+TEST_CASE("AdvertisedEfforts reads models.dev's normalized reasoning_options",
+          "[model_catalog][variants]") {
+    // The shape a Models.dev-style catalog plugin would feed (the convention
+    // is already in the deferred table); effort and budget records mix.
+    const auto efforts = minimal::llm::AdvertisedEfforts(nlohmann::json::parse(
+        R"({"reasoning_options": [{"type": "toggle"},
+                                   {"type": "budget_tokens", "min": 1024},
+                                   {"type": "effort", "values": ["low", "medium", "high"]}]})"));
+    REQUIRE(efforts.size() == 3);
+    CHECK(efforts[0] == "low");
+    CHECK(efforts[2] == "high");
+}
+
+TEST_CASE("AdvertisedEfforts degrades every malformed shape to empty",
+          "[model_catalog][variants][invariant]") {
+    // The MaxCompletionTokens posture: a hostile or foreign metadata body
+    // yields "no variants", never a guess.
+    CHECK(minimal::llm::AdvertisedEfforts(nlohmann::json::object()).empty());
+    CHECK(minimal::llm::AdvertisedEfforts(nlohmann::json::parse(R"({"reasoning": "yes"})")).empty());
+    CHECK(minimal::llm::AdvertisedEfforts(nlohmann::json::parse(R"({"reasoning": null})")).empty());
+    CHECK(minimal::llm::AdvertisedEfforts(
+              nlohmann::json::parse(R"({"reasoning": {"supported_efforts": "high"}})"))
+              .empty());
+    CHECK(minimal::llm::AdvertisedEfforts(
+              nlohmann::json::parse(R"({"reasoning": {"supported_efforts": [1, 2]}})"))
+              .empty());
+    CHECK(minimal::llm::AdvertisedEfforts(
+              nlohmann::json::parse(R"({"reasoning": {"supported_efforts": []}})"))
+              .empty());
+    CHECK(minimal::llm::AdvertisedEfforts(
+              nlohmann::json::parse(R"({"reasoning_options": "low"})"))
+              .empty());
+}

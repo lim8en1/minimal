@@ -190,9 +190,117 @@ std::optional<T> OwnNumber(const nlohmann::json& node, const char* key) {
     return std::nullopt;
 }
 
-// opencode-compat normalization, applied to each provider entry BEFORE the
-// strict parse: an opencode-shaped entry is mapped onto minimal's fields in
-// place, and native minimal keys always win when both are present.
+
+
+// --- variants parsing --------------------------------------------------------
+
+// The `variants` key on a model or provider, either spelling: an ARRAY of
+// effort names (parameters derived per backend at synthesis time) or an OBJECT
+// of named full bodies. Anything else is a named parse error -- this file has
+// always refused typos where the mistake is.
+std::vector<ModelVariant> ParseVariants(const nlohmann::json& node,
+                                        const std::string& /*backend*/,
+                                        const std::string& where) {
+    std::vector<ModelVariant> out;
+    if (node.is_array()) {
+        for (const auto& item : node) {
+            if (!item.is_string() || item.get<std::string>().empty()) {
+                throw std::runtime_error(
+                    "providers.json: " + where +
+                    " \"variants\" must be an array of effort names or an object of named "
+                    "variant bodies; got a non-string array element " + item.dump());
+            }
+            const std::string name = item.get<std::string>();
+            if (!IsKnownEffortName(name)) {
+                throw std::runtime_error(
+                    "providers.json: " + where + " names variant '" + name +
+                    "', which is not a known effort (known: low, medium, high, xhigh, max, "
+                    "minimal, none)");
+            }
+            // No parameters here: MakeVariantResolved derives the wire map from
+            // the name at sibling-build time, where the base model's resolved
+            // max_tokens is available for the anthropic budget clamp. This
+            // function only validates and records the name.
+            out.push_back(ModelVariant{name, nlohmann::json::object(), std::nullopt,
+                                       std::nullopt});
+        }
+        return out;
+    }
+    if (node.is_object()) {
+        for (const auto& [name, body] : node.items()) {
+            if (name.empty() || name.find('@') != std::string::npos) {
+                throw std::runtime_error("providers.json: " + where + " names variant '" +
+                                         name +
+                                         "' -- a variant name must be non-empty and must not "
+                                         "contain '@'");
+            }
+            if (!body.is_object()) {
+                throw std::runtime_error("providers.json: " + where + " variant '" + name +
+                                         "' must be an object");
+            }
+            ModelVariant variant;
+            variant.name = name;
+            if (body.contains("parameters")) {
+                if (!body.at("parameters").is_object()) {
+                    throw std::runtime_error("providers.json: " + where + " variant '" + name +
+                                             "' field \"parameters\" must be an object");
+                }
+                variant.parameters = body.at("parameters");
+            }
+            for (const char* key : {"max_tokens", "context_window_tokens"}) {
+                if (body.contains(key)) {
+                    const nlohmann::json& value = body.at(key);
+                    if (!value.is_number_integer() || value <= 0) {
+                        throw std::runtime_error("providers.json: " + where + " variant '" +
+                                                 name + "' field \"" + key +
+                                                 "\" must be a positive integer, got " +
+                                                 value.dump());
+                    }
+                    if (std::string_view(key) == "max_tokens") {
+                        variant.max_tokens = value.get<int>();
+                    } else {
+                        variant.context_window_tokens = value.get<std::int64_t>();
+                    }
+                }
+            }
+            for (const auto& [key, unused] : body.items()) {
+                (void)unused;
+                if (key != "parameters" && key != "max_tokens" &&
+                    key != "context_window_tokens") {
+                    throw std::runtime_error("providers.json: " + where + " variant '" + name +
+                                             "' has unknown field \"" + key +
+                                             "\" (known: parameters, max_tokens, "
+                                             "context_window_tokens)");
+                }
+            }
+            out.push_back(std::move(variant));
+        }
+        return out;
+    }
+    throw std::runtime_error(
+        "providers.json: " + where +
+        " \"variants\" must be an array of effort names or an object of named variant "
+        "bodies, got " + node.dump());
+}
+
+// The model's own variants, else the provider's (per-model beats per-provider,
+// the same precedence InheritParameters applies at the parameter layer). Both
+// absent = empty = "no declared variants" (discovery then applies the entry's
+// recipe, which itself defaults to "@high" -- see BuildDiscoveredLocked).
+std::vector<ModelVariant> InheritVariants(const nlohmann::json& provider,
+                                          const nlohmann::json& model,
+                                          const std::string& backend,
+                                          const std::string& where) {
+    if (model.contains("variants")) {
+        return ParseVariants(model.at("variants"), backend, where);
+    }
+    if (provider.contains("variants")) {
+        return ParseVariants(provider.at("variants"), backend, where + " (provider)");
+    }
+    return {};
+}
+
+
 //
 //   options.baseURL -> url        (only when url absent)
 //   options.apiKey  -> api_key    (only when neither api_key nor api_key_env)
@@ -322,6 +430,122 @@ nlohmann::json NormalizeOpencodeProvider(const nlohmann::json& provider,
 
 }  // namespace
 
+// --- effort variants ---------------------------------------------------------
+
+// The known effort ladder, sorted. Names follow the union of the live catalogs
+// (OpenRouter's `reasoning.supported_efforts`, models.dev's `reasoning_options`):
+// the six words between them, with "none" meaning reasoning off where the
+// backend supports a disabled state.
+const std::vector<std::string>& KnownEffortNames() {
+    static const std::vector<std::string> names = {"high", "low", "max", "medium",
+                                                   "minimal", "none", "xhigh"};
+    return names;
+}
+
+bool IsKnownEffortName(const std::string& name) {
+    const auto& names = KnownEffortNames();
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+// Anthropic thinking budgets per effort name. A scale, not data: no catalog
+// publishes per-model budgets (models.dev carries per-model min/max in
+// `reasoning_options`; a future catalog plugin can feed those through and this
+// table becomes the fallback). Values sit well under every thinking model's
+// output cap, and the caller clamps against the base's max_tokens when known
+// (the API rejects budget_tokens >= max_tokens).
+std::optional<int> AnthropicBudgetFor(const std::string& effort) {
+    if (effort == "low") return 4096;
+    if (effort == "medium") return 8192;
+    if (effort == "high" || effort == "xhigh" || effort == "max") return 16384;
+    return std::nullopt;  // "none"/"minimal": no thinking block at all
+}
+
+std::pair<nlohmann::json, bool> VariantParametersFor(const std::string& backend,
+                                                     const std::string& effort,
+                                                     std::optional<int> max_tokens) {
+    nlohmann::json out = nlohmann::json::object();
+    if (effort == "none") {
+        // Off, where the wire has a switch for it. Anthropic: thinking omitted
+        // entirely IS off. OpenAI-shape: no meaningful off spelling that all
+        // backends accept -- send nothing (a toggle-only model always thinks).
+        if (backend == "anthropic") return {out, false};
+        out["reasoning_effort"] = "minimal";
+        return {out, false};
+    }
+    // "xhigh"/"max" -> the top rung of whichever ladder the backend speaks.
+    const std::string effort_word =
+        (effort == "xhigh" || effort == "max") ? "high" : effort;
+    if (backend == "anthropic") {
+        const auto budget = AnthropicBudgetFor(effort_word);
+        if (!budget) {
+            // "minimal" has no Anthropic reading; refuse here rather than send
+            // a thinking map the API must 400.
+            throw std::runtime_error(
+                "providers.json: effort '" + effort +
+                "' has no anthropic mapping (known: low, medium, high, xhigh, max, none)");
+        }
+        bool clamped = false;
+        int value = *budget;
+        if (max_tokens && value > *max_tokens - 1024) {
+            // The one cross-field constraint the parser can see coming: the API
+            // rejects budget_tokens >= max_tokens. Leave the model 1k of
+            // visible output; a named warning beats a first-turn 400.
+            value = *max_tokens - 1024;
+            clamped = true;
+        }
+        out["thinking"] = {{"type", "enabled"}, {"budget_tokens", value}};
+        return {out, clamped};
+    }
+    out["reasoning_effort"] = effort_word;
+    return {out, false};
+}
+
+std::pair<std::string, std::string> SplitVariantSuffix(const std::string& model_id) {
+    const auto at = model_id.rfind('@');
+    if (at == std::string::npos || at == 0 || at + 1 == model_id.size()) {
+        return {model_id, ""};
+    }
+    return {model_id.substr(0, at), model_id.substr(at + 1)};
+}
+
+// The sibling ResolvedModel for `base` at variant `variant`: same connection
+// and WIRE model id, the variant's parameters overlaid onto the base's (variant
+// wins per key, the same rule preset-extras apply over model parameters),
+// variant-scoped cap/window when the variant carries them.
+//
+// A list-form variant (parameters empty, name a known effort) has its wire
+// parameters derived HERE, against the base's resolved output cap -- the one
+// place both the backend kind and the inherited max_tokens are known, whether
+// the base came from the static parse or discovery. ParseVariants only
+// validates the name; this owns the derivation, so the clamp rule cannot drift
+// between the two birthplaces of a variant.
+ResolvedModel MakeVariantResolved(const ResolvedModel& base, const ModelVariant& variant) {
+    ResolvedModel sibling = base;
+    sibling.ref = ModelRef{base.ref.provider, base.ref.model + "@" + variant.name};
+    // THE WIRE ID STAYS THE BASE'S. agent_loop sends provider.model_name
+    // verbatim; the @suffix is addressing only and must never reach the wire.
+    sibling.provider.model_name = base.provider.model_name;
+    nlohmann::json parameters = variant.parameters;
+    if (parameters.empty() && IsKnownEffortName(variant.name)) {
+        const auto [derived, clamped] =
+            VariantParametersFor(base.backend, variant.name, base.max_tokens);
+        parameters = derived;
+        if (clamped) {
+            common::DefaultLogger().warn(
+                "providers.json: variant '@{}' of model '{}' had its thinking budget clamped "
+                "to fit max_tokens {}",
+                variant.name, base.ref.model, *base.max_tokens);
+        }
+    }
+    for (const auto& [key, value] : parameters.items()) {
+        sibling.parameters[key] = value;
+    }
+    if (variant.max_tokens) sibling.max_tokens = variant.max_tokens;
+    if (variant.context_window_tokens) sibling.context_window_tokens = *variant.context_window_tokens;
+    return sibling;
+}
+
+
 namespace {
 
 // The overlay ResolvedModel for one discovered model: the entry's connection
@@ -407,6 +631,39 @@ void ProvidersConfig::AddProvider(ProviderEntry entry) {
     catalog_.providers_.insert_or_assign(entry.name, std::move(entry));
 }
 
+std::vector<std::string> ProvidersConfig::VariantsOf(const ModelRef& ref) const {
+    // A ref that already names a variant answers with nothing -- the base is
+    // the thing that carries a variant list; `@x@y` is not a shape anyone can
+    // have declared.
+    const auto [base_id, variant_name] = SplitVariantSuffix(ref.model);
+    if (!variant_name.empty()) return {};
+    std::lock_guard<std::mutex> lock(cache_.mutex_);
+    const std::string key = ref.str();
+
+    // Static base: parse-time synthesis put every declared sibling in the
+    // catalog; list the refs that share the base prefix.
+    std::vector<std::string> out;
+    const std::string prefix = key + "@";
+    if (catalog_.models_.count(key) != 0) {
+        for (const auto& [candidate, unused] : catalog_.models_) {
+            (void)unused;
+            if (candidate.rfind(prefix, 0) == 0) out.push_back(candidate.substr(prefix.size()));
+        }
+        return out;
+    }
+    // Discovered base (cold cache contributes nothing -- a listing, never a
+    // fetch trigger, the same rule ModelRefs applies): the recipe recorded at
+    // publish.
+    if (const auto cache_it = cache_.discovery_.find(ref.provider);
+        cache_it != cache_.discovery_.end() && cache_it->second.ok) {
+        const auto variants_it = cache_it->second.variants_by_model.find(base_id);
+        if (variants_it != cache_it->second.variants_by_model.end()) {
+            for (const auto& variant : variants_it->second) out.push_back(variant.name);
+        }
+    }
+    return out;
+}
+
 const ProviderEntry* ProvidersConfig::FindProviderLocked(const std::string& name) const {
     const auto it = catalog_.providers_.find(name);
     return it == catalog_.providers_.end() ? nullptr : &it->second;
@@ -420,6 +677,33 @@ void ProvidersConfig::SetDiscoveryHook(DiscoveryHook hook) {
 std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& ref) const {
     const std::string key = ref.str();
     std::unique_lock<std::mutex> lock(cache_.mutex_);
+
+    // A `@variant` suffix is checked FIRST: the ref does not exist as a static
+    // or discovered id, and the suffix must be validated against the base
+    // model's declared variants, not treated as a (missing) raw id.
+    if (const auto [base_id, variant_name] = SplitVariantSuffix(ref.model);
+        !variant_name.empty()) {
+        const std::string base_key = ref.provider + "/" + base_id;
+        // The base may be a static entry or a discovered one; Resolve of the
+        // stripped ref answers that (and triggers the lazy fetch, which is
+        // what makes a discovered base's variants resolvable on first use).
+        if (const ProviderEntry* entry = FindProviderLocked(ref.provider);
+            entry != nullptr) {
+            if (auto resolved = ResolveVariant(*entry, base_id, variant_name, key, lock)) {
+                return resolved;
+            }
+        }
+        // Fall through to the plain-id paths ONLY when the base id itself
+        // contains an '@' that SplitVariantSuffix would have misread. Re-split
+        // is unnecessary: if the base id exists as a literal (no live catalog
+        // serves '@', but a hand-written one may), honor it verbatim.
+        if (catalog_.models_.count(key) != 0) {
+            return catalog_.models_.at(key);
+        }
+        // Not a declared variant, not a literal '@' id: a miss, reported by
+        // the caller as "unknown model" -- never a synthesized guess.
+        return nullptr;
+    }
 
     if (const auto it = catalog_.models_.find(key); it != catalog_.models_.end()) {
         if (it->second->context_window_tokens && it->second->max_tokens) return it->second;
@@ -514,6 +798,68 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveDiscovered(
     return nullptr;  // discovery succeeded; the backend does not serve this id
 }
 
+std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
+    const ProviderEntry& entry, const std::string& base_id, const std::string& variant_name,
+    const std::string& ref_key, std::unique_lock<std::mutex>& lock) const {
+    // Served-from-overlay first: the sibling is built at most once per ref per
+    // process, exactly like every other overlay value (RefreshDiscovery evicts
+    // wholesale, so a rebuild after a refresh picks up a changed recipe).
+    if (const auto it = cache_.overlay_.find(ref_key); it != cache_.overlay_.end()) {
+        return it->second;
+    }
+
+    const std::string base_key = entry.name + "/" + base_id;
+
+    // The variant must be DECLARED for this base. Static bases declared theirs
+    // at parse time -- and their siblings were materialized into the catalog
+    // then, so a static variant simply IS a catalog entry; check that first and
+    // skip the rebuild entirely.
+    if (const auto static_it = catalog_.models_.find(ref_key); static_it != catalog_.models_.end()) {
+        return static_it->second;
+    }
+
+    // Everything else resolves through the base. Resolve the base WITHOUT the
+    // suffix: a static base resolves as parsed, a discovered base runs the
+    // lazy fetch (ResolveDiscovered unlocks around the hook, per its contract),
+    // which is what makes `...@high` on a discover-entry fetch on first use.
+    std::shared_ptr<const ResolvedModel> base;
+    if (const auto base_it = catalog_.models_.find(base_key); base_it != catalog_.models_.end()) {
+        base = base_it->second;
+    } else if (entry.discover) {
+        base = ResolveDiscovered(entry, base_id, base_key, lock);
+    }
+    if (base == nullptr) return nullptr;  // unknown base; caller reports the miss
+
+    // The declared variant for this name. A static base: its recipe lived in
+    // providers.json -- but parse-time synthesis put every declared static
+    // sibling in the catalog (handled above), so reaching here with a static
+    // base means the variant was NOT declared: a miss. A discovered base: the
+    // entry's recipe (defaulting to "@high"), intersected with what the
+    // catalog's metadata advertised -- PublishLocked already recorded that
+    // intersection in the discovery cache's variant list when it materialized
+    // the base, so this is a lookup, never a re-derivation.
+    std::optional<ModelVariant> declared;
+    if (!entry.discover) return nullptr;  // static base, undeclared variant
+    if (const auto cache_it = cache_.discovery_.find(entry.name);
+        cache_it != cache_.discovery_.end() && cache_it->second.ok) {
+        const auto variants_it = cache_it->second.variants_by_model.find(base_id);
+        if (variants_it != cache_it->second.variants_by_model.end()) {
+            const auto name_it = std::find_if(variants_it->second.begin(),
+                                              variants_it->second.end(),
+                                              [&](const ModelVariant& v) {
+                                                  return v.name == variant_name;
+                                              });
+            if (name_it != variants_it->second.end()) declared = *name_it;
+        }
+    }
+    if (!declared) return nullptr;  // undeclared (or the model advertises no efforts)
+
+    return cache_
+        .overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(
+                                       MakeVariantResolved(*base, *declared)))
+        .first->second;
+}
+
 DiscoveryOutcome ProvidersConfig::FetchOutcome(const ProviderEntry& entry) const {
     DiscoveryOutcome outcome;
     // Snapshot the hook under cache_.mutex_ (lock order gate -> mutex_, per
@@ -557,6 +903,44 @@ void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryO
         if (model.id.empty()) continue;  // unaddressable; not a config the caller wrote
         cache.models.insert_or_assign(model.id, std::move(model));
     }
+    // The variant recipe per discovered model, computed ONCE here: the entry's
+    // declared recipe (list of effort names or named bodies) -- defaulting to
+    // the single built-in "@high" when the entry declares none -- intersected
+    // with what the model's catalog metadata advertises. An entry with a
+    // declared recipe gets those names for every model that advertises ANY
+    // effort ladder (the recipe is the operator's statement about the backend's
+    // spelling; the catalog only gates whether the knob exists). List-form
+    // names re-derive their parameters here, where the model's own max_tokens
+    // is known for the anthropic budget clamp; map-form bodies are carried
+    // verbatim.
+    for (const auto& [id, discovered] : cache.models) {
+        std::vector<ModelVariant> declared = entry.variants;
+        if (declared.empty()) {
+            const auto efforts = llm::AdvertisedEfforts(discovered.metadata);
+            if (efforts.empty()) continue;  // no ladder advertised: no variants
+            if (std::find(efforts.begin(), efforts.end(), "high") != efforts.end() ||
+                efforts.empty()) {
+                declared.push_back(ModelVariant{"high", {}, std::nullopt, std::nullopt});
+            } else {
+                // No "high" on this ladder (e.g. ["max","low"]): take the
+                // advertised rung closest to high, deterministically.
+                static const char* kPreference[] = {"max", "xhigh", "medium", "low",
+                                                    "minimal", "none"};
+                for (const char* candidate : kPreference) {
+                    if (std::find(efforts.begin(), efforts.end(), candidate) != efforts.end()) {
+                        declared.push_back(
+                            ModelVariant{candidate, {}, std::nullopt, std::nullopt});
+                        break;
+                    }
+                }
+            }
+        }
+        // List-form entries carry no parameters of their own: MakeVariantResolved
+        // derives them at sibling-build time, where the model's resolved
+        // max_tokens is available for the anthropic budget clamp. Map-form
+        // entries were validated at parse and pass through untouched.
+        cache.variants_by_model.emplace(id, std::move(declared));
+    }
     // Materialize every discovered model now: this is what puts them in
     // ModelRefs() and the /model picker's ListModels, and it means a later
     // Resolve() of any of
@@ -568,6 +952,11 @@ void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryO
         if (catalog_.models_.count(key) || cache_.overlay_.count(key)) continue;
         cache_.overlay_.emplace(
             key, std::make_shared<const ResolvedModel>(BuildDiscoveredLocked(entry, discovered)));
+        // Variant siblings materialize lazily (ResolveVariant serves them from
+        // overlay_ on first resolve) -- NOT here: a discover-entry lists
+        // hundreds of models, and pre-building three siblings each would trade
+        // the lazy-fetch design for an eager one. The ref-keyed lookup in
+        // ResolveVariant makes the cost pay-per-use.
     }
 }
 
@@ -602,16 +991,20 @@ std::vector<std::string> ProvidersConfig::ModelRefs() const {
                                      if (slash == std::string::npos) return false;
                                      const auto entry = catalog_.providers_.find(key.substr(0, slash));
                                      if (entry == catalog_.providers_.end()) return false;
-                                     const std::string model = key.substr(slash + 1);
+                                     // A variant ref filters by its BASE id: hiding
+                                     // a model must hide its variants too, and a
+                                     // whitelist of base ids must keep them.
+                                     const std::string model_id =
+                                         SplitVariantSuffix(key.substr(slash + 1)).first;
                                      if (!entry->second.whitelist.empty() &&
                                          std::find(entry->second.whitelist.begin(),
                                                    entry->second.whitelist.end(),
-                                                   model) == entry->second.whitelist.end()) {
+                                                   model_id) == entry->second.whitelist.end()) {
                                          return true;
                                      }
                                      return std::find(entry->second.blacklist.begin(),
                                                       entry->second.blacklist.end(),
-                                                      model) != entry->second.blacklist.end();
+                                                      model_id) != entry->second.blacklist.end();
                                  }),
                     out.end());
     }
@@ -785,6 +1178,23 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
         entry.max_tokens = OwnNumber<int>(provider_normalized, "max_tokens");
         entry.context_window_tokens =
             OwnNumber<std::int64_t>(provider_normalized, "context_window_tokens");
+        // The entry-level variants recipe (list of effort names or named
+        // bodies), applied to every model under the entry -- static and
+        // discovered alike. For a discover-entry this IS the autodiscovery
+        // recipe; absent, discovery defaults to "@high" for models whose
+        // catalog metadata advertises efforts. ParseVariants itself refuses
+        // any other shape with the same message.
+        if (provider_normalized.contains("variants")) {
+            if (!provider_normalized.at("variants").is_array() &&
+                !provider_normalized.at("variants").is_object()) {
+                throw std::runtime_error(
+                    "providers.json: " + where +
+                    " field \"variants\" must be an array of effort names or an object of "
+                    "named variant bodies, got " + provider_normalized.at("variants").dump());
+            }
+            entry.variants = ParseVariants(provider_normalized.at("variants"), backend,
+                                           where + " (provider)");
+        }
         // The output-cap key spelling for the OpenAI-shaped request body.
         // Empty (absent) means the historical "max_tokens"; the only other
         // value accepted is "max_completion_tokens" (newer OpenAI models
@@ -868,6 +1278,20 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
             // `std::move(resolved)` in one call is unsequenced -- the move may
             // run first, and the key is then read from a moved-from string.
             const ModelRef key = resolved.ref;
+            // Effort variants: the model's own `variants` (either spelling),
+            // else the provider's. Each declared variant becomes a SIBLING
+            // ResolvedModel -- same connection and wire id, parameters
+            // overlaid -- addressable as <provider>/<model>@<name>. Declared
+            // names are validated (list form: known efforts; map form:
+            // well-formed bodies) by ParseVariants above, so a sibling that
+            // exists here is always resolvable. Synthesized BEFORE the move
+            // below: the sibling is a copy of `resolved`, and a moved-from
+            // base would publish garbage parameters.
+            for (const auto& variant : InheritVariants(provider, model, backend, model_where)) {
+                ResolvedModel sibling = MakeVariantResolved(resolved, variant);
+                const ModelRef sibling_key = sibling.ref;
+                config.Add(sibling_key, std::move(sibling));
+            }
             config.Add(key, std::move(resolved));
         }
     }

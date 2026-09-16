@@ -242,6 +242,7 @@ is a commented starting point.
 | `max_tokens` | no | int | — | required for the `anthropic` backend (here or per-model) or every request fails |
 | `max_tokens_field` | no | string | `"max_tokens"` | the JSON body key the output cap is emitted under (`openai` backend only). Newer OpenAI models reject the legacy `max_tokens` key and require `"max_completion_tokens"` — set that here. Any other value is a parse error. Ignored by the `anthropic` backend |
 | `context_window_tokens` | no | int | — | per provider = default for all its models |
+| `variants` | no | array or object | — | effort variants applied to EVERY model under the entry — see [Reasoning-effort variants](#reasoning-effort-variants) below. For a `discover: true` entry this is the autodiscovery recipe (with none, discovery adds `@high` to every model whose catalog advertises an effort ladder) |
 
 ### Per model (`models.<name>`)
 
@@ -250,10 +251,64 @@ is a commented starting point.
 | `context_window_tokens` | no | the one field whose staleness disables compaction — set it. Model value wins over the provider default |
 | `max_tokens` | no | inherits from provider when absent |
 | `parameters` | no | **replaces** the provider's `parameters` when present |
+| `variants` | no | effort variants of THIS model (replaces the provider-level recipe) — see below |
 
 The model *key* is sent on the wire verbatim as the request's `model` field —
 it must be the backend's real model id, unlike the provider name which is
 yours to choose.
+
+### Reasoning-effort variants
+
+One model, several thinking efforts. A `variants` block — on a model, or on the
+provider for all its models — synthesizes sibling models addressed as
+`<provider>/<model>@<name>`: same connection, **same wire model id** (the
+`@suffix` is addressing only, never sent), different reasoning parameters. They
+appear in `/model`, `--model`, and `/think` like any model.
+
+Two spellings, one key (JSON's array/object distinction separates them, the
+same list-or-map convention `allowed_skills` uses):
+
+```json
+"claude-opus-4-5": {
+  "context_window_tokens": 200000,
+  "max_tokens": 32000,
+  "variants": ["low", "medium", "xhigh"]
+}
+```
+
+```json
+"z-ai/glm-5.3-flash": {
+  "context_window_tokens": 1310720,
+  "variants": {
+    "deep": { "parameters": { "reasoning": { "effort": "high", "max_tokens": 32768 } } },
+    "lean": { "parameters": { "reasoning_effort": "low" }, "max_tokens": 16384 }
+  }
+}
+```
+
+- **List form** — known effort names: `low`, `medium`, `high`, `xhigh`, `max`,
+  `minimal`, `none`. Wire parameters are derived per backend: `anthropic`
+  entries get `thinking: {type: "enabled", budget_tokens: N}` from a fixed
+  per-name budget scale (clamped to fit `max_tokens` — the API rejects
+  `budget_tokens >= max_tokens`); everything else gets
+  `reasoning_effort: "<name>"` (`xhigh`/`max` normalize to `high`, the top of
+  OpenAI's ladder; `none` means reasoning off where the backend has a switch).
+  An unknown name is a parse error naming the valid ones.
+- **Map form** — opencode-style per-variant bodies: `parameters` (passed
+  through verbatim, model-parameter rules apply), plus optional
+  variant-scoped `max_tokens` and `context_window_tokens`. Any other key in a
+  variant body is a parse error.
+- **Discovery** — a provider-level `variants` block is the recipe for every
+  model a `discover: true` entry lists whose catalog metadata advertises an
+  effort ladder (OpenRouter's `reasoning.supported_efforts`); with no recipe,
+  discovery adds `@high` alone to each such model. The recipe intersection is
+  computed at publish: a model advertising no ladder gets no variants.
+- **Filtering** — `whitelist`/`blacklist` match the BASE model id: hiding a
+  model hides its variants.
+- **`/think`** — switches the current session: bare `/think` lists the active
+  model's variants (`*` marks the current one), `/think <variant>` switches
+  (persisted like `/model`, so it survives `/agent` and resume), `/think off`
+  returns to the base model.
 
 ---
 
