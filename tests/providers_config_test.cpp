@@ -1428,7 +1428,9 @@ TEST_CASE("discovery applies the entry recipe to models that advertise an effort
         return hook.AsHook(kind, c);
     });
 
-    // Default recipe: @high alone, and only where a ladder is advertised.
+    // Default recipe: the model's OWN advertised ladder, verbatim --
+    // ["max","high","low"] here, autodetected with no config. The wire id
+    // stays the base's, and models without a ladder get nothing.
     const auto& base = config.Resolve(ModelRef{"local", "z-ai/glm-5.3-flash"});
     REQUIRE(base != nullptr);
     CHECK(base->provider.model_name == "z-ai/glm-5.3-flash");  // wire id unsuffixed
@@ -1436,16 +1438,22 @@ TEST_CASE("discovery applies the entry recipe to models that advertise an effort
     REQUIRE(high != nullptr);
     CHECK(high->provider.model_name == "z-ai/glm-5.3-flash");
     CHECK(high->parameters.at("reasoning_effort") == "high");
-    // The openai backend's default recipe names the openai spelling.
-    CHECK(config.Resolve(ModelRef{"local", "z-ai/glm-5.3-flash@max"}) == nullptr);
+    // The ladder's own words become the names; each derives the openai
+    // spelling at resolve time (max normalizes to high on the wire).
+    const auto& max = config.Resolve(ModelRef{"local", "z-ai/glm-5.3-flash@max"});
+    REQUIRE(max != nullptr);
+    CHECK(max->parameters.at("reasoning_effort") == "high");
+    CHECK(config.Resolve(ModelRef{"local", "z-ai/glm-5.3-flash@low"}) != nullptr);
     CHECK(config.Resolve(ModelRef{"local", "no-reasoning@high"}) == nullptr);
     CHECK(config.Resolve(ModelRef{"local", "toggle-only@high"}) == nullptr);
 
     // The listing (VariantsOf, cold-cache-safe after the resolves above warmed
-    // it) names exactly the default sibling.
+    // it) names the whole autodetected ladder, in catalog order.
     const auto names = config.VariantsOf(ModelRef{"local", "z-ai/glm-5.3-flash"});
-    REQUIRE(names.size() == 1);
-    CHECK(names[0] == "high");
+    REQUIRE(names.size() == 3);
+    CHECK(names[0] == "max");
+    CHECK(names[1] == "high");
+    CHECK(names[2] == "low");
     CHECK(config.VariantsOf(ModelRef{"local", "no-reasoning"}).empty());
 }
 
@@ -1495,6 +1503,69 @@ TEST_CASE("a cold discovery cache contributes no variants to VariantsOf",
           "[providers][variants][discover]") {
     auto config = DiscoverConfig();  // hook never set: discovery would fail
     CHECK(config.VariantsOf(ModelRef{"local", "anything"}).empty());
+}
+
+TEST_CASE("a static twin without variants picks up the discovery twin's autodetected ladder",
+          "[providers][variants][discover][invariant]") {
+    // THE openrouter SHAPE: "discover": true plus a static entry for the same
+    // model id (the static twin carries parameters the listing cannot express
+    // -- provider routing -- and no variants of its own). The static shadow
+    // wins for the base's identity, but the autodetected ladder still applies:
+    // /think must list it and ResolveVariant must serve it from the STATIC
+    // base (routing parameters included), not from the discovery twin that
+    // would lose them. A static twin that DOES declare its own variants keeps
+    // them -- explicit beats autodetection.
+    CountingHook hook;
+    hook.models = {
+        {"m", 1310720,
+         nlohmann::json::parse(
+             R"({"reasoning": {"supported_efforts": ["max", "high", "low"]}})"),
+         131072}};
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1", "discover": true,
+                          "models": {"m": {"parameters": {"provider": {"only": ["z-ai"]}}}}}}
+    })"));
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    const auto& base = config.Resolve(ModelRef{"p", "m"});
+    REQUIRE(base != nullptr);
+    CHECK(base->parameters.at("provider").at("only") == nlohmann::json::array({"z-ai"}));
+
+    const auto& max = config.Resolve(ModelRef{"p", "m@max"});
+    REQUIRE(max != nullptr);
+    // Sibling of the STATIC twin: routing parameters ride, wire id unsuffixed.
+    CHECK(max->parameters.at("provider").at("only") == nlohmann::json::array({"z-ai"}));
+    CHECK(max->parameters.at("reasoning_effort") == "high");
+    CHECK(max->provider.model_name == "m");
+    // And the discovery twin's window/cap fill the static file's gaps -- a
+    // session on the sibling gets the same compaction as one on the base.
+    REQUIRE(max->context_window_tokens.has_value());
+    CHECK(*max->context_window_tokens == 1310720);
+    REQUIRE(max->max_tokens.has_value());
+    CHECK(*max->max_tokens == 131072);
+
+    const auto names = config.VariantsOf(ModelRef{"p", "m"});
+    REQUIRE(names.size() == 3);
+    CHECK(names[0] == "max");
+    CHECK(names[1] == "high");
+    CHECK(names[2] == "low");
+
+    // Explicit beats autodetection: a static twin with its own list keeps it.
+    CountingHook hook2 = hook;
+    auto config2 = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1", "discover": true,
+                          "models": {"m": {"variants": ["low"]}}}}
+    })"));
+    config2.SetDiscoveryHook([&hook2](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook2.AsHook(kind, c);
+    });
+    CHECK(config2.Resolve(ModelRef{"p", "m@low"}) != nullptr);
+    CHECK(config2.Resolve(ModelRef{"p", "m@max"}) == nullptr);
+    const auto names2 = config2.VariantsOf(ModelRef{"p", "m"});
+    REQUIRE(names2.size() == 1);
+    CHECK(names2[0] == "low");
 }
 
 TEST_CASE("known-effort helpers and the suffix split behave", "[providers][variants]") {

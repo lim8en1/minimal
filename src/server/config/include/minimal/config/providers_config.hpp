@@ -167,7 +167,7 @@ struct ProviderEntry {
     // map form = named full bodies. On the PROVIDER these apply to every model
     // under the entry -- including discovered ones, where they double as the
     // autodiscovery recipe (an entry with no variants of its own gets the
-    // built-in "@high" default for models whose catalog metadata advertises
+    // model's own advertised effort ladder (autodetected) for models whose
     // efforts). A model's own `variants` replaces the provider's wholesale, the
     // same per-model-beats-per-provider precedence InheritParameters applies.
     std::vector<ModelVariant> variants;
@@ -198,6 +198,18 @@ struct ResolvedModel {
     std::optional<int> max_tokens;
     std::optional<std::int64_t> context_window_tokens;
 };
+
+// The static entry's resolved model with its discovery twin's window / output
+// cap filling only the gaps the static file left open -- each field
+// independently, since a model with a window but no cap (or the reverse)
+// reaches this too. The static value ALWAYS wins where it is present: the
+// operator typed it. Shared by ResolveDiscovered (which publishes the enriched
+// base) and ResolveVariant (whose sibling must carry the same window a session
+// on the base would get -- otherwise a /think switch silently drops
+// compaction). Free function: the enrichment rule must not drift between the
+// two call sites.
+ResolvedModel EnrichFromDiscovery(const ResolvedModel& static_model,
+                                  const llm::DiscoveredModel& discovered);
 
 // The result of one catalog consultation, as the injected hook reports it.
 // The hook is built over the ModelCatalogRegistry in main.cpp; distinguishing
@@ -345,7 +357,7 @@ private:
             std::string error;
             std::map<std::string, llm::DiscoveredModel> models;  // by model id
             // The variant recipe applied per discovered model, computed ONCE at
-            // publish (entry recipe, or the "@high" default, intersected with
+            // publish (the entry recipe, or the model's autodetected ladder
             // the model's catalog-advertised efforts) -- ResolveVariant looks
             // the declared variant up here instead of re-deriving the
             // recipe-precedence rules a second time beside the publish path.

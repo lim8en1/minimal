@@ -242,7 +242,7 @@ is a commented starting point.
 | `max_tokens` | no | int | — | required for the `anthropic` backend (here or per-model) or every request fails |
 | `max_tokens_field` | no | string | `"max_tokens"` | the JSON body key the output cap is emitted under (`openai` backend only). Newer OpenAI models reject the legacy `max_tokens` key and require `"max_completion_tokens"` — set that here. Any other value is a parse error. Ignored by the `anthropic` backend |
 | `context_window_tokens` | no | int | — | per provider = default for all its models |
-| `variants` | no | array or object | — | effort variants applied to EVERY model under the entry — see [Reasoning-effort variants](#reasoning-effort-variants) below. For a `discover: true` entry this is the autodiscovery recipe (with none, discovery adds `@high` to every model whose catalog advertises an effort ladder) |
+| `variants` | no | array or object | — | effort variants applied to EVERY model under the entry — see [Reasoning-effort variants](#reasoning-effort-variants) below. For a `discover: true` entry this is the autodiscovery recipe (with none, discovery autodetects: every model whose catalog advertises an effort ladder gets that ladder verbatim) |
 
 ### Per model (`models.<name>`)
 
@@ -300,9 +300,12 @@ same list-or-map convention `allowed_skills` uses):
   variant body is a parse error.
 - **Discovery** — a provider-level `variants` block is the recipe for every
   model a `discover: true` entry lists whose catalog metadata advertises an
-  effort ladder (OpenRouter's `reasoning.supported_efforts`); with no recipe,
-  discovery adds `@high` alone to each such model. The recipe intersection is
-  computed at publish: a model advertising no ladder gets no variants.
+  effort ladder (OpenRouter's `reasoning.supported_efforts`). With no recipe,
+  discovery autodetects: each such model gets its OWN advertised ladder
+  verbatim (`z-ai/glm-5.3-flash` → `@max`, `@high`, `@low` with no config); a
+  model advertising no ladder gets none. An entry-level or model-level recipe
+  overrides the ladder, and a static model on a discover entry that declares
+  no variants of its own picks the ladder up too (its parameters ride along).
 - **Filtering** — `whitelist`/`blacklist` match the BASE model id: hiding a
   model hides its variants.
 - **`/think`** — switches the current session: bare `/think` lists the active

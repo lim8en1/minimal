@@ -109,7 +109,7 @@
           }
         },
 
-        "//4": "A provider-level \"variants\" (either form) applies to EVERY model under the entry -- for a \"discover\": true entry it IS the autodiscovery recipe: models whose catalog advertises reasoning efforts get exactly these variants. With no recipe, discovery adds '@high' alone to every model that advertises an effort ladder (one picker row per reasoning model, not a flood).",
+        "//4": "A provider-level \"variants\" (either form) applies to EVERY model under the entry -- for a \"discover\": true entry it IS the autodiscovery recipe: models whose catalog advertises reasoning efforts get exactly these variants. With no recipe, discovery AUTODETECTS: every model that advertises an effort ladder gets its own ladder verbatim (glm-5.3-flash's supported_efforts [max,high,low] becomes @max, @high, @low with zero config); a model advertising no ladder gets none.",
         "variants": ["high"]
       }
     }

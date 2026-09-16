@@ -286,7 +286,8 @@ std::vector<ModelVariant> ParseVariants(const nlohmann::json& node,
 // The model's own variants, else the provider's (per-model beats per-provider,
 // the same precedence InheritParameters applies at the parameter layer). Both
 // absent = empty = "no declared variants" (discovery then applies the entry's
-// recipe, which itself defaults to "@high" -- see BuildDiscoveredLocked).
+// recipe, which itself defaults to the model's autodetected effort ladder --
+// see PublishLocked).
 std::vector<ModelVariant> InheritVariants(const nlohmann::json& provider,
                                           const nlohmann::json& model,
                                           const std::string& backend,
@@ -519,6 +520,18 @@ std::pair<std::string, std::string> SplitVariantSuffix(const std::string& model_
 // the base came from the static parse or discovery. ParseVariants only
 // validates the name; this owns the derivation, so the clamp rule cannot drift
 // between the two birthplaces of a variant.
+ResolvedModel EnrichFromDiscovery(const ResolvedModel& static_model,
+                                  const llm::DiscoveredModel& discovered) {
+    ResolvedModel copy = static_model;
+    if (!copy.context_window_tokens && discovered.context_window_tokens) {
+        copy.context_window_tokens = discovered.context_window_tokens;
+    }
+    if (!copy.max_tokens && discovered.max_tokens) {
+        copy.max_tokens = discovered.max_tokens;
+    }
+    return copy;
+}
+
 ResolvedModel MakeVariantResolved(const ResolvedModel& base, const ModelVariant& variant) {
     ResolvedModel sibling = base;
     sibling.ref = ModelRef{base.ref.provider, base.ref.model + "@" + variant.name};
@@ -641,7 +654,12 @@ std::vector<std::string> ProvidersConfig::VariantsOf(const ModelRef& ref) const 
     const std::string key = ref.str();
 
     // Static base: parse-time synthesis put every declared sibling in the
-    // catalog; list the refs that share the base prefix.
+    // catalog; list the refs that share the base prefix. A static base that
+    // declared its own variants answers from here alone -- explicit beats
+    // autodetection. But a static base that declared NONE on a discover entry
+    // (the common shape: a static twin supplying parameters the discovery
+    // listing cannot express) still carries the autodetected ladder, so an
+    // empty answer falls through to the discovery-cache lookup below.
     std::vector<std::string> out;
     const std::string prefix = key + "@";
     if (catalog_.models_.count(key) != 0) {
@@ -649,11 +667,11 @@ std::vector<std::string> ProvidersConfig::VariantsOf(const ModelRef& ref) const 
             (void)unused;
             if (candidate.rfind(prefix, 0) == 0) out.push_back(candidate.substr(prefix.size()));
         }
-        return out;
+        if (!out.empty()) return out;
     }
     // Discovered base (cold cache contributes nothing -- a listing, never a
-    // fetch trigger, the same rule ModelRefs applies): the recipe recorded at
-    // publish.
+    // fetch trigger, the same rule ModelRefs applies), or a static base whose
+    // discovery twin advertises a ladder: the recipe recorded at publish.
     if (const auto cache_it = cache_.discovery_.find(ref.provider);
         cache_it != cache_.discovery_.end() && cache_it->second.ok) {
         const auto variants_it = cache_it->second.variants_by_model.find(base_id);
@@ -779,17 +797,10 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveDiscovered(
         // Resolve consult discovery at all -- each field independently, since
         // a model with a window but no cap reaches here too.
         const auto discovered = cache.models.find(model_id);
-        if (discovered != cache.models.end() &&
-            (discovered->second.context_window_tokens || discovered->second.max_tokens)) {
-            ResolvedModel copy = *static_it->second;
-            if (!copy.context_window_tokens && discovered->second.context_window_tokens) {
-                copy.context_window_tokens = discovered->second.context_window_tokens;
-            }
-            if (!copy.max_tokens && discovered->second.max_tokens) {
-                copy.max_tokens = discovered->second.max_tokens;
-            }
-            return cache_.overlay_
-                .emplace(ref_key, std::make_shared<const ResolvedModel>(std::move(copy)))
+        if (discovered != cache.models.end()) {
+            return cache_.overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(
+                                                        EnrichFromDiscovery(*static_it->second,
+                                                                            discovered->second)))
                 .first->second;
         }
         return static_it->second;  // nothing to enrich
@@ -819,12 +830,26 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
     }
 
     // Everything else resolves through the base. Resolve the base WITHOUT the
-    // suffix: a static base resolves as parsed, a discovered base runs the
+    // suffix: a static base resolves as parsed (plus the discovery
+    // enrichment, EnrichFromDiscovery), a discovered base runs the
     // lazy fetch (ResolveDiscovered unlocks around the hook, per its contract),
     // which is what makes `...@high` on a discover-entry fetch on first use.
     std::shared_ptr<const ResolvedModel> base;
     if (const auto base_it = catalog_.models_.find(base_key); base_it != catalog_.models_.end()) {
-        base = base_it->second;
+        // Enrich the static base from its discovery twin -- the sibling must
+        // carry the same window/cap a session on the base would get, or a
+        // /think switch silently drops compaction.
+        if (entry.discover) {
+            if (const auto cache_it = cache_.discovery_.find(entry.name);
+                cache_it != cache_.discovery_.end() && cache_it->second.ok) {
+                const auto discovered = cache_it->second.models.find(base_id);
+                if (discovered != cache_it->second.models.end()) {
+                    base = std::make_shared<const ResolvedModel>(
+                        EnrichFromDiscovery(*base_it->second, discovered->second));
+                }
+            }
+        }
+        if (!base) base = base_it->second;
     } else if (entry.discover) {
         base = ResolveDiscovered(entry, base_id, base_key, lock);
     }
@@ -834,7 +859,7 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
     // providers.json -- but parse-time synthesis put every declared static
     // sibling in the catalog (handled above), so reaching here with a static
     // base means the variant was NOT declared: a miss. A discovered base: the
-    // entry's recipe (defaulting to "@high"), intersected with what the
+    // entry's recipe (defaulting to the model's autodetected ladder), with what the
     // catalog's metadata advertised -- PublishLocked already recorded that
     // intersection in the discovery cache's variant list when it materialized
     // the base, so this is a lookup, never a re-derivation.
@@ -904,35 +929,26 @@ void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryO
         cache.models.insert_or_assign(model.id, std::move(model));
     }
     // The variant recipe per discovered model, computed ONCE here: the entry's
-    // declared recipe (list of effort names or named bodies) -- defaulting to
-    // the single built-in "@high" when the entry declares none -- intersected
-    // with what the model's catalog metadata advertises. An entry with a
-    // declared recipe gets those names for every model that advertises ANY
-    // effort ladder (the recipe is the operator's statement about the backend's
-    // spelling; the catalog only gates whether the knob exists). List-form
-    // names re-derive their parameters here, where the model's own max_tokens
-    // is known for the anthropic budget clamp; map-form bodies are carried
-    // verbatim.
+    // declared recipe (list of effort names or named bodies), or -- when the
+    // entry declares none -- the model's own advertised ladder, verbatim. This
+    // is the autodetection: glm-5.3-flash's catalog says supported_efforts
+    // ["max","high","low"], so openrouter/z-ai/glm-5.3-flash gains @max, @high
+    // and @low without a line of config. A model advertising no ladder (a bare
+    // reasoning toggle, or nothing reasoning-shaped) gets none.
+    // List-form entries carry no parameters of their own: MakeVariantResolved
+    // derives them at sibling-build time, where the model's resolved
+    // max_tokens is available for the anthropic budget clamp. Map-form
+    // entries were validated at parse and pass through verbatim.
     for (const auto& [id, discovered] : cache.models) {
         std::vector<ModelVariant> declared = entry.variants;
         if (declared.empty()) {
             const auto efforts = llm::AdvertisedEfforts(discovered.metadata);
             if (efforts.empty()) continue;  // no ladder advertised: no variants
-            if (std::find(efforts.begin(), efforts.end(), "high") != efforts.end() ||
-                efforts.empty()) {
-                declared.push_back(ModelVariant{"high", {}, std::nullopt, std::nullopt});
-            } else {
-                // No "high" on this ladder (e.g. ["max","low"]): take the
-                // advertised rung closest to high, deterministically.
-                static const char* kPreference[] = {"max", "xhigh", "medium", "low",
-                                                    "minimal", "none"};
-                for (const char* candidate : kPreference) {
-                    if (std::find(efforts.begin(), efforts.end(), candidate) != efforts.end()) {
-                        declared.push_back(
-                            ModelVariant{candidate, {}, std::nullopt, std::nullopt});
-                        break;
-                    }
-                }
+            // The model's OWN ladder, in the catalog's order -- the rungs the
+            // backend says exist, autodetected. AdvertisedEfforts returns
+            // non-empty only with at least one name, so the loop always fills.
+            for (const auto& effort : efforts) {
+                declared.push_back(ModelVariant{effort, {}, std::nullopt, std::nullopt});
             }
         }
         // List-form entries carry no parameters of their own: MakeVariantResolved
