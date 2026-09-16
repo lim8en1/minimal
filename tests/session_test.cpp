@@ -1581,6 +1581,71 @@ TEST_CASE("SetRunMode is refused on a terminated session and changes nothing",
     CHECK(fixture.session->run_mode() == tools::PermissionRunMode::AllowOnly);
 }
 
+TEST_CASE("a preset re-resolution does not reset the runtime run mode",
+          "[session][run_mode][regression]") {
+    // THE REGRESSION: /model (and /agent) land in Session::ApplyPreset, which
+    // recomputed desired_run_mode_ from preset_.run_mode -- the global
+    // default stamped on every resolve, since no preset can declare a mode --
+    // silently resetting a shift+tab'd bypass back to Normal. A preset swap
+    // is a model/policy change, not a posture change; the mode the user set
+    // (SetRunMode) and the mode the session was created with
+    // (params_.run_mode_override) both survive it.
+    SessionFixture fixture;
+    fixture.Start();
+
+    REQUIRE(fixture.session->SetRunMode(tools::PermissionRunMode::Bypass));
+    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Bypass);
+
+    auto switched = fixture.preset;
+    switched.name = "switched";
+    fixture.session->ApplyPreset(switched);
+
+    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Bypass);
+    CHECK(fixture.session->desired_run_mode() == tools::PermissionRunMode::Bypass);
+    // The metadata emission still fires (ApplyPreset's contract to every
+    // attached client's status bar) -- it must announce the UNCHANGED mode,
+    // not a recomputed one.
+    bool mode_announced = false;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_session_metadata() &&
+            event.session_metadata().permission_mode() == "bypass") {
+            mode_announced = true;
+        }
+    }
+    CHECK(mode_announced);
+}
+
+TEST_CASE("a session-creation run-mode override survives a preset re-resolution",
+          "[session][run_mode]") {
+    // The other legitimate writer: params_.run_mode_override (the client's
+    // --run-mode / subagent-clamped choice) fixed the mode at construction.
+    // ApplyPreset removing its recompute must not free a preset to win over
+    // it either -- the mode simply never moves. Built directly (not through
+    // the fixture) because the creation override rides SessionParams, the
+    // same shape the headless-override test above uses.
+    SessionFixture fixture;
+    fixture.Script(testing::TextResponse("unused"));
+
+    agent::SessionParams params;
+    params.session_id = "sess-creation-override";
+    params.agent_preset = "test";
+    params.project_root = fixture.project_root;
+    params.run_mode_override = tools::PermissionRunMode::Bypass;
+    rpc::FinishSessionWiring(params);
+
+    auto owned_store = std::make_unique<testing::InMemoryHistoryStore>();
+    agent::Session session(std::move(params), fixture.preset,
+                           std::make_unique<testing::FakeLlmProvider>(),
+                           std::move(owned_store), fixture.tools_registry, fixture.loop_config,
+                           fixture.observers, common::DefaultLogger());
+
+    CHECK(session.run_mode() == tools::PermissionRunMode::Bypass);
+    session.ApplyPreset(fixture.preset);
+    CHECK(session.run_mode() == tools::PermissionRunMode::Bypass);
+    CHECK(session.desired_run_mode() == tools::PermissionRunMode::Bypass);
+    session.Terminate();
+}
+
 TEST_CASE("ApplyPreset refreshes info_ and announces the new metadata", "[session][metadata]") {
     // /agent and /model land here: without the info_ refresh the tab label and
     // {agent} kept the session's ORIGINAL preset, and without the event every

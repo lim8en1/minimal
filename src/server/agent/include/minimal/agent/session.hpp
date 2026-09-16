@@ -446,11 +446,13 @@ public:
     // session is gone and there is no client stream worth answering on.
     bool SetRunMode(tools::PermissionRunMode mode);
     // The durable record of the user's run-mode choice, kept in sync with the
-    // executor by every writer (SetRunMode, ApplyPreset, the per-turn borrow).
-    // What a /agent re-resolution and a borrow's restore read -- neither
-    // params_ (a session-creation default) nor preset_.run_mode (what the
-    // preset resolves to) tracks a runtime shift+tab. mutex_-guarded: written
-    // by the reader (SetRunMode) and the worker (preset paths).
+    // executor by every writer (SetRunMode, the per-turn borrow; ApplyPreset
+    // deliberately never writes it -- a preset re-resolution is a model/
+    // policy swap, not a posture change). What a /agent re-resolution and a
+    // borrow's restore read -- neither params_ (a session-creation default)
+    // nor preset_.run_mode (the global default, stamped on every resolve)
+    // tracks a runtime shift+tab. mutex_-guarded: written by the reader
+    // (SetRunMode) and read by the worker (preset paths).
     tools::PermissionRunMode desired_run_mode() const;
     // Cross-session splice point: a non-blocking subagent's worker queues its
     // completion here when it finishes; the session's own worker flushes it at

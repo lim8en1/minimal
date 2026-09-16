@@ -93,8 +93,9 @@ Session::Session(SessionParams params, AgentPreset preset,
                 params_.run_mode_override.value_or(preset_.run_mode), params_.policy_ceiling,
                 params_.mcp_policy_ceiling, params_.seed_grants, loop_config.hooks),
       // The sticky record starts where the executor starts; every later
-      // writer (SetRunMode, ApplyPreset, the borrow path) keeps the two in
-      // sync.
+      // writer (SetRunMode, the borrow path) keeps the two in sync.
+      // ApplyPreset deliberately is NOT a writer: a preset re-resolution is
+      // a model/policy swap, not a posture change.
       desired_run_mode_(params_.run_mode_override.value_or(preset_.run_mode)) {
     // An advised checker was composed before this Session existed. The
     // producer shares the cancel HOLDER between the checker and these params;
@@ -533,7 +534,17 @@ void Session::ApplyPreset(AgentPreset preset) {
     // THREE copies of the preset exist -- this one, the loop's, and the
     // executor's run mode derived from it. A command updating only some is a bug
     // that surfaces a turn later, so there is one entry point and it updates all
-    // of them.
+    // of them. The run mode is the deliberate exception: the executor's mode is
+    // the USER'S durable choice (SetRunMode writes it directly; the session-
+    // creation override rode params_ at construction), and desired_run_mode_
+    // already tracks it -- recomputing it here from preset_.run_mode is what
+    // let a /model switch silently reset a shift+tab'd bypass back to Normal:
+    // no preset can declare a run mode (AgentPresetFrontmatter has no field;
+    // the registry stamps permissions_.default_run_mode on every resolve), so
+    // a recompute can only clobber the runtime choice with the global default.
+    // If preset-declared run modes ever land, apply the DECLARED value here --
+    // clamped through params_.run_mode_override -- and leave undeclared
+    // presets preserving desired_run_mode_.
     //
     // The swap takes mutex_ because preset_snapshot() reads preset_ from the
     // RPC layer's command pool, off the worker. The rest of this method touches
@@ -546,12 +557,10 @@ void Session::ApplyPreset(AgentPreset preset) {
         // kept showing the session's original preset after /agent until re-attach.
         if (!preset_.name.empty()) info_.agent_preset = preset_.name;
     }
-    // The sticky record follows the executor, never the reverse: a runtime
-    // shift+tab outranks what any preset resolves to, so an /agent switch
-    // keeps the user's mode (params_.run_mode_override -- the client's
-    // session-creation choice -- still wins overall).
-    desired_run_mode_ = params_.run_mode_override.value_or(preset_.run_mode);
-    executor_.SetRunMode(desired_run_mode_);
+    // The sticky record and the executor keep whatever mode they held: a
+    // preset re-resolution (/model, /agent) is a model/policy swap, not a
+    // posture change. EmitMetadataChanged below still announces the
+    // (unchanged) mode, so attached clients never go stale.
     loop_->SetPreset(preset_);
     // The new preset may allow different MCP servers. Runs on the worker at a
     // turn boundary (the same blocking contract as a preset swap): a dead
