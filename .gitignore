@@ -1,3 +1,8 @@
+# Project-local harness data (agent plans under .minimal/plans/, web_fetch
+# spill cache under .minimal/web-fetch/). In-repo only because tools reach it
+# through project-root confinement; never committed.
+.minimal/
+
 .opencode/
 .claude/
 # Build output
