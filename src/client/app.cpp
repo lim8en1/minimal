@@ -79,6 +79,7 @@ namespace {
 
 using minimal::client::HeadlessOptions;
 using minimal::client::TruncateUtf8;
+using minimal::client::kFoldCollapsed;   // the fold-toggle notice lines (fb06594)
 
 // Exit codes are part of the interface: a script piping `minimal -p` needs to
 // distinguish "the model finished" from "it was cut off" from "the call failed".
