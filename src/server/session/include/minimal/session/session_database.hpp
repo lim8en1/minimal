@@ -433,9 +433,12 @@ private:
 
     sqlite3* db_ = nullptr;  // opaque here; the .cpp includes <sqlite3.h>
     // Held FIRST (acquired in the constructor before sqlite3_open) and
-    // released LAST (declared before db_, destroyed after it): the database is
-    // never open while the lock file does not name this process. Unique_ptr
-    // because <fcntl.h> stays out of this header.
+    // released LAST: the destructor closes db_ explicitly before returning, so
+    // this member's own destructor -- which runs after, whatever its
+    // declaration order relative to db_ -- always releases the lock only once
+    // the database is closed. The database is never open while the lock file
+    // does not name this process. Unique_ptr because <fcntl.h> stays out of
+    // this header.
     std::unique_ptr<common::ExclusiveFileLock> lock_;
     mutable std::mutex mu_;
     std::filesystem::path path_;
