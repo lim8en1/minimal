@@ -86,8 +86,16 @@ std::string EscapeAttrValue(const std::string& value) {
 std::string WrapSignal(const std::string& source, const std::string& signal,
                        const std::map<std::string, std::string>& attributes,
                        const std::string& content) {
-    std::string tag = "<signal source=\"" + source + "\"";
-    if (!signal.empty()) tag += " signal=\"" + signal + "\"";
+    // Escaped like every other attribute below (EscapeAttrValue), not left
+    // verbatim: both call sites today pre-validate source/signal against
+    // config::IsValidSignalName's [a-z0-9._-] charset, so this is currently
+    // unreachable in practice, but this function is documented (see the
+    // header) as reusable beyond those two callers -- a future caller
+    // passing an unvalidated value containing '"' would otherwise break out
+    // of the attribute and forge signal structure, exactly the injection
+    // class this function exists to prevent for every other field.
+    std::string tag = "<signal source=\"" + EscapeAttrValue(source) + "\"";
+    if (!signal.empty()) tag += " signal=\"" + EscapeAttrValue(signal) + "\"";
     for (const auto& [key, value] : attributes) {
         // The same charset rule as the wire params: a key outside it is
         // silently dropped rather than rejected -- one odd attribute must not

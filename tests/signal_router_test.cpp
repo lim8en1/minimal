@@ -135,6 +135,26 @@ TEST_CASE("WrapSignal: provenance frame, attribute sanitization", "[signals][rou
           "<signal source=\"sessions\" from=\"01ARZ3NDEKTSV4RRFFQ69G5FAV\"></signal>");
 }
 
+TEST_CASE(
+    "WrapSignal escapes source/signal like every other attribute value",
+    "[signals][router][regression]") {
+    // The bug: source/signal rode straight into the tag's attribute values
+    // unescaped, unlike every other attribute (EscapeAttrValue). Both real
+    // call sites happen to pre-validate against IsValidSignalName's
+    // [a-z0-9._-] charset, so this was not exploitable today -- but the
+    // function is documented as reusable beyond those two callers, and an
+    // unvalidated value containing '"' would otherwise break out of the
+    // attribute and forge signal structure.
+    const std::string wrapped =
+        agent::WrapSignal("ci\" evil=\"1", "build\" x=\"y", {}, "body");
+    CHECK(wrapped.find("source=\"ci\\\" evil=\\\"1\"") != std::string::npos);
+    CHECK(wrapped.find("signal=\"build\\\" x=\\\"y\"") != std::string::npos);
+    // No unescaped '"' immediately followed by a bare attribute name: the
+    // forged "evil="/"x=" attributes never appear as real attributes.
+    CHECK(wrapped.find("\" evil=\"1\"") == std::string::npos);
+    CHECK(wrapped.find("\" x=\"y\"") == std::string::npos);
+}
+
 TEST_CASE("CheckSelector: syntax and mode rules", "[signals][router]") {
     agent::SignalRouter router;
     router.RegisterChannel(CiChannel());
