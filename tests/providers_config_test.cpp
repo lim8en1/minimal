@@ -1458,6 +1458,40 @@ TEST_CASE("discovery applies the entry recipe to models that advertise an effort
 }
 
 TEST_CASE(
+    "discovery skips an unknown effort name instead of publishing an inert variant",
+    "[providers][variants][discover][regression]") {
+    // The bug: an autodetected effort name outside IsKnownEffortName's
+    // vocabulary was pushed into the variant ladder verbatim, with no
+    // validation (unlike the config-file path, ParseVariants, which rejects
+    // unknown names at parse time). The variant resolved successfully as an
+    // addressable @<name>, but MakeVariantResolved's IsKnownEffortName guard
+    // skipped parameter derivation for it -- a silently inert selector
+    // sending a request identical to the base model, with no warning.
+    CountingHook hook;
+    hook.models = {{"m", 131072,
+                    nlohmann::json::parse(
+                        R"({"reasoning": {"supported_efforts": ["high", "turbo", "low"]}})"),
+                    std::nullopt}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    REQUIRE(config.Resolve(ModelRef{"local", "m"}) != nullptr);  // warms the discovery cache
+
+    // The unknown rung is skipped entirely, not published as an inert variant.
+    CHECK(config.Resolve(ModelRef{"local", "m@turbo"}) == nullptr);
+    const auto names = config.VariantsOf(ModelRef{"local", "m"});
+    REQUIRE(names.size() == 2);
+    CHECK(names[0] == "high");
+    CHECK(names[1] == "low");
+    // The known rungs on either side of it still resolve normally.
+    const auto& high = config.Resolve(ModelRef{"local", "m@high"});
+    REQUIRE(high != nullptr);
+    CHECK(high->parameters.at("reasoning_effort") == "high");
+}
+
+TEST_CASE(
     "an explicit empty variants list opts a model out, even when discovery advertises a ladder",
     "[providers][variants][discover][regression]") {
     // The bug: an explicit `variants: []` (an operator's deliberate opt-out)

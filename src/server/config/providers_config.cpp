@@ -965,7 +965,22 @@ void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryO
             // The model's OWN ladder, in the catalog's order -- the rungs the
             // backend says exist, autodetected. AdvertisedEfforts returns
             // non-empty only with at least one name, so the loop always fills.
+            // Validated against the known vocabulary, unlike the config-file
+            // path (ParseVariants) which already rejects unknown names at
+            // parse time: an autodetected name outside it would otherwise
+            // resolve as an addressable variant whose parameters are never
+            // derived (MakeVariantResolved's IsKnownEffortName guard skips
+            // it), sending a request byte-for-byte identical to the base
+            // model with no warning that the selector did nothing.
             for (const auto& effort : efforts) {
+                if (!IsKnownEffortName(effort)) {
+                    common::DefaultLogger().warn(
+                        "providers.json: model '{}' advertises an unknown effort '{}' via "
+                        "discovery; skipping that variant (known: high, low, max, medium, "
+                        "minimal, none, xhigh)",
+                        id, effort);
+                    continue;
+                }
                 declared.push_back(ModelVariant{effort, {}, std::nullopt, std::nullopt});
             }
         }
