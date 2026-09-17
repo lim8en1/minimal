@@ -601,6 +601,18 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     if (history_.size() < 2) return std::nullopt;
     if (compaction_failed_this_turn_) return std::nullopt;
 
+    // Every exit from here on defaults to "failed this turn" -- only the
+    // success return at the bottom clears it, replacing what used to be a
+    // separate `compaction_failed_this_turn_ = true;` at each of the four
+    // failure exits below (easy to forget on a future one).
+    struct FailureGuard {
+        bool& flag;
+        bool succeeded = false;
+        ~FailureGuard() {
+            if (!succeeded) flag = true;
+        }
+    } failure_guard{compaction_failed_this_turn_};
+
     // Keep the tail verbatim; summarize everything older. The candidate cut
     // comes from the configured strategy's cut selector (S4) when one is
     // set -- honoring memory.compaction_keep_recent_tokens (W11) via a
@@ -626,7 +638,6 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
             "session {}: compaction_keep_recent_tokens covers the whole working set ({} "
             "messages); nothing to compact",
             session_.session_id, history_.size());
-        compaction_failed_this_turn_ = true;  // still don't retry every tool cycle
         if (config_.hooks != nullptr) {
             config_.hooks->EmitAsync(
                 hooks::kPostCompact,
@@ -660,7 +671,6 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
                 "session {}: no safe compaction boundary in {} messages; elided the largest "
                 "tool result instead",
                 session_.session_id, history_.size());
-            compaction_failed_this_turn_ = true;   // still don't retry every tool cycle
             if (config_.hooks != nullptr) {
                 config_.hooks->EmitAsync(
                     hooks::kPostCompact,
@@ -682,7 +692,6 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
             "session {}: cannot compact -- no safe boundary in {} messages; context will keep "
             "growing",
             session_.session_id, history_.size());
-        compaction_failed_this_turn_ = true;
         if (config_.hooks != nullptr) {
             config_.hooks->EmitAsync(hooks::kPostCompact,
                                      nlohmann::json{{"session_id", session_.session_id},
@@ -749,7 +758,6 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     const auto result = compactor_(to_compact, *summarizer, params);
     if (!result) {
         // No compaction this cycle; do not retry on every tool cycle of this turn.
-        compaction_failed_this_turn_ = true;
         if (config_.hooks != nullptr) {
             config_.hooks->EmitAsync(hooks::kPostCompact,
                                      nlohmann::json{{"session_id", session_.session_id},
@@ -848,6 +856,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // The VIEW produced here is checkpointed above; the transcript is not
     // touched. The store keeps the full uncompacted record, so scrollback is
     // unaffected no matter how many times this runs.
+    failure_guard.succeeded = true;
     return cut;
 }
 
