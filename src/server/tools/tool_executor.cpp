@@ -83,6 +83,22 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     // child whose own preset declared no patterns). A canonical path anchors
     // patterns like "**/.env" at "/" for confinement tools; the raw subject
     // stands for everything else (bash's command line).
+    // Path confinement, canonicalized at most ONCE: for a confinement-
+    // supporting tool, PatternSubject() defaults to (and nothing in this
+    // codebase overrides it away from) ExtractPath() -- see tool.hpp -- so
+    // the pattern-subject use below and the out-of-workdir fold in step 2
+    // always confine() the identical path. Computing it here once, ahead of
+    // both, means a single canonicalization serves both instead of one per
+    // use site.
+    std::optional<std::string> confinable_path;
+    std::optional<ConfineResult> confined;
+    if (tool.path_confinement_supported()) {
+        confinable_path = tool.ExtractPath(input);
+        if (confinable_path) {
+            confined = confine(ctx.project_root, *confinable_path, /*must_exist=*/false);
+        }
+    }
+
     PatternSubjects subjects;
     bool subject_is_path = false;
     const bool needs_pattern_subject =
@@ -91,14 +107,14 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
          (!policy_ceiling_->pattern_overrides.empty() ||
           !policy_ceiling_->out_of_workdir_patterns.empty()));
     if (needs_pattern_subject) {
-        if (auto raw = tool.PatternSubject(input)) {
-            if (tool.path_confinement_supported()) {
-                const ConfineResult canonical = confine(ctx.project_root, *raw, false);
-                subjects.whole = canonical.ok ? canonical.absolute_path.string() : *raw;
+        if (tool.path_confinement_supported()) {
+            if (confinable_path) {
+                subjects.whole =
+                    confined->ok ? confined->absolute_path.string() : *confinable_path;
                 subject_is_path = true;
-            } else {
-                subjects.whole = std::move(*raw);
             }
+        } else if (auto raw = tool.PatternSubject(input)) {
+            subjects.whole = std::move(*raw);
         }
         // Stages ride along when the tool can decompose the subject. Only a
         // pattern-carrying policy pays for the decomposition (the same gate as
@@ -124,8 +140,8 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     //    invocation when any of them matches the canonical path: the operator's
     //    per-path intent is the more specific statement.
     if (mode != PermissionMode::AlwaysDeny && tool.path_confinement_supported()) {
-        if (auto path = tool.ExtractPath(input)) {
-            const ConfineResult resolved = confine(ctx.project_root, *path, /*must_exist=*/false);
+        if (confinable_path) {
+            const ConfineResult& resolved = *confined;
             checked = true;
             inside = resolved.ok && !resolved.outside_project_root;
             if (!inside) {
