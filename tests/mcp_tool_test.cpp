@@ -81,6 +81,22 @@ TEST_CASE("McpResultToToolResult: non-text content becomes a placeholder, not si
     CHECK(converted.content_text == "before [image content omitted]");
 }
 
+TEST_CASE("McpResultToToolResult: successful content text is capped, like the error path",
+          "[mcp_tool][regression]") {
+    // The bug: successful tool-result content text had no size cap, unlike
+    // mcp_connection.cpp's own error-message cap (kMaxErrorMessage), even
+    // though a misbehaving/malicious MCP server can return content bounded
+    // only by the transport's 64 MiB HTTP cap (or effectively unbounded over
+    // stdio). The agent loop's own configurable ceiling still runs
+    // downstream, but building and holding an unbounded string here first is
+    // an avoidable transient allocation a hostile server can force.
+    const std::string huge(2 * (1 << 20), 'x');  // 2 MiB, above the 1 MiB cap
+    const ToolResult converted = McpResultToToolResult(TextResult(huge));
+    CHECK(converted.content_text.size() < huge.size());
+    CHECK(converted.content_text.size() <= (1 << 20) + 32);  // cap + truncation marker
+    CHECK(converted.content_text.find("truncated") != std::string::npos);
+}
+
 TEST_CASE("McpResultToToolResult: error result with no content is an error, not an empty success", "[mcp_tool]") {
     const ToolResult converted = McpResultToToolResult(nlohmann::json{{"isError", true}});
     CHECK(converted.is_error);

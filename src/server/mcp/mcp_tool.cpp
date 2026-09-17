@@ -49,8 +49,19 @@ tools::ToolResult McpResultToToolResult(const nlohmann::json& call_result) {
         return result;
     }
 
+    // Capped here, at the source, like mcp_connection.cpp's own error-message
+    // cap: a misbehaving or malicious MCP server can return success content
+    // bounded only by the transport's 64 MiB HTTP body cap (or effectively
+    // unbounded over stdio) -- an unbounded log/context line from a remote
+    // we do not control, same reasoning as the error path. The agent loop's
+    // configurable max_tool_result_bytes ceiling (CapToolResult) still runs
+    // afterward and is the real model-facing bound; this just keeps a
+    // hostile response from forcing a huge transient allocation/copy before
+    // that ceiling ever gets a chance to apply.
+    constexpr std::size_t kMaxContentText = 1 << 20;  // 1 MiB
     std::string text;
     for (const auto& item : call_result.at("content")) {
+        if (text.size() >= kMaxContentText) break;
         if (!item.is_object() || !item.contains("type") || !item.at("type").is_string()) {
             text += "[malformed content item omitted]";
             continue;
@@ -61,6 +72,10 @@ tools::ToolResult McpResultToToolResult(const nlohmann::json& call_result) {
         } else {
             text += PlaceholderFor(type);
         }
+    }
+    if (text.size() > kMaxContentText) {
+        text.resize(kMaxContentText);
+        text += " …[truncated]";
     }
     result.content_text = std::move(text);
     return result;
