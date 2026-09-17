@@ -43,9 +43,23 @@ McpServerEntry ParseEntry(const nlohmann::json& entry) {
     const std::string transport = entry.at("transport").get<std::string>();
     if (transport == "stdio") {
         result.transport = McpTransport::Stdio;
+        // contains + type check, not entry.at(): same reasoning as
+        // "name"/"transport" above -- a missing "command" must not surface a
+        // raw json.exception.out_of_range through the blanket catch below.
+        if (!entry.contains("command") || !entry.at("command").is_string()) {
+            throw std::runtime_error("stdio entry needs a non-empty command");
+        }
         result.command = entry.at("command").get<std::string>();
         if (result.command.empty()) throw std::runtime_error("stdio entry needs a non-empty command");
         if (entry.contains("args")) {
+            // is_array() first: nlohmann's range-for over a non-array value
+            // still "works" (a scalar iterates once over itself; an object
+            // iterates its VALUES in key-sorted order), so without this check
+            // a typo'd object or string silently became a one-element or
+            // reordered args list instead of the intended rejection.
+            if (!entry.at("args").is_array()) {
+                throw std::runtime_error("args must be an array of strings");
+            }
             for (const auto& arg : entry.at("args")) {
                 if (!arg.is_string()) throw std::runtime_error("args must be an array of strings");
                 result.args.push_back(arg.get<std::string>());
@@ -54,6 +68,9 @@ McpServerEntry ParseEntry(const nlohmann::json& entry) {
         if (entry.contains("env")) result.env = ParseStringMap(entry.at("env"), "env");
     } else if (transport == "http") {
         result.transport = McpTransport::Http;
+        if (!entry.contains("url") || !entry.at("url").is_string()) {
+            throw std::runtime_error("http entry needs a non-empty url");
+        }
         result.url = entry.at("url").get<std::string>();
         if (result.url.empty()) throw std::runtime_error("http entry needs a non-empty url");
         if (entry.contains("headers")) result.headers = ParseStringMap(entry.at("headers"), "headers");

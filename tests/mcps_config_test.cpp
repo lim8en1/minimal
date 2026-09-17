@@ -124,6 +124,43 @@ TEST_CASE("ParseMcpsConfig: a missing transport is a named error, never a json e
     CHECK(config.errors[0].find("json.exception") == std::string::npos);
 }
 
+TEST_CASE("ParseMcpsConfig: a missing command is a named error, never a json exception",
+          "[mcps_config][invariant][regression]") {
+    // entry.at("command") used to throw json.exception.out_of_range into the
+    // blanket catch, unlike "name"/"transport" a few lines above which
+    // already had this contains()+type check.
+    auto entry = StdioEntry();
+    entry.erase("command");
+    auto config = ParseMcpsConfig(nlohmann::json::array({entry}));
+    REQUIRE(config.errors.size() == 1);
+    CHECK(config.errors[0].find("command") != std::string::npos);
+    CHECK(config.errors[0].find("json.exception") == std::string::npos);
+}
+
+TEST_CASE("ParseMcpsConfig: a missing url is a named error, never a json exception",
+          "[mcps_config][invariant][regression]") {
+    auto entry = HttpEntry();
+    entry.erase("url");
+    auto config = ParseMcpsConfig(nlohmann::json::array({entry}));
+    REQUIRE(config.errors.size() == 1);
+    CHECK(config.errors[0].find("url") != std::string::npos);
+    CHECK(config.errors[0].find("json.exception") == std::string::npos);
+}
+
+TEST_CASE("ParseMcpsConfig: a non-array 'args' is a named error, not a silently reordered list",
+          "[mcps_config][regression]") {
+    // The bug: entry.at("args") was iterated without an is_array() check.
+    // nlohmann's range-for over a JSON OBJECT iterates its VALUES in
+    // key-sorted order, so a typo'd object silently became an args list in
+    // the wrong order instead of the intended rejection.
+    auto entry = StdioEntry();
+    entry["args"] = nlohmann::json{{"1", "--foo"}, {"0", "--bar"}};
+    auto config = ParseMcpsConfig(nlohmann::json::array({entry}));
+    REQUIRE(config.entries.empty());
+    REQUIRE(config.errors.size() == 1);
+    CHECK(config.errors[0].find("args") != std::string::npos);
+}
+
 TEST_CASE("ParseMcpsConfig: duplicate name is a per-entry error", "[mcps_config]") {
     auto config = ParseMcpsConfig(nlohmann::json::array({StdioEntry(), StdioEntry()}));
     REQUIRE(config.entries.size() == 1);

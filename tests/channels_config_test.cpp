@@ -51,6 +51,20 @@ TEST_CASE("ParseChannelsConfig: extended entry, mode defaults to restricted",
     CHECK(defaulted.entries.empty());
 }
 
+TEST_CASE("ParseChannelsConfig: a non-array 'args' is a named error, not a silently reordered list",
+          "[channels_config][regression]") {
+    // The bug: entry.at("args") was iterated without an is_array() check.
+    // nlohmann's range-for over a JSON OBJECT iterates its VALUES in
+    // key-sorted order, so a typo'd object silently became an args list in
+    // the wrong order instead of the intended rejection.
+    auto entry = RestrictedEntry();
+    entry["args"] = nlohmann::json{{"1", "--foo"}, {"0", "--bar"}};
+    auto config = ParseChannelsConfig(nlohmann::json{{"ci", entry}});
+    CHECK(config.entries.empty());
+    REQUIRE(config.errors.size() == 1);
+    CHECK(config.errors[0].find("args") != std::string::npos);
+}
+
 TEST_CASE("ParseChannelsConfig: per-entry errors degrade, never throw", "[channels_config]") {
     auto config = ParseChannelsConfig(nlohmann::json{
         {"bad-signal",
