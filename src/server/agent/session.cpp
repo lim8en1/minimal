@@ -1060,6 +1060,16 @@ void Session::JoinWorkerOnce() {
     });
 }
 
+void Session::FireOnTurnFinishedOnce(const TurnResult& result, std::string_view context) {
+    if (!params_.on_turn_finished) return;
+    if (subagent_finished_.exchange(true, std::memory_order_acq_rel)) return;
+    try {
+        params_.on_turn_finished(result);
+    } catch (...) {
+        logger_.warn("session {}: on_turn_finished threw{}", params_.session_id, context);
+    }
+}
+
 void Session::Terminate() {
     // Same fire the advisor's Cancel gets: an Advise still running at teardown
     // must see the session is going away, and a DETACHED advise thread polling
@@ -1148,17 +1158,10 @@ void Session::Terminate() {
     // The subagent completion hook fires on EVERY exit path -- including a
     // terminate that lands before the seeded turn ever ran (the initial-attach
     // reaper, or a terminate racing SubmitTurn). Without this, a blocking parent
-    // waits on a promise that nothing will ever set. The exchange makes
-    // exactly-once certain against the store in RunOneTurn.
-    if (params_.on_turn_finished && !subagent_finished_.exchange(true, std::memory_order_acq_rel)) {
-        TurnResult cancelled;
-        cancelled.stop_reason = llm::StopReason::Cancelled;
-        try {
-            params_.on_turn_finished(cancelled);
-        } catch (...) {
-            logger_.warn("session {}: on_turn_finished threw during teardown", params_.session_id);
-        }
-    }
+    // waits on a promise that nothing will ever set.
+    TurnResult cancelled;
+    cancelled.stop_reason = llm::StopReason::Cancelled;
+    FireOnTurnFinishedOnce(cancelled, " during teardown");
 
     try {
         observers_.NotifySessionEnded(InfoSnapshot());
@@ -1704,28 +1707,17 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
     } catch (...) {
         logger_.warn("session {}: notifying turn observers failed", params_.session_id);
     }
-    try {
-        // Last, after every wire event and observer notification: a blocking
-        // parent waiting on this result may proceed the instant the callback
-        // returns, and must not observe a session that still has bookkeeping in
-        // flight. Fired on EVERY exit path -- `result` is default-constructed
-        // after a failed turn, which is exactly what a waiter needs to unblock
-        // with an error.
-        // EXCHANGE, not store. Terminate() guards the same hook with an
-        // exchange and its comment claims that makes the pair exactly-once --
-        // which was true only because Terminate joins this worker before reading
-        // the flag, i.e. because of the JOIN, not because of the exchange. A
-        // claim resting on a mechanism other than the one it names is how the
-        // next edit breaks it; with both sides exchanging, exactly-once holds
-        // whatever the ordering. Firing twice would set a std::promise twice,
-        // which throws.
-        if (params_.on_turn_finished &&
-            !subagent_finished_.exchange(true, std::memory_order_acq_rel)) {
-            params_.on_turn_finished(result);
-        }
-    } catch (...) {
-        logger_.warn("session {}: on_turn_finished threw", params_.session_id);
-    }
+    // Last, after every wire event and observer notification: a blocking
+    // parent waiting on this result may proceed the instant the callback
+    // returns, and must not observe a session that still has bookkeeping in
+    // flight. Fired on EVERY exit path -- `result` is default-constructed
+    // after a failed turn, which is exactly what a waiter needs to unblock
+    // with an error.
+    // EXCHANGE, not store. Terminate() guards the same hook with an exchange
+    // (see FireOnTurnFinishedOnce) -- exactly-once holds whatever the
+    // ordering between the two, not because either one joins the other's
+    // thread first.
+    FireOnTurnFinishedOnce(result, "");
     // Record that an explicit unpause has something to continue into. Set
     // unconditionally on a Paused result -- including when the pause was
     // already cleared (an unpause racing the final round: SetPaused(false)

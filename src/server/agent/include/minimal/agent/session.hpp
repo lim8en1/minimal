@@ -32,6 +32,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <variant>
 
@@ -690,6 +691,12 @@ private:
     // nullopt = the wake path: a turn whose user content is the injected
     // messages themselves (see SessionParams::wake_on_injection).
     void RunOneTurn(std::optional<std::string> text, const QueuedTurn* overrides = nullptr);
+    // Fires params_.on_turn_finished EXACTLY ONCE across every exit path
+    // (a completed turn in RunOneTurn, a terminate that lands before any turn
+    // ever ran) by exchanging subagent_finished_ -- a blocking parent waits on
+    // a promise this sets, and setting it twice throws. `context` names the
+    // caller in the warn log on a throwing hook, e.g. " during teardown".
+    void FireOnTurnFinishedOnce(const TurnResult& result, std::string_view context);
     void RunOneCommand(const QueuedCommand& command);
     void RunOneRewind(const QueuedRewind& request);
     // The full E-additions metadata set (name, preset, model, run mode,
