@@ -201,7 +201,8 @@ public:
                {{"type", "integer"},
                 {"description", "Wall-clock limit in seconds; defaults to " +
                                     std::to_string(settings_.timeout_ms / 1000) + ", capped at " +
-                                    std::to_string(settings_.max_timeout_ms / 1000)}}},
+                                    std::to_string(settings_.max_timeout_ms / 1000) + ". " +
+                                    "Foreground tasks are killed (process group) on timeout."}}},
               {"restart",
                {{"type", "boolean"},
                 {"description", "Reset cwd and environment to their defaults before running"}}},
