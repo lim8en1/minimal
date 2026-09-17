@@ -123,11 +123,22 @@ PermissionResponse AdvisedPermissionChecker::CheckWithTimeout(const PermissionRe
             return advisor->Advise(request, AdvisorContext{cancel_source->is_cancelled});
         });
     std::future<std::optional<PermissionResponse>> future = task.get_future();
-    std::thread worker(std::move(task));
-    // Counted from launch, after construction: if std::thread's own
-    // construction throws (resource exhaustion) nothing was counted and the
-    // caller gets the wire prompt -- no leak in either direction.
+    // Counted BEFORE the thread exists: incrementing after construction let
+    // the new thread finish and run its Decrement guard before this line ever
+    // ran, transiently driving the shared atomic negative for anything
+    // sampling in_flight_advisors() concurrently (nothing was actually broken
+    // by it, but it made every such reading a false alarm). Incrementing
+    // first closes that window; the catch below still keeps "construction
+    // throws -> nothing was counted" true, so a resource-exhaustion failure
+    // here still cannot leak the count upward.
     abandoned_count_->fetch_add(1, std::memory_order_relaxed);
+    std::thread worker;
+    try {
+        worker = std::thread(std::move(task));
+    } catch (...) {
+        abandoned_count_->fetch_sub(1, std::memory_order_relaxed);
+        throw;
+    }
 
     const auto deadline = std::chrono::steady_clock::now() + timeout_;
     for (;;) {
