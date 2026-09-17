@@ -1460,6 +1460,17 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
     } preset_restore;
     preset_restore.session = this;
 
+    // Owns the per-turn borrowed provider (when provider_instance_cache_ is
+    // unset and provider_factories_->Create returns the sole shared_ptr
+    // owner) for the rest of this function, so loop_'s SetProvider(*borrowed)
+    // reference below stays valid through RunTurn and past preset_restore's
+    // rebind back to provider_. Declared at this scope -- not inside the
+    // `if (provider_changed)` block below -- specifically so it outlives
+    // that block; a scope-local shared_ptr there was destroyed the instant
+    // the block ended, leaving loop_ with a dangling reference (UAF) for
+    // every subsequent RunTurn call.
+    std::shared_ptr<llm::LlmProvider> borrowed_provider;
+
     if (overrides && (!overrides->model.empty() || !overrides->agent_preset.empty())) {
         try {
             // active before ANY mutation, and kept set through the catch
@@ -1521,20 +1532,19 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
                 transient.provider.base_url != preset_.provider.base_url ||
                 transient.provider.api_key != preset_.provider.api_key;
             if (provider_changed) {
-                std::shared_ptr<llm::LlmProvider> borrowed;
                 if (provider_instance_cache_ != nullptr) {
-                    borrowed = provider_instance_cache_->GetOrCreate(
+                    borrowed_provider = provider_instance_cache_->GetOrCreate(
                         transient.model_ref.provider, transient.provider_kind,
                         transient.provider);
                 } else if (provider_factories_ != nullptr) {
-                    borrowed = std::shared_ptr<llm::LlmProvider>(
+                    borrowed_provider = std::shared_ptr<llm::LlmProvider>(
                         provider_factories_->Create(transient.provider_kind, transient.provider));
                 }
-                if (borrowed == nullptr) {
+                if (borrowed_provider == nullptr) {
                     throw std::runtime_error("provider kind '" + transient.provider_kind +
                                              "' failed to construct for the per-turn override");
                 }
-                loop_->SetProvider(*borrowed);
+                loop_->SetProvider(*borrowed_provider);
             }
             preset_restore.active = true;
         } catch (const std::exception& error) {

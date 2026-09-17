@@ -79,6 +79,8 @@ struct SessionFixture {
         // A preset registry turns the per-turn /agent borrow path on; tests
         // that only run plain turns leave it null and never touch it.
         if (preset_registry != nullptr) params.presets = preset_registry;
+        params.provider_factories = provider_factories;
+        params.provider_instance_cache = provider_instance_cache;
         // Builds whatever the test did not inject above: a real transport
         // (unless one already came from rpc::ApplyPermissionAdvisor), the
         // default WirePermissionChecker (unless a fake/advised one was
@@ -137,6 +139,10 @@ struct SessionFixture {
     // Optional preset registry for the per-turn borrow path; must outlive the
     // session (declare it in the test, before Start()).
     const agent::AgentPresetRegistry* preset_registry = nullptr;
+    // Optional provider-construction seams for the per-turn provider-rebind
+    // path; must outlive the session (declare in the test, before Start()).
+    const llm::ProviderFactoryRegistry* provider_factories = nullptr;
+    agent::ProviderInstanceCache* provider_instance_cache = nullptr;
     // The idle-wake setting: an out-of-band injection on an IDLE session runs a
     // seedless turn (the injected messages are the user content).
     bool wake_on_injection = false;
@@ -1563,6 +1569,72 @@ TEST_CASE("a borrowed turn does not revert a SetRunMode switch", "[session][run_
     fixture.session->SubmitTurn("plain");
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
     CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Bypass);
+}
+
+TEST_CASE(
+    "a per-turn provider override with only provider_factories_ set does not dangle "
+    "(regression, use-after-free)",
+    "[session][regression]") {
+    // The bug: RunOneTurn's per-turn provider override built the replacement
+    // provider into a scope-local shared_ptr and called loop_->SetProvider(*that),
+    // which stores a REFERENCE. When provider_instance_cache_ is unset (only
+    // provider_factories_ is wired -- true here, and true of any Session built
+    // without SessionRegistry's cache), that local was the sole owner and was
+    // destroyed at the end of the `if (provider_changed)` block, so the
+    // subsequent RunTurn call ran against a dangling reference. This test's own
+    // assertions can't observe a UAF; the point is to give the ASan job (see the
+    // fix priority plan) a reachable repro of the exact starved-ownership
+    // condition.
+    testing::TempDir dir;
+    std::ofstream(dir.path() / "settings.json")
+        << "{\"default_model\": \"main/test-model\"}\n";
+    std::ofstream(dir.path() / "permissions.json") << "{}\n";
+    // Two providers, so the borrow's model resolution picks a DIFFERENT
+    // provider entry than the session's own preset -- flipping provider_changed
+    // to true and exercising the borrowed-provider construction path.
+    std::ofstream(dir.path() / "providers.json")
+        << R"({"providers":{)"
+           R"("main":{"backend":"fake","url":"http://localhost/v1","models":{"test-model":{}}},)"
+           R"("other":{"backend":"fake","url":"http://localhost/v2","models":{"other-model":{}}}}})"
+        << "\n";
+    std::filesystem::create_directories(dir.path() / "agents");
+    std::ofstream(dir.path() / "agents" / "test.md")
+        << "---\nname: test\nmodel: main/test-model\n---\nborrow body\n";
+    config::SkillRegistry skills = config::SkillRegistry::Load(dir.path());
+    agent::AgentPresetRegistry registry(
+        dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
+
+    // Every "fake" provider the factory constructs is scripted to answer once;
+    // the fixture's own `provider` (the session's sticky one) is never used
+    // once the borrow rebinds.
+    llm::ProviderFactoryRegistry factories;
+    REQUIRE(factories.Register("fake", [](const llm::ProviderConfig&) {
+        auto provider = std::make_unique<testing::FakeLlmProvider>();
+        provider->PushResponse(testing::TextResponse("borrowed via factory"));
+        return provider;
+    }));
+
+    SessionFixture fixture(dir.path());
+    fixture.preset_registry = &registry;
+    // provider_instance_cache left null: the bug's exact condition.
+    fixture.provider_factories = &factories;
+    fixture.preset = registry.Resolve("test");
+    fixture.preset.allowed_tools = {"*"};
+    fixture.preset.permission_mode = testing::AllowAllPolicy();
+    fixture.preset.run_mode = tools::PermissionRunMode::Normal;
+    fixture.Script(testing::TextResponse("unused"));
+    fixture.Start();
+
+    agent::QueuedTurn borrowed;
+    borrowed.text = "run on the other provider";
+    borrowed.model = "other/other-model";  // a different provider entry -> provider_changed
+    REQUIRE(fixture.session->SubmitTurnWithOverrides(borrowed));
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    // The turn borrowed a fresh provider via provider_factories_ and ran to
+    // completion; under ASan this proves the borrowed provider was not freed
+    // out from under RunTurn.
+    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Normal);
 }
 
 TEST_CASE("SetRunMode is refused on a terminated session and changes nothing",
