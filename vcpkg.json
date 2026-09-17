@@ -26,11 +26,7 @@
     "yaml-cpp",
     "spdlog",
     "tree-sitter",
-    "re2",
-    {
-      "$comment": "memory plugin: local in-process embeddings (onnx strategy). See plugins/server/memory/README.md for the model/tokenizer files this serves. Heavy port -- see BUILD.md before removing.",
-      "name": "onnxruntime"
-    }
+    "re2"
   ],
   "features": {
     "client": {

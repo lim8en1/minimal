@@ -52,6 +52,15 @@ checkout:
 export VCPKG_ROOT=/path/to/vcpkg   # optional; ./configure bootstraps one otherwise
 ```
 
+If `vcpkg install` fails with "failed to unpack tree object" / "cloned as a
+shallow repository", the vcpkg checkout in use is missing history that a
+pinned port version needs. If `$VCPKG_ROOT` is set, check that it points at
+a full (non-shallow) clone synced to this repo's `builtin-baseline`; for the
+auto-bootstrapped `./.vcpkg`, `./configure` now always ensures full history
+(`git -C .vcpkg rev-parse --is-shallow-repository` should print `false`) --
+delete `.vcpkg/` and re-run `./configure` if it's stuck shallow from an
+older `./configure`.
+
 ### Dependency linkage
 
 Dependencies are built as **shared libraries**. When `VCPKG_TARGET_TRIPLET` is

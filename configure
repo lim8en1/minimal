@@ -98,14 +98,19 @@ bootstrap_vcpkg() {
         say "cloning vcpkg into $dst ..."
         git clone --depth 1 "$VCPKG_REPO_URL" "$dst"
     fi
-    # Pin the checkout to the manifest's baseline so the commit is present in
-    # the local git database (vcpkg resolves builtin-baseline from it). A
-    # shallow clone usually cannot see an older commit by itself: try a cheap
-    # depth-1 fetch of that exact SHA first, fall back to unshallowing.
+    # vcpkg's version-pinning system (versions/*.json) resolves individual
+    # port versions to arbitrary historical git tree objects, not just the
+    # tree reachable from the baseline commit -- so a shallow, single-commit
+    # fetch of the baseline SHA is not enough, even though such a fetch can
+    # itself "succeed" (GitHub allows fetching an arbitrary reachable SHA).
+    # Ensure full history before pinning to the manifest's baseline.
+    if [ "$(git -C "$dst" rev-parse --is-shallow-repository)" = "true" ]; then
+        say "fetching full vcpkg history (one-time) ..."
+        git -C "$dst" fetch --unshallow origin
+    fi
     if [ "$(git -C "$dst" rev-parse HEAD)" != "$baseline" ]; then
         say "pinning vcpkg to baseline $baseline ..."
-        git -C "$dst" fetch --depth 1 origin "$baseline" 2>/dev/null \
-            || git -C "$dst" fetch --unshallow origin
+        git -C "$dst" fetch origin "$baseline" 2>/dev/null || true
         git -C "$dst" checkout --detach --quiet "$baseline"
     fi
     if [ ! -x "$dst/vcpkg" ]; then
