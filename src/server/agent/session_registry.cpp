@@ -118,6 +118,18 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
     params.resume = true;
 
     try {
+        if (model) {
+            // Persist the EXPLICIT override durably: db_.ForkSession only ever
+            // copies the source's own model column into the new row, with no
+            // parameter for a request-level override. Without this, the
+            // override lives only in params.model_override for this
+            // process's lifetime -- a restart resumes the forked session by
+            // re-reading the row, which still holds the source's model,
+            // silently discarding the user's explicit fork-time choice.
+            // Inside this try so a failure here rolls back the row exactly
+            // like a failed Create() does.
+            db_.UpdateSessionModel(row.session_id, model->str());
+        }
         return Create(std::move(params));
     } catch (...) {
         // The fork transaction committed, but the session could not be built

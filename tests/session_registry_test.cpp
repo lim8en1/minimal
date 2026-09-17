@@ -857,3 +857,52 @@ TEST_CASE("project context is absent when disabled or when no candidate file exi
         CHECK(request.system->find("## Project context") == std::string::npos);
     }
 }
+
+TEST_CASE("ForkSession persists an explicit model override to the child's row",
+          "[session_registry][fork][regression]") {
+    // The bug: ForkSession applied an explicit request-level model override
+    // only to the in-memory params.model_override; db_.ForkSession only ever
+    // copies the SOURCE's own model column into the new row, with no
+    // parameter for a request-level override. A restart resuming the forked
+    // session re-reads the row and silently loses the override.
+    RegistryFixture fixture;
+    fixture.config.Write(
+        "providers.json",
+        nlohmann::json{{"providers",
+                        {{"main",
+                          {{"backend", "fake"},
+                           {"url", "http://localhost:8080/v1"},
+                           {"models", {{"test-model", nlohmann::json::object()},
+                                       {"other-model", nlohmann::json::object()}}}}}}}}
+            .dump());
+    fixture.config.Write("settings.json", "{}");
+    fixture.config.Write("permissions.json", "{}");
+    fixture.config.Write("agents/build.md",
+                         "---\nname: build\nmodel: main/test-model\n---\nYou are a build agent.\n");
+    fixture.Build();
+
+    const auto source_row = fixture.db->CreateSession("source", std::nullopt,
+                                                      fixture.config.dir.string(), "build");
+    auto source = fixture.registry->Create(Params(source_row.session_id));
+    REQUIRE(source != nullptr);
+    REQUIRE(source->SubmitTurn("hello"));
+    REQUIRE(source->WaitForIdleForTesting(5s));
+
+    const auto override_model = config::SplitModelRef("main/other-model");
+    REQUIRE(override_model.has_value());
+    auto child = fixture.registry->ForkSession(source_row.session_id, /*target_seq=*/0,
+                                               /*name=*/"", override_model, std::nullopt,
+                                               std::nullopt);
+    REQUIRE(child != nullptr);
+
+    // In-memory: the forked session actually runs on the override.
+    CHECK(child->preset_snapshot().provider.model_name == "other-model");
+
+    // Durable: a restart resuming this row must see the same override, not
+    // the source's model (which was never explicitly set here, so it would
+    // read back as nullopt/absent without the fix).
+    const auto row = fixture.db->GetSession(child->info().session_id);
+    REQUIRE(row.has_value());
+    REQUIRE(row->model.has_value());
+    CHECK(*row->model == "main/other-model");
+}
