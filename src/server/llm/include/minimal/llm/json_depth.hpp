@@ -10,13 +10,19 @@ namespace minimal::llm {
 // nesting depth that overflows the call stack -- a crash reachable from any
 // hostile or broken gateway. Callers parse only when this returns true and
 // classify the refusal as a parse error; parse() itself still validates the
-// document, so this is purely a resource guard (counting opens, not
-// validating brace matching).
+// document, so this is purely a resource guard (tracking nesting depth, not
+// validating brace matching -- an unbalanced close is tolerated and simply
+// ignored, since a malformed document fails in parse() anyway).
 //
 // max_depth 512 is far above any legitimate model/tool payload (tool
 // arguments, stream chunks, error bodies are all single-digit-depth objects).
+// Depth here means actual nesting (opens minus closes), not a running total
+// of every '{'/'[' seen in the whole document: a wide-but-shallow payload
+// (e.g. a flat array of hundreds of sibling objects) opens and closes each
+// one in turn, never nesting past depth 2, so counting only opens would
+// reject it as a false-positive stack-overflow attempt.
 inline bool JsonDepthWithinLimit(std::string_view text, std::size_t max_depth = 512) {
-    std::size_t opens = 0;
+    std::size_t depth = 0;
     bool in_string = false;
     bool escaped = false;
     for (const char c : text) {
@@ -34,7 +40,11 @@ inline bool JsonDepthWithinLimit(std::string_view text, std::size_t max_depth = 
             case '"': in_string = true; break;
             case '{':
             case '[':
-                if (++opens > max_depth) return false;
+                if (++depth > max_depth) return false;
+                break;
+            case '}':
+            case ']':
+                if (depth > 0) --depth;
                 break;
             default: break;
         }

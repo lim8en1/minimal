@@ -11,6 +11,7 @@ add_executable(minimal_tests
     permission_chain_test.cpp
     pattern_match_test.cpp
     path_confinement_test.cpp
+    json_depth_test.cpp
     sse_parser_test.cpp
     frontmatter_test.cpp
     name_registry_test.cpp
