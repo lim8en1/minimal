@@ -736,6 +736,35 @@ TEST_CASE("an over-limit spawn is an error result, not a queue", "[subagent][lim
     fixture.sessions->TerminateAll();
 }
 
+TEST_CASE("a refused spawn does not leak a starting_children_ entry",
+          "[subagent][limit][regression]") {
+    // The bug: the limit check read starting_children_[parent_id] via
+    // operator[], which inserts a default (0) entry for parent_id even when
+    // the spawn is about to be refused a few lines below -- and the refusal
+    // path (an early return, before the TicketGuard is even constructed)
+    // never releases it. Every distinct parent session (session ids are
+    // unique ULIDs, never reused) that ever hit the limit once leaked one
+    // entry, unbounded for the life of the process.
+    SubagentFixture fixture;
+    fixture.BuildWithLimit(0);  // every spawn is refused: 0 concurrent allowed
+
+    agent::SubagentRequest request;
+    request.task = "task";
+    request.agent_preset = "child";
+    request.blocking = false;
+
+    for (int i = 0; i < 5; ++i) {
+        auto parent = fixture.CreateParent();
+        tools::ToolContext ctx{common::DefaultLogger()};
+        ctx.session_id = parent->info().session_id;
+        ctx.tool_use_id = "tu-" + std::to_string(i);
+        const auto outcome = fixture.manager->Spawn(request, ctx);
+        REQUIRE(outcome.kind == agent::SubagentOutcome::Kind::kError);
+    }
+
+    CHECK(fixture.manager->StartingChildrenEntriesForTesting() == 0);
+}
+
 TEST_CASE("sequential spawns past the limit keep succeeding", "[subagent][limit]") {
     // The admission ticket once leaked on every SUCCESSFUL spawn: its guard
     // skipped the decrement when the success path marked it released, so the

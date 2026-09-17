@@ -63,6 +63,16 @@ public:
     // which terminates the child and returns an error instead of hanging).
     SubagentOutcome Spawn(const SubagentRequest& request, const tools::ToolContext& ctx);
 
+    // Testing seam: the number of distinct parent_ids with a live admission
+    // ticket entry. Production code never inspects this -- it exists to catch
+    // a refused (or otherwise never-released) spawn leaving a stale entry
+    // behind, which grows this map for the life of the process regardless of
+    // whether the parent ever spawns again.
+    std::size_t StartingChildrenEntriesForTesting() const {
+        std::lock_guard<std::mutex> lock(limit_mu_);
+        return starting_children_.size();
+    }
+
 private:
     SessionRegistry& sessions_;
     session::SessionDatabase& db_;
@@ -97,7 +107,7 @@ private:
     // Lock order: limit_mu_ -> SessionRegistry::mutex_, one-directional. Nothing
     // holds the registry lock and then enters this class, so no reverse path
     // can close a cycle. Both ends state it; keep them agreeing.
-    std::mutex limit_mu_;
+    mutable std::mutex limit_mu_;
     std::unordered_map<std::string, std::int64_t> starting_children_;
     // The process-wide hook dispatcher (track O). Borrowed; null in tests.
     // Emissions from here: core.subagent_started (before the child produces

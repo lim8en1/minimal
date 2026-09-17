@@ -97,7 +97,17 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     {
         std::lock_guard<std::mutex> lock(limit_mu_);
         const std::size_t live_children = sessions_.ChildCount(parent_id);
-        const std::int64_t starting = starting_children_[parent_id];
+        // find(), not operator[]: this is a read-only check, and operator[]
+        // inserts a default (0) entry for `parent_id` even when the limit is
+        // about to refuse the spawn below -- on the refusal path, no
+        // TicketGuard is ever constructed to release it, so that entry
+        // leaked for the life of the process. Every distinct parent_id
+        // (session ids are unique ULIDs, never reused) that ever hit the
+        // limit once left one behind.
+        std::int64_t starting = 0;
+        if (const auto it = starting_children_.find(parent_id); it != starting_children_.end()) {
+            starting = it->second;
+        }
         if (static_cast<std::int64_t>(live_children) + starting >= max_concurrent_subagents_) {
             return SubagentOutcome::Error("subagent limit reached (" +
                                           std::to_string(max_concurrent_subagents_) +
