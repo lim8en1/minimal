@@ -616,6 +616,7 @@ int main(int argc, char** argv) {
                                              loop_config, minimal::common::DefaultLogger());
     sessions.set_commands(&commands);
     sessions.set_project_commands(&project_commands);
+    sessions.set_signal_router(&signal_router);
     // Project context (AGENTS.md/CLAUDE.md): each session loads its own, from
     // its own project_root, at creation/resume/spawn -- never at startup, since
     // the server serves many project roots and no file belongs to all of them.

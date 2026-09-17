@@ -544,6 +544,10 @@ void SessionRegistry::Terminate(const std::string& session_id) {
         // once per explicitly terminated session and is only otherwise
         // pruned for sessions the reaper itself collects.
         quiescent_since_.erase(session_id);
+        // Same reasoning for the signal router's subscription entry: absent
+        // this, subs_ only ever shrank on a resume, so a session that
+        // terminates normally leaked its entry for the life of the process.
+        if (signal_router_ != nullptr) signal_router_->Unsubscribe(session_id);
     }
     // Terminate() joins the worker, so it runs OUTSIDE the lock: a worker
     // blocked on a permission prompt takes a moment to unwind, and holding the
@@ -555,7 +559,10 @@ void SessionRegistry::TerminateAll() {
     std::vector<std::shared_ptr<Session>> doomed;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& [id, session] : sessions_) doomed.push_back(session);
+        for (auto& [id, session] : sessions_) {
+            doomed.push_back(session);
+            if (signal_router_ != nullptr) signal_router_->Unsubscribe(id);
+        }
         sessions_.clear();
         quiescent_since_.clear();
     }
@@ -610,6 +617,9 @@ void SessionRegistry::ReaperMain() {
                     doomed.push_back(session);
                     it = sessions_.erase(it);
                     quiescent_since_.erase(doomed.back()->info().session_id);
+                    if (signal_router_ != nullptr) {
+                        signal_router_->Unsubscribe(doomed.back()->info().session_id);
+                    }
                     continue;
                 }
                 // S5: the detached-idle reaper. ALL of these must hold, and
@@ -649,6 +659,9 @@ void SessionRegistry::ReaperMain() {
                     doomed.push_back(session);
                     it = sessions_.erase(it);
                     quiescent_since_.erase(doomed.back()->info().session_id);
+                    if (signal_router_ != nullptr) {
+                        signal_router_->Unsubscribe(doomed.back()->info().session_id);
+                    }
                 } else {
                     ++it;
                 }

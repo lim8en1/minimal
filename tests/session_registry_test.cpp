@@ -13,6 +13,7 @@
 
 #include "fakes.hpp"
 #include "minimal/agent/session_registry.hpp"
+#include "minimal/agent/signal_router.hpp"
 #include "minimal/common/logger.hpp"
 #include "session_events.hpp"
 #include "temp_dir.hpp"
@@ -527,6 +528,51 @@ TEST_CASE("TerminateAll stops every live session", "[session_registry]") {
     CHECK(fixture.registry->size() == 0);
     CHECK(first->terminated());
     CHECK(second->terminated());
+}
+
+TEST_CASE("Terminate erases the session's signal-router subscription entry",
+          "[session_registry][regression]") {
+    // The bug: SignalRouter::Unsubscribe was only ever called from
+    // PublishSession on a RESUME (session_registry.cpp, gated by
+    // signal_resume). A session that terminates normally -- the common
+    // case, especially for short-lived subagents -- left its subs_ entry
+    // behind for the life of the process, since nothing in Terminate/
+    // TerminateAll/the reaper ever called Unsubscribe.
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+    agent::SignalRouter router;
+    fixture.registry->set_signal_router(&router);
+
+    auto params = Params("s1");
+    params.signal_router = &router;
+    params.signal_selectors = {"sessions"};  // the internal source; needs no channels.json
+    auto session = fixture.registry->Create(std::move(params));
+    REQUIRE(router.SubscriptionEntriesForTesting() == 1);
+
+    fixture.registry->Terminate("s1");
+    CHECK(router.SubscriptionEntriesForTesting() == 0);
+}
+
+TEST_CASE(
+    "TerminateAll erases every session's signal-router subscription entry too",
+    "[session_registry][regression]") {
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+    agent::SignalRouter router;
+    fixture.registry->set_signal_router(&router);
+
+    for (const std::string& id : {"s1", "s2", "s3"}) {
+        auto params = Params(id);
+        params.signal_router = &router;
+        params.signal_selectors = {"sessions"};
+        fixture.registry->Create(std::move(params));
+    }
+    REQUIRE(router.SubscriptionEntriesForTesting() == 3);
+
+    fixture.registry->TerminateAll();
+    CHECK(router.SubscriptionEntriesForTesting() == 0);
 }
 
 TEST_CASE("sessions are independent", "[session_registry]") {

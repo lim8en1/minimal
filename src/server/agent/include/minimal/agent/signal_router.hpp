@@ -110,6 +110,17 @@ public:
     // model the operator-reviewed framing as early as possible.
     std::string SignalContextFor(const std::vector<std::string>& selectors) const;
 
+    // Testing seam: the number of distinct session ids with a subs_ entry
+    // (subscribed or not -- an emptied-but-not-erased entry still counts).
+    // Production code never inspects this; it exists to catch a session
+    // whose entry outlives normal termination, which grows this map for the
+    // life of the process regardless of whether the session ever
+    // resubscribes.
+    std::size_t SubscriptionEntriesForTesting() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return subs_.size();
+    }
+
 private:
     struct Subscription {
         std::string channel;

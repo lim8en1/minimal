@@ -142,6 +142,17 @@ public:
         project_commands_ = project_commands;
     }
 
+    // The process-wide signal router (one instance, wired from main.cpp),
+    // so every path that removes a session from sessions_ -- Terminate,
+    // TerminateAll, and the reaper's two sweeps -- can also erase its
+    // subscription entry. Without this, subs_ only ever shrank on a RESUME
+    // (SignalRouter::Unsubscribe was called from PublishSession alone); a
+    // session that terminates normally (the common case, especially for
+    // short-lived subagents) left its subs_ entry behind for the life of
+    // the process. Same optionality rule as set_commands: unset (tests)
+    // means no signal cleanup runs, matching today's behavior exactly.
+    void set_signal_router(SignalRouter* signal_router) { signal_router_ = signal_router; }
+
     // Project context (AGENTS.md/CLAUDE.md) settings, read once at startup.
     // Optional but DEFAULTS TO DISABLED: until main wires the parsed settings
     // in, no session reads anything from its project_root -- the same shape as
@@ -320,6 +331,7 @@ private:
     // Optional and borrowed; every session gets the same one.
     const commands::CommandRegistry* commands_ = nullptr;
     const commands::ProjectCommandSource* project_commands_ = nullptr;
+    SignalRouter* signal_router_ = nullptr;
     tools::ToolRegistry& tools_;
     const llm::ProviderFactoryRegistry& providers_;
     // Shared provider instances across every session this registry creates.
