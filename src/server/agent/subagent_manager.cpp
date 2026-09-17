@@ -180,36 +180,36 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
                                             parent->preset().allowed_skills, spawn_model);
         } else {
             // Nothing more specific: the child inherits its parent's model,
-            // unless its preset declares one. Resolved WITH the fallback as the
-            // override so a preset that declares no model -- and a missing or
-            // unresolvable settings.default_model, which used to be this
-            // spawn's failure mode -- cannot brick it. A DECLARED model is
-            // re-resolved without the override so it keeps winning over the
-            // inheritance default.
-            std::optional<common::ModelRef> fallback;
-            if (!default_subagent_model_.empty()) {
-                if (auto ref = common::SplitModelRef(default_subagent_model_)) {
-                    if (presets_.providers().Resolve(*ref) != nullptr) {
-                        fallback = std::move(ref);
-                    } else {
-                        logger_.warn("settings default_subagent_model '{}' resolves to "
-                                     "nothing in providers.json; behaving as unset",
-                                     default_subagent_model_);
-                    }
-                } else {
-                    logger_.warn("settings default_subagent_model '{}' is not a "
-                                 "<provider>/<model> reference; behaving as unset",
-                                 default_subagent_model_);
-                }
-            }
-            if (!fallback) fallback = parent->preset().model_ref;
-            child_preset = presets_.Resolve(preset_name, parent->info().project_root,
-                                            parent->preset().allowed_skills, fallback);
-            if (child_preset.model_declared) {
+            // unless its preset declares one. PresetDeclaresModel is a cheap
+            // peek (path search + frontmatter parse, no provider/skill
+            // resolution) so the branch below pays for exactly one real
+            // Resolve() instead of resolving once with the fallback and
+            // again without it whenever the preset turns out to declare its
+            // own model.
+            if (presets_.PresetDeclaresModel(preset_name, parent->info().project_root)) {
                 child_preset = presets_.Resolve(preset_name, parent->info().project_root,
                                                 parent->preset().allowed_skills, std::nullopt);
                 spawn_model = std::nullopt;  // the preset's own choice stands
             } else {
+                std::optional<common::ModelRef> fallback;
+                if (!default_subagent_model_.empty()) {
+                    if (auto ref = common::SplitModelRef(default_subagent_model_)) {
+                        if (presets_.providers().Resolve(*ref) != nullptr) {
+                            fallback = std::move(ref);
+                        } else {
+                            logger_.warn("settings default_subagent_model '{}' resolves to "
+                                         "nothing in providers.json; behaving as unset",
+                                         default_subagent_model_);
+                        }
+                    } else {
+                        logger_.warn("settings default_subagent_model '{}' is not a "
+                                     "<provider>/<model> reference; behaving as unset",
+                                     default_subagent_model_);
+                    }
+                }
+                if (!fallback) fallback = parent->preset().model_ref;
+                child_preset = presets_.Resolve(preset_name, parent->info().project_root,
+                                                parent->preset().allowed_skills, fallback);
                 spawn_model = std::move(fallback);
             }
         }

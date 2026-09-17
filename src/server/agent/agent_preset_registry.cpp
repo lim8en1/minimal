@@ -314,23 +314,21 @@ void ApplyModel(AgentPreset& preset, const config::ResolvedModel& model) {
     preset.context_window_tokens = model.context_window_tokens;
 }
 
-AgentPreset AgentPresetRegistry::ResolveUncached(
+std::filesystem::path AgentPresetRegistry::FindPresetPath(
     const std::string& preset_name, const std::filesystem::path& project_root,
-    const std::optional<std::map<std::string, SkillMode>>& parent_skills,
-    const std::optional<config::ModelRef>& model_override) const {
+    bool& from_project) const {
     if (preset_name.empty() || preset_name == "." || preset_name == ".." ||
         preset_name.find('/') != std::string::npos) {
         throw std::runtime_error("invalid agent preset name: '" + preset_name + "'");
     }
 
     // Project-local first, then the global config dir -- the nearest
-    // declaration wins, and a project shadowing a global preset is logged once
-    // per (name, root) because the cache makes ResolveUncached run once per
-    // key. An unknown name reports the GLOBAL path: it is the one the operator
-    // configured, and the one the error message has always named.
+    // declaration wins. An unknown name reports the GLOBAL path: it is the
+    // one the operator configured, and the one the error message has always
+    // named.
     const std::filesystem::path global_path = config_dir_ / "agents" / (preset_name + ".md");
     std::filesystem::path preset_path;
-    bool from_project = false;
+    from_project = false;
     if (!project_root.empty()) {
         // A NAMED local, not a range-for over a temporary's member: the walk
         // object must outlive the loop. `for (auto dir : Temp(...).dirs())`
@@ -352,6 +350,26 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     if (!std::filesystem::exists(preset_path)) {
         throw std::runtime_error("unknown agent preset: '" + preset_name + "'");
     }
+    return preset_path;
+}
+
+bool AgentPresetRegistry::PresetDeclaresModel(const std::string& preset_name,
+                                              const std::filesystem::path& project_root) const {
+    bool from_project = false;
+    const std::filesystem::path preset_path = FindPresetPath(preset_name, project_root, from_project);
+    return !LoadAgentPresetFrontmatter(preset_path).model.empty();
+}
+
+AgentPreset AgentPresetRegistry::ResolveUncached(
+    const std::string& preset_name, const std::filesystem::path& project_root,
+    const std::optional<std::map<std::string, SkillMode>>& parent_skills,
+    const std::optional<config::ModelRef>& model_override) const {
+    // Shadowing is logged once per (name, root) because the cache makes
+    // ResolveUncached run once per key -- FindPresetPath itself stays silent
+    // so PresetDeclaresModel's peek doesn't double-log it.
+    bool from_project = false;
+    const std::filesystem::path preset_path = FindPresetPath(preset_name, project_root, from_project);
+    const std::filesystem::path global_path = config_dir_ / "agents" / (preset_name + ".md");
     if (from_project && std::filesystem::exists(global_path)) {
         common::DefaultLogger().warn(
             "project agent preset '{}' ({}) shadows the global one", preset_name,

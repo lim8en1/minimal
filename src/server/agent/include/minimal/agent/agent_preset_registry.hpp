@@ -138,6 +138,18 @@ public:
         const std::optional<std::map<std::string, SkillMode>>& parent_skills = std::nullopt,
         const std::optional<config::ModelRef>& model_override = std::nullopt) const;
 
+    // A cheap peek at whether agents/<preset_name>.md declares its own
+    // `model:` frontmatter field -- just the path search + frontmatter parse,
+    // none of Resolve()'s provider/skill resolution. For a caller that needs
+    // model_declared to DECIDE which model_override to pass a subsequent
+    // Resolve() (e.g. a subagent spawn falling back to the parent's model
+    // only when the preset has none of its own): peeking here first means
+    // that one Resolve() call is the only full resolve paid for, instead of
+    // resolving once speculatively and again once model_declared is known.
+    // Throws the same way Resolve() does for an unknown preset name.
+    bool PresetDeclaresModel(const std::string& preset_name,
+                             const std::filesystem::path& project_root = {}) const;
+
     // Lists every agents/*.md file's name + description WITHOUT resolving its
     // model/provider -- for a picker to show, not for the loop to run. A picker
     // listing one bad preset must not fail to show the rest, so a file that
@@ -196,6 +208,15 @@ private:
         const std::string& preset_name, const std::filesystem::path& project_root,
         const std::optional<std::map<std::string, SkillMode>>& parent_skills,
         const std::optional<config::ModelRef>& model_override) const;
+
+    // Project-local-shadows-global path search shared by ResolveUncached and
+    // PresetDeclaresModel. Throws "unknown agent preset" if neither exists.
+    // Does NOT log the shadow warning -- ResolveUncached does that itself
+    // (it already needs from_project for the check), so a peek stays silent
+    // and the warning still fires exactly once per real resolve.
+    std::filesystem::path FindPresetPath(const std::string& preset_name,
+                                         const std::filesystem::path& project_root,
+                                         bool& from_project) const;
 
     // The shared loader behind a preset frontmatter `compression_prompt:` value
     // and ResolveCompressionPrompt(): validates the bare-filename rule (the name
