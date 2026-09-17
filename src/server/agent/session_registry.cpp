@@ -605,6 +605,21 @@ void SessionRegistry::ReaperMain() {
             reaper_cv_.wait_for(lock, poll_interval, [this] { return stopping_; });
             if (stopping_) return;
 
+            // Precomputed ONCE per tick, in one O(n) pass: ChildCountLocked
+            // itself rescans the whole sessions_ map, and the sweep below
+            // used to call it once per session -- O(n^2) per tick under a
+            // held mutex_, blocking every other Find()/size()/Terminate()
+            // call for the duration. A parent absent from this map has zero
+            // live children, the same answer ChildCountLocked(id) == 0 gave.
+            std::unordered_map<std::string, std::size_t> live_child_counts;
+            for (const auto& [id, session] : sessions_) {
+                const auto& parent = session->info().parent_session_id;
+                if (parent.empty() || session->terminated() || session->subagent_finished()) {
+                    continue;
+                }
+                ++live_child_counts[parent];
+            }
+
             const auto now = std::chrono::steady_clock::now();
             for (auto it = sessions_.begin(); it != sessions_.end();) {
                 const auto& session = it->second;
@@ -638,7 +653,7 @@ void SessionRegistry::ReaperMain() {
                 const bool detached_quiescent =
                     session->ever_attached() && !session->has_subscribers() &&
                     session->idle() && session->background_tasks_live() == 0 &&
-                    ChildCountLocked(it->first) == 0;
+                    live_child_counts.find(it->first) == live_child_counts.end();
                 if (!detached_quiescent) {
                     quiescent_since_.erase(it->first);
                     any_session_holds = true;
