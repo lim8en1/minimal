@@ -412,8 +412,9 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
             // the pause check and answer the message within itself, and the idle
             // case queues a normal turn. The metadata event -- what every
             // attached status bar refreshes from -- goes out after the lock.
-            if (paused_.load(std::memory_order_acquire) && params_.pause_auto_resume_on_submit) {
-                paused_.store(false, std::memory_order_release);
+            if (IsPaused(pause_state_.load(std::memory_order_acquire)) &&
+                params_.pause_auto_resume_on_submit) {
+                ClearPausedLocked();
                 auto_resumed = true;
             }
             // REAL-TIME STEERING: a plain text turn arriving while the AGENT is
@@ -971,31 +972,47 @@ void Session::Cancel() {
     // deny-lock a session that reports itself alive and keeps accepting turns.
     cancel_pending_requests_();
     // CANCEL BEATS PAUSE. Cancel is "stop now" -- the operator escalating past
-    // a pause they just set (or forgot about). Leaving the flag set would
-    // fence the very next turn behind a state the operator just overrode.
-    paused_.store(false, std::memory_order_release);
+    // a pause they just set (or forgot about). Leaving the paused component
+    // set would fence the very next turn behind a state the operator just
+    // overrode. LOCKED, unlike the old independent-atomic paused_.store: once
+    // pause and continuation share one atomic, "clear only the paused half"
+    // is a read-modify-write, not a context-free store, and Cancel() (a
+    // reader-thread method, like SetPaused) holds no other lock here so this
+    // adds no deadlock risk.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ClearPausedLocked();
+    }
 }
 
 void Session::SetPaused(bool paused) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminated_.load(std::memory_order_acquire)) return;
-        if (paused_.load(std::memory_order_acquire) == paused) return;
-        paused_.store(paused, std::memory_order_release);
+        PauseState cur = pause_state_.load(std::memory_order_relaxed);
+        if (IsPaused(cur) == paused) return;
+        const bool had_continuation = HasContinuationPending(cur);
+        pause_state_.store(paused
+                                ? (had_continuation ? PauseState::kPausedWithContinuation
+                                                    : PauseState::kPaused)
+                                : (had_continuation ? PauseState::kContinuationPending
+                                                    : PauseState::kNotPaused),
+                           std::memory_order_release);
         // EXPLICIT RESUME KICK. Only when the unpause has something to
         // continue into: the last turn actually ended paused
-        // (continuation_pending_) -- not one that ended EndTurn on its own
+        // (a continuation is pending) -- not one that ended EndTurn on its own
         // while the flag was set -- and nothing else is queued or running. A
         // queued turn (auto-resume ran) or the worker still finishing the
         // final round makes the kick redundant; a turn that continues past an
         // unpauses' mid-flight clears the flag at its own end. The kick is
         // the seedless wake turn: the model continues from the persisted tool
         // results, answering any steered message that flushed after them.
-        if (!paused && worker_activity_ == WorkerActivity::kIdle && continuation_pending_ &&
+        if (!paused && worker_activity_ == WorkerActivity::kIdle &&
+            HasContinuationPending(pause_state_.load(std::memory_order_relaxed)) &&
             work_.empty() && !subagent_finished_.load(std::memory_order_acquire)) {
             if (work_.size() < kMaxWorkItems) {
                 work_.push_back(QueuedResume{});
-                continuation_pending_ = false;
+                ClearContinuationLocked();
             }
             // Over the bound: drop the kick silently -- the session was
             // idle (the checks above), so the bound cannot be hit here;
@@ -1069,6 +1086,30 @@ void Session::FireOnTurnFinishedOnce(const TurnResult& result, std::string_view 
     } catch (...) {
         logger_.warn("session {}: on_turn_finished threw{}", params_.session_id, context);
     }
+}
+
+void Session::ClearPausedLocked() {
+    const PauseState cur = pause_state_.load(std::memory_order_relaxed);
+    if (IsPaused(cur)) {
+        pause_state_.store(HasContinuationPending(cur) ? PauseState::kContinuationPending
+                                                        : PauseState::kNotPaused,
+                           std::memory_order_release);
+    }
+}
+
+void Session::ClearContinuationLocked() {
+    const PauseState cur = pause_state_.load(std::memory_order_relaxed);
+    if (HasContinuationPending(cur)) {
+        pause_state_.store(IsPaused(cur) ? PauseState::kPaused : PauseState::kNotPaused,
+                           std::memory_order_release);
+    }
+}
+
+void Session::MarkContinuationPendingLocked() {
+    const PauseState cur = pause_state_.load(std::memory_order_relaxed);
+    pause_state_.store(IsPaused(cur) ? PauseState::kPausedWithContinuation
+                                     : PauseState::kContinuationPending,
+                       std::memory_order_release);
 }
 
 void Session::Terminate() {
@@ -1215,7 +1256,7 @@ void Session::WorkerMain() {
                     // PLACE, not reordered around. (A run-mode change is not
                     // here by design: it applies on the reader, immediately --
                     // see SetRunMode.)
-                    if (!paused_.load(std::memory_order_acquire)) return true;
+                    if (!IsPaused(pause_state_.load(std::memory_order_acquire))) return true;
                     for (const auto& candidate : work_) {
                         if (!std::holds_alternative<std::string>(candidate) &&
                             !std::holds_alternative<QueuedTurn>(candidate)) {
@@ -1226,7 +1267,7 @@ void Session::WorkerMain() {
                 }
                 // Idle: the wake paths. All of them hold while paused --
                 // a paused session makes no provider call nobody asked for.
-                if (paused_.load(std::memory_order_acquire)) return false;
+                if (IsPaused(pause_state_.load(std::memory_order_acquire))) return false;
                 if (ShouldWakeForInjections()) return true;
                 // Real-time steering sweep: a steering message that missed
                 // its turn's flush (the model had already returned EndTurn)
@@ -1242,10 +1283,11 @@ void Session::WorkerMain() {
                     return true;
                 }
                 // The explicit-resume kick raced a still-running final round:
-                // SetPaused(false) found running_turn_ true and skipped
-                // enqueueing; the turn then ended Paused. The flag survives,
-                // and this predicate is what turns it into the continuation.
-                return continuation_pending_;
+                // SetPaused(false) found the worker still busy and skipped
+                // enqueueing; the turn then ended Paused. The continuation
+                // survives (kContinuationPending), and this predicate is what
+                // turns it into the actual continuation.
+                return HasContinuationPending(pause_state_.load(std::memory_order_acquire));
             });
             if (terminated_.load(std::memory_order_acquire)) return;
             // Record the cancel generation THIS turn must be measured against,
@@ -1273,7 +1315,7 @@ void Session::WorkerMain() {
             // turn starts clean.
             loop_->SetCancelToken(cancel_source_.Mint());
             if (!work_.empty()) {
-                if (!paused_.load(std::memory_order_acquire)) {
+                if (!IsPaused(pause_state_.load(std::memory_order_acquire))) {
                     item = std::move(work_.front());
                     work_.pop_front();
                 } else {
@@ -1296,7 +1338,7 @@ void Session::WorkerMain() {
                 if (std::holds_alternative<std::string>(item) ||
                     std::holds_alternative<QueuedTurn>(item) ||
                     std::holds_alternative<QueuedResume>(item)) {
-                    continuation_pending_ = false;
+                    ClearContinuationLocked();
                 }
             } else {
                 // Only reachable when a wake condition fired: an out-of-band
@@ -1306,7 +1348,7 @@ void Session::WorkerMain() {
                 // whose user content is the injected messages / the persisted
                 // history itself.
                 wake_turn = true;
-                continuation_pending_ = false;
+                ClearContinuationLocked();
             }
             // kRunningOther for now; RunOneTurn itself upgrades to kRunningTurn
             // for turn-shaped items (the string/QueuedTurn/QueuedResume branches
@@ -1725,17 +1767,18 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
     // ordering between the two, not because either one joins the other's
     // thread first.
     FireOnTurnFinishedOnce(result, "");
-    // Record that an explicit unpause has something to continue into. Set
+    // Record that an explicit unpause has something to continue into. Marked
     // unconditionally on a Paused result -- including when the pause was
     // already cleared (an unpause racing the final round: SetPaused(false)
-    // found running_turn_ and skipped enqueueing the kick), because the
-    // worker's wait predicate is what turns this flag into the seedless
-    // continuation in exactly that race. Staleness is handled at pop: any
-    // real turn or kick clears the flag, so a later unpause can never
-    // re-run a continuation for a session that has moved on.
+    // found the worker still busy and skipped enqueueing the kick), because
+    // the worker's wait predicate is what turns this into the seedless
+    // continuation in exactly that race (kContinuationPending, the
+    // not-paused-but-owed case). Staleness is handled at pop: any real turn
+    // or kick clears it, so a later unpause can never re-run a continuation
+    // for a session that has moved on.
     if (result.stop_reason == llm::StopReason::Paused) {
         std::lock_guard<std::mutex> lock(mutex_);
-        continuation_pending_ = true;
+        MarkContinuationPendingLocked();
     }
 }
 
