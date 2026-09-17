@@ -304,9 +304,40 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
         return {};   // ctrl+alt+arrow: no known single-candidate encoding
     }
 
+    // Enter/Return with a modifier: prompt_editor.cpp's newline-insert key
+    // (default "prompt.newline": "alt+enter", see keybindings.cpp). Unlike
+    // other named keys (unmodified only, below), Alt+Enter needs every
+    // encoding a terminal might emit for it -- the classic ESC-prefixed CR
+    // or LF, the kitty keyboard protocol's CSI 13;3u, and xterm
+    // modifyOtherKeys' CSI 27;3;13~ -- PLUS the CSI 13;2u / 27;2;13~ pair an
+    // actual Shift+Enter reports on those same protocols. Before this spec
+    // existed, prompt_editor.cpp's hardcoded IsNewlineEvent treated both
+    // gestures as "insert a newline" with no way to tell them apart or
+    // rebind away from either; alt+enter here reproduces that leniency
+    // exactly, so the default binding's behavior is unchanged. A user whose
+    // terminal cannot distinguish macOS's plain-\r Option+Enter (see
+    // key_event_parser.hpp / docs/CONFIGURATION.md) can instead rebind
+    // prompt.newline to "shift+enter" alone (just its own two CSI-u
+    // candidates, no ESC CR/LF fallback -- there is no legacy encoding for
+    // bare Shift+Enter) or to any ordinary letter/digit spec entirely
+    // unrelated to Enter, sidestepping the ambiguity rather than fighting
+    // it.
+    if (base == "enter" || base == "return") {
+        if (alt && !ctrl && !shift) {
+            return {Event::Character("\x1b\r"),      Event::Character("\x1b\n"),
+                    Event::Special("\x1b[13;3u"),     Event::Special("\x1b[27;3;13~"),
+                    Event::Special("\x1b[13;2u"),     Event::Special("\x1b[27;2;13~")};
+        }
+        if (shift && !ctrl && !alt) {
+            return {Event::Special("\x1b[13;2u"), Event::Special("\x1b[27;2;13~")};
+        }
+        if (ctrl || (alt && shift)) return {};   // no known single encoding
+        // unmodified "enter"/"return" falls through to NamedKeys() below.
+    }
+
     // Named non-alphanumeric keys: unmodified only (ctrl/alt/shift combined
     // with e.g. tab or escape have no one universal encoding beyond the two
-    // ctrl+tab cases handled above).
+    // ctrl+tab cases, and enter/return's modified forms, handled above).
     if (!ctrl && !alt && !shift) {
         if (const auto it = NamedKeys().find(base); it != NamedKeys().end()) return {it->second};
     }

@@ -8,11 +8,15 @@
 // keyboard protocol / CSI-u (ARCHITECTURE.md "Customization surface"). The
 // alt sequence is matched in every encoding a terminal actually emits: ESC CR
 // / ESC LF, the kitty protocol's CSI 13;{mod}u, and xterm modifyOtherKeys'
-// CSI 27;{mod};13~ (see IsNewlineEvent). A terminal that reports Option+Enter
-// as a PLAIN \r -- the macOS default in Terminal.app, Ghostty, Alacritty and
-// WezTerm until option-as-alt / the kitty protocol is enabled -- cannot be
-// distinguished from submit by any in-app match; enable the terminal setting
-// or remap in keybindings.json.
+// CSI 27;{mod};13~ (see key_event_parser.cpp's enter/return branch). A
+// terminal that reports Option+Enter as a PLAIN \r -- the macOS default in
+// Terminal.app, iTerm2, Ghostty, Alacritty and WezTerm until option-as-alt /
+// the kitty protocol is enabled -- cannot be distinguished from submit by
+// any in-app match; enable the terminal setting, or remap the
+// "prompt.newline" action in keybindings.json (e.g. to "shift+enter", or to
+// any key unrelated to Enter) -- MakePromptEditor's `is_newline_event`
+// parameter below is how RunTui wires that binding in; the fallback used
+// when it is null is IsNewlineEvent's hardcoded default-key candidate list.
 //
 // SOFT WRAP: the prompt body is rendered from WrapPromptContent's visual
 // lines (word-aware, to the terminal width, at most half the screen tall,
@@ -48,6 +52,7 @@
 #include <vector>
 
 #include <ftxui/component/component.hpp>
+#include <ftxui/component/event.hpp>
 
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
@@ -201,7 +206,14 @@ ftxui::Component MakePromptEditor(
     // every pre-existing call site is unchanged. RunTui passes ONE shared
     // instance to every tab's editor: recall is app-scoped by design (see
     // PromptHistory).
-    PromptHistory* history = nullptr);
+    PromptHistory* history = nullptr,
+    // "prompt.newline" (keybindings.json), pre-resolved: null (the default,
+    // every pre-existing call site) falls back to IsNewlineEvent's hardcoded
+    // six-candidate default-key list, unchanged from before this parameter
+    // existed. RunTui passes `[&keymap](event){ return
+    // keymap.Matches("prompt.newline", event); }` so a user's rebind (see
+    // the NEWLINE comment above) actually takes effect.
+    std::function<bool(const ftxui::Event&)> is_newline_event = nullptr);
 
 // THE PER-TAB PROMPT EDITOR. A stable outer component in the FTXUI tree that
 // owns one PromptEditorState + one editor Component PER TAB, built lazily on

@@ -173,8 +173,15 @@ ftxui::Component MakePromptEditor(
     CommandCatalogSource command_catalog,
     std::function<bool()> session_available,
     std::function<bool()> subagent_read_only,
-    std::shared_ptr<bool> pasting, PromptHistory* history) {
+    std::shared_ptr<bool> pasting, PromptHistory* history,
+    std::function<bool(const ftxui::Event&)> is_newline_event) {
     using namespace ftxui;
+    // Null (every pre-existing call site): the hardcoded default-key list,
+    // unchanged behavior. RunTui passes a keymap-backed lambda instead (see
+    // the header's `is_newline_event` comment).
+    const std::function<bool(const Event&)> newline_check =
+        is_newline_event ? std::move(is_newline_event)
+                          : std::function<bool(const Event&)>(IsNewlineEvent);
     // Null (every pre-existing call site): a private timeline, same behavior
     // as before, no cross-editor sharing. OWNED BY THE CLOSURES (a shared_ptr
     // captured below), never a factory stack local -- the component outlives
@@ -272,7 +279,7 @@ ftxui::Component MakePromptEditor(
     // which outlives this component.
     auto with_events = CatchEvent(
         input, [&state, &hist, owned_history, accept_suggestion, on_text, on_command,
-                command_catalog, pasting, mouse_map](const Event& event) {
+                command_catalog, pasting, mouse_map, newline_check](const Event& event) {
         // Bracketed paste (DECSET 2004): the terminal wraps a paste in
         // \x1b[200~ ... \x1b[201~ and every line break inside it arrives as
         // a plain Return, which used to submit each pasted line as its own
@@ -334,9 +341,11 @@ ftxui::Component MakePromptEditor(
             return true;
         }
 
-        // Alt+Enter and its CSI-u siblings insert a newline -- the portable
-        // multi-line keys (see IsNewlineEvent for the encodings).
-        if (IsNewlineEvent(event)) {
+        // The "prompt.newline" action (or, absent a resolved keymap,
+        // IsNewlineEvent's hardcoded default) inserts a newline -- see
+        // newline_check's construction above and the header's NEWLINE
+        // comment.
+        if (newline_check(event)) {
             InsertNewlineAtCursor(state);
             return true;   // consumed
         }

@@ -491,30 +491,50 @@ number the tab bar shows), `group.previous`, `group.next`, `jump.attention`,
 `chat.scroll_up`, `chat.scroll_down`, `chat.scroll_bottom`, `chat.row_up`,
 `chat.row_down`, `chat.toggle_collapse`, `chat.toggle_collapse_all`,
 `chat.toggle_thinking_fold`, `chat.toggle_tool_fold`,
-`chat.toggle_timestamps`, `turn.cancel`, `app.quit`.
+`chat.toggle_timestamps`, `turn.cancel`, `session.pause`, `prompt.newline`,
+`app.quit`.
 
 Modifiers: `ctrl` (or `control`), `alt` (or `option`/`opt`/`meta` — the
 macOS key's spelling), `shift`, joined by `+` in any order. macOS: Apple
 builds match `alt+letter`/`alt+digit` bindings against both the ESC-prefixed
 Alt encoding *and* the glyphs an unconfigured Option key sends (US layout:
 option+g sends `©`, option+j `∆`, …), so bindings fire without the
-terminal's "Use Option as Meta Key" setting. The glyph is then claimed by
-the binding and no longer typeable; on non-US layouts whose plain keys send
-those characters (ß on German), rebind rather than fight it.
+terminal's "Use Option as Meta Key" setting (Terminal.app, iTerm2 — default
+"Normal" left/right Option key —, Ghostty, Alacritty, and WezTerm all send
+these glyphs out of the box). The glyph is then claimed by the binding and
+no longer typeable; on non-US layouts whose plain keys send those characters
+(ß on German), rebind rather than fight it.
+
+macOS keyboard-shortcut collisions: the defaults deliberately avoid two keys
+macOS claims before the terminal ever sees them. `⌃↑`/`⌃↓` are bound
+systemwide to Mission Control / Application Windows (System Settings →
+Keyboard → Keyboard Shortcuts → Mission Control), so `chat.scroll_up`/
+`chat.scroll_down` default to `ctrl+alt+k`/`ctrl+alt+j` instead of
+`ctrl+up`/`ctrl+down`. `F1` is a hardware brightness key on Mac keyboards
+unless Fn is held or "Use F1, F2, etc. keys as standard function keys" is
+enabled, so `help.overlay` defaults to `alt+h` instead of `f1`. Both old
+specs still parse and can be rebound in `keybindings.json` — e.g. after
+disabling the relevant System Settings shortcut — they're just no longer
+the shipped defaults.
 The `/keymap` command opens the same overlay as the `help.overlay` binding:
 a filterable listing of every configured action → key pair.
 
-Prompt newline: Enter submits; Alt+Enter inserts a newline (the prompt
-soft-wraps to the terminal width, at most half the screen). Besides ESC CR /
-ESC LF, the editor recognizes the CSI-u encodings terminals emit when the
-kitty keyboard protocol or xterm modifyOtherKeys is on (`13;3u`,
-`13;2u`, `27;3;13~`, `27;2;13~`) — Shift+Enter works on those terminals
-with no configuration. macOS caveat:
-Terminal.app, Ghostty, Alacritty and WezTerm send Option+Enter as a plain
-`\r` until Option is configured as Alt (Terminal.app: "Use Option as Meta
-Key"; Ghostty: `macos-option-as-alt`; Alacritty: `option_as_alt`; WezTerm:
-`LeftOption` as `LeftAlt`) — with no byte distinguishing it from Enter, no
-in-app binding can catch it.
+Prompt newline (`prompt.newline`, default `alt+enter`): Enter submits;
+Alt+Enter inserts a newline (the prompt soft-wraps to the terminal width, at
+most half the screen). Besides ESC CR / ESC LF, the default matches the
+CSI-u encodings terminals emit when the kitty keyboard protocol or xterm
+modifyOtherKeys is on (`13;3u`, `13;2u`, `27;3;13~`, `27;2;13~`) —
+Shift+Enter works on those terminals with no configuration. macOS caveat:
+Terminal.app, iTerm2, Ghostty, Alacritty and WezTerm send Option+Enter as a
+plain `\r` until Option is configured as Alt (Terminal.app: "Use Option as
+Meta Key"; iTerm2: Profiles → Keys → Left/Right Option Key → `Esc+`;
+Ghostty: `macos-option-as-alt`; Alacritty: `option_as_alt`; WezTerm:
+`LeftOption` as `LeftAlt`) — with no byte distinguishing that from plain
+Enter, no in-app match can tell them apart. If enabling that terminal
+setting isn't an option, rebind `prompt.newline` instead — e.g. to
+`"shift+enter"` (works out of the box on a kitty-protocol-aware terminal) or
+to any letter/digit spec unrelated to Enter (e.g. `"ctrl+alt+n"`), which
+sidesteps the ambiguity rather than needing a distinguishing byte at all.
 
 ### ui.json
 

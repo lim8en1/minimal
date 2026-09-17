@@ -44,7 +44,11 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"session.picker", "ctrl+o"},
         {"agent.picker", "alt+g"},
         {"model.picker", "alt+m"},
-        {"help.overlay", "f1"},
+        // Not f1: on Mac keyboards F1 is a hardware brightness key by
+        // default (needs Fn held, or "Use F1, F2, etc. keys as standard
+        // function keys" enabled in System Settings) -- alt+h reaches every
+        // keyboard with no configuration, and "h" for help is mnemonic.
+        {"help.overlay", "alt+h"},
         {"permission.cycle", "shift+tab"},
         {"session.pause", "alt+p"},
         {"panel.toggle", "ctrl+t"},
@@ -56,8 +60,14 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"panel.focus.prev", "ctrl+e"},
         {"tab.close", "ctrl+w"},
         {"chat.load_older", "pageup"},
-        {"chat.scroll_up", "ctrl+up"},
-        {"chat.scroll_down", "ctrl+down"},
+        // Not ctrl+up/ctrl+down: macOS binds those systemwide by default
+        // (Mission Control / Application Windows), intercepted before the
+        // terminal ever sees them. ctrl+alt+k/j pair with chat.row_up/
+        // chat.row_down's alt+k/alt+j (vim up/down) the same way
+        // ctrl+alt+c/t/o below already pair with alt+c/t/o -- a coarser
+        // variant of an existing alt+letter action.
+        {"chat.scroll_up", "ctrl+alt+k"},
+        {"chat.scroll_down", "ctrl+alt+j"},
         // Not "end": HandleGlobalKey (keybinding_dispatch.cpp) runs BEFORE the
         // prompt editor ever sees an event (app.cpp wraps session_view, which
         // wraps the editor, in the CatchEvent that dispatches these), so
@@ -92,6 +102,14 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"chat.toggle_tool_fold", "ctrl+alt+o"},
         {"chat.toggle_timestamps", "alt+t"},
         {"turn.cancel", "escape"},
+        // The prompt editor's newline-insert key (prompt_editor.cpp):
+        // plain Enter submits, this inserts a line instead. Consulted
+        // directly by the editor (app.cpp's build_prompt_editor), not by
+        // HandleGlobalKey. See key_event_parser.cpp's enter/return branch
+        // for why "alt+enter" resolves to six candidate encodings, and
+        // docs/CONFIGURATION.md for the macOS Option+Enter caveat this
+        // binding exists to be rebindable away from.
+        {"prompt.newline", "alt+enter"},
         {"app.quit", "ctrl+q"},
     };
     return kDefaults;
