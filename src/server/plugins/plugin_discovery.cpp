@@ -50,12 +50,44 @@ PluginConfig ParsePluginConfig(const std::string& json_text) {
         for (const auto& item : *it) {
             if (!item.is_object()) continue;
             PluginConfig::Entry entry;
-            entry.file = item.value("file", std::string{});
+            // Type-checked reads, not item.value(key, default): that overload
+            // only substitutes the default when the key is ABSENT -- a key
+            // present with the wrong JSON type (a user hand-editing this file
+            // can write "enabled": "false" or "enabled": 1) makes it throw
+            // type_error.302 uncaught, which propagates out of this function
+            // (it has no try/catch of its own) and discards the ENTIRE parsed
+            // config at the caller, silently re-deriving every plugin's
+            // enabled state from its provenance default. Degrade-don't-throw,
+            // like the rest of this file (see 'config' below) -- ported from
+            // the client's identical fix in
+            // src/client/plugins/plugin_discovery.cpp.
+            if (auto file_it = item.find("file"); file_it != item.end()) {
+                if (file_it->is_string()) {
+                    entry.file = file_it->get<std::string>();
+                } else {
+                    common::DefaultLogger().warn(
+                        "plugins.json: a plugin entry has a non-string 'file' ({}); skipping it",
+                        file_it->type_name());
+                }
+            }
             if (entry.file.empty()) continue;
-            entry.provenance =
-                item.value("provenance", std::string{kUser}) == kBundled ? Provenance::Bundled
-                                                                         : Provenance::User;
-            entry.enabled = item.value("enabled", false);
+            entry.provenance = Provenance::User;
+            if (auto prov_it = item.find("provenance");
+                prov_it != item.end() && prov_it->is_string()) {
+                entry.provenance =
+                    prov_it->get<std::string>() == kBundled ? Provenance::Bundled : Provenance::User;
+            }
+            entry.enabled = false;
+            if (auto enabled_it = item.find("enabled"); enabled_it != item.end()) {
+                if (enabled_it->is_boolean()) {
+                    entry.enabled = enabled_it->get<bool>();
+                } else {
+                    common::DefaultLogger().warn(
+                        "plugins.json: entry '{}' has a non-boolean 'enabled' ({}); defaulting "
+                        "to disabled",
+                        entry.file, enabled_it->type_name());
+                }
+            }
             if (auto config_it = item.find("config"); config_it != item.end()) {
                 if (config_it->is_object()) {
                     entry.config = *config_it;

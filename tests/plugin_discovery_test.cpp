@@ -56,6 +56,42 @@ TEST_CASE("a non-object config degrades to an empty object", "[plugin_config][tr
     }
 }
 
+TEST_CASE(
+    "a wrong-type 'enabled'/'provenance'/'file' field degrades instead of discarding the config",
+    "[plugin_config][track_k][regression]") {
+    // The bug: item.value(key, default) throws json::type_error.302 when the
+    // key is PRESENT with the wrong JSON type (not merely absent), and
+    // ParsePluginConfig had no try/catch of its own -- the throw propagated
+    // out and discarded the caller's ENTIRE parsed plugins.json on one
+    // hand-edited typo, re-deriving every plugin's enabled state from its
+    // provenance default instead. Each entry below has exactly one
+    // wrong-type field; every entry must still parse (degrading only that
+    // field), and a later entry must not be skipped because an earlier one
+    // would have thrown.
+    const std::string text = R"({
+      "plugins": [
+        {"file": "a.so", "enabled": "true"},
+        {"file": "b.so", "provenance": 1, "enabled": true},
+        {"file": 42, "enabled": true},
+        {"file": "d.so", "enabled": true}
+      ]
+    })";
+
+    const auto config = ParsePluginConfig(text);
+    // "a.so": non-boolean enabled degrades to disabled, entry still present.
+    // "b.so": non-string provenance degrades to User, enabled still honored.
+    // file: 42 has no usable name and is skipped, same as an empty 'file'.
+    // "d.so" proves parsing continued past every earlier malformed entry.
+    REQUIRE(config.plugins.size() == 3);
+    CHECK(config.plugins[0].file == "a.so");
+    CHECK_FALSE(config.plugins[0].enabled);
+    CHECK(config.plugins[1].file == "b.so");
+    CHECK(config.plugins[1].provenance == Provenance::User);
+    CHECK(config.plugins[1].enabled);
+    CHECK(config.plugins[2].file == "d.so");
+    CHECK(config.plugins[2].enabled);
+}
+
 TEST_CASE("serialization round-trips config through a load->save->load cycle",
           "[plugin_config][track_k]") {
     // main.cpp rewrites plugins.json on every startup. A config that vanishes
