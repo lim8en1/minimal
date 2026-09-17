@@ -1,6 +1,7 @@
 #include "minimal/commands/command_registry.hpp"
 
 #include <algorithm>
+#include <unordered_map>
 #include <utility>
 
 #include "minimal/common/logger.hpp"
@@ -62,24 +63,37 @@ std::vector<CommandRegistry::Entry> CommandRegistry::All() const {
 
 void CommandRegistry::RemoveByAttribution(const std::string& plugin_name) {
     // See the header: pre-collision-check, pre-alias rollback only.
+    //
+    // First-wins (Register: "first registration owns the slot"), so the
+    // WINNER of a surface name is whichever attribution for it appears FIRST
+    // in registration order -- computed here, from the full list, before any
+    // entries are removed. A losing attribution for the same surface is kept
+    // only for collision diagnostics and must never affect whether the
+    // winner's slot gets erased: checking "does ANY surviving attribution
+    // still name this surface" (the previous approach) let a leftover
+    // loser's record block erasure of a winning plugin's command during that
+    // winning plugin's own rollback, and conversely erasing on a LOSER's own
+    // removal would wrongly drop a slot the loser never owned.
+    std::unordered_map<std::string, std::string> winner_plugin;  // surface -> plugin_name
+    for (const auto& attr : attributions_) {
+        winner_plugin.try_emplace(attr.surface_name, attr.plugin_name);
+    }
+
     std::vector<Attribution> kept;
     kept.reserve(attributions_.size());
-    std::vector<std::string> surfaces;
+    std::vector<std::string> surfaces_owned_by_removed;
     for (auto& attr : attributions_) {
         if (attr.plugin_name == plugin_name) {
-            surfaces.push_back(std::move(attr.surface_name));
+            if (winner_plugin[attr.surface_name] == plugin_name) {
+                surfaces_owned_by_removed.push_back(attr.surface_name);
+            }
         } else {
             kept.push_back(std::move(attr));
         }
     }
     attributions_ = std::move(kept);
-    for (const auto& surface : surfaces) {
-        // First-wins: the slot holds the FIRST registrant, so erase only when
-        // no surviving attribution still claims the same surface name.
-        const bool claimed = std::any_of(
-            attributions_.begin(), attributions_.end(),
-            [&](const Attribution& attr) { return attr.surface_name == surface; });
-        if (!claimed) commands_.erase(surface);
+    for (const auto& surface : surfaces_owned_by_removed) {
+        commands_.erase(surface);
     }
 }
 

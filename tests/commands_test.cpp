@@ -429,6 +429,46 @@ TEST_CASE("a duplicate surface name is recorded on both sides", "[commands][inva
     CHECK(registry.attributions()[0].surface_name == registry.attributions()[1].surface_name);
 }
 
+TEST_CASE(
+    "RemoveByAttribution erases the winner's slot even when a loser's attribution survives",
+    "[commands][invariant][regression]") {
+    // The bug: the "claimed" check considered ANY surviving attribution for
+    // the surface name, including a losing collision attempt -- so a losing
+    // plugin's mere registration attempt blocked erasure of the WINNING
+    // plugin's command during that winning plugin's own rollback. Here
+    // plugin-a wins "boom"; plugin-b's later attempt loses but is still
+    // recorded. Rolling back plugin-a (the actual owner of the commands_
+    // slot) must erase "boom", regardless of plugin-b's leftover record.
+    commands::CommandRegistry registry;
+    registry.SetAttribution("plugin-a");
+    registry.Register(std::make_unique<ThrowingCommand>());
+    registry.ClearAttribution();
+    registry.SetAttribution("plugin-b");
+    registry.Register(std::make_unique<ThrowingCommand>());
+    registry.ClearAttribution();
+    REQUIRE(registry.Find("boom") != nullptr);
+
+    registry.RemoveByAttribution("plugin-a");
+
+    CHECK(registry.Find("boom") == nullptr);
+    // plugin-b's losing attribution is still recorded for diagnostics.
+    REQUIRE(registry.attributions().size() == 1);
+    CHECK(registry.attributions()[0].plugin_name == "plugin-b");
+
+    // The inverse must also hold: removing a LOSER's own attribution must
+    // never erase a slot it never owned.
+    commands::CommandRegistry registry2;
+    registry2.SetAttribution("plugin-a");
+    registry2.Register(std::make_unique<ThrowingCommand>());
+    registry2.ClearAttribution();
+    registry2.SetAttribution("plugin-b");
+    registry2.Register(std::make_unique<ThrowingCommand>());
+    registry2.ClearAttribution();
+
+    registry2.RemoveByAttribution("plugin-b");
+    CHECK(registry2.Find("boom") != nullptr);
+}
+
 // --- The collision check, which had never run ---------------------------------
 
 TEST_CASE("duplicate surface names are fatal, naming both plugins",
