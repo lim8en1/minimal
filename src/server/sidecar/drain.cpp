@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <utility>
+#include <vector>
 
 #include "minimal/sidecar/capped_buffer.hpp"
 
@@ -81,20 +82,27 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
             break;
         }
 
-        pollfd poll_fds[16];
-        int index_by_slot[16];
-        int nfds = 0;
+        // Sized to the actual sink count, not a fixed cap: this module is
+        // shared by every plugin that spawns processes, and a fixed-size
+        // array here (there used to be one, pollfd[16]) silently truncated
+        // any plan with more pipes than the cap -- the extra pipes were never
+        // polled or drained, and their child blocked forever writing to a
+        // full, undrained pipe until the overall timeout fired, with nothing
+        // explaining why.
+        std::vector<pollfd> poll_fds;
+        std::vector<int> index_by_slot;
+        poll_fds.reserve(outcome.sinks.size());
+        index_by_slot.reserve(outcome.sinks.size());
         any_open = false;
-        for (std::size_t i = 0; i < outcome.sinks.size() && nfds < 16; ++i) {
+        for (std::size_t i = 0; i < outcome.sinks.size(); ++i) {
             if (!open[i]) continue;
-            index_by_slot[nfds] = static_cast<int>(i);
-            poll_fds[nfds] = pollfd{proc.parent_fds[i].get(), POLLIN, 0};
-            ++nfds;
+            index_by_slot.push_back(static_cast<int>(i));
+            poll_fds.push_back(pollfd{proc.parent_fds[i].get(), POLLIN, 0});
             any_open = true;
         }
         if (!any_open) break;
 
-        const int rc = poll(poll_fds, static_cast<nfds_t>(nfds), options.slice_ms);
+        const int rc = poll(poll_fds.data(), static_cast<nfds_t>(poll_fds.size()), options.slice_ms);
         if (rc < 0) {
             if (errno == EINTR) continue;
             outcome.io_error = true;
@@ -104,7 +112,7 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
         if (rc == 0) continue;
 
         char chunk[8192];
-        for (int slot = 0; slot < nfds; ++slot) {
+        for (std::size_t slot = 0; slot < poll_fds.size(); ++slot) {
             if (!(poll_fds[slot].revents & (POLLIN | POLLHUP | POLLERR))) continue;
             const std::size_t i = static_cast<std::size_t>(index_by_slot[slot]);
             const ssize_t n = read(proc.parent_fds[i].get(), chunk, sizeof(chunk));

@@ -109,6 +109,62 @@ TEST_CASE("A passthrough child fd (CLOEXEC cleared) survives exec", "[sidecar][p
     CHECK(outcome.sinks[1].text == "proto\n");
 }
 
+TEST_CASE("DrainAndReap drains more than 16 pipe plans", "[sidecar][process][regression]") {
+    // The bug: DrainAndReap's poll used fixed-size pollfd[16]/index_by_slot[16]
+    // arrays, and the fill loop silently capped at 16 -- any pipe beyond it
+    // was never polled or drained. This module is shared by every plugin
+    // that spawns processes, so a future (or third-party) plugin planning
+    // more than 16 pipes would have its extra pipes' children block forever
+    // writing into a full, undrained pipe.
+    //
+    // 17 pipes here (one past the old cap): the first 16 sit idle (nothing
+    // written to them until the very end, so under the old code they always
+    // win the fixed 16 poll slots and never report EOF), while the LAST pipe
+    // writes 256 KiB up front -- comfortably more than any platform's kernel
+    // pipe buffer -- before the child does anything else. Under the old cap
+    // that last pipe is never polled, the write blocks forever, and the
+    // child never reaches its final `echo done`; this test's timeout would
+    // fire. With the fix, the excess pipe drains like any other and the
+    // child completes quickly.
+    constexpr int kPipeCount = 17;
+    constexpr int kExcessIndex = kPipeCount - 1;
+    LaunchSpec spec;
+    spec.pipes.reserve(kPipeCount);
+    for (int i = 0; i < kPipeCount; ++i) {
+        // High fd numbers, well above anything Launch's own pipe() calls for
+        // this same spec would allocate (up to 2*kPipeCount low-numbered
+        // fds) -- a collision between an allocated pipe fd and another
+        // pipe's dup2 TARGET would corrupt an unrelated pipe before this
+        // test ever reaches DrainAndReap.
+        const int fd = 100 + i;
+        spec.pipes.push_back(PipePlan{PipePlan::ChildEnd::kWrite, {{fd, true}}});
+    }
+    const int excess_fd = 100 + kExcessIndex;
+    const std::string script = "dd if=/dev/zero bs=1024 count=256 >&" +
+                               std::to_string(excess_fd) + " 2>/dev/null; echo done >&100";
+    spec.argv = {"/bin/sh", "-c", script};
+    spec.cwd = std::filesystem::temp_directory_path();
+
+    auto launched = Launch(spec);
+    REQUIRE(launched.ok);
+    REQUIRE(launched.parent_fds.size() == static_cast<std::size_t>(kPipeCount));
+
+    std::vector<PipeSink> sinks(kPipeCount);
+    for (auto& sink : sinks) {
+        sink.mode = PipeSink::Mode::kCapped;
+        sink.cap = 1 << 20;  // 1 MiB, comfortably above the 256 KiB written
+    }
+    DrainOptions options;
+    options.timeout_ms = 5000;
+    const auto outcome = DrainAndReap(std::move(launched), std::move(sinks), options, {});
+    CHECK_FALSE(outcome.timed_out);
+    REQUIRE_FALSE(outcome.reap_error);
+    CHECK(WIFEXITED(outcome.wait_status));
+    CHECK(WEXITSTATUS(outcome.wait_status) == 0);
+    CHECK(outcome.sinks[static_cast<std::size_t>(kExcessIndex)].text.size() == 256 * 1024);
+    CHECK(outcome.sinks[0].text == "done\n");
+}
+
 TEST_CASE("A child whose argv[0] needs PATH resolution is resolved in the parent",
           "[sidecar][process]") {
     LaunchSpec spec;
