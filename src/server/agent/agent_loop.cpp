@@ -24,24 +24,6 @@ std::vector<const llm::ToolUseBlock*> ToolUsesOf(const llm::Message& message) {
     return out;
 }
 
-// The injection queue carries two shapes: tool-result-only user messages (a
-// non-blocking subagent's completion, a background task's result -- these are
-// the model's own tool answers arriving late) and USER-TEXT messages -- a
-// real-time steering submission, which is a human prompt arriving mid-turn
-// and therefore crosses the same hook seam a turn-pop prompt does. Shape is
-// the only marker the queue keeps; this is the shared definition (the
-// session's wake predicate carries a copy in injection_queue.hpp).
-bool IsUserTextMessage(const llm::Message& message) {
-    if (message.role != llm::Role::User) return false;
-    for (const auto& block : message.content) {
-        if (const auto* text = std::get_if<llm::TextBlock>(&block);
-            text != nullptr && !text->text.empty()) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // THE global tool-RESULT ceiling (settings.json tools.max_result_bytes), the
 // output-side mirror of the input ceiling checked before Prepare. Applied
 // here, once, after Execute() returns, so it covers every tool uniformly --
@@ -185,20 +167,12 @@ bool AgentLoop::Paused() const { return is_paused_ && is_paused_(); }
 
 bool AgentLoop::HistoryEndsWithUnansweredUserText() const {
     if (history_.empty()) return false;
-    const auto& last = history_.back();
-    if (last.role != llm::Role::User) return false;
     // Text, not tool results: an injected subagent completion also ends the
     // history in a User message, but its blocks are ToolResultBlocks -- the
     // model's own answers arriving late, which wait for the next real turn
     // when the wake setting is off. Only TEXT is a human prompt awaiting a
-    // reply (IsUserTextMessage shares the definition).
-    for (const auto& block : last.content) {
-        if (const auto* text = std::get_if<llm::TextBlock>(&block);
-            text != nullptr && !text->text.empty()) {
-            return true;
-        }
-    }
-    return false;
+    // reply.
+    return IsUserTextMessage(history_.back());
 }
 
 bool AgentLoop::SleepForBackoff(int attempt,

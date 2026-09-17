@@ -790,13 +790,7 @@ tools::PermissionRunMode Session::desired_run_mode() const {
 // and anything else a human never typed -- rewinding "to" one would cut the
 // transcript at a position the user cannot re-enter as a prompt.
 bool IsRewindTarget(const session::StoredMessage& stored) {
-    if (stored.message.role != llm::Role::User) return false;
-    for (const auto& block : stored.message.content) {
-        if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
-            if (!text->text.empty()) return true;
-        }
-    }
-    return false;
+    return IsUserTextMessage(stored.message);
 }
 
 void Session::RunOneRewind(const QueuedRewind& request) {
