@@ -295,7 +295,15 @@ private:
                              const std::optional<config::ModelRef>& model_override) const;
     std::shared_ptr<llm::LlmProvider> ResolveProvider(const AgentPreset& preset,
                                                        const std::string& agent_preset_name);
-    ResumeSeed LoadResumeSeed(const std::string& session_id);
+    // `pending_repair`, when set on return, is a synthesized tool-result
+    // repair message already folded into the returned seed's history but NOT
+    // yet persisted -- the caller must append it via db_.AppendMessage only
+    // after the session those results belong to has been fully constructed
+    // (and ideally published). Persisting it here, before construction can
+    // still fail, left an orphaned repair message in the transcript of a
+    // session that was never actually created on a resume that threw.
+    ResumeSeed LoadResumeSeed(const std::string& session_id,
+                             std::optional<llm::Message>& pending_repair);
     // Phase 5 step 3: presets/commands/provider factories/instance cache used
     // to be set on the live Session AFTER construction (WireSession, set_*
     // calls) -- a window during which the worker thread already existed but

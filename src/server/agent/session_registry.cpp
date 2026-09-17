@@ -268,7 +268,8 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // worker thread starting and these becoming non-null.
     ApplyConstructorWiring(params);
 
-    ResumeSeed seed = resume ? LoadResumeSeed(session_id) : ResumeSeed{};
+    std::optional<llm::Message> pending_repair;
+    ResumeSeed seed = resume ? LoadResumeSeed(session_id, pending_repair) : ResumeSeed{};
 
     auto store = std::make_unique<session::SqliteHistoryStore>(db_, session_id);
     // loop_config, not loop_config_: CreateResolved may have overridden max_turns
@@ -282,6 +283,19 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // command addressed to this session_id must never be able to observe it
     // before that.
     PublishSession(session_id, session, signal_router, signal_selectors, resume);
+
+    // Persisted only now that the session it belongs to exists and is
+    // published: LoadResumeSeed used to append this before Session
+    // construction, so a construction failure (unresolvable preset/model)
+    // left the synthesized repair permanently committed to a transcript for
+    // a session that was never actually created, with nothing to undo it
+    // (there is no message-delete API, unlike ForkSession's whole-row
+    // DeleteSession rollback, which would be far too destructive here --
+    // this is a resume of a session with real prior history, not a fresh row
+    // a failed fork can just drop).
+    if (pending_repair) {
+        db_.AppendMessage(session_id, *pending_repair, 0);
+    }
 
     guard.committed = true;
     reaper_cv_.notify_all();
@@ -361,7 +375,8 @@ std::shared_ptr<llm::LlmProvider> SessionRegistry::ResolveProvider(
     return provider;
 }
 
-ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id) {
+ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id,
+                                           std::optional<llm::Message>& pending_repair) {
     // RESUME: load the stored transcript as the loop's working history. Loaded,
     // not replayed -- everything below appends NEW messages at MAX(seq) + 1, so
     // the stored rows must not go through the store again or the transcript
@@ -402,17 +417,18 @@ ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id) {
     // the assistant append and the tool-results append -- ends with an
     // unanswered tool_use, which no provider accepts. Synthesize the
     // missing error results as one REAL message (persisted like any other
-    // append) rather than refusing to resume: cancellation is ordinary,
-    // and the transcript stays an exact, valid prefix either way. The
-    // repair appends at MAX(seq)+1, so a checkpoint boundary (which only
-    // covers earlier seqs) is unaffected by it.
+    // append, but not from HERE -- see pending_repair's doc comment) rather
+    // than refusing to resume: cancellation is ordinary, and the transcript
+    // stays an exact, valid prefix either way. The repair appends at
+    // MAX(seq)+1, so a checkpoint boundary (which only covers earlier seqs)
+    // is unaffected by it.
     if (auto repair = synthesize_missing_tool_results(seed.history)) {
         logger_.info(
             "session {}: stored transcript ends mid tool call; appending synthesized "
             "error results before resuming",
             session_id);
-        db_.AppendMessage(session_id, *repair, 0);
-        seed.history.push_back(std::move(*repair));
+        seed.history.push_back(*repair);
+        pending_repair = std::move(repair);
     }
     return seed;
 }
