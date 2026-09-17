@@ -1,3 +1,6 @@
+#include <chrono>
+#include <string>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "minimal/tools/pattern_match.hpp"
@@ -64,6 +67,28 @@ TEST_CASE("GlobMatch: a pattern matches the whole subject, never a substring",
     CHECK_FALSE(GlobMatch("status", "git status", false));
     CHECK_FALSE(GlobMatch("git", "git status", false));
     CHECK(GlobMatch("*status", "git status", false));
+}
+
+TEST_CASE(
+    "GlobMatch: a multi-wildcard pattern against long non-matching text stays fast",
+    "[pattern_match][regression]") {
+    // The bug: the naive backtracking matcher re-explored the same
+    // (pattern-offset, text-offset) pair once per ancestor '*' split point,
+    // exponential in the number of stars. Confirmed empirically on the
+    // pre-fix code: 10 stars against 40 non-matching characters took ~2.4s;
+    // this pattern is a similar shape and must now resolve in well under a
+    // second. Reachable in production via bash pattern-permission rules
+    // against a user/model-controlled command line -- a hang here stalls the
+    // whole session's tool-permission resolution on the worker thread.
+    const std::string pattern = "a*a*a*a*a*a*a*a*a*a*b";
+    const std::string text(40, 'a');  // never contains 'b': guaranteed non-match
+
+    const auto start = std::chrono::steady_clock::now();
+    const bool matched = GlobMatch(pattern, text, false);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    CHECK_FALSE(matched);
+    CHECK(elapsed < std::chrono::milliseconds(200));
 }
 
 TEST_CASE("GlobShaped: wildcard-shaped vs literal", "[pattern_match]") {
