@@ -386,6 +386,39 @@ TEST_CASE("glob: the literal fast path is confined to the search root",
     CHECK(literal.content_text == "src/main.cpp\n");
 }
 
+TEST_CASE("glob: a search root below the project root prefixes its paths",
+          "[tools_search][glob_tool]") {
+    Fixture f;
+    f.Write("src/old.cpp", "x");
+    f.Write("src/nested/new.cpp", "x");
+    f.Write("other/elsewhere.cpp", "x");
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute({{"pattern", "**/*.cpp"}, {"path", "src"}}, ctx);
+    CHECK_FALSE(result.is_error);
+    // Project-root-relative, NOT walk-root-relative: these are literal read
+    // arguments -- the model pastes what it sees. (Negatives are line-anchored:
+    // "nested/new.cpp" alone is a substring of the prefixed path.)
+    CHECK(result.content_text.find("src/nested/new.cpp") != std::string::npos);
+    CHECK(result.content_text.find("src/old.cpp") != std::string::npos);
+    CHECK(result.content_text.find("\nnested/new.cpp\n") == std::string::npos);
+    CHECK(result.content_text.find("\nold.cpp\n") == std::string::npos);
+    CHECK(result.content_text.find("elsewhere.cpp") == std::string::npos);
+}
+
+TEST_CASE("glob: literal fast path with a sub-root search root is prefixed too",
+          "[tools_search][glob_tool]") {
+    Fixture f;
+    f.Write("src/new.cpp", "x");
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute({{"pattern", "new.cpp"}, {"path", "src"}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text == "src/new.cpp\n");
+}
+
 // --- grep tool -----------------------------------------------------------------
 
 TEST_CASE("grep: files_with_matches default mode with gitignore respected",
@@ -460,6 +493,45 @@ TEST_CASE("grep: count mode", "[tools_search][grep_tool]") {
     const auto result = tool->execute({{"pattern", "hit"}, {"output_mode", "count"}}, ctx);
     CHECK_FALSE(result.is_error);
     CHECK(result.content_text == "a.txt:2\n");
+}
+
+TEST_CASE("grep: paths are project-root-relative whatever the search root",
+          "[tools_search][grep_tool]") {
+    Fixture f;
+    f.Write("sub/a.py", "alpha\nmore\nalpha\n");
+    f.Write("sub/code.py", "one\nmatch\n");
+    f.Write("other/b.py", "alpha\n");
+    f.Write("sub/solo.txt", "hit\nmiss\n");
+    auto tool = tools_search::MakeGrepTool(f.settings);
+    auto ctx = f.Context();
+
+    // files_with_matches mode.
+    const auto files = tool->execute({{"pattern", "alpha"}, {"path", "sub"}}, ctx);
+    CHECK_FALSE(files.is_error);
+    CHECK(files.content_text.find("sub/a.py") != std::string::npos);
+    CHECK(files.content_text.find("\na.py:") == std::string::npos);  // not walk-root-relative
+    CHECK(files.content_text.find("b.py") == std::string::npos);    // not under the search root
+
+    // content mode: the file header carries the prefix too.
+    const auto content = tool->execute(
+        {{"pattern", "match"}, {"path", "sub"}, {"output_mode", "content"}}, ctx);
+    CHECK_FALSE(content.is_error);
+    CHECK(content.content_text.find("sub/code.py:2:match") != std::string::npos);
+
+    // count mode.
+    const auto count = tool->execute(
+        {{"pattern", "alpha"}, {"path", "sub"}, {"output_mode", "count"}}, ctx);
+    CHECK_FALSE(count.is_error);
+    CHECK(count.content_text == "sub/a.py:2\n");
+
+    // A FILE as the search root: the walker reports it under its bare
+    // filename, so the prefix must be the file's PARENT -- "sub/solo.txt",
+    // never "sub/solo.txt/solo.txt".
+    const auto file_root = tool->execute(
+        {{"pattern", "hit"}, {"path", "sub/solo.txt"}, {"output_mode", "content"}}, ctx);
+    CHECK_FALSE(file_root.is_error);
+    CHECK(file_root.content_text.find("sub/solo.txt:1:hit") != std::string::npos);
+    CHECK(file_root.content_text.find("sub/solo.txt/") == std::string::npos);
 }
 
 TEST_CASE("grep: case insensitivity and binary/oversize skips",

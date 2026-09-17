@@ -211,12 +211,62 @@ TEST_CASE("a directory mention lists a bounded tree", "[mention_expansion]") {
     REQUIRE(message.content.size() == 2);
     const auto text = BlockText(message, 1);
     CHECK(text.starts_with("<file-tree path=\"src\">"));
-    // One relative path per line, sorted, directories suffixed, dotfiles skipped.
-    CHECK(text.find("main.cpp\n") != std::string::npos);
-    CHECK(text.find("util/\n") != std::string::npos);
-    CHECK(text.find("util/helper.cpp\n") != std::string::npos);
+    // Project-root-relative paths, one per line, sorted, directories suffixed,
+    // dotfiles skipped -- so a listing line is a literal read argument. The
+    // always-on first-line note makes the frame self-describing about that.
+    CHECK(text.find("[paths are relative to the project root -- pass them to read as-is]\n") !=
+          std::string::npos);
+    CHECK(text.find("src/main.cpp\n") != std::string::npos);
+    CHECK(text.find("src/util/\n") != std::string::npos);
+    CHECK(text.find("src/util/helper.cpp\n") != std::string::npos);
     CHECK(text.find(".hidden") == std::string::npos);
     CHECK(text.ends_with("</file-tree>"));
+}
+
+TEST_CASE("directory mention spellings that name the same directory list identically",
+          "[mention_expansion]") {
+    TempDir dir;
+    WriteFile(dir, "src/main.cpp", "x");
+
+    const auto plain = agent::ExpandMentions("@src", dir.path(), common::DefaultLogger());
+    const auto slashed = agent::ExpandMentions("@src/", dir.path(), common::DefaultLogger());
+    const auto dotted = agent::ExpandMentions("@./src", dir.path(), common::DefaultLogger());
+    REQUIRE(plain.content.size() == 2);
+    REQUIRE(slashed.content.size() == 2);
+    REQUIRE(dotted.content.size() == 2);
+
+    // The attribute stays as typed (it differs across spellings), but the
+    // LISTING is canonical: same directory -> identical lines.
+    const auto listing = [](const std::string& frame) {
+        static const std::string note =
+            "[paths are relative to the project root -- pass them to read as-is]\n";
+        const auto pos = frame.find(note);
+        REQUIRE(pos != std::string::npos);
+        return frame.substr(pos + note.size());
+    };
+    const auto plain_listing = listing(BlockText(plain, 1));
+    CHECK(plain_listing.find("src/main.cpp\n") != std::string::npos);
+    CHECK(listing(BlockText(slashed, 1)) == plain_listing);
+    CHECK(listing(BlockText(dotted, 1)) == plain_listing);
+}
+
+TEST_CASE("a root mention lists bare names and still carries the note", "[mention_expansion]") {
+    TempDir dir;
+    WriteFile(dir, "top.txt", "x");
+    WriteFile(dir, "sub/inner.txt", "y");
+
+    const auto message = agent::ExpandMentions("everything in @.", dir.path(),
+                                               common::DefaultLogger());
+
+    REQUIRE(message.content.size() == 2);
+    const auto text = BlockText(message, 1);
+    CHECK(text.starts_with("<file-tree path=\".\">"));
+    // The root itself: no prefix to add, so bare names are already correct.
+    CHECK(text.find("[paths are relative to the project root -- pass them to read as-is]\n") !=
+          std::string::npos);
+    CHECK(text.find("\ntop.txt\n") != std::string::npos);
+    CHECK(text.find("sub/\n") != std::string::npos);
+    CHECK(text.find("./top.txt") == std::string::npos);
 }
 
 TEST_CASE("the directory tree respects its depth bound", "[mention_expansion]") {
@@ -227,8 +277,11 @@ TEST_CASE("the directory tree respects its depth bound", "[mention_expansion]") 
 
     REQUIRE(message.content.size() == 2);
     const auto text = BlockText(message, 1);
-    CHECK(text.find("level1/\n") != std::string::npos);
-    CHECK(text.find("level2\n") == std::string::npos);  // three levels below the mention
+    // Three levels below the mention are listed (with the root-relative
+    // prefix), but level3 is never recursed into -- its children are absent.
+    CHECK(text.find("top/level1/\n") != std::string::npos);
+    CHECK(text.find("top/level1/level2/level3/\n") != std::string::npos);
+    CHECK(text.find("deep.txt") == std::string::npos);
 }
 
 TEST_CASE("a non-regular, non-directory mention stays verbatim", "[mention_expansion]") {

@@ -10,6 +10,11 @@ point of the harness.
 - **Tools**: `grep` (RE2, linear time — a pathological model-authored pattern
   cannot wedge the session worker), `glob` (full tree listing, bounded the same
   way).
+- **Paths are project-root-relative** whatever the `path` argument searched:
+  read/write/edit resolve against the project root, so a returned path is a
+  literal tool argument rather than one the model must re-anchor. The walker
+  itself keeps matching gitignore rules and glob patterns against
+  walk-root-relative paths; the prefix joins at emission only.
 - Path safety is centralized in ToolExecutor, exactly as for tools-fs.
 - The `grep` timeout bounds the directory WALK; RE2 already guarantees the
   regex itself cannot hang. Partial results are reported on expiry.

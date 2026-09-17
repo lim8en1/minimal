@@ -11,6 +11,11 @@ struct ConfineResult {
                                        // resolved at all (see confine() below)
     bool outside_project_root = false;
     std::string error;                // set iff !ok
+    // Project-root-relative form of absolute_path (already clean: no ".", no
+    // "..", no trailing slash -- both inputs to lexically_relative are
+    // canonical). Advisory like outside_project_root: empty iff !ok, and not
+    // meaningful when outside_project_root (it then starts with "..").
+    std::filesystem::path relative_to_root;
 };
 
 // Canonicalizes `user_supplied` (resolved relative to project_root) and reports
@@ -42,5 +47,15 @@ struct ConfineResult {
 ConfineResult confine(const std::filesystem::path& project_root,
                        const std::string& user_supplied,
                        bool must_exist);
+
+// The string to prepend to walk-root- or mention-relative paths so they become
+// project-root-relative -- the coordinate system read/write/edit resolve
+// against ("relative to the project root"), so a prefixed path is a literal,
+// working tool argument rather than one the model must re-anchor. "src/" for a
+// directory result, the file's PARENT ("sub/") for a file result (a walker
+// reports a file root under its bare filename, so the file itself must not be
+// doubled), "" for the root itself or an outside-root/degenerate result.
+// `is_dir` distinguishes the two in-root shapes; callers already know it.
+std::string ProjectRelativePrefix(const ConfineResult& resolved, bool is_dir);
 
 }  // namespace minimal::tools

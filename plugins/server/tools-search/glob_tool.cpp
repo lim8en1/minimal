@@ -39,7 +39,8 @@ public:
         spec_.definition.description =
             "Find files by glob pattern (supports *, ?, [...], {a,b} and **). Returns paths "
             "sorted by modification time, newest first, capped at head_limit with a footer "
-            "stating the total when more exist.";
+            "stating the total when more exist. Paths are relative to the project root, "
+            "not to the `path` argument.";
         spec_.definition.input_schema = {
             {"type", "object"},
             {"properties",
@@ -103,6 +104,14 @@ public:
         const auto resolved =
             tools::confine(ctx.project_root, search_root, /*must_exist=*/true);
         if (!resolved.ok) return Error(resolved.error);
+        // Output paths are project-root-relative -- read's own coordinate
+        // system -- so a returned path is a literal read argument whatever the
+        // search root was. The walker keeps matching gitignore rules and glob
+        // patterns against walk-root-relative rel_paths; the prefix joins at
+        // emission only. (A file-valued `path` with a literal pattern names a
+        // file, so the prefix is that file's parent directory.)
+        const bool root_is_dir = std::filesystem::is_directory(resolved.absolute_path);
+        const std::string path_prefix = tools::ProjectRelativePrefix(resolved, root_is_dir);
 
         if (input.contains("head_limit") && !input.at("head_limit").is_number_integer()) {
             return Error("head_limit must be an integer");
@@ -140,7 +149,7 @@ public:
                 return ToolResult{false, "No files found"};
             }
             std::filesystem::path rel = pattern;
-            return ToolResult{false, rel.generic_string() + "\n"};
+            return ToolResult{false, path_prefix + rel.generic_string() + "\n"};
         }
 
         // Glob patterns are always anchored to the search root (VS Code
@@ -196,7 +205,7 @@ public:
         std::string out;
         const int shown = std::min<int>(head_limit, static_cast<int>(matches.size()));
         for (int i = 0; i < shown; ++i) {
-            out += matches[i].rel_path;
+            out += path_prefix + matches[i].rel_path;
             if (matches[i].is_dir) out += '/';
             out += '\n';
         }

@@ -76,6 +76,11 @@ struct GrepRun {
     int head_limit;   // budget over MATCH units: files, or matching lines
     int offset;       // matches withheld from the top
     ToolContext& ctx;
+    // Prepended to every emitted path: project-root-relative -- read's own
+    // coordinate system -- so a result line is a literal read argument
+    // whatever the search root was. "" when the search root IS the project
+    // root (or a file directly in it).
+    std::string path_prefix;
 
     int total_matches = 0;  // every match seen in scanned files (files count 1x in
                             // files modes, matching-lines count 1x in content mode)
@@ -107,7 +112,7 @@ struct GrepRun {
             budget_exhausted = true;
             return false;
         }
-        Append(rel_path + (mode == OutputMode::kCount
+        Append(path_prefix + rel_path + (mode == OutputMode::kCount
                                ? ":" + std::to_string(match_count)
                                : "") + "\n");
         emitted += 1;
@@ -142,7 +147,7 @@ struct GrepRun {
                 const bool is_match =
                     std::binary_search(block.match_lines.begin(), block.match_lines.end(), line);
                 std::string rendered =
-                    rel_path + (is_match ? ":" : "-") + std::to_string(line + 1) + ":";
+                    path_prefix + rel_path + (is_match ? ":" : "-") + std::to_string(line + 1) + ":";
                 auto text = lines[line];
                 if (static_cast<int>(text.size()) > max_line_length) {
                     text = text.substr(0, max_line_length);
@@ -169,7 +174,8 @@ public:
             "Search file contents with a regex (RE2 syntax: no backreferences or "
             "lookarounds). Respects .gitignore and skips binary files. output_mode: "
             "files_with_matches (default), content (path:line:text with optional context) or "
-            "count (path:matches). Results are capped; the footer states what was withheld.";
+            "count (path:matches). Paths are relative to the project root, not to the `path` "
+            "argument. Results are capped; the footer states what was withheld.";
         spec_.definition.input_schema = {
             {"type", "object"},
             {"properties",
@@ -336,7 +342,13 @@ public:
         const auto resolved = tools::confine(ctx.project_root, search_root, /*must_exist=*/true);
         if (!resolved.ok) return Error(resolved.error);
 
-        GrepRun run{mode, context_before, context_after, head_limit, offset, ctx, {}, {}, {}, {}, false, {}};
+        // The search root may be a file (WalkTree reports it under its bare
+        // filename), so the prefix is the file's PARENT directory in that
+        // case -- ProjectRelativePrefix's file branch.
+        const bool root_is_dir = std::filesystem::is_directory(resolved.absolute_path);
+        GrepRun run{mode, context_before, context_after, head_limit, offset, ctx,
+                    tools::ProjectRelativePrefix(resolved, root_is_dir),
+                    {}, {}, {}, {}, false, {}};
 
         WalkOptions options;
         options.timeout = std::chrono::steady_clock::duration{

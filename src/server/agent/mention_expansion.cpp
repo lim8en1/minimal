@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -22,6 +23,12 @@ constexpr int kMentionMaxLines = 1000;
 constexpr int kMentionMaxLineLength = 2000;
 constexpr int kTreeMaxDepth = 3;  // levels BELOW the mentioned directory
 constexpr std::size_t kTreeMaxEntries = 500;
+// First line of every <file-tree> frame: the listing lines are
+// project-root-relative, not relative to the mentioned directory, and the
+// note is what makes the frame self-describing about that (a model joining
+// the path attribute onto already-prefixed lines would mis-call read).
+constexpr std::string_view kTreePathNote =
+    "[paths are relative to the project root -- pass them to read as-is]";
 // Expansion is bounded per mention AND per message: without the count cap,
 // a message of N mentions reads N ~2 MiB windows into the provider prompt
 // in one turn. Both ceilings leave the mention verbatim -- the model can
@@ -100,11 +107,17 @@ bool AppendTree(std::string& out, const std::filesystem::path& dir,
     return true;
 }
 
-std::string FrameTree(const std::string& path_attr, const std::filesystem::path& dir) {
+std::string FrameTree(const std::string& path_attr, const std::filesystem::path& dir,
+                      const std::string& rel_prefix) {
     std::string listing;
     std::size_t count = 0;
-    AppendTree(listing, dir, /*rel_prefix=*/"", /*depth=*/1, count);
+    AppendTree(listing, dir, rel_prefix, /*depth=*/1, count);
     std::string out = "<file-tree path=\"" + path_attr + "\">\n";
+    // Always-on, self-describing: the listing lines are project-root-relative
+    // -- the coordinate system read/write/edit resolve against -- so a line is
+    // a literal read argument. The attribute stays AS TYPED (what the user
+    // pointed at), so the two deliberately differ for a nested mention.
+    out += std::string(kTreePathNote) + "\n";
     out += listing;
     if (!listing.empty() && listing.back() != '\n') out += '\n';
     out += "</file-tree>";
@@ -150,7 +163,12 @@ llm::Message ExpandMentions(std::string_view text, const std::filesystem::path& 
 
         std::error_code ec;
         if (std::filesystem::is_directory(resolved.absolute_path, ec)) {
-            std::string framed = FrameTree(path_text, resolved.absolute_path);
+            // Listing lines carry the project-root-relative prefix so a line
+            // pasted into read() works as-is; the attribute keeps the typed
+            // form. Root mention -> "" (bare names already correct).
+            std::string framed = FrameTree(
+                path_text, resolved.absolute_path,
+                tools::ProjectRelativePrefix(resolved, /*is_dir=*/true));
             if (expanded_bytes + framed.size() > kMaxMentionBytesPerMessage) {
                 ++unresolved;
                 continue;

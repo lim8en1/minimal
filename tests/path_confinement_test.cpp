@@ -97,3 +97,62 @@ TEST_CASE("confine treats literal encoded-traversal text as an inert filename", 
     CHECK(result.ok);
     CHECK_FALSE(result.outside_project_root);
 }
+
+TEST_CASE("confine carries the project-relative form of the resolved path", "[path_confinement]") {
+    TempProject project;
+    std::filesystem::create_directories(project.root / "sub");
+
+    const auto in_root = confine(project.root, "sub/deep.txt", /*must_exist=*/false);
+    CHECK(in_root.ok);
+    CHECK(in_root.relative_to_root == std::filesystem::path("sub/deep.txt"));
+
+    // Root-level file: no leading "./".
+    const auto top = confine(project.root, "inside.txt", /*must_exist=*/false);
+    CHECK(top.ok);
+    CHECK(top.relative_to_root == std::filesystem::path("inside.txt"));
+
+    // Outside the root: the only form lexically_relative can produce is
+    // ".."-prefixed -- non-empty, and consumers gate on outside_project_root,
+    // not on emptiness.
+    const auto outside = confine(project.root, "../outside_sibling/secret.txt", /*must_exist=*/false);
+    CHECK(outside.ok);
+    CHECK(outside.outside_project_root);
+    REQUIRE_FALSE(outside.relative_to_root.empty());
+    CHECK(outside.relative_to_root.begin()->string() == "..");
+}
+
+TEST_CASE("ProjectRelativePrefix: dir, file parent, root, and outside-root shapes",
+          "[path_confinement]") {
+    TempProject project;
+    std::filesystem::create_directories(project.root / "sub");
+    std::ofstream(project.root / "sub" / "solo.txt").put('x');
+
+    const auto dir = confine(project.root, "sub", /*must_exist=*/true);
+    CHECK(dir.ok);
+    CHECK(ProjectRelativePrefix(dir, /*is_dir=*/true) == "sub/");
+
+    const auto file = confine(project.root, "sub/solo.txt", /*must_exist=*/true);
+    CHECK(file.ok);
+    // A file root is reported by the walker under its bare filename, so the
+    // prefix must be the PARENT's -- never "sub/solo.txt/".
+    CHECK(ProjectRelativePrefix(file, /*is_dir=*/false) == "sub/");
+
+    const auto root = confine(project.root, ".", /*must_exist=*/true);
+    CHECK(root.ok);
+    CHECK_FALSE(root.outside_project_root);
+    CHECK(ProjectRelativePrefix(root, /*is_dir=*/true) == "");
+    CHECK(ProjectRelativePrefix(root, /*is_dir=*/false) == "");
+
+    const auto file_at_top = confine(project.root, "top.txt", /*must_exist=*/false);
+    CHECK(file_at_top.ok);
+    CHECK(ProjectRelativePrefix(file_at_top, /*is_dir=*/false) == "");
+
+    const auto outside = confine(project.root, "../outside.txt", /*must_exist=*/false);
+    CHECK(outside.ok);
+    CHECK(outside.outside_project_root);
+    CHECK(ProjectRelativePrefix(outside, /*is_dir=*/true) == "");
+
+    const auto failed = confine(project.root, "no/such/thing", /*must_exist=*/true);
+    CHECK_FALSE(failed.ok);
+    CHECK(ProjectRelativePrefix(failed, /*is_dir=*/true) == "");
+}

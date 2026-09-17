@@ -38,7 +38,25 @@ ConfineResult confine(const std::filesystem::path& project_root,
 
     const std::filesystem::path relative = resolved.lexically_relative(canonical_root);
     result.outside_project_root = relative.empty() || relative.begin()->string() == "..";
+    result.relative_to_root = relative;
     return result;
+}
+
+std::string ProjectRelativePrefix(const ConfineResult& resolved, bool is_dir) {
+    if (!resolved.ok) return "";
+    const auto& rel = resolved.relative_to_root;
+    if (rel.empty() || rel.is_absolute()) return "";
+    if (rel == ".") return "";  // the root itself: bare names are already correct
+    // An outside-root result lexically relatives to a ".."-prefixed path;
+    // prefixing with it would point every emitted path out of the project.
+    if (rel.begin()->string() == "..") return "";
+    if (is_dir) return rel.generic_string() + "/";
+    // A file: the walker reports it under its bare filename, so the prefix is
+    // the PARENT's project-relative directory ("sub/" for sub/solo.txt), not
+    // the file's own path.
+    const auto parent = rel.parent_path();
+    if (parent.empty() || parent == ".") return "";
+    return parent.generic_string() + "/";
 }
 
 }  // namespace minimal::tools

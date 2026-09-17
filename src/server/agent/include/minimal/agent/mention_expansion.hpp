@@ -39,10 +39,15 @@ namespace minimal::agent {
 //     [truncated: showing lines 1-1000 of 4231 -- use the read tool for more]
 //     </file>
 //
-// A directory mention lists a bounded tree instead:
+// A directory mention lists a bounded tree instead -- the listing lines are
+// PROJECT-ROOT-RELATIVE (the coordinate system read/write/edit resolve
+// against, so a line is a literal read argument), while the attribute stays
+// as typed, and a first-line note makes that contract self-describing:
 //
 //     <file-tree path="src/">
-//     src-relative paths, one per line
+//     [paths are relative to the project root -- pass them to read as-is]
+//     src/main.cpp
+//     src/util/helper.cpp
 //     </file-tree>
 //
 // NOT PermissionChecker-gated: the human typed the reference, exactly as if
