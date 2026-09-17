@@ -305,6 +305,19 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
     // Caller holds handle.start_mu.
     RetireConnection(handle);
 
+    // A connection that opened successfully but fails a LATER check (missing
+    // capability, tool-discovery error, an unnamespaceable server name) must
+    // not have its ~McpConnection run inline here: teardown blocks (worker
+    // join, then a SIGTERM-grace-then-SIGKILL reap), same as RetireConnection
+    // above, and StartHandle runs on session/subagent worker threads (via
+    // EnsureAlive) the graveyard exists specifically to keep off that cost.
+    auto retire_failed_connection = [this](std::unique_ptr<McpConnection> failed) {
+        if (!failed) return;
+        std::lock_guard<std::mutex> lock(graveyard_mu_);
+        graveyard_.push_back(std::shared_ptr<McpConnection>(std::move(failed)));
+        graveyard_cv_.notify_one();
+    };
+
     const auto resolved = ResolveEndpoint(entry, error, logger_);
     if (!resolved) return false;
 
@@ -349,6 +362,7 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
             error = "signal channel '" + entry.name +
                     "' does not declare the experimental '" + mcp::kSignalCapability +
                     "' capability; not usable as a channel";
+            retire_failed_connection(std::move(connection));
             return false;
         }
     }
@@ -357,6 +371,7 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
     const auto listings = connection->ListTools(nullptr, tools_error);
     if (!listings) {
         error = "MCP server '" + entry.name + "' tool discovery failed: " + tools_error.message;
+        retire_failed_connection(std::move(connection));
         return false;
     }
 
@@ -367,6 +382,7 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
         error = "MCP server name '" + entry.name +
                 "' cannot be namespaced (contains '__', ends with '_', or contains whitespace "
                 "or control characters)";
+        retire_failed_connection(std::move(connection));
         return false;
     }
 
