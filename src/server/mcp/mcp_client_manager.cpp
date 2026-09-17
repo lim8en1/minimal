@@ -455,9 +455,18 @@ bool McpClientManager::EnsureAlive(const std::string& server_name, std::string& 
         }
     }
 
-    if (handle->alive && handle->connection) {
+    // Snapshot alive+connection together under handle->mu before pinging:
+    // reading them unguarded here raced HandleInvoker::CallTool's failure
+    // path, which flips handle->alive under handle->mu alone (UB under the
+    // memory model, not merely a stale read).
+    std::shared_ptr<McpConnection> connection;
+    {
+        std::lock_guard<std::mutex> lock(handle->mu);
+        if (handle->alive) connection = handle->connection;
+    }
+    if (connection) {
         McpConnection::Failure ping_error;
-        if (handle->connection->Ping(nullptr, ping_error)) {
+        if (connection->Ping(nullptr, ping_error)) {
             std::lock_guard<std::mutex> lock(handle->mu);
             handle->verified = std::chrono::steady_clock::now();
             return true;
