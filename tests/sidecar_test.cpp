@@ -351,6 +351,78 @@ TEST_CASE("TaskRegistry enforces the per-session running limit", "[sidecar][task
     CHECK(WaitFor([&] { return registry.CountRunning("s1") == 0; }));
 }
 
+TEST_CASE(
+    "TaskRegistry's refusal cleanup does not block other sessions' Start calls",
+    "[sidecar][task_registry][regression]") {
+    // The bug: Start() ran the refused task's cleanup() while still holding
+    // start_mutex_, a process-wide mutex shared by every session's Start()
+    // call -- contradicting the function's own documented invariant that the
+    // lock covers only the cap check + registration. A slow cleanup (in
+    // production, BoundedReapAfterKill can block up to ~5s) wedged every
+    // OTHER session's Start behind it. Reproduced here with an artificially
+    // slow cleanup instead of a real process kill/reap.
+    TaskRegistry registry;
+    CapturingHandles captor;
+
+    TaskRegistry::StartArgs capped;
+    capped.session_id = "full";
+    capped.label = "occupies the only slot";
+    capped.id_prefix = "bg";
+    capped.max_running = 1;
+    std::atomic<bool> release{false};
+    capped.body = [&](TaskRegistry::TaskState& task, const TaskRegistry::WatchHandles& h) {
+        while (!release.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(5ms);
+        }
+        TaskRegistry::Finish(task, h, BackgroundTaskEvent::State::kCompleted, "done", false);
+    };
+    capped.handles = captor.handles;
+    std::string error;
+    REQUIRE(registry.Start(capped, &error));
+
+    // The refused Start's cleanup blocks for a while, simulating
+    // BoundedReapAfterKill -- if it runs under start_mutex_, the concurrent
+    // Start below (a DIFFERENT session, so it never hits the cap) is stuck
+    // behind it too.
+    std::atomic<bool> cleanup_started{false};
+    TaskRegistry::StartArgs refused;
+    refused.session_id = "full";
+    refused.label = "over the cap";
+    refused.id_prefix = "bg";
+    refused.max_running = 1;
+    refused.body = [](TaskRegistry::TaskState&, const TaskRegistry::WatchHandles&) {};
+    refused.cleanup = [&] {
+        cleanup_started.store(true, std::memory_order_release);
+        std::this_thread::sleep_for(300ms);
+    };
+    refused.handles = captor.handles;
+
+    std::thread refused_thread([&] {
+        std::string refused_error;
+        registry.Start(std::move(refused), &refused_error);
+    });
+    REQUIRE(WaitFor([&] { return cleanup_started.load(std::memory_order_acquire); }));
+
+    // The refused cleanup is now sleeping. A different session's Start must
+    // return promptly -- it must not be waiting behind start_mutex_.
+    const auto start_time = std::chrono::steady_clock::now();
+    TaskRegistry::StartArgs other;
+    other.session_id = "other";
+    other.label = "unrelated session";
+    other.id_prefix = "bg";
+    other.body = [&](TaskRegistry::TaskState& task, const TaskRegistry::WatchHandles& h) {
+        TaskRegistry::Finish(task, h, BackgroundTaskEvent::State::kCompleted, "done", false);
+    };
+    other.handles = captor.handles;
+    CHECK(registry.Start(std::move(other), &error));
+    const auto elapsed = std::chrono::steady_clock::now() - start_time;
+    CHECK(elapsed < 100ms);
+
+    release.store(true);
+    refused_thread.join();
+    CHECK(WaitFor([&] { return registry.CountRunning("full") == 0; }));
+}
+
 TEST_CASE("TaskRegistry contains a throwing body: cleanup runs, task fails, event fires",
           "[sidecar][task_registry]") {
     TaskRegistry registry;

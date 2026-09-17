@@ -103,37 +103,45 @@ std::optional<std::string> TaskRegistry::Start(StartArgs args, std::string* erro
     // process-wide start gate across them would wedge every other session's
     // Start -- including its refusals -- behind one slow callback.
     std::shared_ptr<TaskState> task;
+    bool refused = false;
     {
         std::lock_guard<std::mutex> start_lock(start_mutex_);
         if (args.max_running > 0 && CountRunning(args.session_id) >= args.max_running) {
             *error = "background task limit reached (" + std::to_string(args.max_running) +
                      " running); wait for one to finish";
-            // The caller launches the real process BEFORE this cap check (the
-            // check must be authoritative, so the fork precedes it). On
-            // refusal `args` dies here with its body never run -- nobody
-            // would drain, kill, reap, or forget that child: a live orphan
-            // group, a zombie at exit, and a stale pgid in the atexit sweep
-            // set that pid reuse turns into a wrong-target kill. Run the
-            // containment cleanup now.
-            if (args.cleanup) {
-                try {
-                    args.cleanup();
-                } catch (...) {
-                }
-            }
-            return std::nullopt;
+            refused = true;
+        } else {
+            task = std::make_shared<TaskState>();
+            task->id = args.id_prefix + "-" +
+                       std::to_string(next_id_.fetch_add(1, std::memory_order_relaxed));
+            task->session_id = args.session_id;
+            task->label = args.label;
+            task->pid = args.pid;
+            task->started_at = std::chrono::steady_clock::now();
+            std::lock_guard<std::mutex> lock(mutex_);
+            tasks_[args.session_id].push_back(task);
+            PruneFinishedLocked(tasks_[args.session_id]);
         }
-
-        task = std::make_shared<TaskState>();
-        task->id = args.id_prefix + "-" +
-                   std::to_string(next_id_.fetch_add(1, std::memory_order_relaxed));
-        task->session_id = args.session_id;
-        task->label = args.label;
-        task->pid = args.pid;
-        task->started_at = std::chrono::steady_clock::now();
-        std::lock_guard<std::mutex> lock(mutex_);
-        tasks_[args.session_id].push_back(task);
-        PruneFinishedLocked(tasks_[args.session_id]);
+    }
+    if (refused) {
+        // The caller launches the real process BEFORE this cap check (the
+        // check must be authoritative, so the fork precedes it). On refusal
+        // `args` dies here with its body never run -- nobody would drain,
+        // kill, reap, or forget that child: a live orphan group, a zombie at
+        // exit, and a stale pgid in the atexit sweep set that pid reuse turns
+        // into a wrong-target kill. Run the containment cleanup now -- OUTSIDE
+        // start_mutex_, released above: cleanup can call
+        // BoundedReapAfterKill, which blocks for up to ~5s, and holding the
+        // shared start gate across that would wedge every OTHER session's
+        // Start (refusals included) behind this one, contradicting the
+        // lock's own documented "check + registration only" scope.
+        if (args.cleanup) {
+            try {
+                args.cleanup();
+            } catch (...) {
+            }
+        }
+        return std::nullopt;
     }
 
     // STARTED goes out before any output delta can (the watcher does not
