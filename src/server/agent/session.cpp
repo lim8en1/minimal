@@ -417,9 +417,10 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
                 auto_resumed = true;
             }
             // REAL-TIME STEERING: a plain text turn arriving while the AGENT is
-            // mid-turn (in_turn_, not running_turn_ -- a command running is not a
-            // turn to ride) does not queue behind the turn; it is staged onto the
-            // injection queue and appended at the next tool-result boundary, so
+            // mid-turn (worker_activity_ == kRunningTurn, not just "the worker is
+            // busy" -- a command running is not a turn to ride) does not queue
+            // behind the turn; it is staged onto the injection queue and
+            // appended at the next tool-result boundary, so
             // the very next provider request carries
             // [..., assistant(tool_use), user(tool_results), user(steering)].
             // Overrides opt OUT: a mid-turn model/preset switch is a re-resolution
@@ -437,8 +438,8 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
             // subagent completions, background results -- keep the turn-start
             // flush's before-the-seed position: they are not user submissions
             // and their chronology genuinely precedes the seed's turn.)
-            if (in_turn_ && loop_->OpenToSteering() && turn.model.empty() &&
-                turn.agent_preset.empty()) {
+            if (worker_activity_ == WorkerActivity::kRunningTurn && loop_->OpenToSteering() &&
+                turn.model.empty() && turn.agent_preset.empty()) {
                 // The id is assigned for steered submissions too: TurnQueuedEvent's
                 // per-session monotonicity holds, and the id is what the client
                 // correlates its optimistic echo against even though there is
@@ -990,8 +991,8 @@ void Session::SetPaused(bool paused) {
         // unpauses' mid-flight clears the flag at its own end. The kick is
         // the seedless wake turn: the model continues from the persisted tool
         // results, answering any steered message that flushed after them.
-        if (!paused && !running_turn_ && continuation_pending_ && work_.empty() &&
-            !subagent_finished_.load(std::memory_order_acquire)) {
+        if (!paused && worker_activity_ == WorkerActivity::kIdle && continuation_pending_ &&
+            work_.empty() && !subagent_finished_.load(std::memory_order_acquire)) {
             if (work_.size() < kMaxWorkItems) {
                 work_.push_back(QueuedResume{});
                 continuation_pending_ = false;
@@ -1307,7 +1308,11 @@ void Session::WorkerMain() {
                 wake_turn = true;
                 continuation_pending_ = false;
             }
-            running_turn_ = true;
+            // kRunningOther for now; RunOneTurn itself upgrades to kRunningTurn
+            // for turn-shaped items (the string/QueuedTurn/QueuedResume branches
+            // below) once it actually starts. Commands and rewinds stay
+            // kRunningOther for their whole span.
+            worker_activity_ = WorkerActivity::kRunningOther;
         }
 
         // The turn-boundary guarantee, and it is structural rather than checked:
@@ -1357,7 +1362,7 @@ void Session::WorkerMain() {
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            running_turn_ = false;
+            worker_activity_ = WorkerActivity::kIdle;
         }
         turn_cv_.notify_all();
     }
@@ -1368,7 +1373,7 @@ bool Session::ShouldWakeForInjections() const {
     // mutex_ -> the queue's own mutex; producers (subagent completion hooks,
     // background watchers) hold only the queue's mutex, so no cycle exists.
     if (!params_.wake_on_injection) return false;
-    if (running_turn_ || !work_.empty()) return false;
+    if (worker_activity_ != WorkerActivity::kIdle || !work_.empty()) return false;
     // A finished subagent's life is over regardless of what is staged.
     if (subagent_finished_.load(std::memory_order_acquire)) return false;
     return !channels_->injections.empty();
@@ -1383,23 +1388,25 @@ bool Session::HistoryEndsWithUnansweredUserText() const {
 void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* overrides) {
     const auto started = std::chrono::steady_clock::now();
 
-    // THE AGENT IS NOW MID-TURN. in_turn_ is what SubmitTurn's real-time
-    // steering routing keys on, and it must be true for exactly the span of
-    // the turn -- not of a command (running_turn_ serves that coarser role).
-    // RAII, not a post-call clear: an exception out of RunTurn's catchable
-    // surface is contained below, but the worker's own catch-all is the
-    // backstop, and a stuck flag would silently divert every future
-    // submission onto the steering path.
+    // THE AGENT IS NOW MID-TURN. worker_activity_ == kRunningTurn is what
+    // SubmitTurn's real-time steering routing keys on, and it must hold for
+    // exactly the span of the turn -- not of a command (kRunningOther serves
+    // that coarser role). RAII, not a post-call clear: an exception out of
+    // RunTurn's catchable surface is contained below, but the worker's own
+    // catch-all is the backstop, and a stuck kRunningTurn would silently
+    // divert every future submission onto the steering path. Drops back to
+    // kRunningOther, not kIdle -- WorkerMain still owns the transition to
+    // kIdle once this whole work item (not just the in-turn span) is done.
     struct InTurnGuard {
         Session* session;
         ~InTurnGuard() {
             std::lock_guard<std::mutex> lock(session->mutex_);
-            session->in_turn_ = false;
+            session->worker_activity_ = WorkerActivity::kRunningOther;
         }
     } in_turn_guard{this};
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        in_turn_ = true;
+        worker_activity_ = WorkerActivity::kRunningTurn;
     }
 
     // Computed from the RAW text, before @-mention expansion below may move
@@ -1769,13 +1776,14 @@ void Session::EmitDefaultNameIfComputed(const std::string& candidate) {
 
 bool Session::idle() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return work_.empty() && !running_turn_;
+    return work_.empty() && worker_activity_ == WorkerActivity::kIdle;
 }
 
 bool Session::WaitForIdleForTesting(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
     return turn_cv_.wait_for(lock, timeout, [this] {
-        return (work_.empty() && !running_turn_) || terminated_.load(std::memory_order_acquire);
+        return (work_.empty() && worker_activity_ == WorkerActivity::kIdle) ||
+               terminated_.load(std::memory_order_acquire);
     });
 }
 

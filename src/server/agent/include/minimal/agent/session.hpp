@@ -867,12 +867,6 @@ private:
     // unpause has something to continue INTO. mutex_-guarded (worker and the
     // SetPaused reader both touch it).
     bool continuation_pending_ = false;
-    // True only while the worker is inside RunOneTurn (the AGENT is mid-turn)
-    // -- what SubmitTurn's real-time steering routing keys on. Distinct from
-    // running_turn_, which is set for every work item including commands: a
-    // message typed while a /model command executes is a queued turn, not a
-    // steering injection (there is no turn for it to ride). mutex_-guarded.
-    bool in_turn_ = false;
     // Worker-only, recorded where RunOneTurn's `result` is final: did the
     // last turn end with a NATURAL model stop? What gates the steering
     // sweep -- a failed turn's seed, a turn cancelled before its first
@@ -890,7 +884,22 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable turn_cv_;
     std::deque<WorkItem> work_;
-    bool running_turn_ = false;
+    // Replaces what used to be two independent mutex_-guarded bools:
+    // running_turn_ (set for every work item, including commands/rewinds)
+    // and in_turn_ (true only while the worker is literally inside
+    // RunOneTurn -- what SubmitTurn's real-time steering routing keys on,
+    // narrower than "the worker is busy at all"). in_turn_ ⟹ running_turn_
+    // held only by convention before; kRunningTurn vs. kRunningOther makes
+    // that a property of the value set instead. mutex_-guarded, like both
+    // fields it replaces.
+    enum class WorkerActivity : std::uint8_t {
+        kIdle,
+        kRunningTurn,   // inside RunOneTurn: a real turn is executing
+        kRunningOther,  // worker busy but not literally inside RunOneTurn
+                        // (a command/rewind, or RunOneTurn's own entry/exit
+                        // windows before/after its in-turn span)
+    };
+    WorkerActivity worker_activity_ = WorkerActivity::kIdle;
     // Per-session monotonic id handed to each queued user turn (QueuedTurn),
     // announced by TurnQueuedEvent at submit time and addressed by
     // CancelQueuedTurn / TurnCanceledEvent. Guarded by mutex_ with the queue.
