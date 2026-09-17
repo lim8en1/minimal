@@ -577,10 +577,6 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 // `partial` mirrors today's two name-only emission sites
                 // (SetName, EmitDefaultNameIfComputed): the other fields are left
                 // at their proto default rather than sent as zero values that
-                // could be mistaken for an authoritative update.
-                // `partial` mirrors today's two name-only emission sites
-                // (SetName, EmitDefaultNameIfComputed): the other fields are left
-                // at their proto default rather than sent as zero values that
                 // could be mistaken for an authoritative update. PAUSED is the
                 // exception -- both partial sites now fill it in (a bool has no
                 // "absent" encoding), so it is set unconditionally and every
