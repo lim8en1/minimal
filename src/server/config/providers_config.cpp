@@ -301,6 +301,14 @@ std::vector<ModelVariant> InheritVariants(const nlohmann::json& provider,
     return {};
 }
 
+// Same precedence InheritVariants applies, but answering only "was a
+// `variants` key present at all" -- including one that parses to an empty
+// list, which InheritVariants' return value alone cannot distinguish from
+// "nothing declared".
+bool HasDeclaredVariants(const nlohmann::json& provider, const nlohmann::json& model) {
+    return model.contains("variants") || provider.contains("variants");
+}
+
 
 //
 //   options.baseURL -> url        (only when url absent)
@@ -662,12 +670,17 @@ std::vector<std::string> ProvidersConfig::VariantsOf(const ModelRef& ref) const 
     // empty answer falls through to the discovery-cache lookup below.
     std::vector<std::string> out;
     const std::string prefix = key + "@";
-    if (catalog_.models_.count(key) != 0) {
+    if (const auto base_it = catalog_.models_.find(key); base_it != catalog_.models_.end()) {
         for (const auto& [candidate, unused] : catalog_.models_) {
             (void)unused;
             if (candidate.rfind(prefix, 0) == 0) out.push_back(candidate.substr(prefix.size()));
         }
         if (!out.empty()) return out;
+        // An explicit `variants: []` (or `{}`) is an operator's deliberate
+        // opt-out, not "nothing to say" -- honor it here rather than falling
+        // through to the discovery cache's autodetected ladder below, which
+        // would silently re-enable the variants the entry tried to suppress.
+        if (base_it->second->variants_declared) return out;
     }
     // Discovered base (cold cache contributes nothing -- a listing, never a
     // fetch trigger, the same rule ModelRefs applies), or a static base whose
@@ -865,6 +878,11 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
     // the base, so this is a lookup, never a re-derivation.
     std::optional<ModelVariant> declared;
     if (!entry.discover) return nullptr;  // static base, undeclared variant
+    // A static twin's explicit `variants: []` opt-out (see VariantsOf's
+    // identical check) applies here too: reaching this line already means no
+    // static sibling matched `variant_name`, so an opted-out base must answer
+    // "undeclared" rather than falling through to the autodetected ladder.
+    if (base->variants_declared) return nullptr;
     if (const auto cache_it = cache_.discovery_.find(entry.name);
         cache_it != cache_.discovery_.end() && cache_it->second.ok) {
         const auto variants_it = cache_it->second.variants_by_model.find(base_id);
@@ -1290,6 +1308,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
             resolved.context_window_tokens =
                 InheritNumber<std::int64_t>(provider, model, "context_window_tokens",
                                             model_where);
+            resolved.variants_declared = HasDeclaredVariants(provider, model);
             // The key is copied out FIRST. Passing `resolved.ref` alongside
             // `std::move(resolved)` in one call is unsequenced -- the move may
             // run first, and the key is then read from a moved-from string.

@@ -1457,6 +1457,34 @@ TEST_CASE("discovery applies the entry recipe to models that advertise an effort
     CHECK(config.VariantsOf(ModelRef{"local", "no-reasoning"}).empty());
 }
 
+TEST_CASE(
+    "an explicit empty variants list opts a model out, even when discovery advertises a ladder",
+    "[providers][variants][discover][regression]") {
+    // The bug: an explicit `variants: []` (an operator's deliberate opt-out)
+    // and "no variants key at all" (defer to discovery) both parse to an
+    // empty vector via ParseVariants, so VariantsOf/ResolveVariant could not
+    // tell them apart -- the opt-out was silently overridden by the
+    // autodetected ladder the very next lookup fell through to.
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {
+        "local": {"backend": "openai", "url": "http://localhost:8000/v1", "discover": true,
+                  "models": {"m": {"variants": []}}}
+      }
+    })"));
+    CountingHook hook;
+    hook.models = {{"m", 131072,
+                    nlohmann::json::parse(R"({"reasoning": {"supported_efforts": ["high", "low"]}})"),
+                    std::nullopt}};
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    REQUIRE(config.Resolve(ModelRef{"local", "m"}) != nullptr);  // warms the discovery cache
+
+    CHECK(config.VariantsOf(ModelRef{"local", "m"}).empty());
+    CHECK(config.Resolve(ModelRef{"local", "m@high"}) == nullptr);
+}
+
 TEST_CASE("an entry-level variants recipe replaces the discovery default",
           "[providers][variants][discover]") {
     CountingHook hook;

@@ -197,6 +197,14 @@ struct ResolvedModel {
     nlohmann::json parameters = nlohmann::json::object();
     std::optional<int> max_tokens;
     std::optional<std::int64_t> context_window_tokens;
+    // True when the model's own entry or its provider's declared a `variants`
+    // key at all -- including an explicit empty array/object, which means
+    // "no effort variants for this model" as an operator's deliberate choice.
+    // VariantsOf consults this to distinguish that opt-out from "nothing
+    // declared, defer to the discovery-cache's autodetected ladder": both
+    // shapes produce an empty ParseVariants() result, so the vector alone
+    // cannot tell them apart.
+    bool variants_declared = false;
 };
 
 // The static entry's resolved model with its discovery twin's window / output
