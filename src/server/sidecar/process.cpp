@@ -229,17 +229,6 @@ Launched Launch(const LaunchSpec& spec) {
         setsid();  // Own session + process group (pgid == pid): killpg reaches
                    // the whole tree, since group membership is inherited by fork.
 
-        // RLIMIT_CPU is a backstop for CPU-bound runaways; the wall-clock
-        // deadline normally fires first. The grace keeps the two from racing on
-        // a command that legitimately spends its budget.
-        rlimit cpu_limit{};
-        cpu_limit.rlim_cur = cpu_limit.rlim_max = cpu;
-        setrlimit(RLIMIT_CPU, &cpu_limit);
-
-        rlimit fsize_limit{};
-        fsize_limit.rlim_cur = fsize_limit.rlim_max = fsize;
-        setrlimit(RLIMIT_FSIZE, &fsize_limit);
-
         // Length comes from the literal's type: strlen is avoided along with
         // strerror, since this is a post-fork child of a multithreaded process
         // and only async-signal-safe calls are sound here.
@@ -248,6 +237,23 @@ Launched Launch(const LaunchSpec& spec) {
             (void)!write(STDERR_FILENO, "\n", 1);
             return 127;
         };
+
+        // RLIMIT_CPU is a backstop for CPU-bound runaways; the wall-clock
+        // deadline normally fires first. The grace keeps the two from racing on
+        // a command that legitimately spends its budget. Checked, like
+        // hook_shell.cpp's identical limits: an inherited hard rlimit already
+        // below the requested value makes setrlimit fail (EPERM) rather than
+        // clamp, and silently ignoring that would run the child with no
+        // CPU/file-size backstop at all -- defeating the point of setting one.
+        rlimit cpu_limit{};
+        cpu_limit.rlim_cur = cpu_limit.rlim_max = cpu;
+        if (setrlimit(RLIMIT_CPU, &cpu_limit) != 0) _exit(child_die("setrlimit(RLIMIT_CPU) failed"));
+
+        rlimit fsize_limit{};
+        fsize_limit.rlim_cur = fsize_limit.rlim_max = fsize;
+        if (setrlimit(RLIMIT_FSIZE, &fsize_limit) != 0) {
+            _exit(child_die("setrlimit(RLIMIT_FSIZE) failed"));
+        }
 
         for (std::size_t i = 0; i < spec.pipes.size(); ++i) {
             // fds[i].child is exactly the end the plan named; dup2 clears
