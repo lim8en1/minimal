@@ -1283,15 +1283,18 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
 
         if (!has_models) continue;  // discover-only entry: nothing static to resolve
 
+        // provider_name doesn't vary per model, so check it once here rather
+        // than inside the loop below.
+        if (provider_name.find('/') != std::string::npos) {
+            // Otherwise the reference cannot be parsed back apart.
+            throw std::runtime_error("providers.json: provider '" + provider_name +
+                                     "' contains a '/', which makes the reference ambiguous");
+        }
+
         for (const auto& [model_name, model] : provider_normalized.at("models").items()) {
             const std::string model_where = "model '" + provider_name + "/" + model_name + "'";
             if (!model.is_object()) {
                 throw std::runtime_error("providers.json: " + model_where + " must be an object");
-            }
-            if (provider_name.find('/') != std::string::npos) {
-                // Otherwise the reference cannot be parsed back apart.
-                throw std::runtime_error("providers.json: provider '" + provider_name +
-                                         "' contains a '/', which makes the reference ambiguous");
             }
             // A model KEY may contain '/', split at the FIRST one -- the same
             // rule SplitModelRef applies to interactive refs and the
