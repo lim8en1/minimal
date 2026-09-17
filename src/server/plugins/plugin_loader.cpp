@@ -413,18 +413,21 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     }
 
     if (model_catalogs_ != nullptr) {
-        // Attribution-FREE, unlike tools and commands: ModelCatalogRegistry
-        // has no attribution window at all (its Register bool return is the
-        // whole seam). The kinds the plugin actually added are diffed
-        // before/after and recorded on the PluginRecord, which is what feeds
-        // the sanity check's "registered by both ...; the first wins" report
-        // for a duplicate kind.
+        // Attributed the same way as tools/commands/provider factories now
+        // (SetAttribution/ClearAttribution): the kinds-before/after diff this
+        // replaced could not see a LOSING registration at all -- a losing
+        // plugin's Register() silently no-ops, so its own kinds_after equals
+        // its kinds_before, and the diff below never even ran for the kind it
+        // tried to claim. attributions_'s Register-time recording (see
+        // ProviderFactoryRegistry's identical seam) is what lets the sanity
+        // check name BOTH claimants instead of silently reporting nothing.
         const auto kinds_before = model_catalogs_->kinds();
         if (auto register_catalogs = Lookup<RegisterModelCatalogsFn>(
                 handle, "minimal_plugin_register_model_catalogs")) {
-            if (!GuardedRegistration(record, "minimal_plugin_register_model_catalogs", [] {},
-                                      [&] { register_catalogs(*model_catalogs_, context); }, [] {},
-                                      rollback)) {
+            if (!GuardedRegistration(record, "minimal_plugin_register_model_catalogs",
+                                      [&] { model_catalogs_->SetAttribution(record.name); },
+                                      [&] { register_catalogs(*model_catalogs_, context); },
+                                      [&] { model_catalogs_->ClearAttribution(); }, rollback)) {
                 return record;
             }
         }

@@ -53,6 +53,34 @@ TEST_CASE("ModelCatalogRegistry keys on the provider kind string", "[model_catal
     CHECK_FALSE(registry.Register("null", nullptr));
 }
 
+TEST_CASE(
+    "ModelCatalogRegistry attributes a collision to both plugins, like ProviderFactoryRegistry",
+    "[model_catalog][regression]") {
+    // The bug: ModelCatalogRegistry's Register bool return was the whole
+    // seam -- no SetAttribution/collisions(), unlike its sibling
+    // ProviderFactoryRegistry. The loader could only diagnose a duplicate
+    // kind via a before/after kinds() diff per plugin, which cannot see a
+    // LOSING registration at all: a losing plugin's Register() silently
+    // no-ops, so its own kinds_after equals its kinds_before, and the diff
+    // never even runs for the kind it tried to claim. The operator got
+    // silent first-wins with no diagnostic naming the second plugin.
+    ModelCatalogRegistry registry;
+    auto catalog = std::make_shared<FakeCatalog>();
+
+    registry.SetAttribution("plugin-a");
+    CHECK(registry.Register("openai", catalog));
+    registry.ClearAttribution();
+
+    registry.SetAttribution("plugin-b");
+    CHECK_FALSE(registry.Register("openai", catalog));  // collision, refused
+    registry.ClearAttribution();
+
+    REQUIRE(registry.collisions().size() == 1);
+    CHECK(registry.collisions()[0].kind == "openai");
+    CHECK(registry.collisions()[0].first_plugin == "plugin-a");
+    CHECK(registry.collisions()[0].second_plugin == "plugin-b");
+}
+
 // --- ParseModelList: OpenRouter shape ----------------------------------------
 
 TEST_CASE("ParseModelList reads OpenRouter's context_length and keeps metadata",

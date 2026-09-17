@@ -727,6 +727,21 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
                       " -- disable one of them; provider kinds cannot be aliased"));
     }
 
+    // Model catalogs share the provider kind STRING but are a separate
+    // registration namespace (ModelCatalogRegistry), with the same
+    // load-order-dependent silent-drop failure mode ProviderFactoryRegistry
+    // had before its own attribution landed -- now fixed the same way.
+    if (inputs_.model_catalogs != nullptr) {
+        for (const auto& collision : inputs_.model_catalogs->collisions()) {
+            results.push_back(
+                Fatal("name_collisions",
+                      "model catalog for kind '" + collision.kind + "' is registered by both " +
+                          PluginLabel(collision.first_plugin) + " and " +
+                          PluginLabel(collision.second_plugin) +
+                          " -- disable one of them; model catalog kinds cannot be aliased"));
+        }
+    }
+
     // Per-preset tool_config namespaces: the same fatal rule, one level up.
     // Two plugins claiming one namespace would make which slice a tool read
     // depend on plugin load order -- the exact outcome collision detection

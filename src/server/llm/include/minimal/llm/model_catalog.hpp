@@ -90,6 +90,23 @@ public:
     // both claimants rather than throw from inside a plugin's callback.
     bool Register(std::string kind, std::shared_ptr<ModelCatalog> catalog);
 
+    // --- Attribution, for collision reporting -------------------------------
+    //
+    // The same scoped window ProviderFactoryRegistry (and ToolRegistry/
+    // CommandRegistry) use, for the same reason: Register() has no idea who
+    // is calling, and a collision has to be able to name BOTH plugins. Not
+    // thread-safe and does not need to be -- plugin loading is
+    // single-threaded and finishes before any session exists.
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+
+    struct Collision {
+        std::string kind;
+        std::string first_plugin;   // the registration that holds the slot
+        std::string second_plugin;  // the one that was dropped
+    };
+    const std::vector<Collision>& collisions() const { return collisions_; }
+
     // nullptr when no plugin registered a catalog for this kind. A providers.json
     // entry with "discover": true whose backend has no catalog is a startup
     // sanity-check warning, not a crash: the entry may still have static models.
@@ -102,6 +119,9 @@ public:
 
 private:
     std::map<std::string, std::shared_ptr<ModelCatalog>, std::less<>> catalogs_;
+    std::map<std::string, std::string, std::less<>> registrant_;  // kind -> plugin that holds it
+    std::string attribution_;
+    std::vector<Collision> collisions_;
 };
 
 }  // namespace minimal::llm

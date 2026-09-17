@@ -6,7 +6,21 @@ namespace minimal::llm {
 
 bool ModelCatalogRegistry::Register(std::string kind, std::shared_ptr<ModelCatalog> catalog) {
     if (!catalog) return false;
-    return catalogs_.emplace(std::move(kind), std::move(catalog)).second;
+    const std::string key = kind;  // read before the move below
+    const bool inserted = catalogs_.emplace(std::move(kind), std::move(catalog)).second;
+    if (inserted) {
+        registrant_[key] = attribution_;
+        return true;
+    }
+    // Recorded, not just refused. The loser is dropped either way -- the
+    // collision is fatal upstream, so which object holds the slot is moot --
+    // but a silent drop made the winner depend on load order with nothing to
+    // point an operator at (see ProviderFactoryRegistry::Register, the same
+    // pattern for the sibling registry).
+    const auto first = registrant_.find(key);
+    collisions_.push_back(Collision{key, first != registrant_.end() ? first->second : std::string{},
+                                    attribution_});
+    return false;
 }
 
 ModelCatalog* ModelCatalogRegistry::Find(std::string_view kind) const {
