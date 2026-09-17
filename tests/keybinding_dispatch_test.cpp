@@ -439,7 +439,7 @@ TEST_CASE("ResolvedKeymap: every core default binds to something", "[keybinding_
         "agent.picker": "alt+g", "panel.toggle": "ctrl+t",
         "panel.focus.next": "ctrl+g", "panel.focus.prev": "ctrl+e",
         "tab.close": "ctrl+w", "chat.load_older": "pageup",
-        "chat.scroll_up": "ctrl+up", "chat.scroll_down": "ctrl+down",
+        "chat.scroll_up": "ctrl+alt+k", "chat.scroll_down": "ctrl+alt+j",
         "chat.scroll_bottom": "pagedown",
         "turn.cancel": "escape", "app.quit": "ctrl+q"
     })")).Unmapped().empty());

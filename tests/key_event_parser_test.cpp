@@ -141,6 +141,39 @@ TEST_CASE("ParseKeySpec: named keys", "[key_event_parser]") {
     CHECK(Has(ParseKeySpec("space"), Event::Character(" ")));
 }
 
+TEST_CASE("ParseKeySpec: alt+enter matches every newline-insert encoding",
+         "[key_event_parser]") {
+    // The default "prompt.newline" binding (keybindings.cpp): every wire
+    // encoding prompt_editor.cpp's IsNewlineEvent used to hardcode, PLUS
+    // (deliberately) actual Shift+Enter's CSI-u pair, matching that
+    // function's pre-existing leniency exactly.
+    CHECK(Has(ParseKeySpec("alt+enter"), Event::Character("\x1b\r")));
+    CHECK(Has(ParseKeySpec("alt+enter"), Event::Character("\x1b\n")));
+    CHECK(Has(ParseKeySpec("alt+enter"), Event::Special("\x1b[13;3u")));
+    CHECK(Has(ParseKeySpec("alt+enter"), Event::Special("\x1b[27;3;13~")));
+    CHECK(Has(ParseKeySpec("alt+enter"), Event::Special("\x1b[13;2u")));
+    CHECK(Has(ParseKeySpec("alt+enter"), Event::Special("\x1b[27;2;13~")));
+    CHECK(Has(ParseKeySpec("alt+return"), Event::Character("\x1b\r")));
+}
+
+TEST_CASE("ParseKeySpec: shift+enter alone matches only its own CSI-u pair",
+         "[key_event_parser]") {
+    // No ESC CR/LF fallback -- there is no legacy byte encoding for bare
+    // Shift+Enter, only the two protocol-reported forms.
+    const auto candidates = ParseKeySpec("shift+enter");
+    CHECK(Has(candidates, Event::Special("\x1b[13;2u")));
+    CHECK(Has(candidates, Event::Special("\x1b[27;2;13~")));
+    CHECK(candidates.size() == 2);
+    CHECK_FALSE(Has(candidates, Event::Character("\x1b\r")));
+}
+
+TEST_CASE("ParseKeySpec: ctrl+enter and alt+shift+enter have no known encoding",
+         "[key_event_parser]") {
+    CHECK(ParseKeySpec("ctrl+enter").empty());
+    CHECK(ParseKeySpec("ctrl+alt+enter").empty());
+    CHECK(ParseKeySpec("alt+shift+enter").empty());
+}
+
 TEST_CASE("ParseKeySpec: arrow keys generalize alt+ to all four directions",
          "[key_event_parser]") {
     // Not just left/right (the old table's special case) -- up/down too.

@@ -91,6 +91,37 @@ TEST_CASE("PromptEditor: CSI-u alt/shift enter encodings insert a newline",
     }
 }
 
+TEST_CASE("PromptEditor: is_newline_event overrides the default Alt+Enter list",
+          "[prompt_editor]") {
+    // The "prompt.newline" rebind path (app.cpp wires a keymap-backed lambda
+    // here): a null callback (every test above) falls back to the hardcoded
+    // default; a non-null one replaces it entirely, so a spec that ISN'T in
+    // the default list can insert a newline (via InsertNewlineAtCursor,
+    // splicing at the cursor), and Alt+Enter -- no longer recognized once
+    // overridden -- falls through to the Input's plain-character handling
+    // instead (the raw ESC/CR bytes get typed in verbatim, not a clean
+    // newline split).
+    const auto only_ctrl_n = [](const ftxui::Event& event) {
+        return event == ftxui::Event::Special(std::string(1, '\x0E'));  // ctrl+n
+    };
+
+    PromptEditorState alt_enter_state;
+    alt_enter_state.content = "ab";
+    alt_enter_state.cursor_position = 1;
+    auto alt_enter_editor = MakePromptEditor(TestTheme(), alt_enter_state, {}, {}, {}, nullptr,
+                                             nullptr, nullptr, nullptr, nullptr, only_ctrl_n);
+    CHECK(alt_enter_editor->OnEvent(ftxui::Event::Character("\x1b\r")));  // consumed as plain text
+    CHECK(alt_enter_state.content != "a\nb");   // NOT the newline-insert splice anymore
+
+    PromptEditorState ctrl_n_state;
+    ctrl_n_state.content = "ab";
+    ctrl_n_state.cursor_position = 1;
+    auto ctrl_n_editor = MakePromptEditor(TestTheme(), ctrl_n_state, {}, {}, {}, nullptr, nullptr,
+                                          nullptr, nullptr, nullptr, only_ctrl_n);
+    CHECK(ctrl_n_editor->OnEvent(ftxui::Event::Special(std::string(1, '\x0E'))));
+    CHECK(ctrl_n_state.content == "a\nb");
+}
+
 TEST_CASE("PromptEditor: plain Enter submits and clears", "[prompt_editor]") {
     PromptEditorState state;
     state.content = "hello";
