@@ -78,7 +78,7 @@ bool SpawnDetached(const std::filesystem::path& binary,
                 ::dup2(null_fd, STDIN_FILENO);
                 if (null_fd != STDIN_FILENO) ::close(null_fd);
             }
-            ::chdir("/");
+            [[maybe_unused]] const int chdir_rc = ::chdir("/");
             ::execl(binary.c_str(), binary.filename().c_str(), "--listen",
                     socket_path.c_str(), static_cast<char*>(nullptr));
             // execl failed. stderr IS the log (redirected above), so one
@@ -101,7 +101,7 @@ bool SpawnDetached(const std::filesystem::path& binary,
             while (dlen > 0 && len < sizeof(buf) - 2) buf[len++] = digits[--dlen];
             buf[len++] = ')';
             buf[len++] = '\n';
-            (void)::write(STDERR_FILENO, buf, len);
+            [[maybe_unused]] const ssize_t write_rc = ::write(STDERR_FILENO, buf, len);
             _exit(127);
         }
         _exit(0);

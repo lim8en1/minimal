@@ -676,8 +676,8 @@ void Interpreter::MarkDead(std::string reason, bool session_dead) {
         std::lock_guard<std::mutex> lock(mu_);
         for (auto& [id, p] : pending_) {
             // Filled UNDER mu_: sync waiters read these fields under it.
-            p->outcome = RequestOutcome{.ok = false,
-                                        .error = std::string(reason)};
+            p->outcome = RequestOutcome{};
+            p->outcome.error = reason;
             p->done = true;
             to_fail.push_back(p);
         }

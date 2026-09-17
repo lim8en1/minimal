@@ -83,7 +83,7 @@ std::vector<llm::DiscoveredModel> ParseModelList(const std::string& body) {
 
     std::vector<llm::DiscoveredModel> out;
     out.reserve(doc.at("data").size());
-    for (const auto& entry : doc.at("data")) {
+    for (auto& entry : doc.at("data")) {
         if (!entry.is_object()) continue;
         if (!entry.contains("id") || !entry.at("id").is_string() ||
             entry.at("id").get<std::string>().empty()) {
