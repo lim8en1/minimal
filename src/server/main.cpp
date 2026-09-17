@@ -129,9 +129,15 @@ int main(int argc, char** argv) {
     for (int fd : shutdown_pipe_fds) {
         ::fcntl(fd, F_SETFD, ::fcntl(fd, F_GETFD) | FD_CLOEXEC);
     }
+    // Assigned BEFORE the handlers are installed: OnShutdownSignal reads
+    // shutdown_signal_fd, and a signal delivered between installing the
+    // handler and this assignment would see it still at its initial -1 --
+    // `if (fd >= 0)` then silently drops the shutdown byte, so the
+    // operator's first Ctrl+C/kill appears to do nothing until a second one
+    // arrives after the assignment.
+    shutdown_signal_fd = shutdown_pipe_fds[1];
     std::signal(SIGINT, OnShutdownSignal);
     std::signal(SIGTERM, OnShutdownSignal);
-    shutdown_signal_fd = shutdown_pipe_fds[1];
 
     std::filesystem::path socket_path = minimal::rpc::DefaultSocketPath();
     for (int i = 1; i < argc; ++i) {
