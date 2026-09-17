@@ -186,3 +186,20 @@ TEST_CASE("PermissionModeSegmentValue shows the queued mode with the pending mar
     // A sessionless tab applies nothing -- no pending state to show.
     CHECK(PermissionModeSegmentValue("", "bypass", false) == "");
 }
+
+TEST_CASE("WithHiddenRowsSuffix composes the live-view cut notice, never overriding",
+          "[status_bar][live_segments]") {
+    using minimal::client::WithHiddenRowsSuffix;
+
+    // Riding a state word: appended with the same " · " literal the bar
+    // renders between segments.
+    CHECK(WithHiddenRowsSuffix("working") == "working · earlier rows hidden");
+    CHECK(WithHiddenRowsSuffix("cancelling…") == "cancelling… · earlier rows hidden");
+    // An empty activity stands alone with the notice (unknown-segment rule
+    // would otherwise drop it, and a latched cut is never silent).
+    CHECK(WithHiddenRowsSuffix("") == "earlier rows hidden");
+    // Idempotent: a value already suffixed (a provider segment returned the
+    // composed form) is not double-appended.
+    CHECK(WithHiddenRowsSuffix("working · earlier rows hidden") ==
+          "working · earlier rows hidden");
+}

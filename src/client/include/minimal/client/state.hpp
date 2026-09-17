@@ -236,9 +236,10 @@ public:
     // what a human reads mid-turn; the transcript is authoritative -- the
     // turn-end refresh re-fetches the full persisted text.
     static constexpr std::size_t kStreamingTextCapBytes = 2 * 1024 * 1024;
-    // Live-segment count cap: the NEWEST segments are kept; on first
-    // overflow a single "[...truncated]" marker segment is left at the
-    // oldest position so the cut is visible, never silent.
+    // Live-segment count cap: the NEWEST segments are kept; on overflow the
+    // live_view_truncated_ latch stands and the status bar's {activity}
+    // segment carries an "earlier rows hidden" suffix while it does -- the
+    // cut is visible in chrome, never as a synthetic row in the stream.
     static constexpr std::size_t kMaxLiveSegments = 100;
     // Consecutive scrollback-refresh failures after which the tab surfaces a
     // visible error notice (see NoteRefreshFailed). Below this the existing
@@ -363,6 +364,13 @@ public:
         // status bar renders the focused session as "cancelling…" while this
         // stands, so the press is never silent.
         bool cancel_requested = false;
+
+        // The live view dropped older segments of the current turn (the
+        // kMaxLiveSegments count cap latched live_view_truncated_): the
+        // status bar's {activity} suffix reports it until the turn-end
+        // refresh retires the covered segments. Chrome-only signal -- no
+        // synthetic segment exists in the stream.
+        bool live_view_truncated = false;
 
         // A turn is (or may be) running on this session, from the CLIENT's
         // point of view: armed by OnChatSubmitted and by the first delta of a
@@ -765,19 +773,16 @@ private:
 
     // Shared by every live_segments_ append path (text/thinking deltas,
     // OnToolStarted, OnBackgroundTask): enforces kMaxLiveSegments, keeping the
-    // NEWEST segments. Once the one-shot "[...truncated]" marker is inserted
-    // at the oldest position (live_segments_truncated_ latches true), it is a
-    // PERMANENT sentinel at index 0 -- later overflows trim only the real
-    // segments after it, never re-erasing or re-inserting it. The trim used
-    // to re-run the SAME begin()-relative erase every time regardless of
-    // whether the marker was already there, which could erase the marker
-    // itself on a later overflow -- silently losing it forever, since the
-    // "already truncated" guard then permanently blocked reinserting it.
-    // Within the real segments, Text/Thinking are trimmed BEFORE Tool
-    // markers: a marker is a tiny struct, and its disappearance mid-turn is
-    // exactly the "tool calls invisible until finished" failure -- the
-    // persisted rows that would replace it only arrive with the refresh. (A
-    // Tool marker is only trimmed when the turn is entirely tool calls.)
+    // NEWEST segments. No synthetic marker is inserted -- the overflow only
+    // latches live_view_truncated_, which the status bar reports. Within the
+    // kept segments, Text/Thinking are trimmed BEFORE Tool markers: a marker
+    // is a tiny struct, and its disappearance mid-turn is exactly the "tool
+    // calls invisible until finished" failure -- the persisted rows that
+    // would replace it only arrive with the refresh. (A Tool marker is only
+    // trimmed when the turn is entirely tool calls. The one bug class the
+    // 2026-09 permanent-sentinel design guarded -- an erase pass eating the
+    // marker -- is gone with the marker; the oldest-real-segment erase order
+    // it pinned is unchanged.)
     // mtx_ held by caller.
     void TrimLiveSegmentsLocked();
 
@@ -864,8 +869,8 @@ private:
     // per-frame deep snapshot, which copies both members) without limit.
     // streaming_accumulated_ stops at kStreamingTextCapBytes -- further
     // deltas are dropped once a truncation marker has been appended; the
-    // count of live_segments_ stops at kMaxLiveSegments (newest kept, a
-    // single "[...truncated]" marker left at the oldest position). The
+    // count of live_segments_ stops at kMaxLiveSegments (newest kept, the
+    // overflow latching live_view_truncated_ for the status bar). The
     // transcript itself is authoritative: the post-turn refresh re-fetches
     // the full persisted text (scrollback_refresh.hpp).
     std::string streaming_accumulated_;
@@ -877,7 +882,8 @@ private:
     bool thinking_truncated_ = false;       // thinking_accumulated_ hit its cap
     uint64_t thinking_turn_seq_ = 0;        // the turn the accumulation belongs to
     bool streaming_truncated_ = false;      // streaming_accumulated_ hit its cap
-    bool live_segments_truncated_ = false;  // the marker segment is in place
+    bool live_view_truncated_ = false;  // overflow dropped older live segments;
+                                        // surfaced by the status bar's {activity}
     bool is_streaming_ = false;
     uint64_t turn_seq_ = 0;    // increments when a NEW TURN's stream starts
     bool turn_ended_ = true;   // armed by OnTurnCompleted/OnError; disarmed by the next delta
@@ -989,6 +995,11 @@ public:
 
         // The focused tab's interrupt request still awaiting its turn end.
         bool cancel_requested = false;
+
+        // The tab's live view dropped older segments of its current turn
+        // (SessionState's live_view_truncated_ latch, via GetAllTabs) -- the
+        // status bar's {activity} suffix reports it.
+        bool live_view_truncated = false;
 
         // The tab's session pause state (SessionMetadataEvent.paused -- the
         // confirming event for SetPausedEvent). The status bar's paused

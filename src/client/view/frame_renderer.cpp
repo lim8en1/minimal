@@ -518,6 +518,15 @@ ftxui::Element FrameRenderer::Render() {
             values["activity"] = "cancelling…";
             emphasis["activity"] = deps_.theme.ColorFor("attention");
         }
+        // The live-segment count cap dropped older segments of this turn:
+        // the notice rides {activity} composed AFTER the state words above
+        // (never overriding them -- WithHiddenRowsSuffix appends). In chrome
+        // because it is about the session's live view, not a message; in the
+        // status bar because a synthetic row in the stream read as model
+        // output glued to whatever the page applies had not retired yet.
+        if (focused_details.live_view_truncated) {
+            values["activity"] = WithHiddenRowsSuffix(values["activity"]);
+        }
     }
     // Registered segment providers fill their own ids. Render runs on the
     // render thread at ~20 Hz -- the provider contract (cheap, never

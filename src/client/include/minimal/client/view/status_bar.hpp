@@ -74,6 +74,17 @@ std::string FormatTokenUsage(std::int64_t used, std::int64_t max);
 std::string PermissionModeSegmentValue(const std::string& applied,
                                        const std::string& desired, bool has_session);
 
+// The {activity} segment's composition with the live-view cut notice, pure
+// and independently testable. When the live-segment count cap has dropped
+// older segments of the current turn (SessionState's live_view_truncated
+// latch), the suffix says so -- chrome about the session, riding the one
+// segment that already means "what the session is doing right now".
+// Appends with the " · " literal when `activity` is non-empty (the same
+// separator spelling the bar renders between segments); a non-empty notice
+// over an empty activity stands alone. Composed, never overriding: the
+// state word (working / cancelling… / …) must survive the suffix.
+std::string WithHiddenRowsSuffix(std::string activity);
+
 // `emphasis` colors individual segment values by id (activity by state,
 // tokens near the window, a risky permission mode); unlisted values use the
 // body color, literals the muted one.

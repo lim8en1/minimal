@@ -68,7 +68,8 @@ std::string ExpandTabsForDisplay(std::string_view body) {
 // The live thinking render's bounds (see RenderLiveThinking): how many
 // settled lines are kept/ drawn, and how many bytes of the trailing partial
 // line are ever re-wrapped. The transcript is authoritative -- these cap
-// presentation only, mirroring the segment-level "[...truncated]" sentinel.
+// presentation only (the segment-count cap's notice lives in the status
+// bar's {activity} suffix; this one is an in-row "[...]").
 constexpr std::size_t kMaxLiveThinkingLines = 300;
 constexpr std::size_t kMaxLiveThinkingTailBytes = 64 * 1024;
 

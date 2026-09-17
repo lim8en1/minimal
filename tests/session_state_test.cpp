@@ -1090,23 +1090,27 @@ TEST_CASE("the segment count cap trims text/thinking BEFORE tool markers",
     }
     const auto snap = state.TakeSnapshot();
     REQUIRE(snap.live_segments.size() == SessionState::kMaxLiveSegments);
-    // The cut is visible, never silent (the permanent sentinel at index 0).
-    REQUIRE(snap.live_segments[0].kind == LiveTurnSegment::Kind::Text);
-    CHECK(snap.live_segments[0].Text() == "[...truncated]");
-    // With the budget spent on text first, the survivors are sentinel +
-    // tools only -- and the OLDEST surviving marker is exactly the one the
-    // first erasure lands on, not shifted arbitrarily.
+    // The cut is visible, never silent -- but in CHROME, not the stream: no
+    // synthetic segment exists; the status bar's {activity} suffix reports
+    // the latch instead (light snapshot carries it to GetAllTabs).
+    CHECK(state.TakeLightSnapshot().live_view_truncated);
+    for (const auto& segment : snap.live_segments) {
+        REQUIRE_FALSE(segment.Text() == "[...truncated]");   // no synthetic row, ever
+    }
+    // With the budget spent on text first, the survivors are tools only --
+    // and the OLDEST surviving marker is exactly the one the first erasure
+    // lands on, not shifted arbitrarily.
     std::size_t tool_markers = 0;
-    std::size_t text_besides_sentinel = 0;
-    for (std::size_t i = 1; i < snap.live_segments.size(); ++i) {
-        if (snap.live_segments[i].kind == LiveTurnSegment::Kind::Tool) {
+    std::size_t text_besides_tools = 0;
+    for (const auto& segment : snap.live_segments) {
+        if (segment.kind == LiveTurnSegment::Kind::Tool) {
             ++tool_markers;
         } else {
-            ++text_besides_sentinel;
+            ++text_besides_tools;
         }
     }
-    CHECK(tool_markers == SessionState::kMaxLiveSegments - 1);
-    CHECK(text_besides_sentinel == 0);
+    CHECK(tool_markers == SessionState::kMaxLiveSegments);
+    CHECK(text_besides_tools == 0);
     // The newest marker survives, whatever else was trimmed.
     const auto newest = std::find_if(snap.live_segments.begin(), snap.live_segments.end(),
                                      [](const LiveTurnSegment& s) {
@@ -1762,30 +1766,54 @@ TEST_CASE("a truncated live segment drops further deltas instead of still growin
     CHECK(second.live_segments[0].Text().size() == capped_size);   // unchanged, not larger
 }
 
-// The bug: the FIRST overflow inserted a "[...truncated]" marker at index 0
-// and latched live_segments_truncated_; the SECOND overflow reran the same
-// begin()-relative erase, which could erase the marker itself along with
-// real segments -- and the latch then permanently blocked reinserting it,
-// losing it forever while the snapshot still claimed a cut happened.
-TEST_CASE("the live-segment-count marker survives repeated overflows",
+// Once the overflow latched live_view_truncated_, repeated overflows keep
+// the latch set and the count at the cap; the turn-end clear and the
+// fully-covered page apply are the only things that reset it. (The 2026-09
+// bug this test replaced -- an erase pass eating the synthetic marker --
+// is gone with the marker; the invariants that outlive it are these.)
+TEST_CASE("the live-view truncation latch survives repeated overflows and resets on retirement",
           "[session_state][live_segments]") {
     SessionState state("s-1");
-    // Two full overflow cycles: kMaxLiveSegments (a marker occupies one slot
-    // after the first overflow) plus enough more tool starts to overflow a
-    // second time.
+    // Two full overflow cycles: the cap plus enough more tool starts to
+    // overflow a second time.
     for (std::size_t i = 0; i < SessionState::kMaxLiveSegments + 50; ++i) {
         state.OnToolStarted(StartTool("t-" + std::to_string(i)));
     }
     const auto snap = state.TakeSnapshot();
     using Kind = LiveTurnSegment::Kind;
-    const auto marker_count =
-        std::count_if(snap.live_segments.begin(), snap.live_segments.end(),
-                      [](const LiveTurnSegment& s) { return s.Text() == "[...truncated]"; });
-    CHECK(marker_count == 1);
-    REQUIRE_FALSE(snap.live_segments.empty());
-    CHECK(snap.live_segments.front().kind == Kind::Text);
-    CHECK(snap.live_segments.front().Text() == "[...truncated]");
-    CHECK(snap.live_segments.size() <= SessionState::kMaxLiveSegments);
+    for (const auto& segment : snap.live_segments) {
+        if (segment.kind == Kind::Tool) {
+            REQUIRE_FALSE(segment.tool_use_id.empty());
+        }
+        CHECK_FALSE(segment.Text() == "[...truncated]");   // no synthetic row, ever
+    }
+    CHECK(snap.live_segments.size() == SessionState::kMaxLiveSegments);
+    CHECK(state.TakeLightSnapshot().live_view_truncated);
+    // The turn-end refresh's coarse clear is what clears it.
+    state.ClearStreamingIfCurrentTurn(state.CurrentTurnSeq());
+    CHECK_FALSE(state.TakeLightSnapshot().live_view_truncated);
+
+    // Re-latch, then a page apply whose answer set covers every live row
+    // (the public seam for RetireCoveredLiveSegments' full-retire branch)
+    // empties the live view and resets the latch the same way. The tools
+    // must be FINISHED first -- a still-running tool never retires even
+    // though its result row reached the page.
+    for (std::size_t i = 0; i < SessionState::kMaxLiveSegments + 10; ++i) {
+        const std::string id = "u-" + std::to_string(i);
+        state.OnToolStarted(StartTool(id));
+        state.OnToolFinished(id, FinishTool());
+    }
+    REQUIRE(state.TakeLightSnapshot().live_view_truncated);
+    v1::GetMessagesResponse covered;
+    for (std::size_t i = 0; i < SessionState::kMaxLiveSegments + 10; ++i) {
+        auto* stored = covered.add_messages();
+        stored->set_seq(static_cast<int64_t>(i) + 1);
+        auto* block = stored->mutable_message()->add_content();
+        block->mutable_tool_result()->set_tool_use_id("u-" + std::to_string(i));
+    }
+    state.ApplyScrollbackPage(covered);
+    CHECK(state.TakeSnapshot().live_segments.empty());
+    CHECK_FALSE(state.TakeLightSnapshot().live_view_truncated);
 }
 
 // The bug: OnToolStarted/OnBackgroundTask pushed a live_segments_ entry with

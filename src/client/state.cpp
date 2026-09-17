@@ -95,6 +95,7 @@ SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output)
     s.cache_write_tokens = cache_write_tokens_;
     s.cancel_requested = cancel_requested_;
     s.turn_in_flight = turn_in_flight_;
+    s.live_view_truncated = live_view_truncated_;
     s.model = model_;
     s.agent_preset = agent_preset_;
     s.desired_model = desired_model_;
@@ -198,6 +199,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.cache_write_tokens = cache_write_tokens_;
     s.cancel_requested = cancel_requested_;
     s.turn_in_flight = turn_in_flight_;
+    s.live_view_truncated = live_view_truncated_;
     s.transcript_version = transcript_version_;
     s.turn_ended = turn_ended_;
     s.scrollback_trimmed = scrollback_trimmed_;
@@ -563,32 +565,21 @@ void SessionState::MaybeGoIdleLocked() {
 // struct, and its disappearance mid-turn is exactly the "tool calls invisible
 // until finished" failure -- the persisted rows that would replace it only
 // arrive with the refresh. A Tool marker is trimmed only when the turn is
-// entirely tool calls.
+// entirely tool calls. The cut itself is never rendered as a segment: the
+// live_view_truncated_ latch it sets is what the status bar's {activity}
+// suffix reports (chrome about the session, not a fake row in the stream --
+// a synthetic Text segment read as model output, glued to the streaming
+// rows the page applies had not retired yet).
 void SessionState::TrimLiveSegmentsLocked() {
     if (live_segments_.size() <= kMaxLiveSegments) return;
-    if (!live_segments_truncated_) {
-        // The cut must be visible, never silent: a permanent sentinel at
-        // index 0, stamped turn_seq 0 so ClearStreamingIfCurrentTurn retires
-        // it first once a persisted page covers the turn (same rule as the
-        // pre-2026-09 whole-vector trim this replaced).
-        live_segments_truncated_ = true;
-        live_segments_.insert(live_segments_.begin(),
-                              LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
-                                              .turn_seq = 0,
-                                              .segment_id = next_segment_id_++,
-                                              .text = "[...truncated]"});
-    }
-    // The sentinel occupies one slot, so the real segments cap at
-    // kMaxLiveSegments - 1 -- the same budget the previous single-shot erase
-    // kept. Candidates start after the sentinel (index >= 1); it can never
-    // itself be erased.
+    live_view_truncated_ = true;
     while (live_segments_.size() > kMaxLiveSegments) {
-        auto victim = std::find_if(live_segments_.begin() + 1, live_segments_.end(),
+        auto victim = std::find_if(live_segments_.begin(), live_segments_.end(),
                                    [](const LiveTurnSegment& segment) {
                                        return segment.kind != LiveTurnSegment::Kind::Tool;
                                    });
         if (victim == live_segments_.end()) {
-            victim = live_segments_.begin() + 1;   // all tools: drop the oldest
+            victim = live_segments_.begin();   // all tools: drop the oldest
         }
         live_segments_.erase(victim);
     }
@@ -734,7 +725,7 @@ void SessionState::ClearStreaming() {
     thinking_truncated_ = false;
     is_streaming_ = false;
     live_segments_.clear();
-    live_segments_truncated_ = false;
+    live_view_truncated_ = false;
 }
 
 void SessionState::ClearStreamingIfCurrentTurn(uint64_t turn_seq) {
@@ -758,7 +749,7 @@ void SessionState::ClearStreamingIfCurrentTurn(uint64_t turn_seq) {
         thinking_truncated_ = false;
         is_streaming_ = false;
         live_segments_.clear();
-        live_segments_truncated_ = false;
+        live_view_truncated_ = false;
         return;
     }
     // The thinking accumulation is turn-stamped (see AppendStreamingThinking):
@@ -848,7 +839,7 @@ void SessionState::RetireCoveredLiveSegments(const std::set<std::string>& answer
         thinking_truncated_ = false;
         is_streaming_ = false;
         live_segments_.clear();
-        live_segments_truncated_ = false;
+        live_view_truncated_ = false;
         return;
     }
     // Rebuild the flat accumulations from the surviving segments, exactly the
@@ -987,7 +978,7 @@ void SessionState::OnResyncRequired(const std::string& reason) {
     thinking_truncated_ = false;
     is_streaming_ = false;
     live_segments_.clear();
-    live_segments_truncated_ = false;
+    live_view_truncated_ = false;
     // A dropped ToolExecutionEvent{finished} is exactly the kind of gap a
     // resync exists to cover: a FOREGROUND row whose finish never arrived
     // stays "running" forever, and (per MaybeGoIdleLocked) blocks the tab
@@ -1049,7 +1040,7 @@ void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_las
     thinking_truncated_ = false;
     is_streaming_ = false;
     live_segments_.clear();
-    live_segments_truncated_ = false;
+    live_view_truncated_ = false;
     pending_user_messages_.clear();
     cancel_requested_ = false;
     scrollback_page_shared_ =
@@ -3411,6 +3402,7 @@ std::vector<AppState::TabSnapshot> AppState::GetAllTabs(bool include_tool_output
         snap.cancel_requested = ss.cancel_requested;
         snap.paused = ss.paused;
         snap.turn_in_flight = ss.turn_in_flight;
+        snap.live_view_truncated = ss.live_view_truncated;
         // The glyph merge (docs/EXTENSIBILITY.md 4.2, "Attention sink"): core
         // event derivation is the default source; a plugin raise wins until
         // cleared. '!' stays the only color-independent signal whatever raised

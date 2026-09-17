@@ -104,6 +104,21 @@ std::string PermissionModeSegmentValue(const std::string& applied,
     return "→ " + desired;
 }
 
+std::string WithHiddenRowsSuffix(std::string activity) {
+    // The literal is the same " · " spelling the bar renders between
+    // segments, so the suffix reads as one composed value.
+    constexpr std::string_view kSeparator = " · ";
+    constexpr std::string_view kSuffix = "earlier rows hidden";
+    if (activity.size() >= kSuffix.size() &&
+        activity.compare(activity.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0) {
+        return activity;   // already suffixed -- never double-append
+    }
+    if (activity.empty()) return std::string(kSuffix);
+    activity += kSeparator;
+    activity += kSuffix;
+    return activity;
+}
+
 std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& format,
                                             const std::map<std::string, std::string>& values,
                                             int max_width) {
