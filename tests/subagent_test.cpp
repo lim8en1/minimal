@@ -1137,6 +1137,49 @@ TEST_CASE("max_turns bounds the child's loop", "[subagent][max_turns]") {
     }
 }
 
+TEST_CASE(
+    "max_turns is reported as an error even when the capping round left narration text",
+    "[subagent][max_turns][regression]") {
+    // The bug: ResultOf() checked final_text.empty() before hit_max_turns, so
+    // a subagent that hit its max_turns limit on a round whose response
+    // carried BOTH narration text and a tool_use (final_text therefore
+    // non-empty) was reported to the parent as a successful completion --
+    // silently truncating an incomplete task with no error signal.
+    SubagentFixture fixture;
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "data"));
+
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* child_script = fixture.scripts["child-script"].get();
+    parent_script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent",
+        {{"task", "loop forever"}, {"agent_preset", "child"}, {"max_turns", 2}}));
+    parent_script->Push(testing::TextResponse("parent done"));
+    child_script->Push(testing::ToolUseResponse("r1", "read"));
+    // The capping round: narration alongside the tool_use, so final_text is
+    // non-empty even though this is the round that trips max_turns.
+    llm::ChatResponse capping_round;
+    capping_round.content.push_back(llm::TextBlock{"let me check one more thing"});
+    capping_round.content.push_back(llm::ToolUseBlock{"r2", "read", nlohmann::json::object()});
+    capping_round.stop_reason = llm::StopReason::ToolUse;
+    child_script->Push(capping_round);
+    child_script->Push(testing::ToolUseResponse("r3", "read"));  // never consumed
+
+    parent->SubmitTurn("go");
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    const auto page = fixture.db->GetMessagesPage(parent->info().session_id, std::nullopt, 50);
+    const auto& block =
+        std::get<llm::ToolResultBlock>(page.messages[1].message.content.front());
+    CHECK(block.is_error);
+    CHECK(TextOf(block).find("max_turns") != std::string::npos);
+    // Not the capping round's leftover narration read as a successful answer.
+    CHECK(TextOf(block).find("let me check one more thing") == std::string::npos);
+}
+
 TEST_CASE("the preset's steps ceiling bounds the child even when the spawn does not",
           "[subagent][max_turns][compat]") {
     SubagentFixture fixture;

@@ -22,10 +22,16 @@ ChildResult ResultOf(const TurnResult& result) {
     if (result.stop_reason == llm::StopReason::Cancelled) {
         return {true, "subagent was terminated before it finished"};
     }
+    // Checked BEFORE final_text.empty(): a subagent can hit max_turns on a
+    // round that still produced narration text alongside its (final)
+    // tool_use, so final_text is non-empty even though the task never
+    // actually completed. Checking emptiness first let that narration read
+    // as a successful answer, silently truncating an incomplete task with no
+    // error signal to the parent.
+    if (result.hit_max_turns) {
+        return {true, "subagent reached its max_turns limit without producing a result"};
+    }
     if (result.final_text.empty()) {
-        if (result.hit_max_turns) {
-            return {true, "subagent reached its max_turns limit without producing a result"};
-        }
         // A paused child's one-turn life ended at the tool-call return; there
         // is no completed answer to hand the parent, but the reason is not a
         // failure -- say what happened rather than reading as an error state.
