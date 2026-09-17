@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 #include <thread>
 
 #include <catch2/catch_test_macros.hpp>
@@ -106,4 +107,23 @@ TEST_CASE("Wait is idempotent after everything has drained", "[tool_pool]") {
     pool.Wait();
     pool.Wait();
     CHECK(done.load() == 1);
+}
+
+TEST_CASE("a task that throws is contained: the pool survives and later tasks still run",
+          "[tool_pool][regression]") {
+    // A background worker thread's task escaping is unreachable by contract
+    // (every real task is AgentLoop::execute_one, which is total), but the
+    // pool guards against a future task-builder mistake anyway -- width >= 2
+    // so this actually exercises WorkerMain's try/catch, not Submit's inline
+    // width-1 path (which does not wrap the call at all).
+    auto result = minimal::testing::RunInBackground([] {
+        minimal::tools::ToolPool pool(2);
+        std::atomic<int> after_throw{0};
+        pool.Submit([] { throw std::runtime_error("task builder mistake"); });
+        pool.Submit([&after_throw] { after_throw.fetch_add(1); });
+        pool.Wait();
+        return after_throw.load();
+    });
+    REQUIRE(result.WaitFor(minimal::testing::kDefaultDeadline));
+    CHECK(result.Get() == 1);
 }

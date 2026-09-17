@@ -1,5 +1,7 @@
 #include "minimal/tools/tool_pool.hpp"
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::tools {
 
 ToolPool::ToolPool(int width) : width_(width < 1 ? 1 : width) {}
@@ -28,14 +30,21 @@ void ToolPool::WorkerMain() {
         }
         try {
             task();
-        } catch (...) {
+        } catch (const std::exception& e) {
             // Unreachable by contract: every task is AgentLoop::execute_one,
             // which is total -- an executor-guard escape becomes an error
             // result, not a throw. The catch exists so a future task builder's
             // mistake degrades to a lost task (the round's default-constructed
             // result slot appends) instead of std::terminate taking every
             // session in the process down. It wraps ONLY the call: the
-            // running_ bookkeeping below must run whatever happened.
+            // running_ bookkeeping below must run whatever happened. Logged
+            // rather than silently dropped, so a contract violation is
+            // debuggable instead of just quietly losing a task.
+            common::DefaultLogger().warn("ToolPool: a task threw (contract violation): {}",
+                                         e.what());
+        } catch (...) {
+            common::DefaultLogger().warn(
+                "ToolPool: a task threw a non-exception value (contract violation)");
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
