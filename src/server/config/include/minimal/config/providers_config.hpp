@@ -280,10 +280,10 @@ public:
     bool empty() const { return catalog_.models_.empty(); }
 
     // Every `<provider>/<model>` this config can serve right now, sorted:
-    // static entries plus DISCOVERED models already in the runtime cache. A
-    // cold cache contributes none -- this is a listing, not a trigger to fetch.
-    // What `/providers` lists and what a "no such model" error offers as
-    // alternatives.
+    // static entries plus DISCOVERED models and their variant siblings already
+    // in the runtime cache. A cold cache contributes none -- this is a
+    // listing, not a trigger to fetch. What `/providers` lists and what a
+    // "no such model" error offers as alternatives.
     std::vector<std::string> ModelRefs() const;
 
     // The providers this file defines, keyed by name -- including discover
@@ -384,6 +384,13 @@ private:
     DiscoveryCacheState cache_;
 
     const ProviderEntry* FindProviderLocked(const std::string& name) const;
+    // The body of VariantsOf, minus the ref parse -- shared with ModelRefs'
+    // variant-refs union, which needs the same precedence (static-catalog
+    // siblings first, the discovery cache's autodetected ladder only where the
+    // base has none and did not opt out) while already holding cache_.mutex_.
+    // cache_.mutex_ held.
+    std::vector<std::string> VariantsOfLocked(const std::string& provider_name,
+                                              const std::string& base_id) const;
     // Calls the hook -- the network I/O. Requires NO lock held; `entry` points
     // into catalog_.providers_, which is parse-time only and never mutated after.
     DiscoveryOutcome FetchOutcome(const ProviderEntry& entry) const;

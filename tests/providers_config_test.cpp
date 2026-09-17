@@ -597,6 +597,114 @@ TEST_CASE("ModelRefs unions static and cached-discovered entries", "[providers][
     CHECK(warm[1] == "mixed/static1");
     CHECK(warm[2] == "mixed/windowed");
 }
+TEST_CASE("ModelRefs lists a discovered model's variant siblings once the cache is warm",
+          "[providers][variants][discover][regression]") {
+    // THE BUG: discovery materialized the base model into the listing but not
+    // its autodetected variant siblings -- /think offered three variants
+    // (VariantsOf read the discovery cache) while the /model picker and
+    // --model showed the bare model only, and <provider>/<model>@<name> was
+    // the only way to address a sibling the config fully served. The listing
+    // must be the same union the resolver serves: every materialized
+    // discovery-cache variant ref, not just the materialized bases.
+    CountingHook hook;
+    hook.models = {
+        {"m", 131072,
+         nlohmann::json::parse(R"({"reasoning": {"supported_efforts": ["max", "high", "low"]}})"),
+         std::nullopt}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    // Cold cache: bases only (no fetch trigger, the standing rule).
+    const auto cold = config.ModelRefs();
+    CHECK(std::find(cold.begin(), cold.end(), "local/m@max") == cold.end());
+
+    REQUIRE(config.Resolve(ModelRef{"local", "m"}) != nullptr);  // warms the cache
+    const auto warm = config.ModelRefs();
+    CHECK(std::find(warm.begin(), warm.end(), "local/m") != warm.end());
+    CHECK(std::find(warm.begin(), warm.end(), "local/m@max") != warm.end());
+    CHECK(std::find(warm.begin(), warm.end(), "local/m@high") != warm.end());
+    CHECK(std::find(warm.begin(), warm.end(), "local/m@low") != warm.end());
+    // Models without an advertised ladder still list no siblings.
+    CHECK(std::find_if(warm.begin(), warm.end(), [](const std::string& ref) {
+              return ref.find("mixed/static1@") == 0 || ref.find("mixed/windowed@") == 0;
+          }) == warm.end());
+}
+
+TEST_CASE("ModelRefs dedupes variant siblings against static siblings",
+          "[providers][variants][discover]") {
+    // A static twin with declared variants already put its siblings in the
+    // catalog; the discovery cache records the recipe too. The union must not
+    // list either twice -- and the static twin's own ladder wins (the same
+    // explicit-beats-autodetection rule VariantsOf applies), so a recipe the
+    // static entry opted out of adds nothing.
+    CountingHook hook;
+    hook.models = {
+        {"m", 131072,
+         nlohmann::json::parse(R"({"reasoning": {"supported_efforts": ["max", "high", "low"]}})"),
+         std::nullopt}};
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"local": {"backend": "openai", "url": "http://localhost:8000/v1",
+                              "discover": true, "models": {"m": {"variants": ["low"]}}}}
+    })"));
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    REQUIRE(config.Resolve(ModelRef{"local", "m"}) != nullptr);
+    const auto refs = config.ModelRefs();
+    CHECK(std::count(refs.begin(), refs.end(), "local/m") == 1);
+    CHECK(std::count(refs.begin(), refs.end(), "local/m@low") == 1);
+    // The static twin declared [low] only: @max/@high stay undiscoverable...
+    CHECK(std::find(refs.begin(), refs.end(), "local/m@max") == refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), "local/m@high") == refs.end());
+    // ...and ResolveVariant agrees (a static sibling simply IS a catalog
+    // entry), so the listing and the resolver cannot disagree here either.
+    CHECK(config.Resolve(ModelRef{"local", "m@low"}) != nullptr);
+    CHECK(config.Resolve(ModelRef{"local", "m@max"}) == nullptr);
+
+    // An explicit `variants: []` opt-out lists no siblings at all.
+    CountingHook hook2 = hook;
+    auto config2 = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"local": {"backend": "openai", "url": "http://localhost:8000/v1",
+                              "discover": true, "models": {"m": {"variants": []}}}}
+    })"));
+    config2.SetDiscoveryHook([&hook2](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook2.AsHook(kind, c);
+    });
+    REQUIRE(config2.Resolve(ModelRef{"local", "m"}) != nullptr);
+    const auto refs2 = config2.ModelRefs();
+    CHECK(std::find(refs2.begin(), refs2.end(), "local/m") != refs2.end());
+    CHECK(std::find_if(refs2.begin(), refs2.end(), [](const std::string& ref) {
+              return ref.rfind("local/m@", 0) == 0;
+          }) == refs2.end());
+}
+
+TEST_CASE("ModelRefs filters a discovered variant by its base id",
+          "[providers][variants][discover]") {
+    // The picker filter matches the BASE id for static variants ("hiding a
+    // model must hide its variants"); the discovered union extends that rule
+    // to discovery-cache siblings, which never reach the catalog keys the old
+    // filter walked.
+    CountingHook hook;
+    hook.models = {
+        {"m", 131072,
+         nlohmann::json::parse(R"({"reasoning": {"supported_efforts": ["max", "high", "low"]}})"),
+         std::nullopt}};
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"local": {"backend": "openai", "url": "http://localhost:8000/v1",
+                              "discover": true, "blacklist": ["m"]}}
+    })"));
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+    REQUIRE(config.Resolve(ModelRef{"local", "m"}) != nullptr);
+    const auto refs = config.ModelRefs();
+    CHECK(std::find(refs.begin(), refs.end(), "local/m") == refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), "local/m@max") == refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), "local/m@low") == refs.end());
+}
 
 TEST_CASE("a static model with an omitted window is enriched from discovery",
           "[providers][discover][invariant]") {

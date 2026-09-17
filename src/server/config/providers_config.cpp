@@ -659,7 +659,17 @@ std::vector<std::string> ProvidersConfig::VariantsOf(const ModelRef& ref) const 
     const auto [base_id, variant_name] = SplitVariantSuffix(ref.model);
     if (!variant_name.empty()) return {};
     std::lock_guard<std::mutex> lock(cache_.mutex_);
-    const std::string key = ref.str();
+    return VariantsOfLocked(ref.provider, base_id);
+}
+
+// The variant recipe lookup under cache_.mutex_ -- the body of VariantsOf,
+// shared with ModelRefs' variant-refs union (which needs the same
+// static-catalog-beats-discovery-cache precedence while already holding the
+// mutex). See VariantsOf's public contract for the rules.
+std::vector<std::string> ProvidersConfig::VariantsOfLocked(const std::string& provider_name,
+                                                           const std::string& base_id) const {
+    std::vector<std::string> out;
+    const std::string key = provider_name + "/" + base_id;
 
     // Static base: parse-time synthesis put every declared sibling in the
     // catalog; list the refs that share the base prefix. A static base that
@@ -668,7 +678,6 @@ std::vector<std::string> ProvidersConfig::VariantsOf(const ModelRef& ref) const 
     // (the common shape: a static twin supplying parameters the discovery
     // listing cannot express) still carries the autodetected ladder, so an
     // empty answer falls through to the discovery-cache lookup below.
-    std::vector<std::string> out;
     const std::string prefix = key + "@";
     if (const auto base_it = catalog_.models_.find(key); base_it != catalog_.models_.end()) {
         for (const auto& [candidate, unused] : catalog_.models_) {
@@ -685,7 +694,7 @@ std::vector<std::string> ProvidersConfig::VariantsOf(const ModelRef& ref) const 
     // Discovered base (cold cache contributes nothing -- a listing, never a
     // fetch trigger, the same rule ModelRefs applies), or a static base whose
     // discovery twin advertises a ladder: the recipe recorded at publish.
-    if (const auto cache_it = cache_.discovery_.find(ref.provider);
+    if (const auto cache_it = cache_.discovery_.find(provider_name);
         cache_it != cache_.discovery_.end() && cache_it->second.ok) {
         const auto variants_it = cache_it->second.variants_by_model.find(base_id);
         if (variants_it != cache_it->second.variants_by_model.end()) {
@@ -1011,17 +1020,39 @@ void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryO
 
 std::vector<std::string> ProvidersConfig::ModelRefs() const {
     std::lock_guard<std::mutex> lock(cache_.mutex_);
-    // Static ∪ cached-discovered. Both maps are individually sorted, but a
-    // concatenation interleaves wrongly ("local/zdisc" sorts before
-    // "mixed/static1" yet lives in the other map) -- so merge, skipping refs a
-    // static entry already provides (an enriched static model lives in the
-    // overlay too). A cold cache contributes nothing: this is a listing, never
-    // a discovery trigger.
+    // Static ∪ cached-discovered ∪ cached-discovered variant siblings. All
+    // three sources are individually sorted, but a concatenation interleaves
+    // wrongly ("local/zdisc" sorts before "mixed/static1" yet lives in the
+    // other map) -- so merge, skipping refs a static entry already provides
+    // (an enriched static model and a parsed static variant sibling both live
+    // in the catalog), and sort once at the end. A cold cache contributes
+    // nothing: this is a listing, never a discovery trigger.
     std::vector<std::string> out;
     out.reserve(catalog_.models_.size() + cache_.overlay_.size());
     for (const auto& [key, unused] : catalog_.models_) out.push_back(key);
     for (const auto& [key, unused] : cache_.overlay_) {
         if (!catalog_.models_.count(key)) out.push_back(key);
+    }
+    // The variant siblings each materialized discovery-cache model carries.
+    // VariantsOfLocked applies the same precedence the resolver does: a
+    // static base's own declared siblings are catalog entries already (the
+    // dedup below drops the overlap), and an explicit `variants: []` opt-out
+    // suppresses the autodetected ladder. The discovered-model guard skips
+    // enriched static twins (their siblings come from the catalog) and a
+    // variant sibling already materialized into the overlay re-derives its
+    // base, which keeps a later /think switch from changing the listing.
+    for (const auto& [key, unused] : cache_.overlay_) {
+        (void)unused;
+        const auto slash = key.find('/');
+        if (slash == std::string::npos) continue;
+        const std::string provider = key.substr(0, slash);
+        const std::string model_id = SplitVariantSuffix(key.substr(slash + 1)).first;
+        const auto cache_it = cache_.discovery_.find(provider);
+        if (cache_it == cache_.discovery_.end() || !cache_it->second.ok) continue;
+        if (!cache_it->second.models.count(model_id)) continue;  // an enriched static twin
+        for (const auto& name : VariantsOfLocked(provider, model_id)) {
+            out.push_back(provider + "/" + model_id + "@" + name);
+        }
     }
 
     // The picker filters (opencode compat): whitelist keeps only the listed
@@ -1059,6 +1090,7 @@ std::vector<std::string> ProvidersConfig::ModelRefs() const {
     }
 
     std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
 }
 
