@@ -110,14 +110,16 @@ bool SessionSupport::RenameSession(const std::string& session_id, const std::str
     }
     // A name the user chose at creation is a decision, not a placeholder. The
     // free default-name rule protects it with its `name = ''` guard; the
-    // generated-title path protects it here, by refusing. The refusal is
-    // logged, not silent: a titler configured over an explicitly-named session
-    // would otherwise look like a broken plugin.
-    if (db_->IsExplicitlyNamed(session_id)) {
-        logger_.info("session {}: keeps its explicit name; titler skipped", session_id);
+    // generated-title path protects it here, by refusing -- atomically, in the
+    // SQL itself (UpdateSessionNameUnlessExplicit), not via a separate
+    // IsExplicitlyNamed check beforehand: a check-then-act pair here raced a
+    // concurrent user /rename landing in between, letting this titler seam
+    // clobber a rename that arrived after the check but before the write.
+    if (!db_->UpdateSessionNameUnlessExplicit(session_id, name)) {
+        logger_.info("session {}: not renamed (explicitly named, or unknown session); titler skipped",
+                     session_id);
         return false;
     }
-    if (!db_->UpdateSessionName(session_id, name)) return false;
     // Best effort -- a terminated session has no live object to update and no
     // attached client to notify; the database row is the authoritative record.
     if (auto session = sessions_->Find(session_id)) {

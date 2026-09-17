@@ -226,6 +226,17 @@ public:
     bool UpdateSessionName(const std::string& session_id, const std::string& name,
                            std::string_view name_source = "observer");
 
+    // Like UpdateSessionName, but atomically refuses a session with
+    // name_source = 'explicit' inside the SQL itself, rather than leaving the
+    // guard to a separate IsExplicitlyNamed check the caller performs first.
+    // The titler seam used to do exactly that check-then-act, which races a
+    // concurrent user /rename landing in between: the titler's stale
+    // "not explicit yet" verdict let it clobber the rename that arrived after
+    // its check but before its write. Returns false for an explicitly-named
+    // or unknown session.
+    bool UpdateSessionNameUnlessExplicit(const std::string& session_id, const std::string& name,
+                                         std::string_view name_source = "observer");
+
     // Persists (or, with nullopt, clears) the session's model override. The
     // runtime half of the same record creation writes: /model goes through
     // here, resume reads the column back. Not part of any append transaction
