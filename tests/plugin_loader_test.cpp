@@ -311,6 +311,44 @@ TEST_CASE("discovery applies the provenance enablement rule", "[plugin_discovery
     std::filesystem::remove_all(tmp);
 }
 
+TEST_CASE(
+    "two same-basename files under one provenance share a single plugins.json entry",
+    "[plugin_discovery][regression]") {
+    // The bug: DiscoverPlugins only warned about a basename collision ACROSS
+    // provenances (also_from_other_provenance). Two files sharing a basename
+    // within the SAME provenance -- realistic for the recursive bundled scan,
+    // e.g. two plugin subdirectories producing identically-named .so files --
+    // got no warning at all, even though both are keyed to the SAME
+    // plugins.json entry below (matched by (provenance, file) alone): the
+    // user cannot disable one without disabling both, and previously had no
+    // diagnostic explaining why toggling one entry affected two files.
+    //
+    // This asserts the structural scenario the new warning fires for (two
+    // distinct files discovered independently, merged into one entry); the
+    // warning text itself is logged, like every other discovery diagnostic
+    // in this file, and not independently captured here.
+    const auto tmp = std::filesystem::temp_directory_path() /
+                     ("minimal-discovery-same-prov-" + std::to_string(::getpid()));
+    const auto bundled = tmp / "bundled";
+    std::filesystem::create_directories(bundled / "plugin-a");
+    std::filesystem::create_directories(bundled / "plugin-b");
+    { std::ofstream(bundled / "plugin-a" / "dup.so") << "x"; }
+    { std::ofstream(bundled / "plugin-b" / "dup.so") << "x"; }
+
+    plugins::PluginConfig config;
+    const auto candidates = plugins::DiscoverPlugins(bundled, {}, config);
+
+    // Both distinct files are still discovered and would both be dlopen'd...
+    REQUIRE(candidates.size() == 2);
+    CHECK(candidates[0].file != candidates[1].file);
+    // ...but share ONE plugins.json entry: toggling it affects both files,
+    // which is exactly the surprising outcome the new warning flags.
+    REQUIRE(config.plugins.size() == 1);
+    CHECK(config.plugins[0].file == "dup.so");
+
+    std::filesystem::remove_all(tmp);
+}
+
 TEST_CASE("an existing plugins.json entry overrides the provenance default",
           "[plugin_discovery]") {
     const auto tmp = std::filesystem::temp_directory_path() /

@@ -253,6 +253,29 @@ std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundle
                 item.file);
         }
 
+        // Same basename found TWICE within the SAME provenance -- realistic
+        // for the recursive bundled scan (a build misconfiguration, or a
+        // copy-pasted plugin subdirectory). Both distinct files are still
+        // discovered and dlopen'd independently (the loop below pushes one
+        // PluginCandidate per `found` entry), but they are keyed to the SAME
+        // plugins.json entry above (matched by (provenance, file) alone), so
+        // the user cannot disable one without disabling both -- and without
+        // this warning, gets no explanation for why toggling one entry
+        // affects two unrelated plugins.
+        const bool also_same_provenance = std::any_of(
+            found.begin(), found.end(), [&](const Found& e) {
+                return e.path != item.path && e.file == item.file &&
+                       e.provenance == item.provenance;
+            });
+        if (also_same_provenance) {
+            common::DefaultLogger().warn(
+                "plugin '{}' was found more than once under the same provenance ({}) at {}; they "
+                "share one plugins.json entry and its enabled toggle -- rename one of the files "
+                "to tell them apart",
+                item.file, item.provenance == Provenance::Bundled ? kBundled : kUser,
+                item.path.string());
+        }
+
         candidates.push_back(
             PluginCandidate{item.path, item.provenance, existing->enabled, existing->config});
     }
