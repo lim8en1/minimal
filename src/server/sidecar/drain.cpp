@@ -15,14 +15,13 @@
 namespace minimal::sidecar {
 namespace {
 
+// kCapped never reaches here: DrainAndReap's read loop dispatches it straight
+// to its own CappedBuffer (one per kCapped sink, keyed by position) before
+// this switch ever runs.
 void FeedSink(PipeSink& sink, std::string_view chunk) {
     switch (sink.mode) {
-        case PipeSink::Mode::kCapped: {
-            // Owned per-drain; a static would race across concurrent tool
-            // calls. One CappedBuffer per kCapped sink, keyed by position.
-            // Built lazily here and looked up by index in DrainAndReap.
+        case PipeSink::Mode::kCapped:
             break;
-        }
         case PipeSink::Mode::kBounded: {
             if (sink.overflow) {
                 // Still counted: the caller learns how much was thrown away.
