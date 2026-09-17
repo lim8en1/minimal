@@ -99,6 +99,15 @@ WaitResult WaitSlot(Slot<T>& slot, const tools::CancelTokenPtr& cancel,
 // their own request ids) must not match, and non-numeric strings cannot.
 bool FrameIdMatches(const nlohmann::json& message, int64_t id) {
     if (!message.is_object() || !message.contains("id")) return false;
+    // A JSON-RPC REQUEST also carries an "id" (that's what distinguishes it
+    // from a notification) -- only "result"/"error" mark this frame as a
+    // RESPONSE. Our own id counter and a server's own outbound request-id
+    // counter both commonly start at 1, so without this check a
+    // server-initiated request (e.g. sampling/createMessage) whose id
+    // happens to collide with ours would be mistaken for our answer,
+    // completing the slot with whatever "result" a request object doesn't
+    // even have (an empty/garbage value) while the real response is ignored.
+    if (!message.contains("result") && !message.contains("error")) return false;
     const auto& wire = message.at("id");
     if (wire.is_number_integer()) return wire.get<int64_t>() == id;
     if (wire.is_string()) {

@@ -514,6 +514,34 @@ TEST_CASE("McpConnection http: a stringified id echo still matches", "[mcp_conne
     REQUIRE(outcome.ok);
 }
 
+TEST_CASE(
+    "McpConnection http: a server-initiated request sharing our id is not mistaken for our answer",
+    "[mcp_connection][regression]") {
+    // The bug: FrameIdMatches only compared the "id" field, never checking
+    // the frame was actually a RESPONSE (has "result"/"error", not
+    // "method"). Our own id counter and a compliant server's own outbound
+    // request-id counter both commonly start at 1, so a server-initiated
+    // request (e.g. sampling/createMessage) sharing our id was mistaken for
+    // our response -- completing the call with an empty/garbage result
+    // while the real response, sent right after, was ignored.
+    FakeHttpMcpServer server(
+        FakeHttpMcpServer::Options{.reply_sse = true, .colliding_request_frame = true});
+    McpEndpoint endpoint;
+    endpoint.transport = McpTransport::Http;
+    endpoint.url = server.url();
+
+    McpConnection::Failure error;
+    auto connection = McpConnection::Open(endpoint, {std::chrono::seconds(5), std::chrono::seconds(5)},
+                                          "test", "0.0.1", error);
+    REQUIRE(connection != nullptr);
+    const auto tools = connection->ListTools(nullptr, error);
+    REQUIRE(tools.has_value());
+    const McpCallOutcome outcome = connection->CallTool("echo", nlohmann::json::object(), nullptr);
+    REQUIRE(outcome.ok);
+    REQUIRE(outcome.result.contains("content"));
+    CHECK(outcome.result.at("content").at(0).at("text") == "http-echo");
+}
+
 TEST_CASE("McpConnection http: a stream with no matching frame is a named error", "[mcp_connection]") {
     FakeHttpMcpServer server(
         FakeHttpMcpServer::Options{.reply_sse = true, .no_response_frame = true});

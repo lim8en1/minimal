@@ -23,6 +23,11 @@ public:
         bool no_response_frame = false; // SSE reply carrying only unrelated frames
         int call_delay_ms = 0;          // tools/call sleeps before answering
         bool gate_initialize = false;   // initialize blocked until ReleaseGate()
+        // SSE reply is preceded by a server-initiated REQUEST frame (has
+        // "method", no "result"/"error") sharing our own outbound id -- both
+        // counters commonly start at 1. Models a real MCP server sending a
+        // sampling/createMessage request on the same stream as our answer.
+        bool colliding_request_frame = false;
     };
 
     FakeHttpMcpServer() : FakeHttpMcpServer(Options{}) {}
@@ -147,6 +152,17 @@ private:
                 "event: message\n"
                 "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n",
                 "text/event-stream");
+            return;
+        }
+        if (options_.colliding_request_frame && options_.reply_sse &&
+            body.value("method", "") != "initialize") {
+            nlohmann::json request_frame = {{"jsonrpc", "2.0"},
+                                            {"id", body.at("id")},
+                                            {"method", "sampling/createMessage"},
+                                            {"params", nlohmann::json::object()}};
+            res.set_content("event: message\ndata: " + request_frame.dump() +
+                            "\n\nevent: message\ndata: " + message.dump() + "\n\n",
+                            "text/event-stream");
             return;
         }
         if (options_.reply_sse) {
