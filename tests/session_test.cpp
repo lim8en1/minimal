@@ -1761,6 +1761,41 @@ TEST_CASE("a preset re-resolution does not reset the runtime run mode",
     CHECK(mode_announced);
 }
 
+TEST_CASE(
+    "ApplyPreset rejects the whole switch when the new provider fails to construct",
+    "[session][regression]") {
+    // The bug: ApplyPreset committed preset_, called loop_->SetPreset, and
+    // emitted EmitMetadataChanged() BEFORE attempting the provider rebuild.
+    // On rebuild failure, the client had already been told a model switch
+    // happened -- and the next turn would send the NEW preset's model name
+    // to the OLD provider connection. Fixed: the rebuild now runs first, and
+    // a failure leaves preset_/the announced metadata untouched.
+    SessionFixture fixture;  // no provider_factories set: any rebuild attempt fails
+    fixture.Start();
+
+    const std::string original_name = fixture.session->info().agent_preset;
+    const std::string original_kind = fixture.session->preset_snapshot().provider_kind;
+
+    auto switched = fixture.preset;
+    switched.name = "switched-but-should-fail";
+    switched.provider_kind = "some-other-backend";  // differs -> provider_changed
+    fixture.session->ApplyPreset(switched);
+
+    // Nothing committed: same preset kind, same session-info name.
+    CHECK(fixture.session->preset_snapshot().provider_kind == original_kind);
+    CHECK(fixture.session->info().agent_preset == original_name);
+
+    // No metadata event announcing the new (never-applied) preset name.
+    bool announced_new_name = false;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_session_metadata() &&
+            event.session_metadata().agent_preset() == "switched-but-should-fail") {
+            announced_new_name = true;
+        }
+    }
+    CHECK_FALSE(announced_new_name);
+}
+
 TEST_CASE("a session-creation run-mode override survives a preset re-resolution",
           "[session][run_mode]") {
     // The other legitimate writer: params_.run_mode_override (the client's

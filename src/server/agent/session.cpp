@@ -548,6 +548,46 @@ void Session::ApplyPreset(AgentPreset preset) {
                                   preset.provider.base_url != preset_.provider.base_url ||
                                   preset.provider.api_key != preset_.provider.api_key;
 
+    // THE PROVIDER REBUILD RUNS FIRST, before anything below commits. preset_,
+    // loop_'s preset, and EmitMetadataChanged all describe the NEW preset's
+    // model/provider -- committing them ahead of a rebuild that then fails
+    // told clients a model switch had happened when it hadn't, and the next
+    // turn would send the new preset's model name to the OLD provider
+    // connection (possibly a different, incompatible backend). On failure
+    // this returns having changed nothing: preset_, provider_, and every
+    // announcement stay exactly as they were before the call.
+    std::shared_ptr<llm::LlmProvider> rebuilt;
+    if (provider_changed) {
+        if (provider_factories_ == nullptr) {
+            logger_.warn("session {}: cannot rebuild the provider; keeping the previous one",
+                         params_.session_id);
+            return;
+        }
+        // Through the instance cache, not a fresh construct: entries are
+        // immutable at runtime, so a switch back to an entry this process
+        // already built is a cache hit -- the same instance, shared with any
+        // session using it. The PREVIOUS provider needs no teardown either:
+        // this session only drops its reference, and the cache holds the
+        // instance for whoever else uses it.
+        if (provider_instance_cache_ != nullptr) {
+            rebuilt = provider_instance_cache_->GetOrCreate(preset.model_ref.provider,
+                                                            preset.provider_kind, preset.provider);
+        } else {
+            rebuilt = std::shared_ptr<llm::LlmProvider>(
+                provider_factories_->Create(preset.provider_kind, preset.provider));
+        }
+        if (rebuilt == nullptr) {
+            // The preset resolved, so the kind was known at that point; failing
+            // to construct is still possible. Nothing has been committed yet,
+            // so there is no dangling reference to worry about -- just refuse
+            // the whole switch and keep running the old preset/provider pair.
+            logger_.warn(
+                "session {}: provider kind '{}' failed to construct; keeping the previous preset",
+                params_.session_id, preset.provider_kind);
+            return;
+        }
+    }
+
     // THREE copies of the preset exist -- this one, the loop's, and the
     // executor's run mode derived from it. A command updating only some is a bug
     // that surfaces a turn later, so there is one entry point and it updates all
@@ -590,34 +630,6 @@ void Session::ApplyPreset(AgentPreset preset) {
     EmitMetadataChanged();
 
     if (!provider_changed) return;
-    if (provider_factories_ == nullptr) {
-        logger_.warn("session {}: cannot rebuild the provider; keeping the previous one",
-                     params_.session_id);
-        return;
-    }
-
-    // Through the instance cache, not a fresh construct: entries are immutable
-    // at runtime, so a switch back to an entry this process already built is a
-    // cache hit -- the same instance, shared with any session using it. The
-    // PREVIOUS provider needs no teardown either: this session only drops its
-    // reference, and the cache holds the instance for whoever else uses it.
-    std::shared_ptr<llm::LlmProvider> rebuilt;
-    if (provider_instance_cache_ != nullptr) {
-        rebuilt = provider_instance_cache_->GetOrCreate(preset_.model_ref.provider,
-                                                        preset_.provider_kind, preset_.provider);
-    } else {
-        rebuilt = std::shared_ptr<llm::LlmProvider>(
-            provider_factories_->Create(preset_.provider_kind, preset_.provider));
-    }
-    if (rebuilt == nullptr) {
-        // The preset resolved, so the kind was known at that point; failing to
-        // construct is still possible and must not leave the loop holding a
-        // dangling reference. Keeping the old provider is wrong but survivable;
-        // dropping it is not.
-        logger_.warn("session {}: provider kind '{}' failed to construct; keeping the previous one",
-                     params_.session_id, preset_.provider_kind);
-        return;
-    }
 
     // Worker thread, between turns: the loop is provably not inside a provider
     // call, so rebinding and then releasing the old reference is safe. Rebind
