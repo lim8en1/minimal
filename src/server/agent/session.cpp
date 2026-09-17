@@ -387,70 +387,81 @@ bool Session::SubmitTurnWithOverrides(std::string text, const std::optional<comm
 }
 
 bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
-    bool refused = false;
+    // Set => the session refuses this turn outright (terminated/finished, or
+    // the backlog check below); emitted as a SessionError once the lock is
+    // released. Every refusal reason must go through this, not a bare
+    // `return false` under the lock: SubmitTurn's contract (session.hpp) is
+    // that false always comes with a visible error on the wire, so a client
+    // is never left waiting on a turn that was silently dropped.
+    std::optional<std::string> refusal;
     bool steered = false;
     bool auto_resumed = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (terminated_.load(std::memory_order_acquire)) return false;
-        // A subagent's life is ONE turn: once it has finished, a further turn
-        // would run a session its spawner has already collected and reported on.
-        if (subagent_finished_.load(std::memory_order_acquire)) return false;
-        // AUTO-RESUME: a user message while paused IS the intent to continue,
-        // unless the operator opted out. Cleared before routing so the
-        // mid-turn case (steering, below) lets the running turn continue past
-        // the pause check and answer the message within itself, and the idle
-        // case queues a normal turn. The metadata event -- what every
-        // attached status bar refreshes from -- goes out after the lock.
-        if (paused_.load(std::memory_order_acquire) && params_.pause_auto_resume_on_submit) {
-            paused_.store(false, std::memory_order_release);
-            auto_resumed = true;
-        }
-        // REAL-TIME STEERING: a plain text turn arriving while the AGENT is
-        // mid-turn (in_turn_, not running_turn_ -- a command running is not a
-        // turn to ride) does not queue behind the turn; it is staged onto the
-        // injection queue and appended at the next tool-result boundary, so
-        // the very next provider request carries
-        // [..., assistant(tool_use), user(tool_results), user(steering)].
-        // Overrides opt OUT: a mid-turn model/preset switch is a re-resolution
-        // the running loop cannot absorb, so those ride the work queue as
-        // today. The steering gate (core.user_prompt_submit) fires at flush
-        // time on the worker.
-        //
-        // OpenToSteering() closes the window between the turn's POP and its
-        // seed landing in the history: a submission there is ahead of the
-        // seed on the clock but behind it in submission order, and steering
-        // it would flush it BEFORE the seed (RunTurn's turn-start flush
-        // precedes AppendAndPersist) -- reversing on the durable transcript
-        // the order the user actually typed. Such a submission queues on the
-        // work queue and runs its own turn. (Out-of-band injections --
-        // subagent completions, background results -- keep the turn-start
-        // flush's before-the-seed position: they are not user submissions
-        // and their chronology genuinely precedes the seed's turn.)
-        if (in_turn_ && loop_->OpenToSteering() && turn.model.empty() &&
-            turn.agent_preset.empty()) {
-            // The id is assigned for steered submissions too: TurnQueuedEvent's
-            // per-session monotonicity holds, and the id is what the client
-            // correlates its optimistic echo against even though there is
-            // nothing to cancel.
-            turn.turn_id = next_turn_id_++;
-            steered = channels_->injections.Push(
-                llm::Message{llm::Role::User, {llm::TextBlock{turn.text}}});
-            if (!steered) refused = true;  // injection backlog full -- answered below
-        } else if (work_.size() >= kMaxWorkItems) {
-            refused = true;
+        if (terminated_.load(std::memory_order_acquire)) {
+            refusal = "session already terminated";
+        } else if (subagent_finished_.load(std::memory_order_acquire)) {
+            // A subagent's life is ONE turn: once it has finished, a further
+            // turn would run a session its spawner has already collected and
+            // reported on.
+            refusal = "subagent session already finished";
         } else {
-            turn.turn_id = next_turn_id_++;
-            work_.push_back(turn);
+            // AUTO-RESUME: a user message while paused IS the intent to continue,
+            // unless the operator opted out. Cleared before routing so the
+            // mid-turn case (steering, below) lets the running turn continue past
+            // the pause check and answer the message within itself, and the idle
+            // case queues a normal turn. The metadata event -- what every
+            // attached status bar refreshes from -- goes out after the lock.
+            if (paused_.load(std::memory_order_acquire) && params_.pause_auto_resume_on_submit) {
+                paused_.store(false, std::memory_order_release);
+                auto_resumed = true;
+            }
+            // REAL-TIME STEERING: a plain text turn arriving while the AGENT is
+            // mid-turn (in_turn_, not running_turn_ -- a command running is not a
+            // turn to ride) does not queue behind the turn; it is staged onto the
+            // injection queue and appended at the next tool-result boundary, so
+            // the very next provider request carries
+            // [..., assistant(tool_use), user(tool_results), user(steering)].
+            // Overrides opt OUT: a mid-turn model/preset switch is a re-resolution
+            // the running loop cannot absorb, so those ride the work queue as
+            // today. The steering gate (core.user_prompt_submit) fires at flush
+            // time on the worker.
+            //
+            // OpenToSteering() closes the window between the turn's POP and its
+            // seed landing in the history: a submission there is ahead of the
+            // seed on the clock but behind it in submission order, and steering
+            // it would flush it BEFORE the seed (RunTurn's turn-start flush
+            // precedes AppendAndPersist) -- reversing on the durable transcript
+            // the order the user actually typed. Such a submission queues on the
+            // work queue and runs its own turn. (Out-of-band injections --
+            // subagent completions, background results -- keep the turn-start
+            // flush's before-the-seed position: they are not user submissions
+            // and their chronology genuinely precedes the seed's turn.)
+            if (in_turn_ && loop_->OpenToSteering() && turn.model.empty() &&
+                turn.agent_preset.empty()) {
+                // The id is assigned for steered submissions too: TurnQueuedEvent's
+                // per-session monotonicity holds, and the id is what the client
+                // correlates its optimistic echo against even though there is
+                // nothing to cancel.
+                turn.turn_id = next_turn_id_++;
+                steered = channels_->injections.Push(
+                    llm::Message{llm::Role::User, {llm::TextBlock{turn.text}}});
+                if (!steered) refusal = "session backlog is full; turn refused";
+            } else if (work_.size() >= kMaxWorkItems) {
+                refusal = "session backlog is full; turn refused";
+            } else {
+                turn.turn_id = next_turn_id_++;
+                work_.push_back(turn);
+            }
         }
     }
     if (auto_resumed) EmitMetadataChanged();
-    if (refused && !steered) {
+    if (refusal && !steered) {
         // Answer the refusal rather than dropping it: the client sent a turn and
         // must learn it was not accepted. The sink never blocks (this runs on
         // the reader, which must never block even on its own error path), and
         // it only refuses a closed broadcaster.
-        if (!EmitEvent(SessionEvent{SessionError{"session backlog is full; turn refused"}})) {
+        if (!EmitEvent(SessionEvent{SessionError{*refusal}})) {
             logger_.warn("session {}: turn refused and the queue refused the error too; client will not see it",
                          params_.session_id);
         }
@@ -476,22 +487,28 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
 }
 
 bool Session::SubmitCommand(QueuedCommand command) {
-    bool refused = false;
+    // Every refusal branch below must reject through RejectCommand, not a
+    // bare `return false`: a client waiting on this request_id's
+    // CommandResult must not hang because the command was silently dropped
+    // (the terminated_ branch used to do exactly that).
+    std::optional<std::string> refusal;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (terminated_.load(std::memory_order_acquire)) return false;
-        // The SAME queue as turns, deliberately. Two queues would have no order
-        // between them, so `/model x` typed before a turn could apply after it.
-        if (work_.size() >= kMaxWorkItems) {
-            refused = true;
+        if (terminated_.load(std::memory_order_acquire)) {
+            refusal = "session already terminated";
+        } else if (work_.size() >= kMaxWorkItems) {
+            // The SAME queue as turns, deliberately. Two queues would have no
+            // order between them, so `/model x` typed before a turn could
+            // apply after it.
+            refusal = "session backlog is full";
         } else {
             work_.push_back(std::move(command));
         }
     }
-    if (refused) {
+    if (refusal) {
         // Same contract as SubmitTurn, plus the request_id: a client waiting on
         // a CommandResult must not hang because its command was not accepted.
-        RejectCommand(QueuedCommand{std::move(command)}, "session backlog is full");
+        RejectCommand(QueuedCommand{std::move(command)}, *refusal);
         return false;
     }
     turn_cv_.notify_one();
@@ -694,23 +711,24 @@ bool Session::SubmitRewind(QueuedRewind request) {
         return false;
     }
 
-    bool refused = false;
+    std::optional<std::string> refusal;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (terminated_.load(std::memory_order_acquire)) return false;
-        // The SAME queue as turns and commands, deliberately: a rewind runs at
-        // a turn boundary, and a turn queued behind it forks the rewound
-        // branch -- queue order IS the semantics.
-        if (work_.size() >= kMaxWorkItems) {
-            refused = true;
+        if (terminated_.load(std::memory_order_acquire)) {
+            refusal = "session already terminated";
+        } else if (work_.size() >= kMaxWorkItems) {
+            // The SAME queue as turns and commands, deliberately: a rewind runs
+            // at a turn boundary, and a turn queued behind it forks the
+            // rewound branch -- queue order IS the semantics.
+            refusal = "session backlog is full; rewind refused";
         } else {
             work_.push_back(std::move(request));
         }
     }
-    if (refused) {
+    if (refusal) {
         // Same contract as SubmitTurn: refusal answered on the wire, never
         // dropped. The sink never blocks on the reader thread.
-        if (!EmitEvent(SessionEvent{SessionError{"session backlog is full; rewind refused"}})) {
+        if (!EmitEvent(SessionEvent{SessionError{*refusal}})) {
             logger_.warn("session {}: rewind refused and the queue is full; client will not "
                          "see it",
                          params_.session_id);

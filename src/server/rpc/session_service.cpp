@@ -785,6 +785,15 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
             shared->RejectCommand(queued, "the command pool is saturated; retry shortly");
             return;
         }
+        // The registry already erased this session_id -- SessionRegistry::
+        // Terminate() erases the map entry before Session::Terminate() finishes
+        // tearing the session down, so `session` (this call's own reference)
+        // can still be a live, valid object here even though the lookup just
+        // failed. Reject immediately rather than falling through into the
+        // busy/unknown-command checks below, which have nothing useful to say
+        // about a session that is no longer registered.
+        session.RejectCommand(queued, "session is no longer registered");
+        return;
     }
 
     // THE BUSY CHECK, which until now nothing ever performed: both callers of

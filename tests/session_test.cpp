@@ -936,6 +936,80 @@ TEST_CASE("a turn submitted after termination is ignored", "[session]") {
     CHECK(fixture.store->messages.empty());
 }
 
+TEST_CASE(
+    "a turn submitted to a finished subagent is refused with a visible error, not silently "
+    "dropped",
+    "[session][regression]") {
+    // The bug: SubmitTurn's terminated_/subagent_finished_ early returns used
+    // to `return false` with no EmitEvent, unlike the backlog-full refusal a
+    // few lines below -- breaking session.hpp's documented contract that
+    // false always comes with an error on the wire. A subagent's single turn
+    // finishing (on_turn_finished fires, subagent_finished_ flips true) is a
+    // normal, non-racy way to reach that state without tearing down the
+    // session or its transport, so it is directly testable here.
+    SessionFixture fixture;
+    fixture.on_turn_finished = [](const agent::TurnResult&) {};
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("the only turn");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    REQUIRE(fixture.session->subagent_finished());
+
+    CHECK_FALSE(fixture.session->SubmitTurn("too late"));
+
+    bool saw_refusal = false;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_error() && event.error().message().find("finished") != std::string::npos) {
+            saw_refusal = true;
+        }
+    }
+    CHECK(saw_refusal);
+}
+
+TEST_CASE(
+    "a command submitted to a terminated session gets a CommandResult, not a permanent hang",
+    "[session][regression]") {
+    // Same bug, the command side: SubmitCommand's terminated_ early return
+    // used to skip RejectCommand entirely, unlike its own backlog-full
+    // sibling three lines below. A client waiting on this request_id's
+    // CommandResult must not hang.
+    //
+    // A real transport is built (so EmitEvent has somewhere to land, and this
+    // test's DrainQueue can observe it) but close_transport is overridden to
+    // a no-op: this reproduces the window the real bug lives in
+    // (SessionRegistry::Terminate erases the registry entry and flips
+    // terminated_ before Session::Terminate gets around to closing the
+    // transport) deterministically instead of needing the real race.
+    SessionFixture fixture;
+    {
+        agent::SessionParams temp;
+        temp.session_id = "sess-1";
+        rpc::FinishSessionWiring(temp);
+        fixture.injected_transport_handle = temp.transport_handle;
+        fixture.injected_event_sink = temp.event_sink;
+        fixture.injected_cancel_pending_requests = temp.cancel_pending_requests;
+        fixture.injected_shutdown_pending_requests = temp.shutdown_pending_requests;
+        fixture.injected_close_transport = [] {};  // deliberately NOT temp.close_transport
+    }
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+    fixture.session->Terminate();
+
+    agent::QueuedCommand command;
+    command.request_id = "req-1";
+    command.name = "cost";
+    CHECK_FALSE(fixture.session->SubmitCommand(command));
+
+    bool saw_result = false;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_command_result() && event.command_result().request_id() == "req-1") {
+            saw_result = true;
+        }
+    }
+    CHECK(saw_result);
+}
+
 TEST_CASE("a provider error surfaces as an ErrorEvent and the session survives",
           "[session]") {
     // One failed turn is not a reason to tear down a conversation the user can
