@@ -544,6 +544,9 @@ int main(int argc, char** argv) {
             } catch (const std::exception& error) {
                 outcome.error = error.what();
                 logger.warn("model discovery for backend kind '{}' failed: {}", kind, outcome.error);
+            } catch (...) {
+                outcome.error = "unknown error";
+                logger.warn("model discovery for backend kind '{}' failed: {}", kind, outcome.error);
             }
             return outcome;
         });
@@ -831,6 +834,8 @@ int main(int argc, char** argv) {
                     }
                 } catch (const std::exception& error) {
                     logger.warn("model discovery warm-up failed: {}", error.what());
+                } catch (...) {
+                    logger.warn("model discovery warm-up failed: unknown error");
                 }
                 worker.join();
             });
