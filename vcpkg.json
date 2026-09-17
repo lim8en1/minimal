@@ -15,11 +15,22 @@
     },
     "curl",
     "sqlite3",
+    {
+      "$comment": "memory plugin: FTS5 lexical prefilter + trigram substring search. The plain sqlite3 above stays for the core stores.",
+      "name": "sqlite3",
+      "features": [
+        "fts5"
+      ]
+    },
     "nlohmann-json",
     "yaml-cpp",
     "spdlog",
     "tree-sitter",
-    "re2"
+    "re2",
+    {
+      "$comment": "memory plugin: local in-process embeddings (onnx strategy). See plugins/server/memory/README.md for the model/tokenizer files this serves. Heavy port -- see BUILD.md before removing.",
+      "name": "onnxruntime"
+    }
   ],
   "features": {
     "client": {

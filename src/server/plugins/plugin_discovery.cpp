@@ -26,7 +26,12 @@ bool IsPluginFile(const std::filesystem::path& path) {
 // own initiative (~100 per session) -- trusted code, but a cost the operator
 // should opt into. Match by basename, the same key plugins.json entries use.
 bool DefaultsDisabled(std::string_view file) {
-    return file == "session-titler.so" || file == "session-titler.dylib";
+    // session-titler: spends the user's tokens on its own initiative.
+    // memory: writes to disk on the model's initiative and (under the http
+    // embedding strategy) sends entry text to an external endpoint; enabling
+    // it is the operator's informed decision. Both ship disabled by default.
+    return file == "session-titler.so" || file == "session-titler.dylib" ||
+           file == "memory.so" || file == "memory.dylib";
 }
 
 }  // namespace

@@ -112,6 +112,17 @@ add_executable(minimal_tests
     plugin_storage_test.cpp
     plugin_rpc_test.cpp
     checklist_test.cpp
+    # The memory plugin: store, tools, tokenizer and enricher are pure plugin
+    # logic over core headers; plugin.cpp (the extern "C" entry points) stays
+    # out, like every other bundled plugin. Same pattern as checklist above.
+    memory_test.cpp
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_store.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_command.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_settings.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/enricher.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/hf_tokenizer.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/embedding_http.cpp"
     # The checklist-VIEW client plugin: model (header-only), poller and panel
     # view are pure plugin logic over the ClientApi/FocusProvider seams,
     # compiled in with stub seams; checklist_view_plugin.cpp (the extern "C"
@@ -274,6 +285,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tool-ask"
     "${CMAKE_SOURCE_DIR}/plugins/server/session-titler"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory"
     "${CMAKE_SOURCE_DIR}/plugins/client/cost-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/checklist-view")
 
@@ -318,10 +330,11 @@ target_link_libraries(minimal_tests PRIVATE
     # tools-search sources are compiled directly into the test binary (see the
     # sources list above), so RE2 comes with them -- same linkage as the plugin.
     minimal_re2
-    # command_scanner.cpp is compiled directly into the test binary (see the
-    # sources list above), so the scanner's tree-sitter dependencies come with
-    # it -- same linkage as the plugin.
-    minimal_tree_sitter
+    # memory sources are compiled directly into the test binary (see the
+    # sources list above); onnxruntime stays plugin-only -- embedding_onnx.cpp
+    # is deliberately NOT in the test sources (its TryMakeOnnxEmbeddingFunction
+    # is referenced only by plugin.cpp, which is out, like every other entry
+    # point).
     minimal_tree_sitter_bash)
 
 # Scripted stdio MCP server spawned by the MCP tests as a real child process.
