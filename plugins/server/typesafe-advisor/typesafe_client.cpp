@@ -100,7 +100,7 @@ bool SleepFor(std::chrono::milliseconds delay, std::chrono::milliseconds budget_
         if (is_cancelled()) return false;
         auto now = std::chrono::steady_clock::now();
         if (now >= deadline) return true;
-        const auto slice = std::min(kSleepSlice, std::chrono::duration_cast<decltype(kSleepSlice)>(
+        const auto slice = std::min(kSleepSlice, std::chrono::duration_cast<std::chrono::milliseconds>(
                                                         deadline - now));
         std::this_thread::sleep_for(slice);
     }
