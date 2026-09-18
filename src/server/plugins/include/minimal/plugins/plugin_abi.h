@@ -49,6 +49,7 @@
 #include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
+#include "minimal/llm/variant_params.hpp"
 #include "minimal/net/http_client.hpp"
 #include "minimal/net/sse_parser.hpp"
 #include "minimal/plugins/plugin_rpc.hpp"
@@ -323,6 +324,18 @@ void minimal_plugin_register_model_catalogs(minimal::llm::ModelCatalogRegistry&,
 void minimal_plugin_register_metadata_catalogs(
     minimal::llm::MetadataCatalogRegistry&,
     const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL, additive: contributes the wire-shape a backend kind wants for one
+// "@effort" variant (ARCHITECTURE.md, "Core vs. plugin surface" -- relocated
+// out of core's providers_config.cpp), keyed by the SAME kind string
+// ProviderFactoryRegistry/ModelCatalogRegistry use. A providers.json entry's
+// "variants": [<effort names>] list form (and a discovered model's
+// autodetected effort ladder) derives its wire parameters through whichever
+// kind's provider is registered here; an unregistered kind falls back to
+// core's generic {"reasoning_effort": "<word>"} shape. See variant_params.hpp
+// for the DeriveParameters contract.
+void minimal_plugin_register_variant_params(minimal::llm::VariantParamsRegistry&,
+                                             const minimal::plugins::PluginRegistrationContext&);
 
 // OPTIONAL, additive: contributes a compaction strategy (S4), keyed by name --
 // memory.compaction_strategy in settings.json selects one. Core registers its

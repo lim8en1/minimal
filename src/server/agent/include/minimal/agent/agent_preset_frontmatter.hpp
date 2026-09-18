@@ -113,10 +113,23 @@ struct AgentPresetFrontmatter {
 // permission-mode string outside allow|ask|deny (including an empty-string key
 // in permission_mode.overrides -- see permissions_config.hpp for why that key
 // is reserved).
-AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatter& parsed);
+//
+// `known_tool_permission_keys`: the live ToolRegistry's permission-key
+// vocabulary (AgentPresetRegistry::ToolPermissionKeys::all) -- what
+// `permission:` block keys not in the fixed opencode-shape category set
+// (read/glob/grep/list/edit/write/bash/webfetch/websearch/external_directory)
+// are checked against before being accepted as a per-tool pattern-map alias.
+// Structural, not a hardcoded literal list, so a renamed/aliased/third-party
+// tool name works here exactly like the bundled ones. Required, not
+// defaulted: an empty list is a real, distinguishable answer ("no tools
+// known yet"), not "caller forgot".
+AgentPresetFrontmatter ParseAgentPresetFrontmatter(
+    const config::ParsedFrontmatter& parsed,
+    const std::vector<std::string>& known_tool_permission_keys);
 
 // Thin: reads the file, splits frontmatter/body, then parses. Throws if the
 // file is missing.
-AgentPresetFrontmatter LoadAgentPresetFrontmatter(const std::filesystem::path& path);
+AgentPresetFrontmatter LoadAgentPresetFrontmatter(
+    const std::filesystem::path& path, const std::vector<std::string>& known_tool_permission_keys);
 
 }  // namespace minimal::agent

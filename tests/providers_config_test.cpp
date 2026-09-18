@@ -67,6 +67,37 @@ nlohmann::json TwoModelsOnOneProvider() {
     })");
 }
 
+// A test-local fixture replicating provider-anthropic's AnthropicVariantParams
+// (plugins/server/provider-anthropic/anthropic_variant_params.cpp) -- plugin
+// code is not linked into this test binary, so the mapping is duplicated
+// here rather than shared, the same way every other plugin-relocated
+// behavior in this tree gets its own test-side fixture. Kept in exact sync
+// with the plugin: any change to one should be mirrored in the other.
+VariantParamsHook AnthropicVariantParamsHookFixture() {
+    return [](const std::string& backend, const std::string& effort_word,
+              std::optional<int> max_tokens) -> std::optional<std::pair<nlohmann::json, bool>> {
+        if (backend != "anthropic") return std::nullopt;
+        if (effort_word == "none") return std::pair{nlohmann::json::object(), false};
+        std::optional<int> budget;
+        if (effort_word == "low") budget = 4096;
+        else if (effort_word == "medium") budget = 8192;
+        else if (effort_word == "high") budget = 16384;
+        if (!budget) {
+            throw std::runtime_error(
+                "providers.json: effort '" + effort_word +
+                "' has no anthropic mapping (known: low, medium, high, xhigh, max, none)");
+        }
+        bool clamped = false;
+        int value = *budget;
+        if (max_tokens && value > *max_tokens - 1024) {
+            value = *max_tokens - 1024;
+            clamped = true;
+        }
+        return std::pair{
+            nlohmann::json{{"thinking", {{"type", "enabled"}, {"budget_tokens", value}}}}, clamped};
+    };
+}
+
 const ResolvedModel& Require(const ProvidersConfig& config, const std::string& text) {
     const auto ref = ParseModelRef(text);
     REQUIRE(ref.has_value());
@@ -1366,7 +1397,7 @@ TEST_CASE("list-form variants synthesize addressable siblings with backend-deriv
         "openai": {"backend": "openai", "url": "http://x/v1",
                    "models": {"gpt": {"variants": ["medium"]}}}
       }
-    })"));
+    })"), AnthropicVariantParamsHookFixture());
 
     // The base still resolves, and each declared name became a sibling.
     const auto base = Require(config, "anthropic/claude");
@@ -1403,10 +1434,86 @@ TEST_CASE("the anthropic thinking budget is clamped to fit the model's max_token
       "providers": {"p": {"backend": "anthropic", "url": "https://api.anthropic.com",
                           "max_tokens": 4096,
                           "models": {"m": {"variants": ["xhigh"]}}}}
-    })"));
+    })"), AnthropicVariantParamsHookFixture());
     const auto& model = Require(config, "p/m@xhigh");
     // 16384 wanted, 4096 - 1024 available.
     CHECK(model.parameters.at("thinking").at("budget_tokens") == 3072);
+}
+
+TEST_CASE("VariantParametersFor: a registered hook produces identical output to the "
+          "pre-relocation anthropic branch, across the full effort ladder",
+          "[providers][variants]") {
+    const auto hook = AnthropicVariantParamsHookFixture();
+
+    {
+        const auto [params, clamped] = VariantParametersFor("anthropic", "low", 32000, hook);
+        CHECK_FALSE(clamped);
+        CHECK(params.at("thinking").at("type") == "enabled");
+        CHECK(params.at("thinking").at("budget_tokens") == 4096);
+    }
+    {
+        const auto [params, clamped] = VariantParametersFor("anthropic", "medium", 32000, hook);
+        CHECK_FALSE(clamped);
+        CHECK(params.at("thinking").at("budget_tokens") == 8192);
+    }
+    {
+        const auto [params, clamped] = VariantParametersFor("anthropic", "high", 32000, hook);
+        CHECK_FALSE(clamped);
+        CHECK(params.at("thinking").at("budget_tokens") == 16384);
+    }
+    {
+        // xhigh/max fold to "high" before the hook is ever consulted.
+        const auto [params, clamped] = VariantParametersFor("anthropic", "xhigh", 32000, hook);
+        CHECK(params.at("thinking").at("budget_tokens") == 16384);
+        const auto [params2, clamped2] = VariantParametersFor("anthropic", "max", 32000, hook);
+        CHECK(params2.at("thinking").at("budget_tokens") == 16384);
+        (void)clamped;
+        (void)clamped2;
+    }
+    {
+        // Anthropic: thinking omitted entirely IS off.
+        const auto [params, clamped] = VariantParametersFor("anthropic", "none", 32000, hook);
+        CHECK_FALSE(clamped);
+        CHECK(params.empty());
+    }
+    {
+        // "minimal" has no Anthropic reading.
+        CHECK_THROWS_AS(VariantParametersFor("anthropic", "minimal", 32000, hook),
+                        std::runtime_error);
+    }
+}
+
+TEST_CASE("VariantParametersFor: an unregistered kind (no hook, or a hook that answers "
+          "nullopt) falls back to the generic reasoning_effort shape",
+          "[providers][variants]") {
+    // No hook at all -- the "provider-anthropic plugin isn't loaded" case.
+    // Resolution never throws and never produces the old Anthropic shape;
+    // only the value of an unused parameter blob differs (session
+    // construction fails first at ProviderFactoryRegistry::Find("anthropic"),
+    // before any request carrying these parameters is ever sent).
+    {
+        const auto [params, clamped] = VariantParametersFor("anthropic", "high", 32000);
+        CHECK_FALSE(clamped);
+        CHECK(params.at("reasoning_effort") == "high");
+        CHECK_FALSE(params.contains("thinking"));
+    }
+    {
+        const auto [params, clamped] = VariantParametersFor("anthropic", "none", 32000);
+        CHECK_FALSE(clamped);
+        CHECK(params.at("reasoning_effort") == "minimal");
+    }
+    // A hook that is set but has nothing registered for this kind -- same
+    // fallback as no hook at all.
+    {
+        const VariantParamsHook empty_hook =
+            [](const std::string&, const std::string&,
+              std::optional<int>) -> std::optional<std::pair<nlohmann::json, bool>> {
+            return std::nullopt;
+        };
+        const auto [params, clamped] = VariantParametersFor("anthropic", "high", 32000, empty_hook);
+        CHECK_FALSE(clamped);
+        CHECK(params.at("reasoning_effort") == "high");
+    }
 }
 
 TEST_CASE("map-form variants carry full bodies; unknown keys are refused",

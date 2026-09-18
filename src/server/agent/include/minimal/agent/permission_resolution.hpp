@@ -2,6 +2,7 @@
 
 #include <unordered_map>
 #include <string>
+#include <vector>
 
 #include "minimal/tools/permission.hpp"
 
@@ -38,9 +39,16 @@ namespace minimal::agent {
 // still be a narrowing for an arbitrary tool name would require the tool's
 // ToolCategory, unavailable here. A GLOBAL-config preset (the operator's own
 // agents/*.md) stays fully trusted, as before.
-tools::PermissionPolicy BuildPermissionPolicy(const tools::PermissionOverrideLayer& preset,
-                                               const tools::PermissionOverrideLayer& global,
-                                               bool preset_is_trusted = true);
+// `dotenv_protected_permission_keys`: the live ToolRegistry's
+// DotenvProtectedPermissionKeys() -- what tools::default_pattern_rules()
+// applies its dotenv-deny defaults to. Defaulted to {} (no dotenv defaults)
+// so callers that do not have a ToolRegistry handy (most tests) keep
+// compiling; this layer still never consults ToolRegistry directly (see
+// above) -- the caller resolves the list once, elsewhere, and hands it down.
+tools::PermissionPolicy BuildPermissionPolicy(
+    const tools::PermissionOverrideLayer& preset, const tools::PermissionOverrideLayer& global,
+    bool preset_is_trusted = true,
+    const std::vector<std::string>& dotenv_protected_permission_keys = {});
 
 // Exact -- McpPermissionPolicy's own two-layer shape already matches
 // resolve_mcp_chain() once per_server/default_mode are seeded this way.

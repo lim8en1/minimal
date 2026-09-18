@@ -4,4 +4,5 @@ minimal_add_plugin(provider-anthropic
     anthropic_response.cpp
     anthropic_stream_reassembler.cpp
     anthropic_error_mapping.cpp
-    anthropic_provider.cpp)
+    anthropic_provider.cpp
+    anthropic_variant_params.cpp)

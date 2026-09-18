@@ -171,14 +171,6 @@ TEST_CASE("ParseSettingsConfig: legacy context_compaction_trigger_tokens still p
     }
 }
 
-TEST_CASE("ParseSettingsConfig: tools settings pass through as raw JSON", "[settings_config]") {
-    nlohmann::json doc = {{"tools", {{"bash", {{"timeout_ms", 5000}, {"max_output_bytes", 64}}}}}};
-
-    auto config = ParseSettingsConfig(doc);
-    CHECK(config.tools.bash == nlohmann::json{{"timeout_ms", 5000}, {"max_output_bytes", 64}});
-    CHECK(config.tools.read == nlohmann::json::object());
-}
-
 TEST_CASE("ParseSettingsConfig: tools.raw carries the whole slice verbatim, including keys "
           "ParseTools does not recognize",
           "[settings_config]") {

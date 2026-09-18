@@ -206,9 +206,14 @@ void merge_pattern_layers(
     std::vector<PermissionPatternRule>& out_ood_patterns);
 
 // The built-in default pattern set, consulted only for tools neither config
-// layer gave patterns for: file-reading tools deny dotenv files, the opencode
-// default. Living in the DEFAULT layer (not a hard floor) is what keeps it
-// overridable -- config patterns replace it wholesale per tool.
-std::unordered_map<std::string, std::vector<PermissionPatternRule>> default_pattern_rules();
+// layer gave patterns for: dotenv files are denied for every tool in
+// `dotenv_protected_permission_keys` (Tool::default_dotenv_protected() --
+// ToolRegistry::DotenvProtectedPermissionKeys() -- structural, not a
+// hardcoded read/write/edit literal, so a renamed or third-party file tool
+// that opts in is covered too). Living in the DEFAULT layer (not a hard
+// floor) is what keeps it overridable -- config patterns replace it wholesale
+// per tool.
+std::unordered_map<std::string, std::vector<PermissionPatternRule>> default_pattern_rules(
+    const std::vector<std::string>& dotenv_protected_permission_keys);
 
 }  // namespace minimal::tools

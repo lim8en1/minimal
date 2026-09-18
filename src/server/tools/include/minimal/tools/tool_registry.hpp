@@ -119,6 +119,18 @@ public:
     };
     ConfigNamespaceReport ConfigNamespaces() const;
 
+    // --- Structural tool-name queries ---------------------------------------
+    //
+    // Every LIVE (non-shadowed, non-MCP) tool's permission key, sorted and
+    // deduped. For callers that need "is this string an actual registered
+    // tool" structurally -- a renamed/aliased/third-party tool answers
+    // correctly here, unlike a fixed literal name list.
+    std::vector<std::string> PermissionKeys() const;
+
+    // The subset of PermissionKeys() whose tool opted into
+    // Tool::default_dotenv_protected().
+    std::vector<std::string> DotenvProtectedPermissionKeys() const;
+
     // Startup rollback for a plugin whose registration threw: removes every
     // tool -- and its attribution/owner entries -- attributed to `plugin_name`.
     // Valid ONLY before ApplyAliases and before any session exists: aliases

@@ -106,7 +106,9 @@ TEST_CASE("a matching deny pattern survives an AlwaysAllow exact override",
     PermissionPolicy policy;
     policy.read_only = PermissionMode::Ask;
     policy.per_tool_overrides["read"] = PermissionMode::AlwaysAllow;
-    for (auto& [key, rules] : default_pattern_rules()) policy.pattern_overrides[key] = rules;
+    for (auto& [key, rules] : default_pattern_rules({"read", "write", "edit"})) {
+        policy.pattern_overrides[key] = rules;
+    }
 
     CHECK(policy.mode_for("read", ToolCategory::ReadOnly, std::string("/proj/.env"),
                           /*subject_is_path=*/true) == PermissionMode::AlwaysDeny);

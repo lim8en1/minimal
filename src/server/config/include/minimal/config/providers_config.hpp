@@ -71,6 +71,7 @@
 #include "minimal/llm/metadata_catalog.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider.hpp"
+#include "minimal/llm/variant_params.hpp"
 
 namespace minimal::config {
 
@@ -110,28 +111,55 @@ struct ModelVariant {
     std::optional<std::int64_t> context_window_tokens;
 };
 
-// The effort vocabulary and the derived parameters, per backend kind. Pure;
-// shared by the static parse, discovery synthesis, and (via the same constants)
-// the variant-name validation.
+// Kind-keyed provider-metadata lookup (ARCHITECTURE.md, "Core vs. plugin
+// surface"), injected the same way DiscoveryHook/MetadataHook are: main.cpp
+// builds it over a VariantParamsRegistry once, after plugin load; the config
+// layer never links plugins. UNLIKE those two, this is threaded as a
+// PARSE-TIME ARGUMENT rather than a post-construction setter: the static
+// `"variants": [...]` list form derives its wire parameters DURING
+// ParseProvidersConfig itself (MakeVariantResolved, called while the config
+// is still being built), before any ProvidersConfig object exists to call a
+// setter on. `effort_word` arrives normalized (see VariantParametersFor).
+// nullopt return means "no plugin-registered mapping for this kind" -- the
+// generic reasoning_effort fallback applies, same as any backend that never
+// had one.
+using VariantParamsHook = std::function<std::optional<std::pair<nlohmann::json, bool>>(
+    const std::string& backend_kind, const std::string& effort_word, std::optional<int> max_tokens)>;
+
+// Translates a registry pointer into a VariantParamsHook -- the Find-then-
+// invoke glue shared by every call site that owns a VariantParamsRegistry
+// (main.cpp's own hook for the two eager parse call sites, sanity_check.cpp,
+// AgentPresetRegistry's constructor). Null registry -> an always-nullopt
+// hook, so the generic fallback applies uniformly whether the registry is
+// absent (a test with no plugin registry) or simply has no mapping for a
+// particular kind.
+VariantParamsHook MakeVariantParamsHook(const llm::VariantParamsRegistry* registry);
+
+// The effort vocabulary and the derived parameters, per backend kind. Pure
+// (given `hook`); shared by the static parse, discovery synthesis, and (via
+// the same constants) the variant-name validation.
 //
-//   openai backend: `reasoning_effort: "<name>"` -- OpenAI's own words;
-//     "xhigh"/"max" normalize to "high" (OpenAI's ladder tops out there), and
-//     "none"/"minimal" normalize to "minimal".
-//   anthropic backend: `thinking: {"type": "enabled", "budget_tokens": N}` from
-//     a fixed per-name budget scale, clamped to max_tokens - 1024 when the
-//     base's output cap is known (the API rejects budget >= max_tokens).
-//
-// Any other backend kind: names pass through as `reasoning_effort` too -- the
-// OpenAI-compatible-proxy spelling is the closest thing to a lingua franca, and
-// a backend that rejects it fails the turn with the API's own message rather
-// than silently doing nothing.
+// A THIN DISPATCHER, not the backend-specific knowledge itself (relocated to
+// plugins/server/provider-anthropic -- see ARCHITECTURE.md, "Core vs. plugin
+// surface", and llm/variant_params.hpp): "xhigh"/"max" fold to "high" once,
+// here, so the fold cannot drift between a plugin's mapping and the fallback
+// below; `hook` is then consulted for `backend` (see VariantParamsHook) and,
+// on a hit, owns the rest of the derivation entirely, including how "none"
+// spells "off" on that backend's wire. On a miss -- no hook, or the kind has
+// no registered provider -- every backend gets the same generic
+// `reasoning_effort: "<name>"` shape ("none" spells "minimal"): the
+// OpenAI-compatible-proxy vocabulary is the closest thing to a lingua franca,
+// and a backend that rejects it fails the turn with the API's own message
+// rather than silently doing nothing.
 //
 // `max_tokens` is the base model's resolved output cap (nullopt = unknown),
-// used only for the anthropic budget clamp. The second element of the pair is
-// false when the clamp fired, so the caller can warn.
+// forwarded to the hook for backends whose wire shape needs it (Anthropic's
+// budget clamp). The second element of the returned pair is false when a
+// value was clamped, so the caller can warn.
 std::pair<nlohmann::json, bool> VariantParametersFor(const std::string& backend,
                                                      const std::string& effort,
-                                                     std::optional<int> max_tokens);
+                                                     std::optional<int> max_tokens,
+                                                     const VariantParamsHook& hook = {});
 
 // The known effort names, for validation and error messages. Sorted.
 const std::vector<std::string>& KnownEffortNames();
@@ -325,6 +353,14 @@ public:
     // never for a model that already has the fields declared.
     void SetMetadataHook(MetadataHook hook);
 
+    // Injection point for the DISCOVERED-variant path (ResolveVariant),
+    // mirroring SetDiscoveryHook/SetMetadataHook -- consulted lazily, after
+    // this object already exists, so a post-construction setter works fine
+    // here (unlike the static list-form path, which needs the hook DURING
+    // ParseProvidersConfig -- see VariantParametersFor's own threading).
+    // Once per process; called under the config mutex, must not re-enter.
+    void SetVariantParamsHook(VariantParamsHook hook);
+
     // Whether discovery failed for a provider, and why. Untouched
     // (attempted == false) for a non-discover provider or a discover-entry the
     // session has not resolved against yet.
@@ -402,10 +438,14 @@ private:
         };
 
         // Guards gates_, discovery_, overlay_, hook_, metadata_hook_,
-        // metadata_variants_ and generation_.
+        // variant_params_hook_, metadata_variants_ and generation_.
         mutable std::mutex mutex_;
         DiscoveryHook hook_;
         MetadataHook metadata_hook_;
+        // Consulted only by the discovered-variant path (ResolveVariant); the
+        // static list-form path reads its hook from a function parameter
+        // instead (see VariantParametersFor/ParseProvidersConfig).
+        VariantParamsHook variant_params_hook_;
         std::uint64_t generation_ = 0;
         mutable std::map<std::string, DiscoveryCache> discovery_;  // by provider name
         // Discovered models, and overlay copies of static models enriched with
@@ -489,16 +529,25 @@ std::string DescribeModels(const ProvidersConfig& providers);
 // model is genuinely not served, which DescribeModels already says.
 std::string DescribeDiscovery(const ProvidersConfig& providers, const std::string& provider_name);
 
-// Pure. Throws std::runtime_error on: a top-level array (the pre-`models` schema
-// -- refused by name rather than silently misparsed), a provider missing
-// `backend`/`url`, a provider with no `models` UNLESS it sets "discover": true
-// (a discover-entry is addressable through its catalog), both api_key and
-// api_key_env set, or api_key_env naming an unset variable. Neither key set is
-// NOT an error -- local servers routinely need none.
-ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc);
+// Pure (given `variant_params_hook`). Throws std::runtime_error on: a
+// top-level array (the pre-`models` schema -- refused by name rather than
+// silently misparsed), a provider missing `backend`/`url`, a provider with no
+// `models` UNLESS it sets "discover": true (a discover-entry is addressable
+// through its catalog), both api_key and api_key_env set, or api_key_env
+// naming an unset variable. Neither key set is NOT an error -- local servers
+// routinely need none.
+//
+// `variant_params_hook` derives wire parameters for a static
+// `"variants": [<effort names>]` list-form entry -- see VariantParamsHook.
+// Defaulted to {} so a caller with no plugin registry handy (most tests, and
+// any caller that only wants the generic reasoning_effort shape) keeps
+// compiling.
+ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc,
+                                     const VariantParamsHook& variant_params_hook = {});
 
 // Thin: reads the file and parses it. Throws if the file is missing or is not
 // valid JSON, or per ParseProvidersConfig above.
-ProvidersConfig LoadProvidersConfig(const std::filesystem::path& path);
+ProvidersConfig LoadProvidersConfig(const std::filesystem::path& path,
+                                    const VariantParamsHook& variant_params_hook = {});
 
 }  // namespace minimal::config

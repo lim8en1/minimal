@@ -150,6 +150,7 @@ public:
 
     const ToolSpec& spec() const override { return spec_; }
     bool path_confinement_supported() const override { return true; }
+    bool default_dotenv_protected() const override { return true; }
     std::optional<std::string> ExtractPath(const nlohmann::json& input) const override {
         return ExtractPathField(input);
     }
@@ -233,6 +234,7 @@ public:
 
     const ToolSpec& spec() const override { return spec_; }
     bool path_confinement_supported() const override { return true; }
+    bool default_dotenv_protected() const override { return true; }
     std::optional<std::string> ExtractPath(const nlohmann::json& input) const override {
         return ExtractPathField(input);
     }
@@ -335,6 +337,7 @@ public:
 
     const ToolSpec& spec() const override { return spec_; }
     bool path_confinement_supported() const override { return true; }
+    bool default_dotenv_protected() const override { return true; }
     std::optional<std::string> ExtractPath(const nlohmann::json& input) const override {
         return ExtractPathField(input);
     }

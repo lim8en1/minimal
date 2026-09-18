@@ -211,14 +211,18 @@ void merge_pattern_layers(
     }
 }
 
-std::unordered_map<std::string, std::vector<PermissionPatternRule>> default_pattern_rules() {
-    // File-shaped tools deny dotenv files; matched against the canonical
-    // absolute path, so "**/" covers every depth including the project root.
+std::unordered_map<std::string, std::vector<PermissionPatternRule>> default_pattern_rules(
+    const std::vector<std::string>& dotenv_protected_permission_keys) {
+    // Tools that opted into Tool::default_dotenv_protected() deny dotenv
+    // files by default; matched against the canonical absolute path, so
+    // "**/" covers every depth including the project root.
     const PermissionPatternRule dotenv_exact{"**/.env", PermissionMode::AlwaysDeny};
     const PermissionPatternRule dotenv_suffix{"**/.env.*", PermissionMode::AlwaysDeny};
-    return {{"read", {dotenv_exact, dotenv_suffix}},
-            {"write", {dotenv_exact, dotenv_suffix}},
-            {"edit", {dotenv_exact, dotenv_suffix}}};
+    std::unordered_map<std::string, std::vector<PermissionPatternRule>> rules;
+    for (const auto& key : dotenv_protected_permission_keys) {
+        rules[key] = {dotenv_exact, dotenv_suffix};
+    }
+    return rules;
 }
 
 }  // namespace minimal::tools

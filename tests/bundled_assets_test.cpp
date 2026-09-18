@@ -136,7 +136,8 @@ TEST_CASE("every bundled/agents preset parses through the production load path",
         ++checked;
         SECTION(entry.path().filename().string()) {
             agent::AgentPresetFrontmatter preset;
-            REQUIRE_NOTHROW(preset = agent::LoadAgentPresetFrontmatter(entry.path()));
+            REQUIRE_NOTHROW(preset = agent::LoadAgentPresetFrontmatter(
+                                entry.path(), {"bash", "read", "write", "edit", "glob", "grep"}));
             CHECK(preset.name == entry.path().stem().string());
             CHECK(!preset.body.empty());
             CHECK(!preset.description.empty());

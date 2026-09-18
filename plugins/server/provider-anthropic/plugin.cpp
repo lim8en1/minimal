@@ -16,7 +16,10 @@
 
 #include "minimal/plugins/plugin_abi.h"
 
+#include <memory>
+
 #include "anthropic_provider.hpp"
+#include "anthropic_variant_params.hpp"
 
 extern "C" {
 
@@ -28,6 +31,18 @@ void minimal_plugin_register_provider_factories(
     registry.Register("anthropic", [](const minimal::llm::ProviderConfig& config) {
         return std::make_unique<minimal::provider_anthropic::AnthropicProvider>(config);
     });
+}
+
+// The "@effort" variant wire-shape provider (ARCHITECTURE.md, "Core vs.
+// plugin surface") -- a second, sibling registration under the SAME kind
+// string, consulted by core's VariantParametersFor dispatcher for both the
+// static "variants": [...] list form (parse time) and the discovered-model
+// variant path (ResolveVariant, lazy). See variant_params.hpp for why this
+// is a separate registry rather than a capability query on LlmProvider.
+void minimal_plugin_register_variant_params(
+    minimal::llm::VariantParamsRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
+    registry.Register("anthropic", std::make_shared<minimal::provider_anthropic::AnthropicVariantParams>());
 }
 
 }  // extern "C"

@@ -317,6 +317,12 @@ int main(int argc, char** argv) {
     // listing catalogs' (one catalog per backend kind, first-wins) and an
     // enrichment source serves several backends at once.
     minimal::llm::MetadataCatalogRegistry metadata_catalogs;
+    // Additive across plugins, keyed by the SAME provider kind string: the
+    // wire-shape a backend wants for one "@effort" variant (relocated out of
+    // core -- ARCHITECTURE.md, "Core vs. plugin surface"). An unregistered
+    // kind is not degraded state -- it is the ordinary case for every backend
+    // that needs no per-kind table of its own (see variant_params.hpp).
+    minimal::llm::VariantParamsRegistry variant_params;
     // S4: additive across plugins, keyed by name -- memory.compaction_strategy
     // selects one, with agent-preset frontmatter overriding per preset. Core's
     // own strategies are registered directly here, BEFORE plugin load, so the
@@ -389,7 +395,8 @@ int main(int argc, char** argv) {
                                           &auth_providers, &permission_advisors, &model_catalogs,
                                           &services, plugin_storage.get(), plugin_data_root,
                                           &hook_dispatcher, &mention_resolvers,
-                                          &compaction_strategies, &metadata_catalogs);
+                                          &compaction_strategies, &metadata_catalogs,
+                                          &variant_params);
     const auto records = loader.LoadAll(candidates);
     // The load thread is the only writer; from here the map is read-only, which
     // is what makes unguarded Find from session workers and the command pool
@@ -423,6 +430,9 @@ int main(int argc, char** argv) {
         }
         if (record.registered_metadata_fallback) {
             std::printf("      metadata (fallback: kinds nobody named)\n");
+        }
+        for (const auto& kind : record.registered_variant_params_kinds) {
+            std::printf("      variant  %s\n", kind.c_str());
         }
         for (const auto& point : record.registered_hook_points) {
             std::printf("      hook     %s\n", point.c_str());
@@ -504,6 +514,7 @@ int main(int argc, char** argv) {
         &services,
         &model_catalogs,
         &metadata_catalogs,
+        &variant_params,
         &compaction_strategies,
         &hook_dispatcher,
     });
@@ -544,9 +555,15 @@ int main(int argc, char** argv) {
     minimal::config::PermissionsConfig permissions = sanity.permissions();
     std::unique_ptr<minimal::agent::AgentPresetRegistry> presets;
     auto session_db = sanity.take_session_db();
+    // Resolved once, after ApplyAliases/SetPermissionKeys above, so preset
+    // parsing and permission-default resolution see the live tool vocabulary
+    // rather than a hardcoded read/write/edit/bash/glob/grep literal list
+    // (ARCHITECTURE.md, "Core vs. plugin surface").
+    const minimal::agent::ToolPermissionKeys tool_permission_keys{
+        tools.PermissionKeys(), tools.DotenvProtectedPermissionKeys()};
     try {
-        presets = std::make_unique<minimal::agent::AgentPresetRegistry>(config_dir, skills,
-                                                                        settings, permissions);
+        presets = std::make_unique<minimal::agent::AgentPresetRegistry>(
+            config_dir, skills, settings, permissions, tool_permission_keys, &variant_params);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "\nconfiguration error (%s): %s\n", config_dir.c_str(), e.what());
         return 1;
@@ -604,6 +621,16 @@ int main(int argc, char** argv) {
                 return std::nullopt;
             }
         });
+
+    // Inject the DISCOVERED-variant params hook (ResolveVariant), the same
+    // AFTER-plugin-load / BEFORE-first-Resolve point the two hooks above use.
+    // The STATIC "variants": [...] list-form path already resolved its
+    // parameters above, during the LoadProvidersConfig call inside
+    // AgentPresetRegistry's own constructor -- it needed the registry
+    // earlier than any post-construction setter could supply it, so it took
+    // the same &variant_params pointer directly as a constructor argument
+    // instead (see AgentPresetRegistry's constructor comment).
+    presets->SetVariantParamsHook(minimal::config::MakeVariantParamsHook(&variant_params));
 
     // Preset-scoped tool definitions: the builders run once per resolved
     // preset (inside the registry's resolve cache) and their results ride the

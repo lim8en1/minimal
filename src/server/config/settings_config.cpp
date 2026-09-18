@@ -99,9 +99,6 @@ ToolsSettings ParseTools(const nlohmann::json& doc) {
     if (!doc.contains("tools")) return result;
     const auto& tools = doc.at("tools");
     result.raw = tools;
-    result.read = tools.value("read", result.read);
-    result.edit = tools.value("edit", result.edit);
-    result.bash = tools.value("bash", result.bash);
     if (tools.contains("mcp") && tools.at("mcp").is_object()) {
         const auto& mcp = tools.at("mcp");
         result.mcp.connect_timeout_ms = mcp.value("connect_timeout_ms", result.mcp.connect_timeout_ms);

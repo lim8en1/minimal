@@ -15,6 +15,7 @@
 #include "minimal/llm/metadata_catalog.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
+#include "minimal/llm/variant_params.hpp"
 #include "minimal/plugins/service_registry.hpp"
 #include "minimal/rpc/auth_provider.hpp"
 #include "minimal/tools/permission_advisor.hpp"
@@ -96,6 +97,11 @@ struct PluginRecord {
     // Compaction strategy kinds, keyed like registered_provider_kinds. Feeds
     // the sanity check's memory.compaction_strategy resolution warning.
     std::vector<std::string> registered_compaction_strategy_kinds;
+    // Variant-params kinds, keyed like registered_provider_kinds (the same
+    // kind string a providers.json `backend` names). Feeds the startup print;
+    // an unregistered kind is not an error -- it just means that backend uses
+    // the generic reasoning_effort fallback.
+    std::vector<std::string> registered_variant_params_kinds;
     // FULL hook point names, as the plugin declared them. Points live in their
     // own namespace -- no aliasing, no permission keys -- and a duplicate is
     // fatal at startup via the NameRegistry (NameKind::HookPoint).
@@ -135,7 +141,8 @@ public:
                  hooks::HookDispatcher* hook_points = nullptr,
                  agent::MentionResolverRegistry* mention_resolvers = nullptr,
                  agent::CompactionStrategyRegistry* compaction_strategies = nullptr,
-                 llm::MetadataCatalogRegistry* metadata_catalogs = nullptr);
+                 llm::MetadataCatalogRegistry* metadata_catalogs = nullptr,
+                 llm::VariantParamsRegistry* variant_params = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -216,6 +223,12 @@ private:
     // are the listing catalogs', and this seam's contract is per-model Lookup
     // with a cache, not a pure List.
     llm::MetadataCatalogRegistry* metadata_catalogs_ = nullptr;
+    // Optional like the others; null means plugins cannot register a
+    // variant-params provider. Additive across plugins, keyed by the provider
+    // kind string; a duplicate kind is refused and reported by the sanity
+    // check. An unregistered kind is not a degraded state -- it is the
+    // ordinary case for every backend that needs no per-kind wire shape.
+    llm::VariantParamsRegistry* variant_params_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 
     // One entry per loaded plugin that exports

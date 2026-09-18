@@ -1,6 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "fakes.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -39,4 +42,35 @@ TEST_CASE("Register keeps first-wins and parks the duplicate in shadowed_",
     const auto kept = registry.Find("dup");
     REQUIRE(kept != nullptr);
     CHECK(kept->spec().category == tools::ToolCategory::ReadOnly);
+}
+
+namespace {
+// A tool that opts into Tool::default_dotenv_protected(), the way tools-fs's
+// Read/Write/Edit do -- see fs_tools.cpp.
+class DotenvProtectedFakeTool : public FakeTool {
+public:
+    using FakeTool::FakeTool;
+    bool default_dotenv_protected() const override { return true; }
+};
+}  // namespace
+
+TEST_CASE("PermissionKeys/DotenvProtectedPermissionKeys reflect the live registry, not a "
+          "hardcoded name list",
+          "[tool_registry]") {
+    // Two tools, neither named read/write/edit: proves the structural query
+    // works for a renamed/third-party tool exactly like a bundled one
+    // (ARCHITECTURE.md, "Core vs. plugin surface" -- fixes the
+    // "not structurally privileged" claim for real).
+    tools::ToolRegistry registry;
+    registry.Register(
+        std::make_unique<DotenvProtectedFakeTool>("custom_read", tools::ToolCategory::ReadOnly));
+    registry.Register(std::make_unique<FakeTool>("custom_search", tools::ToolCategory::ReadOnly));
+    registry.SetPermissionKeys({});  // no aliasing: surface name == permission key
+
+    const auto all = registry.PermissionKeys();
+    CHECK(std::find(all.begin(), all.end(), "custom_read") != all.end());
+    CHECK(std::find(all.begin(), all.end(), "custom_search") != all.end());
+
+    const auto dotenv = registry.DotenvProtectedPermissionKeys();
+    CHECK(dotenv == std::vector<std::string>{"custom_read"});
 }

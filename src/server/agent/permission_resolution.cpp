@@ -9,9 +9,9 @@ namespace {
 constexpr const char* kCategoryProbeToolName = "";
 }  // namespace
 
-tools::PermissionPolicy BuildPermissionPolicy(const tools::PermissionOverrideLayer& preset,
-                                               const tools::PermissionOverrideLayer& global,
-                                               bool preset_is_trusted) {
+tools::PermissionPolicy BuildPermissionPolicy(
+    const tools::PermissionOverrideLayer& preset, const tools::PermissionOverrideLayer& global,
+    bool preset_is_trusted, const std::vector<std::string>& dotenv_protected_permission_keys) {
     tools::PermissionPolicy policy;
 
     // Untrusted mode: fold the preset-applied resolution against what global
@@ -64,10 +64,10 @@ tools::PermissionPolicy BuildPermissionPolicy(const tools::PermissionOverrideLay
         tools::merge_pattern_layers(tools::PermissionOverrideLayer{}, global,
                                     policy.pattern_overrides, policy.out_of_workdir_patterns);
     }
-    // The built-in defaults (dotenv denial for the file tools) fill in only
+    // The built-in defaults (dotenv denial for tools that opt in) fill in only
     // where neither layer spoke: operator patterns replace them wholesale per
     // tool, which is what makes them a default rather than a floor.
-    for (auto& [key, rules] : tools::default_pattern_rules()) {
+    for (auto& [key, rules] : tools::default_pattern_rules(dotenv_protected_permission_keys)) {
         if (policy.pattern_overrides.find(key) == policy.pattern_overrides.end()) {
             policy.pattern_overrides.emplace(key, std::move(rules));
         }

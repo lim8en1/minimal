@@ -49,6 +49,17 @@ public:
     }
 };
 
+// The variant-params relocation seam (ARCHITECTURE.md, "Core vs. plugin
+// surface"): the plugin also registers one under the SAME kind string, so
+// the loader tests can observe this seam through a real dlopen too.
+class FixtureVariantParams : public minimal::llm::VariantParamsProvider {
+public:
+    std::pair<nlohmann::json, bool> DeriveParameters(const std::string& effort_word,
+                                                     std::optional<int>) const override {
+        return {nlohmann::json{{"fixture_effort", effort_word}}, false};
+    }
+};
+
 }  // namespace
 
 extern "C" {
@@ -87,5 +98,10 @@ void minimal_plugin_register_model_catalogs(
     minimal::llm::ModelCatalogRegistry& registry,
     const minimal::plugins::PluginRegistrationContext&) {
     registry.Register("fixture", std::make_shared<FixtureCatalog>());
+}
+void minimal_plugin_register_variant_params(
+    minimal::llm::VariantParamsRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
+    registry.Register("fixture", std::make_shared<FixtureVariantParams>());
 }
 }

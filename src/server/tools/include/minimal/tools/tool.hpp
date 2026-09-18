@@ -216,6 +216,16 @@ public:
     // nothing to do with what they actually do.
     virtual bool network_access_required() const { return false; }
 
+    // Declarative opt-in, same shape as path_confinement_supported(): a tool
+    // that reads/writes/edits file CONTENT a human would not want an agent
+    // silently touching (.env and friends) sets this true so
+    // tools::default_pattern_rules() denies dotenv paths for it by default --
+    // via ToolRegistry::DotenvProtectedPermissionKeys(), without core ever
+    // needing to know the tool's name. Default false: most tools (glob, grep,
+    // bash) either never touch file content or have no path-shaped subject
+    // this protects.
+    virtual bool default_dotenv_protected() const { return false; }
+
     // Declarative opt-in for per-preset plugin config: the namespace this tool
     // reads from the active preset's `tool_config` frontmatter map
     // (agents/*.md: `tool_config: {<namespace>: {...}}`). Delivered

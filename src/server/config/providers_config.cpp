@@ -441,6 +441,16 @@ nlohmann::json NormalizeOpencodeProvider(const nlohmann::json& provider,
 
 // --- effort variants ---------------------------------------------------------
 
+VariantParamsHook MakeVariantParamsHook(const llm::VariantParamsRegistry* registry) {
+    if (registry == nullptr) return {};
+    return [registry](const std::string& kind, const std::string& effort_word,
+                      std::optional<int> max_tokens) -> std::optional<std::pair<nlohmann::json, bool>> {
+        auto* provider = registry->Find(kind);
+        if (provider == nullptr) return std::nullopt;
+        return provider->DeriveParameters(effort_word, max_tokens);
+    };
+}
+
 // The known effort ladder, sorted. Names follow the union of the live catalogs
 // (OpenRouter's `reasoning.supported_efforts`, models.dev's `reasoning_options`):
 // the six words between them, with "none" meaning reasoning off where the
@@ -456,56 +466,28 @@ bool IsKnownEffortName(const std::string& name) {
     return std::find(names.begin(), names.end(), name) != names.end();
 }
 
-// Anthropic thinking budgets per effort name. A scale, not data: no catalog
-// publishes per-model budgets (models.dev carries per-model min/max in
-// `reasoning_options`; a future catalog plugin can feed those through and this
-// table becomes the fallback). Values sit well under every thinking model's
-// output cap, and the caller clamps against the base's max_tokens when known
-// (the API rejects budget_tokens >= max_tokens).
-std::optional<int> AnthropicBudgetFor(const std::string& effort) {
-    if (effort == "low") return 4096;
-    if (effort == "medium") return 8192;
-    if (effort == "high" || effort == "xhigh" || effort == "max") return 16384;
-    return std::nullopt;  // "none"/"minimal": no thinking block at all
-}
-
 std::pair<nlohmann::json, bool> VariantParametersFor(const std::string& backend,
                                                      const std::string& effort,
-                                                     std::optional<int> max_tokens) {
-    nlohmann::json out = nlohmann::json::object();
-    if (effort == "none") {
-        // Off, where the wire has a switch for it. Anthropic: thinking omitted
-        // entirely IS off. OpenAI-shape: no meaningful off spelling that all
-        // backends accept -- send nothing (a toggle-only model always thinks).
-        if (backend == "anthropic") return {out, false};
-        out["reasoning_effort"] = "minimal";
-        return {out, false};
+                                                     std::optional<int> max_tokens,
+                                                     const VariantParamsHook& hook) {
+    // Backend-agnostic: "xhigh"/"max" top out whichever ladder the backend
+    // speaks. Computed once, before dispatch, so it cannot drift between a
+    // plugin-registered mapping and the generic fallback below.
+    const std::string effort_word = (effort == "xhigh" || effort == "max") ? "high" : effort;
+
+    if (hook) {
+        if (auto derived = hook(backend, effort_word, max_tokens)) return *derived;
+        // hook set but returned nullopt: `backend` has no plugin-registered
+        // mapping (unregistered kind, or the kind's plugin isn't loaded) --
+        // fall through to the generic shape below, exactly as any backend
+        // that never had one already does.
     }
-    // "xhigh"/"max" -> the top rung of whichever ladder the backend speaks.
-    const std::string effort_word =
-        (effort == "xhigh" || effort == "max") ? "high" : effort;
-    if (backend == "anthropic") {
-        const auto budget = AnthropicBudgetFor(effort_word);
-        if (!budget) {
-            // "minimal" has no Anthropic reading; refuse here rather than send
-            // a thinking map the API must 400.
-            throw std::runtime_error(
-                "providers.json: effort '" + effort +
-                "' has no anthropic mapping (known: low, medium, high, xhigh, max, none)");
-        }
-        bool clamped = false;
-        int value = *budget;
-        if (max_tokens && value > *max_tokens - 1024) {
-            // The one cross-field constraint the parser can see coming: the API
-            // rejects budget_tokens >= max_tokens. Leave the model 1k of
-            // visible output; a named warning beats a first-turn 400.
-            value = *max_tokens - 1024;
-            clamped = true;
-        }
-        out["thinking"] = {{"type", "enabled"}, {"budget_tokens", value}};
-        return {out, clamped};
-    }
-    out["reasoning_effort"] = effort_word;
+
+    // Off, where the generic shape has no meaningful "off" spelling every
+    // backend accepts -- send the toggle word instead (a toggle-only model
+    // always thinks); otherwise the name passes through verbatim.
+    nlohmann::json out;
+    out["reasoning_effort"] = (effort_word == "none") ? "minimal" : effort_word;
     return {out, false};
 }
 
@@ -540,7 +522,8 @@ ResolvedModel EnrichFromDiscovery(const ResolvedModel& static_model,
     return copy;
 }
 
-ResolvedModel MakeVariantResolved(const ResolvedModel& base, const ModelVariant& variant) {
+ResolvedModel MakeVariantResolved(const ResolvedModel& base, const ModelVariant& variant,
+                                  const VariantParamsHook& variant_params_hook = {}) {
     ResolvedModel sibling = base;
     sibling.ref = ModelRef{base.ref.provider, base.ref.model + "@" + variant.name};
     // THE WIRE ID STAYS THE BASE'S. agent_loop sends provider.model_name
@@ -548,13 +531,13 @@ ResolvedModel MakeVariantResolved(const ResolvedModel& base, const ModelVariant&
     sibling.provider.model_name = base.provider.model_name;
     nlohmann::json parameters = variant.parameters;
     if (parameters.empty() && IsKnownEffortName(variant.name)) {
-        const auto [derived, clamped] =
-            VariantParametersFor(base.backend, variant.name, base.max_tokens);
+        const auto [derived, clamped] = VariantParametersFor(base.backend, variant.name,
+                                                             base.max_tokens, variant_params_hook);
         parameters = derived;
         if (clamped) {
             common::DefaultLogger().warn(
-                "providers.json: variant '@{}' of model '{}' had its thinking budget clamped "
-                "to fit max_tokens {}",
+                "providers.json: variant '@{}' of model '{}' had a wire parameter clamped to fit "
+                "max_tokens {}",
                 variant.name, base.ref.model, *base.max_tokens);
         }
     }
@@ -731,6 +714,11 @@ void ProvidersConfig::SetDiscoveryHook(DiscoveryHook hook) {
 void ProvidersConfig::SetMetadataHook(MetadataHook hook) {
     std::lock_guard<std::mutex> lock(cache_.mutex_);
     cache_.metadata_hook_ = std::move(hook);
+}
+
+void ProvidersConfig::SetVariantParamsHook(VariantParamsHook hook) {
+    std::lock_guard<std::mutex> lock(cache_.mutex_);
+    cache_.variant_params_hook_ = std::move(hook);
 }
 
 std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& ref) const {
@@ -957,8 +945,8 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
                                           });
         if (name_it == metadata_it->second.end()) return nullptr;
         return cache_
-            .overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(
-                                           MakeVariantResolved(*base, *name_it)))
+            .overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(MakeVariantResolved(
+                                           *base, *name_it, cache_.variant_params_hook_)))
             .first->second;
     }
     // A static twin's explicit `variants: []` opt-out (see VariantsOf's
@@ -981,8 +969,8 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
     if (!declared) return nullptr;  // undeclared (or the model advertises no efforts)
 
     return cache_
-        .overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(
-                                       MakeVariantResolved(*base, *declared)))
+        .overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(MakeVariantResolved(
+                                       *base, *declared, cache_.variant_params_hook_)))
         .first->second;
 }
 
@@ -1375,7 +1363,8 @@ std::string DescribeDiscovery(const ProvidersConfig& providers, const std::strin
     return "; discovery for provider '" + provider_name + "' failed: " + status.error;
 }
 
-ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
+ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
+                                              const VariantParamsHook& variant_params_hook) {
     // The pre-`models` schema was a top-level array of flat provider+model
     // records. Named explicitly rather than allowed to fail as "expected an
     // object": someone hitting this has a working file from a previous build and
@@ -1638,7 +1627,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
             // below: the sibling is a copy of `resolved`, and a moved-from
             // base would publish garbage parameters.
             for (const auto& variant : InheritVariants(provider, model, backend, model_where)) {
-                ResolvedModel sibling = MakeVariantResolved(resolved, variant);
+                ResolvedModel sibling = MakeVariantResolved(resolved, variant, variant_params_hook);
                 const ModelRef sibling_key = sibling.ref;
                 config.Add(sibling_key, std::move(sibling));
             }
@@ -1648,22 +1637,29 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
     return config;
 }
 
-ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc) {
+ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc,
+                                     const VariantParamsHook& variant_params_hook) {
     // ParseProvidersConfigUnwrapped already throws well-formed
     // "providers.json: ..." runtime_errors for every schema violation it
     // anticipates (checked with contains()/is_*() before every get<T>()); this
     // only catches a stray nlohmann::json::exception a future unguarded get<T>()
     // might leak, normalizing it the same way settings/permissions self-wrap.
     try {
-        return ParseProvidersConfigUnwrapped(doc);
+        return ParseProvidersConfigUnwrapped(doc, variant_params_hook);
     } catch (const nlohmann::json::exception& error) {
         throw std::runtime_error(std::string("providers.json: ") + error.what());
     }
 }
 
-ProvidersConfig LoadProvidersConfig(const std::filesystem::path& path) {
-    return LoadJsonConfig<ProvidersConfig>(path, "providers", AbsencePolicy::kThrow,
-                                           EmptyFilePolicy::kTreatAsMalformed, ParseProvidersConfig);
+ProvidersConfig LoadProvidersConfig(const std::filesystem::path& path,
+                                    const VariantParamsHook& variant_params_hook) {
+    // LoadJsonConfig's parse callback is single-argument (const json&); the
+    // hook rides a capture instead of a second callback parameter.
+    return LoadJsonConfig<ProvidersConfig>(
+        path, "providers", AbsencePolicy::kThrow, EmptyFilePolicy::kTreatAsMalformed,
+        [&variant_params_hook](const nlohmann::json& doc) {
+            return ParseProvidersConfig(doc, variant_params_hook);
+        });
 }
 
 }  // namespace minimal::config

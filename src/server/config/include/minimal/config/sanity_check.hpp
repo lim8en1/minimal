@@ -71,6 +71,12 @@ struct SanityCheckInputs {
     // catalog registered" style warning is the only thing lost). Borrowed --
     // it outlives the check. Structural only, like model_catalogs above.
     const llm::MetadataCatalogRegistry* metadata_catalogs = nullptr;
+    // Optional: absent means no plugin-registered variant-params provider
+    // exists, so the static "variants": [...] list-form parse (which already
+    // ran, since providers.json parsing happens inside this check) used the
+    // generic reasoning_effort fallback for every backend kind. Borrowed --
+    // it outlives the check. Structural only, like model_catalogs above.
+    const llm::VariantParamsRegistry* variant_params = nullptr;
     // Optional: absent means memory.compaction_strategy can only be checked
     // against core's own built-in name ("summarize"), not against whatever
     // plugins additionally registered. Borrowed -- it outlives the check.

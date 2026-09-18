@@ -60,7 +60,8 @@ TEST_CASE("every examples/agents preset parses through the production load path"
     for (const auto& path : files) {
         SECTION(path.filename().string()) {
             agent::AgentPresetFrontmatter preset;
-            REQUIRE_NOTHROW(preset = agent::LoadAgentPresetFrontmatter(path));
+            REQUIRE_NOTHROW(preset = agent::LoadAgentPresetFrontmatter(
+                                path, {"bash", "read", "write", "edit", "glob", "grep"}));
             // The file stem is the address (`--agent research`); a preset whose
             // display name drifts from it would resolve under a name the docs
             // never mention.

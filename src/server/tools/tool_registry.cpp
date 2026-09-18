@@ -109,6 +109,38 @@ ToolRegistry::ConfigNamespaceReport ToolRegistry::ConfigNamespaces() const {
     return report;
 }
 
+std::vector<std::string> ToolRegistry::PermissionKeys() const {
+    // Iterates tools_, not owners_/attributions_: those two parallel arrays
+    // also carry shadowed duplicates (see ConfigNamespaces above), which never
+    // serve and would misrepresent the live, addressable tool set. tools_ is
+    // keyed by SURFACE name (post-ApplyAliases), so PermissionKeyForUnlocked
+    // resolves exactly the vocabulary PermissionPolicy::mode_for() matches.
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::vector<std::string> keys;
+    keys.reserve(tools_.size());
+    for (const auto& [name, tool] : tools_) {
+        if (mcp_owners_.count(name)) continue;
+        keys.push_back(std::string(PermissionKeyForUnlocked(name)));
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    return keys;
+}
+
+std::vector<std::string> ToolRegistry::DotenvProtectedPermissionKeys() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::vector<std::string> keys;
+    for (const auto& [name, tool] : tools_) {
+        if (mcp_owners_.count(name)) continue;
+        if (tool && tool->default_dotenv_protected()) {
+            keys.push_back(std::string(PermissionKeyForUnlocked(name)));
+        }
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    return keys;
+}
+
 void ToolRegistry::ApplyAliases(const std::map<std::string, std::string>& aliases) {
     // Startup-only: exclusive for the whole body. It manipulates tools_ and
     // shadowed_ directly and must not overlap a runtime MCP replacement.

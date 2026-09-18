@@ -130,7 +130,8 @@ std::vector<CheckResult> StartupSanityCheck::check_config_files() {
     }
 
     try {
-        providers_ = LoadProvidersConfig(dir / "providers.json");
+        providers_ = LoadProvidersConfig(dir / "providers.json",
+                                         MakeVariantParamsHook(inputs_.variant_params));
         providers_loaded_ = true;
     } catch (const std::exception& e) {
         results.push_back(Fatal("config_parse", std::string("providers.json: ") + e.what()));
@@ -381,7 +382,8 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
             if (!entry.is_regular_file(ec) || entry.path().extension() != ".md") continue;
             const auto preset_name = entry.path().stem().string();
             try {
-                presets_[preset_name] = agent::LoadAgentPresetFrontmatter(entry.path());
+                presets_[preset_name] = agent::LoadAgentPresetFrontmatter(
+                    entry.path(), inputs_.tool_registry.PermissionKeys());
             } catch (const std::exception& e) {
                 results.push_back(Warning("presets", "agents/" + preset_name + ".md: " + e.what()));
             }

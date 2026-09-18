@@ -72,6 +72,7 @@ add_library(minimal_server_core SHARED
     llm/provider_factory_registry.cpp
     llm/model_catalog.cpp
     llm/metadata_catalog.cpp
+    llm/variant_params.cpp
     plugins/plugin_loader.cpp
     plugins/plugin_rpc.cpp
     plugins/plugin_storage.cpp

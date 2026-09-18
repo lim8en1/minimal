@@ -51,8 +51,8 @@ struct MemorySettings {
 };
 
 // Kept as raw pass-through JSON: each plugin owns the schema of its own slice
-// (tools-fs parses `read`/`edit`, tools-bash parses `bash`), so core never has
-// to match or break their shapes.
+// (tools-fs parses its own tool config, tools-bash parses `bash`), so core
+// never has to match or break their shapes.
 struct McpSettings {
     // Spawn/handshake deadline and per-call deadline. The MCP client wrapper
     // enforces these itself: cpp-mcp's client blocks internally (up to a fixed
@@ -73,9 +73,6 @@ struct McpSettings {
 };
 
 struct ToolsSettings {
-    nlohmann::json read = nlohmann::json::object();
-    nlohmann::json edit = nlohmann::json::object();
-    nlohmann::json bash = nlohmann::json::object();
     McpSettings mcp;
     // How many tool calls from one assistant turn may execute concurrently
     // (parallel dispatch -- see ARCHITECTURE.md "Tool dispatch"). 1 reproduces

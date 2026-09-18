@@ -51,6 +51,7 @@ struct Harness {
     tools::ToolRegistry tool_registry;
     llm::ProviderFactoryRegistry provider_registry;
     llm::ModelCatalogRegistry model_catalog_registry;
+    llm::VariantParamsRegistry variant_params_registry;
     plugins::ServiceRegistry service_registry;
     hooks::HookDispatcher hook_dispatcher{common::DefaultLogger()};
     // A real (empty) registry, not nullptr: RegisterProjectCommands tests
@@ -58,9 +59,16 @@ struct Harness {
     // optional per-root hook (see plugin_loader.cpp). No existing fixture
     // registers commands, so every other test here is unaffected.
     commands::CommandRegistry commands;
-    plugins::PluginLoader loader{tool_registry, provider_registry, nlohmann::json::object(),
-                                 nullptr, &commands, nullptr, nullptr, &model_catalog_registry,
-                                 &service_registry, nullptr, {}, &hook_dispatcher};
+    plugins::PluginLoader loader{tool_registry,      provider_registry,
+                                 nlohmann::json::object(), nullptr,
+                                 &commands,          nullptr,
+                                 nullptr,            &model_catalog_registry,
+                                 &service_registry,  nullptr,
+                                 {},                 &hook_dispatcher,
+                                 /*mention_resolvers=*/nullptr,
+                                 /*compaction_strategies=*/nullptr,
+                                 /*metadata_catalogs=*/nullptr,
+                                 &variant_params_registry};
 };
 
 }  // namespace
@@ -79,6 +87,7 @@ TEST_CASE("a well-formed plugin loads and contributes its registrations", "[plug
     CHECK(record.registered_tools == std::vector<std::string>{"fixture_tool"});
     CHECK(record.registered_provider_kinds == std::vector<std::string>{"fixture"});
     CHECK(record.registered_model_catalog_kinds == std::vector<std::string>{"fixture"});
+    CHECK(record.registered_variant_params_kinds == std::vector<std::string>{"fixture"});
 
     // The registrations reached the real registries, not just the record.
     CHECK(h.tool_registry.Find("fixture_tool") != nullptr);
@@ -90,6 +99,13 @@ TEST_CASE("a well-formed plugin loads and contributes its registrations", "[plug
     const auto listed = catalog->List({});
     REQUIRE(listed.size() == 1);
     CHECK(listed[0].id == "fixture-model");
+    // ... and the variant-params provider (ARCHITECTURE.md, "Core vs. plugin
+    // surface" -- the relocated Anthropic-shape seam), same kind string.
+    auto* variant_params = h.variant_params_registry.Find("fixture");
+    REQUIRE(variant_params != nullptr);
+    const auto [params, clamped] = variant_params->DeriveParameters("high", std::nullopt);
+    CHECK_FALSE(clamped);
+    CHECK(params.at("fixture_effort") == "high");
 }
 
 TEST_CASE("a DEPLOYED user plugin loads from its config-dir-shaped location",

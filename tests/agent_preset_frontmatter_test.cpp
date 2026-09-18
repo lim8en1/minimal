@@ -12,8 +12,21 @@ using minimal::tools::PermissionMode;
 
 namespace {
 
+// Pins today's bundled tool vocabulary at the test -- production passes
+// ToolRegistry::PermissionKeys() (see agent_preset_registry.cpp), not a
+// literal list.
+const std::vector<std::string> kBundledToolPermissionKeys = {"bash",  "read", "write",
+                                                              "edit", "glob", "grep"};
+
 AgentPresetFrontmatter Parse(const std::string& markdown) {
-    return ParseAgentPresetFrontmatter(config::parse_frontmatter_markdown(markdown));
+    return ParseAgentPresetFrontmatter(config::parse_frontmatter_markdown(markdown),
+                                       kBundledToolPermissionKeys);
+}
+
+AgentPresetFrontmatter ParseWithTools(const std::string& markdown,
+                                      const std::vector<std::string>& known_tool_permission_keys) {
+    return ParseAgentPresetFrontmatter(config::parse_frontmatter_markdown(markdown),
+                                       known_tool_permission_keys);
 }
 
 }  // namespace
@@ -511,6 +524,50 @@ TEST_CASE("ParseAgentPresetFrontmatter: opencode permission maps become pattern 
     CHECK_FALSE(preset.permission_mode.execute.has_value());
 }
 
+TEST_CASE("ParseAgentPresetFrontmatter: a non-bundled tool name decodes as a pattern-map alias "
+          "when it is a known registered tool",
+          "[agent_preset_frontmatter][patterns]") {
+    // "custom_file_tool" is not one of the fixed opencode-shape category words
+    // (by_key in agent_preset_frontmatter.cpp), but it IS a live registered
+    // tool per known_tool_permission_keys -- exactly the case a renamed or
+    // third-party tools-fs replacement would hit (ARCHITECTURE.md, "Core vs.
+    // plugin surface": read/write/edit are "not structurally privileged").
+    auto preset = ParseWithTools(
+        "---\n"
+        "name: build\n"
+        "permission:\n"
+        "  custom_file_tool:\n"
+        "    \"**/*.secret\": deny\n"
+        "---\n"
+        "body\n",
+        {"custom_file_tool"});
+
+    REQUIRE(preset.permission_mode.pattern_overrides.count("custom_file_tool") == 1);
+    CHECK(preset.permission_mode.pattern_overrides.at("custom_file_tool")[0].glob ==
+          "**/*.secret");
+    CHECK(preset.permission_mode.pattern_overrides.at("custom_file_tool")[0].mode ==
+          PermissionMode::AlwaysDeny);
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: the same key is dropped, not decoded, when the tool "
+          "is not known",
+          "[agent_preset_frontmatter][patterns]") {
+    // Same input as above, but the caller's known_tool_permission_keys says
+    // nothing registers under that name -- falls through to the same "no
+    // minimal category" warning-and-drop an unknown opencode key gets.
+    auto preset = ParseWithTools(
+        "---\n"
+        "name: build\n"
+        "permission:\n"
+        "  custom_file_tool:\n"
+        "    \"**/*.secret\": deny\n"
+        "---\n"
+        "body\n",
+        {});
+
+    CHECK(preset.permission_mode.pattern_overrides.empty());
+}
+
 TEST_CASE("ParseAgentPresetFrontmatter: scalar alias values still map to categories",
           "[agent_preset_frontmatter][patterns][compat]") {
     auto preset = Parse(
@@ -573,7 +630,8 @@ TEST_CASE("LoadAgentPresetFrontmatter: an oversized file is refused before the r
         // Comfortably over the 1 MiB cap.
         out << std::string(2 << 20, 'x');
     }
-    CHECK_THROWS_AS(LoadAgentPresetFrontmatter(path), std::runtime_error);
+    CHECK_THROWS_AS(LoadAgentPresetFrontmatter(path, kBundledToolPermissionKeys),
+                    std::runtime_error);
 }
 
 TEST_CASE("LoadAgentPresetFrontmatter: a normally-sized file is unaffected by the cap",
@@ -584,6 +642,6 @@ TEST_CASE("LoadAgentPresetFrontmatter: a normally-sized file is unaffected by th
         std::ofstream out(path);
         out << "---\nname: build\n---\nbody\n";
     }
-    const auto preset = LoadAgentPresetFrontmatter(path);
+    const auto preset = LoadAgentPresetFrontmatter(path, kBundledToolPermissionKeys);
     CHECK(preset.name == "build");
 }

@@ -48,6 +48,8 @@ using RegisterModelCatalogsFn =
     void (*)(llm::ModelCatalogRegistry&, const PluginRegistrationContext&);
 using RegisterMetadataCatalogsFn =
     void (*)(llm::MetadataCatalogRegistry&, const PluginRegistrationContext&);
+using RegisterVariantParamsFn =
+    void (*)(llm::VariantParamsRegistry&, const PluginRegistrationContext&);
 using RegisterCompactionStrategiesFn =
     void (*)(agent::CompactionStrategyRegistry&, const PluginRegistrationContext&);
 using RegisterServicesFn =
@@ -142,7 +144,8 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
                            hooks::HookDispatcher* hook_points,
                            agent::MentionResolverRegistry* mention_resolvers,
                            agent::CompactionStrategyRegistry* compaction_strategies,
-                           llm::MetadataCatalogRegistry* metadata_catalogs)
+                           llm::MetadataCatalogRegistry* metadata_catalogs,
+                           llm::VariantParamsRegistry* variant_params)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
@@ -157,7 +160,8 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
       plugin_data_root_(std::move(plugin_data_root)),
       hook_points_(hook_points),
       compaction_strategies_(compaction_strategies),
-      metadata_catalogs_(metadata_catalogs) {}
+      metadata_catalogs_(metadata_catalogs),
+      variant_params_(variant_params) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -464,6 +468,26 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
                             std::back_inserter(record.registered_metadata_catalog_kinds));
         record.registered_metadata_fallback = metadata_catalogs_->fallbacks().size() >
                                               fallbacks_before;
+    }
+
+    if (variant_params_ != nullptr) {
+        // Same attribution/kinds-diff shape as model_catalogs_ above -- see
+        // that block's comment for why the diff (not just Register's bool)
+        // is what lets the sanity check name both claimants on a collision.
+        const auto kinds_before = variant_params_->kinds();
+        if (auto register_variant_params = Lookup<RegisterVariantParamsFn>(
+                handle, "minimal_plugin_register_variant_params")) {
+            if (!GuardedRegistration(record, "minimal_plugin_register_variant_params",
+                                      [&] { variant_params_->SetAttribution(record.name); },
+                                      [&] { register_variant_params(*variant_params_, context); },
+                                      [&] { variant_params_->ClearAttribution(); }, rollback)) {
+                return record;
+            }
+        }
+        const auto kinds_after = variant_params_->kinds();
+        std::set_difference(kinds_after.begin(), kinds_after.end(), kinds_before.begin(),
+                            kinds_before.end(),
+                            std::back_inserter(record.registered_variant_params_kinds));
     }
 
     if (compaction_strategies_ != nullptr) {

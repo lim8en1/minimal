@@ -114,9 +114,10 @@ subkeys are legal and plugin-owned. Core recognizes:
 **No bundled tool plugin reads a `tools.read` / `tools.edit` / `tools.bash`
 slice from settings.json.** The `tools-fs` and `tools-bash` plugins take their
 knobs from their own `config` object in `plugins.json` (the per-plugin channel
-of EXTENSIBILITY §2.3). Core still parses `tools.read`/`edit`/`bash` into its
-settings struct, but nothing consumes them — put tool settings in
-`plugins.json`.
+of EXTENSIBILITY §2.3). Core does not parse a `tools.read`/`edit`/`bash` slice
+into anything typed at all — the whole `tools` object forwards to every plugin
+verbatim as `tools.raw`; put tool settings in `plugins.json`'s per-plugin
+`config`, not here.
 
 ### Per-plugin tool settings (`plugins.json` `config`)
 

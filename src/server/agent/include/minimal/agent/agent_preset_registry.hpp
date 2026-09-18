@@ -5,6 +5,7 @@
 #include <optional>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/config/permissions_config.hpp"
@@ -54,6 +55,19 @@ struct PresetToolContext {
 using PresetToolDefinitionBuilder =
     std::function<llm::ToolDefinition(const PresetToolContext&)>;
 
+// The live ToolRegistry's structural tool-name vocabulary, resolved ONCE
+// (main.cpp, after ToolRegistry::ApplyAliases) and handed down rather than a
+// ToolRegistry& itself -- presets, like permission resolution, must resolve
+// without consulting ToolRegistry directly (see permission_resolution.hpp).
+// Both lists come from ToolRegistry and are always supplied together, hence
+// one struct instead of two loose constructor parameters. Consulted by
+// preset-frontmatter parsing (agent_preset_frontmatter.cpp's
+// AliasKeyIsToolName) and by BuildPermissionPolicy's dotenv defaults.
+struct ToolPermissionKeys {
+    std::vector<std::string> all;              // ToolRegistry::PermissionKeys()
+    std::vector<std::string> dotenv_protected;  // ToolRegistry::DotenvProtectedPermissionKeys()
+};
+
 // Loads providers.json/permissions.json/agents/*.md into fully resolved
 // AgentPresets, plus the settings.json handed to it. Config is read once at
 // startup -- there is no hot-reload (see ARCHITECTURE.md's Config section).
@@ -79,8 +93,21 @@ public:
     // main ran the loop on the sanity check's parse while this one resolved
     // default_model from its own -- the sanity check could validate content the
     // server was not running. One parse, in the sanity check, handed to both.
+    // `tool_permission_keys` defaults to {} so a caller with no ToolRegistry
+    // handy (most tests) keeps compiling -- dotenv defaults and preset
+    // pattern-map aliases simply see no known tools in that case.
+    //
+    // `variant_params` defaults to nullptr for the same reason: this
+    // constructor's own LoadProvidersConfig call is where a static
+    // "variants": [...] entry derives its wire parameters (see
+    // VariantParametersFor), and it runs DURING construction -- before
+    // main.cpp's SetDiscoveryHook/SetMetadataHook post-construction calls
+    // even happen -- so the registry must arrive as a constructor parameter,
+    // not a setter called afterward like those two.
     AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
-                        const config::SettingsConfig& settings);
+                        const config::SettingsConfig& settings,
+                        ToolPermissionKeys tool_permission_keys = {},
+                        const llm::VariantParamsRegistry* variant_params = nullptr);
 
     // Same as above, but takes an already-parsed PermissionsConfig instead of
     // loading permissions.json itself -- the production path (main.cpp),
@@ -89,7 +116,9 @@ public:
     // copy for every other caller (tests construct this directly).
     AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
                         const config::SettingsConfig& settings,
-                        const config::PermissionsConfig& permissions);
+                        const config::PermissionsConfig& permissions,
+                        ToolPermissionKeys tool_permission_keys = {},
+                        const llm::VariantParamsRegistry* variant_params = nullptr);
 
     // Throws if agents/<preset_name>.md doesn't exist, or its `provider`
     // doesn't resolve (a providers.json entry, or "default" with no
@@ -205,6 +234,15 @@ public:
         providers_.SetMetadataHook(std::move(hook));
     }
 
+    // Injects the variant-params hook for the DISCOVERED-variant path
+    // (ProvidersConfig::ResolveVariant), main-injected like the two hooks
+    // above -- the STATIC "variants": [...] list form already resolved its
+    // parameters during this object's own construction (see the constructor
+    // comment); this hook only ever fires for a variant discovered lazily.
+    void SetVariantParamsHook(config::VariantParamsHook hook) {
+        providers_.SetVariantParamsHook(std::move(hook));
+    }
+
     // Evicts and refetches every discover-entry's catalog (see
     // ProvidersConfig::RefreshDiscovery). Const for the same reason: it touches
     // only mutex-guarded cache state, never the parsed config.
@@ -254,6 +292,7 @@ private:
     config::SettingsConfig settings_;
     config::PermissionsConfig permissions_;
     const config::SkillRegistry& skills_;
+    ToolPermissionKeys tool_permission_keys_;
     std::string subagent_prefix_;
     std::string default_compression_prompt_;
     // Startup-only in practice (main.cpp wires builders beside the tool

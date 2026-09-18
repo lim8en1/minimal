@@ -8,6 +8,11 @@ field — no core change, no enum to keep in sync.
 
 - **Provider factory**: `backend: "anthropic"` — the Anthropic `/v1/messages`
   API, with prompt-caching support (`cache_ttl` parameter).
+- **Variant-params provider**: under the same `"anthropic"` kind, derives the
+  `thinking: {budget_tokens: N}` wire shape for a providers.json entry's
+  `"variants": ["low", "medium", "high", ...]` effort list (see
+  ARCHITECTURE.md, "Core vs. plugin surface"). A backend with no registered
+  provider here gets core's generic `reasoning_effort` shape instead.
 
 ## Configuration
 

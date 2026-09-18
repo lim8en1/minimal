@@ -2,6 +2,7 @@
 
 #include "minimal/config/providers_config.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -162,11 +163,16 @@ std::optional<tools::PermissionMode> CollapsePermissionValue(const YAML::Node& v
     return std::nullopt;
 }
 
-// True for alias keys that are also minimal TOOL names, so a map value has a
-// subject to match against and becomes real pattern rules.
-bool AliasKeyIsToolName(const std::string& key) {
-    return key == "bash" || key == "read" || key == "write" || key == "edit" ||
-           key == "glob" || key == "grep";
+// True for alias keys that are also a LIVE registered tool's permission key,
+// so a map value has a subject to match against and becomes real pattern
+// rules -- checked against the actual ToolRegistry vocabulary
+// (AgentPresetRegistry::ToolPermissionKeys::all), not a fixed literal list,
+// so a renamed/aliased/third-party tool name works here exactly like
+// tools-fs's bundled ones.
+bool AliasKeyIsToolName(const std::string& key,
+                        const std::vector<std::string>& known_tool_permission_keys) {
+    return std::find(known_tool_permission_keys.begin(), known_tool_permission_keys.end(), key) !=
+           known_tool_permission_keys.end();
 }
 
 void DecodeToolPatternMap(const YAML::Node& value, const std::string& key,
@@ -181,7 +187,8 @@ void DecodeToolPatternMap(const YAML::Node& value, const std::string& key,
     }
 }
 
-tools::PermissionOverrideLayer DecodePermissionAlias(const YAML::Node& node) {
+tools::PermissionOverrideLayer DecodePermissionAlias(
+    const YAML::Node& node, const std::vector<std::string>& known_tool_permission_keys) {
     tools::PermissionOverrideLayer layer;
     const YAML::Node block = node["permission"];
     if (!block || !block.IsMap()) return layer;
@@ -201,6 +208,16 @@ tools::PermissionOverrideLayer DecodePermissionAlias(const YAML::Node& node) {
         const std::string key = entry.first.as<std::string>();
         const auto it = by_key.find(key);
         if (it == by_key.end()) {
+            // Not one of the fixed opencode-shape category words -- but a map
+            // value naming a LIVE registered tool still has a real subject to
+            // match against, so it decodes as a pattern-map alias exactly like
+            // the fixed-vocabulary tool names below. A scalar value has no
+            // category to fold into regardless of the key's tool-name status,
+            // so it falls through to the same warning as an unknown key.
+            if (AliasKeyIsToolName(key, known_tool_permission_keys) && entry.second.IsMap()) {
+                DecodeToolPatternMap(entry.second, key, layer);
+                continue;
+            }
             // task/skill/question/lsp/doom_loop are opencode keys minimal has
             // no category for; silently dropping a rule the author wrote would
             // WIDEN what they asked for, so it is named instead.
@@ -223,7 +240,7 @@ tools::PermissionOverrideLayer DecodePermissionAlias(const YAML::Node& node) {
             }
             continue;
         }
-        if (AliasKeyIsToolName(key) && entry.second.IsMap()) {
+        if (AliasKeyIsToolName(key, known_tool_permission_keys) && entry.second.IsMap()) {
             DecodeToolPatternMap(entry.second, key, layer);
             continue;
         }
@@ -413,7 +430,9 @@ std::unordered_map<std::string, tools::PermissionMode> DecodeMcpPermissionsBlock
 
 }  // namespace
 
-AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatter& parsed) {
+AgentPresetFrontmatter ParseAgentPresetFrontmatter(
+    const config::ParsedFrontmatter& parsed,
+    const std::vector<std::string>& known_tool_permission_keys) {
     const YAML::Node& node = parsed.frontmatter;
 
     AgentPresetFrontmatter result;
@@ -465,7 +484,7 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatt
     // native field or override replaces what an alias wrote; running the
     // `tools` alias after the block would let it overwrite a native
     // permission_mode.overrides entry, inverting this contract.
-    result.permission_mode = DecodePermissionAlias(node);
+    result.permission_mode = DecodePermissionAlias(node, known_tool_permission_keys);
     ApplyToolsAlias(node, result.permission_mode);
     result.permission_mode = DecodePermissionModeBlock(node, std::move(result.permission_mode));
     result.mcp_permissions = DecodeMcpPermissionsBlock(node);
@@ -492,13 +511,15 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatt
     return result;
 }
 
-AgentPresetFrontmatter LoadAgentPresetFrontmatter(const std::filesystem::path& path) {
+AgentPresetFrontmatter LoadAgentPresetFrontmatter(
+    const std::filesystem::path& path, const std::vector<std::string>& known_tool_permission_keys) {
     CheckPresetFileSize(path);
     std::ifstream in(path);
     if (!in) throw std::runtime_error("agent preset not found: " + path.string());
     std::ostringstream buffer;
     buffer << in.rdbuf();
-    return ParseAgentPresetFrontmatter(config::parse_frontmatter_markdown(buffer.str()));
+    return ParseAgentPresetFrontmatter(config::parse_frontmatter_markdown(buffer.str()),
+                                       known_tool_permission_keys);
 }
 
 }  // namespace minimal::agent

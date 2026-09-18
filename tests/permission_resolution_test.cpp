@@ -104,7 +104,11 @@ TEST_CASE("BuildMcpPermissionPolicy: an untrusted preset may still narrow", "[pe
 
 TEST_CASE("BuildPermissionPolicy: the built-in dotenv defaults fill in only where config is silent",
           "[permission_resolution][patterns]") {
-    auto policy = BuildPermissionPolicy({}, {});
+    // Production passes ToolRegistry::DotenvProtectedPermissionKeys() (see
+    // main.cpp) -- {"read", "write", "edit"} pins today's tools-fs set at the
+    // test, structurally identical to what the live registry resolves to.
+    const std::vector<std::string> dotenv_protected = {"read", "write", "edit"};
+    auto policy = BuildPermissionPolicy({}, {}, /*preset_is_trusted=*/true, dotenv_protected);
     REQUIRE(policy.pattern_overrides.count("read") == 1);
     REQUIRE(policy.pattern_overrides.count("write") == 1);
     REQUIRE(policy.pattern_overrides.count("edit") == 1);
@@ -114,12 +118,28 @@ TEST_CASE("BuildPermissionPolicy: the built-in dotenv defaults fill in only wher
     // intent, not a floor to fight.
     PermissionOverrideLayer global;
     global.pattern_overrides["read"].push_back({"**/scratch", PermissionMode::AlwaysAllow});
-    auto customized = BuildPermissionPolicy({}, global);
+    auto customized = BuildPermissionPolicy({}, global, /*preset_is_trusted=*/true, dotenv_protected);
     REQUIRE(customized.pattern_overrides.count("read") == 1);
     CHECK(customized.pattern_overrides["read"].size() == 1);
     CHECK(customized.pattern_overrides["read"][0].glob == "**/scratch");
     // The other file tools keep their defaults.
     CHECK(customized.pattern_overrides.count("write") == 1);
+}
+
+TEST_CASE("BuildPermissionPolicy: dotenv defaults apply to any tool that opts in, not just "
+          "read/write/edit",
+          "[permission_resolution][patterns]") {
+    // A renamed or third-party file tool works exactly like tools-fs's
+    // bundled ones (ARCHITECTURE.md, "Core vs. plugin surface" -- the
+    // read/write/edit "not structurally privileged" claim, made true).
+    auto policy = BuildPermissionPolicy({}, {}, /*preset_is_trusted=*/true, {"my_renamed_tool"});
+    REQUIRE(policy.pattern_overrides.count("my_renamed_tool") == 1);
+    const auto& rules = policy.pattern_overrides.at("my_renamed_tool");
+    REQUIRE(rules.size() == 2);
+    CHECK(rules[0].glob == "**/.env");
+    CHECK(rules[0].mode == PermissionMode::AlwaysDeny);
+    CHECK(rules[1].glob == "**/.env.*");
+    CHECK(policy.pattern_overrides.count("read") == 0);
 }
 
 TEST_CASE("BuildPermissionPolicy: trusted preset patterns replace global per glob",

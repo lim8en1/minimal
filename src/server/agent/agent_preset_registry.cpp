@@ -131,19 +131,26 @@ std::string RenderPreloadedSkills(
 
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
                                          const config::SkillRegistry& skills,
-                                         const config::SettingsConfig& settings)
+                                         const config::SettingsConfig& settings,
+                                         ToolPermissionKeys tool_permission_keys,
+                                         const llm::VariantParamsRegistry* variant_params)
     : AgentPresetRegistry(config_dir, skills, settings,
-                          config::LoadPermissionsConfig(config_dir / "permissions.json")) {}
+                          config::LoadPermissionsConfig(config_dir / "permissions.json"),
+                          std::move(tool_permission_keys), variant_params) {}
 
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
                                          const config::SkillRegistry& skills,
                                          const config::SettingsConfig& settings,
-                                         const config::PermissionsConfig& permissions)
+                                         const config::PermissionsConfig& permissions,
+                                         ToolPermissionKeys tool_permission_keys,
+                                         const llm::VariantParamsRegistry* variant_params)
     : config_dir_(std::move(config_dir)),
-      providers_(config::LoadProvidersConfig(config_dir_ / "providers.json")),
+      providers_(config::LoadProvidersConfig(config_dir_ / "providers.json",
+                                             config::MakeVariantParamsHook(variant_params))),
       settings_(settings),
       permissions_(permissions),
-      skills_(skills) {
+      skills_(skills),
+      tool_permission_keys_(std::move(tool_permission_keys)) {
     // Both optional at this phase -- a real deployment's absence is the
     // startup sanity check's job to flag, not this constructor's.
     subagent_prefix_ = common::ReadFileOrEmpty(config_dir_ / "prompts" / "subagent.md");
@@ -232,7 +239,8 @@ std::vector<AgentPresetSummary> AgentPresetRegistry::ListPresets(
             if (!entry.is_regular_file() || entry.path().extension() != ".md") continue;
             const std::string id = entry.path().stem().string();
             try {
-                const AgentPresetFrontmatter raw = LoadAgentPresetFrontmatter(entry.path());
+                const AgentPresetFrontmatter raw =
+                    LoadAgentPresetFrontmatter(entry.path(), tool_permission_keys_.all);
                 if (record != nullptr) record->insert(id);
                 // Visibility rules. Picker: disabled presets cannot run at all;
                 // `hidden` and `mode: subagent` presets are spawnable but not
@@ -357,7 +365,7 @@ bool AgentPresetRegistry::PresetDeclaresModel(const std::string& preset_name,
                                               const std::filesystem::path& project_root) const {
     bool from_project = false;
     const std::filesystem::path preset_path = FindPresetPath(preset_name, project_root, from_project);
-    return !LoadAgentPresetFrontmatter(preset_path).model.empty();
+    return !LoadAgentPresetFrontmatter(preset_path, tool_permission_keys_.all).model.empty();
 }
 
 AgentPreset AgentPresetRegistry::ResolveUncached(
@@ -375,7 +383,8 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
             "project agent preset '{}' ({}) shadows the global one", preset_name,
             preset_path.string());
     }
-    const AgentPresetFrontmatter raw = LoadAgentPresetFrontmatter(preset_path);
+    const AgentPresetFrontmatter raw =
+        LoadAgentPresetFrontmatter(preset_path, tool_permission_keys_.all);
     if (raw.disable) {
         // Refuse rather than resolve: a disabled preset must not run through
         // /agent, spawn, or a default_model reference.
@@ -507,7 +516,8 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     // operator's permissions.json floor but must never widen it. See the
     // preset_is_trusted doc on BuildPermissionPolicy.
     preset.permission_mode =
-        BuildPermissionPolicy(raw.permission_mode, permissions_.global_layer, !from_project);
+        BuildPermissionPolicy(raw.permission_mode, permissions_.global_layer, !from_project,
+                              tool_permission_keys_.dotenv_protected);
     // Same untrusted-content rule as the line above, for MCP: a project
     // preset's per-server modes may only narrow the global default, never
     // widen it. See the preset_is_trusted doc on BuildMcpPermissionPolicy.
