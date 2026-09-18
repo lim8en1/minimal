@@ -7,9 +7,11 @@
 //   1. the plugin's own config slice in plugins.json ("rates") -- the user's
 //      explicit prices, so they outrank everything;
 //   2. the fetched OpenRouter snapshot (its own /api/v1/models list), cached
-//      in this plugin's storage by /cost-update-rates (opt-in network, never
-//      at startup);
-//   3. the fetched LiteLLM snapshot, same command, same opt-in rule;
+//      in this plugin's storage by the startup auto-refresh (a server start
+//      fetches when the cached snapshot is older than rates_refresh_days;
+//      --refresh-cost-rates and the .rpc refresh_rates method fetch on
+//      demand);
+//   3. the fetched LiteLLM snapshot, the same paths, the same rule;
 //   4. the seeded bundled snapshot (cost-rates.json in the config dir).
 //
 // The OpenRouter tier sits above LiteLLM because the wire ids an
@@ -49,9 +51,9 @@ inline constexpr char kPluginName[] = "cost-tracker";
 inline constexpr char kStorageNamespace[] = "cost-tracker";
 
 // Storage layout keys. Session history is one blob per session under
-// "sessions/<session_id>"; the two fetched-rates snapshots /cost-update-rates
-// writes and RateTable's middle tiers read live at "rates/fetched" (LiteLLM)
-// and "rates/fetched_openrouter".
+// "sessions/<session_id>"; the two fetched-rates snapshots the startup
+// auto-refresh writes and RateTable's middle tiers read live at
+// "rates/fetched" (LiteLLM) and "rates/fetched_openrouter".
 inline constexpr char kSessionKeyPrefix[] = "sessions/";
 inline constexpr char kFetchedRatesKey[] = "rates/fetched";
 inline constexpr char kOpenRouterFetchedRatesKey[] = "rates/fetched_openrouter";
@@ -146,7 +148,12 @@ std::map<std::string, Rate> IngestLiteLlmPrices(const nlohmann::json& document);
 std::map<std::string, Rate> IngestOpenRouterPrices(const nlohmann::json& document);
 
 struct FetchedRates {
-    std::string fetched_at;  // ISO-8601 UTC, diagnostic only
+    // ISO-8601 UTC, diagnostic only.
+    std::string fetched_at;
+    // Unix seconds, the machine-usable twin of fetched_at -- the staleness
+    // gate the startup auto-refresh checks. 0 (a blob written before this
+    // field existed) counts as stale, never fresh.
+    std::int64_t fetched_at_unix = 0;
     std::map<std::string, Rate> models;
 };
 
@@ -167,7 +174,8 @@ struct RateSources {
 
 // Resolution: config > openrouter-fetched > litellm-fetched > bundled.
 // Thread-safe: /cost and the .rpc service read from command-pool and gRPC
-// threads while /cost-update-rates swaps the fetched tables.
+// threads while the startup auto-refresh (and any on-demand fetch) swaps the
+// fetched tables.
 class RateTable {
 public:
     explicit RateTable(RateSources sources, plugins::PluginStorage* storage);
@@ -175,8 +183,10 @@ public:
     std::optional<Rate> Resolve(const std::string& model) const;
 
     // Re-reads both fetched snapshots from storage and swaps them in. Called
-    // at registration and after /cost-update-rates. A missing or corrupt blob
-    // clears only THAT tier -- one corrupt snapshot must not lose the other.
+    // at registration and after every fetch (the startup auto-refresh, the
+    // --refresh-cost-rates one-shot, the .rpc refresh_rates method). A
+    // missing or corrupt blob clears only THAT tier -- one corrupt snapshot
+    // must not lose the other.
     void RefreshFetched();
 
 private:

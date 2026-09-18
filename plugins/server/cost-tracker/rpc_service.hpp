@@ -18,8 +18,9 @@
 //   list   {}                    -> {"sessions": [totals...]}   every session
 //                                   (per-session, no roll-up)
 //   refresh_rates {}             -> fetches both pricing snapshots now; same
-//                                   path as /cost-update-rates. Returns
-//                                   {"updated": N, "litellm_updated": N,
+//                                   path as the startup auto-refresh and the
+//                                   server's --refresh-cost-rates flag.
+//                                   Returns {"updated": N, "litellm_updated": N,
 //                                   "openrouter_updated": N, "fetched_at":
 //                                   "...", "warning": "..."} or !ok with the
 //                                   failure (both sources down).

@@ -9,9 +9,14 @@
 //   - "cost-tracker.tracking" exposes read-only totals to other server-side
 //     plugins through the §2.2 service channel;
 //   - "cost-tracker.rpc" serves the same state as JSON over the generic
-//     PluginCall channel -- the data path the future UI view consumes;
-//   - /cost-update-rates is the opt-in live refresh of the LiteLLM and
-//     OpenRouter pricing snapshots.
+//     PluginCall channel -- the data path the future UI view consumes -- and
+//     its refresh_rates method is what the server's --refresh-cost-rates
+//     flag drives;
+//   - the startup auto-refresh (rates_refresh.hpp) fetches the LiteLLM and
+//     OpenRouter pricing snapshots when the cached ones are older than
+//     CostSettings::rates_refresh_days -- the opt-in network rule's
+//     replacement, bounded and background, with the join parked on the
+//     RatesRefresherOwner observer.
 // All of them resolve prices through the same RateTable, so a report can never
 // disagree with itself, and the command-free sibling of the checklist shape:
 // the model has no tool here because cost is the operator's business.
@@ -23,10 +28,10 @@
 //
 // PRICING. Four sources, config > openrouter-fetched > litellm-fetched >
 // bundled: the user's "rates" slice in plugins.json, the OpenRouter snapshot
-// cached by /cost-update-rates (its slugs ARE the wire model ids an
-// OpenRouter-shaped provider sends, so no provider naming is consulted), the
-// LiteLLM snapshot from the same command (opt-in -- no network at startup,
-// none during a turn), and the seeded cost-rates.json in the config dir
+// (its slugs ARE the wire model ids an OpenRouter-shaped provider sends, so
+// no provider naming is consulted), the LiteLLM snapshot (both cached by the
+// startup auto-refresh, the --refresh-cost-rates flag, or the .rpc service's
+// refresh_rates), and the seeded cost-rates.json in the config dir
 // (bundled/ treatment: user-editable text, never overwritten, never compiled
 // in). Keys are model ids -- the ccusage convention. A model with no rate
 // anywhere, and a turn whose usage the backend reported as all zeros (the
@@ -48,9 +53,8 @@
 #include "cost_tracking_service.hpp"
 #include "cost_tracking_service_impl.hpp"
 #include "in_flight.hpp"
-#include "rates_fetch.hpp"
+#include "rates_refresh.hpp"
 #include "rpc_service.hpp"
-#include "update_rates_command.hpp"
 
 namespace {
 
@@ -77,6 +81,15 @@ std::shared_ptr<minimal::cost_tracker::RateTable>& SharedRates() {
 std::shared_ptr<minimal::cost_tracker::CostSettings>& SharedSettings() {
     static std::shared_ptr<minimal::cost_tracker::CostSettings> settings;
     return settings;
+}
+
+// The startup auto-refresh. Not destroyed with the process: Shutdown() runs
+// from RatesRefresherOwner's destructor (see below), while the worker can
+// still see a living PluginStorage; a static destructor would join after
+// plugin_storage is gone.
+std::shared_ptr<minimal::cost_tracker::RatesRefresher>& SharedRefresher() {
+    static std::shared_ptr<minimal::cost_tracker::RatesRefresher> refresher;
+    return refresher;
 }
 
 // The bundled snapshot, read from the config dir -- the seeded file the user
@@ -119,6 +132,10 @@ void EnsureSharedState(const minimal::plugins::PluginRegistrationContext& contex
         SharedStore() = std::make_shared<minimal::cost_tracker::CostStore>(context.storage);
     }
     if (!SharedInFlight()) SharedInFlight() = std::make_shared<minimal::cost_tracker::InFlightUsage>();
+    if (!SharedRefresher()) {
+        SharedRefresher() = std::make_shared<minimal::cost_tracker::RatesRefresher>(
+            *SharedSettings(), *SharedStore(), *SharedRates(), context.storage);
+    }
 }
 
 }  // namespace
@@ -133,16 +150,20 @@ void minimal_plugin_register_commands(
     EnsureSharedState(context);
     registry.Register(std::make_unique<minimal::cost_tracker::CostCommand>(
         *SharedStore(), *SharedRates()));
-    registry.Register(std::make_unique<minimal::cost_tracker::UpdateRatesCommand>(
-        *SharedStore(), *SharedRates(), *SharedSettings()));
 }
 
 void minimal_plugin_register_session_observer(
     minimal::agent::SessionObserverRegistry& registry,
     const minimal::plugins::PluginRegistrationContext& context) {
     EnsureSharedState(context);
+    // The auto-refresh fires here, where the shared state is first guaranteed
+    // to exist; the same registration plants the observer whose destructor
+    // will join the worker at teardown.
+    SharedRefresher()->MaybeStart();
     registry.Register(std::make_shared<minimal::cost_tracker::CostSessionObserver>(
         *SharedStore(), *SharedInFlight()));
+    registry.Register(std::make_shared<minimal::cost_tracker::RatesRefresherOwner>(
+        *SharedRefresher()));
 }
 
 void minimal_plugin_register_services(

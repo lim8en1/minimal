@@ -175,7 +175,8 @@ std::string FormatSessionTotals(const SessionTotals& totals) {
            << CostCell(totals.total_cost, totals.total_cost_known);
     if (totals.unpriced_turns > 0) {
         report << "  (" << totals.unpriced_turns
-               << " turn(s) unpriced -- run /cost-update-rates)";
+               << " turn(s) unpriced -- prices refresh at server start; refresh now with "
+                  "minimal-server --refresh-cost-rates)";
     }
     report << '\n';
     return report.str();

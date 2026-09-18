@@ -202,7 +202,9 @@ nlohmann::json FetchedToJson(const FetchedRates& rates) {
             {kCacheWriteKey, rate.cache_write_per_mtok},
         };
     }
-    return nlohmann::json{{"fetched_at", rates.fetched_at}, {"models", std::move(models)}};
+    return nlohmann::json{{"fetched_at", rates.fetched_at},
+                          {"fetched_at_unix", rates.fetched_at_unix},
+                          {"models", std::move(models)}};
 }
 
 std::optional<FetchedRates> FetchedFromJson(std::string_view json) {
@@ -218,6 +220,12 @@ std::optional<FetchedRates> FetchedFromJson(std::string_view json) {
     FetchedRates rates;
     if (const auto at = document.find("fetched_at"); at != document.end() && at->is_string()) {
         rates.fetched_at = at->get<std::string>();
+    }
+    // Tolerant of absence: blobs written before the field existed decode with
+    // the struct's 0, which every staleness consumer treats as stale.
+    if (const auto at = document.find("fetched_at_unix");
+        at != document.end() && at->is_number_integer()) {
+        rates.fetched_at_unix = at->get<std::int64_t>();
     }
     rates.models = ParseRateTable(*models);
     return rates;
@@ -236,7 +244,7 @@ void RateTable::RefreshFetched() {
     std::map<std::string, Rate> openrouter;
     if (storage_ != nullptr) {
         // Namespace is this plugin's own, so the blobs are unreachable from
-        // outside; the keys are the ones /cost-update-rates writes. Each tier
+        // outside; the keys are the ones the rates fetch writes. Each tier
         // decodes independently: one corrupt snapshot must not lose the other.
         if (const auto blob = storage_->Get(kStorageNamespace, kFetchedRatesKey)) {
             if (const auto rates = FetchedFromJson(*blob)) fetched = rates->models;

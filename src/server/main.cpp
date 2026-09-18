@@ -51,6 +51,7 @@
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
+#include "minimal/plugins/plugin_rpc.hpp"
 #include "minimal/plugins/plugin_storage.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
@@ -141,9 +142,12 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, OnShutdownSignal);
 
     std::filesystem::path socket_path = minimal::rpc::DefaultSocketPath();
+    bool refresh_cost_rates = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--listen") == 0 && i + 1 < argc) {
             socket_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--refresh-cost-rates") == 0) {
+            refresh_cost_rates = true;
         } else if (std::strcmp(argv[i], "--version") == 0) {
             std::printf("minimal-server %s\n", minimal::common::Version());
             return 0;
@@ -402,6 +406,35 @@ int main(int argc, char** argv) {
     // is what makes unguarded Find from session workers and the command pool
     // safe. A runtime Provide is logged and ignored (the registry's own rule).
     services.Seal();
+
+    // One-shot rates refresh: load plugins exactly as a normal start does, ask
+    // cost-tracker's .rpc service to fetch its pricing snapshots, print the
+    // outcome, and exit before listening. This is the manual escape hatch the
+    // old /cost-update-rates command was (cost-tracker's startup auto-refresh
+    // gates itself on the snapshot's age; this flag always fetches). Reaching
+    // the plugin through the generic PluginCall channel -- the same sealed
+    // registry the RPC transport dispatches through -- keeps core from
+    // depending on any bundled plugin: the name is a runtime string, and a
+    // disabled or failed cost-tracker is an error, not a link dependency.
+    if (refresh_cost_rates) {
+        void* raw = services.Find(minimal::plugins::PluginRpcServiceName("cost-tracker"));
+        if (raw == nullptr) {
+            std::fprintf(stderr, "cost-tracker is not loaded or disabled; nothing to refresh\n");
+            return 1;
+        }
+        // The .rpc convention's handler type (see plugin_rpc.hpp): the name
+        // registry guarantees what sits under "cost-tracker.rpc" is one.
+        const auto reply = static_cast<minimal::plugins::PluginRpcHandler*>(raw)->Handle(
+            "refresh_rates", "{}");
+        if (!reply.ok) {
+            std::fprintf(stderr, "%s\n", reply.error.c_str());
+            return 1;
+        }
+        std::printf("%s\n", reply.payload.c_str());
+        return 0;
+        // The exit cascade joins cost-tracker's startup auto-refresh worker
+        // (its observer-owner) with plugin storage still alive.
+    }
 
     // The project-scoped half of the /-command catalog (docs/COMMANDS_HOWTO.md
     // §2): unlike `commands` above, this is never populated here -- there is

@@ -58,6 +58,15 @@ std::map<std::string, Rate> FetchSource(
     return rates;
 }
 
+// Unix seconds for the same kind of instant -- the snapshot's machine-usable
+// timestamp, the one the startup staleness gate reads (the ISO string above is
+// diagnostic only).
+std::int64_t UnixSecondsNow() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
 }  // namespace
 
 RatesFetchOutcome FetchAndUpdateRates(const CostSettings& settings, CostStore& store,
@@ -79,10 +88,12 @@ RatesFetchOutcome FetchAndUpdateRates(const CostSettings& settings, CostStore& s
     }
 
     outcome.fetched_at = Iso8601UtcNow();
+    const std::int64_t fetched_at_unix = UnixSecondsNow();
     try {
         if (!litellm.empty()) {
             FetchedRates fetched;
             fetched.fetched_at = outcome.fetched_at;
+            fetched.fetched_at_unix = fetched_at_unix;
             fetched.models = std::move(litellm);
             outcome.litellm_updated = static_cast<int>(fetched.models.size());
             store.SetFetchedRates(fetched);
@@ -90,6 +101,7 @@ RatesFetchOutcome FetchAndUpdateRates(const CostSettings& settings, CostStore& s
         if (!openrouter.empty()) {
             FetchedRates fetched;
             fetched.fetched_at = outcome.fetched_at;
+            fetched.fetched_at_unix = fetched_at_unix;
             fetched.models = std::move(openrouter);
             outcome.openrouter_updated = static_cast<int>(fetched.models.size());
             store.SetOpenRouterFetchedRates(fetched);

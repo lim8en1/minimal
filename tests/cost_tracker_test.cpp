@@ -3,6 +3,7 @@
 // the test binary like every other bundled plugin's pure logic (plugin.cpp,
 // the extern "C" entry points, stays out -- the loader tests cover that shape).
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <utility>
@@ -19,13 +20,14 @@
 #include "cost_tracking_service_impl.hpp"
 #include "minimal/plugins/plugin_storage.hpp"
 #include "temp_dir.hpp"
-#include "update_rates_command.hpp"
 
 // tests/ sits beside the include dirs of EVERY bundled plugin, and checklist
 // also ships an rpc_service.hpp -- quoted lookup finds that one first. This
 // plugin's own headers are reached the same way commands_core_fixture.hpp
 // reaches its plugin: a relative path.
 #include "../plugins/server/cost-tracker/rpc_service.hpp"
+#include "../plugins/server/cost-tracker/rates_fetch.hpp"
+#include "../plugins/server/cost-tracker/rates_refresh.hpp"
 
 using namespace minimal;
 using namespace minimal::cost_tracker;
@@ -133,17 +135,28 @@ TEST_CASE("OpenRouter ingestion parses string pricing and skips the rest", "[cos
 TEST_CASE("fetched-rates blob round-trips and rejects corruption", "[cost_tracker]") {
     FetchedRates rates;
     rates.fetched_at = "2026-08-31T00:00:00Z";
+    rates.fetched_at_unix = 1780000000;
     rates.models["m1"] = Rate{1.0, 2.0, 0.5, 0.0};
     const auto decoded = FetchedFromJson(FetchedToJson(rates).dump());
 
     REQUIRE(decoded);
     CHECK(decoded->fetched_at == "2026-08-31T00:00:00Z");
+    CHECK(decoded->fetched_at_unix == 1780000000);
     REQUIRE(decoded->models.count("m1") == 1);
     CHECK(decoded->models.at("m1").output_per_mtok == 2.0);
 
     CHECK(!FetchedFromJson("not json"));
     CHECK(!FetchedFromJson(R"([])"));
     CHECK(!FetchedFromJson(R"({"fetched_at": "x"})"));
+
+    // The machine timestamp is optional: a blob written before it existed
+    // decodes with the struct's 0 -- which the staleness gate reads as stale,
+    // so an old cache always triggers one refresh rather than pinning.
+    const auto legacy = FetchedFromJson(
+        R"({"fetched_at": "2026-08-31T00:00:00Z", "models": {"m1": {"input": 1.0, "output": 2.0}}})");
+    REQUIRE(legacy);
+    CHECK(legacy->fetched_at_unix == 0);
+    CHECK(legacy->models.at("m1").input_per_mtok == 1.0);
 }
 
 TEST_CASE("cost arithmetic bills every tier and refuses unreported usage",
@@ -232,9 +245,9 @@ TEST_CASE("rate resolution is config > openrouter > litellm > bundled",
           "[cost_tracker][invariant]") {
     Harness harness;
     harness.store.SetFetchedRates(FetchedRates{
-        "t", {{"m", Rate{10.0, 10.0}}, {"only-litellm", Rate{7.0, 7.0}}}});
+        "t", 0, {{"m", Rate{10.0, 10.0}}, {"only-litellm", Rate{7.0, 7.0}}}});
     harness.store.SetOpenRouterFetchedRates(FetchedRates{
-        "t", {{"m", Rate{20.0, 20.0}}, {"only-openrouter", Rate{30.0, 30.0}}}});
+        "t", 0, {{"m", Rate{20.0, 20.0}}, {"only-openrouter", Rate{30.0, 30.0}}}});
 
     RateSources sources;
     sources.bundled_models = nlohmann::json::parse(R"({"m": {"input": 1.0, "output": 1.0}})");
@@ -608,8 +621,9 @@ TEST_CASE("the /cost table sizes columns to content and never fakes a price",
     CHECK(unknown_text.find("?") != std::string::npos);
     CHECK(unknown_text.find("$0.0000") == std::string::npos);
     CHECK(unknown_text.find('+') == std::string::npos);
-    CHECK(unknown_text.find("(1 turn(s) unpriced -- run /cost-update-rates)") !=
-          std::string::npos);
+    CHECK(unknown_text.find(
+              "(1 turn(s) unpriced -- prices refresh at server start; refresh now with "
+              "minimal-server --refresh-cost-rates)") != std::string::npos);
 
     // Partially priced: the priced portion is shown as a floor, ">= $X".
     SessionTotals partial = unknown;
@@ -867,20 +881,74 @@ TEST_CASE("a failed rates fetch keeps the old table", "[cost_tracker]") {
     RateTable rates(sources, &harness.storage);
     harness.store.AppendTurn("s1", "", Turn("m1", 1000000, 0));
 
-    // Unroutable ports for BOTH sources: the command must fail cleanly and
-    // the price must survive. (No live network in tests; this hits nothing.)
+    // Unroutable ports for BOTH sources: every fetch entry point (the startup
+    // auto-refresh, --refresh-cost-rates, the .rpc method) must fail cleanly
+    // and the price must survive. (No live network in tests; this hits
+    // nothing.) Drives FetchAndUpdateRates directly -- it is the shared path
+    // all three run on.
     CostSettings settings;
     settings.rates_fetch_url = "http://127.0.0.1:1/x.json";
     settings.openrouter_rates_fetch_url = "http://127.0.0.1:1/or.json";
     settings.rates_fetch_timeout_ms = 2000;
 
-    testing::CommandFixture fixture;
-    fixture.registry.Register(
-        std::make_unique<UpdateRatesCommand>(harness.store, rates, settings));
-    const auto result = fixture.Run("cost-update-rates");
-    CHECK(result.status == Status::kError);
+    const auto outcome = FetchAndUpdateRates(settings, harness.store, rates);
+    CHECK_FALSE(outcome.ok);
 
     const auto totals = Aggregate("s1", "", harness.store.Load("s1").turns,
                                   [&rates](const std::string& m) { return rates.Resolve(m); });
     CHECK(totals.total_cost == 2.0);
+}
+
+TEST_CASE("the startup refresh gate fetches only when a snapshot is stale", "[cost_tracker]") {
+    Harness harness;
+    CostSettings settings;  // default 7-day horizon
+
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    const FetchedRates fresh{"t", now, {{"m", Rate{1.0, 1.0}}}};
+    const FetchedRates old{"t", now - 8 * 86400, {{"m", Rate{1.0, 1.0}}}};
+    const FetchedRates boundary{"t", now - 6 * 86400, {{"m", Rate{1.0, 1.0}}}};
+
+    // No cache at all: the first boot fetches.
+    CHECK(RefreshRatesDue(std::nullopt, std::nullopt, settings));
+    // Either tier stale (or timestamp-less: a pre-fetched_at_unix cache) is
+    // enough -- one tier of prices silently aging out is what the gate exists
+    // to prevent.
+    CHECK(RefreshRatesDue(old, fresh, settings));
+    CHECK(RefreshRatesDue(fresh, old, settings));
+    CHECK(RefreshRatesDue(FetchedRates{"t", 0, {}}, fresh, settings));
+    // Fresh on both sides of the horizon: skip. (The boundary case sits one
+    // day inside the 7-day window; "at least 7 days" is covered by `old`.)
+    CHECK_FALSE(RefreshRatesDue(fresh, fresh, settings));
+    CHECK_FALSE(RefreshRatesDue(fresh, boundary, settings));
+    // rates_refresh_days == 0 means fetch on every start, fresh or not.
+    CostSettings always;
+    always.rates_refresh_days = 0;
+    CHECK(RefreshRatesDue(fresh, fresh, always));
+}
+
+TEST_CASE("the startup refresh runs in the background and teardown joins it", "[cost_tracker]") {
+    Harness harness;
+    RateSources sources;
+    sources.config_rates = nlohmann::json::parse(R"({"m1": {"input": 2.0, "output": 0.0}})");
+    RateTable rates(sources, &harness.storage);
+    // Unroutable ports: the worker runs its full (bounded) fetch and fails,
+    // which is exactly the shape the teardown join must tolerate.
+    CostSettings settings;
+    settings.rates_fetch_url = "http://127.0.0.1:1/x.json";
+    settings.openrouter_rates_fetch_url = "http://127.0.0.1:1/or.json";
+    settings.rates_fetch_timeout_ms = 2000;
+
+    RatesRefresher refresher(settings, harness.store, rates, &harness.storage);
+    // No cache: the gate opens.
+    refresher.MaybeStart();
+
+    // The owner is the real teardown path: its destructor joins the worker.
+    // The suite surviving this scope (no hang, no ASan use-after-free) IS the
+    // assertion; destruction order here mirrors main()'s -- owner first, then
+    // everything the worker can still touch.
+    {
+        RatesRefresherOwner owner(refresher);
+    }
 }

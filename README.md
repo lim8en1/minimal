@@ -61,10 +61,11 @@ id=$(minimal -p "refactor the parser" --output-format jsonl | head -1 | jq -r .s
 minimal --resume "$id"    # attach to the session (and its live subagents)
 ```
 
-`minimal-server` — the server: `--listen <path>` (socket path) and
-`--version`. Normally spawned for you by the first client that needs it; it
-exits on its own once nothing has used it for a while (sessions stay
-resumable for `sessions.detached_idle_ttl_seconds`, default 30 min).
+`minimal-server` — the server: `--listen <path>`, `--refresh-cost-rates`
+(refresh cost-tracker's cached price snapshots now and exit — prints the
+outcome as JSON) and `--version`. Normally spawned for you by the first client
+that needs it; it exits on its own once nothing has used it for a while
+(sessions stay resumable for `sessions.detached_idle_ttl_seconds`, default 30 min).
 
 ## Configuration
 

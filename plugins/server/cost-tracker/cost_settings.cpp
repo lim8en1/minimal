@@ -17,6 +17,12 @@ CostSettings ParseCostSettings(const nlohmann::json& config) {
         it != config.end() && it->is_number_integer() && it->get<int>() > 0) {
         settings.rates_fetch_timeout_ms = it->get<int>();
     }
+    // 0 is meaningful ("always refresh"), so it is the one accepted
+    // non-positive value; anything negative or non-integer keeps the default.
+    if (const auto it = config.find("rates_refresh_days");
+        it != config.end() && it->is_number_integer() && it->get<int>() >= 0) {
+        settings.rates_refresh_days = it->get<int>();
+    }
     return settings;
 }
 

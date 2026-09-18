@@ -1,5 +1,5 @@
 {
-  "note": "cost-tracker's fallback price table: USD per million tokens. Precedence is config > fetched > bundled: a 'rates' entry in this plugin's plugins.json slice always wins, a snapshot fetched by /cost-update-rates wins over this file, and this file answers only when a model appears in neither. Add a model here by hand, or run /cost-update-rates to fetch current LiteLLM data.",
+  "note": "cost-tracker's fallback price table: USD per million tokens. Precedence is config > fetched > bundled: a 'rates' entry in this plugin's plugins.json slice always wins, a fetched snapshot wins over this file, and this file answers only when a model appears in neither. Add a model here by hand, or let the plugin refresh prices at server start (or run minimal-server --refresh-cost-rates to fetch immediately).",
   "updated": "2026-08-01",
   "models": {
     "gpt-5":            {"input": 1.25, "output": 10.0,  "cache_read": 0.125},

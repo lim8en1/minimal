@@ -220,14 +220,16 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist/rpc_service.cpp"
     # Same pattern for cost-tracker. rates_fetch.cpp is the shared fetch path;
     # its network test uses an unroutable port, never the live snapshot.
+    # rates_refresh.cpp is the startup auto-refresh: the gate is tested pure,
+    # the teardown join against the same unroutable ports.
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_model.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_store.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_settings.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/in_flight.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_observer.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_command.cpp"
-    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/update_rates_command.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/rates_fetch.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/rates_refresh.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_tracking_service_impl.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/rpc_service.cpp"
     # Same pattern for tools-search. The walker forks nothing and needs the

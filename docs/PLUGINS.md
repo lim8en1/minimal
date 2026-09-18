@@ -27,7 +27,7 @@ Installed to `<libdir>/minimal/plugins/server/`. All enabled by default unless n
 | `commands-md` | Turns `commands/*.md` files into `/`-commands (config dir, project, and `.opencode/commands/`; opencode-syntax desugaring — see CONFIGURATION.md, how-to in COMMANDS_HOWTO.md) |
 | `checklist` | Tool `checklist` + cross-plugin RPC endpoint `checklist.rpc` |
 | `signals-message` | Tool `message_session` (cross-session messaging on the core `signals` service) |
-| `cost-tracker` | Commands `/cost`, `/cost-update-rates`; per-session cost accumulation; RPC endpoint `cost-tracker.rpc` |
+| `cost-tracker` | Command `/cost`; startup auto-refresh of pricing snapshots (also `--refresh-cost-rates`); per-session cost accumulation; RPC endpoint `cost-tracker.rpc` |
 | `session-titler` | Session observer that auto-titles sessions (~100 tokens/session spend). **Ships disabled** |
 
 ## Bundled client plugins (`plugins/client/`)
