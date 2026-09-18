@@ -23,8 +23,9 @@ Entries are configured in `plugins.json` (see
 
 The `config` object is passed to the plugin verbatim — core imposes no schema;
 each plugin owns its own, and every one documented here treats missing or
-partial config as normal (defaults apply). Only `session-titler` ships
-disabled; everything else is load-bearing for the default harness.
+partial config as normal (defaults apply). `session-titler`, `memory` and
+`typesafe-advisor` ship disabled; everything else is load-bearing for the
+default harness.
 
 ## Tools
 
@@ -63,3 +64,4 @@ names. Configured in providers.json, not plugins.json
 | cost-tracker | `/cost`, startup auto-refresh + `--refresh-cost-rates` (pricing snapshots), `cost-tracker.rpc` (token usage and cost) | [README](server/cost-tracker/README.md) |
 | session-titler | LLM-generated session titles after turn 1. **Ships disabled** — enable in plugins.json | [README](server/session-titler/README.md) |
 | signals-message | `message_session` tool (cross-session messaging) | [README](server/signals-message/README.md) |
+| typesafe-advisor | Jev-based permission advisor (auto-allow/auto-deny with abstain-to-human). **Ships disabled** — enable in plugins.json + permissions.json `advisor` | [README](server/typesafe-advisor/README.md) |

@@ -26,6 +26,17 @@ minimal_add_fixture_plugin(fixture-minimal     fixture_minimal.cpp)
 minimal_add_fixture_plugin(fixture-not-a-plugin fixture_not_a_plugin.cpp)
 minimal_add_fixture_plugin(fixture-throws    fixture_throws.cpp)
 minimal_add_fixture_plugin(fixture-advisor    fixture_advisor.cpp)
+# The typesafe-advisor E2E: the REAL TypesafeAdvisor (the plugin's own sources)
+# behind a fixture .so, so the session_service E2E loads shipped code through
+# the real loader rather than a hand-rolled advisor.
+minimal_add_fixture_plugin(typesafe-advisor-fixture fixture_typesafe_advisor.cpp)
+target_sources(typesafe-advisor-fixture PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor/settings.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor/decision.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor/typesafe_client.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor/advisor.cpp")
+target_include_directories(typesafe-advisor-fixture PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor")
 minimal_add_fixture_plugin(fixture-service    fixture_service.cpp)
 minimal_add_fixture_plugin(fixture-service-b  fixture_service_b.cpp)
 minimal_add_fixture_plugin(fixture-hook       fixture_hook.cpp)

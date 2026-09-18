@@ -112,6 +112,23 @@ struct ServiceFixture {
         REQUIRE(records.front().registered_permission_advisor);
     }
 
+    // Same, with a config slice for plugins whose registration reads one
+    // (the typesafe-advisor E2E: the loopback stub URL rides the plugin's own
+    // "config" object, exactly as a real plugins.json entry would carry it).
+    void LoadAdvisorPlugin(const nlohmann::json& config, const std::string& file) {
+        plugins::PluginCandidate candidate;
+        candidate.file = std::filesystem::path(MINIMAL_FIXTURE_DIR) / file;
+        candidate.provenance = plugins::Provenance::User;
+        candidate.enabled = true;
+        candidate.config = config;
+        plugins::PluginLoader loader(tools, providers, nlohmann::json::object(), nullptr, nullptr,
+                                     nullptr, &permission_advisors);
+        const auto records = loader.LoadAll({candidate});
+        REQUIRE(records.size() == 1);
+        REQUIRE(records.front().ok());
+        REQUIRE(records.front().registered_permission_advisor);
+    }
+
     // Loads the generic-channel endpoint fixture through the REAL loader, so
     // PluginCall/PluginSubscribe dispatch runs against a dlopen'd PluginEndpoint.
     void LoadEndpointPlugin() {
@@ -375,6 +392,75 @@ std::optional<v1::CommandResult> RunCommand(Stream& stream, const std::string& s
         }
     }
     return std::nullopt;
+}
+
+// Loopback stand-in for the System One endpoint, one pre-canned body per
+// accepted connection (the tools_web_test LoopbackServer shape, kept
+// file-local like every other helper in this suite).
+class JevStubServer {
+public:
+    explicit JevStubServer(std::vector<std::string> bodies)
+        : responses_(std::move(bodies)) {
+        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        REQUIRE(listen_fd_ >= 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        REQUIRE(::bind(listen_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        REQUIRE(::listen(listen_fd_, 1) == 0);
+        socklen_t length = sizeof(address);
+        REQUIRE(::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&address), &length) == 0);
+        port_ = ntohs(address.sin_port);
+        thread_ = std::thread([this] { Serve(); });
+    }
+
+    ~JevStubServer() {
+        if (listen_fd_ >= 0) ::close(listen_fd_);
+        if (thread_.joinable()) thread_.join();
+    }
+
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(port_) + "/"; }
+
+private:
+    void Serve() {
+        timeval tv{10, 0};
+        (void)::setsockopt(listen_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        for (const auto& body : responses_) {
+            int fd = ::accept(listen_fd_, nullptr, nullptr);
+            if (fd < 0) return;
+            std::string request;
+            char buffer[8192];
+            while (request.find("\r\n\r\n") == std::string::npos) {
+                ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
+                if (n <= 0) break;
+                request.append(buffer, static_cast<std::size_t>(n));
+            }
+            std::string head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n";
+            head += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+            head += "Connection: close\r\n\r\n";
+            std::string bytes = head + body;
+            std::size_t sent = 0;
+            while (sent < bytes.size()) {
+                ssize_t n = ::send(fd, bytes.data() + sent, bytes.size() - sent, 0);
+                if (n <= 0) break;
+                sent += static_cast<std::size_t>(n);
+            }
+            ::close(fd);
+        }
+    }
+
+    int listen_fd_ = -1;
+    int port_ = 0;
+    std::vector<std::string> responses_;
+    std::thread thread_;
+};
+
+// The captured live responses, as the strings the stub answers with.
+std::string JevFixtureBody(const std::string& name) {
+    std::ifstream stream(std::filesystem::path(TYPESAFE_FIXTURE_DIR) / name);
+    REQUIRE(stream.good());
+    return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
 }
 
 }  // namespace
@@ -3195,6 +3281,91 @@ TEST_CASE("an advisor answers Ask; abstention still reaches the human over the w
 }
 
 // --- Session traversal (rewind) over the real channel ------------------------
+
+// The typesafe-advisor E2E: the SHIPPED advisor -- its own sources behind a
+// fixture .so, registered through the real loader with a config slice, named
+// by permissions.json -- resolves an Ask over a real socket, against a loopback
+// stub standing in for the System One endpoint. This is the full length of the
+// track-J path with the production plugin at the end of it: the same registration
+// attribution permissions.json selects on, the same composition in
+// FinishSessionWiring, the same thresholds, and the same grant behavior.
+TEST_CASE("the typesafe-advisor answers a confident Ask and abstains below the margin",
+          "[session_service][advisor][typesafe]") {
+    ServiceFixture fixture;
+    fixture.tools.Register(std::make_unique<testing::FakeTool>("auto_tool",
+                                                               tools::ToolCategory::Execute,
+                                                               "auto ran"));
+    fixture.tools.Register(std::make_unique<testing::FakeTool>("manual_tool",
+                                                               tools::ToolCategory::Execute,
+                                                               "manual ran"));
+
+    // Two responses consumed in arrival order across the two tool calls:
+    // call 1 (auto_tool) -> confident allow (live-fixture shape, 0.91/0.09,
+    // both gates clear); call 2 (manual_tool) -> confident REVIEW (0.86, the
+    // captured abstain path).
+    JevStubServer stub({JevFixtureBody("allow-response.json"),
+                        JevFixtureBody("review-response.json")});
+
+    // Load the REAL advisor through the REAL loader, with the stub URL riding
+    // the config slice -- a plugins.json entry in miniature.
+    fixture.LoadAdvisorPlugin(nlohmann::json{{"endpoint", stub.url()}},
+                              "typesafe-advisor-fixture.so");
+    fixture.service_permissions.advisor = "typesafe-advisor-fixture";
+    fixture.Script(testing::ToolUseResponse("call-1", "auto_tool", nlohmann::json::object()));
+    fixture.Script(testing::TextResponse("auto done"));
+    fixture.Script(testing::ToolUseResponse("call-2", "manual_tool", nlohmann::json::object()));
+    fixture.Script(testing::TextResponse("manual done"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "run auto")));
+
+    v1::ServerEvent event;
+    bool prompted = false;
+    bool answered = false;
+    int tool_finishes = 0;
+    int turn_completions = 0;
+    bool second_turn_sent = false;
+    while (stream->Read(&event)) {
+        if (event.has_permission_request()) {
+            prompted = true;
+            // The advisor auto-allowed auto_tool (the stub's first response);
+            // the ONLY prompt on this stream is manual_tool -- its review
+            // answer abstained and fell through to the wire checker, the
+            // human, exactly as designed.
+            CHECK(event.permission_request().tool_name() == "manual_tool");
+            v1::ClientEvent answer;
+            answer.set_session_id(session_id);
+            auto* response = answer.mutable_permission_response();
+            response->set_request_id(event.permission_request().request_id());
+            response->set_decision(v1::PERMISSION_DECISION_ALLOW);
+            REQUIRE(stream->Write(answer));
+            answered = true;
+        }
+        if (event.has_tool_execution() && !event.tool_execution().started()) ++tool_finishes;
+        if (event.has_turn_completed()) {
+            ++turn_completions;
+            if (turn_completions == 1) {
+                REQUIRE(stream->Write(ChatTurn(session_id, "run manual")));
+                second_turn_sent = true;
+            }
+        }
+        if (event.has_error()) break;
+        if (turn_completions == 2) break;
+    }
+    (void)DrainAndFinish(stream);
+
+    CHECK(answered);
+    CHECK(prompted);
+    CHECK(second_turn_sent);
+    CHECK(tool_finishes == 2);
+    CHECK(turn_completions == 2);
+}
+
+// --- Session traversal (rewind) over the real channel (original) --------------
 
 // Drives a full interactive session on ONE stream -- closing a stream
 // terminates the session, so turn 1, the rewind, and the fork turn all share
