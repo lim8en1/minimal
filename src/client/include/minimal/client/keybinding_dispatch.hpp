@@ -54,11 +54,11 @@ std::string NextAttentionTab(const std::vector<AppState::TabSnapshot>& tabs,
 bool AnyWorkInFlight(const std::vector<AppState::TabSnapshot>& tabs,
                     const std::vector<std::string>& ids);
 
-// tab.close: the session ids to close for `sid`, in CLOSE order (children
-// first, root last -- so a confirmation or a close loop can act on the list
-// directly without re-deriving order). Closing a root tab closes its whole
-// group; closing a subagent tab closes only itself. Empty if `sid` names no
-// known tab.
+// tab.close: the session ids to close for `sid`, in CLOSE order (root FIRST,
+// children after -- render order; so a confirmation or a close loop can act
+// on the list directly without re-deriving order). Closing a root tab closes
+// its whole group; closing a subagent tab closes only itself. Empty if `sid`
+// names no known tab.
 std::vector<std::string> TabsToClose(const std::vector<AppState::TabSnapshot>& tabs,
                                      const std::string& sid);
 

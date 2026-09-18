@@ -19,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include <unistd.h>
@@ -227,27 +228,38 @@ minimal::client::SessionClient::CreateOptions DefaultCreateOptions() {
     return opts;
 }
 
+// Auto-spawn (if allowed) BEFORE any client channel exists: the probe channel
+// EnsureServerRunning creates has the process's only sockets at that moment,
+// so a forked server inherits nothing to hold open. Shared by every entry
+// point that dials a target this same way (headless, --list-sessions, TUI).
+bool EnsureServerReachable(const std::string& target, bool autospawn) {
+    minimal::client::SpawnOptions spawn_options;
+    spawn_options.enabled = autospawn;
+    return minimal::client::EnsureServerRunning(
+        target, spawn_options, [](const std::string& line) {
+            std::fprintf(stderr, "minimal: %s\n", line.c_str());
+        });
+}
+
+// The shared "we couldn't connect" diagnostic, printed once regardless of
+// which of the three entry points above failed to dial the same target.
+void ReportServerUnreachable(const std::string& target) {
+    std::fprintf(stderr, "cannot reach a minimal-server at %s\n", target.c_str());
+    std::fprintf(stderr, "start one with: minimal-server --listen %s\n",
+                 target.rfind("unix://", 0) == 0 ? target.c_str() + 7 : "<socket path>");
+}
+
 int RunHeadless(const HeadlessOptions& options) {
     // Already resolved by ParseArgs -- a bare path became a unix:// target
     // there, so what is printed on failure is what was actually dialled.
     const std::string target =
         options.server.empty() ? minimal::client::DefaultServerTarget() : options.server;
 
-    // Auto-spawn BEFORE the client's channel exists: the probe channel this
-    // creates has the process's only sockets at that moment, so the forked
-    // server inherits nothing to hold open.
-    minimal::client::SpawnOptions spawn_options;
-    spawn_options.enabled = options.autospawn;
-    const bool reachable = minimal::client::EnsureServerRunning(
-        target, spawn_options, [](const std::string& line) {
-            std::fprintf(stderr, "minimal: %s\n", line.c_str());
-        });
+    const bool reachable = EnsureServerReachable(target, options.autospawn);
 
     minimal::client::SessionClient client(target);
     if (!reachable || !client.WaitForConnected(std::chrono::seconds(5))) {
-        std::fprintf(stderr, "cannot reach a minimal-server at %s\n", target.c_str());
-        std::fprintf(stderr, "start one with: minimal-server --listen %s\n",
-                     target.rfind("unix://", 0) == 0 ? target.c_str() + 7 : "<socket path>");
+        ReportServerUnreachable(target);
         return kUnavailable;
     }
 
@@ -584,18 +596,11 @@ int RunListSessions(const minimal::client::HeadlessOptions& options) {
 
     // Same autospawn-before-channel discipline as RunHeadless: the probe
     // channel must not hold open descriptors the forked server would inherit.
-    minimal::client::SpawnOptions spawn_options;
-    spawn_options.enabled = options.autospawn;
-    const bool reachable = minimal::client::EnsureServerRunning(
-        target, spawn_options, [](const std::string& line) {
-            std::fprintf(stderr, "minimal: %s\n", line.c_str());
-        });
+    const bool reachable = EnsureServerReachable(target, options.autospawn);
 
     minimal::client::SessionClient client(target);
     if (!reachable || !client.WaitForConnected(std::chrono::seconds(5))) {
-        std::fprintf(stderr, "cannot reach a minimal-server at %s\n", target.c_str());
-        std::fprintf(stderr, "start one with: minimal-server --listen %s\n",
-                     target.rfind("unix://", 0) == 0 ? target.c_str() + 7 : "<socket path>");
+        ReportServerUnreachable(target);
         return kUnavailable;
     }
 
@@ -723,6 +728,24 @@ using minimal::client::Theme;
 // confirm modal chooses TERMINATE (destroy the sessions and everything in
 // flight) or DETACH (end only the streams; work finishes unattended and
 // /sessions reattaches).
+// Looks up session_id's TabUi and, if it exists and has a live ChatView yet
+// (a sessionless tab doesn't), calls fn(chat_view). Returns fn's result, or a
+// default-constructed one (false/nullptr/nothing) on a miss. Collapses what
+// used to be nine copy-pasted `tab_ui.find(...)` guards in KeyContext's
+// construction below into one-line calls, so a future fix to the lookup/guard
+// itself only has to happen once.
+template <typename Fn>
+auto WithChat(std::map<std::string, minimal::client::TabUi>& tab_ui, const std::string& session_id,
+             Fn&& fn) {
+    using Ret = std::invoke_result_t<Fn, minimal::client::ChatView&>;
+    if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
+        return fn(*it->second.chat);
+    }
+    if constexpr (!std::is_void_v<Ret>) {
+        return Ret{};
+    }
+}
+
 struct PendingClose {
     bool quit = false;
     // STAGING ORDER: render order -- the root FIRST, its children directly
@@ -745,18 +768,14 @@ int RunTui(const minimal::client::ParsedArgs& args) {
 
     // Auto-spawn before the client's channel exists, so the forked server
     // inherits no stray descriptors (same reason as the headless path).
-    minimal::client::SpawnOptions spawn_options;
-    spawn_options.enabled = args.headless.autospawn;
-    const bool reachable =
-        minimal::client::EnsureServerRunning(target, spawn_options, [](const std::string& line) {
-            std::fprintf(stderr, "minimal: %s\n", line.c_str());
-        });
+    const bool reachable = EnsureServerReachable(target, args.headless.autospawn);
 
+    // Same wait budget as the headless/--list-sessions paths (previously 2s
+    // here with no stated reason, vs. 5s there): unified rather than left as
+    // an unexplained asymmetry.
     auto client = std::make_shared<minimal::client::SessionClient>(target);
-    if (!reachable || !client->WaitForConnected(std::chrono::seconds(2))) {
-        std::fprintf(stderr, "cannot reach a minimal-server at %s\n", target.c_str());
-        std::fprintf(stderr, "start one with: minimal-server --listen %s\n",
-                     target.rfind("unix://", 0) == 0 ? target.c_str() + 7 : "<socket path>");
+    if (!reachable || !client->WaitForConnected(std::chrono::seconds(5))) {
+        ReportServerUnreachable(target);
         return kUnavailable;
     }
 
@@ -1869,23 +1888,19 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // lazily inside session_view's own render lambda, so it may not
         // exist on the very first frame of a freshly opened tab).
         [&](const std::string& session_id, int delta_rows) {
-            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
-                it->second.chat->ScrollBy(delta_rows);
-            }
+            WithChat(tab_ui, session_id, [&](auto& chat) { chat.ScrollBy(delta_rows); });
         },
         // The wheel's own path: the gate in ScrollWheelBy bounds how fast a
         // momentum flick can walk the transcript (keyboard scrolling above
         // stays ungated).
         [&](const std::string& session_id, int delta_rows) {
-            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
-                it->second.chat->ScrollWheelBy(delta_rows);
-            }
+            WithChat(tab_ui, session_id, [&](auto& chat) { chat.ScrollWheelBy(delta_rows); });
         },
         [&](const std::string& session_id) {
-            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
-                it->second.chat->ScrollToBottom();
-                it->second.chat->ClearRowFocus();
-            }
+            WithChat(tab_ui, session_id, [](auto& chat) {
+                chat.ScrollToBottom();
+                chat.ClearRowFocus();
+            });
         },
         // tab.close with work in flight: stage ONE confirmation for the
         // whole closing group, same as request_quit's own busy branch.
@@ -1895,41 +1910,29 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             show_quit_confirm = true;
         },
         [&](const std::string& session_id, int delta) {
-            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
-                it->second.chat->MoveRowFocus(delta);
-            }
+            WithChat(tab_ui, session_id, [&](auto& chat) { chat.MoveRowFocus(delta); });
         },
         [&](const std::string& session_id) {
-            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
-                it->second.chat->ToggleCollapseFocused();
-            }
+            WithChat(tab_ui, session_id, [](auto& chat) { chat.ToggleCollapseFocused(); });
         },
         [&](const std::string& session_id) {
-            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
-                it->second.chat->ToggleCollapseAll();
-            }
+            WithChat(tab_ui, session_id, [](auto& chat) { chat.ToggleCollapseAll(); });
         },
         // Mouse-click collapse: ToggleCollapseAt consumes the click only
         // when it landed on a collapsible row; a miss falls through.
         [&](const std::string& session_id, int screen_y) -> bool {
-            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
-                return it->second.chat->ToggleCollapseAt(screen_y);
-            }
-            return false;
+            return WithChat(tab_ui, session_id,
+                            [&](auto& chat) { return chat.ToggleCollapseAt(screen_y); });
         },
         // Mouse-click cancel of a QUEUED message: CancelPendingAt consumes
         // the click only when a cancellable queued row is under it; a miss
         // falls through to the collapse toggle above's handling order.
         [&](const std::string& session_id, int screen_y) -> bool {
-            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
-                return it->second.chat->CancelPendingAt(screen_y);
-            }
-            return false;
+            return WithChat(tab_ui, session_id,
+                            [&](auto& chat) { return chat.CancelPendingAt(screen_y); });
         },
         [&](const std::string& session_id) {
-            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
-                it->second.chat->ToggleTimestamps();
-            }
+            WithChat(tab_ui, session_id, [](auto& chat) { chat.ToggleTimestamps(); });
         },
         // The fold toggles are session-wide preferences, unlike the
         // per-tab actions above: EVERY open tab's ChatView flips, and the

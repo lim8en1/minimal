@@ -160,9 +160,30 @@ void PromptHistory::Record(const std::string& line) {
     // arrow-up recall is used for.
     constexpr std::size_t kMaxHistoryEntries = 500;
     if (entries.size() > kMaxHistoryEntries) {
-        entries.erase(entries.begin(),
-                      entries.begin() + static_cast<long>(entries.size() - kMaxHistoryEntries));
+        const std::size_t trimmed = entries.size() - kMaxHistoryEntries;
+        entries.erase(entries.begin(), entries.begin() + static_cast<long>(trimmed));
+        // Every registered browse position is a raw index into `entries`
+        // (see the ArrowUp/ArrowDown handling below); a front-trim triggered
+        // by ANY tab's Record() call must shift every one of them by the
+        // same amount, or a DIFFERENT tab mid-browse silently ends up
+        // pointed at an unrelated (or out-of-range) line.
+        for (std::optional<std::size_t>* cursor : cursors_) {
+            if (!cursor->has_value()) continue;
+            if (**cursor >= trimmed) {
+                **cursor -= trimmed;
+            } else {
+                cursor->reset();
+            }
+        }
     }
+}
+
+void PromptHistory::RegisterCursor(std::optional<std::size_t>* cursor) {
+    cursors_.push_back(cursor);
+}
+
+void PromptHistory::UnregisterCursor(std::optional<std::size_t>* cursor) {
+    cursors_.erase(std::remove(cursors_.begin(), cursors_.end(), cursor), cursors_.end());
 }
 
 ftxui::Component MakePromptEditor(
@@ -190,6 +211,22 @@ ftxui::Component MakePromptEditor(
     std::shared_ptr<PromptHistory> owned_history =
         history != nullptr ? nullptr : std::make_shared<PromptHistory>();
     PromptHistory& hist = history != nullptr ? *history : *owned_history;
+
+    // Only a SHARED history (history != nullptr, i.e. per-tab editors over
+    // one app-scoped timeline) needs this: a private/owned history has
+    // exactly one editor, so nothing else can trim it out from under this
+    // editor's own browse position. `state.history_cursor`'s address is
+    // stable for the component's lifetime (PerTabPromptEditors::states_ is a
+    // std::map, and ForgetTab drops state and editor together), so
+    // registering it here and unregistering via this guard's destruction --
+    // tied to the returned component's lifetime below -- brackets it exactly.
+    std::shared_ptr<void> history_cursor_guard;
+    if (history != nullptr) {
+        history->RegisterCursor(&state.history_cursor);
+        history_cursor_guard = std::shared_ptr<void>(nullptr, [history, cursor = &state.history_cursor](void*) {
+            history->UnregisterCursor(cursor);
+        });
+    }
 
     // Multiline ON: Return-as-newline is the Input's default, so the submit
     // decision is ours -- CatchEvent sees every event first. cursor_position
@@ -373,7 +410,20 @@ ftxui::Component MakePromptEditor(
                        std::isspace(static_cast<unsigned char>(completed.back()))) {
                     completed.pop_back();
                 }
-                already_typed = (completed == state.content);
+                if (IsCommandNameInProgress(state.content)) {
+                    already_typed = (completed == state.content);
+                } else if (const auto at =
+                               MentionTokenStart(state.content, state.cursor_position)) {
+                    // A mention's completion only replaces its OWN token
+                    // (accept_suggestion splices over MentionTokenStart..End,
+                    // not the whole line), so "already typed" must compare
+                    // against that token -- "@" + completed -- not the whole
+                    // buffer, which for a mention always also carries the
+                    // surrounding prose and can never equal it.
+                    const std::size_t end = MentionTokenEnd(state.content, *at);
+                    const std::string token = state.content.substr(*at, end - *at);
+                    already_typed = (token == "@" + completed);
+                }
             }
             if (!already_typed) {
                 accept_suggestion();

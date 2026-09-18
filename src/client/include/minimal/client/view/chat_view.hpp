@@ -270,6 +270,12 @@ private:
     // identity list, stable across a rebuild the way a column index is not
     // (loading an older page shifts every position).
     std::vector<RowKey> row_keys_;
+    // row_keys_'s inverse, rebuilt alongside it: RowCursorOffsetFromBottom
+    // runs every Render() while a row cursor is active and otherwise needed
+    // a linear std::find over row_keys_ (O(rows) per frame -- mouse move,
+    // streaming ticks, the pump -- at up to ~2000 rows in the scrollback
+    // window) just to locate the focused row's position.
+    std::map<RowKey, std::size_t> row_key_index_;
     // Parallel to row_keys_: each row's ChatRow::created_at_unix_ms, so
     // Render() can draw the clock (a layout concern, drawn OUTSIDE the
     // per-row render cache so toggling it needs no cache invalidation) without

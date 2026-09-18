@@ -1,5 +1,6 @@
 #include "minimal/client/view/theme_picker.hpp"
 
+#include "minimal/client/utf8.hpp"
 #include "minimal/client/view/filterable_menu.hpp"
 
 namespace minimal::client {
@@ -9,8 +10,15 @@ ftxui::Component MakeThemePicker(const std::vector<std::string>& names,
                                  ThemePickerCallbacks callbacks) {
     auto build_rows = [names, current](const std::string& filter) {
         std::vector<MenuRow> rows;
+        // Case-insensitive, matching every sibling picker (session/agent/
+        // model/mcp/subagent) -- this was the only case-sensitive filter box
+        // in the app.
+        const std::string lowered_filter = ToLower(filter);
         for (const auto& name : names) {
-            if (!filter.empty() && name.find(filter) == std::string::npos) continue;
+            if (!lowered_filter.empty() &&
+                ToLower(name).find(lowered_filter) == std::string::npos) {
+                continue;
+            }
             // The active theme gets a marker: /theme reads as a switch, and a
             // switch shows what it is switched FROM. The id stays the bare
             // name either way -- the swap path takes it verbatim.

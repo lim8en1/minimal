@@ -316,10 +316,12 @@ SubscribeOutcome SessionClient::PluginSubscribe(
     while (reader->Read(&response)) {
         if (on_payload && !on_payload(response.json_payload())) {
             context.TryCancel();
+            const grpc::Status cancel_status = reader->Finish();
             {
                 std::lock_guard lk(registry->mtx);
                 registry->active.erase(&context);
             }
+            if (status != nullptr) *status = cancel_status;
             return SubscribeOutcome::kCancelled;
         }
     }
@@ -616,19 +618,20 @@ std::optional<std::string> SessionClient::Stream::Open(const CreateOptions& opts
         // LIVE registry only, answered NOT_FOUND, and the dead stream
         // swallowed every prompt.
         request.set_session_id(opts.resume_session_id);
-        request.set_run_mode(opts.run_mode);
     } else {
         request.set_project_root(opts.project_root);
         request.set_agent_preset(opts.agent_preset);
         request.set_name(opts.name);
-        request.set_run_mode(opts.run_mode);
-        // Sent either way -- see CreateOptions::model/signals. A /model choice
-        // staged on a sessionless tab rides these; dropping them here silently
-        // discarded the staged selection.
-        request.set_model(opts.model);
-        for (const auto& selector : opts.signals) {
-            request.add_signals(selector);
-        }
+    }
+    request.set_run_mode(opts.run_mode);
+    // Sent either way -- see CreateOptions::model/signals. A /model choice
+    // staged on a sessionless tab rides these; dropping them here silently
+    // discarded the staged selection. Applies on resume too, mirroring
+    // CreateOptions::model's documented contract and SessionClient::CreateSession's
+    // unconditional send.
+    request.set_model(opts.model);
+    for (const auto& selector : opts.signals) {
+        request.add_signals(selector);
     }
 
     v1::CreateSessionResponse response;
@@ -797,18 +800,11 @@ void SessionClient::Stream::Detach(EndSessionMode mode) {
     // writer's final WritesDone -- is the timed wait's predicate; the
     // join() below only reaps an already-finishing thread.
     if (writer_.joinable()) {
-        const auto deadline = std::chrono::steady_clock::now() + kDetachJoinTimeout;
-        {
-            std::unique_lock lk(qmtx_);
-            if (!writer_cv_.wait_until(lk, deadline, [this] { return writer_exited_; })) {
-                context_.TryCancel();
-                // After the cancel a blocked Write() returns false, the
-                // writer breaks out, and the flag lands; no further timeout
-                // is needed (a second one could only paper over a genuine
-                // gRPC bug worth surfacing as a hang).
-                writer_cv_.wait(lk, [this] { return writer_exited_; });
-            }
-        }
+        // After the cancel (inside WaitForExit, past the bound) a blocked
+        // Write() returns false, the writer breaks out, and the flag lands;
+        // no further timeout is needed (a second one could only paper over
+        // a genuine gRPC bug worth surfacing as a hang).
+        WaitForExit(writer_cv_, writer_exited_);
         writer_.join();
     }
     if (reader_.joinable()) {
@@ -822,17 +818,19 @@ void SessionClient::Stream::Detach(EndSessionMode mode) {
         // writer's own bound already firing. reader_exited_ -- latched
         // under qmtx_ right after the reader's own Finish() -- is the timed
         // wait's predicate.
-        const auto deadline = std::chrono::steady_clock::now() + kDetachJoinTimeout;
-        {
-            std::unique_lock lk(qmtx_);
-            if (!reader_cv_.wait_until(lk, deadline, [this] { return reader_exited_; })) {
-                context_.TryCancel();
-                reader_cv_.wait(lk, [this] { return reader_exited_; });
-            }
-        }
+        WaitForExit(reader_cv_, reader_exited_);
         JoinReaderOrDetachSelf();
     } else if (bidi_) {
         SetStatus(bidi_->Finish());
+    }
+}
+
+void SessionClient::Stream::WaitForExit(std::condition_variable& cv, bool& exited_flag) {
+    const auto deadline = std::chrono::steady_clock::now() + kDetachJoinTimeout;
+    std::unique_lock lk(qmtx_);
+    if (!cv.wait_until(lk, deadline, [&exited_flag] { return exited_flag; })) {
+        context_.TryCancel();
+        cv.wait(lk, [&exited_flag] { return exited_flag; });
     }
 }
 

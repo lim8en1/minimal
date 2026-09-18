@@ -333,9 +333,15 @@ void ChatSurfaceRegistry::Register(std::unique_ptr<ChatSurface> candidate) {
 }
 
 void ChatSurfaceRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    if (!record.registered || record.plugin_name != plugin_name) return;
-    surface.reset();
-    record = ExclusiveRecord{};
+    // Register() records every claim attempt in attributions_ before checking
+    // Claim() -- a LOSING claimant still gets an attributions_ entry even
+    // though it never became the holder. Erase that entry unconditionally;
+    // only reset the slot itself (surface/record) when this plugin actually
+    // holds it, mirroring MessageRendererRegistry::RemoveByAttribution.
+    if (record.registered && record.plugin_name == plugin_name) {
+        surface.reset();
+        record = ExclusiveRecord{};
+    }
     attributions_.erase(std::remove_if(attributions_.begin(), attributions_.end(),
                                        [&](const Attribution& a) {
                                            return a.plugin_name == plugin_name;
@@ -358,9 +364,13 @@ void MarkdownEngineRegistry::Register(std::unique_ptr<MarkdownEngine> candidate)
 }
 
 void MarkdownEngineRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    if (!record.registered || record.plugin_name != plugin_name) return;
-    engine.reset();
-    record = ExclusiveRecord{};
+    // See ChatSurfaceRegistry::RemoveByAttribution: a losing claimant's
+    // attributions_ entry must be erased unconditionally, not only when it
+    // holds the slot.
+    if (record.registered && record.plugin_name == plugin_name) {
+        engine.reset();
+        record = ExclusiveRecord{};
+    }
     attributions_.erase(std::remove_if(attributions_.begin(), attributions_.end(),
                                        [&](const Attribution& a) {
                                            return a.plugin_name == plugin_name;

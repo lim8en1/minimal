@@ -34,6 +34,12 @@ ClientPluginConfig ParseClientPluginConfig(const std::string& json_text) {
         return config;
     }
 
+    if (auto it = parsed.find("plugins"); it != parsed.end() && !it->is_array()) {
+        common::DefaultLogger().warn(
+            "client-plugins.json: 'plugins' is a {}, not an array; ignoring it -- no plugins "
+            "will load",
+            it->type_name());
+    }
     if (auto it = parsed.find("plugins"); it != parsed.end() && it->is_array()) {
         for (const auto& item : *it) {
             if (!item.is_object()) continue;
@@ -88,6 +94,10 @@ ClientPluginConfig ParseClientPluginConfig(const std::string& json_text) {
         }
     }
 
+    if (auto it = parsed.find("aliases"); it != parsed.end() && !it->is_object()) {
+        common::DefaultLogger().warn(
+            "client-plugins.json: 'aliases' is a {}, not an object; ignoring it", it->type_name());
+    }
     if (auto it = parsed.find("aliases"); it != parsed.end() && it->is_object()) {
         for (const auto& [key, value] : it->items()) {
             if (value.is_string()) config.aliases.emplace(key, value.get<std::string>());
@@ -128,19 +138,32 @@ std::vector<PluginCandidate> DiscoverClientPlugins(
     };
     std::vector<Found> found;
 
+    // Constructed with an error_code, but the range-based-for form still calls
+    // the THROWING operator++ on every step -- a permission-denied or
+    // concurrently-removed subdirectory mid-scan would throw filesystem_error
+    // uncaught and crash client startup. Manual iteration via the
+    // error_code-taking `increment()` keeps every step non-throwing; a
+    // mid-scan error just ends that scan early instead of aborting the
+    // process.
     auto scan = [&](const std::filesystem::path& dir, Provenance provenance, bool recurse) {
         std::error_code ec;
         if (dir.empty() || !std::filesystem::is_directory(dir, ec)) return;
         if (recurse) {
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
-                if (entry.is_regular_file(ec) && IsPluginFile(entry.path())) {
-                    found.push_back({entry.path(), entry.path().filename().string(), provenance});
+            std::filesystem::recursive_directory_iterator it(dir, ec);
+            const std::filesystem::recursive_directory_iterator end;
+            for (; !ec && it != end; it.increment(ec)) {
+                std::error_code file_ec;
+                if (it->is_regular_file(file_ec) && IsPluginFile(it->path())) {
+                    found.push_back({it->path(), it->path().filename().string(), provenance});
                 }
             }
         } else {
-            for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-                if (entry.is_regular_file(ec) && IsPluginFile(entry.path())) {
-                    found.push_back({entry.path(), entry.path().filename().string(), provenance});
+            std::filesystem::directory_iterator it(dir, ec);
+            const std::filesystem::directory_iterator end;
+            for (; !ec && it != end; it.increment(ec)) {
+                std::error_code file_ec;
+                if (it->is_regular_file(file_ec) && IsPluginFile(it->path())) {
+                    found.push_back({it->path(), it->path().filename().string(), provenance});
                 }
             }
         }

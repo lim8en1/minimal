@@ -42,6 +42,7 @@ struct Block {
     // Block parameters.
     unsigned heading_level = 0;
     std::string code_language;  // fence info string, already canonicalized
+    std::size_t code_block_id = 0;  // this document's Nth code fence (1-based)
     std::string code_text;      // raw; highlighted at leave
     unsigned ordered_index = 0; // item number on an OL (0 is a legal start=)
     bool is_ordered = false;    // parent list is MD_BLOCK_OL -- the marker test
@@ -199,8 +200,16 @@ public:
                 break;
             case MD_BLOCK_CODE: {
                 const auto* d = static_cast<const MD_BLOCK_CODE_DETAIL*>(detail);
-                block.code_language =
-                    CanonicalLanguage(std::string_view(d->lang.text, d->lang.size));
+                const std::string_view lang(d->lang.text, d->lang.size);
+                // CanonicalLanguageFor consults the highlighter's own injected
+                // language table (vendored + every plugin grammar), unlike the
+                // table-less free function, which only ever matches the
+                // vendored aliases -- a plugin-only grammar's fence label used
+                // to resolve to "" here and never reach the highlighter at all.
+                block.code_language = highlighter_ != nullptr
+                                          ? highlighter_->CanonicalLanguageFor(lang)
+                                          : CanonicalLanguage(lang);
+                block.code_block_id = ++next_code_block_id_;
                 break;
             }
             case MD_BLOCK_OL:
@@ -519,7 +528,8 @@ private:
         block.code_text = ExpandCodeTabs(block.code_text);
         Elements lines;
         if (highlighter_ != nullptr && !block.code_language.empty()) {
-            lines = highlighter_->Highlight(block.code_text, block.code_language);
+            lines = highlighter_->Highlight(block.code_text, block.code_language,
+                                            block.code_block_id);
         } else if (block.code_text.empty()) {
             lines.push_back(ftxui::text(""));
         } else {
@@ -603,6 +613,11 @@ private:
     const SyntaxHighlighter* highlighter_;
     std::stack<Block> stack_;
     Element finished_doc_ = ftxui::text("");
+    // Ordinal position of each code fence within this Render() call, so the
+    // highlighter's incremental parse cache can key on the BLOCK, not just
+    // the language -- two same-language fences in one message used to share
+    // one cache slot and evict each other's incremental base every tick.
+    std::size_t next_code_block_id_ = 0;
 };
 
 int EnterBlockCb(MD_BLOCKTYPE type, void* detail, void* userdata) {

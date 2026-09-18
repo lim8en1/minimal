@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "minimal/client/render/streaming_markdown_view.hpp"
+#include "minimal/client/utf8.hpp"
 #include "minimal/client/view/tool_status.hpp"
 
 namespace minimal::client::plugins {
@@ -265,7 +266,7 @@ Elements RenderUserAttachmentBlocks(const ChatRow& row, const Theme& theme,
         std::string body = row.text;
         bool truncated = false;
         if (body.size() > kAttachmentExpandedRenderCapChars) {
-            body = body.substr(0, kAttachmentExpandedRenderCapChars);
+            body = TruncateUtf8(body, kAttachmentExpandedRenderCapChars);
             truncated = true;
         }
         for (auto& chunk : SplitTextBlocks(body)) {
@@ -382,8 +383,9 @@ Elements RenderToolActivityBlocks(const ChatRow& row, const Theme& theme,
             // fall; no newline inside the window hard-truncates, as before.
             const std::size_t tail_start = body.size() - 4000;
             const auto newline = body.find('\n', tail_start);
-            body = "... " + (newline != std::string::npos ? body.substr(newline + 1)
-                                                          : body.substr(tail_start));
+            body = "... " + (newline != std::string::npos
+                                  ? body.substr(newline + 1)
+                                  : body.substr(Utf8CeilToBoundary(body, tail_start)));
         }
         // Line-buffered output ends in '\n', which paragraph() drew as one
         // trailing empty row under every expanded result.

@@ -42,9 +42,12 @@ Element Rule(const Theme& theme) {
 int ModalBodyHeightBudget() {
     const int dimy = ftxui::Terminal::Size().dimy;
     // window borders (2) + hint line (1) + slack for the tab bar/editor the
-    // modal overlays; a tiny or unknown terminal degrades to a small fixed
-    // budget rather than an uncapped modal.
-    return dimy > 8 ? dimy - 6 : 10;
+    // modal overlays; a tiny or unknown terminal degrades to the smallest
+    // budget that still leaves room for the pinned hint line, rather than a
+    // fixed value that could exceed dimy itself and clip the hints again --
+    // the exact regression this cap exists to prevent, just at small sizes.
+    if (dimy > 8) return dimy - 6;
+    return std::max(dimy - 3, 1);
 }
 
 // One column of breathing room on each side: window() draws its border

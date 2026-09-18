@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 
@@ -47,10 +48,25 @@ TSPoint AdvancePoint(TSPoint start, std::string_view text) {
 // The rule type is the ABI-visible SyntaxRule (registries.hpp reuses it) so a
 // registered grammar's table needs no translation.
 
+// A function name/call-target position, identified by (parent node type,
+// field name) rather than by node type alone: tree-sitter grammars use the
+// SAME node type ("identifier") for a function name as for any other
+// identifier, so the flat SyntaxRule table (type -> category) can't tell
+// `foo` in `foo()` from `foo` in `x = foo`. The cursor traversal in Collect()
+// already tracks the current node's field name and its parent's type at
+// negligible extra cost, so matching here is exact -- no false positives on
+// ordinary identifiers. Field names verified against this build's vendored
+// grammar sources (_deps/tsgrammar_*-src/**/node-types.json).
+struct FunctionFieldRule {
+    std::string_view parent_type;
+    std::string_view field_name;
+};
+
 struct Language {
     const char* name;
     const TSLanguage* (*language_fn)(void);
     std::vector<SyntaxRule> rules;
+    std::vector<FunctionFieldRule> function_fields;
 };
 
 Language CppLanguage() {
@@ -121,6 +137,10 @@ Language CppLanguage() {
                 {"++", HighlightCategory::Operator},  {"--", HighlightCategory::Operator},
                 {"?", HighlightCategory::Operator},   {":", HighlightCategory::Operator},
                 {".", HighlightCategory::Operator},   {"::", HighlightCategory::Operator},
+            },
+            {
+                {"call_expression", "function"},
+                {"function_declarator", "declarator"},
             }};
 }
 
@@ -181,6 +201,10 @@ Language PythonLanguage() {
                 {"and", HighlightCategory::Operator}, {"or", HighlightCategory::Operator},
                 {"not", HighlightCategory::Operator}, {"in", HighlightCategory::Operator},
                 {"is", HighlightCategory::Operator},
+            },
+            {
+                {"call", "function"},
+                {"function_definition", "name"},
             }};
 }
 
@@ -249,6 +273,11 @@ Language JavascriptLanguage() {
                 {"!", HighlightCategory::Operator},   {"?", HighlightCategory::Operator},
                 {":", HighlightCategory::Operator},   {".", HighlightCategory::Operator},
                 {"=>", HighlightCategory::Operator},
+            },
+            {
+                {"call_expression", "function"},
+                {"function_declaration", "name"},
+                {"method_definition", "name"},
             }};
 }
 
@@ -264,6 +293,10 @@ Language TypescriptLanguage() {
     ts.rules.push_back({"implements", HighlightCategory::Keyword});
     ts.rules.push_back({"type_identifier", HighlightCategory::Type});
     ts.rules.push_back({"predefined_type", HighlightCategory::Type});
+    // call_expression/function_declaration/method_definition field names are
+    // identical to javascript's in this vendored grammar; method_signature
+    // (interface/ambient declarations, no body) is TS-only.
+    ts.function_fields.push_back({"method_signature", "name"});
     return ts;
 }
 
@@ -301,14 +334,10 @@ Language BashLanguage() {
                 {"&&", HighlightCategory::Operator},  {"||", HighlightCategory::Operator},
                 {"!", HighlightCategory::Operator},   {":", HighlightCategory::Operator},
                 {".", HighlightCategory::Operator},
-
-                {"=", HighlightCategory::Operator},
-                {"==", HighlightCategory::Operator},  {"!=", HighlightCategory::Operator},
-                {"&&", HighlightCategory::Operator},  {"||", HighlightCategory::Operator},
                 {"|", HighlightCategory::Operator},   {"&", HighlightCategory::Operator},
-                {">", HighlightCategory::Operator},   {"<", HighlightCategory::Operator},
                 {">>", HighlightCategory::Operator},  {"<<", HighlightCategory::Operator},
-            }};
+            },
+            {}};
 }
 
 Language JsonLanguage() {
@@ -322,7 +351,8 @@ Language JsonLanguage() {
                 {"true", HighlightCategory::Keyword},
                 {"false", HighlightCategory::Keyword},
                 {"null", HighlightCategory::Keyword},
-            }};
+            },
+            {}};
 }
 
 Language YamlLanguage() {
@@ -341,7 +371,8 @@ Language YamlLanguage() {
                 {"anchor_name", HighlightCategory::Type},
                 {"alias_name", HighlightCategory::Type},
                 {"tag", HighlightCategory::Type},
-            }};
+            },
+            {}};
 }
 
 Language RustLanguage() {
@@ -408,6 +439,10 @@ Language RustLanguage() {
                 {"->", HighlightCategory::Operator},  {"=>", HighlightCategory::Operator},
                 {"::", HighlightCategory::Operator},  {".", HighlightCategory::Operator},
                 {"?", HighlightCategory::Operator},
+            },
+            {
+                {"call_expression", "function"},
+                {"function_item", "name"},
             }};
 }
 
@@ -463,6 +498,11 @@ Language GoLanguage() {
                 {"|", HighlightCategory::Operator},   {"^", HighlightCategory::Operator},
                 {"<-", HighlightCategory::Operator},  {":=", HighlightCategory::Operator},
                 {".", HighlightCategory::Operator},
+            },
+            {
+                {"call_expression", "function"},
+                {"function_declaration", "name"},
+                {"method_declaration", "name"},
             }};
 }
 
@@ -476,7 +516,7 @@ const std::array<Language, 9>& VendoredTable() {
 }
 
 const Language& FindLanguage(std::string_view language) {
-    static const Language kUnsupported{"", nullptr, {}};
+    static const Language kUnsupported{"", nullptr, {}, {}};
     for (const Language& entry : VendoredTable()) {
         if (language == entry.name) return entry;
     }
@@ -582,6 +622,10 @@ bool SyntaxHighlighter::Supports(std::string_view language) const {
     return !CanonicalLanguage(language, languages_).empty();
 }
 
+std::string SyntaxHighlighter::CanonicalLanguageFor(std::string_view language) const {
+    return CanonicalLanguage(language, languages_);
+}
+
 SyntaxHighlighter::SyntaxHighlighter(const Theme& theme)
     : theme_(theme), languages_(nullptr), parser_cache_(std::make_unique<ParserCache>()) {}
 
@@ -680,6 +724,20 @@ public:
         }
         last_code_.erase(canonical);
         last_point_.erase(canonical);
+        last_spans_.erase(canonical);
+    }
+
+    // The full span list Collect() returned last time for `canonical` (this
+    // tree cache's key, which already folds in the caller's block_id -- see
+    // Collect()). Paired with LastTree/LastSource to let an incremental parse
+    // reuse the spans covering the region ts_tree_get_changed_ranges proves
+    // is untouched, instead of re-walking the whole tree every debounce tick.
+    const std::vector<HighlightSpan>* LastSpans(const std::string& canonical) const {
+        const auto it = last_spans_.find(canonical);
+        return it != last_spans_.end() ? &it->second : nullptr;
+    }
+    void AdoptSpans(const std::string& canonical, std::vector<HighlightSpan> spans) {
+        last_spans_[canonical] = std::move(spans);
     }
 
     // Node-type -> category, hashed once per language (the first draft walked
@@ -719,16 +777,21 @@ private:
     // the slot.
     std::unordered_map<std::string, std::string> last_code_;
     std::unordered_map<std::string, TSPoint> last_point_;
+    // See LastSpans/AdoptSpans -- one entry per tree cache slot, same lifetime
+    // as trees_/last_code_/last_point_ (cleared together by Invalidate).
+    std::unordered_map<std::string, std::vector<HighlightSpan>> last_spans_;
 };
 
 std::vector<HighlightSpan> SyntaxHighlighter::HighlightCode(std::string_view code,
-                                                            std::string_view language) const {
-    return Collect(code, language, /*include_plain=*/true);
+                                                            std::string_view language,
+                                                            std::size_t block_id) const {
+    return Collect(code, language, /*include_plain=*/true, block_id);
 }
 
 std::vector<HighlightSpan> SyntaxHighlighter::Collect(std::string_view code,
                                                       std::string_view language,
-                                                      bool include_plain) const {
+                                                      bool include_plain,
+                                                      std::size_t block_id) const {
     // Two lookup paths, one traversal: the vendored table (default) and the
     // injected table the host assembles from the grammar registry. The
     // categorizer differs; everything else is shared.
@@ -767,6 +830,16 @@ std::vector<HighlightSpan> SyntaxHighlighter::Collect(std::string_view code,
         const auto it = rule_table.find(node_type);
         return it != rule_table.end() ? it->second : HighlightCategory::Plain;
     };
+    // The incremental-parse tree cache is keyed per BLOCK (block_id), not
+    // just per language: two same-language code blocks rendered in the same
+    // document previously shared one "language" slot and thrashed each
+    // other's incremental base every debounce tick (each Highlight() call for
+    // block B evicted block A's cached tree, so both fell back to a full
+    // reparse every tick). block_id==0 (no identity offered) keeps the
+    // original language-only key so existing callers (tests, HighlightCode
+    // direct callers) are unaffected.
+    const std::string tree_key =
+        block_id == 0 ? canonical : canonical + '#' + std::to_string(block_id);
 
     // Incremental parse: feed the previous tree for this language as the base
     // so a still-growing block's reparse only re-examines what changed (the
@@ -781,13 +854,13 @@ std::vector<HighlightSpan> SyntaxHighlighter::Collect(std::string_view code,
     // optimizes -- and edit it first; anything else (a different block, a
     // shrink, a mid-string edit) gets a full reparse (nullptr base), same as
     // a cache miss.
-    TSTree* old_tree = parser_cache_->LastTree(canonical);
-    const std::string* old_code = parser_cache_->LastSource(canonical);
+    TSTree* old_tree = parser_cache_->LastTree(tree_key);
+    const std::string* old_code = parser_cache_->LastSource(tree_key);
     TSPoint new_end_point{0, 0};
     bool edited_old_tree = false;
     if (old_tree != nullptr && old_code != nullptr && old_code->size() <= code.size() &&
         code.compare(0, old_code->size(), *old_code) == 0) {
-        const TSPoint old_end_point = parser_cache_->LastEndPoint(canonical);
+        const TSPoint old_end_point = parser_cache_->LastEndPoint(tree_key);
         new_end_point = AdvancePoint(old_end_point, code.substr(old_code->size()));
         TSInputEdit edit{};
         edit.start_byte = static_cast<uint32_t>(old_code->size());
@@ -814,34 +887,106 @@ std::vector<HighlightSpan> SyntaxHighlighter::Collect(std::string_view code,
         // already-edited-but-never-reparsed tree. A tree we left untouched
         // (the full-reparse branch) is still a valid base to retry with, same
         // as today.
-        if (edited_old_tree) parser_cache_->Invalidate(canonical);
+        if (edited_old_tree) parser_cache_->Invalidate(tree_key);
         return {{HighlightCategory::Plain, 0, static_cast<uint32_t>(code.size())}};
     }
-    parser_cache_->AdoptTree(canonical, tree, std::string(code), new_end_point);
+
+    // Bound the walk to what tree-sitter itself certifies changed: for the
+    // append-only incremental case (edited_old_tree), ts_tree_get_changed_ranges
+    // between the pre-parse edited tree and the fresh one returns the byte
+    // ranges where old and new trees actually differ -- everything strictly
+    // before the earliest such range is PROVEN identical (same node types,
+    // same byte extents, no shift, since the edit only ever inserts at/after
+    // the old text's end), so the previous call's spans for that prefix are
+    // still valid and the traversal below skips re-walking their subtrees
+    // entirely. This is what turns per-tick collection cost from O(current
+    // block size) into O(what actually changed) for a long streaming block --
+    // without it, Collect() re-walked the whole tree from the root every 120ms
+    // tick even though ts_parser_parse_string above was already incremental.
+    uint32_t skip_before = 0;
+    if (edited_old_tree && old_tree != nullptr) {
+        uint32_t range_count = 0;
+        TSRange* ranges = ts_tree_get_changed_ranges(old_tree, tree, &range_count);
+        if (ranges != nullptr) {
+            if (range_count > 0) {
+                uint32_t min_start = ranges[0].start_byte;
+                for (uint32_t i = 1; i < range_count; ++i) {
+                    min_start = std::min(min_start, ranges[i].start_byte);
+                }
+                skip_before = min_start;
+            }
+            free(ranges);
+        }
+    }
+    parser_cache_->AdoptTree(tree_key, tree, std::string(code), new_end_point);
 
     std::vector<HighlightSpan> spans;
+    if (skip_before > 0) {
+        if (const std::vector<HighlightSpan>* cached = parser_cache_->LastSpans(tree_key);
+            cached != nullptr) {
+            for (const HighlightSpan& s : *cached) {
+                if (s.end_byte <= skip_before) spans.push_back(s);
+            }
+        }
+    }
+
+    // parent_type_stack.back() is the type of the CURRENT cursor node's
+    // parent (empty at the root) -- tracked alongside the cursor's own
+    // descend/sibling/climb steps below, at the cost of one push per descend
+    // and one pop per goto_parent, so FunctionFieldRule matching (which needs
+    // "what is my parent, and which of its fields am I") never needs a
+    // separate ts_node_parent() walk per node.
+    std::vector<const char*> parent_type_stack;
     TSTreeCursor cursor = ts_tree_cursor_new(ts_tree_root_node(tree));
     bool descend = true;
     while (true) {
         if (descend) {
             const TSNode node = ts_tree_cursor_current_node(&cursor);
-            const HighlightCategory category = categorize(ts_node_type(node));
-            // include_plain=false (the render path) skips the informational
-            // Plain spans entirely -- Highlight() discarded them anyway; the
-            // public HighlightCode keeps them for the span-level tests.
-            if ((ts_node_is_named(node) && include_plain) ||
-                category != HighlightCategory::Plain) {
-                AppendSpan(spans, category, ts_node_start_byte(node), ts_node_end_byte(node));
+            if (skip_before > 0 && ts_node_end_byte(node) <= skip_before) {
+                // Entirely within the region ts_tree_get_changed_ranges says
+                // is unchanged; its spans are already in `spans` from the
+                // cache above. Don't descend into it, don't re-append it --
+                // just treat it as a leaf for traversal purposes.
+                descend = false;
+            } else {
+                HighlightCategory category = categorize(ts_node_type(node));
+                if (category == HighlightCategory::Plain && vendored != nullptr &&
+                    !vendored->function_fields.empty()) {
+                    const char* field = ts_tree_cursor_current_field_name(&cursor);
+                    const char* parent_type =
+                        parent_type_stack.empty() ? nullptr : parent_type_stack.back();
+                    if (field != nullptr && parent_type != nullptr) {
+                        for (const FunctionFieldRule& rule : vendored->function_fields) {
+                            if (rule.parent_type == parent_type && rule.field_name == field) {
+                                category = HighlightCategory::Function;
+                                break;
+                            }
+                        }
+                    }
+                }
+                // include_plain=false (the render path) skips the informational
+                // Plain spans entirely -- Highlight() discarded them anyway; the
+                // public HighlightCode keeps them for the span-level tests.
+                if ((ts_node_is_named(node) && include_plain) ||
+                    category != HighlightCategory::Plain) {
+                    AppendSpan(spans, category, ts_node_start_byte(node), ts_node_end_byte(node));
+                }
             }
         }
-        if (descend && ts_tree_cursor_goto_first_child(&cursor)) {
-            descend = true;
-        } else if (ts_tree_cursor_goto_next_sibling(&cursor)) {
+        if (descend) {
+            const TSNode current = ts_tree_cursor_current_node(&cursor);
+            if (ts_tree_cursor_goto_first_child(&cursor)) {
+                parent_type_stack.push_back(ts_node_type(current));
+                continue;
+            }
+        }
+        if (ts_tree_cursor_goto_next_sibling(&cursor)) {
             descend = true;
         } else {
             // Climb until a parent has an unvisited sibling, or the root.
             bool moved = false;
             while (ts_tree_cursor_goto_parent(&cursor)) {
+                if (!parent_type_stack.empty()) parent_type_stack.pop_back();
                 if (ts_tree_cursor_goto_next_sibling(&cursor)) {
                     moved = true;
                     descend = true;
@@ -852,6 +997,7 @@ std::vector<HighlightSpan> SyntaxHighlighter::Collect(std::string_view code,
         }
     }
     ts_tree_cursor_delete(&cursor);
+    parser_cache_->AdoptSpans(tree_key, spans);
     // `tree` stays owned by the parser cache: it is the incremental base for
     // this block's next (likely grown) reparse, and a completed block never
     // re-enters here at all -- the whole-result (language, code) cache above
@@ -890,8 +1036,8 @@ std::vector<HighlightSpan> ApplySpanOverrides(std::string_view code,
     return runs;
 }
 
-ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code,
-                                             std::string_view language) const {
+ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code, std::string_view language,
+                                             std::size_t block_id) const {
     // MRU-ordered linear scan: kHighlightCacheCap (64) is small enough that a
     // handful of string compares is cheaper than the hashing/bucketing this
     // would need to be an unordered_map, and simple enough that it needs no
@@ -924,7 +1070,7 @@ ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code,
     }
 
     const std::vector<HighlightSpan> spans =
-        ApplySpanOverrides(code, Collect(code, language, /*include_plain=*/false));
+        ApplySpanOverrides(code, Collect(code, language, /*include_plain=*/false, block_id));
 
     ftxui::Elements lines;
     ftxui::Elements current_line;

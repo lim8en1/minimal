@@ -80,20 +80,35 @@ public:
     // (deeper wins) -- the reference consumer. Plain spans are informational:
     // named nodes not in the rule table. A language outside the set yields a
     // single Plain span covering the input.
-    std::vector<HighlightSpan> HighlightCode(std::string_view code,
-                                             std::string_view language) const;
+    //
+    // `block_id`, when nonzero, identifies the calling code block within its
+    // document (e.g. a fence's ordinal position) so the incremental parse
+    // cache below can keep one base tree per BLOCK, not per language -- two
+    // same-language blocks sharing one slot otherwise thrash each other's
+    // incremental base every debounce tick. 0 (the default) preserves the
+    // original language-only keying for callers with no block identity to
+    // offer (tests, ad hoc callers).
+    std::vector<HighlightSpan> HighlightCode(std::string_view code, std::string_view language,
+                                             std::size_t block_id = 0) const;
 
     // Internal render path: identical traversal, Plain spans omitted (the
     // Element renderer never consumed them).
     std::vector<HighlightSpan> Collect(std::string_view code, std::string_view language,
-                                       bool include_plain) const;
+                                       bool include_plain, std::size_t block_id = 0) const;
     // One Element per line of the block (vbox-able), colors from the theme.
     // Per the documented signature; built on HighlightCode.
-    ftxui::Elements Highlight(std::string_view code, std::string_view language) const;
+    ftxui::Elements Highlight(std::string_view code, std::string_view language,
+                              std::size_t block_id = 0) const;
 
     // Whether `language` resolves to a grammar in the active set (aliases
     // applied). With no table injected, the vendored set.
     bool Supports(std::string_view language) const;
+
+    // CanonicalLanguage(language, this highlighter's own injected table).
+    // markdown_renderer calls this instead of the free function with no table
+    // so a plugin-registered (non-vendored) grammar's fence label resolves --
+    // the free function with no table only ever matches the vendored aliases.
+    std::string CanonicalLanguageFor(std::string_view language) const;
 
     // The Theme the highlighter holds is a REFERENCE whose contents may be
     // swapped in place at runtime (/theme); highlight_cache_ bakes the colors

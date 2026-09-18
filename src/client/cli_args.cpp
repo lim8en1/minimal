@@ -37,6 +37,7 @@ std::string ExpandTilde(std::string_view path) {
 // editor sends commands through the same split the headless flag uses.
 CommandInvocationText SplitCommand(std::string_view text) {
     CommandInvocationText out;
+    if (text.empty() || text.front() != '/') return out;  // no-op: nothing to split
     std::size_t i = 1;  // past the '/'
     while (i < text.size() && !std::isspace(static_cast<unsigned char>(text[i]))) ++i;
     out.name = std::string(text.substr(1, i - 1));

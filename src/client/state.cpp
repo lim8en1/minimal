@@ -360,10 +360,8 @@ void SessionState::AppendStreamingText(std::string_view text) {
     }
     // Segment-COUNT cap: a turn with hundreds of tool round trips would
     // otherwise grow live_segments_ (and the per-frame deep snapshot)
-    // without limit. A marker stamped turn_seq 0 is retired first by
-    // ClearStreamingIfCurrentTurn (0 <= any captured turn), which is exactly
-    // right: the refresh that covers the turn replaces it with persisted
-    // rows.
+    // without limit. Overflow only latches live_view_truncated_ (surfaced by
+    // the status bar) -- no synthetic marker segment is inserted.
     TrimLiveSegmentsLocked();
 
     // A NEW TURN begins only after the previous one ENDED (TurnCompleted/Error)
@@ -585,6 +583,16 @@ void SessionState::TrimLiveSegmentsLocked() {
     }
 }
 
+void SessionState::ClearStreamingLocked() {
+    streaming_accumulated_.clear();
+    streaming_truncated_ = false;
+    thinking_accumulated_.clear();
+    thinking_truncated_ = false;
+    is_streaming_ = false;
+    live_segments_.clear();
+    live_view_truncated_ = false;
+}
+
 void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
@@ -719,13 +727,7 @@ void SessionState::RequestCancel() {
 
 void SessionState::ClearStreaming() {
     std::lock_guard lk(mtx_);
-    streaming_accumulated_.clear();
-    streaming_truncated_ = false;   // fresh accumulation: cap budget resets
-    thinking_accumulated_.clear();   // thinking retires with the text it preceded
-    thinking_truncated_ = false;
-    is_streaming_ = false;
-    live_segments_.clear();
-    live_view_truncated_ = false;
+    ClearStreamingLocked();
 }
 
 void SessionState::ClearStreamingIfCurrentTurn(uint64_t turn_seq) {
@@ -743,13 +745,7 @@ void SessionState::ClearStreamingIfCurrentTurn(uint64_t turn_seq) {
         [turn_seq](const LiveTurnSegment& segment) { return segment.turn_seq > turn_seq; });
     if (keep_end == live_segments_.begin()) {
         // Nothing survives: the classic clear.
-        streaming_accumulated_.clear();
-        streaming_truncated_ = false;
-        thinking_accumulated_.clear();
-        thinking_truncated_ = false;
-        is_streaming_ = false;
-        live_segments_.clear();
-        live_view_truncated_ = false;
+        ClearStreamingLocked();
         return;
     }
     // The thinking accumulation is turn-stamped (see AppendStreamingThinking):
@@ -773,6 +769,11 @@ void SessionState::ClearStreamingIfCurrentTurn(uint64_t turn_seq) {
     streaming_truncated_ =
         streaming_accumulated_.size() > kStreamingTextCapBytes;
     live_segments_.erase(keep_end, live_segments_.end());
+    // The retired (older) segments are exactly what a count-cap overflow
+    // would have dropped; once the page that covers them has landed, the
+    // "hidden rows" the latch reports are no longer hidden -- reset it here
+    // too, not just on the full-clear path above.
+    live_view_truncated_ = false;
 }
 
 void SessionState::RetireCoveredLiveSegments(const std::set<std::string>& answered_tool_ids,
@@ -833,13 +834,7 @@ void SessionState::RetireCoveredLiveSegments(const std::set<std::string>& answer
     if (keep_end == live_segments_.begin()) {
         // Everything retired: the classic clear (the turn's whole live tail is
         // covered by the page).
-        streaming_accumulated_.clear();
-        streaming_truncated_ = false;
-        thinking_accumulated_.clear();
-        thinking_truncated_ = false;
-        is_streaming_ = false;
-        live_segments_.clear();
-        live_view_truncated_ = false;
+        ClearStreamingLocked();
         return;
     }
     // Rebuild the flat accumulations from the surviving segments, exactly the
@@ -877,6 +872,10 @@ void SessionState::RetireCoveredLiveSegments(const std::set<std::string>& answer
     if (!live_segments_.empty() && live_segments_.back().kind == LiveTurnSegment::Kind::Tool) {
         is_streaming_ = false;
     }
+    // Same reasoning as ClearStreamingIfCurrentTurn's partial-retirement
+    // path: the segments this page covered are exactly what an overflow
+    // would have dropped, so the "hidden rows" latch no longer applies.
+    live_view_truncated_ = false;
 }
 
 uint64_t SessionState::CurrentTurnSeq() const {
@@ -972,13 +971,7 @@ void SessionState::OnResyncRequired(const std::string& reason) {
     // the content changed so the frame pump's newest-slice refresh fires. A
     // pending prompt is NOT dropped: the server replays outstanding prompts
     // on attach (S5.3), and a prompt whose modal is showing is still real.
-    streaming_accumulated_.clear();
-    streaming_truncated_ = false;
-    thinking_accumulated_.clear();
-    thinking_truncated_ = false;
-    is_streaming_ = false;
-    live_segments_.clear();
-    live_view_truncated_ = false;
+    ClearStreamingLocked();
     // A dropped ToolExecutionEvent{finished} is exactly the kind of gap a
     // resync exists to cover: a FOREGROUND row whose finish never arrived
     // stays "running" forever, and (per MaybeGoIdleLocked) blocks the tab
@@ -1034,13 +1027,7 @@ void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_las
     // The live-state wipe ClearStreaming does (inlined: it locks, we hold mtx_),
     // plus the pending-turn bookkeeping -- the rewound turn's echo has nothing
     // left to retire it and a pending cancel belongs to the discarded turn.
-    streaming_accumulated_.clear();
-    streaming_truncated_ = false;
-    thinking_accumulated_.clear();
-    thinking_truncated_ = false;
-    is_streaming_ = false;
-    live_segments_.clear();
-    live_view_truncated_ = false;
+    ClearStreamingLocked();
     pending_user_messages_.clear();
     cancel_requested_ = false;
     scrollback_page_shared_ =
@@ -1132,9 +1119,14 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     // A duplicate started (a redelivery from a stream replay) must not open a
     // second row and a second live segment: the reverse-scan finisher would
     // resolve only the copy, stranding the original in "running" forever --
-    // and MaybeGoIdleLocked would wait on it. Ignore the redelivery.
+    // and MaybeGoIdleLocked would wait on it. Ignore the redelivery whether
+    // the existing row is still running OR already finished (started ==
+    // false, OnToolFinished's mark) -- a late-arriving started replay for a
+    // tool_use_id that already opened a row this turn is a duplicate either
+    // way; this handler never legitimately reopens one (background rows
+    // reopen through OnBackgroundTask, not here).
     for (const auto& existing : tools_) {
-        if (existing.tool_use_id == evt.tool_use_id() && existing.started) return;
+        if (existing.tool_use_id == evt.tool_use_id()) return;
     }
     // A NEW TURN can open on a tool call with no preceding text or thinking
     // delta -- a tool-first turn, or an injected turn (a subagent completion
@@ -1732,7 +1724,14 @@ AppState::AppState(std::shared_ptr<SessionClient> client) : client_(std::move(cl
 // -- tabs_ cleared but valid), so by the time tabs_'s destructor runs no
 // callback can reach into this object. Detach would be wrong here: it leaves
 // the client threads running, exactly the half-destroyed-race this prevents.
-AppState::~AppState() { CloseAllTabs(); }
+AppState::~AppState() {
+    // Per StopRpcQueue()'s own documented ordering contract (state.hpp): a
+    // queued RPC job's completion callback touches SessionState/AppState the
+    // same way a reader-thread dispatch does, so the worker must stop before
+    // CloseAllTabs() tears down the tabs a straggling job would publish into.
+    StopRpcQueue();
+    CloseAllTabs();
+}
 
 void AppState::SetUiBounds(int scrollback_max_messages, int tool_output_buffer_bytes) {
     if (scrollback_max_messages > 0) scrollback_max_messages_ = scrollback_max_messages;
@@ -2154,9 +2153,10 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
     // the reader thread function and std::terminate'd the whole TUI -- and a
     // blocking surface wedges the data plane AND the CloseAllTabs join; the
     // block contract is documented, the throw is enforced.
-    if (chat_surface_ != nullptr && !chat_surface_broken_.load(std::memory_order_acquire)) {
+    plugins::ChatSurface* chat_surface = chat_surface_.load(std::memory_order_acquire);
+    if (chat_surface != nullptr && !chat_surface_broken_.load(std::memory_order_acquire)) {
         try {
-            chat_surface_->OnEvent(event);
+            chat_surface->OnEvent(event);
         } catch (const std::exception& error) {
             chat_surface_broken_.store(true, std::memory_order_release);
             common::DefaultLogger().error(

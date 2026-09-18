@@ -10,19 +10,9 @@ namespace minimal::client {
 
 namespace {
 
-bool MatchesFilter(const v1::SessionSummary& session, const std::string& lowered_filter) {
-    if (lowered_filter.empty()) return true;
-    return ToLower(session.name()).find(lowered_filter) != std::string::npos ||
-           ToLower(session.session_id()).find(lowered_filter) != std::string::npos ||
-           ToLower(session.project_root()).find(lowered_filter) != std::string::npos;
-}
-
-// A name longer than this is truncated rather than pushing every other
-// column off the picker's width.
-constexpr std::size_t kNameColumnCap = 40;
-
 std::string DisplayName(const v1::SessionSummary& session) {
-    return session.name().empty() ? std::string("(unnamed)") : session.name();
+    std::string name = StripControlChars(session.name());
+    return name.empty() ? std::string("(unnamed)") : name;
 }
 
 std::string Label(const v1::SessionSummary& session, std::size_t name_width,
@@ -72,7 +62,10 @@ std::vector<PickerRow> BuildPickerRows(const std::vector<v1::SessionSummary>& se
     std::vector<const v1::SessionSummary*> matched;
     matched.reserve(sessions.size());
     for (const auto& session : sessions) {
-        if (MatchesFilter(session, lowered_filter)) matched.push_back(&session);
+        if (MatchesFilter(lowered_filter,
+                          {session.name(), session.session_id(), session.project_root()})) {
+            matched.push_back(&session);
+        }
     }
 
     if (sort == PickerSort::kName) {

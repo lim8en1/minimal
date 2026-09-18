@@ -14,7 +14,7 @@
 namespace minimal::client {
 
 struct SubagentPickerRow {
-    std::string label;        // display text: "glyph name  ·  N msgs  ·  age"
+    std::string label;        // display text: "glyph name  ·  N msgs  ·  state  ·  age"
     std::string session_id;   // the child session the row opens
     bool is_live = false;     // a Session object still exists server-side
 };

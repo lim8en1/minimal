@@ -23,6 +23,7 @@ std::vector<ModelPickerRow> BuildModelPickerRows(
                      });
 
     std::vector<ModelPickerRow> rows;
+    rows.reserve(ordered.size());  // undercounts by header-row count, still avoids most reallocation
     std::string current_provider;
     bool header_emitted = false;
 

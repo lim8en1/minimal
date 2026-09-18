@@ -17,11 +17,12 @@ struct McpPickerRow {
 };
 
 // A flat list (no provider-style grouping -- a server list is small and has
-// no natural 2-tier axis). The label carries the server's live status so a
-// glance says enabled/disabled and alive/dead without opening anything:
-// "name [off]", "name [on, connected]", "name [on, error: ...]". An empty
-// filter lists every server; a non-empty one matches the name
-// case-insensitively.
+// no natural 2-tier axis). The label carries the server's transport and live
+// status so a glance says enabled/disabled and alive/dead without opening
+// anything: "name  [transport, disabled]", "name  [transport, enabled,
+// connected]", "name  [transport, enabled, error: ...]", "name  [transport,
+// enabled, not yet connected]" (enabled but not dialed yet). An empty filter
+// lists every server; a non-empty one matches the name case-insensitively.
 std::vector<McpPickerRow> BuildMcpPickerRows(const std::vector<v1::McpServerSummary>& servers,
                                              const std::string& filter);
 

@@ -129,7 +129,7 @@ std::string InputSummary(const nlohmann::json& input) {
     if (input.is_null() || input.empty()) return "";
     try {
         std::string summary = input.dump();
-        if (summary.size() > 120) summary = summary.substr(0, 120) + "…";
+        if (summary.size() > 120) summary = TruncateUtf8(summary, 120) + "…";
         return summary;
     } catch (const std::exception&) {
         return "";   // a non-serializable input degrades to no summary
@@ -228,6 +228,7 @@ RowWindowSelection SelectRowWindow(const std::vector<RowSpan>& spans,
     }
     for (const std::size_t included : force_include) {
         if (static_cast<long>(included) >= n) continue;
+        if (!spans[included].known()) continue;   // never laid out: no geometry to extend by
         if (first < 0 || static_cast<long>(included) < first) first = static_cast<long>(included);
         if (static_cast<long>(included) > last) last = static_cast<long>(included);
     }

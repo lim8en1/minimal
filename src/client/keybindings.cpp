@@ -115,6 +115,19 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
     return kDefaults;
 }
 
+// Keys handled directly by keybinding_dispatch.cpp's HandleGlobalKey (e.g.
+// the hardcoded Event::CtrlC busy-cancel/idle-quit branch), never routed
+// through ResolvedKeymap::Matches -- so a user/default binding to one of
+// these is accepted with no parse error and simply never fires. Checked in
+// ApplyDefaults() the same way a normal collision is, but never inserted
+// into bindings_ since these aren't real, rebindable actions.
+const std::unordered_map<std::string, std::string>& ReservedKeys() {
+    static const std::unordered_map<std::string, std::string> kReserved{
+        {"app cancel/quit (Event::CtrlC, keybinding_dispatch.cpp)", "ctrl+c"},
+    };
+    return kReserved;
+}
+
 }  // namespace
 
 Keybindings Keybindings::Parse(std::string_view json) {
@@ -146,8 +159,15 @@ Keybindings Keybindings::Parse(std::string_view json) {
         const std::string identity = NormalizeKeySpec(key);
         const auto collision = key_to_action.find(identity);
         if (collision != key_to_action.end()) {
+            // NOT "the first wins": bindings_ keeps every action's own key
+            // independently (below), so both actions stay configured to this
+            // key. Which one actually fires is decided by
+            // keybinding_dispatch.cpp's HandleGlobalKey -- a fixed if-chain
+            // checked in source order, unrelated to JSON iteration order.
             common::DefaultLogger().warn(
-                "keybindings.json: '{}' ({}) is bound to both '{}' and '{}' -- the first wins",
+                "keybindings.json: '{}' ({}) is bound to both '{}' and '{}' -- only one can "
+                "fire at runtime, decided by keybinding_dispatch.cpp's dispatch order, not by "
+                "this file",
                 key, identity, collision->second, it.key());
         } else {
             key_to_action.emplace(identity, it.key());
@@ -202,13 +222,35 @@ void Keybindings::ApplyDefaults() {
         const std::string identity = NormalizeKeySpec(key);
         for (const auto& [existing_action, existing_key] : bindings_) {
             if (existing_action != action && NormalizeKeySpec(existing_key) == identity) {
+                // NOT "the user binding wins": both actions stay independently
+                // bound to this key in bindings_ (emplace below never
+                // overwrites `existing_action`'s entry). Which one actually
+                // fires is decided by keybinding_dispatch.cpp's fixed dispatch
+                // order, not by which table this loop happened to insert from.
                 common::DefaultLogger().warn(
                     "keybindings.json: default '{}' for '{}' collides with user binding for "
-                    "'{}' on the same key -- the user binding wins",
+                    "'{}' on the same key -- only one can fire at runtime, decided by "
+                    "keybinding_dispatch.cpp's dispatch order, not by this file",
                     key, action, existing_action);
             }
         }
         bindings_.emplace(action, key);
+    }
+    // Keys HandleGlobalKey consumes directly (keybinding_dispatch.cpp),
+    // bypassing the ResolvedKeymap dispatch entirely -- not real actions, so
+    // they're never inserted into bindings_, but a user/default binding on
+    // one of these keys is silently unreachable. Warn the same way an
+    // ordinary collision does.
+    for (const auto& [reserved_name, reserved_key] : ReservedKeys()) {
+        const std::string identity = NormalizeKeySpec(reserved_key);
+        for (const auto& [existing_action, existing_key] : bindings_) {
+            if (NormalizeKeySpec(existing_key) == identity) {
+                common::DefaultLogger().warn(
+                    "keybindings.json: '{}' bound to '{}' can never fire -- {} is reserved for "
+                    "{}, consumed before any action dispatch",
+                    existing_key, existing_action, reserved_key, reserved_name);
+            }
+        }
     }
 }
 

@@ -160,6 +160,21 @@ const std::unordered_map<std::string, std::string>& CtrlLetterAliases() {
     return table;
 }
 
+enum class ModifierToken { kCtrl, kAlt, kShift, kUnknown };
+
+// The one place "ctrl"/"control", "alt"/"option"/"opt"/"meta", and "shift"
+// are recognized -- NormalizeKeySpec and ParseKeySpec used to each keep their
+// own copy of this list, and a future alias added to one and not the other
+// would silently desync collision detection from event matching.
+ModifierToken ClassifyModifier(const std::string& token) {
+    if (token == "ctrl" || token == "control") return ModifierToken::kCtrl;
+    if (token == "alt" || token == "option" || token == "opt" || token == "meta") {
+        return ModifierToken::kAlt;
+    }
+    if (token == "shift") return ModifierToken::kShift;
+    return ModifierToken::kUnknown;
+}
+
 }  // namespace
 
 // The collision identity of a key spec: modifiers are canonicalized
@@ -185,15 +200,20 @@ std::string NormalizeKeySpec(const std::string& spec) {
     std::vector<std::string> modifiers;
     modifiers.reserve(parts.size() - 1);
     for (std::size_t i = 0; i + 1 < parts.size(); ++i) {
-        const std::string& m = parts[i];
-        if (m == "ctrl" || m == "control") {
-            modifiers.push_back("ctrl");
-        } else if (m == "alt" || m == "option" || m == "opt" || m == "meta") {
-            modifiers.push_back("alt");
-        } else if (m == "shift") {
-            modifiers.push_back("shift");
-        } else {
-            return lower;   // unknown token: keep the raw spelling visible
+        std::string canon;
+        switch (ClassifyModifier(parts[i])) {
+            case ModifierToken::kCtrl: canon = "ctrl"; break;
+            case ModifierToken::kAlt: canon = "alt"; break;
+            case ModifierToken::kShift: canon = "shift"; break;
+            case ModifierToken::kUnknown: return lower;   // unknown token: keep the raw spelling visible
+        }
+        // Repeated modifiers ("ctrl+ctrl+c") must collapse to one identity --
+        // ParseKeySpec's bool flags are naturally idempotent, so a spec that
+        // fights over the same physical key as a single-modifier spec must
+        // produce the identical identity here too, or the collision detector
+        // misses it.
+        if (std::find(modifiers.begin(), modifiers.end(), canon) == modifiers.end()) {
+            modifiers.push_back(canon);
         }
     }
     // A modified LETTER's shift-case survives as a DISTINCT Event only in
@@ -243,15 +263,11 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
 
     bool ctrl = false, alt = false, shift = false;
     for (const auto& modifier : parts) {
-        if (modifier == "ctrl" || modifier == "control") {
-            ctrl = true;
-        } else if (modifier == "alt" || modifier == "option" || modifier == "opt" ||
-                   modifier == "meta") {
-            alt = true;
-        } else if (modifier == "shift") {
-            shift = true;
-        } else {
-            return {};   // an unrecognized modifier is "no mapping", not a guess
+        switch (ClassifyModifier(modifier)) {
+            case ModifierToken::kCtrl: ctrl = true; break;
+            case ModifierToken::kAlt: alt = true; break;
+            case ModifierToken::kShift: shift = true; break;
+            case ModifierToken::kUnknown: return {};   // an unrecognized modifier is "no mapping", not a guess
         }
     }
 

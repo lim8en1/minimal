@@ -95,12 +95,37 @@ ftxui::Component MakeFilterableMenuModal(
     auto state = std::make_shared<MenuState>();
 
     auto rebuild = [state, build_rows] {
+        // Re-anchor by the ROW'S IDENTITY, not its stale index: a filter or
+        // sort change can shift what index the previously-highlighted row
+        // now lives at (or drop it entirely). Anchoring only the index left
+        // the cursor pointing at a DIFFERENT row after such a rebuild --
+        // e.g. session_picker.cpp's ctrl+d then deletes the row now sitting
+        // at that index, not the one the user actually had highlighted.
+        std::optional<std::string> selected_id;
+        if (!state->rows.empty() && state->selected >= 0 &&
+            state->selected < static_cast<int>(state->rows.size()) &&
+            !state->rows[state->selected].header) {
+            selected_id = state->rows[state->selected].id;
+        }
         state->rows = build_rows(state->filter);
         state->labels.clear();
         state->labels.reserve(state->rows.size());
         for (const auto& row : state->rows) state->labels.push_back(row.label);
         const int last = static_cast<int>(state->labels.size()) - 1;
-        state->selected = std::clamp(state->selected, 0, std::max(last, 0));
+        bool reanchored = false;
+        if (selected_id) {
+            const auto it = std::find_if(state->rows.begin(), state->rows.end(),
+                                          [&](const MenuRow& row) {
+                                              return !row.header && row.id == *selected_id;
+                                          });
+            if (it != state->rows.end()) {
+                state->selected = static_cast<int>(it - state->rows.begin());
+                reanchored = true;
+            }
+        }
+        if (!reanchored) {
+            state->selected = std::clamp(state->selected, 0, std::max(last, 0));
+        }
         state->selected =
             ResolveSelectableRow(state->rows, state->selected, state->direction);
     };
@@ -194,6 +219,10 @@ ftxui::Component MakeFilterableMenuModal(
         } else if (event == Event::End) {
             state->direction = -1;  // End lands on the last row: scanning backward
         }
+        // An empty label list must never reach Menu's own event handling:
+        // vendored ftxui's util::clamp tolerates a hi<lo range (this file
+        // does not rely on that being true) when there is nothing to select.
+        if (state->labels.empty()) return true;
         return false;   // arrow keys go to Menu
     });
 
@@ -263,7 +292,13 @@ ftxui::Component MakeFilterableMenuModal(
         if (state->rows.size() <= spec.empty_threshold) {
             rows.push_back(text(spec.empty_message) | Muted(theme));
         }
-        rows.push_back(interactive->Render() | vscroll_indicator | frame | flex);
+        // Never hand Menu's own Render() an empty label list -- same
+        // reasoning as the event guard above; this file keeps the reserved
+        // space so the window doesn't jump when a filter starts matching
+        // again.
+        rows.push_back(state->labels.empty()
+                            ? (filler() | flex)
+                            : (interactive->Render() | vscroll_indicator | frame | flex));
         // Key hints in a pinned footer, like the permission/confirm modals --
         // one place to look, whichever overlay is open. paragraph(): a long
         // hint line wraps rather than losing its tail.

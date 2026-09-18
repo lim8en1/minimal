@@ -183,10 +183,17 @@ bool EnsureServerRunning(const std::string& target, const SpawnOptions& options,
     }
 
     // The socket appears only once the server has finished config load, plugin
-    // load and the sanity check -- give that the full budget.
+    // load and the sanity check -- give that the full budget. One channel is
+    // reused across the whole poll instead of one per attempt: constructing a
+    // channel isn't free (thread pool/resolver/fd setup), and this loop can
+    // run for tens of seconds at a 500ms cadence.
+    const auto poll_channel = grpc::CreateChannel(target, grpc::InsecureChannelCredentials());
     const auto deadline = std::chrono::steady_clock::now() + options.startup_timeout;
     for (;;) {
-        if (Reachable(target, std::chrono::milliseconds(500))) return true;
+        if (poll_channel->WaitForConnected(std::chrono::system_clock::now() +
+                                            std::chrono::milliseconds(500))) {
+            return true;
+        }
         if (std::chrono::steady_clock::now() >= deadline) break;
     }
 

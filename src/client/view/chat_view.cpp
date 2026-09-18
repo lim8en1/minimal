@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/tool_status.hpp"
@@ -355,14 +356,20 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
     // geometry; new rows start empty (never laid out). Spans for keys that
     // left the page prune with their slots.
     row_boxes_.resize(row_keys_.size());
+    row_key_index_.clear();
     for (std::size_t i = 0; i < row_keys_.size(); ++i) {
         const auto it = old_row_boxes.find(row_keys_[i]);
         row_boxes_[i] = it != old_row_boxes.end()
                             ? std::move(it->second)
                             : std::vector<std::shared_ptr<ftxui::Box>>{};
+        row_key_index_.emplace(row_keys_[i], i);
     }
+    // A set lookup, not std::find per entry: with up to ~2000 rows in the
+    // scrollback window, a linear scan per pruned entry made this O(rows^2)
+    // on every page load, session switch, or collapse-all toggle.
+    const std::set<RowKey> live_row_keys(row_keys_.begin(), row_keys_.end());
     for (auto it = row_spans_.begin(); it != row_spans_.end();) {
-        if (std::find(row_keys_.begin(), row_keys_.end(), it->first) == row_keys_.end()) {
+        if (live_row_keys.find(it->first) == live_row_keys.end()) {
             it = row_spans_.erase(it);
         } else {
             ++it;
@@ -861,10 +868,12 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             row_boxes_.push_back(std::move(boxes));
         }
         // Prune slots for rows no longer in the window (page trim, eviction,
-        // session switch): the pool must not outgrow the rendered rows.
+        // session switch): the pool must not outgrow the rendered rows. A
+        // set lookup, not std::find per entry -- see RebuildRows's identical
+        // fix for row_spans_.
+        const std::set<RowKey> live_row_keys(row_keys_.begin(), row_keys_.end());
         for (auto it = row_box_slots_.begin(); it != row_box_slots_.end();) {
-            if (std::find(row_keys_.begin(), row_keys_.end(), it->first) ==
-                row_keys_.end()) {
+            if (live_row_keys.find(it->first) == live_row_keys.end()) {
                 it = row_box_slots_.erase(it);
             } else {
                 ++it;
@@ -1120,9 +1129,9 @@ std::optional<int> ChatView::RowCursorOffsetFromBottom() const {
     if (!focused_row_.has_value() || scroll_state_->viewport_height <= 0) {
         return std::nullopt;
     }
-    const auto it = std::find(row_keys_.begin(), row_keys_.end(), *focused_row_);
-    if (it == row_keys_.end()) return std::nullopt;
-    const auto row_index = static_cast<std::size_t>(std::distance(row_keys_.begin(), it));
+    const auto it = row_key_index_.find(*focused_row_);
+    if (it == row_key_index_.end()) return std::nullopt;
+    const std::size_t row_index = it->second;
     if (row_index >= row_boxes_.size() || row_boxes_[row_index].empty()) {
         return std::nullopt;
     }

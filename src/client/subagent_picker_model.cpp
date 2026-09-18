@@ -10,20 +10,18 @@ namespace minimal::client {
 
 namespace {
 
-bool MatchesFilter(const v1::SessionSummary& session, const std::string& lowered_filter) {
-    if (lowered_filter.empty()) return true;
-    return ToLower(session.name()).find(lowered_filter) != std::string::npos ||
-           ToLower(session.session_id()).find(lowered_filter) != std::string::npos;
-}
-
 // A subagent row is created nameless server-side (subagent_manager.cpp mints
 // the row with name=""); a titler or /rename may have named it since. The raw
 // id as the fallback label (truncated) beats a row of empty strings.
 std::string DisplayName(const v1::SessionSummary& session) {
-    if (!session.name().empty()) return session.name();
-    std::string id = session.session_id();
-    if (id.size() > 12) id = id.substr(0, 12);
-    return id;
+    std::string name = StripControlChars(session.name());
+    if (name.empty()) {
+        name = session.session_id();
+        if (name.size() > 12) name = name.substr(0, 12);
+        return name;
+    }
+    if (Utf8ColumnWidth(name) > kNameColumnCap) name = TruncateUtf8Columns(name, kNameColumnCap);
+    return name;
 }
 
 std::string Label(const v1::SessionSummary& session, std::int64_t now_unix_ms) {
@@ -32,8 +30,9 @@ std::string Label(const v1::SessionSummary& session, std::int64_t now_unix_ms) {
     // indent to align. State vocabulary is deliberately coarse -- the wire
     // summary carries is_live only (see the header).
     const std::string state = session.is_live() ? "running" : "ended";
-    return std::string(session.is_live() ? "● " : "  ") + DisplayName(session) + "  ·  " + state +
-           "  ·  " + RelativeAge(session.updated_at_unix_ms(), now_unix_ms);
+    std::string count = std::to_string(session.message_count()) + " msgs";
+    return std::string(session.is_live() ? "● " : "  ") + DisplayName(session) + "  ·  " + count +
+           "  ·  " + state + "  ·  " + RelativeAge(session.updated_at_unix_ms(), now_unix_ms);
 }
 
 }  // namespace
@@ -51,7 +50,7 @@ std::vector<SubagentPickerRow> BuildSubagentPickerRows(
     matched.reserve(sessions.size());
     for (const auto& session : sessions) {
         if (!include_ended && !session.is_live()) continue;
-        if (!MatchesFilter(session, lowered_filter)) continue;
+        if (!MatchesFilter(lowered_filter, {session.name(), session.session_id()})) continue;
         matched.push_back(&session);
     }
 

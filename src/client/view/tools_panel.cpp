@@ -27,11 +27,19 @@ constexpr std::size_t kSessionColumn = 16;
 // string_view instead.
 std::size_t TailStart(std::string_view text, int max_lines) {
     if (max_lines <= 0) return text.size();
+    // A trailing PARTIAL line (text doesn't end with '\n') is still line #1
+    // of the tail -- the scan below only counts COMPLETE lines via their
+    // closing '\n', so budget for the partial one up front. Without this,
+    // e.g. "a\nb\nc\nd" (the normal shape of live/streaming stdout captured
+    // mid-write) with max_lines=2 kept one extra earlier line ("b\nc\nd"
+    // instead of "c\nd").
+    int remaining = max_lines;
+    if (!text.empty() && text.back() != '\n') --remaining;
     int newlines = 0;
     for (std::size_t i = text.size(); i > 0; --i) {
         if (text[i - 1] == '\n') {
             ++newlines;
-            if (newlines > max_lines) return i;
+            if (newlines > remaining) return i;
         }
     }
     return 0;

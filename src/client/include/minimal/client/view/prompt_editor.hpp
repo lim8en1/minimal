@@ -117,6 +117,17 @@ struct PromptEditorState {
 struct PromptHistory {
     void Record(const std::string& line);
     std::vector<std::string> entries;
+
+    // A live browse position (PromptEditorState::history_cursor) registers
+    // its address here for as long as its editor is alive, while `entries`
+    // is shared across tabs (history != nullptr in MakePromptEditor) -- see
+    // Record()'s trim step. Not used by a private/test-owned history (one
+    // editor, nothing else can trim out from under its own cursor).
+    void RegisterCursor(std::optional<std::size_t>* cursor);
+    void UnregisterCursor(std::optional<std::size_t>* cursor);
+
+private:
+    std::vector<std::optional<std::size_t>*> cursors_;
 };
 
 // One /-command the editor may offer. From ListCommands, fetched once at

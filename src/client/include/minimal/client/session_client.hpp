@@ -193,6 +193,12 @@ public:
     // Close()'s self-join invariant): there it detaches instead -- joining
     // the current thread throws and would std::terminate via ~Stream.
     void JoinReaderOrDetachSelf();
+    // Waits (bounded by kDetachJoinTimeout) for `exited_flag` to latch under
+    // qmtx_; past the bound, cancels the call and waits again, unbounded --
+    // the cancel guarantees the blocked Write()/Read() unblocks promptly.
+    // Shared by Detach()'s writer_/reader_ joins (identical logic, different
+    // thread/cv/flag).
+    void WaitForExit(std::condition_variable& cv, bool& exited_flag);
 
         std::shared_ptr<grpc::Channel> channel_;
         std::unique_ptr<v1::SessionService::Stub> stub_;

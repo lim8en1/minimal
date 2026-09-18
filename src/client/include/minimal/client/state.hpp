@@ -786,6 +786,14 @@ private:
     // mtx_ held by caller.
     void TrimLiveSegmentsLocked();
 
+    // Shared by every "drop all live streaming state" site (ClearStreaming,
+    // the full-clear branches of ClearStreamingIfCurrentTurn/
+    // RetireCoveredLiveSegments, OnResyncRequired, OnSessionRewound): resets
+    // the flat text/thinking accumulations, their truncation flags,
+    // is_streaming_, live_segments_, and live_view_truncated_. mtx_ held by
+    // caller.
+    void ClearStreamingLocked();
+
     // Shared by TakeSnapshot/TakeLightSnapshot: the single place a tool row
     // is copied out to a snapshot. The working stdout buffer (up to
     // tool_output_buffer_bytes_ (64 KiB default) per tool) never leaves
@@ -1356,12 +1364,16 @@ public:
     // pushes EVERY ServerEvent to it (reader thread; OnEvent must not block)
     // before core's own handling -- a surface owns its presentation, core keeps
     // its data plane regardless.
-    void SetChatSurface(plugins::ChatSurface* surface) { chat_surface_ = surface; }
+    void SetChatSurface(plugins::ChatSurface* surface) {
+        chat_surface_.store(surface, std::memory_order_release);
+    }
 
     // The exclusive chat surface, unless a plugin threw out of it (catch +
     // disable): null means the core chat view renders the tab body.
     plugins::ChatSurface* EffectiveChatSurface() const {
-        return chat_surface_broken_.load(std::memory_order_acquire) ? nullptr : chat_surface_;
+        return chat_surface_broken_.load(std::memory_order_acquire)
+                   ? nullptr
+                   : chat_surface_.load(std::memory_order_acquire);
     }
 
     // Disables a surface that threw mid-render (loop thread). `reason` may be
@@ -1531,7 +1543,11 @@ private:
 
     // E5 seams (see the setters above).
     plugins::AttentionState* plugin_attention_ = nullptr;
-    plugins::ChatSurface* chat_surface_ = nullptr;
+    // Atomic: SetChatSurface can race a reader thread's DispatchToTab read
+    // via EffectiveChatSurface (e.g. late/dynamic plugin registration) --
+    // same unsynchronized-race class chat_surface_broken_ below was already
+    // fixed for.
+    std::atomic<plugins::ChatSurface*> chat_surface_{nullptr};
     // A plugin surface that THREW is disabled for the process (catch +
     // disable): the core chat view takes over, the process survives. Third
     // thrown events downgrade to a logged error, not a dead tab. Atomic: every

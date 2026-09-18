@@ -1,5 +1,6 @@
 #include "minimal/client/view/frame_renderer.hpp"
 
+#include <chrono>
 #include <string_view>
 
 #include "minimal/client/render/markdown_renderer.hpp"
@@ -304,7 +305,20 @@ ftxui::Element FrameRenderer::Render() {
         // moves on every text delta; see frame_renderer.hpp for the key's
         // rationale). With the key matching, the fetch is still cheap: the
         // per-tool output views are copy-on-publish shared pointers.
-        const PanelCacheKey key{deps_.app.ToolsVersion(), tabs.size(), deps_.theme.epoch()};
+        bool any_running = false;
+        for (const auto& snap : tabs) {
+            if (snap.state == SessionStateKind::Working) {
+                any_running = true;
+                break;
+            }
+        }
+        const std::int64_t elapsed_bucket =
+            any_running ? std::chrono::duration_cast<std::chrono::seconds>(
+                              std::chrono::system_clock::now().time_since_epoch())
+                              .count()
+                        : 0;
+        const PanelCacheKey key{deps_.app.ToolsVersion(), tabs.size(), deps_.theme.epoch(),
+                                 elapsed_bucket};
         if (!tools_panel_cache_valid_ || !(key == tools_panel_cache_key_)) {
             const auto panel_tabs = deps_.app.GetAllTabs(/*include_tool_output=*/true);
             // vscroll_indicator: every other scrollable yframe region in the

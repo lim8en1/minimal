@@ -122,6 +122,16 @@ private:
         uint64_t tools_version;
         std::size_t tab_count;
         uint64_t theme_epoch;
+        // Seconds-since-epoch, but ONLY while some tab is actively running a
+        // tool (else left at 0). ToolsVersion bumps on row MUTATIONS, never
+        // on the mere passage of time, so a silent long-running tool (no
+        // wire events) left the cached panel's "elapsed" column frozen even
+        // though the app's own pump thread keeps forcing repaints for it.
+        // Bucketing to whole seconds while running (and pinning to 0 when
+        // idle) invalidates the cache about once a second exactly when
+        // there's an elapsed counter to update, without reintroducing a
+        // rebuild-every-frame cost while nothing is running.
+        std::int64_t elapsed_bucket = 0;
         bool operator==(const PanelCacheKey&) const = default;
     };
     ftxui::Element tools_panel_cache_;

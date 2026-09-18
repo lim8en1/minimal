@@ -9,12 +9,33 @@
 // v1::SessionSummary list app.cpp already fetches.
 
 #include <cstdint>
+#include <initializer_list>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "minimal/client/utf8.hpp"
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::client {
+
+// A name longer than this is truncated rather than pushing every other
+// column off a picker's width. Shared across every picker that shows a
+// session/preset name column.
+inline constexpr std::size_t kNameColumnCap = 40;
+
+// True if `lowered_filter` (already ToLower'd by the caller) is empty, or is
+// a case-insensitive substring of any of `fields`. The one filter predicate
+// every picker model (session, agent, subagent) needs, parameterized by
+// whichever fields that picker's rows are matched against.
+inline bool MatchesFilter(const std::string& lowered_filter,
+                          std::initializer_list<std::string_view> fields) {
+    if (lowered_filter.empty()) return true;
+    for (const auto& field : fields) {
+        if (ToLower(field).find(lowered_filter) != std::string::npos) return true;
+    }
+    return false;
+}
 
 enum class PickerSort { kRecent, kName };
 

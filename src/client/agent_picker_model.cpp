@@ -1,16 +1,11 @@
 #include "minimal/client/agent_picker_model.hpp"
 
+#include "minimal/client/picker_model.hpp"
 #include "minimal/client/utf8.hpp"
 
 namespace minimal::client {
 
 namespace {
-
-bool MatchesFilter(const v1::AgentPresetSummary& preset, const std::string& lowered_filter) {
-    if (lowered_filter.empty()) return true;
-    return ToLower(preset.name()).find(lowered_filter) != std::string::npos ||
-           ToLower(preset.description()).find(lowered_filter) != std::string::npos;
-}
 
 std::string Label(const v1::AgentPresetSummary& preset) {
     if (preset.description().empty()) return preset.name();
@@ -26,7 +21,7 @@ std::vector<AgentPickerRow> BuildAgentPickerRows(const std::vector<v1::AgentPres
     std::vector<AgentPickerRow> rows;
     rows.reserve(presets.size());
     for (const auto& preset : presets) {
-        if (!MatchesFilter(preset, lowered_filter)) continue;
+        if (!MatchesFilter(lowered_filter, {preset.name(), preset.description()})) continue;
         rows.push_back(AgentPickerRow{Label(preset), preset.name(), preset.color()});
     }
     return rows;

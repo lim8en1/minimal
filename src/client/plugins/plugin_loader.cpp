@@ -178,6 +178,19 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (const char* name = name_fn(); name != nullptr) record.name = name;
     if (const char* version = version_fn(); version != nullptr) record.version = version;
 
+    // A null/empty name would leave record.name == "", the same sentinel core
+    // registrations use for their own attributions (see tui_bootstrap.cpp's
+    // RegisterCoreSyntaxGrammars, registered before any plugin loads). If this
+    // plugin then registered something and a later hook threw, rollback's
+    // RemoveByAttribution("") would strip every ""-attributed entry, including
+    // core's -- so a malformed plugin name is rejected outright, never
+    // silently coerced to the shared sentinel.
+    if (record.name.empty()) {
+        record.status = LoadStatus::MissingRequiredSymbol;
+        record.error = "minimal_client_plugin_name() returned null or an empty string";
+        return record;
+    }
+
     // Everything the registration hooks see: this plugin's own config slice,
     // plus the host-owned seams the context carries. Built once per plugin,
     // before any hook runs.

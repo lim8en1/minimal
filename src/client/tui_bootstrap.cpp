@@ -64,11 +64,15 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // the server owns plugins.json, so neither writer can stomp the other's
     // entries. Written back after discovery, like the server's.
     plugins::ClientPluginConfig plugin_config;
+    // Read once, reused below for the write-back comparison instead of a
+    // second disk read: stays empty (matching "nothing on disk yet") when the
+    // file doesn't exist, and is never consulted when plugin_config.malformed
+    // ends up true (the write block is skipped in that case either way).
+    std::string contents;
     {
         const auto config_path = out.config_dir / "client-plugins.json";
         std::error_code ec;
         if (std::filesystem::exists(config_path, ec)) {
-            std::string contents;
             if (!TryReadConfigFile(config_path, &contents)) {
                 // Exists but could not be read (permission, a transient I/O
                 // error, a race with another process's own write): treated
@@ -106,16 +110,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             // parent dir, skip the write when nothing changed, report errors.
             std::filesystem::create_directories(out.config_dir, ec);
             const auto serialized = plugins::SerializeClientPluginConfig(plugin_config);
-            std::string existing;
-            bool existing_known = true;
-            if (std::filesystem::exists(config_path, ec)) {
-                existing_known = TryReadConfigFile(config_path, &existing);
-            }
-            // existing_known false means the file exists but could not be
-            // read just now (a race since the read above, or a permission
-            // change) -- skip the write rather than risk clobbering real
-            // bytes we never actually saw.
-            if (existing_known && existing != serialized) {
+            if (contents != serialized) {
                 if (!WriteConfigFileAtomic(config_path, serialized)) {
                     std::fprintf(stderr, "minimal: warning: could not write %s\n",
                                  std::filesystem::path(config_path).c_str());
