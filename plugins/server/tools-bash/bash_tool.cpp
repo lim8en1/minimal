@@ -80,6 +80,9 @@ struct RunOutcome {
     // waitpid returned -1 (ECHILD): the pid was reaped out from under us, so
     // wait_status is meaningless and must not be read as "exit 0".
     bool reap_error = false;
+    // A grandchild inherited the output pipe and outlived the shell; the
+    // idle-after-reap rule killed the group (see DrainOptions).
+    bool detached_grandchild = false;
     int wait_status = 0;   // valid unless the spawn itself failed
     std::string output;    // the capped, rendered stdout+stderr captured so far
     std::string state_payload;
@@ -108,6 +111,10 @@ RunOutcome RunProcess(const LaunchedProcess& proc, const BashSettings& settings,
 
     minimal::sidecar::DrainOptions options;
     options.timeout_ms = timeout_ms;
+    // Fail fast when a grandchild holds the output pipe after the shell exits
+    // (the `nohup cmd &` trap): idle-after-reap ends the run in ~2 s with a
+    // teaching note instead of the full deadline.
+    options.idle_after_reap_ms = kIdleAfterReapMs;
 
     // Sliced inside the runner so cancellation is noticed within a slice,
     // not at the deadline.
@@ -121,6 +128,7 @@ RunOutcome RunProcess(const LaunchedProcess& proc, const BashSettings& settings,
     outcome.timed_out = drained.timed_out;
     outcome.cancelled = drained.cancelled;
     outcome.reap_error = drained.reap_error;
+    outcome.detached_grandchild = drained.detached_grandchild;
     outcome.wait_status = drained.wait_status;
     outcome.output = std::move(drained.sinks[0].text);
     outcome.state_payload = std::move(drained.sinks[1].text);
@@ -192,7 +200,9 @@ public:
             "working directory and environment PERSIST across calls: use `cd` and `export` "
             "normally, and pass restart=true to reset both. stdout and stderr are returned "
             "together; very long output is truncated in the middle; a non-zero exit status is "
-            "an error. Set run_in_background=true for long-running commands.";
+            "an error. For long-running commands (servers, builds, watchers) pass "
+            "detach=true -- never nohup/&: a backgrounded child that keeps stdout open wedges "
+            "the call until its deadline, then the whole group is killed.";
         spec_.definition.input_schema = {
             {"type", "object"},
             {"properties",
@@ -206,14 +216,17 @@ public:
               {"restart",
                {{"type", "boolean"},
                 {"description", "Reset cwd and environment to their defaults before running"}}},
-              {"run_in_background",
+              {"detach",
                {{"type", "boolean"},
                 {"description",
-                 "Run without waiting. Returns a task id and pid immediately; the result is "
-                 "reported automatically at a turn boundary when the command finishes, and "
-                 "the task is killed when the session ends. To read output mid-run, redirect "
-                 "it to a file in the command itself. Kill the whole process group with: "
-                 "kill -- -PID"}}}}},
+                 "Run without waiting and report at the next turn boundary. Returns a task id "
+                 "and pid immediately; the result arrives as an injected tool-result when it "
+                 "finishes. The task is killed when the session ends; kill it sooner with: "
+                 "kill -- -PID. To read output mid-run, redirect it to a file in the command "
+                 "itself."}}},
+              {"run_in_background",
+               {{"type", "boolean"},
+                {"description", "Alias of detach (same behavior). Prefer detach."}}}}},
             {"required", nlohmann::json::array({"command"})}};
     }
 
@@ -323,6 +336,19 @@ public:
             run_in_background = input.at("run_in_background").get<bool>();
         }
 
+        // The same mode under both names: `detach` is the model-facing name
+        // (named for the mental model agents arrive with), `run_in_background`
+        // the accepted alias for the post-trained habit. Either selects the
+        // background path; no interaction if both appear.
+        bool detach = false;
+        if (input.contains("detach")) {
+            if (!input.at("detach").is_boolean()) {
+                return Reject(ctx, started, "detach must be a boolean", command);
+            }
+            detach = input.at("detach").get<bool>();
+        }
+        const bool background = run_in_background || detach;
+
         std::int64_t timeout_ms = settings_.timeout_ms;
         bool timeout_supplied = false;
         if (input.contains("timeout")) {
@@ -381,7 +407,7 @@ public:
         // wiped the session's cwd and environment on its way out.
         if (restart) store_.Reset(ctx.session_id, ctx.project_root);
 
-        if (run_in_background) return ExecuteBackground(ctx, command, timeout_ms, timeout_supplied);
+        if (background) return ExecuteBackground(ctx, command, timeout_ms, timeout_supplied);
 
         timeout_ms = std::min(timeout_ms, settings_.max_timeout_ms);
         const auto state = store_.Snapshot(ctx.session_id, ctx.project_root);
@@ -394,6 +420,12 @@ public:
                             duration_ms);
             return Error("failed to start shell: " + proc.spawn_error);
         }
+        // Degraded backstops (host caps RLIMIT_* below the request) still run:
+        // say so, or a capped host's commands run silently weaker than asked.
+        if (!proc.warnings.empty()) {
+            ctx.logger.warn("bash[{}]: rlimit backstops clamped by the host: {}", ctx.session_id,
+                            proc.warnings);
+        }
 
         const auto outcome = RunProcess(proc, settings_, timeout_ms, ctx);
         const auto duration_ms = ElapsedMs(started);
@@ -404,16 +436,33 @@ public:
             return Error("failed reading command output: " + outcome.io_error_message);
         }
 
+        // A grandchild held the output pipe past the shell's exit and was
+        // killed by the idle rule. The shell's real status stays the primary
+        // fact (success OR error); the note rides on top on both paths.
+        const std::string grandchild_note =
+            outcome.detached_grandchild
+                ? "[a process this command left running is holding the output pipe; the "
+                  "process group was killed. For long-running work use detach=true, or fully "
+                  "redirect the child's stdio: cmd > log 2>&1 < /dev/null &]"
+                : "";
+
         // The captured output leads every failure result: it is usually the most
         // useful thing the model can see (the error message, the partial log).
+        // With no note, the output is returned verbatim -- no separator churn.
         const auto with_output = [&](const std::string& footer) {
-            return outcome.output.empty() ? footer : outcome.output + "\n" + footer;
+            if (grandchild_note.empty()) {
+                return outcome.output.empty() ? footer : outcome.output + "\n" + footer;
+            }
+            const std::string tail =
+                footer.empty() ? grandchild_note : footer + "\n" + grandchild_note;
+            return outcome.output.empty() ? tail : outcome.output + "\n" + tail;
         };
         // The run's facts as fields -- a client shows the status as a badge
         // instead of parsing the footer text the model gets.
         const auto display = [&](const nlohmann::json& facts) {
             auto payload = ProcessDisplay(command, state.cwd, duration_ms, outcome.output);
             payload.update(facts);
+            if (outcome.detached_grandchild) payload["detached_grandchild"] = true;
             return payload;
         };
 
@@ -469,7 +518,10 @@ public:
         const int code = WIFEXITED(outcome.wait_status) ? WEXITSTATUS(outcome.wait_status) : -1;
         if (code == 0) {
             ctx.logger.info("bash[{}] ok: '{}' ({} ms)", ctx.session_id, command, duration_ms);
-            return ToolResult{false, outcome.output, display({{"exit_code", 0}})};
+            // Verbatim when there is no note; the note (with_output) only on
+            // the detached-grandchild path.
+            return ToolResult{false, grandchild_note.empty() ? outcome.output : with_output(""),
+                              display({{"exit_code", 0}})};
         }
         ctx.logger.warn("bash[{}] exit {}: '{}' ({} ms)", ctx.session_id, code, command,
                         duration_ms);
@@ -491,7 +543,9 @@ private:
             // at completion. The synchronous path always works; refuse this
             // one with the reason rather than start work nobody can collect.
             return Error("background execution is unavailable in this session "
-                         "(no deferred-completion channel)");
+                         "(no deferred-completion channel); run the command in the "
+                         "foreground, or leave a long-running process behind with full "
+                         "redirection: cmd > log 2>&1 < /dev/null &");
         }
         // A background task's budget is its own ceiling: the sync default (2
         // minutes) exists to bound a BLOCKED WORKER, which a background task
@@ -527,10 +581,10 @@ private:
         // reaches the whole tree -- the model can clean up its own task with an
         // ordinary bash call. The polling hint steers toward the redirect-to-file
         // pattern instead of a bespoke output tool: pipes and redirection are the
-        // reason this tool has no schema knobs, and background changes nothing.
+        // reason this tool has no schema knobs, and detach changes nothing.
         return ToolResult{
             false,
-            "running in background as task " + started_task->id + " (pid " +
+            "running detached as task " + started_task->id + " (pid " +
                 std::to_string(started_task->pid) + ", timeout " +
                 std::to_string(bg_timeout / 1000) + " s). The result will be reported "
                 "automatically at a turn boundary once it finishes; this session ends, so does "

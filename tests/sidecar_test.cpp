@@ -259,6 +259,69 @@ TEST_CASE("A discarded sink still drains (the child must not block on a full pip
     CHECK(outcome.sinks[0].text.empty());
 }
 
+TEST_CASE("idle_after_reap_ms = 0 preserves the blocking-to-deadline semantics",
+          "[sidecar][drain]") {
+    // The default is today's behavior, pinned here: a grandchild holding the
+    // output pipe blocks the drain to the deadline, group killed, timed_out.
+    // This is what callers that pass nothing (tools-python) keep getting.
+    const auto started = std::chrono::steady_clock::now();
+    const auto outcome = RunToCompletion("sleep 60 &", 500);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+    CHECK(outcome.timed_out);
+    CHECK_FALSE(outcome.detached_grandchild);
+    CHECK(elapsed < 5000);  // the deadline, not the grandchild's 60 s
+}
+
+TEST_CASE("idle_after_reap_ms returns at reap+idle when a grandchild holds the pipe",
+          "[sidecar][drain]") {
+    // The shell exits immediately; `sleep 60 &` keeps the pipe. The idle rule
+    // ends the run with the SHELL's real status and the flag set.
+    auto launched = Launch(SimpleSpec("sleep 60 &"));
+    REQUIRE(launched.ok);
+    std::vector<PipeSink> sinks(1);
+    sinks[0].mode = PipeSink::Mode::kCapped;
+    sinks[0].cap = 64 * 1024;
+    DrainOptions options;
+    options.timeout_ms = 60000;
+    options.idle_after_reap_ms = 500;
+    const auto started = std::chrono::steady_clock::now();
+    const auto outcome = DrainAndReap(std::move(launched), std::move(sinks), options, {});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+    CHECK(outcome.detached_grandchild);
+    CHECK_FALSE(outcome.timed_out);
+    CHECK_FALSE(outcome.cancelled);
+    CHECK(elapsed < 10000);  // reap + idle, not the 60 s deadline or the child
+    // The reaped status is the SHELL's: exited 0 (not signal-killed, not -1).
+    CHECK(WIFEXITED(outcome.wait_status));
+    CHECK(WEXITSTATUS(outcome.wait_status) == 0);
+}
+
+TEST_CASE("data inside the idle window resets the countdown",
+          "[sidecar][drain]") {
+    // A streaming grandchild is still working: 1 s gaps against a 2 s window
+    // never trip the idle rule, and the run ends when the shell (having
+    // waited) exits -- normal completion, no flag.
+    auto launched = Launch(SimpleSpec(
+        "(for i in 1 2 3; do echo tick-$i; sleep 1; done); wait"));
+    REQUIRE(launched.ok);
+    std::vector<PipeSink> sinks(1);
+    sinks[0].mode = PipeSink::Mode::kCapped;
+    sinks[0].cap = 64 * 1024;
+    DrainOptions options;
+    options.timeout_ms = 30000;
+    options.idle_after_reap_ms = 2000;
+    const auto outcome = DrainAndReap(std::move(launched), std::move(sinks), options, {});
+    CHECK_FALSE(outcome.detached_grandchild);
+    CHECK_FALSE(outcome.timed_out);
+    CHECK(WIFEXITED(outcome.wait_status));
+    CHECK(outcome.sinks[0].text.find("tick-1") != std::string::npos);
+    CHECK(outcome.sinks[0].text.find("tick-3") != std::string::npos);
+}
+
 TEST_CASE("The capped emit tap sees live chunks", "[sidecar][drain]") {
     auto launched = Launch(SimpleSpec("echo one; echo two"));
     REQUIRE(launched.ok);
@@ -569,4 +632,83 @@ TEST_CASE("WatchLifetime is disarmed by releasing the guard before expiry",
     lifetime.reset();
     std::this_thread::sleep_for(200ms);
     CHECK(fired.load() == 0);
+}
+
+TEST_CASE("ClampRlimit degrades an over-cap request to the hard cap, and leaves the rest alone",
+          "[sidecar][process][rlimit]") {
+    std::string warnings;
+
+    // An unlimited hard cap absorbs anything; no clamping, no note.
+    CHECK(ClampRlimit(60, RLIM_INFINITY, &warnings) == 60);
+    CHECK(ClampRlimit(RLIM_INFINITY, RLIM_INFINITY, &warnings) == RLIM_INFINITY);
+    CHECK(warnings.empty());
+
+    // At or under the cap: the request survives verbatim.
+    CHECK(ClampRlimit(60, 125, &warnings) == 60);
+    CHECK(ClampRlimit(125, 125, &warnings) == 125);
+    CHECK(warnings.empty());
+
+    // Over the cap: degrade to the cap (the tightest enforceable bound) and
+    // say so -- a silently degraded backstop would look like the real one.
+    CHECK(ClampRlimit(200, 125, &warnings) == 125);
+    CHECK(warnings.find("200") != std::string::npos);
+    CHECK(warnings.find("125") != std::string::npos);
+    warnings.clear();
+
+    // "Unlimited" against a capped host: the cap, also with a note.
+    CHECK(ClampRlimit(RLIM_INFINITY, 125, &warnings) == 125);
+    CHECK(warnings.find("unlimited") != std::string::npos);
+    CHECK(warnings.find("125") != std::string::npos);
+
+    // A null warnings sink is legal.
+    CHECK(ClampRlimit(RLIM_INFINITY, 125, nullptr) == 125);
+}
+
+TEST_CASE("Launch survives backstop requests above the host's hard caps",
+          "[sidecar][process][regression]") {
+    // The regression: the child's checked setrlimit made any request above
+    // the inherited hard cap fatal (_exit(127) before exec), so on a host
+    // that caps RLIMIT_CPU every spawn died. Launch() now clamps both
+    // backstops to the inherited hard caps -- the child runs under the
+    // host's own ceiling instead of not running at all. On an uncapped host
+    // this test exercises the no-clamp path; on a capped one, the clamp.
+    LaunchSpec spec = SimpleSpec("echo clamped-or-not; exit 0");
+    spec.cpu_seconds = 1'000'000;               // above any plausible hard cap
+    spec.file_size_bytes = 1LL << 40;           // 1 TiB, likewise
+    auto launched = Launch(spec);
+    REQUIRE(launched.ok);
+
+    std::vector<PipeSink> sinks(1);
+    sinks[0].mode = PipeSink::Mode::kCapped;
+    sinks[0].cap = 4096;
+    DrainOptions options;
+    options.timeout_ms = 10000;
+    const auto outcome = DrainAndReap(std::move(launched), std::move(sinks), options, {});
+    REQUIRE_FALSE(outcome.reap_error);
+    CHECK(WIFEXITED(outcome.wait_status));
+    CHECK(WEXITSTATUS(outcome.wait_status) == 0);
+    CHECK(outcome.sinks[0].text == "clamped-or-not\n");
+
+    // The warnings field only speaks when a clamp actually happened: empty
+    // on an uncapped host, one line per clamped limit on a capped one.
+    if (launched.warnings.empty()) return;
+    CHECK(launched.warnings.find("rlimit:") != std::string::npos);
+}
+
+TEST_CASE("ReapAfterKill reports an already-reaped child as reaped, not lost",
+          "[sidecar][process][regression]") {
+    // The regression: waitpid's ECHILD ("no such child" -- reaped elsewhere)
+    // was folded into the not-reaped outcome, so HardKill logged a bogus
+    // "child not reaped within the post-kill budget" for a child that was
+    // long gone. ECHILD is the SUCCESS shape here: no residue, nothing to
+    // wait for.
+    pid_t pid = fork();
+    REQUIRE(pid >= 0);
+    if (pid == 0) _exit(0);  // exits immediately; the parent reaps below
+    int status = 0;
+    REQUIRE(waitpid(pid, &status, 0) == pid);  // reaped elsewhere, on purpose
+
+    KillProcessGroup(pid);  // the kill half of ReapAfterKill, harmless on a
+                            // dead pid: SIGKILL to a reaped pid is a no-op
+    CHECK(ReapAfterKill(pid));
 }

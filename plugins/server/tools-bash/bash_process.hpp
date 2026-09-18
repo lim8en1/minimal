@@ -44,6 +44,14 @@ constexpr int kStateFd = 9;
 // environment state.
 constexpr std::size_t kMaxStatePayloadBytes = 1 << 20;  // 1 MiB
 
+// Fail-fast window for a detached grandchild (DrainOptions::idle_after_reap_ms):
+// after the shell is reaped, output pipes still open mean a grandchild inherited
+// them; quiet for this long ends the run with a teaching note instead of holding
+// the call to its deadline. A grandchild that exits 2-5 s after the shell is
+// killed at 2 s -- accepted, the footer makes the fix a one-line edit (fully
+// redirect the child's stdio). Not config on purpose: one default, no knobs.
+constexpr std::int64_t kIdleAfterReapMs = 2000;
+
 struct ShellState {
     std::filesystem::path cwd;
     std::map<std::string, std::string> env;
@@ -75,6 +83,9 @@ struct LaunchedProcess {
     pid_t pid = -1;
     int out_fd = -1;    // stdout+stderr, merged, in order
     int state_fd = -1;  // the fd-9 state channel
+    // Non-empty when Launch() had to clamp an rlimit backstop to the host's
+    // hard cap (see ClampRlimit); log it -- the child runs degraded, not dead.
+    std::string warnings;
 };
 
 // fork + execve of the configured shell with `wrapped`, over the sidecar

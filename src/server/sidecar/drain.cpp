@@ -71,6 +71,12 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
     // --- Drain: poll every open parent fd, feed its sink --------------------
     std::vector<bool> open(outcome.sinks.size(), true);
     bool any_open = !open.empty();
+    // idle_after_reap_ms > 0 only: PEEK at the shell each slice -- waitid with
+    // WNOWAIT reports "exited (status ready)" WITHOUT reaping, so the pid
+    // stays ours (an unreaped zombie cannot be recycled) and the group kill
+    // below can never hit a recycled pgid. The real reap happens after.
+    bool child_exited = false;
+    std::chrono::steady_clock::time_point idle_deadline{};
     while (any_open) {
         if (stop && stop()) {
             outcome.cancelled = true;
@@ -108,26 +114,67 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
             outcome.io_error_message = std::strerror(errno);
             break;
         }
-        if (rc == 0) continue;
 
-        char chunk[8192];
-        for (std::size_t slot = 0; slot < poll_fds.size(); ++slot) {
-            if (!(poll_fds[slot].revents & (POLLIN | POLLHUP | POLLERR))) continue;
-            const std::size_t i = static_cast<std::size_t>(index_by_slot[slot]);
-            const ssize_t n = read(proc.parent_fds[i].get(), chunk, sizeof(chunk));
-            if (n > 0) {
-                const std::string_view view(chunk, static_cast<std::size_t>(n));
-                switch (outcome.sinks[i].mode) {
-                    case PipeSink::Mode::kCapped:
-                        capped[i].Append(view);
-                        if (outcome.sinks[i].emit) outcome.sinks[i].emit(view);
-                        break;
-                    default:
-                        FeedSink(outcome.sinks[i], view);
-                        break;
+        bool got_data = false;
+        if (rc > 0) {
+            char chunk[8192];
+            for (std::size_t slot = 0; slot < poll_fds.size(); ++slot) {
+                if (!(poll_fds[slot].revents & (POLLIN | POLLHUP | POLLERR))) continue;
+                const std::size_t i = static_cast<std::size_t>(index_by_slot[slot]);
+                const ssize_t n = read(proc.parent_fds[i].get(), chunk, sizeof(chunk));
+                if (n > 0) {
+                    got_data = true;
+                    const std::string_view view(chunk, static_cast<std::size_t>(n));
+                    switch (outcome.sinks[i].mode) {
+                        case PipeSink::Mode::kCapped:
+                            capped[i].Append(view);
+                            if (outcome.sinks[i].emit) outcome.sinks[i].emit(view);
+                            break;
+                        default:
+                            FeedSink(outcome.sinks[i], view);
+                            break;
+                    }
+                } else if (n == 0 || errno != EINTR) {
+                    open[i] = false;  // EOF (or a persistent error): this pipe is done
                 }
-            } else if (n == 0 || errno != EINTR) {
-                open[i] = false;  // EOF (or a persistent error): this pipe is done
+            }
+        }
+
+        if (options.idle_after_reap_ms <= 0) continue;
+
+        // --- Idle-after-exit accounting (opt-in; see DrainOptions) ----------
+        //
+        // The shell HAS exited (peeked, still unreaped) and some pipe is still
+        // open: a grandchild inherited it. Data resets the countdown (a
+        // streaming grandchild stays alive, deadline-bounded as ever); quiet
+        // past the window ends the run here instead of at the deadline.
+        if (!child_exited) {
+            siginfo_t info{};
+            const int wrc = waitid(P_PID, proc.pid, &info,
+                                   WEXITED | WNOHANG | WNOWAIT);
+            if (wrc == 0 && info.si_pid == proc.pid) child_exited = true;
+            // EINTR: retry next slice; 0 with si_pid == 0 means "still
+            // running" for WNOHANG.
+        }
+        if (child_exited) {
+            bool any_pipe_open = false;
+            for (bool pipe_open : open) {
+                if (pipe_open) {
+                    any_pipe_open = true;
+                    break;
+                }
+            }
+            if (any_pipe_open) {
+                if (got_data || idle_deadline.time_since_epoch().count() == 0) {
+                    idle_deadline = std::chrono::steady_clock::now() +
+                                    std::chrono::milliseconds(options.idle_after_reap_ms);
+                }
+                if (std::chrono::steady_clock::now() >= idle_deadline) {
+                    outcome.detached_grandchild = true;
+                    break;
+                }
+            } else {
+                idle_deadline = {};
             }
         }
     }
@@ -167,7 +214,12 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
         }
     }
 
-    if (!reaped) KillProcessGroup(proc.pid);
+    // The group kill ordering is load-bearing for the detached-grandchild
+    // path: the shell was only PEEKED (never reaped early), so its pid --
+    // and pgid, the shell setsid()s -- cannot have been recycled. killpg
+    // reaps-first would race pid reuse and could SIGKILL an unrelated,
+    // recycled process group.
+    if (!reaped || outcome.detached_grandchild) KillProcessGroup(proc.pid);
     if (!reaped && !outcome.reap_error) {
         const auto kill_deadline = std::chrono::steady_clock::now() +
                                    std::chrono::milliseconds(options.post_kill_reap_ms);

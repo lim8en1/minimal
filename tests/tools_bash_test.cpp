@@ -6,11 +6,14 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <thread>
 #include <vector>
 
 #include "fakes.hpp"
+#include "minimal/llm/message.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -42,6 +45,13 @@ struct Fixture {
     BackgroundTaskRegistry background;
     BashSettings settings;  // defaults: 120 s timeout, 1 MiB cap, /bin/sh
 
+    // The deferred-completion fakes, needed by any Run() that selects the
+    // background path: without schedule_injection the tool refuses the mode
+    // (the result would be silently lost), which is its own tested contract.
+    std::shared_ptr<const void> lifetime = std::make_shared<int>(0);
+    std::vector<llm::Message> injected;
+    std::mutex injected_mu;
+
     struct Outcome {
         tools::ToolResult result;
         std::string streamed;  // everything emit_output received (the live channel)
@@ -57,6 +67,13 @@ struct Fixture {
         ctx.project_root = dir.path();
         ctx.is_cancelled = std::move(is_cancelled);
         ctx.emit_output = [&out](std::string_view chunk) { out.streamed += chunk; };
+        ctx.tool_use_id = "tu-fixture";
+        ctx.schedule_injection = [this](llm::Message message) {
+            std::lock_guard<std::mutex> lock(injected_mu);
+            injected.push_back(std::move(message));
+            return true;
+        };
+        ctx.session_lifetime = lifetime;
         const auto started = std::chrono::steady_clock::now();
         out.result = tool->execute(input, ctx);
         out.elapsed_ms = ElapsedMs(started);
@@ -91,6 +108,22 @@ bool Names(const tools_bash::ScanResult& result, const std::string& word) {
 
 bool HasStage(const tools_bash::ScanResult& result, const std::string& stage) {
     return std::find(result.stages.begin(), result.stages.end(), stage) != result.stages.end();
+}
+
+// Polls a predicate with a deadline -- the standard shape for waiting on a
+// detached watcher's observable effects without sleeping a fixed time.
+template <typename Pred>
+bool WaitFor(Pred&& pred, std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return pred();
+}
+
+bool ReachedTerminal(tools::BackgroundTaskEvent::State state) {
+    return state != tools::BackgroundTaskEvent::State::kStarted;
 }
 
 bool Offers(const tools::PermissionDisclosure& disclosure, const std::string& suffix) {
@@ -600,6 +633,121 @@ TEST_CASE("a corrupted state payload leaves state unchanged", "[tools_bash][stat
     CHECK_FALSE(out.result.is_error);
     CHECK(out.result.content_text == "done\n");
     CHECK(f.Cwd() == before);  // the cd is discarded along with the bad payload
+}
+
+// --- background execution ----------------------------------------------------------------
+
+TEST_CASE("detach acks immediately and runs as a background task",
+          "[tools_bash][background]") {
+    // The tool call itself must return immediately -- that is the mode's
+    // contract. The result is injected by the watcher at a turn boundary,
+    // which is the background test's subject; here the ack and the session-
+    // lifetime kill are the observable halves.
+    Fixture f;
+    f.settings.background_max_timeout_ms = 60000;
+
+    const auto out = f.Run({{"command", "sleep 30"}, {"detach", true}});
+
+    CHECK_FALSE(out.result.is_error);
+    CHECK(out.elapsed_ms < 2000);
+    CHECK(out.result.content_text.find("running detached as task bg-") != std::string::npos);
+    CHECK(out.result.content_text.find("(pid ") != std::string::npos);
+
+    // The task is registered and live, and dies with the session's lifetime.
+    const auto tasks = f.background.List("s1");
+    REQUIRE(tasks.size() == 1);
+    CHECK(tasks.front().state == tools::BackgroundTaskEvent::State::kStarted);
+
+    // Session death: drop the lifetime (the watcher's poll is the kill
+    // mechanism), then wait for the terminal state BEFORE the Fixture -- and
+    // its emit_output channel -- are destroyed. A watcher that is still
+    // draining into `out.streamed` when the Fixture dies would write through
+    // a dangling this-capture.
+    f.lifetime.reset();
+    REQUIRE(WaitFor([&] {
+        const auto live = f.background.List("s1");
+        return live.empty() || ReachedTerminal(live.front().state);
+    }));
+}
+
+TEST_CASE("run_in_background remains an accepted alias of detach",
+          "[tools_bash][background]") {
+    Fixture f;
+    f.settings.background_max_timeout_ms = 60000;
+
+    const auto out = f.Run({{"command", "sleep 30"}, {"run_in_background", true}});
+
+    CHECK_FALSE(out.result.is_error);
+    CHECK(out.elapsed_ms < 2000);
+    CHECK(out.result.content_text.find("running detached as task bg-") != std::string::npos);
+    f.lifetime.reset();
+    REQUIRE(WaitFor([&] {
+        const auto live = f.background.List("s1");
+        return live.empty() || ReachedTerminal(live.front().state);
+    }));
+}
+
+TEST_CASE("a non-boolean detach is rejected like the other flag checks",
+          "[tools_bash][background]") {
+    Fixture f;
+    const auto out = f.Run({{"command", "echo x"}, {"detach", "yes"}});
+    CHECK(out.result.is_error);
+    CHECK(out.result.content_text.find("detach must be a boolean") != std::string::npos);
+}
+
+TEST_CASE("a command that leaves a pipe-holding child returns promptly with the teaching note",
+          "[tools_bash][background][invariant]") {
+    // The nohup/& trap, at the sync deadline's scale: `sleep 5 &` with no
+    // redirect holds the output pipe after the shell exits. Before the
+    // idle-after-reap rule this held the call to its full 30 s deadline and
+    // killed the group "timed out"; now the shell is reaped, the idle window
+    // (2 s) expires, and the result is the shell's real status plus the note.
+    Fixture f;
+    f.settings.timeout_ms = 30000;
+
+    const auto out = f.Run({{"command", "sleep 5 &"}});
+
+    CHECK_FALSE(out.result.is_error);  // the shell itself exited 0
+    CHECK(out.elapsed_ms < 5000);      // idle rule, not the 30 s deadline
+    CHECK(out.result.content_text.find("sleep 5 &") == std::string::npos);
+    CHECK(out.result.content_text.find(
+              "a process this command left running is holding the output pipe") !=
+          std::string::npos);
+    CHECK(out.result.content_text.find("detach=true") != std::string::npos);
+    CHECK(out.result.display.at("detached_grandchild") == true);
+    CHECK(out.result.display.at("exit_code") == 0);
+}
+
+TEST_CASE("a quiet but live command is not killed by the idle rule",
+          "[tools_bash][background][invariant]") {
+    // The correctness hinge: the idle countdown may only fire AFTER the shell
+    // is reaped. A shell that simply takes a while is normal, and an idle rule
+    // that fired on it would kill every slow build.
+    Fixture f;
+    f.settings.timeout_ms = 30000;
+
+    const auto out = f.Run({{"command", "sleep 5; echo done"}});
+
+    CHECK_FALSE(out.result.is_error);
+    CHECK(out.result.content_text == "done\n");
+    CHECK(out.elapsed_ms >= 4900);
+    CHECK(out.result.display.contains("detached_grandchild") == false);
+}
+
+TEST_CASE("a streaming grandchild keeps the run alive",
+          "[tools_bash][background][invariant]") {
+    // Data inside the idle window resets the countdown: a detached grandchild
+    // that is still WORKING (emitting) is not killed for being quiet once.
+    Fixture f;
+    f.settings.timeout_ms = 30000;
+
+    const auto out = f.Run(
+        {{"command", "(for i in 1 2 3; do echo tick-$i; sleep 1; done); wait"}});
+
+    CHECK_FALSE(out.result.is_error);
+    CHECK(out.result.content_text.find("tick-1") != std::string::npos);
+    CHECK(out.result.content_text.find("tick-3") != std::string::npos);
+    CHECK(out.result.display.contains("detached_grandchild") == false);
 }
 
 // --- timeout, cancellation, and bounded reaping --------------------------------------

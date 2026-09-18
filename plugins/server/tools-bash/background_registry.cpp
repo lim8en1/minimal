@@ -72,6 +72,12 @@ void WatchBackgroundTask(TaskRegistry::TaskState& task,
     minimal::sidecar::DrainOptions options;
     options.timeout_ms = timeout_ms;
 
+    // Fail fast when a grandchild holds the output pipe after the shell exits
+    // (the `nohup cmd &` trap): idle-after-reap ends the run in ~2 s with the
+    // teaching note appended to the injected result, turning a would-be 600 s
+    // "timed out" into a prompt completion-with-note.
+    options.idle_after_reap_ms = kIdleAfterReapMs;
+
     // session_lifetime is the ONLY stop source (no turn CancelToken is held).
     const auto outcome = minimal::sidecar::DrainAndReap(
         std::move(launched), std::move(sinks), options,
@@ -121,8 +127,22 @@ void WatchBackgroundTask(TaskRegistry::TaskState& task,
     }
 
     const std::string output = outcome.sinks[0].text;
+    // Same advisory as the synchronous path, on top of the shell's own status
+    // (state stays kCompleted/kFailed per the shell's real exit). With no
+    // note, the text is returned verbatim.
+    const std::string grandchild_note =
+        outcome.detached_grandchild
+            ? "[a process this task left running is holding the output pipe; the process "
+              "group was killed. Fully redirect the child's stdio inside the task: cmd > log "
+              "2>&1 < /dev/null &]"
+            : "";
     const auto with_output = [&](const std::string& footer) {
-        return output.empty() ? footer : output + "\n" + footer;
+        if (grandchild_note.empty()) {
+            return output.empty() ? footer : output + "\n" + footer;
+        }
+        const std::string tail =
+            footer.empty() ? grandchild_note : footer + "\n" + grandchild_note;
+        return output.empty() ? tail : output + "\n" + tail;
     };
     std::string text;
     bool is_error = false;
@@ -190,6 +210,13 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
         return std::nullopt;
     }
     const int pid = launched.pid;
+    // Degraded backstops (host caps RLIMIT_* below the request) still start:
+    // say so, or a capped host's background tasks run silently weaker than
+    // asked. The handles' logger mirrors the watcher's resolution below.
+    if (!launched.warnings.empty() && handles.logger != nullptr) {
+        handles.logger->warn("bash[{}]: rlimit backstops clamped by the host: {}", session_id,
+                             launched.warnings);
+    }
 
     TaskRegistry::StartArgs args;
     args.session_id = session_id;

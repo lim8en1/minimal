@@ -306,6 +306,32 @@ TEST_CASE("a background task honours its wall-clock ceiling and reports the time
     CHECK(errno == ESRCH);
 }
 
+TEST_CASE("a detached task whose shell exits but grandchild holds the pipe completes at idle",
+          "[tools_bash][background]") {
+    // The nohup/& trap inside a DETACHED task: `sleep 30 &` with no redirect
+    // keeps the output pipe open after the shell exits. Before the
+    // idle-after-reap rule the watcher held the task to its 600 s ceiling and
+    // reported "timed out"; now the shell is reaped, the idle window (2 s)
+    // expires, and the injected result is the shell's own completion plus the
+    // teaching note.
+    Harness h;
+    h.settings.background_max_timeout_ms = 60000;
+    const auto ack = h.Start("sleep 30 &");
+
+    REQUIRE(WaitFor([&] {
+        const auto state = h.TaskState(ack.task_id);
+        return state && ReachedTerminal(*state);
+    }, std::chrono::seconds(10)));
+    CHECK(h.TaskState(ack.task_id) == BackgroundTaskEvent::State::kCompleted);
+
+    const auto completion = SingleCompletion(h);
+    REQUIRE(completion.present);
+    CHECK_FALSE(completion.is_error);  // the shell itself exited 0
+    CHECK(completion.text.find(
+              "a process this task left running is holding the output pipe") !=
+          std::string::npos);
+}
+
 TEST_CASE("the per-session background task limit refuses without blocking",
           "[tools_bash][background]") {
     Harness h;

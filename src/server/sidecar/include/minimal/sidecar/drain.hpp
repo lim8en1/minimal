@@ -56,6 +56,16 @@ struct DrainOptions {
     int slice_ms = 50;             // drain-poll slice: the cancel-latency bound
     int reap_slice_ms = 10;        // WNOHANG poll slice after EOF
     int post_kill_reap_ms = 5000;  // ceiling on the post-kill reap (D-state bound)
+    // Fail-fast for a detached grandchild: once the direct child IS reaped, a
+    // pipe still open means some grandchild inherited it. 0 (default) keeps
+    // today's semantics -- wait for EOF or the deadline. A positive value
+    // starts an idle countdown on still-open pipes at that point: any data
+    // resets it (a streaming grandchild stays alive, deadline-bounded as
+    // ever); quiet for this long closes the pipes, kills the group, and
+    // reports detached_grandchild. May only fire AFTER the child is reaped --
+    // a live shell that goes quiet (slow build, test pause) is normal and
+    // must never be killed by an idle rule.
+    std::int64_t idle_after_reap_ms = 0;
 };
 
 struct DrainOutcome {
@@ -66,6 +76,11 @@ struct DrainOutcome {
     // waitpid returned -1 (ECHILD): the pid was reaped out from under us, so
     // wait_status is meaningless and must not be read as "exit 0".
     bool reap_error = false;
+    // idle_after_reap_ms fired: the shell was reaped and a grandchild that
+    // inherited the output pipe was quiet past the idle window, so the group
+    // was killed. wait_status is the SHELL's real status (valid, reaped);
+    // the caller appends its own advisory on top of the normal result.
+    bool detached_grandchild = false;
     int wait_status = 0;
     std::vector<PipeSink> sinks;  // the sinks, filled
 };
