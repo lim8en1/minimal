@@ -64,6 +64,13 @@ struct ShellState {
 // corrupt, hang, or leak) while `cd`/`export` still chain across calls.
 std::string WrapCommand(const std::string& command);
 
+// Joins captured output with a status footer and, when non-empty, a
+// detached-grandchild teaching note -- shared by the sync (bash_tool.cpp) and
+// background (background_registry.cpp) result paths so the composition rule
+// (footer/note ordering, when to skip the separator) only exists once.
+std::string ComposeResult(const std::string& output, const std::string& footer,
+                           const std::string& grandchild_note);
+
 // Payload: <absolute cwd> NUL (KEY=VALUE NUL)*
 //
 // Validated rather than trusted. A command may write to fd 9 itself -- by

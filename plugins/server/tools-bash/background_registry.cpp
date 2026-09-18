@@ -137,12 +137,7 @@ void WatchBackgroundTask(TaskRegistry::TaskState& task,
               "2>&1 < /dev/null &]"
             : "";
     const auto with_output = [&](const std::string& footer) {
-        if (grandchild_note.empty()) {
-            return output.empty() ? footer : output + "\n" + footer;
-        }
-        const std::string tail =
-            footer.empty() ? grandchild_note : footer + "\n" + grandchild_note;
-        return output.empty() ? tail : output + "\n" + tail;
+        return ComposeResult(output, footer, grandchild_note);
     };
     std::string text;
     bool is_error = false;
@@ -153,7 +148,7 @@ void WatchBackgroundTask(TaskRegistry::TaskState& task,
         case BackgroundTaskEvent::State::kFailed: {
             is_error = true;
             if (outcome.reap_error) {
-                text = "[could not determine exit status (process already reaped)]";
+                text = with_output("[could not determine exit status (process already reaped)]");
             } else if (WIFSIGNALED(outcome.wait_status)) {
                 text = with_output("[terminated by signal " +
                                    std::to_string(WTERMSIG(outcome.wait_status)) + "]");

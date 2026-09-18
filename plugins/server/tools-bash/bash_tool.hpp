@@ -15,7 +15,8 @@ namespace minimal::tools_bash {
 // holds a reference because it and the future /restart-shell command and
 // SessionObserver all operate on the same map -- one .so, one state owner.
 // `background` is the same plugin's background task registry: the state the
-// tool's run_in_background path creates and the /tasks command lists.
+// tool's detach path (run_in_background is a kept alias) creates and the
+// /tasks command lists.
 //
 // `before_command` is this plugin's OWN hook point (veto-capable): a hook
 // action may refuse an individual invocation before it spawns, at a finer

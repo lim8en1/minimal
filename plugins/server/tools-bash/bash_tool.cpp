@@ -198,7 +198,9 @@ public:
             "Run a shell command. Prefer piping to a filter (`| tail -50`, `| grep -i error`) "
             "over returning a huge log, since everything returned enters the context. The "
             "working directory and environment PERSIST across calls: use `cd` and `export` "
-            "normally, and pass restart=true to reset both. stdout and stderr are returned "
+            "normally, and pass restart=true to reset both. When a command changes directory, "
+            "the result reports the new cwd -- no need to `cd` back into a directory you're "
+            "already confirmed to be in. stdout and stderr are returned "
             "together; very long output is truncated in the middle; a non-zero exit status is "
             "an error. For long-running commands (servers, builds, watchers) pass "
             "detach=true -- never nohup/&: a backgrounded child that keeps stdout open wedges "
@@ -450,12 +452,7 @@ public:
         // useful thing the model can see (the error message, the partial log).
         // With no note, the output is returned verbatim -- no separator churn.
         const auto with_output = [&](const std::string& footer) {
-            if (grandchild_note.empty()) {
-                return outcome.output.empty() ? footer : outcome.output + "\n" + footer;
-            }
-            const std::string tail =
-                footer.empty() ? grandchild_note : footer + "\n" + grandchild_note;
-            return outcome.output.empty() ? tail : outcome.output + "\n" + tail;
+            return ComposeResult(outcome.output, footer, grandchild_note);
         };
         // The run's facts as fields -- a client shows the status as a badge
         // instead of parsing the footer text the model gets.
@@ -490,20 +487,34 @@ public:
         // RunProcess; the all-or-nothing PARSE (ParseStatePayload) cannot see
         // this case, because a valid prefix is indistinguishable from a
         // complete state.
+        // Told to the model (not just the UI) so it has real grounding for
+        // "am I already there" instead of defensively re-`cd`-ing every call:
+        // ToolResult::display is UI-only and never reaches content_text.
+        std::string cwd_note;
         if (outcome.state_overflow) {
             ctx.logger.warn("bash[{}] fd-9 state payload exceeded {} bytes; cwd and environment "
                             "left unchanged",
                             ctx.session_id, kMaxStatePayloadBytes);
-        } else {
-            AdoptShellState(ctx, outcome.state_payload);
+        } else if (const auto new_cwd = AdoptShellState(ctx, outcome.state_payload)) {
+            if (*new_cwd != state.cwd) cwd_note = "[cwd is now " + new_cwd->string() + "]";
         }
+        // Combines the grandchild teaching note with the cwd note: both are
+        // bracketed one-liners appended after the output, same join rule
+        // ComposeResult already uses for footer+note.
+        const std::string notes = grandchild_note.empty()
+                                      ? cwd_note
+                                      : (cwd_note.empty() ? grandchild_note
+                                                           : grandchild_note + "\n" + cwd_note);
+        const auto with_notes = [&](const std::string& footer) {
+            return ComposeResult(outcome.output, footer, notes);
+        };
 
         if (outcome.reap_error) {
             // ECHILD: the pid was reaped out from under us, so the status in
             // wait_status is meaningless. Reporting it (0 would mean success)
             // instead of silently calling the command a clean exit.
             return WithDisplay(
-                Error(with_output("[could not determine exit status (process already reaped)]")),
+                Error(with_notes("[could not determine exit status (process already reaped)]")),
                 display(nlohmann::json::object()));
         }
         if (WIFSIGNALED(outcome.wait_status)) {
@@ -511,21 +522,21 @@ public:
             ctx.logger.warn("bash[{}] '{}' terminated by signal {} ({} ms)", ctx.session_id,
                             command, sig, duration_ms);
             return WithDisplay(
-                Error(with_output("[terminated by signal " + std::to_string(sig) + "]")),
+                Error(with_notes("[terminated by signal " + std::to_string(sig) + "]")),
                 display({{"signal", sig}}));
         }
 
         const int code = WIFEXITED(outcome.wait_status) ? WEXITSTATUS(outcome.wait_status) : -1;
         if (code == 0) {
             ctx.logger.info("bash[{}] ok: '{}' ({} ms)", ctx.session_id, command, duration_ms);
-            // Verbatim when there is no note; the note (with_output) only on
-            // the detached-grandchild path.
-            return ToolResult{false, grandchild_note.empty() ? outcome.output : with_output(""),
+            // Verbatim when there is no note; the note (with_notes) only when
+            // the detached-grandchild or cwd-change note applies.
+            return ToolResult{false, notes.empty() ? outcome.output : with_notes(""),
                               display({{"exit_code", 0}})};
         }
         ctx.logger.warn("bash[{}] exit {}: '{}' ({} ms)", ctx.session_id, code, command,
                         duration_ms);
-        return WithDisplay(Error(with_output("[exit status: " + std::to_string(code) + "]")),
+        return WithDisplay(Error(with_notes("[exit status: " + std::to_string(code) + "]")),
                            display({{"exit_code", code}}));
     }
 
@@ -593,16 +604,22 @@ private:
                 std::to_string(started_task->pid)};
     }
 
-    void AdoptShellState(ToolContext& ctx, const std::string& payload) {
-        if (payload.empty()) return;  // the command exited before the trailer ran
+    // Returns the newly adopted cwd on success, so the caller can tell the
+    // model when a command actually moved the shell (nullopt: nothing was
+    // adopted -- the command exited before the trailer ran, or the payload
+    // was malformed).
+    std::optional<std::filesystem::path> AdoptShellState(ToolContext& ctx,
+                                                          const std::string& payload) {
+        if (payload.empty()) return std::nullopt;  // the command exited before the trailer ran
         const ShellState reported = ParseStatePayload(payload);
         if (!reported.ok) {
             ctx.logger.warn("bash[{}] ignoring malformed shell state ({} bytes); "
                             "cwd and environment left unchanged",
                             ctx.session_id, payload.size());
-            return;
+            return std::nullopt;
         }
         store_.SetState(ctx.session_id, reported.cwd, reported.env);
+        return reported.cwd;
     }
 
     ToolResult Reject(ToolContext& ctx, std::chrono::steady_clock::time_point started,

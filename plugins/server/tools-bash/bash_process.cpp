@@ -21,6 +21,16 @@ std::string WrapCommand(const std::string& command) {
            std::to_string(kStateFd) + "\nexit $__minimal_rc\n";
 }
 
+std::string ComposeResult(const std::string& output, const std::string& footer,
+                           const std::string& grandchild_note) {
+    if (grandchild_note.empty()) {
+        return output.empty() ? footer : output + "\n" + footer;
+    }
+    const std::string tail =
+        footer.empty() ? grandchild_note : footer + "\n" + grandchild_note;
+    return output.empty() ? tail : output + "\n" + tail;
+}
+
 ShellState ParseStatePayload(const std::string& payload) {
     ShellState state;
     const auto nul = payload.find('\0');

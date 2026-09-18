@@ -189,7 +189,8 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
     // bound a blocking waitpid, so poll WNOHANG instead).
     int status = 0;
     bool reaped = false;
-    if (!outcome.cancelled && !outcome.timed_out && !outcome.io_error) {
+    if (!outcome.cancelled && !outcome.timed_out && !outcome.io_error &&
+        !outcome.detached_grandchild) {
         while (true) {
             const pid_t rc = waitpid(proc.pid, &status, WNOHANG);
             if (rc == proc.pid) {
