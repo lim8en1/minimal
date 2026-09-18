@@ -1,6 +1,6 @@
 // memory -- the dynamic-skill / dynamic-context plugin: a durable,
 // DB-backed lesson store the model grows itself, with embedding-similarity
-// search (http or onnx backends behind one seam), a capped per-scope topic
+// search (http or sidecar backends behind one seam), a capped per-scope topic
 // taxonomy, and an optional small-LLM enrichment pass (summary + topic).
 //
 // SHIPPED DISABLED (DefaultsDisabled in plugin_discovery.cpp): it writes to
@@ -19,6 +19,7 @@
 
 #include "embedding.hpp"
 #include "embedding_http.hpp"
+#include "embedding_sidecar.hpp"
 #include "memory_settings.hpp"
 #include "memory_store.hpp"
 #include "memory_tool.hpp"
@@ -53,15 +54,15 @@ void BuildRuntime(const minimal::plugins::PluginRegistrationContext& context) {
     runtime->enricher = std::make_unique<minimal::memory::Enricher>(
         runtime->settings, runtime->store.get());
 
-    // Strategy resolution. "auto" walks onnx -> http -> none, reporting the
-    // winner through Describe() (never a silent fallback: /memory and the
-    // digest name which backend actually won and the reason the others were
-    // skipped is derivable from config).
+    // Strategy resolution. "auto" walks sidecar -> http -> none, reporting
+    // the winner through Describe() (never a silent fallback: /memory and
+    // the digest name which backend actually won and the reason the others
+    // were skipped is derivable from config).
     const auto& s = runtime->settings;
     auto strategy = s.strategy;
     if (strategy == minimal::memory::StrategyKind::kAuto) {
-        if (!s.model_path.empty() && std::filesystem::exists(context.data_dir / s.model_path)) {
-            strategy = minimal::memory::StrategyKind::kOnnx;
+        if (!s.sidecar_model.empty()) {
+            strategy = minimal::memory::StrategyKind::kSidecar;
         } else if (!s.api_base.empty()) {
             strategy = minimal::memory::StrategyKind::kHttp;
         } else {
@@ -74,10 +75,10 @@ void BuildRuntime(const minimal::plugins::PluginRegistrationContext& context) {
             runtime->embedder = std::make_unique<minimal::memory::HttpEmbeddingFunction>(
                 s, minimal::net::HttpClient{});
             break;
-        case minimal::memory::StrategyKind::kOnnx:
-            // Model load failures leave embedder null: the tools answer
+        case minimal::memory::StrategyKind::kSidecar:
+            // Spawn/handshake failures leave embedder null: the tools answer
             // "lexical only" rather than failing the plugin load.
-            runtime->embedder = minimal::memory::TryMakeOnnxEmbeddingFunction(
+            runtime->embedder = minimal::memory::TryMakeSidecarEmbeddingFunction(
                 s, context.data_dir);
             break;
         default:

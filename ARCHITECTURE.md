@@ -28,10 +28,11 @@ minimal/
   proto/minimal/v1/{common,session_service}.proto
   plugins/                    # bundled plugin IMPLEMENTATIONS -- what the harness loads
     server/                       # tools-fs, tools-search, tools-bash, tools-web,
-                                  #   tools-python, provider-openai,
-                                  #   commands-core, checklist, signals-message,
+                                  #   tools-python, provider-openai, provider-anthropic,
+                                  #   commands-core, commands-md, checklist, signals-message,
                                   #   session-titler (shipped disabled -- see naming),
-                                  #   cost-tracker
+                                  #   cost-tracker, tool-ask, memory (shipped disabled --
+                                  #   see its own README)
     client/                       # logo (the ASCII-banner start view)
   bundled/                    # non-code assets that ship WITH the binary
     prompts/{compression,subagent}.md  # all of it copied into the config dir by
@@ -1060,13 +1061,17 @@ Default is no authentication, matching the local-only topology. `src/server/rpc/
 | `checklist` tool + `checklist.rpc` service | **Bundled plugin** | The model's per-session task scratchpad. Exercises the PluginStorage seam and the PluginCall dispatch convention as a third-party plugin would; UI presentation lives in consumers, fetched over the generic channel. |
 | `cost-tracker` (observer + `/cost` + `/cost-update-rates` + tracking service + `.rpc`) | **Bundled plugin** | The cumulative-totals consumer of the token accounting above. Observer-only writing; `/cost` and both service surfaces read the same store, so a report cannot disagree with itself. The `.rpc` surface is the UI data path — the checklist shape, command-free, because cost is the operator's business and no model tool belongs here. |
 | OpenAI provider (`provider-openai`) | **Bundled plugin** | Two-method interface; the obvious thing to fork. |
-| Built-in `/`-commands (`commands-core`) | **Bundled plugin** | One plugin, not nine. |
+| Anthropic provider (`provider-anthropic`) | **Bundled plugin** | Same rationale as `provider-openai` — two-method interface, obvious to fork. |
+| Built-in `/`-commands (`commands-core`, `commands-md`) | **Bundled plugins** | Built-in commands split across two bundled plugins by authoring shape — native C++ (`commands-core`) vs. markdown-declared, opencode-compatible (`commands-md`) — not nine one-off plugins. |
+| `memory` (tools + `/memory` command) | **Bundled plugin, shipped disabled** | The model's durable lesson store — DB-backed, with embedding search behind a swappable backend seam (http or a local sidecar process) and an optional LLM enrichment pass. Shipped disabled: it writes to disk on the model's own initiative, and under the http strategy sends entry text to an external endpoint. |
 | llama.cpp KV-cache commands (`llamacpp-kv`) | **Deferred to v1.x+** | Retained below as the worked example that drove the plugin design, not shipped in v1. |
 | `spawn_subagent` tool | **Core** | Entry point to the core subagent loop; making it a plugin means exposing session *creation* across the ABI to relocate a thin wrapper. |
 | `SkillTool` | **Core** | A thin accessor over the core md loader + skill registry. |
 | `PrefixMentionResolver` | **Core default**, plugin-overridable | The minimum default needed to function. |
 | Themes, skills, agent presets, prompts | **Not plugins — config** | Pure data; a plugin would add ABI/build complexity for something that is already just a file. |
 | Syntax-highlighting grammars | **Fixed vendored set** | Runtime-loadable grammars are plausible future work. |
+
+`ask_user` (`tool-ask`) is also a bundled plugin, not listed as its own row — see *Asking the user* above for its rationale.
 
 ### `llamacpp-kv` — the worked example (deferred to v1.x+)
 

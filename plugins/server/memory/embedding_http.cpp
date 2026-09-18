@@ -1,6 +1,8 @@
 #include "embedding_http.hpp"
 
+#include <algorithm>
 #include <cstdlib>
+#include <iterator>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -24,13 +26,29 @@ HttpEmbeddingFunction::HttpEmbeddingFunction(MemorySettings settings, net::HttpC
 std::vector<Embedding> HttpEmbeddingFunction::Embed(const std::vector<std::string>& inputs) {
     if (inputs.empty()) return {};
 
+    std::vector<Embedding> out;
+    out.reserve(inputs.size());
+    const std::size_t batch_size = static_cast<std::size_t>(std::max(1, settings_.batch_size));
+    for (std::size_t start = 0; start < inputs.size(); start += batch_size) {
+        const std::size_t end = std::min(inputs.size(), start + batch_size);
+        auto chunk = EmbedChunk(inputs, start, end);
+        out.insert(out.end(), std::make_move_iterator(chunk.begin()),
+                  std::make_move_iterator(chunk.end()));
+    }
+    return out;
+}
+
+std::vector<Embedding> HttpEmbeddingFunction::EmbedChunk(const std::vector<std::string>& inputs,
+                                                         std::size_t start, std::size_t end) {
+    const std::vector<std::string> chunk(inputs.begin() + static_cast<std::ptrdiff_t>(start),
+                                         inputs.begin() + static_cast<std::ptrdiff_t>(end));
+
     nlohmann::json body;
     body["model"] = settings_.model;
-    body["input"] = inputs;
+    body["input"] = chunk;
     // Two sentences of input encoding are worth stating: OpenAI's embeddings
     // API accepts either a string or an array of strings; we always send the
     // array so batching is uniform across backends.
-    nlohmann::json headers = nlohmann::json::array();
     std::vector<net::HttpHeader> request_headers;
     request_headers.push_back({"Content-Type", "application/json"});
     request_headers.push_back({"Accept", "application/json"});
@@ -68,13 +86,13 @@ std::vector<Embedding> HttpEmbeddingFunction::Embed(const std::vector<std::strin
                                  error.what());
     }
     const auto data = parsed.find("data");
-    if (data == parsed.end() || !data->is_array() || data->size() != inputs.size()) {
+    if (data == parsed.end() || !data->is_array() || data->size() != chunk.size()) {
         throw std::runtime_error("embedding backend response: expected data[" +
-                                 std::to_string(inputs.size()) + "], got " +
+                                 std::to_string(chunk.size()) + "], got " +
                                  (data == parsed.end() ? "no data" : data->dump().substr(0, 120)));
     }
 
-    std::vector<Embedding> out(inputs.size());
+    std::vector<Embedding> out(chunk.size());
     for (const auto& entry : *data) {
         if (!entry.is_object() || !entry.contains("embedding") || !entry["embedding"].is_array() ||
             !entry.contains("index") || !entry["index"].is_number_integer()) {

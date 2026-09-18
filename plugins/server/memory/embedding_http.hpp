@@ -20,6 +20,12 @@ public:
     std::string Signature() const override;
 
 private:
+    // One POST for inputs[start, end). Split out so Embed() can chunk by
+    // settings_.batch_size -- a caller (the reindex drain, a large ingest)
+    // may pass far more inputs than one request should carry.
+    std::vector<Embedding> EmbedChunk(const std::vector<std::string>& inputs, std::size_t start,
+                                      std::size_t end);
+
     MemorySettings settings_;
     net::HttpClient http_;
 };

@@ -583,20 +583,28 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     Compactor summarizer = compactor_;
     if (!summarizer) {
         summarizer = config_.EffectiveCompactor(preset_, compaction_strategies_);
-        if (summarizer && !preset_.compaction_strategy.empty() &&
-            compaction_strategies_ != nullptr &&
-            compaction_strategies_->Find(preset_.compaction_strategy) == nullptr) {
-            // The preset named a kind nothing registered. Warn ONCE per loop,
-            // not per attempt -- a failing summarizer already has a per-turn
-            // cooldown, but the name is a config typo, not a transient
-            // condition, so per-attempt repetition is log spam. Falls through
-            // to the settings-level strategy or the built-in.
-            if (!compaction_strategy_warned_) {
-                compaction_strategy_warned_ = true;
-                session_.logger.warn(
-                    "session {}: agent preset '{}' names compaction strategy '{}' which is not "
-                    "registered; using the settings-level strategy or the built-in",
-                    session_.session_id, preset_.name, preset_.compaction_strategy);
+        if (summarizer && !preset_.compaction_strategy.empty() && compaction_strategies_ != nullptr) {
+            // The preset named a kind nothing registered, OR named one that IS
+            // registered but declares no summarize half (a cut-only plugin
+            // strategy referenced by mistake) -- EffectiveCompactor falls
+            // through to the settings-level strategy or the built-in in both
+            // cases, and both deserve the same operator-visible signal: a
+            // silent fallback here is indistinguishable from the preset's
+            // choice actually taking effect.
+            const auto* found = compaction_strategies_->Find(preset_.compaction_strategy);
+            if (found == nullptr || !found->summarize) {
+                // Warn ONCE per loop, not per attempt -- a failing summarizer
+                // already has a per-turn cooldown, but the name is a config
+                // typo, not a transient condition, so per-attempt repetition
+                // is log spam.
+                if (!compaction_strategy_warned_) {
+                    compaction_strategy_warned_ = true;
+                    session_.logger.warn(
+                        "session {}: agent preset '{}' names compaction strategy '{}' which is "
+                        "not usable ({}); using the settings-level strategy or the built-in",
+                        session_.session_id, preset_.name, preset_.compaction_strategy,
+                        found == nullptr ? "not registered" : "registered with no summarizer");
+                }
             }
         }
     }

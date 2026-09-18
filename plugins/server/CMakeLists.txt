@@ -14,6 +14,4 @@ add_subdirectory(checklist)
 add_subdirectory(signals-message)
 add_subdirectory(session-titler)
 add_subdirectory(cost-tracker)
-# TODO: re-enable once the vcpkg protobuf/onnxruntime shallow-clone build
-# issue is fixed (onnxruntime dropped from vcpkg.json alongside this).
-# add_subdirectory(memory)
+add_subdirectory(memory)

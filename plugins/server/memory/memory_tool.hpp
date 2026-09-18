@@ -4,6 +4,7 @@
 // MemoryTools holds the shared state (store, embedder, enricher) behind the
 // plugin's static holder; each tool is a thin Tool impl over it.
 
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -42,6 +43,10 @@ struct MemoryRuntime {
     std::unordered_set<std::string> digest_shown;
 };
 
+// Worktree-root walk shared by the tools' scope=project resolution and the
+// /memory command's project-topics listing (memory_tool.cpp).
+std::filesystem::path WorktreeRoot(const std::filesystem::path& project_root);
+
 std::unique_ptr<tools::Tool> MakeMemorySearchTool(std::shared_ptr<MemoryRuntime> runtime);
 std::unique_ptr<tools::Tool> MakeMemoryStoreTool(std::shared_ptr<MemoryRuntime> runtime);
 std::unique_ptr<tools::Tool> MakeMemoryGetTool(std::shared_ptr<MemoryRuntime> runtime);
@@ -52,10 +57,11 @@ std::unique_ptr<tools::Tool> MakeMemoryDeleteTool(std::shared_ptr<MemoryRuntime>
 // pending reindex) plus `purge <path>` for bulk group removal.
 std::unique_ptr<commands::Command> MakeMemoryCommand(std::shared_ptr<MemoryRuntime> runtime);
 
-// onnx backend (embedding_onnx.cpp): loads the session + tokenizer; null on
-// any failure (file missing, tokenizer unparsable) -- strategy degrades, the
-// plugin still loads.
-std::unique_ptr<EmbeddingFunction> TryMakeOnnxEmbeddingFunction(const MemorySettings& settings,
-                                                                const std::filesystem::path& data_dir);
+// sidecar backend (embedding_sidecar.cpp): spawns a long-lived python/
+// fastembed subprocess; null on any failure (python missing, spawn failure,
+// fastembed import/model-load failure) -- strategy degrades, the plugin
+// still loads.
+std::unique_ptr<EmbeddingFunction> TryMakeSidecarEmbeddingFunction(
+    const MemorySettings& settings, const std::filesystem::path& data_dir);
 
 }  // namespace minimal::memory

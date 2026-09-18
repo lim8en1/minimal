@@ -1,8 +1,8 @@
 ---
 name: build
 description: Reads, writes and runs things. The default preset.
-allowed_tools: ["*"]
-allowed_skills: ["*"]
+allowed_tools: ["ask_user", "read", "grep", "glob", "bash", "write", "edit", "checklist"]
+allowed_skills: []
 permission_mode:
   read_only: allow
   file_write: ask

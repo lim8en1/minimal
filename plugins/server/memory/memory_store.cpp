@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -151,6 +152,14 @@ MemoryStore::MemoryStore(const std::filesystem::path& db_path) : path_(db_path) 
     ExecChecked(db_, "PRAGMA journal_mode=WAL;", "memory: journal mode");
     ExecChecked(db_, "PRAGMA foreign_keys=ON;", "memory: foreign keys");
     Migrate();
+    // embed_status=3 (in-flight) only exists for the duration of one
+    // synchronous ClaimPendingEmbeddings-to-StoreEmbedding/MarkEmbedFailed
+    // call; nothing legitimately holds it across a process restart. A row
+    // still at 3 here belongs to a process that died mid-embed -- reset it
+    // to pending so it isn't orphaned forever (invisible to both search,
+    // which needs status 1, and the next drain, which claims status 0).
+    ExecChecked(db_, "UPDATE memory_entries SET embed_status = 0 WHERE embed_status = 3;",
+                "memory: reset stale in-flight rows");
 }
 
 MemoryStore::~MemoryStore() {
@@ -561,11 +570,25 @@ int MemoryStore::SetSignatureForAll(const std::string& signature, int dim) {
 std::vector<SearchHit> MemoryStore::Search(const SearchQuery& query) {
     std::lock_guard<std::mutex> lock(mu_);
 
+    // full_scan: an embedder is available and the caller gave both a sort=sim
+    // request and query text to embed. In this case the FTS trigram match
+    // would gate cosine reranking down to entries that already lexically
+    // overlap the query -- exactly backwards for semantic search, whose whole
+    // point is finding differently-worded but conceptually similar entries.
+    // So the candidate set drops the FTS gate entirely and the caller
+    // (MemorySearchTool) reranks over every matching row by cosine similarity
+    // instead, the same unbounded scope LoadVectors() already reads for that
+    // rerank -- this does not change the existing cost profile, only which
+    // rows are eligible to be found.
+    const bool full_scan = query.sort == "sim" && query.has_embeddings && query.query.has_value();
+
     std::string sql =
         "SELECT e.id, e.text, e.summary, t.name, e.created_ms, e.project_root "
         "FROM memory_entries e LEFT JOIN memory_topics t ON t.id = e.topic_id WHERE "
         "e.scope = ?1 AND e.project_root = ?2 ";
-    if (query.query) sql += "AND e.rowid_ IN (SELECT rowid FROM memory_fts WHERE memory_fts MATCH ?3 AND project_root = ?2) ";
+    if (query.query && !full_scan) {
+        sql += "AND e.rowid_ IN (SELECT rowid FROM memory_fts WHERE memory_fts MATCH ?3 AND project_root = ?2) ";
+    }
     if (!query.keywords.empty()) {
         for (std::size_t i = 0; i < query.keywords.size(); ++i) {
             sql += "AND (instr(lower(e.text), :k" + std::to_string(i) + ") > 0 "
@@ -582,7 +605,7 @@ std::vector<SearchHit> MemoryStore::Search(const SearchQuery& query) {
     int bind = 1;
     sqlite3_bind_int(stmt.stmt, bind++, query.scope);
     sqlite3_bind_text(stmt.stmt, bind++, query.project_root.c_str(), -1, SQLITE_TRANSIENT);
-    if (query.query) {
+    if (query.query && !full_scan) {
         sqlite3_bind_text(stmt.stmt, bind++, FtsQuote(*query.query).c_str(), -1, SQLITE_TRANSIENT);
     }
     for (std::size_t i = 0; i < query.keywords.size(); ++i) {
@@ -597,8 +620,12 @@ std::vector<SearchHit> MemoryStore::Search(const SearchQuery& query) {
         sqlite3_bind_text(stmt.stmt, sqlite3_bind_parameter_index(stmt.stmt, ":topic"),
                           query.topic->c_str(), -1, SQLITE_TRANSIENT);
     }
+    // full_scan: no SQL-side cap -- every row in scope is a semantic
+    // candidate, matching LoadVectors()'s own unbounded read below. Otherwise
+    // (lexical/time paths, or sim-browse with no query text to rerank by):
+    // exactly the requested limit, no over-fetch to walk back afterward.
     sqlite3_bind_int(stmt.stmt, sqlite3_bind_parameter_index(stmt.stmt, ":limit"),
-                     query.limit * (query.sort == "sim" ? 4 : 1));  // over-fetch for sim re-rank
+                     full_scan ? std::numeric_limits<int>::max() : query.limit);
 
     std::vector<SearchHit> hits;
     while (sqlite3_step(stmt.stmt) == SQLITE_ROW) {

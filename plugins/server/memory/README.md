@@ -24,20 +24,27 @@ an ingest group.
 
 ## Backends (`config.strategy`)
 
-- `"auto"` (default): `onnx` if the model loads, else `http` if `api_base` is
-  set, else lexical-only. The winner is reported by `/memory` and the digest.
+- `"auto"` (default): `sidecar` if `sidecar_model` is set, else `http` if
+  `api_base` is set, else lexical-only. The winner is reported by `/memory`
+  and the digest.
 - `"http"`: OpenAI-shape `POST {api_base}/embeddings` (llama.cpp server, vLLM,
   OpenAI...). Zero extra dependencies.
-- `"onnx"`: local, in-process (ONNX Runtime, CPU EP). Needs two operator-provided
-  files under the config data dir (`plugins/memory/`):
+- `"sidecar"`: local, via a long-lived python subprocess running
+  [fastembed](https://github.com/qdrant/fastembed) (a small wrapper over
+  ONNX Runtime, distributed as a prebuilt wheel -- no native build step in
+  this repo). Needs an operator-provided python interpreter with fastembed
+  already installed:
 
   ```
-  <data_dir>/models/model.onnx        # e.g. all-MiniLM-L6-v2 / bge-small-en-v1.5 ONNX export
-  <data_dir>/models/tokenizer.json    # HF fast-tokenizer file for the same model
+  sidecar_python_path   # absolute path; empty resolves "python3" on PATH
+  sidecar_model         # a fastembed model name, e.g. "BAAI/bge-small-en-v1.5"
   ```
 
-  v1 tokenizers: **WordPiece only** (the models above). One download, no runtime
-  network, nothing sent anywhere.
+  The model itself downloads on first use into
+  `<data_dir>/fastembed_cache/`, cached there for later runs -- no runtime
+  network after that, nothing sent anywhere. Same "zero extra C++
+  dependencies" shape as `http`: the plugin just spawns a process and speaks
+  JSON lines to it, the same way `tools-python`'s interpreter does.
 - `"none"`: no vectors; search is the lexical prefilter only. The store stays
   fully usable.
 
@@ -66,8 +73,8 @@ endpoint. Enabling it is one plugins.json edit:
 { "file": "memory.so", "enabled": true,
   "config": {
     "strategy": "auto",
-    "model_path": "models/model.onnx",
-    "tokenizer_path": "models/tokenizer.json",
+    "sidecar_python_path": "/usr/bin/python3",
+    "sidecar_model": "BAAI/bge-small-en-v1.5",
     "api_base": "http://127.0.0.1:8080/v1",
     "api_key_env": "MEMORY_API_KEY",
     "model": "nomic-embed-text",

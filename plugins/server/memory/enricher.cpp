@@ -169,8 +169,19 @@ void Enricher::Enqueue(std::string entry_id, std::string text, int scope,
     std::thread([state, provider = std::move(provider), model = std::move(model),
                  id = std::move(entry_id), text = std::move(text), scope,
                  root = std::move(project_root)]() mutable {
-        RunEnrichment(state->config, *state->store, provider.get(), model, state->logger, id,
-                      text, scope, root);        {
+        // Enrichment is garnish (enricher.hpp's "failure is always
+        // silent-degrade" invariant): a SQLite write failure in
+        // RunEnrichment (SetSummary/BindTopic) must not escape a detached
+        // thread, where an uncaught exception would call std::terminate and
+        // take the whole process down, nor skip the decrement below, which
+        // would hang Drain() forever.
+        try {
+            RunEnrichment(state->config, *state->store, provider.get(), model, state->logger, id,
+                          text, scope, root);
+        } catch (const std::exception& error) {
+            state->logger.warn("memory: enrichment worker failed: {}", error.what());
+        }
+        {
             std::lock_guard<std::mutex> lock(state->mu);
             state->workers -= 1;
         }

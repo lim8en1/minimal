@@ -114,17 +114,18 @@ add_executable(minimal_tests
     plugin_storage_test.cpp
     plugin_rpc_test.cpp
     checklist_test.cpp
-    # The memory plugin: store, tools, tokenizer and enricher are pure plugin
-    # logic over core headers; plugin.cpp (the extern "C" entry points) stays
-    # out, like every other bundled plugin. Same pattern as checklist above.
+    # The memory plugin: store, tools, embedding backends and enricher are
+    # pure plugin logic over core headers; plugin.cpp (the extern "C" entry
+    # points) stays out, like every other bundled plugin. Same pattern as
+    # checklist above.
     memory_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_store.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_tool.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_command.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_settings.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/enricher.cpp"
-    "${CMAKE_SOURCE_DIR}/plugins/server/memory/hf_tokenizer.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/embedding_http.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/embedding_sidecar.cpp"
     # The checklist-VIEW client plugin: model (header-only), poller and panel
     # view are pure plugin logic over the ClientApi/FocusProvider seams,
     # compiled in with stub seams; checklist_view_plugin.cpp (the extern "C"
@@ -333,10 +334,10 @@ target_link_libraries(minimal_tests PRIVATE
     # sources list above), so RE2 comes with them -- same linkage as the plugin.
     minimal_re2
     # memory sources are compiled directly into the test binary (see the
-    # sources list above); onnxruntime stays plugin-only -- embedding_onnx.cpp
-    # is deliberately NOT in the test sources (its TryMakeOnnxEmbeddingFunction
-    # is referenced only by plugin.cpp, which is out, like every other entry
-    # point).
+    # sources list above), same as every other bundled plugin's non-entry-
+    # point sources; the sidecar backend spawns a plain python subprocess
+    # (minimal::sidecar, already in server_core), so unlike the old onnx
+    # backend there is no extra native dependency to keep plugin-only.
     minimal_tree_sitter_bash)
 
 # Scripted stdio MCP server spawned by the MCP tests as a real child process.

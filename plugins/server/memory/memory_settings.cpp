@@ -33,7 +33,7 @@ MemorySettings ParseMemorySettings(const nlohmann::json& config) {
 
     const auto strategy = StringOr(config, "strategy", "auto");
     if (strategy == "http") out.strategy = StrategyKind::kHttp;
-    else if (strategy == "onnx") out.strategy = StrategyKind::kOnnx;
+    else if (strategy == "sidecar") out.strategy = StrategyKind::kSidecar;
     else if (strategy == "none") out.strategy = StrategyKind::kNone;
     else out.strategy = StrategyKind::kAuto;  // unknown value: auto, not a load failure
 
@@ -42,9 +42,12 @@ MemorySettings ParseMemorySettings(const nlohmann::json& config) {
     out.model = StringOr(config, "model", "");
     out.timeout_ms = IntOr(config, "timeout_ms", out.timeout_ms);
 
-    out.model_path = StringOr(config, "model_path", "");
-    out.tokenizer_path = StringOr(config, "tokenizer_path", "");
-    out.intra_op_threads = IntOr(config, "intra_op_threads", out.intra_op_threads);
+    out.sidecar_python_path = StringOr(config, "sidecar_python_path", "");
+    out.sidecar_model = StringOr(config, "sidecar_model", "");
+    out.sidecar_startup_timeout_ms =
+        IntOr(config, "sidecar_startup_timeout_ms", out.sidecar_startup_timeout_ms);
+    out.sidecar_request_timeout_ms =
+        IntOr(config, "sidecar_request_timeout_ms", out.sidecar_request_timeout_ms);
 
     out.summarizer_model = StringOr(config, "summarizer_model", "");
     out.summarize_max_tokens = IntOr(config, "summarize_max_tokens", out.summarize_max_tokens);

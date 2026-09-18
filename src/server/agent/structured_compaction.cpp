@@ -43,8 +43,10 @@ nlohmann::json StringArraySchema(const char* description) {
                           {"description", description}};
 }
 
-nlohmann::json RecordSummarySchema() {
-    return nlohmann::json{
+// Built once: the schema is identical on every compaction attempt, and
+// compaction is infrequent enough that this is about clarity, not perf.
+const nlohmann::json& RecordSummarySchema() {
+    static const nlohmann::json schema{
         {"type", "object"},
         // The only hard requirement. required/minItems are prompt intentions
         // at runtime -- enforcement varies by backend (OpenAI strict mode
@@ -122,6 +124,7 @@ nlohmann::json RecordSummarySchema() {
                                 "them. File-backed plans (a path a future "
                                 "session can read) are strongly advised in "
                                 "plan->execute flows.")}}}};
+    return schema;
 }
 
 std::string SectionHeader(std::string_view title) {

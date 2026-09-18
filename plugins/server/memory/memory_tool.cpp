@@ -16,16 +16,14 @@
 #include "minimal/tools/tool.hpp"
 
 namespace minimal::memory {
-namespace {
-
-constexpr int kHardLimitCeiling = 64;
-constexpr double kSimilarHintThreshold = 0.92;
 
 // Worktree-root walk: the same convention presets and skill lookup use
 // (docs/CONFIGURATION.md "Project-local skills") -- walk up from the session
 // root to the enclosing worktree root, marked by .git (directory in the
 // normal case, a FILE in a linked worktree). The memory plugin resolves
 // scope=project identically so scope is stable across subdirectories.
+// Declared in memory_tool.hpp: MemoryCommand (/memory) needs the same
+// resolution to report project-scope topics, not just the tools.
 std::filesystem::path WorktreeRoot(const std::filesystem::path& project_root) {
     std::filesystem::path current = project_root;
     const std::filesystem::path fallback = project_root;
@@ -38,6 +36,11 @@ std::filesystem::path WorktreeRoot(const std::filesystem::path& project_root) {
     }
     return fallback;
 }
+
+namespace {
+
+constexpr int kHardLimitCeiling = 64;
+constexpr double kSimilarHintThreshold = 0.92;
 
 // 128 code points, not bytes (session-titler's rule -- a byte cut would
 // render U+FFFD in the surface the model reads).
@@ -71,10 +74,11 @@ ScopeResolved ResolveScope(tools::ToolContext& ctx, const std::string& requested
 }
 
 // Lazy re-embed drain: budgeted (reindex_budget_rows), synchronous, at the
-// top of each memory tool call. With the local onnx backend this is tens of
-// ms; with a remote backend it is one batched request. Deliberately no
-// background thread: nothing to lifetime-manage at process teardown, and the
-// budget bounds the latency every caller already accepts by invoking a tool.
+// top of each memory tool call. With the sidecar backend this is one round
+// trip to the already-running subprocess; with the http backend it is one
+// batched request. Deliberately no background thread: nothing to
+// lifetime-manage at process teardown, and the budget bounds the latency
+// every caller already accepts by invoking a tool.
 void MaybeDrainReindex(MemoryRuntime& rt) {
     if (rt.embedder == nullptr) return;
     auto pending = rt.store->ClaimPendingEmbeddings(rt.signature, rt.settings.reindex_budget_rows);
@@ -469,8 +473,9 @@ private:
         std::string content((std::istreambuf_iterator<char>(file)),
                             std::istreambuf_iterator<char>());
         // Binary refusal: a NUL in the first 8 KiB is binary for read_window's
-        // purposes too; markdown memory is text by construction.
-        if (content.substr(0, 8192).find('\0') != std::string::npos) {
+        // purposes too; markdown memory is text by construction. string_view
+        // scans in place -- no need to copy the first 8 KiB just to search it.
+        if (std::string_view(content).substr(0, 8192).find('\0') != std::string_view::npos) {
             throw std::runtime_error("memory_store: refusing binary file (memory is text)");
         }
         if (content.empty()) throw std::runtime_error("memory_store: file is empty");

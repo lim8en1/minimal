@@ -7,6 +7,8 @@
 
 #include "memory_tool.hpp"
 
+#include "minimal/commands/command_context.hpp"
+
 namespace minimal::memory {
 namespace {
 
@@ -54,10 +56,25 @@ public:
         out << "\n  backend: " << digest.backend;
         out << "\n  enrichment: " << digest.enrichment;
         if (digest.pending_reindex > 0) out << "\n  pending re-embed: " << digest.pending_reindex;
-        const auto topics = rt.store->AllTopics(MemoryStore::kScopeGlobal, "");
-        if (!topics.empty()) {
+        const auto global_topics = rt.store->AllTopics(MemoryStore::kScopeGlobal, "");
+        if (!global_topics.empty()) {
             out << "\n  global topics:";
-            for (const auto& [name, count] : topics) out << " " << name << "(" << count << ")";
+            for (const auto& [name, count] : global_topics) out << " " << name << "(" << count << ")";
+        }
+        // Project topics too, when a session is bound. RequiresSession() is
+        // false (an operator may run /memory sessionless), so this degrades
+        // to the global-only view above rather than asserting on session().
+        if (context.has_session()) {
+            const std::string project_root =
+                WorktreeRoot(context.session().project_root()).string();
+            const auto project_topics =
+                rt.store->AllTopics(MemoryStore::kScopeProject, project_root);
+            if (!project_topics.empty()) {
+                out << "\n  project topics:";
+                for (const auto& [name, count] : project_topics) {
+                    out << " " << name << "(" << count << ")";
+                }
+            }
         }
         return commands::CommandResult::Ok(out.str());
     }

@@ -1,10 +1,11 @@
 // memory plugin tests: store, search ranking, scopes, topics, ingest groups,
-// tokenizer goldens, enrichment pipeline with a fake summarizer. The plugin
-// sources compile in directly (checklist_test.cpp's pattern); plugin.cpp and
-// its extern "C" entry points stay out.
+// the sidecar embedding backend's protocol, enrichment pipeline with a fake
+// summarizer. The plugin sources compile in directly (checklist_test.cpp's
+// pattern); plugin.cpp and its extern "C" entry points stay out.
 
 #include <unistd.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -15,8 +16,10 @@
 
 #include "memory_settings.hpp"
 #include "memory_store.hpp"
-#include "hf_tokenizer.hpp"
+#include "embedding_sidecar.hpp"
 #include "enricher.hpp"
+
+#include "minimal/sidecar/process.hpp"
 
 namespace fs = std::filesystem;
 using namespace minimal::memory;
@@ -250,6 +253,10 @@ TEST_CASE("memory settings: defaults, clamps, lenient parse", "[memory]") {
     REQUIRE(settings.max_topics == 4096);
     REQUIRE(settings.summarizer_model.empty());
     REQUIRE(settings.default_limit == 12);
+    REQUIRE(settings.sidecar_python_path.empty());
+    REQUIRE(settings.sidecar_model.empty());
+    REQUIRE(settings.sidecar_startup_timeout_ms == 60000);
+    REQUIRE(settings.sidecar_request_timeout_ms == 30000);
 
     // Bad values clamp, never throw (a bad optional number must not disable
     // the plugin).
@@ -261,6 +268,18 @@ TEST_CASE("memory settings: defaults, clamps, lenient parse", "[memory]") {
 
     settings = ParseMemorySettings(nlohmann::json{{"strategy", "nonsense"}});
     REQUIRE(settings.strategy == StrategyKind::kAuto);
+
+    settings = ParseMemorySettings(nlohmann::json{
+        {"strategy", "sidecar"},
+        {"sidecar_python_path", "/usr/bin/python3"},
+        {"sidecar_model", "BAAI/bge-small-en-v1.5"},
+        {"sidecar_startup_timeout_ms", 5000},
+        {"sidecar_request_timeout_ms", 2000}});
+    REQUIRE(settings.strategy == StrategyKind::kSidecar);
+    REQUIRE(settings.sidecar_python_path == "/usr/bin/python3");
+    REQUIRE(settings.sidecar_model == "BAAI/bge-small-en-v1.5");
+    REQUIRE(settings.sidecar_startup_timeout_ms == 5000);
+    REQUIRE(settings.sidecar_request_timeout_ms == 2000);
 }
 
 TEST_CASE("memory digest info", "[memory]") {
@@ -278,47 +297,55 @@ TEST_CASE("memory digest info", "[memory]") {
     REQUIRE(digest.enrichment == "off");
 }
 
-TEST_CASE("hf tokenizer: golden WordPiece vectors, truncation, specials", "[memory]") {
-    const fs::path dir = fs::temp_directory_path() / ("memory-tok-" + std::to_string(getpid()));
-    fs::create_directories(dir);
-    const auto path = dir / "tokenizer.json";
-    // Tiny WordPiece vocab mirroring the bert-base-uncased shape.
-    std::ofstream(path) << R"json({
-      "model": {"type": "WordPiece", "unk_token": "[UNK]",
-        "vocab": {"[PAD]": 0, "[UNK]": 1, "[CLS]": 2, "[SEP]": 3,
-                  "hello": 4, "world": 5, "hel": 6, "##lo": 7, "!": 8,
-                  "word": 9, "##s": 10}},
-      "normalizer": {"lowercase": true},
-      "tokenizer_options": {"model_max_length": 8}
-    })json";
-    const auto tokenizer = HfTokenizer::Load(path.string());
+TEST_CASE("memory sidecar embedder: unconfigured or unusable python degrades to null", "[memory]") {
+    // No sidecar_model at all: TryMake returns null without even trying to
+    // spawn -- same "degrade to lexical, never fail plugin load" contract
+    // the http/onnx backends had.
+    MemorySettings settings;
+    REQUIRE(TryMakeSidecarEmbeddingFunction(settings, fs::temp_directory_path()) == nullptr);
 
-    REQUIRE(tokenizer.cls_id() == 2);
-    REQUIRE(tokenizer.sep_id() == 3);
-    REQUIRE(tokenizer.pad_id() == 0);
-    REQUIRE(tokenizer.max_len() == 8);
+    // A python_path that does not exist: the spawn itself fails.
+    settings.sidecar_model = "some/model";
+    settings.sidecar_python_path = "/definitely/not/a/real/python/binary";
+    REQUIRE(TryMakeSidecarEmbeddingFunction(settings, fs::temp_directory_path()) == nullptr);
+}
 
-    // Whole words.
-    REQUIRE(tokenizer.Encode("hello world") ==
-            std::vector<int>{2, 4, 5, 3});
-    // Lowercasing + punctuation split.
-    REQUIRE(tokenizer.Encode("Hello!") == std::vector<int>{2, 4, 8, 3});
-    // Subword continuation: "hellos" -> hel + ##lo + ##s (or unk fallback).
-    const auto ids = tokenizer.Encode("hellos");
-    REQUIRE(ids.front() == 2);
-    REQUIRE(ids.back() == 3);
-    // Unknown word -> [UNK].
-    REQUIRE(tokenizer.Encode("zzz") == std::vector<int>{2, 1, 3});
-    // Truncation to model_max_length, specials preserved.
-    const auto long_ids = tokenizer.Encode("hello world hello world hello world");
-    REQUIRE(long_ids.size() <= 8);
-    REQUIRE(long_ids.front() == 2);
-    REQUIRE(long_ids.back() == 3);
+TEST_CASE("memory sidecar embedder: real fastembed round trip", "[memory][sidecar]") {
+    // Real end-to-end: spawns the actual driver against a real python3 with
+    // fastembed installed. Skips rather than fails when either is missing,
+    // the same convention tools_python_test.cpp uses for its interpreter
+    // tests -- a python3-less or fastembed-less machine is a normal dev/CI
+    // state, not a broken build.
+    const std::string python_path = minimal::sidecar::ResolveOnPath("python3");
+    if (python_path.empty()) SKIP("python3 not available");
+    const std::string check = python_path + " -c \"import fastembed\" >/dev/null 2>&1";
+    if (std::system(check.c_str()) != 0) SKIP("fastembed not importable");
 
-    // Unsupported model type fails loud with a self-describing message.
-    std::ofstream(path) << R"json({"model": {"type": "BPE", "vocab": {}}})json";
-    REQUIRE_THROWS_WITH(HfTokenizer::Load(path.string()),
-                        Catch::Matchers::ContainsSubstring("not WordPiece"));
+    MemorySettings settings;
+    settings.sidecar_python_path = python_path;
+    settings.sidecar_model = "BAAI/bge-small-en-v1.5";
+    settings.sidecar_startup_timeout_ms = 120000;  // first run downloads the model
+    settings.sidecar_request_timeout_ms = 30000;
+
+    const fs::path dir =
+        fs::temp_directory_path() / ("memory-sidecar-" + std::to_string(getpid()));
+    auto embedder = TryMakeSidecarEmbeddingFunction(settings, dir);
+    REQUIRE(embedder != nullptr);
+
+    const auto vectors = embedder->Embed(
+        {"the cat sat on the mat", "a feline rested on a rug", "quarterly earnings report"});
+    REQUIRE(vectors.size() == 3);
+    REQUIRE(vectors[0].dim > 0);
+    REQUIRE(vectors[0].dim == vectors[1].dim);
+
+    // The semantically close (but lexically dissimilar) pair scores higher
+    // than the unrelated one -- the whole point of the fix to Search()'s
+    // full_scan path earlier in this pass.
+    const double close = Cosine(vectors[0].values, vectors[1].values);
+    const double far = Cosine(vectors[0].values, vectors[2].values);
+    REQUIRE(close > far);
+
+    REQUIRE_THAT(embedder->Describe(), Catch::Matchers::ContainsSubstring("fastembed"));
 
     std::error_code ec;
     fs::remove_all(dir, ec);

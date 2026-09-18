@@ -1,7 +1,7 @@
 ---
 name: plan
 description: Investigates and proposes, without changing anything.
-allowed_tools: ["ask_user", "read", "grep", "glob", "bash", "skill", "write", "edit", "checklist"]
+allowed_tools: ["ask_user", "read", "grep", "glob", "bash", "write", "edit", "checklist"]
 allowed_skills: []
 allowed_mcp_servers: []
 permission_mode:

@@ -11,8 +11,9 @@
 namespace minimal::memory {
 
 // Which embedding backend the store uses. "auto" resolves at registration:
-// onnx when its model file loads, else http when api_base is set, else none.
-enum class StrategyKind { kAuto, kHttp, kOnnx, kNone };
+// sidecar when sidecar_model is set, else http when api_base is set, else
+// none.
+enum class StrategyKind { kAuto, kHttp, kSidecar, kNone };
 
 struct MemorySettings {
     StrategyKind strategy = StrategyKind::kAuto;
@@ -23,10 +24,11 @@ struct MemorySettings {
     std::string model;           // backend-side model name, e.g. "nomic-embed-text"
     int timeout_ms = 30000;      // whole-transfer cap per embeddings call
 
-    // --- onnx backend ---
-    std::string model_path;      // relative to data_dir unless absolute
-    std::string tokenizer_path;  // relative to data_dir unless absolute
-    int intra_op_threads = 2;
+    // --- sidecar backend (fastembed via a long-lived python subprocess) ---
+    std::string sidecar_python_path;  // absolute; empty = resolve "python3" on PATH
+    std::string sidecar_model;        // fastembed model name, e.g. "BAAI/bge-small-en-v1.5"; no default
+    int sidecar_startup_timeout_ms = 60000;  // first run may download model weights
+    int sidecar_request_timeout_ms = 30000;  // per Embed() round trip
 
     // --- enrichment (small LLM summary + topic attribution) ---
     // "<provider>/<model>" resolved through SessionSupportService. EMPTY =
