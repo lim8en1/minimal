@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cctype>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -15,6 +16,21 @@
 #include "minimal/llm/provider.hpp"
 
 namespace minimal::agent {
+
+// The fixed line every summary head opens with, free-text and structured
+// alike -- declared here rather than in either .cpp so the two compacters
+// cannot drift (the resumed working set must not depend on which strategy
+// happened to write the head).
+inline constexpr std::string_view kSummaryFraming =
+    "The earlier part of this conversation was compacted into the following summary.\n\n";
+
+// Whitespace-only check shared by both compacters' refusal chains.
+inline bool IsBlank(std::string_view text) {
+    for (const char c : text) {
+        if (!std::isspace(static_cast<unsigned char>(c))) return false;
+    }
+    return true;
+}
 
 // The outcome of a successful compaction.
 //

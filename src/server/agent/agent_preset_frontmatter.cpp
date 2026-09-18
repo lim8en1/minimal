@@ -319,7 +319,7 @@ bool IsKnownKey(const std::string& key) {
         {"allowed_tools", 0}, {"allowed_skills", 0},{"allowed_mcp_servers", 0},
         {"allowed_subagents", 0},
         {"permission_mode", 0}, {"permission", 0},  {"tools", 0},
-        {"mcp_permissions", 0}, {"compression_prompt", 0},
+        {"mcp_permissions", 0}, {"compression_prompt", 0}, {"compaction_strategy", 0},
         {"mode", 0},          {"disable", 0},       {"hidden", 0},
         {"color", 0},         {"steps", 0},         {"tool_config", 0},
     };
@@ -470,6 +470,7 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatt
     result.permission_mode = DecodePermissionModeBlock(node, std::move(result.permission_mode));
     result.mcp_permissions = DecodeMcpPermissionsBlock(node);
     result.compression_prompt = OptionalString(node, "compression_prompt");
+    result.compaction_strategy = OptionalString(node, "compaction_strategy");
 
     // --- opencode-compat surface ----------------------------------------------
     result.mode = DecodeMode(node);

@@ -8,19 +8,6 @@
 #include "minimal/llm/chat.hpp"
 
 namespace minimal::agent {
-namespace {
-
-constexpr std::string_view kSummaryFraming =
-    "The earlier part of this conversation was compacted into the following summary.\n\n";
-
-bool IsBlank(std::string_view text) {
-    for (const char c : text) {
-        if (!std::isspace(static_cast<unsigned char>(c))) return false;
-    }
-    return true;
-}
-
-}  // namespace
 
 // Serialized size of a JSON value, without serializing it. Structural
 // characters are counted the way dump() would emit them; the point is a stable

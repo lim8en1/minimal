@@ -124,7 +124,8 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
                       LoopConfig config, SessionContext session,
                       std::function<bool()> is_cancelled, std::function<bool()> is_paused,
                       llm::StreamEventSink event_sink,
-                      Compactor compactor, ResumeSeed seed, std::string project_context)
+                      Compactor compactor, ResumeSeed seed, std::string project_context,
+                      const CompactionStrategyRegistry* compaction_strategies)
     : provider_(provider),
       executor_(executor),
       registry_(registry),
@@ -137,6 +138,7 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       is_paused_(std::move(is_paused)),
       event_sink_(std::move(event_sink)),
       compactor_(std::move(compactor)),
+      compaction_strategies_(compaction_strategies),
       history_(std::move(seed.history)),
       first_persisted_seq_(seed.first_persisted_seq),
       head_is_summary_(seed.head_is_summary),
@@ -571,7 +573,34 @@ void AgentLoop::RestorePersisted(std::vector<llm::Message> rows, std::int64_t fi
 
 std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
                                               std::string_view prompt_override) {
-    if (!compactor_) return std::nullopt;
+    // Resolve the summarizer NOW, not at construction: an injected compactor
+    // (tests, direct-API users) wins outright; otherwise the preset's
+    // `compaction_strategy` frontmatter names the strategy -- resolved against
+    // the registry at each attempt, so a mid-session /agent switch changes the
+    // summary format the way it already changes compression_prompt -- and the
+    // settings-level strategy is the fallback. See EffectiveCompactor's
+    // precedence doc; the unknown-preset-name warn lives there.
+    Compactor summarizer = compactor_;
+    if (!summarizer) {
+        summarizer = config_.EffectiveCompactor(preset_, compaction_strategies_);
+        if (summarizer && !preset_.compaction_strategy.empty() &&
+            compaction_strategies_ != nullptr &&
+            compaction_strategies_->Find(preset_.compaction_strategy) == nullptr) {
+            // The preset named a kind nothing registered. Warn ONCE per loop,
+            // not per attempt -- a failing summarizer already has a per-turn
+            // cooldown, but the name is a config typo, not a transient
+            // condition, so per-attempt repetition is log spam. Falls through
+            // to the settings-level strategy or the built-in.
+            if (!compaction_strategy_warned_) {
+                compaction_strategy_warned_ = true;
+                session_.logger.warn(
+                    "session {}: agent preset '{}' names compaction strategy '{}' which is not "
+                    "registered; using the settings-level strategy or the built-in",
+                    session_.session_id, preset_.name, preset_.compaction_strategy);
+            }
+        }
+    }
+    if (!summarizer) return std::nullopt;
     if (history_.size() < 2) return std::nullopt;
     if (compaction_failed_this_turn_) return std::nullopt;
 
@@ -707,10 +736,11 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // reference is impossible, and an assignment through one would run the
     // small provider's copy-assignment against the session's own provider --
     // corrupting it for every later turn -- rather than switching which
-    // provider the summarizer call uses.
-    llm::LlmProvider* summarizer = &provider_.get();
+    // provider the summarizer call uses. Named summarizer_provider to stay
+    // distinct from the summarizer std::function above.
+    llm::LlmProvider* summarizer_provider = &provider_.get();
     if (config_.small_model.has_value() && config_.small_model->provider != nullptr) {
-        summarizer = config_.small_model->provider.get();
+        summarizer_provider = config_.small_model->provider.get();
         params.model_name = config_.small_model->model_name;
         params.parameters = config_.small_model->parameters;
         params.max_tokens = config_.small_model->max_tokens;
@@ -729,7 +759,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
                                                 {"occupancy_tokens", tokens_.last_occupancy()}});
     }
 
-    const auto result = compactor_(to_compact, *summarizer, params);
+    const auto result = summarizer(to_compact, *summarizer_provider, params);
     if (!result) {
         // No compaction this cycle; do not retry on every tool cycle of this turn.
         if (config_.hooks != nullptr) {

@@ -31,6 +31,7 @@
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/agent/signal_service.hpp"
 #include "minimal/agent/spawn_subagent_tool.hpp"
+#include "minimal/agent/structured_compaction.hpp"
 #include "minimal/agent/subagent_manager.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
@@ -309,13 +310,20 @@ int main(int argc, char** argv) {
     // lazily at first resolve and never written back to the file.
     minimal::llm::ModelCatalogRegistry model_catalogs;
     // S4: additive across plugins, keyed by name -- memory.compaction_strategy
-    // selects one. Core's own "summarize" strategy (today's only production
-    // behavior) is registered directly here, BEFORE plugin load, so the
+    // selects one, with agent-preset frontmatter overriding per preset. Core's
+    // own strategies are registered directly here, BEFORE plugin load, so the
     // default path is never plugin-dependent -- a plugin adds a kind core has
     // never heard of (drop-oldest, tool-result-elide, the deferred
-    // llamacpp-kv's external-KV strategy), it does not replace this one.
+    // llamacpp-kv's external-KV strategy), it does not replace these two.
+    // "structured" is the settings.json DEFAULT: the summarizer's output is
+    // constrained to a forced record_summary tool call parsed into typed
+    // sections; "summarize" is the free-text format, reachable globally by
+    // settings or per agent by declaring `compaction_strategy: summarize` in
+    // the preset's frontmatter.
     minimal::agent::CompactionStrategyRegistry compaction_strategies;
     compaction_strategies.Register("summarize", minimal::agent::MakeSummarizeCompactionStrategy());
+    compaction_strategies.Register("structured",
+                                   minimal::agent::MakeStructuredCompactionStrategy());
     // The sanctioned cross-plugin channel (pull; SessionObserver is push).
     // Additive: many plugins may each provide services, and a duplicate name is
     // fatal at startup via the name resolution below. Also handed to every
@@ -585,9 +593,10 @@ int main(int argc, char** argv) {
     // consumer, rather than dissolving into two loose std::functions at this
     // producer. An unresolved name (typo, or the providing plugin is
     // disabled -- the sanity check already warned) leaves it default-
-    // constructed, which AgentLoop/LoopConfig::EffectiveCompactor() treat as
-    // "use the built-in behavior" -- exactly what "summarize" itself does,
-    // so this degrades to the same place it would have resolved to anyway.
+    // constructed, which AgentLoop treats as "use the built-in behavior".
+    // The registry ALSO reaches every session whole (below): an agent preset's
+    // `compaction_strategy:` frontmatter resolves against it per compaction
+    // attempt, outranking this settings-level choice for that preset.
     if (const auto* strategy = compaction_strategies.Find(settings.memory.compaction_strategy)) {
         loop_config.compaction_strategy = *strategy;
     }
@@ -614,6 +623,11 @@ int main(int argc, char** argv) {
 
     minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, *session_db,
                                              loop_config, minimal::common::DefaultLogger());
+    // The strategy registry presets resolve their `compaction_strategy:`
+    // frontmatter against at compaction time. The map is read-only after
+    // plugin load (see the loader comment), which is what makes the loop's
+    // per-attempt Find safe from session workers.
+    sessions.set_compaction_strategies(&compaction_strategies);
     sessions.set_commands(&commands);
     sessions.set_project_commands(&project_commands);
     sessions.set_signal_router(&signal_router);

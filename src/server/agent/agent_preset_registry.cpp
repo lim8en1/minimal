@@ -522,6 +522,14 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     } else {
         preset.compression_prompt = default_compression_prompt_;
     }
+    // The NAME travels verbatim; resolving it against the strategy registry is
+    // the loop's job at compaction time (the registry is still filling here --
+    // plugins register after presets load -- and /agent re-resolution must
+    // pick up strategies registered later). An unknown name is not a load
+    // error: it warns once per session at first use and degrades to the
+    // settings-level strategy, the same policy as an unresolved
+    // memory.compaction_strategy.
+    preset.compaction_strategy = raw.compaction_strategy;
 
     // --- Preset-scoped tool definitions ---------------------------------------
     // Run ONCE here, on the frozen preset the cache is about to hold (and on

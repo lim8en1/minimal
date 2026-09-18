@@ -19,7 +19,7 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
     CHECK(config.memory.context_compaction_trigger.kind == CompactionTriggerSettings::Kind::Never);
     CHECK(config.memory.compaction_keep_recent_tokens == 0);
     CHECK(config.memory.scrollback_page_size == 0);
-    CHECK(config.memory.compaction_strategy == "summarize");
+    CHECK(config.memory.compaction_strategy == "structured");
     CHECK(config.tools.mcp.connect_timeout_ms == 10000);
     CHECK(config.tools.mcp.request_timeout_ms == 60000);
     CHECK(config.tools.mcp.max_list_pages == 100);

@@ -77,6 +77,12 @@ struct AgentPreset {
     tools::McpPermissionPolicy mcp_permissions;
     tools::PermissionRunMode run_mode = tools::PermissionRunMode::Normal;
     std::string compression_prompt;  // loaded text, not a filename
+    // The resolved `compaction_strategy:` frontmatter, verbatim: a NAME, not a
+    // strategy object -- the preset cache is built before the strategy
+    // registry is fully loaded, and the loop resolves the name at each
+    // compaction attempt against the registry Session borrows (see
+    // AgentLoop::Compact). Empty = the settings-level strategy stands.
+    std::string compaction_strategy;
 
     // Preset-scoped tool definitions, produced by the builders registered on
     // AgentPresetRegistry (SetDefinitionBuilder) and run ONCE at resolve time

@@ -307,6 +307,14 @@ struct SessionParams {
     const commands::ProjectCommandSource* project_commands = nullptr;
     const llm::ProviderFactoryRegistry* provider_factories = nullptr;
     ProviderInstanceCache* provider_instance_cache = nullptr;
+    // Borrowed, process-wide, read-only after plugin load; wired by
+    // ApplyConstructorWiring alongside provider_factories. The loop resolves
+    // a preset's `compaction_strategy:` frontmatter against it at COMPACTION
+    // TIME -- not construction time -- so a mid-session /agent switch changes
+    // the summary format the way it already changes compression_prompt. Null
+    // (tests) skips the preset-name step of the resolution; the settings-level
+    // strategy and the built-in remain.
+    const agent::CompactionStrategyRegistry* compaction_strategies = nullptr;
 };
 
 // One item of work for the session worker. A variant rather than two queues,

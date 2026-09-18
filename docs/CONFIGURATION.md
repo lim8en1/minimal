@@ -91,7 +91,7 @@ Full example (`bundled/settings.json`):
 | `context_compaction_trigger` | object | absent = never | **exactly one** of `percent` (1–100), `tokens` (> 0), `buffer_tokens` (> 0) |
 | `context_compaction_trigger_tokens` | int | `0` | legacy flat key, honored only when the object form is absent; `0` = never |
 | `compaction_keep_recent_tokens` | int | `0` | |
-| `compaction_strategy` | string | `"summarize"` | name of a registered strategy (core built-in or plugin-registered); unknown name → warning, falls back |
+| `compaction_strategy` | string | `"structured"` | name of a registered strategy (core built-in `structured`/`summarize` or plugin-registered); unknown name → warning, falls back. An agent preset's `compaction_strategy:` frontmatter overrides this per agent |
 | `estimate_zero_usage` | bool | `true` | when a turn's backend usage is all zero (some OpenAI-compatible proxies), seed occupancy from the request's bytes/4 estimate so the compaction trigger arms, and flag the turn's wire usage `usage_estimated`. Estimates are never priced by cost tracking and never enter cumulative totals |
 | `scrollback_page_size` | int | `0` | |
 
@@ -599,7 +599,11 @@ shows through.
   frontmatter; addressed by file stem (`build`, `plan`). At least one resolvable
   preset is **required**; a broken *non-default* preset only warns. A preset may
   name its own `model: <provider>/<model>`, overriding `default_model`
-  (`--model` / `/model` override both).
+  (`--model` / `/model` override both), and its own `compaction_strategy: <name>`
+  — the strategy kind its compaction summaries use (`structured`, the settings
+  default, or `summarize`; see `memory.compaction_strategy`). Absent = the
+  settings-level strategy stands; a name nothing registered warns once per
+  session and degrades the same way.
 - **`allowed_tools`** — the allow-list of core/plugin tools the preset runs
   with. **Fail-closed: omitted or empty means NO core tools.** `permission_mode`
   only decides what happens when an admitted tool is called (allow/ask/deny);
@@ -838,6 +842,7 @@ collisions; duplicate provider-kind registration; two plugins claiming one
 `channels.json`; unregistered `backend` kind; `default_model` typo; broken
 non-default presets; missing `prompts/compression.md`; MCP command/url and
 channel command problems; unknown permission advisor; unknown
-`compaction_strategy`; `max_concurrent_subagents` out of range; unknown
+`compaction_strategy` (settings or an agent preset's frontmatter naming no
+registered kind); `max_concurrent_subagents` out of range; unknown
 `per_tool_overrides` keys; unclaimed `tool_config` namespaces; dangling
 aliases; a **user** plugin failing to load.

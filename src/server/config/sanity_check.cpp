@@ -915,11 +915,12 @@ std::vector<CheckResult> StartupSanityCheck::check_compaction_strategy() {
     if (!settings_loaded_) return results;  // already Fatal under config_parse
 
     const std::string& name = settings_.memory.compaction_strategy;
-    // "summarize" is core's own built-in, registered directly in main.cpp
-    // before plugin load -- it resolves even when inputs_.compaction_strategies
-    // is null (a test harness that never wires the registry).
+    // "summarize" and "structured" are core's own built-ins, registered
+    // directly in main.cpp before plugin load -- they resolve even when
+    // inputs_.compaction_strategies is null (a test harness that never wires
+    // the registry).
     const bool resolved =
-        name == "summarize" ||
+        name == "summarize" || name == "structured" ||
         (inputs_.compaction_strategies != nullptr && inputs_.compaction_strategies->Has(name));
     if (!resolved) {
         results.push_back(Warning(

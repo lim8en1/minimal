@@ -20,6 +20,7 @@ add_executable(minimal_tests
     compaction_strategy_test.cpp
     compaction_trigger_test.cpp
     context_compactor_test.cpp
+    structured_compaction_test.cpp
     bundled_assets_test.cpp
     examples_parse_test.cpp
     chat_request_bench.cpp

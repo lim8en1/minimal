@@ -131,11 +131,36 @@ struct LoopConfig {
     // fire-and-forget dispatch contract every observer notification has).
     std::function<void(RoundUsage)> on_provider_round;
 
-    // The producer-resolved summarizer: compaction_strategy's own when a
-    // strategy set one, compact_messages (today's only behavior) otherwise.
+    // The producer-resolved summarizer. The settings-level strategy rides
+    // `compaction_strategy` above (resolved once in main.cpp); an AGENT
+    // PRESET may override the format per agent by declaring
+    // `compaction_strategy:` frontmatter -- AgentPreset carries the NAME
+    // (config code cannot see the strategy registry), and this resolves it
+    // against the registry the LoopConfig holds no reference to, so the
+    // registry is passed in per call.
+    //
+    // Precedence, first hit wins:
+    //   1. the test/direct-API injection seam (AgentLoop's `compactor` ctor
+    //      argument -- AgentLoop consults it BEFORE this, see Compact());
+    //   2. preset.compaction_strategy naming a REGISTERED kind -- an unknown
+    //      name (typo, or the providing plugin is disabled) warns once and
+    //      falls through: a typo'd agent file must not brick compaction for
+    //      every session running it;
+    //   3. the settings-level strategy's summarize half;
+    //   4. compact_messages, the built-in free-text compactor -- the
+    //      historical final fallback.
+    //
     // Centralized here so the consumer (Session's ctor, building AgentLoop)
-    // does not need to know what the fallback is.
-    Compactor EffectiveCompactor() const {
+    // does not need to know what the fallback is. Registry may be null (tests
+    // that never built one): steps 2 is skipped, 3/4 still apply.
+    Compactor EffectiveCompactor(const AgentPreset& preset,
+                                 const CompactionStrategyRegistry* strategies) const {
+        if (!preset.compaction_strategy.empty() && strategies != nullptr) {
+            const std::string_view name = preset.compaction_strategy;
+            if (const auto* found = strategies->Find(name)) {
+                if (found->summarize) return found->summarize;
+            }
+        }
         return compaction_strategy.summarize ? compaction_strategy.summarize
                                              : Compactor(compact_messages);
     }
@@ -318,7 +343,12 @@ public:
               // every BuildChatRequest -- a SESSION property held here rather
               // than baked into the preset, so /agent re-resolving the preset
               // cannot silently drop the project's instructions.
-              std::string project_context = {});
+              std::string project_context = {},
+              // The strategy registry a preset's `compaction_strategy:`
+              // frontmatter resolves against at each compaction attempt.
+              // Borrowed, process-wide, read-only after plugin load; null
+              // (plain tests) skips the preset-name step of the resolution.
+              const CompactionStrategyRegistry* compaction_strategies = nullptr);
 
     // Appends `seed_message`, then runs to a natural stop. A subagent's entire
     // life is one call to this -- there is one loop implementation, not two.
@@ -552,7 +582,14 @@ private:
     std::function<bool()> is_cancelled_;
     std::function<bool()> is_paused_;
     llm::StreamEventSink event_sink_;
+    // The test/direct-API injection seam, and the registry presets resolve
+    // their `compaction_strategy` name against at COMPACTION TIME (not
+    // construction time -- a mid-session /agent switch must change the format
+    // the way it already changes compression_prompt). Both may be null/empty:
+    // an injected compactor wins outright (tests), and a null registry just
+    // skips the preset-name step of the resolution inside Compact().
     Compactor compactor_;
+    const CompactionStrategyRegistry* compaction_strategies_ = nullptr;
 
     std::vector<llm::Message> history_;
     // Compaction-checkpoint bookkeeping: where the persisted suffix of history_
@@ -590,6 +627,11 @@ private:
     // against: MaybeCompact runs on every tool cycle, and the situation is one
     // actionable line per session, not noise per cycle.
     bool compaction_trigger_warned_ = false;
+
+    // Same latch, same reasoning, for a preset whose `compaction_strategy`
+    // name nothing registered: one actionable line per session, not one per
+    // compaction attempt.
+    bool compaction_strategy_warned_ = false;
 };
 
 }  // namespace minimal::agent

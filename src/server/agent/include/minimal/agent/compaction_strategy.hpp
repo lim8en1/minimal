@@ -66,4 +66,10 @@ private:
 // is never plugin-dependent.
 CompactionStrategy MakeSummarizeCompactionStrategy();
 
+// The cut-selection half of "summarize", exposed because the "structured"
+// strategy shares it verbatim -- where to cut is orthogonal to how to
+// summarize, and duplicating the walk would let the two drift.
+std::size_t ProposeSummarizeCut(const std::vector<llm::Message>& history,
+                                std::int64_t keep_recent_tokens);
+
 }  // namespace minimal::agent

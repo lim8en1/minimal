@@ -134,6 +134,15 @@ public:
     // with "not available". Set before any session exists.
     void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
 
+    // The strategy registry every session's loop resolves a preset-declared
+    // `compaction_strategy:` frontmatter against at compaction time. Optional
+    // and borrowed, process-wide, read-only after plugin load (main.cpp); null
+    // degrades to the settings-level strategy / built-in, so plain tests skip
+    // it.
+    void set_compaction_strategies(const CompactionStrategyRegistry* strategies) {
+        compaction_strategies_ = strategies;
+    }
+
     // The project-scoped half of the catalog (ProjectCommandSource). Same
     // optionality rule as set_commands: unset means every session's
     // project_commands is null, and Dispatch simply never sees a project
@@ -342,6 +351,8 @@ private:
     // CreateResolved funnel.
     const hooks::HookDispatcher* hooks_ = nullptr;
     session::SessionDatabase& db_;
+    // See set_compaction_strategies. Borrowed, process-wide, optional.
+    const CompactionStrategyRegistry* compaction_strategies_ = nullptr;
     // Track M: the one SessionReader every session (top-level, resume, and
     // SubagentManager spawns alike) reads its transcript through --
     // stateless (holds only db_, every method takes session_id), so one

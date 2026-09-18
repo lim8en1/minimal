@@ -447,6 +447,7 @@ ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id,
 
 void SessionRegistry::ApplyConstructorWiring(SessionParams& params) {
     params.presets = &presets_;
+    params.compaction_strategies = compaction_strategies_;
     // A SUBAGENT GETS A READ-ONLY COMMAND SURFACE. Commands are a user control
     // channel, and a child has no user: its client attaches to observe, and the
     // spawn was driven by the parent's model rather than by a person with a

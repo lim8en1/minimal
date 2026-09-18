@@ -77,6 +77,14 @@ struct AgentPresetFrontmatter {
     tools::PermissionOverrideLayer permission_mode;  // read_only/file_write/execute/out_of_workdir/network + overrides -> per_tool_overrides
     std::unordered_map<std::string, tools::PermissionMode> mcp_permissions;  // server -> mode
     std::string compression_prompt;                 // filename under prompts/, "" = use default
+    // Optional override of memory.compaction_strategy for THIS agent: the name
+    // of a registered CompactionStrategy kind ("summarize" = free-text head,
+    // "structured" = the forced record_summary tool-call format). Resolved
+    // against the strategy registry at each compaction attempt -- see
+    // AgentLoop::Compact. Empty = the settings-level strategy stands; a name
+    // nothing registered warns once per session and degrades the same way
+    // (a typo must not brick compaction).
+    std::string compaction_strategy;
     std::string body;                               // system prompt text, unresolved (no prompts/subagent.md prefix)
 
     // --- opencode-compat surface ----------------------------------------------

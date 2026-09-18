@@ -268,15 +268,13 @@ Session::Session(SessionParams params, AgentPreset preset,
         return true;
     };
 
-    // The real summarizer. Passed as the plain function rather than wrapped,
-    // because everything it needs -- provider, model, prompt, cancel flag -- is
-    // an argument the loop supplies per call. That is what keeps a mid-session
-    // /agent switch from compacting with the previous preset's prompt.
-    //
-    // loop_config.EffectiveCompactor() (S4) resolves the configured strategy's
-    // summarize half (memory.compaction_strategy, set once in main.cpp) or
-    // falls back to compact_messages -- the producer-side default, so this
-    // call site does not need to know what the fallback is.
+    // The real summarizer. Resolved by the loop PER COMPACTION ATTEMPT -- see
+    // AgentLoop::Compact: a mid-session /agent switch must change the summary
+    // format the way it already changes compression_prompt, and a preset can
+    // pin the format with `compaction_strategy:` frontmatter (resolved against
+    // the registry borrowed into params_.compaction_strategies). What is
+    // passed here is the injected compactor (tests) or nullopt-equivalent;
+    // everything else the loop resolves live.
     //
     // seed is non-default only on resume: the stored transcript becomes the
     // loop's working history WITHOUT being re-appended to the store it was
@@ -293,8 +291,8 @@ Session::Session(SessionParams params, AgentPreset preset,
     loop_ = std::make_unique<AgentLoop>(
         *provider_, executor_, registry, *store_, preset_, loop_config, std::move(context),
         [this] { return IsCancelled(); }, [this] { return paused(); },
-        std::move(stream_event_sink), loop_config.EffectiveCompactor(), std::move(seed),
-        std::move(params_.project_context));
+        std::move(stream_event_sink), Compactor{}, std::move(seed),
+        std::move(params_.project_context), params_.compaction_strategies);
 
     // Constructor-injected wiring (Phase 5 step 3): formerly set by
     // SessionRegistry AFTER construction, via set_presets/set_commands/

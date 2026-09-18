@@ -26,8 +26,6 @@ std::vector<std::string> CompactionStrategyRegistry::kinds() const {
     return out;  // map iteration is already sorted
 }
 
-namespace {
-
 std::size_t ProposeSummarizeCut(const std::vector<llm::Message>& history,
                                 std::int64_t keep_recent_tokens) {
     if (keep_recent_tokens <= 0) return history.size() / 2;  // legacy default
@@ -55,8 +53,6 @@ std::size_t ProposeSummarizeCut(const std::vector<llm::Message>& history,
     }
     return idx;
 }
-
-}  // namespace
 
 CompactionStrategy MakeSummarizeCompactionStrategy() {
     CompactionStrategy strategy;
