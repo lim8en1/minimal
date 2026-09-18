@@ -11,6 +11,8 @@ build-debug/
 build-server/
 build-asan/
 build-tsan/
+build-clang/
+build-gcc/
 out/
 cmake-build-*/
 install/
@@ -27,6 +29,11 @@ vcpkg_installed/
 
 # vcpkg checkout auto-bootstrapped by ./configure
 /.vcpkg/
+
+# Local Linux build/test harness (Docker): Dockerfile + wrapper scripts, and
+# its stray artifacts. One-command run: ./docker-linux/build.sh
+/docker-linux/
+/minimal-linux-build.log
 
 # User plugin registrations (see PLUGINS.md "User plugins"): symlinks into
 # your own plugin repos, clones, or scaffolded experiments. Machine-local

@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include <sys/resource.h>
 #include <sys/types.h>
 
 namespace minimal::sidecar {
