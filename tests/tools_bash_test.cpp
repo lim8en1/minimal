@@ -566,6 +566,25 @@ TEST_CASE("cd and export persist across calls via the state channel", "[tools_ba
     CHECK(f.Run({{"command", "cat leaf.txt"}}).result.content_text == "leaf\n");
 }
 
+TEST_CASE("a directory change is reported to the model, not just the UI",
+          "[tools_bash][state]") {
+    // display.cwd is UI-only and never reaches the model; content_text is the
+    // only channel the model reads, and it carried no cwd signal at all --
+    // leaving the model no way to know a `cd` "stuck", so it defensively
+    // re-cd's on every later call. Fails with the fix reverted.
+    Fixture f;
+    std::filesystem::create_directories(f.dir.path() / "sub");
+
+    const auto moved = f.Run({{"command", "cd sub"}});
+    CHECK_FALSE(moved.result.is_error);
+    CHECK(moved.result.content_text.find("cwd is now") != std::string::npos);
+    CHECK(moved.result.content_text.find("sub") != std::string::npos);
+
+    // A call that does not change directory gets no such note.
+    const auto stayed = f.Run({{"command", "pwd -P"}});
+    CHECK(stayed.result.content_text.find("cwd is now") == std::string::npos);
+}
+
 TEST_CASE("unset is reflected, not merged away", "[tools_bash][state]") {
     // The reason state is adopted wholesale rather than merged: a merge would
     // resurrect variables the command deliberately removed.
