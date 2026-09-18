@@ -14,19 +14,19 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `minimal_plugin_register_session_observer(SessionObserverRegistry&)` | live | fire-and-forget lifecycle reactions; cannot veto anything |
 | `minimal_plugin_register_commands(CommandRegistry&)` | live | `/`-commands, registered once at startup into the process-wide registry |
 | `minimal_plugin_register_project_commands(CommandRegistry&, const std::filesystem::path&)` | **live** | project-scoped `/`-commands (`commands-md`'s own project-local discovery is the only caller): unlike every other hook, called LAZILY per project root (`ProjectCommandSource`, cached per root) rather than once at startup -- there is no project root yet then. `registry` is a fresh, per-root instance, never the global one; a name here may shadow a global command for sessions rooted there |
-| `minimal_plugin_register_services(ServiceRegistry&)` | **live (track L)** | pull-side access to another plugin's services; consumer side rides `PluginRegistrationContext::services` |
+| `minimal_plugin_register_services(ServiceRegistry&)` | **live** | pull-side access to another plugin's services; consumer side rides `PluginRegistrationContext::services` |
 | `minimal_plugin_register_mention_resolver(...)` | **live** — `plugin_loader.cpp` dlsym's and calls it; `SessionServiceImpl` resolves every `@`-mention through `MentionResolverRegistry::Active()` | pluggable `@`-mention resolution; `PrefixMentionResolver` is the core default, exclusive first-wins |
 | `minimal_plugin_register_auth_provider(...)` | live | exclusive connection policy; pass-through default |
-| `minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&)` | **live (track J)** | answers `Ask` automatically; abstains/throws to the wire checker — the human |
-| `minimal_plugin_register_model_catalogs(ModelCatalogRegistry&)` | **live (track N)** | `"discover": true` providers list their models from the backend, lazily at first resolve; keyed by the same kind string as the provider factory |
+| `minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&)` | **live** | answers `Ask` automatically; abstains/throws to the wire checker — the human |
+| `minimal_plugin_register_model_catalogs(ModelCatalogRegistry&)` | **live** | `"discover": true` providers list their models from the backend, lazily at first resolve; keyed by the same kind string as the provider factory |
 | `minimal_plugin_register_compaction_strategies(CompactionStrategyRegistry&)` | **live (S4)** | plugin compaction strategies keyed by name — `memory.compaction_strategy` in settings.json selects one. Core registers its built-in `"summarize"` strategy directly in `main.cpp` (never through this hook), and always snaps a strategy's proposed cut to a safe tool-call boundary before using it |
-| `minimal_plugin_register_hook_points(HookDispatcher&)` | **live (track O)** | named, veto-capable or observe-only events the plugin emits; hooks.json actions answer them — see §5 |
+| `minimal_plugin_register_hook_points(HookDispatcher&)` | **live** | named, veto-capable or observe-only events the plugin emits; hooks.json actions answer them — see §5 |
 
 Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`, `PermissionAdvisor` (composing above the wire checker — see §3), and the service interfaces a provider ships (abstract, header-only — see §2.2).
 
-**Utilities half** — included from `plugin_abi.h`: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `SseParser`, `Logger`, `SessionReader` + `HistoryWindow` (landed with track M), `PluginStorage` (per-plugin KV, plus a per-plugin `data_dir` on the context) and `plugin_rpc.hpp` (the `PluginCall` dispatch convention), plus the registry headers. The frontmatter parser remains reachable through ordinary core linkage (plugins link `minimal_server_core`, a shared library) but is not declared surface.
+**Utilities half** — included from `plugin_abi.h`: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `SseParser`, `Logger`, `SessionReader` + `HistoryWindow`, `PluginStorage` (per-plugin KV, plus a per-plugin `data_dir` on the context) and `plugin_rpc.hpp` (the `PluginCall` dispatch convention), plus the registry headers. The frontmatter parser remains reachable through ordinary core linkage (plugins link `minimal_server_core`, a shared library) but is not declared surface.
 
-**Client ABI** (`src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h`) — **live (track E5)**: `minimal_client_plugin_abi_tag` / `_name` / `_version` plus eight optional `minimal_client_plugin_register_*` hooks (views, start views, tool-result renderers, message-kind renderers, status segments, syntax grammars, and the exclusive chat-surface and markdown-engine slots), each taking `(Registry&, const ClientPluginRegistrationContext&)` — the context carries the per-plugin `config` slice, an `AttentionSink`, and the `ClientApi` data path (GetMessages paging + the PluginCall/PluginSubscribe channel). Loaded by `client_plugin_loader.cpp` (the server loader's twin: `RTLD_NOW|RTLD_LOCAL`, tag gate, guarded registration, attribution, never dlclosed) against `client-plugins.json` — a separate file from the server's `plugins.json`, so neither writer can stomp the other's entries. Client plugins link `minimal::client_core` (SHARED, like the server core) and install to `plugins/client/`. The generic channel dispatches server-side through the ServiceRegistry to a `PluginEndpoint` the pair plugin Provides under `PluginEndpointServiceName(name)` ("`<plugin_name>.endpoint`") -- suffixed, like `PluginRpcServiceName`, so a bare plugin_name key can never let PluginCall's lookup `static_cast` some other §2.2 service the same plugin registered.
+**Client ABI** (`src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h`) — **live**: `minimal_client_plugin_abi_tag` / `_name` / `_version` plus eight optional `minimal_client_plugin_register_*` hooks (views, start views, tool-result renderers, message-kind renderers, status segments, syntax grammars, and the exclusive chat-surface and markdown-engine slots), each taking `(Registry&, const ClientPluginRegistrationContext&)` — the context carries the per-plugin `config` slice, an `AttentionSink`, and the `ClientApi` data path (GetMessages paging + the PluginCall/PluginSubscribe channel). Loaded by `client_plugin_loader.cpp` (the server loader's twin: `RTLD_NOW|RTLD_LOCAL`, tag gate, guarded registration, attribution, never dlclosed) against `client-plugins.json` — a separate file from the server's `plugins.json`, so neither writer can stomp the other's entries. Client plugins link `minimal::client_core` (SHARED, like the server core) and install to `plugins/client/`. The generic channel dispatches server-side through the ServiceRegistry to a `PluginEndpoint` the pair plugin Provides under `PluginEndpointServiceName(name)` ("`<plugin_name>.endpoint`") -- suffixed, like `PluginRpcServiceName`, so a bare plugin_name key can never let PluginCall's lookup `static_cast` some other §2.2 service the same plugin registered.
 
 `tests/support/` is an **in-tree INTERFACE target** (`minimal::test_support`) used by the test suite only — it is not installed and not exported, so a plugin author cannot link the `FakeLlmProvider`/`ScriptedProvider`/permission fakes; they exist for this repo's tests.
 
@@ -36,7 +36,7 @@ Ordered roughly by the size of the ceiling each imposes. Each entry states the h
 
 ### 2.1 A tool cannot see the conversation
 
-**Status: landed as track M.** Implemented with two refinements over the sketch below — the handle is typed `session::HistoryWindow`, not `const SessionReader*`, which turns the two stated constraints into properties of the type:
+**Status: landed.** Implemented with two refinements over the sketch below — the handle is typed `session::HistoryWindow`, not `const SessionReader*`, which turns the two stated constraints into properties of the type:
 
 - **The window.** `history_window.hpp` (frozen surface in `plugin_abi.h`, with `SessionReader`) is a header-only, non-owning wrapper holding the reader pointer **and the session id it is bound to**, exposing only keyset-paged `GetMessages(before_seq, limit)` with the page size **clamped to a hard cap** (1000) — a tool asking for a whole transcript in one call gets a bounded page, so "one call cannot materialize the history" is structural too. There is no `LoadAll` on it — full materialization stays the resume path's job on `SessionReader`, which no tool holds — so "no path a tool can reach materializes the full history" is structural, not a documented rule. Binding is also what isolates subagents: the registry is the one funnel every session passes through, so injecting the reader there binds each session's window to its own id with no extra code.
 - **Ownership.** As planned below: `SessionParams` gained a reader pointer, owned by `Session` alongside the window built from it (declared before the loop, so the loop's borrowed pointer never outlives it); the agent loop sets `ctx.history` from it per invocation. Stores that are not SQLite-backed (test fakes) leave it null — `history == nullptr` is the natural "unavailable" case, not an error path.
@@ -64,7 +64,7 @@ Constraints that keep it safe:
 
 ### 2.2 No sanctioned cross-plugin channel
 
-**Status: landed as track L.** Implemented as specified, with the interface shaped as below and three implementation findings:
+**Status: landed.** Implemented as specified, with the interface shaped as below and three implementation findings:
 
 - **The consumer channel is `PluginRegistrationContext::services`** (a `ServiceRegistry*` alongside the config from 2.3). A consumer captures the pointer at registration and resolves with `Find` lazily at use time — plugin load order is file order, so a consumer can load before its provider. Null when the host offers no seam (a test), treated as "no services".
 - **The provider's interface must be abstract** (header-only, pure virtual). The concrete store's symbols live inside the providing `.so`, loaded `RTLD_LOCAL` — a consumer calling them by symbol fails at `dlopen(RTLD_NOW)`. Virtual dispatch needs no symbols. `tools-bash` ships `bash_state_service.hpp` (`BashSessionStateService`: `Erase`/`Reset`) and `BashSessionStateStore` implements it.
@@ -106,7 +106,7 @@ The first consumer justifies the pattern: `/restart-shell` lives in `tools-bash`
 
 ### 2.3 No per-plugin config beyond one verbatim blob
 
-**Status: landed as track K.** Implemented as specified below, with one deviation: the bundled plugins' knobs did **not** stay in `tools_settings` — `tools-bash` and `tools-fs` moved their knobs to their own `plugins.json` `config` objects with no `tools.*` fallback (the "optional per plugin" migration exercised immediately, strict rather than backward-compatible). The `tools_settings` channel itself is unchanged and still carries the whole verbatim `tools` object.
+**Status: landed.** Implemented as specified below, with one deviation: the bundled plugins' knobs did **not** stay in `tools_settings` — `tools-bash` and `tools-fs` moved their knobs to their own `plugins.json` `config` objects with no `tools.*` fallback (the "optional per plugin" migration exercised immediately, strict rather than backward-compatible). The `tools_settings` channel itself is unchanged and still carries the whole verbatim `tools` object.
 
 **Hole.** Only tool-registering plugins receive configuration: `ToolRegistrationContext::tools_settings` is the verbatim `tools` object from `settings.json`, and it reaches only `minimal_plugin_register_tools`. A provider, observer, or command plugin has no sanctioned way to read its own settings, and a tool plugin cannot get anything but the `tools.*` slice.
 
@@ -160,7 +160,7 @@ void minimal_plugin_register_mcp_observer(minimal::mcp::McpObserverRegistry&);
 
 Payloads are owned values (copies) for the same reason `SessionObserver`'s are — dispatch runs on another thread. Discovery is cached per shared subprocess (§ *MCP client*), so `OnToolsDiscovered` fires once per process start, not per session; the registry is therefore process-scoped, not per-session.
 
-**Cost.** Low, but **sequenced after track G** — there is nothing to observe until the MCP client exists.
+**Cost.** Low, but **sequenced after the MCP client** — there is nothing to observe until the MCP client exists.
 
 ### 2.5 No UI surface for server-plugin data
 
@@ -169,11 +169,11 @@ Payloads are owned values (copies) for the same reason `SessionObserver`'s are �
 **Suggested architecture.** Two halves, split because they land in different tracks:
 
 - **Server half (with 2.2):** ~~the generic `PluginCall`/`PluginSubscribe` RPCs from § *Client plugins*~~ — both done as above (`PluginCall` serving `.endpoint` and `.rpc`; `PluginSubscribe` serving `.endpoint` push).
-- **Client half (track E):** `ViewRegistry` + `ToolResultRendererRegistry` per § *Client plugins* — the renderer slot first, views and other slots later.
+- **Client half:** `ViewRegistry` + `ToolResultRendererRegistry` per § *Client plugins* — the renderer slot first, views and other slots later.
 
 The design intent is unchanged from `ARCHITECTURE.md`: one generic channel, plugin-owned JSON, renderers keyed by tool name with fallback to default rendering. What this document adds is the server-side dispatch story — 2.2's registry is what `PluginCall` routes *to* — which `ARCHITECTURE.md` leaves implicit.
 
-**Cost.** Moderate; sequenced with track E.
+**Cost.** Moderate; sequenced with the client half.
 
 ### 2.6 No model auto-discovery
 
@@ -250,7 +250,7 @@ public:
 void minimal_plugin_register_permission_advisor(minimal::tools::PermissionAdvisorRegistry&);
 ```
 
-Cancellation reaches the advisor the way it reaches every blocking component on the worker — an `is_cancelled` predicate delivered alongside the request (a small `AdvisorContext`, or one field on `PermissionRequest`; either is additive). Track J settles the shape.
+Cancellation reaches the advisor the way it reaches every blocking component on the worker — an `is_cancelled` predicate delivered alongside the request (a small `AdvisorContext`, or one field on `PermissionRequest`; either is additive).
 
 Composition in `Session`, after the checker-injection change below:
 
@@ -309,7 +309,7 @@ Depends on nothing unbuilt.
 
 ## 4. TUI: core vs. pluggable
 
-Track E is building the client now; this section is the spec it leaves the seams against. It revises the `ARCHITECTURE.md` § *Client plugins* table in one direction: **more of the TUI is pluggable than that table allowed.** The principle is unchanged — the frame, the state machine, and the transport are the client's equivalent of core tools, and presentation is plugin surface — but presentation is most of the TUI, and most of it is now slotted.
+This section is the spec the client leaves its seams against. It revises the `ARCHITECTURE.md` § *Client plugins* table in one direction: **more of the TUI is pluggable than that table allowed.** The principle is unchanged — the frame, the state machine, and the transport are the client's equivalent of core tools, and presentation is plugin surface — but presentation is most of the TUI, and most of it is now slotted.
 
 ### 4.1 What stays core
 
@@ -488,15 +488,15 @@ Command (the abstract -- already named Command; no rename)
 
 | Item | Depends on | Status |
 |---|---|---|
-| 2.1 Tool history access | nothing | **done (track M)**; the tool-facing type is `session::HistoryWindow` |
-| 2.2 Cross-plugin services | nothing | **done (track L)**; first consumer: `/restart-shell` |
-| 2.3 Per-plugin config | nothing | **done (track K)** |
-| 2.4 MCP lifecycle | track G | designed, waits on G |
-| 2.5 Plugin UI surface | track E + 2.2 | **done (track E5)**; `PluginCall` dispatches to a `PluginEndpoint` (`<name>.endpoint`) or a `PluginRpcHandler` (`<name>.rpc`), `PluginSubscribe` to the `.endpoint` push half; the client half is the `ClientApi` in the registration context |
-| 2.6 Model auto-discovery | nothing | **done (track N)**; lazy discovery via `ModelCatalogRegistry`, background warm-up at server start (`server.discovery_warmup_timeout_seconds`), refresh via the `/model` picker's ctrl+r (originally `/providers refresh`, since removed), network-free sanity checks |
-| 3 Permission advisor | nothing | **done (track J)** |
-| 5 Hooks (track O) | nothing | **done (track O)**; core mechanism + 11 core points + `tools-bash.before_command` worked example |
-| 4.2 TUI slots | E's frame first | **done (track E5)**; the full §4.2 slot table ships — additive views/tool-renderers/message-kinds/status-segments/grammars plus the exclusive chat-surface and markdown-engine slots, host `src/client/plugins/`, fixtures proving the loader through a real dlopen |
+| 2.1 Tool history access | nothing | **done**; the tool-facing type is `session::HistoryWindow` |
+| 2.2 Cross-plugin services | nothing | **done**; first consumer: `/restart-shell` |
+| 2.3 Per-plugin config | nothing | **done** |
+| 2.4 MCP lifecycle | the MCP client | designed, waits on the MCP client |
+| 2.5 Plugin UI surface | client view layer + 2.2 | **done**; `PluginCall` dispatches to a `PluginEndpoint` (`<name>.endpoint`) or a `PluginRpcHandler` (`<name>.rpc`), `PluginSubscribe` to the `.endpoint` push half; the client half is the `ClientApi` in the registration context |
+| 2.6 Model auto-discovery | nothing | **done**; lazy discovery via `ModelCatalogRegistry`, background warm-up at server start (`server.discovery_warmup_timeout_seconds`), refresh via the `/model` picker's ctrl+r (originally `/providers refresh`, since removed), network-free sanity checks |
+| 3 Permission advisor | nothing | **done** |
+| 5 Hooks | nothing | **done**; core mechanism + 11 core points + `tools-bash.before_command` worked example |
+| 4.2 TUI slots | the client frame first | **done**; the full §4.2 slot table ships — additive views/tool-renderers/message-kinds/status-segments/grammars plus the exclusive chat-surface and markdown-engine slots, host `src/client/plugins/`, fixtures proving the loader through a real dlopen |
 | 4.3 `ListCommands` | nothing (server half trivial) | **done (track E5a)**; unary, fetched once at connect, feeds `/`-autocomplete |
 | 4.4 Command display modes | nothing | **done (track E5a/E5b)**; `CommandDisplay` on the wire, dispatcher downgrades errors to Status, results never enter the chat (`CommandNotice` is type-disjoint from `ChatRow`) |
 

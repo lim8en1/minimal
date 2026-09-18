@@ -20,6 +20,9 @@ Licensed under [Apache 2.0](LICENSE).
 
 ## Quick start
 
+Requires a C++20 compiler on macOS or Linux (native Windows is not supported;
+use WSL).
+
 ```sh
 export VCPKG_ROOT=/path/to/vcpkg
 make            # configure + build (cmake preset `default`)
@@ -96,8 +99,12 @@ prompts, skills, and commands: **[examples/](examples/)**.
 Everything interesting ships as a plugin: `tools-fs`, `tools-search`,
 `tools-bash`, `tools-python`, `tools-web`, `tool-ask`, `provider-openai`,
 `provider-anthropic`, `commands-core`, `commands-md`, `checklist`,
-`signals-message`, `cost-tracker`, `session-titler` (server), and `logo`,
-`cost-view`, `checklist-view` (client). Drop your own
+`signals-message`, `cost-tracker`, `memory`, `session-titler`,
+`typesafe-advisor` (server), and `logo`, `cost-view`, `checklist-view`
+(client). `memory`, `session-titler` and `typesafe-advisor` ship disabled;
+`typesafe-advisor` sends tool input to an external endpoint to auto-answer
+permission prompts, so enabling it takes two deliberate edits (see its
+[README](plugins/server/typesafe-advisor/README.md)). Drop your own
 into `<config>/plugins/`, enable/disable or reconfigure any plugin in
 `plugins.json`, and rename tools/commands via its `"aliases"` map — see
 **[docs/PLUGINS.md](docs/PLUGINS.md)**.
@@ -116,3 +123,9 @@ make asan          # AddressSanitizer build (dependencies instrumented too)
 make tsan          # ThreadSanitizer build
 make server-only   # no TUI client
 ```
+
+## Security and contributing
+
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+Issues and pull requests are welcome; for anything larger than a small fix,
+please open an issue first to discuss the approach.

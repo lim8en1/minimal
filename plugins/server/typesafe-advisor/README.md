@@ -6,7 +6,7 @@ not confident about falls through to you in the usual permission modal.
 
 ## What it adds
 
-- **PermissionAdvisor** (track J): every `Ask`-gated tool call is evaluated
+- **PermissionAdvisor**: every `Ask`-gated tool call is evaluated
   against TypeSafe's System One API. A confident answer resolves the prompt
   without you; the modal appears exactly as before for everything else.
 - **Auto-allow and auto-deny**, gated asymmetrically: deny requires more
