@@ -1,18 +1,26 @@
 # minimal
 
-Local-first, memory/CPU-efficient coding-agent harness: a C++ **server** that
-owns the agent turn loop, tools, sessions, and LLM provider dispatch, and a
-C++/FTXUI **terminal client** that renders it — plus a headless one-turn mode
-(`minimal -p`) over the same gRPC interface.
+A coding-agent harness — the program that runs the LLM turn loop, tools,
+sessions, and provider calls around a model — built to be light on CPU and RAM
+and to be taken apart: nearly everything is a plugin you can reconfigure,
+rename, replace, or remove.
 
-- **Local and single-user.** One server per machine, one binary per client;
-  sessions persist in SQLite and survive client disconnects.
+It is a C++ **server** that owns the turn loop, tools, sessions, and provider
+dispatch, and a C++/FTXUI **terminal client** that renders it — plus a
+headless one-turn mode (`minimal -p`) over the same gRPC interface.
+
+- **Light.** A native C++ server and client. The running server uses about
+  25 MiB of RAM, versus roughly 1 GiB per opencode instance and ~300 MiB for Claude
+  Code, at about a quarter of opencode's CPU usage (informal measurements on
+  the author's machine). Built for long conversations: 512k–1M token histories
+  without holding or re-rendering full history; compaction is triggered from
+  context occupancy and streamed incrementally.
 - **Plugin-first.** Read/write/edit/bash, the model providers, and even the
   built-in `/`-commands are bundled plugins using the same ABI a third-party
-  plugin would — core owns mechanisms, you own the config.
-- **Built for long conversations.** 512k–1M token histories without holding
-  or re-rendering full history; compaction is triggered from context
-  occupancy and streamed incrementally.
+  plugin would. Core owns mechanisms, you own the config: disable what you
+  don't want, alias what you do, add your own.
+- **Local and single-user.** One server per machine, one binary per client;
+  sessions persist in SQLite and survive client disconnects.
 
 Architecture and design decisions: [ARCHITECTURE.md](ARCHITECTURE.md) ·
 Extensibility: [docs/EXTENSIBILITY.md](docs/EXTENSIBILITY.md) ·
