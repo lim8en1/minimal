@@ -68,6 +68,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/common/model_ref.hpp"
+#include "minimal/llm/metadata_catalog.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider.hpp"
 
@@ -159,6 +160,16 @@ struct ProviderEntry {
     // entry configured no credential at all (a keyless local server is normal).
     std::string api_key_origin;
     bool discover = false;
+    // Metadata enrichment knobs (docs/EXTENSIBILITY.md §2.13). `metadata`
+    // false declines enrichment for this entry (the auto default is on);
+    // `metadata_match` selects the id-matching policy for the entry
+    // (default: the config-wide "full"); `metadata_provider` pins the
+    // catalog's provider-table choice (catalog-specific spelling, passed
+    // through verbatim -- the escape hatch when base_url matching picks the
+    // wrong table).
+    bool metadata = true;
+    llm::MetadataMatch metadata_match = llm::MetadataMatch::Full;
+    std::string metadata_provider;
     nlohmann::json parameters = nlohmann::json::object();
     std::optional<int> max_tokens;
     std::optional<std::int64_t> context_window_tokens;
@@ -239,6 +250,18 @@ struct DiscoveryOutcome {
 using DiscoveryHook = std::function<DiscoveryOutcome(const std::string& backend_kind,
                                                      const llm::ProviderConfig& connection)>;
 
+// The metadata-enrichment hook (docs/EXTENSIBILITY.md §2.13), injected the
+// same way as DiscoveryHook: main.cpp builds it over the
+// MetadataCatalogRegistry; the config layer never links plugins. The query
+// carries the backend kind, the model id (already addressable -- enrichment
+// never invents one), the entry's base_url and name, and the entry's
+// `metadata_provider` pin verbatim. nullopt = "no answer" -- never an error;
+// failures are the hook implementation's to degrade. Called with no config
+// lock held, like the discovery hook.
+using MetadataHook =
+    std::function<std::optional<llm::DiscoveredModel>(const llm::MetadataQuery& query,
+                                                      llm::MetadataMatch match)>;
+
 // What the last discovery attempt for a provider concluded -- the input to
 // miss reporting, so a typo and a dead catalog read differently.
 struct DiscoveryStatus {
@@ -295,6 +318,12 @@ public:
     // process; the hook is called under the config mutex and must not
     // re-enter this object.
     void SetDiscoveryHook(DiscoveryHook hook);
+
+    // Injects the metadata-enrichment hook (docs/EXTENSIBILITY.md §2.13).
+    // Consulted lazily: when a static model lacking a window/cap resolves, or
+    // a discover-entry's listing leaves fields unset -- never at startup, and
+    // never for a model that already has the fields declared.
+    void SetMetadataHook(MetadataHook hook);
 
     // Whether discovery failed for a provider, and why. Untouched
     // (attempted == false) for a non-discover provider or a discover-entry the
@@ -372,14 +401,28 @@ private:
             std::map<std::string, std::vector<ModelVariant>> variants_by_model;
         };
 
-        // Guards gates_, discovery_, overlay_, hook_ and generation_.
+        // Guards gates_, discovery_, overlay_, hook_, metadata_hook_,
+        // metadata_variants_ and generation_.
         mutable std::mutex mutex_;
         DiscoveryHook hook_;
+        MetadataHook metadata_hook_;
         std::uint64_t generation_ = 0;
         mutable std::map<std::string, DiscoveryCache> discovery_;  // by provider name
         // Discovered models, and overlay copies of static models enriched with
         // a discovered context window. Keyed "<provider>/<model>".
         mutable std::map<std::string, std::shared_ptr<const ResolvedModel>> overlay_;
+        // The variant recipes metadata enrichment contributed, per
+        // "<provider>/<model>" base key -- the static-side twin of
+        // DiscoveryCache::variants_by_model. Written by the lazy metadata
+        // enrichment in Resolve/ResolveVariant, read by VariantsOfLocked and
+        // ResolveVariant. Precedence makes this safe to fill eagerly or
+        // lazily: a parse-time declared sibling lives in the catalog and wins
+        // regardless of what lands here, and `variants_declared` bases never
+        // consult it. An entry in metadata_tombstones_ has already consulted
+        // the hook and gotten "no answer" -- recorded so a miss costs one
+        // Lookup, not one per resolve.
+        mutable std::map<std::string, std::vector<ModelVariant>> metadata_variants_;
+        mutable std::map<std::string, bool> metadata_tombstones_;  // ref key -> miss recorded
     };
     DiscoveryCacheState cache_;
 
@@ -422,6 +465,17 @@ private:
                                                         const std::string& variant_name,
                                                         const std::string& ref_key,
                                                         std::unique_lock<std::mutex>& lock) const;
+    // The metadata-enrichment half of a resolve: the static model at `ref_key`
+    // is missing window/cap (or has no autodetected ladder recorded), the
+    // entry has not declined enrichment, and a metadata hook is injected.
+    // Unlocks, consults the hook under the per-provider gate (the same
+    // discipline ResolveDiscovered uses -- a slow catalog must not stall
+    // other config reads), re-locks, and writes the gap-filled overlay copy
+    // plus the autodetected variant recipe into metadata_variants_.
+    // Cache_.mutex_ held on entry and on return; dropped across the hook.
+    void EnrichFromMetadata(const ProviderEntry& entry, const std::string& model_id,
+                            const std::string& ref_key,
+                            std::unique_lock<std::mutex>& lock) const;
 };
 
 // What providers.json actually offers, for a "no such model" error. A miss is

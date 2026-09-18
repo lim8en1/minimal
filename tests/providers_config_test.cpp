@@ -1760,3 +1760,278 @@ TEST_CASE("known-effort helpers and the suffix split behave", "[providers][varia
     (void)_;
     CHECK(no_head == "@high");  // an empty base is not a variant address
 }
+
+// --- Metadata enrichment (docs/EXTENSIBILITY.md §2.13) -----------------------
+
+namespace {
+
+// A metadata hook with a call counter and a canned answer -- the metadata twin
+// of CountingHook. `answers` is consulted per model id (missing id = nullopt),
+// and every consultation is counted and recorded, so tests can assert on HOW
+// OFTEN and WITH WHAT the catalog is asked.
+struct CountingMetadataHook {
+    int calls = 0;
+    std::map<std::string, llm::DiscoveredModel> answers;
+    std::vector<std::string> asked_ids;
+    std::vector<llm::MetadataMatch> asked_matches;
+    std::vector<std::string> asked_pins;
+
+    std::optional<llm::DiscoveredModel> AsHook(const llm::MetadataQuery& query,
+                                               llm::MetadataMatch match) {
+        ++calls;
+        asked_ids.push_back(query.model_id);
+        asked_matches.push_back(match);
+        asked_pins.push_back(query.metadata_provider);
+        const auto it = answers.find(query.model_id);
+        if (it == answers.end()) return std::nullopt;
+        return it->second;
+    }
+};
+
+// A non-discover entry with one static model missing BOTH the window and the
+// cap -- the shape metadata enrichment exists for.
+ProvidersConfig StaticConfig() {
+    return ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                          "models": {"m": {}}}}
+    })"));
+}
+
+}  // namespace
+
+TEST_CASE("metadata enrichment gap-fills a static model's window and cap",
+          "[providers][metadata]") {
+    auto config = StaticConfig();
+    CountingMetadataHook hook;
+    hook.answers["m"] = llm::DiscoveredModel{"m", 200000, nlohmann::json::object(), 65536};
+    config.SetMetadataHook(
+        [&hook](const llm::MetadataQuery& q, llm::MetadataMatch m) { return hook.AsHook(q, m); });
+
+    const auto& resolved = config.Resolve(ModelRef{"p", "m"});
+    REQUIRE(resolved != nullptr);
+    REQUIRE(resolved->context_window_tokens.has_value());
+    CHECK(*resolved->context_window_tokens == 200000);
+    REQUIRE(resolved->max_tokens.has_value());
+    CHECK(*resolved->max_tokens == 65536);
+    // One consult, cached: a second resolve is a lookup, not a re-ask.
+    REQUIRE(config.Resolve(ModelRef{"p", "m"}) != nullptr);
+    CHECK(hook.calls == 1);
+}
+
+TEST_CASE("a metadata miss never fails a resolve and is not re-consulted",
+          "[providers][metadata][invariant]") {
+    auto config = StaticConfig();
+    CountingMetadataHook hook;  // no answers at all
+    config.SetMetadataHook(
+        [&hook](const llm::MetadataQuery& q, llm::MetadataMatch m) { return hook.AsHook(q, m); });
+
+    const auto& resolved = config.Resolve(ModelRef{"p", "m"});
+    // The static model resolves as parsed -- a dead enrichment source must not
+    // take a hand-written model down with it (the discovery degradation rule).
+    REQUIRE(resolved != nullptr);
+    CHECK_FALSE(resolved->context_window_tokens.has_value());
+    CHECK(hook.calls == 1);  // tombstoned: the miss costs one consult, not one per resolve
+    REQUIRE(config.Resolve(ModelRef{"p", "m"}) != nullptr);
+    CHECK(hook.calls == 1);
+}
+
+TEST_CASE("user-declared fields beat metadata enrichment, field by field",
+          "[providers][metadata][invariant]") {
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                          "models": {"m": {"context_window_tokens": 4096}}}}
+    })"));
+    CountingMetadataHook hook;
+    hook.answers["m"] = llm::DiscoveredModel{"m", 999999, nlohmann::json::object(), 999};
+    config.SetMetadataHook(
+        [&hook](const llm::MetadataQuery& q, llm::MetadataMatch m) { return hook.AsHook(q, m); });
+
+    const auto& resolved = config.Resolve(ModelRef{"p", "m"});
+    REQUIRE(resolved != nullptr);
+    CHECK(*resolved->context_window_tokens == 4096);  // declared window stands
+    REQUIRE(resolved->max_tokens.has_value());
+    CHECK(*resolved->max_tokens == 999);  // undeclared cap still fills
+}
+
+TEST_CASE("metadata_match carries the entry's policy and the provider pin rides the query",
+          "[providers][metadata]") {
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                          "metadata_match": "substring", "metadata_provider": "anthropic",
+                          "models": {"m": {}}}}
+    })"));
+    CountingMetadataHook hook;
+    hook.answers["m"] = llm::DiscoveredModel{"m", 1000, nlohmann::json::object(), std::nullopt};
+    config.SetMetadataHook(
+        [&hook](const llm::MetadataQuery& q, llm::MetadataMatch m) { return hook.AsHook(q, m); });
+
+    REQUIRE(config.Resolve(ModelRef{"p", "m"}) != nullptr);
+    REQUIRE(hook.calls == 1);
+    CHECK(hook.asked_matches.front() == llm::MetadataMatch::Substring);
+    CHECK(hook.asked_pins.front() == "anthropic");
+    CHECK(hook.asked_ids.front() == "m");
+}
+
+TEST_CASE("\"metadata\": false declines enrichment for the entry", "[providers][metadata]") {
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1", "metadata": false,
+                          "models": {"m": {}}}}
+    })"));
+    CHECK(config.provider_entries().at("p").metadata == false);
+    CountingMetadataHook hook;
+    hook.answers["m"] = llm::DiscoveredModel{"m", 200000, nlohmann::json::object(), 65536};
+    config.SetMetadataHook(
+        [&hook](const llm::MetadataQuery& q, llm::MetadataMatch m) { return hook.AsHook(q, m); });
+
+    REQUIRE(config.Resolve(ModelRef{"p", "m"}) != nullptr);
+    CHECK(hook.calls == 0);  // never consulted
+    CHECK_FALSE(config.Resolve(ModelRef{"p", "m"})->context_window_tokens.has_value());
+}
+
+TEST_CASE("a static model gains its autodetected ladder from metadata enrichment",
+          "[providers][metadata][variants]") {
+    auto config = StaticConfig();
+    CountingMetadataHook hook;
+    hook.answers["m"] = llm::DiscoveredModel{
+        "m", 200000,
+        nlohmann::json::parse(
+            R"({"reasoning_options": [{"type": "effort", "values": ["low", "high"]}]})"),
+        65536};
+    config.SetMetadataHook(
+        [&hook](const llm::MetadataQuery& q, llm::MetadataMatch m) { return hook.AsHook(q, m); });
+
+    // Cold, the listing shows nothing (VariantsOf is not a consultation
+    // trigger -- the discovery rule at "a cold discovery cache contributes no
+    // variants" applies here too).
+    CHECK(config.VariantsOf(ModelRef{"p", "m"}).empty());
+
+    const auto& base = config.Resolve(ModelRef{"p", "m"});
+    REQUIRE(base != nullptr);
+    // The first base resolve consults once and records the ladder: the
+    // listing AND a sibling resolve serve it from cache from here on.
+    const auto names = config.VariantsOf(ModelRef{"p", "m"});
+    REQUIRE(names.size() == 2);
+    CHECK(names[0] == "low");
+    CHECK(names[1] == "high");
+
+    const auto& high = config.Resolve(ModelRef{"p", "m@high"});
+    REQUIRE(high != nullptr);
+    CHECK(high->provider.model_name == "m");  // the wire id stays unsuffixed
+    CHECK(high->parameters.at("reasoning_effort") == "high");
+    REQUIRE(high->context_window_tokens.has_value());
+    CHECK(*high->context_window_tokens == 200000);
+    CHECK(hook.calls == 1);  // one consult covered base + sibling
+}
+
+TEST_CASE("declared variants beat the metadata ladder", "[providers][metadata][variants]") {
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                          "models": {"m": {"variants": ["low"]}}}}
+    })"));
+    CountingMetadataHook hook;
+    hook.answers["m"] = llm::DiscoveredModel{
+        "m", 200000,
+        nlohmann::json::parse(
+            R"({"reasoning_options": [{"type": "effort", "values": ["low", "max"]}]})"),
+        65536};
+    config.SetMetadataHook(
+        [&hook](const llm::MetadataQuery& q, llm::MetadataMatch m) { return hook.AsHook(q, m); });
+
+    // The declared sibling is listed cold (parse-time synthesis), and the
+    // metadata ladder never joins it: the resolve records an EMPTY recipe for
+    // the base (explicit beats autodetection), so the listing stays as
+    // parsed.
+    const auto cold = config.VariantsOf(ModelRef{"p", "m"});
+    REQUIRE(cold.size() == 1);
+    CHECK(cold[0] == "low");
+    REQUIRE(config.Resolve(ModelRef{"p", "m@low"}) != nullptr);   // declared
+    CHECK(config.Resolve(ModelRef{"p", "m@max"}) == nullptr);     // metadata: suppressed
+    const auto names = config.VariantsOf(ModelRef{"p", "m"});
+    REQUIRE(names.size() == 1);
+    CHECK(names[0] == "low");
+}
+
+TEST_CASE("an unknown effort in the metadata ladder is skipped with the known set intact",
+          "[providers][metadata][variants][regression]") {
+    auto config = StaticConfig();
+    CountingMetadataHook hook;
+    hook.answers["m"] = llm::DiscoveredModel{
+        "m", 200000,
+        nlohmann::json::parse(R"({"reasoning_options": [{"type": "effort",
+                                   "values": ["high", "turbo-9000"]}]})"),
+        std::nullopt};
+    config.SetMetadataHook(
+        [&hook](const llm::MetadataQuery& q, llm::MetadataMatch m) { return hook.AsHook(q, m); });
+
+    CHECK(config.VariantsOf(ModelRef{"p", "m"}).empty());  // cold: not a trigger
+    REQUIRE(config.Resolve(ModelRef{"p", "m"}) != nullptr);  // consults, records "high"
+    const auto names = config.VariantsOf(ModelRef{"p", "m"});
+    REQUIRE(names.size() == 1);
+    CHECK(names[0] == "high");
+    CHECK(hook.calls == 1);
+}
+
+TEST_CASE("discovered models get their gaps filled from metadata at fetch time",
+          "[providers][metadata][discover]") {
+    auto config = DiscoverConfig();
+    CountingHook discovery;  // a listing with no window, the vLLM gap
+    discovery.models = {{"served1", std::nullopt, nlohmann::json::object(), std::nullopt}};
+    CountingMetadataHook metadata;
+    metadata.answers["served1"] =
+        llm::DiscoveredModel{"served1", 262144, nlohmann::json::object(), 32768};
+    config.SetDiscoveryHook([&discovery](const std::string& kind, const llm::ProviderConfig& c) {
+        return discovery.AsHook(kind, c);
+    });
+    config.SetMetadataHook(
+        [&metadata](const llm::MetadataQuery& q, llm::MetadataMatch m) {
+            return metadata.AsHook(q, m);
+        });
+
+    // Trigger the lazy fetch through a resolve of the discovered id.
+    const auto& resolved = config.Resolve(ModelRef{"local", "served1"});
+    REQUIRE(resolved != nullptr);
+    REQUIRE(resolved->context_window_tokens.has_value());
+    CHECK(*resolved->context_window_tokens == 262144);
+    REQUIRE(resolved->max_tokens.has_value());
+    CHECK(*resolved->max_tokens == 32768);
+    CHECK(metadata.asked_ids.size() == 1);
+    CHECK(metadata.asked_ids.front() == "served1");
+}
+
+TEST_CASE("the listing wins: metadata never overwrites a discovered field",
+          "[providers][metadata][discover][invariant]") {
+    auto config = DiscoverConfig();
+    CountingHook discovery;
+    discovery.models = {{"served1", 8192, nlohmann::json::object(), 2048}};
+    CountingMetadataHook metadata;
+    metadata.answers["served1"] =
+        llm::DiscoveredModel{"served1", 999999, nlohmann::json::object(), 999999};
+    config.SetDiscoveryHook([&discovery](const std::string& kind, const llm::ProviderConfig& c) {
+        return discovery.AsHook(kind, c);
+    });
+    config.SetMetadataHook(
+        [&metadata](const llm::MetadataQuery& q, llm::MetadataMatch m) {
+            return metadata.AsHook(q, m);
+        });
+
+    const auto& resolved = config.Resolve(ModelRef{"local", "served1"});
+    REQUIRE(resolved != nullptr);
+    CHECK(*resolved->context_window_tokens == 8192);
+    CHECK(*resolved->max_tokens == 2048);
+    // The metadata layer was never consulted: both gaps are already filled by
+    // the listing, so there is nothing to ask it for.
+    CHECK(metadata.calls == 0);
+}
+
+TEST_CASE("malformed metadata knobs are named parse errors", "[providers][metadata]") {
+    for (const char* body : {
+             R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                                     "metadata": "yes", "models": {"m": {}}}}})",
+             R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                                     "metadata_match": "fuzzy", "models": {"m": {}}}}})",
+             R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                                     "metadata_provider": "", "models": {"m": {}}}}})",
+         }) {
+        CHECK_THROWS_AS(ParseProvidersConfig(nlohmann::json::parse(body)), std::runtime_error);
+    }
+}

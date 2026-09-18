@@ -12,6 +12,7 @@
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
+#include "minimal/llm/metadata_catalog.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/plugins/service_registry.hpp"
@@ -85,6 +86,13 @@ struct PluginRecord {
     // a providers.json `backend` names). Feeds the sanity check's discover-entry
     // warnings and its duplicate-catalog report.
     std::vector<std::string> registered_model_catalog_kinds;
+    // Enrichment-catalog kinds, keyed like registered_model_catalog_kinds (a
+    // models.dev-style default source registers under the wire kinds it
+    // knows). Feeds the startup print and the sanity check's metadata report.
+    std::vector<std::string> registered_metadata_catalog_kinds;
+    // True when the plugin appended a fallback enrichment catalog (answers for
+    // kinds nobody named). Recorded for the same diagnostics.
+    bool registered_metadata_fallback = false;
     // Compaction strategy kinds, keyed like registered_provider_kinds. Feeds
     // the sanity check's memory.compaction_strategy resolution warning.
     std::vector<std::string> registered_compaction_strategy_kinds;
@@ -126,7 +134,8 @@ public:
                  std::filesystem::path plugin_data_root = {},
                  hooks::HookDispatcher* hook_points = nullptr,
                  agent::MentionResolverRegistry* mention_resolvers = nullptr,
-                 agent::CompactionStrategyRegistry* compaction_strategies = nullptr);
+                 agent::CompactionStrategyRegistry* compaction_strategies = nullptr,
+                 llm::MetadataCatalogRegistry* metadata_catalogs = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -199,6 +208,14 @@ private:
     // built-in "summarize" strategy is registered directly in main.cpp
     // before plugin load, not through this hook.
     agent::CompactionStrategyRegistry* compaction_strategies_ = nullptr;
+    // Optional like the others; null means plugins cannot register an
+    // enrichment (metadata) catalog. Additive across plugins, keyed by the
+    // provider kind string with a first-answering fallback chain for kinds
+    // nobody named; a duplicate kind is refused and reported by the sanity
+    // check. Beside model_catalogs_, not merged with it: the kind slots there
+    // are the listing catalogs', and this seam's contract is per-model Lookup
+    // with a cache, not a pure List.
+    llm::MetadataCatalogRegistry* metadata_catalogs_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 
     // One entry per loaded plugin that exports

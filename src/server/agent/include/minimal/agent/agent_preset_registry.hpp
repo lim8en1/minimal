@@ -196,6 +196,15 @@ public:
     // that could trigger a fetch -- main.cpp injects right after construction.
     void SetDiscoveryHook(config::DiscoveryHook hook) { providers_.SetDiscoveryHook(std::move(hook)); }
 
+    // Injects the metadata-enrichment hook (docs/EXTENSIBILITY.md §2.13),
+    // main-injected like the discovery hook above -- the registry stays a
+    // config reader and never links the plugin-facing catalog registries
+    // itself. Arguments: backend kind, model id, entry base_url, entry name,
+    // match policy. nullopt = no answer (never an error).
+    void SetMetadataHook(config::MetadataHook hook) {
+        providers_.SetMetadataHook(std::move(hook));
+    }
+
     // Evicts and refetches every discover-entry's catalog (see
     // ProvidersConfig::RefreshDiscovery). Const for the same reason: it touches
     // only mutex-guarded cache state, never the parsed config.

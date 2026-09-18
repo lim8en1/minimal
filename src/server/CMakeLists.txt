@@ -71,6 +71,7 @@ add_library(minimal_server_core SHARED
     mcp/mcp_client_manager.cpp
     llm/provider_factory_registry.cpp
     llm/model_catalog.cpp
+    llm/metadata_catalog.cpp
     plugins/plugin_loader.cpp
     plugins/plugin_rpc.cpp
     plugins/plugin_storage.cpp

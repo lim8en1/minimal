@@ -309,6 +309,14 @@ int main(int argc, char** argv) {
     // be asked to LIST its models ("discover": true in providers.json), fetched
     // lazily at first resolve and never written back to the file.
     minimal::llm::ModelCatalogRegistry model_catalogs;
+    // Enrichment defaults (docs/EXTENSIBILITY.md §2.13): a models.dev-style
+    // catalog fills missing context windows, output caps and effort ladders
+    // for models the config already addresses -- automatically, no per-entry
+    // opt-in; providers.json "metadata": false declines per entry. A second
+    // registry beside model_catalogs because that one's kind slots are the
+    // listing catalogs' (one catalog per backend kind, first-wins) and an
+    // enrichment source serves several backends at once.
+    minimal::llm::MetadataCatalogRegistry metadata_catalogs;
     // S4: additive across plugins, keyed by name -- memory.compaction_strategy
     // selects one, with agent-preset frontmatter overriding per preset. Core's
     // own strategies are registered directly here, BEFORE plugin load, so the
@@ -381,7 +389,7 @@ int main(int argc, char** argv) {
                                           &auth_providers, &permission_advisors, &model_catalogs,
                                           &services, plugin_storage.get(), plugin_data_root,
                                           &hook_dispatcher, &mention_resolvers,
-                                          &compaction_strategies);
+                                          &compaction_strategies, &metadata_catalogs);
     const auto records = loader.LoadAll(candidates);
     // The load thread is the only writer; from here the map is read-only, which
     // is what makes unguarded Find from session workers and the command pool
@@ -409,6 +417,12 @@ int main(int argc, char** argv) {
         }
         for (const auto& kind : record.registered_model_catalog_kinds) {
             std::printf("      catalog  %s\n", kind.c_str());
+        }
+        for (const auto& kind : record.registered_metadata_catalog_kinds) {
+            std::printf("      metadata %s\n", kind.c_str());
+        }
+        if (record.registered_metadata_fallback) {
+            std::printf("      metadata (fallback: kinds nobody named)\n");
         }
         for (const auto& point : record.registered_hook_points) {
             std::printf("      hook     %s\n", point.c_str());
@@ -489,6 +503,7 @@ int main(int argc, char** argv) {
         &permission_advisors,
         &services,
         &model_catalogs,
+        &metadata_catalogs,
         &compaction_strategies,
         &hook_dispatcher,
     });
@@ -563,6 +578,31 @@ int main(int argc, char** argv) {
                 logger.warn("model discovery for backend kind '{}' failed: {}", kind, outcome.error);
             }
             return outcome;
+        });
+
+    // Inject metadata enrichment (docs/EXTENSIBILITY.md §2.13), the same
+    // AFTER-plugin-load / BEFORE-first-Resolve point the discovery hook uses.
+    // The hook consults the metadata registry: the kind's own catalog, else
+    // the fallback chain. Every failure inside Lookup is the catalog's own
+    // degraded nullopt or a caught throw: an enrichment miss must never fail
+    // a resolve.
+    presets->SetMetadataHook(
+        [&metadata_catalogs, &logger = minimal::common::DefaultLogger()](
+            const minimal::llm::MetadataQuery& query, minimal::llm::MetadataMatch match)
+            -> std::optional<minimal::llm::DiscoveredModel> {
+            auto* catalog = metadata_catalogs.FindForQuery(query);
+            if (catalog == nullptr) return std::nullopt;
+            try {
+                return catalog->Lookup(query, match);
+            } catch (const std::exception& error) {
+                logger.warn("metadata lookup for '{}' (kind '{}') failed: {}", query.model_id,
+                            query.backend, error.what());
+                return std::nullopt;
+            } catch (...) {
+                logger.warn("metadata lookup for '{}' (kind '{}') failed: unknown error",
+                            query.model_id, query.backend);
+                return std::nullopt;
+            }
         });
 
     // Preset-scoped tool definitions: the builders run once per resolved

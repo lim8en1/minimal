@@ -45,6 +45,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/rpc/auth_provider.hpp"
+#include "minimal/llm/metadata_catalog.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
@@ -304,6 +305,24 @@ void minimal_plugin_register_permission_advisor(
 // entry's static models.
 void minimal_plugin_register_model_catalogs(minimal::llm::ModelCatalogRegistry&,
                                              const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL, additive: contributes an enrichment catalog, keyed by the kind
+// string(s) whose wire shapes it knows models for -- NOT exclusively one kind,
+// and not displacing the listing catalogs registered under the same strings
+// (this is a SECOND registry: ModelCatalogRegistry stays the discover/list
+// seam). An enrichment catalog answers Lookup(model_id) with field defaults
+// for models the config already addresses -- a providers.json entry uses its
+// answers automatically (no per-entry opt-in) whenever a model is missing
+// `context_window_tokens`/`max_tokens`, and, through the advertised effort
+// ladder, declares no `variants` of its own. A metadata answer can only FILL
+// FIELDS of an existing model, never add an addressable one -- that invariant
+// is core-enforced (Lookup is only ever called for a resolved or listed id)
+// and is what lets auto-use be the default. See metadata_catalog.hpp for the
+// Lookup contract and the fallback chain (RegisterFallback) for kinds nobody
+// named.
+void minimal_plugin_register_metadata_catalogs(
+    minimal::llm::MetadataCatalogRegistry&,
+    const minimal::plugins::PluginRegistrationContext&);
 
 // OPTIONAL, additive: contributes a compaction strategy (S4), keyed by name --
 // memory.compaction_strategy in settings.json selects one. Core registers its

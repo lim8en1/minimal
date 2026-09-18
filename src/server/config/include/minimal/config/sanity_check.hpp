@@ -66,6 +66,11 @@ struct SanityCheckInputs {
     // never a live List()): discovery is fetched lazily at first resolve,
     // never at startup.
     const llm::ModelCatalogRegistry* model_catalogs = nullptr;
+    // Optional: absent means no enrichment catalog exists, so metadata
+    // enrichment is structurally inert (a "metadata defaults requested but no
+    // catalog registered" style warning is the only thing lost). Borrowed --
+    // it outlives the check. Structural only, like model_catalogs above.
+    const llm::MetadataCatalogRegistry* metadata_catalogs = nullptr;
     // Optional: absent means memory.compaction_strategy can only be checked
     // against core's own built-in name ("summarize"), not against whatever
     // plugins additionally registered. Borrowed -- it outlives the check.

@@ -170,7 +170,8 @@ struct Fixture {
                                          provider_factories, skills,  plugin_config,
                                          resolution,         command_registry, advisors,
                                          services,           &model_catalogs,
-                                         &compaction_strategies, &hook_dispatcher};
+                                         nullptr,            &compaction_strategies,
+                                         &hook_dispatcher};
     }
 };
 

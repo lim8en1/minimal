@@ -694,12 +694,26 @@ std::vector<std::string> ProvidersConfig::VariantsOfLocked(const std::string& pr
     // Discovered base (cold cache contributes nothing -- a listing, never a
     // fetch trigger, the same rule ModelRefs applies), or a static base whose
     // discovery twin advertises a ladder: the recipe recorded at publish.
+    // NB: cold-cache-here does NOT consult metadata either -- VariantsOf is a
+    // listing, and triggering enrichment I/O from a listing would make the
+    // picker latency-bound. The ladder lands here the first time the base (or
+    // one of its variants) actually resolves.
     if (const auto cache_it = cache_.discovery_.find(provider_name);
         cache_it != cache_.discovery_.end() && cache_it->second.ok) {
         const auto variants_it = cache_it->second.variants_by_model.find(base_id);
         if (variants_it != cache_it->second.variants_by_model.end()) {
             for (const auto& variant : variants_it->second) out.push_back(variant.name);
+            return out;
         }
+        // Discovery is ok but this base is a static-only model its listing
+        // does not name: fall through -- the metadata recipe (if the base was
+        // enriched) still applies.
+    }
+    // The metadata-enrichment recipe, when the base has been enriched
+    // already. Not a consultation trigger -- see the NB above.
+    if (const auto metadata_it = cache_.metadata_variants_.find(key);
+        metadata_it != cache_.metadata_variants_.end()) {
+        for (const auto& variant : metadata_it->second) out.push_back(variant.name);
     }
     return out;
 }
@@ -712,6 +726,11 @@ const ProviderEntry* ProvidersConfig::FindProviderLocked(const std::string& name
 void ProvidersConfig::SetDiscoveryHook(DiscoveryHook hook) {
     std::lock_guard<std::mutex> lock(cache_.mutex_);
     cache_.hook_ = std::move(hook);
+}
+
+void ProvidersConfig::SetMetadataHook(MetadataHook hook) {
+    std::lock_guard<std::mutex> lock(cache_.mutex_);
+    cache_.metadata_hook_ = std::move(hook);
 }
 
 std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& ref) const {
@@ -756,7 +775,7 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& re
             return enriched->second;
         }
         if (const ProviderEntry* entry = FindProviderLocked(ref.provider);
-            entry != nullptr && entry->discover) {
+             entry != nullptr && entry->discover) {
             // The catalog's answer for a model it lists, or nothing when the
             // fetch failed. A STATIC hit degrades to its parsed self either
             // way -- a dead backend must not take a hand-written model down
@@ -767,7 +786,28 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& re
             if (auto resolved = ResolveDiscovered(*entry, ref.model, key, lock)) {
                 return resolved;
             }
+            // Discovery could not fill the gaps (failed fetch, or the model is
+            // a static twin its listing does not name): the metadata layer
+            // gets its turn before the parsed self is handed back.
+            if (entry->metadata) {
+                EnrichFromMetadata(*entry, ref.model, key, lock);
+                if (const auto enriched = cache_.overlay_.find(key);
+                    enriched != cache_.overlay_.end()) {
+                    return enriched->second;
+                }
+            }
             return it->second;
+        }
+        // Metadata enrichment (docs/EXTENSIBILITY.md §2.13): a non-discover
+        // entry's static model missing its window/cap consults the metadata
+        // registry -- the auto default, declined per entry with
+        // "metadata": false. Same overlay-copy rule as above.
+        if (const ProviderEntry* entry = FindProviderLocked(ref.provider);
+            entry != nullptr && entry->metadata) {
+            EnrichFromMetadata(*entry, ref.model, key, lock);
+            if (const auto enriched = cache_.overlay_.find(key); enriched != cache_.overlay_.end()) {
+                return enriched->second;
+            }
         }
         return it->second;
     }
@@ -880,13 +920,47 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
     // The declared variant for this name. A static base: its recipe lived in
     // providers.json -- but parse-time synthesis put every declared static
     // sibling in the catalog (handled above), so reaching here with a static
-    // base means the variant was NOT declared: a miss. A discovered base: the
-    // entry's recipe (defaulting to the model's autodetected ladder), with what the
+    // base means the variant was NOT declared by config. It may still have an
+    // AUTODETECTED ladder from metadata enrichment: consult the recorded
+    // recipe (EnrichFromMetadata fills it on the base's first resolve; the
+    // consult in the static branch below covers a `...@high` ref arriving
+    // before any base resolve). A discovered base: the entry's recipe
+    // (defaulting to the model's autodetected ladder), with what the
     // catalog's metadata advertised -- PublishLocked already recorded that
     // intersection in the discovery cache's variant list when it materialized
     // the base, so this is a lookup, never a re-derivation.
     std::optional<ModelVariant> declared;
-    if (!entry.discover) return nullptr;  // static base, undeclared variant
+    if (!entry.discover) {
+        // A static twin's explicit `variants: []` opt-out (see VariantsOf's
+        // identical check) applies here too: reaching this line already means
+        // no static sibling matched `variant_name`, so an opted-out base must
+        // answer "undeclared" rather than consulting the metadata ladder.
+        if (base->variants_declared) return nullptr;
+        // A `...@high` ref can arrive before the base itself was ever
+        // resolved -- pull the metadata recipe in (no-op when it already
+        // exists; the same per-provider-gate consult EnrichFromMetadata owns).
+        if (entry.metadata) EnrichFromMetadata(entry, base_id, base_key, lock);
+        // The base must be the ENRICHED copy (window/cap/parameters), not the
+        // parsed node the overlay also holds -- the sibling carries what a
+        // session on the base would get, exactly as ResolveDiscovered's static
+        // branch does for the discovery twin.
+        if (const auto enriched_it = cache_.overlay_.find(base_key);
+            enriched_it != cache_.overlay_.end()) {
+            base = enriched_it->second;
+        }
+        const auto metadata_it = cache_.metadata_variants_.find(base_key);
+        if (metadata_it == cache_.metadata_variants_.end()) return nullptr;
+        const auto name_it = std::find_if(metadata_it->second.begin(),
+                                          metadata_it->second.end(),
+                                          [&](const ModelVariant& v) {
+                                              return v.name == variant_name;
+                                          });
+        if (name_it == metadata_it->second.end()) return nullptr;
+        return cache_
+            .overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(
+                                           MakeVariantResolved(*base, *name_it)))
+            .first->second;
+    }
     // A static twin's explicit `variants: []` opt-out (see VariantsOf's
     // identical check) applies here too: reaching this line already means no
     // static sibling matched `variant_name`, so an opted-out base must answer
@@ -912,6 +986,102 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
         .first->second;
 }
 
+void ProvidersConfig::EnrichFromMetadata(const ProviderEntry& entry, const std::string& model_id,
+                                         const std::string& ref_key,
+                                         std::unique_lock<std::mutex>& lock) const {
+    // cache_.mutex_ is HELD on entry (via `lock`): the hook snapshot and the
+    // already-enriched checks below read mutex-guarded state directly, never
+    // re-locking -- a second acquisition of a non-recursive mutex this caller
+    // already holds is a deadlock, not a scope.
+    MetadataHook hook = cache_.metadata_hook_;
+    // Already enriched (or already answered "no answer"): the overlay or
+    // tombstone IS the result; a second consult would repeat the Lookup on
+    // every resolve of the same model.
+    if (cache_.overlay_.count(ref_key) != 0 || cache_.metadata_tombstones_.count(ref_key) != 0) {
+        return;
+    }
+    if (!hook) return;
+
+    // The hook may do I/O (the modelsdev plugin reads its cache; a refresh
+    // may hit the network). Hold ONLY this provider's gate across it -- the
+    // same discipline ResolveDiscovered uses, for the same reason: a slow
+    // catalog must not stall session creation or listings, which take
+    // cache_.mutex_ alone. Lock order is always gate -> mutex_, never the
+    // reverse.
+    lock.unlock();
+    DiscoveryCacheState::FetchGate& gate = [&] () -> DiscoveryCacheState::FetchGate& {
+        std::lock_guard<std::mutex> held(cache_.mutex_);
+        return cache_.gates_.try_emplace(entry.name).first->second;
+    }();
+    std::lock_guard<std::mutex> gate_lock(gate.mtx);
+    // Deadlock note, learned the hard way: the gate lambda above MUST be the
+    // only place this function touches cache_.mutex_ while `lock` is
+    // unlocked -- it is fine here because `lock` is NOT holding the mutex at
+    // that moment, and the re-lock below happens after the lambda's guard has
+    // released. Never take cache_.mutex_ again while `lock` holds it.
+
+    llm::MetadataQuery query;
+    query.model_id = model_id;
+    query.base_url = entry.connection.base_url;
+    query.backend = entry.backend;
+    query.provider_name = entry.name;
+    query.metadata_provider = entry.metadata_provider;
+    std::optional<llm::DiscoveredModel> answer;
+    try {
+        answer = hook(query, entry.metadata_match);
+    } catch (...) {
+        // The hook's own contract is to degrade, not throw; this is
+        // defense-in-depth, and it degrades the same way a nullopt would.
+        answer = std::nullopt;
+    }
+
+    lock.lock();
+    // A refresh may have published while we consulted; prefer its result.
+    if (const auto it = cache_.overlay_.find(ref_key); it != cache_.overlay_.end()) return;
+    // The model was parsed away? It cannot be -- catalog_ is parse-time only
+    // and ProvidersConfig has no removal path. The double-check under the gate
+    // still re-verifies the tombstone in case a concurrent resolver enriched
+    // terminal, so re-consulting never happens either way.
+    if (cache_.metadata_tombstones_.count(ref_key) != 0) return;
+
+    if (!answer.has_value()) {
+        cache_.metadata_tombstones_.emplace(ref_key, true);
+        return;
+    }
+
+    const auto static_it = catalog_.models_.find(ref_key);
+    if (static_it == catalog_.models_.end()) {
+        // Unreachable by construction (Lookup is keyed by an existing id) --
+        // recorded as a miss rather than trusted.
+        cache_.metadata_tombstones_.emplace(ref_key, true);
+        return;
+    }
+    // Gap-fill only: user-declared fields always win (EnrichFromDiscovery's
+    // rule), and the overlay copy never mutates the parsed node.
+    ResolvedModel enriched = EnrichFromDiscovery(*static_it->second, *answer);
+    // The autodetected ladder from the metadata answer, for models that
+    // declare no variants of their own -- the same recipe PublishLocked
+    // computes for discovered models. Unknown effort names warn-and-skip so
+    // an autodetected selector never resolves to a request identical to the
+    // base model with no trace why.
+    std::vector<ModelVariant> ladder;
+    if (!enriched.variants_declared) {
+        for (const auto& effort : llm::AdvertisedEfforts(answer->metadata)) {
+            if (!IsKnownEffortName(effort)) {
+                common::DefaultLogger().warn(
+                    "providers.json: model '{}' advertises an unknown effort '{}' via metadata "
+                    "enrichment; skipping that variant (known: high, low, max, medium, minimal, "
+                    "none, xhigh)",
+                    model_id, effort);
+                continue;
+            }
+            ladder.push_back(ModelVariant{effort, {}, std::nullopt, std::nullopt});
+        }
+    }
+    cache_.metadata_variants_.emplace(ref_key, std::move(ladder));
+    cache_.overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(std::move(enriched)));
+}
+
 DiscoveryOutcome ProvidersConfig::FetchOutcome(const ProviderEntry& entry) const {
     DiscoveryOutcome outcome;
     // Snapshot the hook under cache_.mutex_ (lock order gate -> mutex_, per
@@ -920,9 +1090,11 @@ DiscoveryOutcome ProvidersConfig::FetchOutcome(const ProviderEntry& entry) const
     // is UB, however unlikely the overlap. The copy is released before the
     // hook runs -- the network I/O must not hold any config lock.
     DiscoveryHook hook;
+    MetadataHook metadata_hook;
     {
         std::lock_guard<std::mutex> lock(cache_.mutex_);
         hook = cache_.hook_;
+        metadata_hook = cache_.metadata_hook_;
     }
     if (!hook) {
         // Uninjected (a test or an unhosted config): report rather than treat
@@ -932,7 +1104,53 @@ DiscoveryOutcome ProvidersConfig::FetchOutcome(const ProviderEntry& entry) const
         outcome.error = "no discovery hook set";
         return outcome;
     }
-    return hook(entry.backend, entry.connection);
+    outcome = hook(entry.backend, entry.connection);
+    // Metadata defaults (docs/EXTENSIBILITY.md §2.13): the discovery listing
+    // wins on ids and on anything IT reports, and the metadata layer fills
+    // only what it leaves unset -- a listed model with no context window (the
+    // vLLM gap this seam exists for) gets models.dev's window without a line
+    // of config. Consulted HERE, inside the same per-provider gate the fetch
+    // holds, so the fill is serialized with the fetch that feeds it and a
+    // refreshed listing re-fills from the current metadata answer. A model
+    // that declares its own `variants` keeps them: the ladder below is
+    // skipped for any model whose metadata already advertises efforts, and
+    // PublishLocked's declared-recipe precedence is untouched.
+    if (outcome.ok && entry.metadata && metadata_hook && !outcome.models.empty()) {
+        for (auto& model : outcome.models) {
+            if (model.context_window_tokens.has_value() && model.max_tokens.has_value()) continue;
+            llm::MetadataQuery query;
+            query.model_id = model.id;
+            query.base_url = entry.connection.base_url;
+            query.backend = entry.backend;
+            query.provider_name = entry.name;
+            query.metadata_provider = entry.metadata_provider;
+            try {
+                if (auto fill = metadata_hook(query, entry.metadata_match);
+                    fill.has_value()) {
+                    if (!model.context_window_tokens.has_value() &&
+                        fill->context_window_tokens.has_value()) {
+                        model.context_window_tokens = fill->context_window_tokens;
+                    }
+                    if (!model.max_tokens.has_value() && fill->max_tokens.has_value()) {
+                        model.max_tokens = fill->max_tokens;
+                    }
+                    // No ladder of its own from the listing: the metadata
+                    // answer's `reasoning_options` IS the advertised effort
+                    // set -- merged into the metadata the variant recipe
+                    // reads below, never overriding what the listing said.
+                    if (model.metadata.is_object() && !model.metadata.contains("reasoning") &&
+                        fill->metadata.is_object() && fill->metadata.contains("reasoning_options") &&
+                        !model.metadata.contains("reasoning_options")) {
+                        model.metadata["reasoning_options"] = fill->metadata["reasoning_options"];
+                    }
+                }
+            } catch (...) {
+                // Enrichment must never fail a listing; the unfilled model
+                // degrades exactly as if no metadata catalog existed.
+            }
+        }
+    }
+    return outcome;
 }
 
 void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryOutcome& outcome,
@@ -1230,6 +1448,50 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
             discover = provider_normalized.at("discover").get<bool>();
         }
 
+        // Metadata enrichment knobs (docs/EXTENSIBILITY.md §2.13). On by
+        // default: the whole point of the seam is that a model missing its
+        // window/efforts gets them without a line of config, so the only
+        // spelling that matters here is the opt-out. A non-boolean is a named
+        // parse error, like "discover" above.
+        bool metadata = true;
+        if (provider_normalized.contains("metadata")) {
+            if (!provider_normalized.at("metadata").is_boolean()) {
+                throw std::runtime_error("providers.json: " + where +
+                                         " sets \"metadata\" which must be a boolean");
+            }
+            metadata = provider_normalized.at("metadata").get<bool>();
+        }
+        // Per-entry id-matching policy override. The config-wide default is
+        // Full (the conservative choice); an entry that serves ids with dated
+        // suffixes or vendor prefixes can loosen it locally. Anything but the
+        // two known names is a named parse error -- the mistake must not
+        // silently read as "full".
+        llm::MetadataMatch metadata_match = llm::MetadataMatch::Full;
+        if (provider_normalized.contains("metadata_match")) {
+            const auto& match = provider_normalized.at("metadata_match");
+            if (!match.is_string() ||
+                (match.get<std::string>() != "full" && match.get<std::string>() != "substring")) {
+                throw std::runtime_error(
+                    "providers.json: " + where +
+                    " has an invalid \"metadata_match\": expected \"full\" or \"substring\"");
+            }
+            metadata_match = match.get<std::string>() == "substring"
+                                 ? llm::MetadataMatch::Substring
+                                 : llm::MetadataMatch::Full;
+        }
+        // The catalog-side provider-table pin. Opaque here -- MetadataQuery
+        // carries it verbatim and the catalog validates its own spelling.
+        std::string metadata_provider;
+        if (provider_normalized.contains("metadata_provider")) {
+            const auto& pin = provider_normalized.at("metadata_provider");
+            if (!pin.is_string() || pin.get<std::string>().empty()) {
+                throw std::runtime_error("providers.json: " + where +
+                                         " sets \"metadata_provider\" which must be a non-empty "
+                                         "string (the catalog's provider name)");
+            }
+            metadata_provider = pin.get<std::string>();
+        }
+
         const bool has_models = provider_normalized.contains("models") &&
                                 provider_normalized.at("models").is_object() &&
                                 !provider_normalized.at("models").empty();
@@ -1252,6 +1514,9 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
         entry.connection.api_key = api_key.key;
         entry.api_key_origin = api_key.origin;
         entry.discover = discover;
+        entry.metadata = metadata;
+        entry.metadata_match = metadata_match;
+        entry.metadata_provider = metadata_provider;
         if (provider_normalized.contains("parameters") &&
             provider_normalized.at("parameters").is_object()) {
             entry.parameters = provider_normalized.at("parameters");

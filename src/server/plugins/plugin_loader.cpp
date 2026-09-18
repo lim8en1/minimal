@@ -46,6 +46,8 @@ using RegisterPermissionAdvisorFn =
     void (*)(tools::PermissionAdvisorRegistry&, const PluginRegistrationContext&);
 using RegisterModelCatalogsFn =
     void (*)(llm::ModelCatalogRegistry&, const PluginRegistrationContext&);
+using RegisterMetadataCatalogsFn =
+    void (*)(llm::MetadataCatalogRegistry&, const PluginRegistrationContext&);
 using RegisterCompactionStrategiesFn =
     void (*)(agent::CompactionStrategyRegistry&, const PluginRegistrationContext&);
 using RegisterServicesFn =
@@ -139,7 +141,8 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
                            std::filesystem::path plugin_data_root,
                            hooks::HookDispatcher* hook_points,
                            agent::MentionResolverRegistry* mention_resolvers,
-                           agent::CompactionStrategyRegistry* compaction_strategies)
+                           agent::CompactionStrategyRegistry* compaction_strategies,
+                           llm::MetadataCatalogRegistry* metadata_catalogs)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
@@ -153,7 +156,8 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
       storage_(storage),
       plugin_data_root_(std::move(plugin_data_root)),
       hook_points_(hook_points),
-      compaction_strategies_(compaction_strategies) {}
+      compaction_strategies_(compaction_strategies),
+      metadata_catalogs_(metadata_catalogs) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -434,6 +438,32 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         const auto kinds_after = model_catalogs_->kinds();
         std::set_difference(kinds_after.begin(), kinds_after.end(), kinds_before.begin(),
                             kinds_before.end(), std::back_inserter(record.registered_model_catalog_kinds));
+    }
+
+    if (metadata_catalogs_ != nullptr) {
+        // Attribution window like the registries that name both claimants on a
+        // collision; the kinds diff records what landed for the startup print
+        // and the sanity check. Falls in the no-rollback family of the warning
+        // below -- enrichment catalogs hold no config-critical state, but
+        // stripping them from the registry is not a removal seam this loader
+        // offers.
+        const auto kinds_before = metadata_catalogs_->kinds();
+        const std::size_t fallbacks_before = metadata_catalogs_->fallbacks().size();
+        if (auto register_metadata = Lookup<RegisterMetadataCatalogsFn>(
+                handle, "minimal_plugin_register_metadata_catalogs")) {
+            if (!GuardedRegistration(record, "minimal_plugin_register_metadata_catalogs",
+                                     [&] { metadata_catalogs_->SetAttribution(record.name); },
+                                     [&] { register_metadata(*metadata_catalogs_, context); },
+                                     [&] { metadata_catalogs_->ClearAttribution(); }, rollback)) {
+                return record;
+            }
+        }
+        const auto kinds_after = metadata_catalogs_->kinds();
+        std::set_difference(kinds_after.begin(), kinds_after.end(), kinds_before.begin(),
+                            kinds_before.end(),
+                            std::back_inserter(record.registered_metadata_catalog_kinds));
+        record.registered_metadata_fallback = metadata_catalogs_->fallbacks().size() >
+                                              fallbacks_before;
     }
 
     if (compaction_strategies_ != nullptr) {
