@@ -16,7 +16,7 @@ mkdir -p .agents && cp research.md .agents/../agents/   # <project>/agents/
 ```
 
 Project presets shadow global ones of the same stem (the shadowing is
-logged). The bundled presets (`build`, `plan`, `explore`, `general`) are
+logged). The bundled presets (`build`, `plan`, `explore`, `general`, `review`) are
 seeded into the config dir at install time and never overwritten; these
 examples live beside them once copied.
 

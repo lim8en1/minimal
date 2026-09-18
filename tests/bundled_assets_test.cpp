@@ -14,11 +14,14 @@
 // settings.json, permissions.json or agents/*.md either, and the server exited 1
 // on a cold start.
 
+#include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "minimal/agent/agent_preset_frontmatter.hpp"
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "temp_dir.hpp"
 
@@ -109,4 +112,38 @@ TEST_CASE("a preset's compression_prompt override wins over the seeded default",
 
     CHECK(registry.Resolve("brief").compression_prompt == "BE BRIEF.\n");
     CHECK(registry.Resolve("build").compression_prompt == "THE DEFAULT.\n");
+}
+
+TEST_CASE("every bundled/agents preset parses through the production load path",
+          "[bundled_assets][agent_preset]") {
+    // The shipped defaults are config-dir content like any other, and the same
+    // rot that took examples/ down (see examples_parse_test.cpp) would take these:
+    // nobody loads them in a test, so a frontmatter schema change turns each file
+    // into a broken default that fails only on a user's cold start.
+    //
+    // The stem is the address (FindPresetPath resolves agents/<stem>.md; --agent,
+    // /agent and spawn all name it), so a frontmatter `name:` that drifts from the
+    // stem resolves fine but surfaces the wrong identity -- the tab label and loop
+    // attribution read preset.name, and a bundled review.md carrying `name: plan`
+    // shipped exactly that way. Asserted per file below, not once.
+    const std::filesystem::path agents_dir =
+        std::filesystem::path(MINIMAL_BUNDLED_DIR) / "agents";
+    REQUIRE(std::filesystem::exists(agents_dir));
+
+    std::size_t checked = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(agents_dir)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".md") continue;
+        ++checked;
+        SECTION(entry.path().filename().string()) {
+            agent::AgentPresetFrontmatter preset;
+            REQUIRE_NOTHROW(preset = agent::LoadAgentPresetFrontmatter(entry.path()));
+            CHECK(preset.name == entry.path().stem().string());
+            CHECK(!preset.body.empty());
+            CHECK(!preset.description.empty());
+        }
+    }
+    // The set is five today (build, explore, general, plan, review); the bound
+    // catches the agents/ directory going missing under a renamed checkout root
+    // without pinning the test to every future preset addition.
+    CHECK(checked >= 2);
 }

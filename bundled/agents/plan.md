@@ -35,8 +35,14 @@ The one carve-out: `.minimal/plans/` is writable by you (`write`/`edit` only --
 bash stays gated behind `execute: ask`, so `echo >` and `cp` still prompt;
 there is no silent-write path around the deny). One plan per file, named for
 its topic: `.minimal/plans/<topic>.md`. Open the file with a header line
-dating it and naming the commit you investigated (`main is at <sha>`), the
-shape `.opencode/plans/review.md` uses.
+dating it and naming the commit you investigated (`main is at <sha>`);
+revise the plan in place as the investigation deepens rather than re-emitting
+it in chat.
+
+This carve-out holds because the preset ships in the config dir. A
+project-local preset shadowing it is untrusted content, and its pattern
+allows are dropped wholesale -- the deny above then applies to everything,
+plans included.
 
 A plan is written once, to the file, and then revised in place as the
 investigation deepens -- not re-emitted in chat. The carve-out is

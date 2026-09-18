@@ -36,7 +36,8 @@ minimal/
     client/                       # logo (the ASCII-banner start view)
   bundled/                    # non-code assets that ship WITH the binary
     prompts/{compression,subagent}.md  # all of it copied into the config dir by
-    agents/{plan,build}.md         #   `cmake --install` -- never read from here
+    agents/{build,explore,general,plan,review}.md
+                                   #   `cmake --install` -- never read from here
     settings.json  permissions.json   #   at runtime, never compiled into the binary
     providers.json  providers.example.json
     cost-rates.json                   # cost-tracker's fallback price table
@@ -1597,7 +1598,7 @@ variable the install rule uses, so overriding one moves both.
 
 **File format**: agents, skills, and prompts are Markdown with YAML frontmatter — the same convention Claude Code and opencode use: frontmatter for structured metadata, Markdown body for prompt text, loaded verbatim. `src/server/config/frontmatter.{hpp,cpp}` provides `parse_frontmatter_markdown(contents) -> {YAML::Node frontmatter, std::string body}` (split on `---` delimiters, frontmatter to **yaml-cpp**, remainder as body). The `.json` files stay plain JSON — harness config, not prompt content, with no body to split.
 
-- **`agents/*.md`** — presets: frontmatter `name, description, model, allowed_tools, allowed_skills, allowed_mcp_servers, permission_mode: {read_only, file_write, execute, out_of_workdir, network, overrides}, mcp_permissions: {<server>: allow|ask|deny}, compression_prompt?, tool_config?: {<namespace>: {...}}`; **body is the system prompt directly**. `model` is a `<provider>/<model>` reference, or absent to take `settings.default_model`. `tool_config` carries per-tool/per-plugin configuration VERBATIM ({namespace: {...}}), structural (never provider passthrough), delivered to each tool per-invocation as its own `config_namespace()` slice on `ToolContext` (§ Core tools; the collision/typo discipline mirrors permission keys: unclaimed namespace warns, cross-plugin claim is fatal). `plan.md` and `build.md` ship in `bundled/agents/` and are seeded like everything else there.
+- **`agents/*.md`** — presets: frontmatter `name, description, model, allowed_tools, allowed_skills, allowed_mcp_servers, permission_mode: {read_only, file_write, execute, out_of_workdir, network, overrides}, mcp_permissions: {<server>: allow|ask|deny}, compression_prompt?, tool_config?: {<namespace>: {...}}`; **body is the system prompt directly**. `model` is a `<provider>/<model>` reference, or absent to take `settings.default_model`. `tool_config` carries per-tool/per-plugin configuration VERBATIM ({namespace: {...}}), structural (never provider passthrough), delivered to each tool per-invocation as its own `config_namespace()` slice on `ToolContext` (§ Core tools; the collision/typo discipline mirrors permission keys: unclaimed namespace warns, cross-plugin claim is fatal). `build.md`, `explore.md`, `general.md`, `plan.md` and `review.md` ship in `bundled/agents/` and are seeded like everything else there.
 - **`prompts/subagent.md`** — plain Markdown, no frontmatter. Prepended to the resolved preset's body whenever `parent_session_id` is non-null. Also seeded.
 - **`prompts/compression.md`** — default compaction prompt; a preset's `compression_prompt` overrides it, resolved relative to this directory. **Seeded from `bundled/prompts/` by `cmake --install` and never overwritten after** — see *Bundled assets* below.
 - **`skills/<name>/SKILL.md`** (+ supporting files) — lazy-loaded: frontmatter (`name`, `description`) resident in the registry; body loads only on invocation.
