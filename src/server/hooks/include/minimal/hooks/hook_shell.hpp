@@ -36,6 +36,10 @@ struct ShellActionResult {
     ShellActionOutcome outcome = ShellActionOutcome::kPass;
     std::string block_reason;  // set when kBlock
     std::string fail_reason;   // set when kFailOpen; logged, never surfaced to the model
+    // Non-empty when a backstop was clamped to the host's hard cap (see
+    // sidecar's ClampRlimit, the same mechanism): one line per clamp. Callers
+    // log it; the hook still runs -- a degraded backstop beats a dead child.
+    std::string warnings;
 };
 
 // `timeout` <= 0 disables the wall-clock budget (cancellation still applies).

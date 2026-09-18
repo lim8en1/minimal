@@ -22,6 +22,29 @@ namespace {
 constexpr int kPostKillReapMs = 5000;
 }  // namespace
 
+// --- ClampRlimit ---------------------------------------------------------------------
+
+rlim_t ClampRlimit(rlim_t requested, rlim_t hard_cap, std::string* warnings) {
+    // An unlimited hard cap (the normal host) can absorb any request, and a
+    // request at or under it needs no adjustment: setrlimit will succeed.
+    if (hard_cap == RLIM_INFINITY || requested <= hard_cap) return requested;
+
+    // The host caps this resource below the request (container, sandbox,
+    // systemd unit). Raising is EPERM -- degrade to the tightest enforceable
+    // bound instead of letting the child die at its own setrlimit check.
+    if (warnings != nullptr) {
+        if (requested == RLIM_INFINITY) {
+            *warnings += "rlimit: requested unlimited, host hard cap is " +
+                         std::to_string(hard_cap) + "; child runs under the cap\n";
+        } else {
+            *warnings += "rlimit: requested " + std::to_string(requested) +
+                         ", host hard cap is " + std::to_string(hard_cap) +
+                         "; child runs under the cap\n";
+        }
+    }
+    return hard_cap;
+}
+
 // --- ScopedFd ------------------------------------------------------------------------
 
 ScopedFd::~ScopedFd() { reset(); }
@@ -109,7 +132,10 @@ bool ReapAfterKill(pid_t pid) {
         const pid_t rc = waitpid(pid, &status, WNOHANG);
         if (rc == pid) return true;
         if (rc < 0 && errno == EINTR) continue;
-        if (rc < 0) return false;  // ECHILD: reaped elsewhere
+        // ECHILD: the child is gone already (reaped elsewhere) -- there is
+        // nothing left to wait for, which is success, not failure. Any other
+        // waitpid error is reported.
+        if (rc < 0) return errno == ECHILD;
         poll(nullptr, 0, 25);
     }
     return false;
@@ -213,9 +239,24 @@ Launched Launch(const LaunchSpec& spec) {
     argvp.push_back(nullptr);
 
     const std::string cwd_string = spec.cwd.string();
-    const rlim_t cpu = spec.cpu_seconds > 0 ? static_cast<rlim_t>(spec.cpu_seconds)
-                                            : RLIM_INFINITY;
-    const rlim_t fsize = static_cast<rlim_t>(spec.file_size_bytes);
+    // Backstops are computed in the parent, clamped to the inherited hard
+    // caps: a request above a hard cap is EPERM in the child (a hard limit
+    // cannot be raised), which since its setrlimit is checked would kill the
+    // child before exec. Clamping keeps the spawn alive -- the child runs
+    // under the host's own ceiling, the tightest enforceable backstop.
+    rlim_t cpu = spec.cpu_seconds > 0 ? static_cast<rlim_t>(spec.cpu_seconds) : RLIM_INFINITY;
+    rlim_t fsize = static_cast<rlim_t>(spec.file_size_bytes);
+    {
+        rlimit inherited{};
+        if (getrlimit(RLIMIT_CPU, &inherited) == 0) {
+            cpu = ClampRlimit(cpu, inherited.rlim_max, &proc.warnings);
+        }
+        if (getrlimit(RLIMIT_FSIZE, &inherited) == 0) {
+            fsize = ClampRlimit(fsize, inherited.rlim_max, &proc.warnings);
+        }
+        // A failed getrlimit leaves the request untouched: the child's
+        // checked setrlimit remains the last line of defense.
+    }
 
     const pid_t pid = fork();
     if (pid < 0) {
@@ -240,11 +281,11 @@ Launched Launch(const LaunchSpec& spec) {
 
         // RLIMIT_CPU is a backstop for CPU-bound runaways; the wall-clock
         // deadline normally fires first. The grace keeps the two from racing on
-        // a command that legitimately spends its budget. Checked, like
-        // hook_shell.cpp's identical limits: an inherited hard rlimit already
-        // below the requested value makes setrlimit fail (EPERM) rather than
-        // clamp, and silently ignoring that would run the child with no
-        // CPU/file-size backstop at all -- defeating the point of setting one.
+        // a command that legitimately spends its budget. Launch() already
+        // clamped both requests to the inherited hard caps, so these checks
+        // are not expected to fire -- they stay as defense in depth: an
+        // unchecked setrlimit failure would leave the child with no
+        // CPU/file-size backstop at all, silently defeating the point.
         rlimit cpu_limit{};
         cpu_limit.rlim_cur = cpu_limit.rlim_max = cpu;
         if (setrlimit(RLIMIT_CPU, &cpu_limit) != 0) _exit(child_die("setrlimit(RLIMIT_CPU) failed"));

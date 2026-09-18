@@ -174,6 +174,11 @@ std::optional<std::string> HookDispatcher::RunActions(
         if (!FilterMatches(action, payload)) continue;
         const auto result =
             RunShellAction(action.command, payload.dump(), action.timeout, is_cancelled);
+        // Degraded backstops (host caps RLIMIT_* below the request) still run:
+        // say so, or a capped host's hooks run silently weaker than asked.
+        if (!result.warnings.empty()) {
+            logger_.warn("hook action on '{}' degraded: {}", entry.spec.name, result.warnings);
+        }
         switch (result.outcome) {
             case ShellActionOutcome::kPass:
                 break;

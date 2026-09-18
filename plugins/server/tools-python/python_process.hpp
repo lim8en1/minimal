@@ -45,6 +45,9 @@ struct LaunchedInterpreter {
     int diag_fd = -1;    // parent drains diagnostics here (capped, on death)
     int stream_fd = -1;  // parent drains live stdout deltas here
     int user_in_fd = -1; // parent writes python_input lines here
+    // Non-empty when Launch() had to clamp an rlimit backstop to the host's
+    // hard cap (see ClampRlimit); log it -- the child runs degraded, not dead.
+    std::string warnings;
 };
 
 // fork + execve of `argv` with `cwd` as the working directory, over the

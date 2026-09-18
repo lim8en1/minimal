@@ -100,6 +100,12 @@ std::shared_ptr<Interpreter> Interpreter::Spawn(const InterpreterConfig& config,
         *error = "failed to start " + config.python_path + ": " + proc.spawn_error;
         return nullptr;
     }
+    // Degraded backstops (host caps RLIMIT_* below the request) still start:
+    // say so, or a capped host's interpreters run silently weaker than asked.
+    if (!proc.warnings.empty()) {
+        logger.warn("python[{}]: rlimit backstops clamped by the host: {}", proc.pid,
+                    proc.warnings);
+    }
 
     // The interpreter owns the reader thread JOINABLY: the destructor kills
     // the process first (EOF wakes the reader within one poll slice) and joins

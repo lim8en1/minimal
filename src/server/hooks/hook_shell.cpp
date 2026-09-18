@@ -1,4 +1,5 @@
 #include "minimal/hooks/hook_shell.hpp"
+#include "minimal/sidecar/process.hpp"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -127,6 +128,25 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
         timeout.count() > 0 ? timeout : (cancellable ? std::chrono::milliseconds::zero()
                                                      : kUncancellableFloor);
 
+    // Backstop values are computed AND clamped in the parent, before fork:
+    // a request above the inherited hard cap is EPERM in the child (a hard
+    // limit cannot be raised), which since the child's setrlimit is checked
+    // would kill the hook before exec. Clamping keeps the hook running --
+    // under the host's own ceiling, the tightest enforceable backstop. Same
+    // mechanism as the sidecar launcher's ClampRlimit.
+    const bool backstops = effective.count() > 0;
+    rlim_t cpu = backstops ? static_cast<rlim_t>(effective.count() / 1000) + 5 : 0;
+    rlim_t fsize = kMaxHookFileSizeBytes;
+    if (backstops) {
+        rlimit inherited{};
+        if (getrlimit(RLIMIT_CPU, &inherited) == 0) {
+            cpu = minimal::sidecar::ClampRlimit(cpu, inherited.rlim_max, &result.warnings);
+        }
+        if (getrlimit(RLIMIT_FSIZE, &inherited) == 0) {
+            fsize = minimal::sidecar::ClampRlimit(fsize, inherited.rlim_max, &result.warnings);
+        }
+    }
+
     const pid_t pid = fork();
     if (pid < 0) {
         result.outcome = ShellActionOutcome::kFailOpen;
@@ -142,17 +162,19 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
         // server's stdin or writing over its stderr.
         if (setsid() == -1) _exit(127);  // pgid == pid: killpg reaches the whole tree.
 
-        if (effective.count() > 0) {
+        if (backstops) {
             // CPU backstop behind the wall-clock deadline, like the bash tool.
-            rlimit cpu{};
-            cpu.rlim_cur = cpu.rlim_max = static_cast<rlim_t>(effective.count() / 1000) + 5;
-            if (setrlimit(RLIMIT_CPU, &cpu) != 0) _exit(127);
+            // Pre-clamped in the parent (see above), so these checks are not
+            // expected to fire -- they stay as defense in depth.
+            rlimit cpu_l{};
+            cpu_l.rlim_cur = cpu_l.rlim_max = cpu;
+            if (setrlimit(RLIMIT_CPU, &cpu_l) != 0) _exit(127);
 
             // Filesize backstop, matching the bash tool: a runaway script
             // redirecting to a file must not fill the disk unbounded.
-            rlimit fsize{};
-            fsize.rlim_cur = fsize.rlim_max = kMaxHookFileSizeBytes;
-            if (setrlimit(RLIMIT_FSIZE, &fsize) != 0) _exit(127);
+            rlimit fsize_l{};
+            fsize_l.rlim_cur = fsize_l.rlim_max = fsize;
+            if (setrlimit(RLIMIT_FSIZE, &fsize_l) != 0) _exit(127);
         }
 
         if (dup2(in_read.get(), STDIN_FILENO) == -1) _exit(127);

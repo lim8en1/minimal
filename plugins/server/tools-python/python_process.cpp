@@ -44,6 +44,7 @@ LaunchedInterpreter LaunchInterpreter(const std::vector<std::string>& argv,
     proc.ok = launched.ok;
     proc.spawn_error = std::move(launched.spawn_error);
     proc.pid = launched.pid;
+    proc.warnings = std::move(launched.warnings);
     if (launched.ok && launched.parent_fds.size() == 5) {
         proc.in_fd = launched.parent_fds[0].release();
         proc.diag_fd = launched.parent_fds[1].release();

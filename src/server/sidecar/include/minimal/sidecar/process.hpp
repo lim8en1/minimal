@@ -84,8 +84,8 @@ struct LaunchSpec {
     // When no Dup targets fd 0, the child's stdin is /dev/null -- without
     // this, a child inherits the server's stdin and any command that reads
     // fd 0 blocks until the deadline.
-    std::int64_t cpu_seconds = 0;  // 0 = RLIMIT_CPU unlimited (no backstop)
-    std::int64_t file_size_bytes = 1LL << 30;  // RLIMIT_FSIZE backstop
+    std::int64_t cpu_seconds = 0;  // 0 = unlimited; clamped to the host's hard cap by Launch()
+    std::int64_t file_size_bytes = 1LL << 30;  // RLIMIT_FSIZE backstop; clamped likewise
 };
 
 // The parent-side handles of a launched process. All fds are O_CLOEXEC and
@@ -97,9 +97,22 @@ struct Launched {
     std::string spawn_error;
     pid_t pid = -1;
     std::vector<ScopedFd> parent_fds;
+    // Non-empty when a backstop was clamped to the host's hard cap (see
+    // ClampRlimit): one line per clamp, naming the limit, what was requested,
+    // and what the child will actually run under. Callers log it; the spawn
+    // still succeeds -- a degraded backstop beats a dead child.
+    std::string warnings;
 };
 
 Launched Launch(const LaunchSpec& spec);
+
+// The largest value setrlimit(resource) can actually set in a child of THIS
+// process: `requested` clamped to `hard_cap` (an RLIM_INFINITY hard cap never
+// clamps). The launcher calls this with the limit's inherited rlim_max so a
+// request above it degrades to the cap instead of dying at the child's
+// setrlimit check (EPERM: a hard limit cannot be raised). Appends a
+// human-readable line to `*warnings` when it clamps; `warnings` may be null.
+rlim_t ClampRlimit(rlim_t requested, rlim_t hard_cap, std::string* warnings);
 
 // SIGKILL the process group, plus the pid itself to cover the fork-to-setsid
 // window (between them the child's pgid is still ours and killpg finds no
@@ -110,7 +123,8 @@ void KillProcessGroup(pid_t pid);
 // 5 s (a D-state child never becomes reapable, and a blocking waitpid would
 // park a session worker forever). Returns false when the child was not
 // reaped within the budget -- the caller decides whether that is worth
-// logging; the child is a zombie at worst, never a hang.
+// logging; the child is a zombie at worst, never a hang. ECHILD counts as
+// reaped: the child is gone (reaped elsewhere), no residue, not a failure.
 bool ReapAfterKill(pid_t pid);
 
 // The process-global pgid set + atexit sweep. THE SWEEP IS A BACKSTOP FOR
