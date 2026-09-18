@@ -185,7 +185,7 @@ TEST_CASE("AllowOnly run mode auto-denies rather than blocking", "[tool_executor
     CHECK(f.tool->calls.empty());
 }
 
-TEST_CASE("Bypass overrides an explicit deny", "[tool_executor][run_mode]") {
+TEST_CASE("Bypass preserves an explicit deny", "[tool_executor][run_mode]") {
     Fixture f;
     f.AddTool("bash", ToolCategory::Execute);
     UnreachablePermissionChecker checker;
@@ -195,8 +195,84 @@ TEST_CASE("Bypass overrides an explicit deny", "[tool_executor][run_mode]") {
     auto ctx = f.Context();
     const auto block = executor.Run("tu1", "bash", nlohmann::json::object(), ctx);
 
+    CHECK(block.is_error);
+    CHECK_FALSE(checker.called);
+    CHECK(f.tool->calls.empty());
+}
+
+TEST_CASE("Bypass auto-approves an Ask without prompting", "[tool_executor][run_mode]") {
+    Fixture f;
+    f.AddTool("bash", ToolCategory::Execute);
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.execute = PermissionMode::Ask;
+
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Bypass);
+    auto ctx = f.Context();
+    const auto block = executor.Run("tu1", "bash", nlohmann::json::object(), ctx);
+
     CHECK_FALSE(block.is_error);
+    CHECK_FALSE(checker.called);
     CHECK(f.tool->calls.size() == 1);
+}
+
+TEST_CASE("Bypass cannot write past a file_write deny, but still approves Ask tools",
+          "[tool_executor][run_mode]") {
+    // The plan-preset shape: file_write denied, execute left at Ask.
+    Fixture f;
+    auto& write = f.AddTool("write", ToolCategory::FileWrite);
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.file_write = PermissionMode::AlwaysDeny;
+    policy.execute = PermissionMode::Ask;
+
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Bypass);
+    auto ctx = f.Context();
+
+    CHECK(executor.Run("t1", "write", nlohmann::json::object(), ctx).is_error);
+    CHECK(write.calls.empty());
+    CHECK_FALSE(executor.Run("t2", "bash", nlohmann::json::object(), ctx).is_error);
+    CHECK(bash.calls.size() == 1);
+    CHECK_FALSE(checker.called);
+}
+
+TEST_CASE("Bypass cannot read past a deny pattern", "[tool_executor][run_mode][patterns]") {
+    testing::TempDir dir;
+    std::filesystem::create_directories(dir.path() / "root");
+    std::ofstream(dir.path() / "root" / ".env") << "SECRET=1";
+    std::ofstream(dir.path() / "root" / "main.cpp") << "int main(){}";
+
+    Fixture f;
+    auto& read = f.AddTool("read", ToolCategory::ReadOnly);
+    read.set_path_key("path");
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.pattern_overrides["read"].push_back({"**/.env", PermissionMode::AlwaysDeny});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Bypass);
+    auto ctx = f.Context(dir.path() / "root");
+
+    CHECK(executor.Run("t1", "read", {{"path", ".env"}}, ctx).is_error);
+    CHECK_FALSE(executor.Run("t2", "read", {{"path", "main.cpp"}}, ctx).is_error);
+}
+
+TEST_CASE("Bypass cannot loosen a parent ceiling's deny", "[tool_executor][run_mode][ceiling]") {
+    Fixture f;
+    f.AddTool("bash", ToolCategory::Execute);
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy ceiling = AllowAllPolicy();
+    ceiling.execute = PermissionMode::AlwaysDeny;
+
+    tools::ToolExecutor executor(f.registry, checker, AllowAllPolicy(), {},
+                                 PermissionRunMode::Bypass, ceiling);
+    auto ctx = f.Context();
+
+    CHECK(executor.Run("tu1", "bash", nlohmann::json::object(), ctx).is_error);
+    CHECK(f.tool->calls.empty());
 }
 
 TEST_CASE("out-of-workdir folds in and cannot loosen the tool's own mode",

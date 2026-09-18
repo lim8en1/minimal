@@ -272,7 +272,7 @@ An advisor sits **below** `ResolveMode` and **above** the wire checker. Everythi
 | `AlwaysDeny` short-circuit | `tool_executor.cpp:175-178` | Never sees a denied tool at all |
 | Policy + out-of-workdir fold | `tool_executor.cpp:47-100` | Cannot overturn `file_write: deny` |
 | Subagent ceilings | `tool_executor.cpp:86-96` | A child's advisor cannot exceed its parent |
-| Run mode (`AllowOnly`/`Bypass`) | `tool_executor.cpp:99` | Under `AllowOnly`, `Ask` → `AlwaysDeny` short-circuits *before* the advisor — an auto-approver cannot smuggle approvals into headless runs |
+| Run mode (`AllowOnly`/`Bypass`) | `tool_executor.cpp:239` (`apply_run_mode`) | Under `AllowOnly`, `Ask` → `AlwaysDeny` short-circuits *before* the advisor — an auto-approver cannot smuggle approvals into headless runs. `Bypass` turns `Ask` → `AlwaysAllow` the same way; `AlwaysDeny` is preserved |
 | Grant minting | Double filter: `tool_executor.cpp:199-205` + `proto_convert.cpp:493-498` | May grant only keys the disclosure offered — already guaranteed, no new code |
 | Cancel semantics | Template exists: `wire_permission_checker.cpp` maps cancel/no-answer → Deny | Must map cancellation → abstain or Deny; never block through a cancel |
 

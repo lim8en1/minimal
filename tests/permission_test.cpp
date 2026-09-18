@@ -50,8 +50,10 @@ TEST_CASE("network folds in rather than substituting", "[permission]") {
 }
 
 TEST_CASE("apply_run_mode", "[permission]") {
-    SECTION("Bypass allows everything, ignoring the base") {
-        CHECK(apply_run_mode(PermissionMode::AlwaysDeny, PermissionRunMode::Bypass) == PermissionMode::AlwaysAllow);
+    SECTION("Bypass turns Ask into Allow but never overrides a Deny") {
+        CHECK(apply_run_mode(PermissionMode::Ask, PermissionRunMode::Bypass) == PermissionMode::AlwaysAllow);
+        CHECK(apply_run_mode(PermissionMode::AlwaysAllow, PermissionRunMode::Bypass) == PermissionMode::AlwaysAllow);
+        CHECK(apply_run_mode(PermissionMode::AlwaysDeny, PermissionRunMode::Bypass) == PermissionMode::AlwaysDeny);
     }
     SECTION("AllowOnly turns Ask into Deny so headless runs never block") {
         CHECK(apply_run_mode(PermissionMode::Ask, PermissionRunMode::AllowOnly) == PermissionMode::AlwaysDeny);
@@ -124,4 +126,37 @@ TEST_CASE("MCP permission is server-scoped", "[permission][mcp]") {
 
     CHECK(policy.mode_for("trusted-search") == PermissionMode::AlwaysAllow);
     CHECK(policy.mode_for("anything-else") == PermissionMode::Ask);
+}
+
+TEST_CASE("allow_eligible=false keeps allow rules inert but ask/deny rules live", "[permission][patterns]") {
+    PermissionPolicy policy;
+    policy.execute = PermissionMode::AlwaysDeny;
+    policy.pattern_overrides["bash"] = {{"git status", PermissionMode::AlwaysAllow},
+                                        {"git status *", PermissionMode::AlwaysAllow},
+                                        {"git *--output*", PermissionMode::AlwaysDeny},
+                                        {"git log", PermissionMode::Ask}};
+
+    PatternSubjects eligible;
+    eligible.whole = "git status";
+    eligible.stages = {"git status"};
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, eligible, false) == PermissionMode::AlwaysAllow);
+
+    // Same stages, but the tool vouches for nothing (e.g. `git status > f`): the
+    // allow rule no longer applies and the category default stands.
+    PatternSubjects ineligible = eligible;
+    ineligible.allow_eligible = false;
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, ineligible, false) == PermissionMode::AlwaysDeny);
+
+    // No stages at all + ineligible: the whole-line fallback must not let an allow through either.
+    PatternSubjects whole_only;
+    whole_only.whole = "git status --short";
+    whole_only.allow_eligible = false;
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, whole_only, false) == PermissionMode::AlwaysDeny);
+
+    // ask/deny rules still fold when ineligible.
+    PatternSubjects asked;
+    asked.whole = "git log";
+    asked.stages = {"git log"};
+    asked.allow_eligible = false;
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, asked, false) == PermissionMode::Ask);
 }

@@ -66,7 +66,7 @@ PermissionMode PermissionPolicy::mode_for(std::string_view tool_name, ToolCatego
 PermissionMode PermissionPolicy::mode_for(std::string_view tool_name, ToolCategory category,
                                           const PatternSubjects& subjects,
                                           bool subject_is_path) const {
-    if (subjects.stages.empty()) {
+    if (subjects.stages.empty() && subjects.allow_eligible) {
         // No staged view of this invocation: exactly the old behavior.
         return mode_for(tool_name, category, subjects.whole, subject_is_path);
     }
@@ -101,7 +101,11 @@ PermissionMode PermissionPolicy::mode_for(std::string_view tool_name, ToolCatego
     // must match some allow rule; any unmatched stage leaves the fold below in
     // charge. This is the one place the whole-line subject is NOT consulted --
     // an allow rule's reach is per program, never the unstructured line.
-    if (rules) {
+    // Skipped when the tool vouched the decomposition is not trustworthy
+    // (allow_eligible = false: a stage writes a file, or the parse is shaky):
+    // allow rules go inert -- for the whole-line fallback too -- while ask/deny
+    // above still apply, so `"git status": allow` never rides `git status > f`.
+    if (rules && subjects.allow_eligible && !subjects.stages.empty()) {
         bool all_allowed = true;
         for (const auto& stage : subjects.stages) {
             const auto mode = FoldPatterns(*rules, stage, subject_is_path);

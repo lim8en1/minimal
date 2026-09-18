@@ -208,6 +208,17 @@ public:
         return std::nullopt;
     }
 
+    // Whether allow-mode pattern rules may act on this invocation's stages. A
+    // tool whose decomposition can be shaky or can hide a side effect the
+    // stages do not name (bash: an unparseable program, an output redirect)
+    // returns false, which keeps allow rules inert -- ask/deny rules still match
+    // -- so the category default stands. Default true. A wrapper must forward
+    // this like PatternStages.
+    virtual bool PatternAllowEligible(const nlohmann::json& input) const {
+        (void)input;
+        return true;
+    }
+
     // Declarative opt-in, same shape as path_confinement_supported(): a tool
     // that reaches the network (S3's web_fetch/web_search) sets this true so
     // ToolExecutor folds in PermissionPolicy::network via most_restrictive.

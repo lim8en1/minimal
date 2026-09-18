@@ -120,6 +120,7 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
         // pattern-carrying policy pays for the decomposition (the same gate as
         // the subject above); a pattern-free pair never sees this work.
         subjects.stages = tool.PatternStages(input).value_or(std::vector<std::string>{});
+        subjects.allow_eligible = tool.PatternAllowEligible(input);
     }
 
     PermissionMode mode =

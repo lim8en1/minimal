@@ -258,9 +258,10 @@ public:
 
     // Stages: what the scanner already parses out of the command string (one
     // per `command` node -- pipeline stages, subshells, substitutions), handed
-    // to the pattern layer. Eligibility is the scanner's call: when the parse
-    // is shaky or a stage writes a file, the fold keeps allow rules off and
-    // this list is inert extra matching surface for ask/deny rules.
+    // to the pattern layer. Eligibility is the scanner's call, surfaced through
+    // PatternAllowEligible below: when the parse is shaky or a stage writes a
+    // file, allow rules go inert and this list is extra matching surface for
+    // ask/deny rules only.
     std::optional<std::vector<std::string>> PatternStages(
         const nlohmann::json& input) const override {
         if (!input.is_object() || !input.contains("command") ||
@@ -270,6 +271,17 @@ public:
         const auto command = input.at("command").get<std::string>();
         if (command.find_first_not_of(" \t\r\n") == std::string::npos) return std::nullopt;
         return ScanCommand(command).stages;
+    }
+
+    // The scanner's verdict: an incomplete parse (`$X args`, `eval "$CMD"`) or
+    // a stage with a real output redirect (`git log > f`) is not what an allow
+    // rule on `git log` vouched for, so allow rules stay inert for it.
+    bool PatternAllowEligible(const nlohmann::json& input) const override {
+        if (!input.is_object() || !input.contains("command") ||
+            !input.at("command").is_string()) {
+            return false;
+        }
+        return ScanCommand(input.at("command").get<std::string>()).allow_eligible;
     }
 
     // Bash keeps the interface default for path confinement: there is no sound

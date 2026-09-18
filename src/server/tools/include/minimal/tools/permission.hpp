@@ -45,7 +45,10 @@ constexpr PermissionMode most_restrictive(PermissionMode a, PermissionMode b) {
 // Least to most permissive.
 enum class PermissionRunMode { AllowOnly, Normal, Bypass };
 
-// Bypass    -> AlwaysAllow, ignoring `base` entirely.
+// Bypass    -> base's Allow/Deny pass through; base's Ask becomes Allow. Bypass
+//              answers prompts on the operator's behalf; it never overrides a
+//              configured or preset Deny (a plan agent's `file_write: deny`, a
+//              dotenv pattern, a parent ceiling all still hold).
 // AllowOnly -> base's Allow/Deny pass through; base's Ask becomes Deny, so a
 //              non-interactive run auto-denies instead of blocking forever on a
 //              human who was never attached.
@@ -53,7 +56,7 @@ enum class PermissionRunMode { AllowOnly, Normal, Bypass };
 constexpr PermissionMode apply_run_mode(PermissionMode base, PermissionRunMode run_mode) {
     switch (run_mode) {
         case PermissionRunMode::Bypass:
-            return PermissionMode::AlwaysAllow;
+            return base == PermissionMode::Ask ? PermissionMode::AlwaysAllow : base;
         case PermissionRunMode::AllowOnly:
             return base == PermissionMode::Ask ? PermissionMode::AlwaysDeny : base;
         case PermissionRunMode::Normal:
@@ -82,6 +85,9 @@ struct PermissionPatternRule {
 struct PatternSubjects {
     std::optional<std::string> whole;
     std::vector<std::string> stages;  // empty = no staged matching
+    // false = allow-mode pattern rules must not act on this invocation (the
+    // tool could not vouch for the decomposition). ask/deny rules still match.
+    bool allow_eligible = true;
 };
 
 struct PermissionPolicy {

@@ -49,7 +49,7 @@ seeding): **[BUILD.md](BUILD.md)**.
 | `--model P/M` | model as `<provider>/<model>` (overrides preset and settings) |
 | `--output-format text\|jsonl` | headless output format (`json` is a `--list-sessions` listing) |
 | `--signals LIST` | comma-separated signals to receive (requires `-p`) |
-| `--dangerously-bypass` | bypass permission gating |
+| `--dangerously-bypass` | auto-approve permission prompts (configured denies still apply) |
 | `--no-autospawn` | never start a server; fail if none is reachable |
 
 A headless run prints the session id it used — `[session <id>]` on stderr in

@@ -23,6 +23,15 @@
 
 #include "minimal/agent/agent_preset_frontmatter.hpp"
 #include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/agent/permission_resolution.hpp"
+#include "minimal/tools/tool_executor.hpp"
+#include "minimal/tools/tool_registry.hpp"
+
+#include "background_registry.hpp"
+#include "bash_session_state.hpp"
+#include "bash_settings.hpp"
+#include "bash_tool.hpp"
+#include "fakes.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
@@ -147,4 +156,95 @@ TEST_CASE("every bundled/agents preset parses through the production load path",
     // catches the agents/ directory going missing under a renamed checkout root
     // without pinning the test to every future preset addition.
     CHECK(checked >= 2);
+}
+
+TEST_CASE("the bundled plan preset: bash is deny + atomic allow, write is denied, in every run mode",
+          "[bundled][plan][permissions]") {
+    // Loads the real bundled/agents/plan.md and drives it through a real
+    // ToolExecutor + bash tool. Bypass must change nothing here: it approves
+    // prompts, and this preset asks nothing -- every outcome is allow or deny.
+    const auto preset = agent::LoadAgentPresetFrontmatter(
+        std::filesystem::path(MINIMAL_BUNDLED_DIR) / "agents" / "plan.md",
+        {"bash", "read", "write", "edit", "glob", "grep"});
+    const auto policy = agent::BuildPermissionPolicy(preset.permission_mode, {},
+                                                     /*preset_is_trusted=*/true,
+                                                     {"read", "write", "edit"});
+
+    for (const auto run_mode : {tools::PermissionRunMode::Normal, tools::PermissionRunMode::Bypass,
+                                tools::PermissionRunMode::AllowOnly}) {
+        testing::TempDir dir;
+        tools_bash::BashSessionStateStore store;
+        tools_bash::BackgroundTaskRegistry background;
+        tools::ToolRegistry registry;
+        registry.Register(tools_bash::MakeBashTool(tools_bash::BashSettings{}, store, background));
+        auto write = std::make_unique<testing::FakeTool>("write", tools::ToolCategory::FileWrite);
+        write->set_path_key("path");
+        auto* write_raw = write.get();
+        registry.Register(std::move(write));
+        auto edit = std::make_unique<testing::FakeTool>("edit", tools::ToolCategory::FileWrite);
+        edit->set_path_key("path");
+        auto* edit_raw = edit.get();
+        registry.Register(std::move(edit));
+
+        testing::UnreachablePermissionChecker checker;
+        tools::ToolExecutor executor(registry, checker, policy, {}, run_mode);
+        tools::ToolContext ctx{common::DefaultLogger()};
+        ctx.session_id = "s1";
+        ctx.project_root = dir.path();
+        ctx.emit_output = [](std::string_view) {};
+        int n = 0;
+        auto bash = [&](const std::string& command) {
+            return executor.Run("t" + std::to_string(++n), "bash", {{"command", command}}, ctx);
+        };
+
+        SECTION("atomic read-only programs run, alone and piped") {
+            CHECK_FALSE(bash("pwd").is_error);
+            CHECK_FALSE(bash("ls").is_error);
+            CHECK_FALSE(bash("ls | wc -l").is_error);
+        }
+        SECTION("everything not on the list is denied outright, never prompted") {
+            CHECK(bash("touch made.txt").is_error);
+            CHECK(bash("rm -rf .").is_error);
+            CHECK(bash("sed -i s/a/b/ f").is_error);
+            CHECK(bash("git commit -m x").is_error);
+            CHECK_FALSE(std::filesystem::exists(dir.path() / "made.txt"));
+        }
+        SECTION("one uncovered stage denies the whole pipeline or list") {
+            CHECK(bash("ls | tee out.txt").is_error);
+            CHECK(bash("ls; touch made.txt").is_error);
+            CHECK(bash("ls && touch made.txt").is_error);
+            CHECK(bash("ls $(touch made.txt)").is_error);
+            CHECK_FALSE(std::filesystem::exists(dir.path() / "made.txt"));
+        }
+        SECTION("an output redirect makes an allowed program ineligible") {
+            CHECK(bash("ls > out.txt").is_error);
+            CHECK(bash("pwd >> out.txt").is_error);
+            CHECK(bash("git log > out.txt").is_error);
+            CHECK_FALSE(std::filesystem::exists(dir.path() / "out.txt"));
+        }
+        SECTION("an unparseable program name is not an allowed program") {
+            CHECK(bash("P=touch; $P made.txt").is_error);
+            CHECK(bash("eval \"touch made.txt\"").is_error);
+            CHECK_FALSE(std::filesystem::exists(dir.path() / "made.txt"));
+        }
+        SECTION("flags that turn an allowed program into a writer or launcher are denied") {
+            CHECK(bash("git log --output=out.txt").is_error);
+            CHECK(bash("git diff --output=out.txt").is_error);
+            CHECK(bash("rg --pre=touch x").is_error);
+            CHECK_FALSE(std::filesystem::exists(dir.path() / "out.txt"));
+        }
+        SECTION("write/edit: only .minimal/plans/** is open, .env never") {
+            for (const auto* tool : {"write", "edit"}) {
+                CHECK_FALSE(executor
+                                .Run("p", tool, {{"path", ".minimal/plans/topic.md"}}, ctx)
+                                .is_error);
+                CHECK(executor.Run("s", tool, {{"path", "src/a.cpp"}}, ctx).is_error);
+                CHECK(executor.Run("e", tool, {{"path", ".env"}}, ctx).is_error);
+                CHECK(executor.Run("n", tool, {{"path", ".minimal/plans/.env"}}, ctx).is_error);
+            }
+            CHECK(write_raw->calls.size() == 1);
+            CHECK(edit_raw->calls.size() == 1);
+        }
+        CHECK_FALSE(checker.called);  // nothing was ever ask-gated
+    }
 }
