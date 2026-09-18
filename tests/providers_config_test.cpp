@@ -1872,7 +1872,10 @@ TEST_CASE("metadata_match carries the entry's policy and the provider pin rides 
     CHECK(hook.asked_ids.front() == "m");
 }
 
-TEST_CASE("\"metadata\": false declines enrichment for the entry", "[providers][metadata]") {
+// No double quotes in the name: catch_discover_tests hands it to ctest as a
+// filter, and the quoting does not survive the round trip on Linux ("No test
+// cases matched").
+TEST_CASE("metadata=false declines enrichment for the entry", "[providers][metadata]") {
     auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
       "providers": {"p": {"backend": "openai", "url": "http://x/v1", "metadata": false,
                           "models": {"m": {}}}}

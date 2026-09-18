@@ -142,7 +142,9 @@ TEST_CASE("DrainAndReap drains more than 16 pipe plans", "[sidecar][process][reg
     const int excess_fd = 100 + kExcessIndex;
     const std::string script = "dd if=/dev/zero bs=1024 count=256 >&" +
                                std::to_string(excess_fd) + " 2>/dev/null; echo done >&100";
-    spec.argv = {"/bin/sh", "-c", script};
+    // bash, not /bin/sh: Debian/Ubuntu's sh is dash, which only accepts
+    // single-digit fds in redirections ("Bad fd number" for >&100).
+    spec.argv = {"/bin/bash", "-c", script};
     spec.cwd = std::filesystem::temp_directory_path();
 
     auto launched = Launch(spec);
