@@ -2,7 +2,7 @@
 # spill cache under .minimal/web-fetch/). In-repo only because tools reach it
 # through project-root confinement; never committed.
 .minimal/
-
+src-*.md
 .opencode/
 .claude/
 # Build output
