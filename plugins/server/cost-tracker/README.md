@@ -26,15 +26,19 @@ every completed turn (the only writer).
 
 ## Pricing
 
-Three tiers, config > fetched > bundled, all resolved through ONE RateTable so
-a report can never disagree with itself:
+Four tiers, config > openrouter-fetched > litellm-fetched > bundled, all
+resolved through ONE RateTable so a report can never disagree with itself:
 
 1. The user's `rates` slice in plugins.json (below).
-2. The LiteLLM + OpenRouter snapshots cached by the startup auto-refresh, the
+2. The fetched OpenRouter snapshot, cached by the startup auto-refresh, the
    `--refresh-cost-rates` flag, or the `.rpc` service's `refresh_rates` method
    (keys are model ids — the ccusage convention; a cached snapshot from an
-   earlier run is picked up at startup).
-3. The seeded `cost-rates.json` in the config dir.
+   earlier run is picked up at startup). Ranked above the LiteLLM snapshot
+   because the wire ids an OpenRouter-shaped provider sends ARE OpenRouter
+   slugs, so OpenRouter's own price for that exact string is authoritative;
+   LiteLLM's `openrouter/*` entries duplicate the same data and lag it.
+3. The fetched LiteLLM snapshot, the same paths, the same rule.
+4. The seeded `cost-rates.json` in the config dir.
 
 A model with no rate anywhere — and a turn whose usage the backend reported as
 all zeros (the known proxy gap) — renders as "unknown", never as $0.00.

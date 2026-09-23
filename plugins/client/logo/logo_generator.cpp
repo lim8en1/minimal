@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <utility>
@@ -179,13 +180,24 @@ std::vector<std::string> GenerateLogo(const GenerateOptions& options,
     // noise. SPACE: every glyph cell draws independently. noise_pick is only
     // consumed under `marked`.
     const char marker = marked ? glyph_pool[pick(rng)] : '\0';
-    std::uniform_int_distribution<std::size_t> noise_pick(0, noise_pool.size() - 1);
+    // Constructed only under `marked` (like `marker` above): a space style
+    // reaches here with noise_pool genuinely empty (never populated above),
+    // and `0, size() - 1` on an empty pool underflows to `0, SIZE_MAX` --
+    // harmless only because the sole consumer below is itself gated on
+    // `marked`, one refactor away from reading a garbage index if that ever
+    // changed. `marked` guarantees a non-empty noise_pool (the empty-cleaned
+    // check above throws otherwise), so this constructs a genuine range.
+    // Not const: operator() mutates the distribution's internal state.
+    std::optional<std::uniform_int_distribution<std::size_t>> noise_pick =
+        marked ? std::make_optional<std::uniform_int_distribution<std::size_t>>(
+                     0, noise_pool.size() - 1)
+               : std::nullopt;
     for (auto& line : grid) {
         for (char& cell : line) {
             if (cell == '#') {
                 cell = marked ? marker : glyph_pool[pick(rng)];
             } else if (marked) {
-                cell = noise_pool[noise_pick(rng)];
+                cell = noise_pool[(*noise_pick)(rng)];
             }
         }
     }

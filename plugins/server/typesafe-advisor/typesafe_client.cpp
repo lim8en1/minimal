@@ -194,11 +194,13 @@ JevOutcome AskJev(const net::HttpClient& http, const Settings& settings,
             }
             // A 2xx body that is not the expected envelope is a contract
             // violation: never retried (it would recur), never guessed at.
-            if (ExtractActionAnswer(parsed) == std::nullopt) {
+            auto choice = ExtractActionAnswer(parsed);
+            if (choice == std::nullopt) {
                 outcome.abstain_reason = "response carries no 'action' choice answer";
                 break;
             }
             outcome.ok = true;
+            outcome.choice = std::move(choice);
             outcome.answer = parsed.at("answers");
             if (auto model = parsed.find("model"); model != parsed.end() && model->is_string()) {
                 outcome.answered_model = model->get<std::string>();

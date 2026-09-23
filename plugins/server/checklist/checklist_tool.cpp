@@ -10,6 +10,11 @@
 namespace minimal::checklist {
 namespace {
 
+// Shared by OpSet (bulk replace) and OpUpdate (single-item edit) so the two
+// enforcement points can't silently diverge -- OpUpdate used to hardcode its
+// own literal `4000` instead of referencing this.
+constexpr std::size_t kMaxItemTextBytes = 4000;
+
 tools::ToolResult Error(const std::string& message) {
     return tools::ToolResult{true, message};
 }
@@ -120,7 +125,6 @@ private:
         // The list is one KV row: without a cap, a runaway model could store
         // an unbounded blob under its own session key.
         constexpr std::size_t kMaxItems = 200;
-        constexpr std::size_t kMaxItemTextBytes = 4000;
         if (entries.size() > kMaxItems) {
             return Error("checklist: 'items' is capped at " + std::to_string(kMaxItems) +
                          " entries");
@@ -204,8 +208,9 @@ private:
         if (has_status) item->status = status;
         if (has_text) {
             item->text = body.at("text").get<std::string>();
-            if (item->text.size() > 4000) {
-                return Error("checklist: item text is capped at 4000 bytes");
+            if (item->text.size() > kMaxItemTextBytes) {
+                return Error("checklist: item text is capped at " +
+                             std::to_string(kMaxItemTextBytes) + " bytes");
             }
         }
 

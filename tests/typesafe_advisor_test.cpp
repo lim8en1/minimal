@@ -552,6 +552,30 @@ TEST_CASE("typesafe-advisor a 2xx body that is not the envelope abstains without
     CHECK(server.requests().size() == 1);
 }
 
+TEST_CASE("typesafe-advisor a successful AskJev already carries the parsed ChoiceAnswer -- "
+         "the caller must not have to re-parse it",
+         "[typesafe_advisor][retry]") {
+    // JevOutcome::choice is populated by the SAME ExtractActionAnswer call
+    // that validates the 2xx envelope (the one the test above exercises the
+    // failure branch of), so a successful outcome must never need advisor.cpp
+    // to wrap `answer` back into a fake envelope and parse it a second time.
+    LoopbackServer server({HttpResponseOf(200, "OK", LoadFixture("allow-response.json").dump())});
+    auto settings = FastSettings();
+    settings.endpoint = server.url();
+    const auto outcome =
+        AskJev(net::HttpClient{}, settings, "k", nlohmann::json::object(), [] { return false; });
+    REQUIRE(outcome.ok);
+    REQUIRE(outcome.choice.has_value());
+    CHECK(outcome.choice->choice == "allow");
+    CHECK(outcome.choice->p_allow == 0.91);
+    // Consistency: re-deriving it the OLD way from outcome.answer must agree
+    // exactly with what AskJev already computed.
+    const auto reparsed = ExtractActionAnswer(nlohmann::json{{"answers", outcome.answer}});
+    REQUIRE(reparsed.has_value());
+    CHECK(reparsed->choice == outcome.choice->choice);
+    CHECK(reparsed->p_allow == outcome.choice->p_allow);
+}
+
 TEST_CASE("typesafe-advisor a refused connection abstains after exhausting retries",
           "[typesafe_advisor][retry]") {
     // A port with nothing listening: ConnectFailed on every attempt.

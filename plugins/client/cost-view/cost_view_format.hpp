@@ -81,6 +81,32 @@ inline std::string FormatCost(double usd) {
     return buf;
 }
 
+// The four token sums cost-tracker's totals RPC carries per model, summed
+// across every model in the "models" array. Shared by FormatTotals (which
+// only needs input/output) and FormatTokenDetail (which needs all four) --
+// they used to duplicate this loop verbatim, a future change to token
+// aggregation (a new field, a different truncation rule) having to happen in
+// two places.
+struct TokenTotals {
+    std::int64_t input_tokens = 0;
+    std::int64_t output_tokens = 0;
+    std::int64_t cache_read = 0;
+    std::int64_t cache_write = 0;
+};
+
+inline TokenTotals AggregateModelTokens(const nlohmann::json& totals) {
+    TokenTotals sum;
+    if (const auto models = totals.find("models"); models != totals.end() && models->is_array()) {
+        for (const auto& model : *models) {
+            sum.input_tokens += SafeValue<std::int64_t>(model, "input_tokens", 0LL);
+            sum.output_tokens += SafeValue<std::int64_t>(model, "output_tokens", 0LL);
+            sum.cache_read += SafeValue<std::int64_t>(model, "cache_read_tokens", 0LL);
+            sum.cache_write += SafeValue<std::int64_t>(model, "cache_write_tokens", 0LL);
+        }
+    }
+    return sum;
+}
+
 // nullopt: no usable totals yet for this session (a fresh session with zero
 // turns, a parse failure, a refused/unreachable call) -- Render() shows
 // nothing for those, same as any other unfilled segment.
@@ -89,13 +115,7 @@ inline std::optional<std::string> FormatTotals(const nlohmann::json& totals) {
     const auto turns = SafeValue<int>(totals, "turns", 0);
     if (turns <= 0) return std::nullopt;   // nothing spent yet -- not "$0.00"
 
-    std::int64_t input_tokens = 0, output_tokens = 0;
-    if (const auto models = totals.find("models"); models != totals.end() && models->is_array()) {
-        for (const auto& model : *models) {
-            input_tokens += SafeValue<std::int64_t>(model, "input_tokens", 0LL);
-            output_tokens += SafeValue<std::int64_t>(model, "output_tokens", 0LL);
-        }
-    }
+    const TokenTotals tokens = AggregateModelTokens(totals);
 
     std::string text;
     // A missing price is not a price of zero (cost_model.hpp's own rule) --
@@ -115,7 +135,8 @@ inline std::optional<std::string> FormatTotals(const nlohmann::json& totals) {
     } else {
         text = "cost?";
     }
-    text += " · " + FormatTokens(input_tokens) + "/" + FormatTokens(output_tokens) + " tok";
+    text += " · " + FormatTokens(tokens.input_tokens) + "/" + FormatTokens(tokens.output_tokens) +
+           " tok";
     if (SafeValue<int>(totals, "unpriced_turns", 0) > 0) text += " (+unpriced)";
     return text;
 }
@@ -132,28 +153,19 @@ inline std::optional<std::string> FormatTotals(const nlohmann::json& totals) {
 // malformed-input contract as FormatTotals.
 inline std::optional<std::string> FormatTokenDetail(const nlohmann::json& totals) {
     if (!totals.is_object()) return std::nullopt;
-    std::int64_t input_tokens = 0, output_tokens = 0;
-    std::int64_t cache_read = 0, cache_write = 0;
-    if (const auto models = totals.find("models"); models != totals.end() && models->is_array()) {
-        for (const auto& model : *models) {
-            input_tokens += SafeValue<std::int64_t>(model, "input_tokens", 0LL);
-            output_tokens += SafeValue<std::int64_t>(model, "output_tokens", 0LL);
-            cache_read += SafeValue<std::int64_t>(model, "cache_read_tokens", 0LL);
-            cache_write += SafeValue<std::int64_t>(model, "cache_write_tokens", 0LL);
-        }
-    }
+    const TokenTotals tokens = AggregateModelTokens(totals);
     std::string text;
-    const auto append = [&text](const char* label, std::int64_t tokens) {
-        if (tokens <= 0) return;   // suppressed -- and negatives are corruption, not a refund
+    const auto append = [&text](const char* label, std::int64_t count) {
+        if (count <= 0) return;   // suppressed -- and negatives are corruption, not a refund
         if (!text.empty()) text += " · ";
         text += label;
         text += ' ';
-        text += FormatTokens(tokens);
+        text += FormatTokens(count);
     };
-    append("i", input_tokens);
-    append("o", output_tokens);
-    append("cr", cache_read);
-    append("cw", cache_write);
+    append("i", tokens.input_tokens);
+    append("o", tokens.output_tokens);
+    append("cr", tokens.cache_read);
+    append("cw", tokens.cache_write);
     if (text.empty()) return std::nullopt;
     return text;
 }

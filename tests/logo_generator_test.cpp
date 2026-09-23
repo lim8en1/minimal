@@ -67,6 +67,22 @@ TEST_CASE("logo generator: fill characters come from the style's pools", "[logo]
     }
 }
 
+TEST_CASE("logo generator: a space style (empty marker_pool/noise_charset) generates without "
+         "touching noise_pick",
+         "[logo]") {
+    // "blocks" is a SPACE style: marker_pool and noise_charset are both "".
+    // The noise_pick distribution used to be constructed unconditionally
+    // from `0, noise_pool.size() - 1`, underflowing to `0, SIZE_MAX` for
+    // exactly this style -- harmless only because the sole consumer is
+    // gated on `marked` (always false here), so it was never actually
+    // sampled. This pins that a space style still generates cleanly across
+    // several seeds now that the construction itself is gated too.
+    for (unsigned seed = 0; seed < 20; ++seed) {
+        const auto art = GenerateLogo(GenerateOptions{}, "blocks", seed);
+        CHECK_FALSE(art.empty());
+    }
+}
+
 TEST_CASE("logo generator: marked styles pick ONE marker and stay readable", "[logo]") {
     for (const auto& style : BuiltinStyles()) {
         if (style.marker_pool.empty()) continue;

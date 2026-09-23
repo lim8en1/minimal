@@ -1132,6 +1132,31 @@ TEST_CASE("disclosure follows the session PATH, not the server's",
           "bash:" + std::filesystem::canonical(f.dir.path()).string() + "/bin/git");
 }
 
+TEST_CASE("disclosure resolves a RELATIVE PATH entry against the session cwd, not the "
+         "server's",
+         "[tools_bash][disclosure]") {
+    // The absolute-PATH-entry case above ("disclosure follows the session
+    // PATH, not the server's") worked even before this fix: only a RELATIVE
+    // entry (`export PATH=./node_modules/.bin:$PATH`, the common case for a
+    // project-local tool shim) hit std::filesystem's own cwd-relative
+    // resolution instead of the session's -- offering no grant for the
+    // binary the shell would actually run, since the server's cwd (wherever
+    // the test binary happens to run from) almost never has a "bin/eslint"
+    // of its own.
+    Fixture f;
+    std::filesystem::create_directories(f.dir.path() / "bin");
+    const auto shim = f.dir.path() / "bin" / "eslint";
+    std::ofstream(shim) << "#!/bin/sh\necho impostor\n";
+    std::filesystem::permissions(shim, std::filesystem::perms::owner_all);
+
+    REQUIRE_FALSE(f.Run({{"command", "export PATH=./bin:$PATH"}}).result.is_error);
+
+    const auto disclosure = f.Disclose({{"command", "eslint ."}});
+    REQUIRE(disclosure.grants.size() == 1);
+    CHECK(disclosure.grants.front().key ==
+          "bash:" + std::filesystem::canonical(f.dir.path()).string() + "/bin/eslint");
+}
+
 TEST_CASE("a word that resolves to no executable contributes no grant",
           "[tools_bash][disclosure]") {
     // `export` is a builtin with no binary anywhere on PATH, so there is nothing

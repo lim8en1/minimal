@@ -11,6 +11,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <filesystem>
@@ -265,6 +266,26 @@ TEST_CASE("HtmlToText: numeric entities decode to UTF-8", "[tools_web][html_text
     const auto text = HtmlToText("caf&#233; and &#x2014;dash");   // e-acute, em dash
     CHECK(text.find("caf\xC3\xA9") != std::string::npos);
     CHECK(text.find("\xE2\x80\x94""dash") != std::string::npos);
+}
+
+TEST_CASE("HtmlToText: a body of bare '&' with no ';' anywhere does not scan the whole "
+         "document per '&'",
+         "[tools_web][html_text][invariant]") {
+    // DecodeEntity's ';' search used to be unbounded (`html.find(';', pos +
+    // 1)` over the FULL string), with only the RESULT compared against the
+    // 13-byte entity window afterward -- so a body of mostly '&' with no ';'
+    // anywhere scanned from each '&' to end-of-document, O(N^2). Measured on
+    // the unfixed code: ~0.1s for 100k '&', ~1.1s for 400k, extrapolating to
+    // minutes at real page sizes. Bounded to a comfortably-generous ceiling
+    // that the fixed O(N) behavior clears trivially but the old O(N^2)
+    // behavior does not (800k chars extrapolates to several seconds under
+    // the bug).
+    const std::string body(800000, '&');
+    const auto start = std::chrono::steady_clock::now();
+    const auto text = HtmlToText(body);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    CHECK(text.size() == body.size());  // every '&' survives as a literal
+    CHECK(elapsed < std::chrono::seconds(2));
 }
 
 TEST_CASE("HtmlToText: surrogates, NUL, and control entities are dropped, not emitted",

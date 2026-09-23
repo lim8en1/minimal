@@ -5,21 +5,28 @@
 
 #include <nlohmann/json.hpp>
 
+#include "decision.hpp"
 #include "minimal/net/http_client.hpp"
 
 #include "settings.hpp"
 
 namespace minimal::typesafe_advisor {
 
-// The outcome of one AskJev call, after retries. `answer` is set exactly when
-// the endpoint answered 2xx with a parseable envelope; every other terminal
-// condition -- budget exhausted, retries spent, cancel, non-retryable status,
-// unparseable body -- is `abstain` with a reason for the log line. There is no
-// error outcome that blocks the caller: a judge that cannot answer costs one
-// human prompt, never the turn (the hooks fail-open posture).
+// The outcome of one AskJev call, after retries. `answer`/`choice` are set
+// exactly when the endpoint answered 2xx with a parseable envelope; every
+// other terminal condition -- budget exhausted, retries spent, cancel,
+// non-retryable status, unparseable body -- is `abstain` with a reason for
+// the log line. There is no error outcome that blocks the caller: a judge
+// that cannot answer costs one human prompt, never the turn (the hooks
+// fail-open posture).
 struct JevOutcome {
     bool ok = false;
     nlohmann::json answer;      // the verbatim answers map (present when ok)
+    // The SAME ExtractActionAnswer call that validates the envelope already
+    // produces this; carrying it here means the caller (TypesafeAdvisor::
+    // Advise) doesn't have to wrap `answer` back into a fake envelope and
+    // parse it a second time just to get what this struct already computed.
+    std::optional<ChoiceAnswer> choice;
     std::string answered_model;  // the response's model field, when present
     std::string abstain_reason;  // when !ok
     int attempts = 0;

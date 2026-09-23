@@ -36,6 +36,7 @@ default harness.
 | tools-bash | `bash` (sync + background), `/restart-shell`, `/tasks`, shell-state service, before-command hook point | [README](server/tools-bash/README.md) |
 | tools-python | `python_exec`, `python_interrupt`, `/python` (persistent per-session interpreter) | [README](server/tools-python/README.md) |
 | tools-web | `web_fetch`, `web_search` | [README](server/tools-web/README.md) |
+| tool-ask | `ask_user` (structured multiple-choice questions to the human, answered through a client modal) | [README](server/tool-ask/README.md) |
 
 ## Providers
 

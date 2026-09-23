@@ -72,8 +72,8 @@ ShellState ParseStatePayload(const std::string& payload) {
 
 // --- Launch ------------------------------------------------------------------------
 
-LaunchedProcess LaunchProcess(const std::string& wrapped, const SessionShellState& state,
-                              const BashSettings& settings, std::int64_t timeout_ms) {
+minimal::sidecar::LaunchSpec BuildLaunchSpec(const std::string& wrapped, const SessionShellState& state,
+                                             const BashSettings& settings, std::int64_t timeout_ms) {
     // The launch shape, expressed over the sidecar core's generic launcher:
     // pipe 0 is merged stdout+stderr (one write end dup2'd onto both, so the
     // streams interleave in order), pipe 1 is the fd-9 state channel -- a
@@ -95,18 +95,12 @@ LaunchedProcess LaunchProcess(const std::string& wrapped, const SessionShellStat
     // that legitimately spends its budget.
     spec.cpu_seconds = timeout_ms / 1000 + 5;
     spec.file_size_bytes = settings.max_file_size_bytes;
+    return spec;
+}
 
-    auto launched = minimal::sidecar::Launch(spec);
-    LaunchedProcess proc;
-    proc.ok = launched.ok;
-    proc.spawn_error = std::move(launched.spawn_error);
-    proc.pid = launched.pid;
-    proc.warnings = std::move(launched.warnings);
-    if (launched.ok && launched.parent_fds.size() == 2) {
-        proc.out_fd = launched.parent_fds[0].release();
-        proc.state_fd = launched.parent_fds[1].release();
-    }
-    return proc;
+minimal::sidecar::Launched LaunchProcess(const std::string& wrapped, const SessionShellState& state,
+                                         const BashSettings& settings, std::int64_t timeout_ms) {
+    return minimal::sidecar::Launch(BuildLaunchSpec(wrapped, state, settings, timeout_ms));
 }
 
 }  // namespace minimal::tools_bash

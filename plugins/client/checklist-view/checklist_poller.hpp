@@ -7,16 +7,14 @@
 // which this plugin has always run on).
 
 #include <chrono>
-#include <condition_variable>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/plugins/background_poller.hpp"
 #include "minimal/common/logger.hpp"
 #include "checklist_model.hpp"
 
@@ -24,7 +22,7 @@ namespace minimal::checklist_view {
 
 namespace plugins = minimal::client::plugins;
 
-class ChecklistPoller {
+class ChecklistPoller : private plugins::BackgroundPoller {
 public:
     // Borrowed, either may be null (a host without the seam): focus then
     // comes only from the segment's nudge, and the caches simply never fill.
@@ -33,7 +31,12 @@ public:
     // timing assertions off the wall clock.
     explicit ChecklistPoller(plugins::ClientApi* api, plugins::FocusProvider* focus,
                              std::chrono::milliseconds cadence = std::chrono::seconds(3))
-        : api_(api), focus_(focus), cadence_(cadence), worker_([this] { RunLoop(); }) {}
+        : api_(api), focus_(focus), cadence_(cadence) {
+        // Started from the constructor BODY, not an initializer -- every
+        // member RunLoop touches (base's mtx_/cv_/stop_, and every member
+        // below) is guaranteed to exist by now. See background_poller.hpp.
+        Start([this] { RunLoop(); });
+    }
 
     ~ChecklistPoller();
 
@@ -93,23 +96,14 @@ private:
     plugins::FocusProvider* focus_;
     std::chrono::milliseconds cadence_;
 
-    mutable std::mutex mtx_;
-    std::condition_variable cv_;
+    // mtx_/cv_/stop_ live in BackgroundPoller (protected base members),
+    // constructed before any member below -- see background_poller.hpp.
     FocusedSnapshot focused_snapshot_;
     std::string focused_text_;
     std::map<std::string, std::vector<Item>> all_items_;
     bool all_valid_ = false;
     bool all_ever_fetched_ = false;
-    bool stop_ = false;
     bool refresh_requested_ = false;
-
-    // LAST, and it must stay last: the constructor starts RunLoop() from this
-    // member's initializer, and members are constructed in declaration order.
-    // Declared above mtx_ (as it was), the worker could lock a mutex -- and
-    // read stop_ -- that did not exist yet: macOS reported "mutex lock
-    // failed: Invalid argument" in ~1 of 5 runs of the poller tests under
-    // parallel load. The destructor joins before any member is destroyed.
-    std::thread worker_;
 };
 
 }  // namespace minimal::checklist_view

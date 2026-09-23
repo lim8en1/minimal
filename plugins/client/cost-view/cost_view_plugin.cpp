@@ -29,6 +29,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/plugins/background_poller.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "cost_view_format.hpp"
 
@@ -45,24 +46,22 @@ using minimal::client::cost_view::FormatTotals;
 // Shared polling state behind BOTH segments: one worker thread, one
 // PluginCall per poll, two cached strings. Two independent pollers would
 // double the PluginCall traffic for data a single reply already carries.
-class TotalsPoller {
+class TotalsPoller : private plugins::BackgroundPoller {
 public:
     explicit TotalsPoller(plugins::ClientApi* client_api) : client_api_(client_api) {
-        worker_ = std::thread([this] { RunLoop(); });
+        // Constructor BODY, not an initializer -- see background_poller.hpp.
+        Start([this] { RunLoop(); });
     }
 
     ~TotalsPoller() {
-        {
-            std::lock_guard<std::mutex> lock(mtx_);
-            stop_ = true;
-        }
-        cv_.notify_all();
-        // The join can wait out one in-flight fetch, bounded by
+        // Explicit, not left to ~BackgroundPoller(): see checklist_poller.cpp's
+        // ~ChecklistPoller for why the derived destructor must call Stop()
+        // itself. The join can wait out one in-flight fetch, bounded by
         // SessionClient::PluginCall's 5 s deadline. Deliberate: a detached
         // worker would keep calling into the ClientApi (and the
         // SessionClient behind it) while this destructor tears the object
         // down -- a shutdown UAF is strictly worse than a bounded stall.
-        if (worker_.joinable()) worker_.join();
+        Stop();
     }
 
     TotalsPoller(const TotalsPoller&) = delete;
@@ -139,14 +138,12 @@ private:
     }
 
     plugins::ClientApi* client_api_;
-    std::thread worker_;
 
-    mutable std::mutex mtx_;
-    mutable std::condition_variable cv_;
+    // mtx_/cv_/stop_ live in BackgroundPoller (protected base members),
+    // constructed before any member below -- see background_poller.hpp.
     mutable std::string focused_session_id_;
     mutable std::string cost_text_;
     mutable std::string detail_text_;
-    bool stop_ = false;
     // Set by Render() on a tab switch, under mtx_ (mutable: Render() is
     // const). Wakes RunLoop's wait_for immediately instead of the notify
     // landing with nothing in the predicate to act on it -- see Render()'s

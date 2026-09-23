@@ -189,6 +189,8 @@ install(TARGETS minimal-server minimal_server_core
     RUNTIME_DEPENDENCY_SET minimal_runtime_deps
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+minimal_strip_debug_info(minimal-server "${CMAKE_INSTALL_BINDIR}")
+minimal_strip_debug_info(minimal_server_core "${CMAKE_INSTALL_LIBDIR}")
 
 target_compile_options(minimal_server_core PRIVATE ${MINIMAL_WARNING_FLAGS})
 target_compile_options(minimal-server PRIVATE ${MINIMAL_WARNING_FLAGS})

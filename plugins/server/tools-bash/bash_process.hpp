@@ -79,27 +79,29 @@ std::string ComposeResult(const std::string& output, const std::string& footer,
 // command that exits before the trailer runs produces (an empty payload).
 ShellState ParseStatePayload(const std::string& payload);
 
-// The parent-side handles of a launched shell. The fds are owned by the
-// caller (ScopedFd); both read ends are O_CLOEXEC and belong to THIS
-// process only. `state_fd` carries the wrapper's cwd/env trailer -- a caller
-// that does not want state (the background runner) still DRAINS it, because a
-// child blocked writing a full pipe never reaches its own exit.
-struct LaunchedProcess {
-    bool ok = false;
-    std::string spawn_error;
-    pid_t pid = -1;
-    int out_fd = -1;    // stdout+stderr, merged, in order
-    int state_fd = -1;  // the fd-9 state channel
-    // Non-empty when Launch() had to clamp an rlimit backstop to the host's
-    // hard cap (see ClampRlimit); log it -- the child runs degraded, not dead.
-    std::string warnings;
-};
+// The launch shape shared by BOTH the synchronous path (this file's
+// LaunchProcess) and the background task runner (background_registry.cpp's
+// BackgroundTaskRegistry::Start): merged stdout+stderr on parent_fds[0], the
+// fd-9 state channel on parent_fds[1] -- a passthrough fd, so its CLOEXEC
+// must be cleared explicitly or exec closes it. `argv` differs between the
+// two callers only in the wrapped command string; everything else (cwd, env,
+// pipes, rlimit backstops) is identical, so this is the ONE place that shape
+// is expressed -- any future rlimit or state-fd change is made here, not
+// twice.
+minimal::sidecar::LaunchSpec BuildLaunchSpec(const std::string& wrapped, const SessionShellState& state,
+                                             const BashSettings& settings, std::int64_t timeout_ms);
 
 // fork + execve of the configured shell with `wrapped`, over the sidecar
 // core's pipe-plan launcher. The child setsid()s, so pgid == pid and
-// KillProcessGroup reaches the whole tree. stdin is /dev/null.
-LaunchedProcess LaunchProcess(const std::string& wrapped, const SessionShellState& state,
-                              const BashSettings& settings, std::int64_t timeout_ms);
+// KillProcessGroup reaches the whole tree. stdin is /dev/null. Returns the
+// sidecar core's own result type directly (not a bash-specific wrapper) --
+// the caller (bash_tool.cpp's RunProcess) hands it straight to DrainAndReap,
+// which also takes a `Launched`; the previous shape (a LaunchedProcess with
+// raw `int out_fd`/`state_fd`) forced every caller to `.release()` the real
+// ScopedFds and re-wrap fresh ones just to call DrainAndReap, a window where
+// a throw between the two would leak both fds and the child.
+minimal::sidecar::Launched LaunchProcess(const std::string& wrapped, const SessionShellState& state,
+                                         const BashSettings& settings, std::int64_t timeout_ms);
 
 // Group kill / pgid tracking: the sidecar core's one implementation (and one
 // sweep, shared with every other spawning plugin).

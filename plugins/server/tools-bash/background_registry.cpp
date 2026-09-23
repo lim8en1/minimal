@@ -200,27 +200,13 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
         return std::nullopt;
     }
 
-    minimal::sidecar::LaunchSpec spec;
-    // Same launch shape as the synchronous path (bash_process.cpp): merged
-    // stdout+stderr, plus the fd-9 state channel -- drained and discarded
-    // here, since a background task's final cwd/env is stale by the time it
-    // reports. The state fd is a passthrough fd, so its CLOEXEC must be
-    // cleared explicitly or exec closes it.
-    spec.argv = {settings.shell, "-c", WrapCommand(command)};
-    spec.cwd = state.cwd;
-    spec.env = state.env;
-    spec.pipes = {
-        minimal::sidecar::PipePlan{
-            minimal::sidecar::PipePlan::ChildEnd::kWrite,
-            {{STDOUT_FILENO, false}, {STDERR_FILENO, false}}},
-        minimal::sidecar::PipePlan{
-            minimal::sidecar::PipePlan::ChildEnd::kWrite,
-            {{kStateFd, true}}},
-    };
-    spec.cpu_seconds = timeout_ms / 1000 + 5;
-    spec.file_size_bytes = settings.max_file_size_bytes;
-
-    auto launched = minimal::sidecar::Launch(spec);
+    // Same launch shape as the synchronous path -- BuildLaunchSpec
+    // (bash_process.cpp) is the ONE place that shape is expressed now,
+    // shared with LaunchProcess. A background task's final cwd/env is stale
+    // by the time it reports, so the state channel is drained and discarded
+    // here rather than parsed, but it is still the identical spec otherwise.
+    auto launched =
+        minimal::sidecar::Launch(BuildLaunchSpec(WrapCommand(command), state, settings, timeout_ms));
     if (!launched.ok) {
         *error = "failed to start shell: " + launched.spawn_error;
         return std::nullopt;

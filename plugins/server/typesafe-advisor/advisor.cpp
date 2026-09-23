@@ -45,7 +45,12 @@ std::optional<tools::PermissionResponse> TypesafeAdvisor::Advise(
         return std::nullopt;
     }
 
-    const auto answer = ExtractActionAnswer(nlohmann::json{{"answers", outcome.answer}});
+    // AskJev's own ExtractActionAnswer call (the one that validated the
+    // envelope enough to set outcome.ok) already produced this -- re-wrapping
+    // outcome.answer into a fake envelope and parsing it again here would be
+    // redundant work on every successful call, and a second place the two
+    // call sites could drift if ExtractActionAnswer's contract changed.
+    const auto& answer = outcome.choice;
     if (answer == std::nullopt) {
         // AskJev already refused to return an envelope without a choice
         // answer; reaching here would mean the parse contract drifted.

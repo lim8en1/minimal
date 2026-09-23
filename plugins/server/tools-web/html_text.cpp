@@ -101,16 +101,20 @@ const std::unordered_map<std::string, std::uint32_t>& NamedEntities() {
 // terminating ';' within a short window is emitted as a literal '&').
 std::size_t DecodeEntity(std::string_view html, std::size_t pos, std::string& out) {
     // An entity is '&' + body + ';' with total length <= 13 from the '&', so
-    // the ';' search is bounded to that window. Unbounded, a page of '&'
-    // characters scanned to end-of-document per '&' -- O(N^2) on an 8MiB body
-    // was hours of CPU. npos compares past the window, so the unbounded miss
-    // lands in the same branch.
+    // the ';' search must be bounded to that window -- searching the SUBSTR,
+    // not the comment's promise alone: `html.find(';', pos + 1)` over the
+    // full string scans to end-of-document per '&' when none is found,
+    // O(N^2) on a page of bare '&' characters (measured hours of CPU on an
+    // 8 MiB body). Only comparing the result against window_end afterward,
+    // as this used to do, bounds which matches are ACCEPTED, not how far the
+    // search itself looks.
     const std::size_t window_end = std::min(pos + 13, html.size());
-    const std::size_t semi = html.find(';', pos + 1);
-    if (semi >= window_end) {
+    const std::size_t semi_in_window = html.substr(pos + 1, window_end - pos - 1).find(';');
+    if (semi_in_window == std::string_view::npos) {
         out += '&';
         return 1;
     }
+    const std::size_t semi = pos + 1 + semi_in_window;
     const std::string_view body = html.substr(pos + 1, semi - pos - 1);
     if (!body.empty() && body[0] == '#') {
         const bool hex = body.size() > 1 && (body[1] == 'x' || body[1] == 'X');

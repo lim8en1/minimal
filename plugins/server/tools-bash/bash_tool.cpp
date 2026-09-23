@@ -89,17 +89,13 @@ struct RunOutcome {
     bool state_overflow = false;  // fd-9 payload exceeded the cap; state untouched
 };
 
-RunOutcome RunProcess(const LaunchedProcess& proc, const BashSettings& settings,
+RunOutcome RunProcess(minimal::sidecar::Launched launched, const BashSettings& settings,
                       std::int64_t timeout_ms, ToolContext& ctx) {
-    // DrainAndReap takes the process handles by value and closes them; the
-    // LaunchedProcess struct carries raw ints, so they move into ScopedFds
-    // here -- the same ownership transfer the local wrappers used to express.
-    minimal::sidecar::Launched launched;
-    launched.ok = true;
-    launched.pid = proc.pid;
-    launched.parent_fds.push_back(ScopedFd(proc.out_fd));
-    launched.parent_fds.push_back(ScopedFd(proc.state_fd));
-
+    // `launched` arrives as the real sidecar::Launched LaunchProcess got back
+    // from Launch() -- DrainAndReap takes it by value and closes it, so it
+    // just moves straight through. The previous shape released real ScopedFds
+    // to raw ints in LaunchProcess and re-wrapped fresh ones here, a window
+    // where a throw in between would leak both fds and the child.
     std::vector<minimal::sidecar::PipeSink> sinks(2);
     sinks[0].mode = minimal::sidecar::PipeSink::Mode::kCapped;
     sinks[0].cap = settings.max_output_bytes;
@@ -171,8 +167,24 @@ std::optional<std::filesystem::path> ResolveOnPath(const SessionShellState& stat
     for (;;) {
         const auto colon = dirs.find(':');
         const std::string_view dir = dirs.substr(0, colon);
-        // An empty element means the current directory, like in a shell.
-        const auto candidate = dir.empty() ? state.cwd / word : std::filesystem::path(dir) / word;
+        // An empty element means the current directory, like in a shell --
+        // and so does any OTHER relative entry: `std::filesystem::path(dir)`
+        // for a relative `dir` resolves filesystem calls against THIS
+        // process's cwd, not the session's, unless prefixed with state.cwd
+        // explicitly. `export PATH=./node_modules/.bin:$PATH` left every
+        // relative entry but "" looked up against the server's cwd instead
+        // of the session's, offering no grant for the binary the shell
+        // would actually run (and, for a same-named file relative to the
+        // server's cwd, a wrong grant key and wrong hook `program`).
+        const std::filesystem::path dir_path(dir);
+        std::filesystem::path candidate;
+        if (dir.empty()) {
+            candidate = state.cwd / word;
+        } else if (dir_path.is_absolute()) {
+            candidate = dir_path / word;
+        } else {
+            candidate = state.cwd / dir_path / word;
+        }
         if (std::filesystem::is_regular_file(candidate, ec) && !ec &&
             access(candidate.c_str(), X_OK) == 0) {
             // Canonical so the grant key is stable: /var/... and /private/var/...
@@ -448,8 +460,7 @@ public:
         timeout_ms = std::min(timeout_ms, settings_.max_timeout_ms);
         const auto state = store_.Snapshot(ctx.session_id, ctx.project_root);
 
-        const auto proc =
-            LaunchProcess(WrapCommand(command), state, settings_, timeout_ms);
+        auto proc = LaunchProcess(WrapCommand(command), state, settings_, timeout_ms);
         if (!proc.ok) {
             const auto duration_ms = ElapsedMs(started);
             ctx.logger.warn("bash[{}] spawn failed: {} ({} ms)", ctx.session_id, proc.spawn_error,
@@ -463,7 +474,7 @@ public:
                             proc.warnings);
         }
 
-        const auto outcome = RunProcess(proc, settings_, timeout_ms, ctx);
+        const auto outcome = RunProcess(std::move(proc), settings_, timeout_ms, ctx);
         const auto duration_ms = ElapsedMs(started);
 
         if (outcome.io_error) {

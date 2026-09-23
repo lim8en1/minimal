@@ -8,17 +8,16 @@
 namespace minimal::checklist_view {
 
 ChecklistPoller::~ChecklistPoller() {
-    {
-        std::lock_guard<std::mutex> lock(mtx_);
-        stop_ = true;
-    }
-    cv_.notify_all();
-    // The join can wait out one in-flight fetch, bounded by
-    // SessionClient::PluginCall's 5 s deadline. Deliberate: a detached
-    // worker would keep calling into the ClientApi (and the SessionClient
-    // behind it) while this destructor tears the object down -- a shutdown
-    // UAF is strictly worse than a bounded stall.
-    if (worker_.joinable()) worker_.join();
+    // Explicit, not left to ~BackgroundPoller(): destruction is derived-
+    // first, so by the time the base destructor would run, this object's own
+    // members (the ones RunLoop reads) are already gone. Stop() joins the
+    // worker HERE, while everything it touches is still valid -- the join
+    // can wait out one in-flight fetch, bounded by SessionClient::PluginCall's
+    // 5 s deadline. Deliberate: a detached worker would keep calling into the
+    // ClientApi (and the SessionClient behind it) while this destructor tears
+    // the object down -- a shutdown UAF is strictly worse than a bounded
+    // stall.
+    Stop();
 }
 
 void ChecklistPoller::SwitchFocusLocked(const std::string& session_id) {
