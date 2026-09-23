@@ -130,6 +130,18 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
 
+# ccache, if present, transparently caches object files: a no-op on a cold
+# cache, a large wall-clock win on rebuilds after a branch switch or clean.
+# Applied unconditionally, including to the sanitizer presets, since ccache
+# hashes the full compiler invocation (including -fsanitize=...), so an asan
+# and a plain build never collide in the same cache. Silently absent if
+# ccache is not installed; nothing downstream depends on it.
+find_program(MINIMAL_CCACHE_PROGRAM ccache)
+if(MINIMAL_CCACHE_PROGRAM)
+    set(CMAKE_C_COMPILER_LAUNCHER "${MINIMAL_CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${MINIMAL_CCACHE_PROGRAM}")
+endif()
+
 option(MINIMAL_BUILD_CLIENT "Build the FTXUI TUI client" ON)
 option(MINIMAL_BUILD_TESTS  "Build the test suite"       ON)
 
@@ -138,6 +150,15 @@ option(MINIMAL_BUILD_TESTS  "Build the test suite"       ON)
 # Measured before enabling: the first-party tree was already clean apart from two
 # sign-compare lines, so this costs nothing to turn on and something to leave off.
 set(MINIMAL_WARNING_FLAGS -Wall -Wextra)
+
+# Puts each function/global in its own section so the linker's dead-code
+# elimination below (--gc-sections / -dead_strip) can drop ones nothing
+# references -- pure object-file layout metadata, no ABI or runtime effect,
+# so applied globally rather than to our own targets only. Appending (not
+# a plain set()) for the same reason as the RPATH flags below: the sanitizer
+# presets already populate these as cache variables.
+string(APPEND CMAKE_C_FLAGS " -ffunction-sections -fdata-sections")
+string(APPEND CMAKE_CXX_FLAGS " -ffunction-sections -fdata-sections")
 
 # Old-style DT_RPATH on Linux, not DT_RUNPATH: glibc consults DT_RPATH (of the
 # loaded object and its loaders) for a dependency's OWN dependencies, but
@@ -151,6 +172,22 @@ if(NOT APPLE)
     string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,--disable-new-dtags")
     string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--disable-new-dtags")
     string(APPEND CMAKE_MODULE_LINKER_FLAGS " -Wl,--disable-new-dtags")
+endif()
+
+# Same dead-code elimination at link time, flag name split by linker: GNU ld
+# and lld (Linux) use --gc-sections; ld64 (macOS) uses -dead_strip, which it
+# does NOT enable by default for any Mach-O output type (executable, dylib,
+# or a plugin bundle) -- that's Xcode's "Dead Code Stripping" build setting
+# opting in, and nothing here goes through Xcode. CMAKE_MODULE_LINKER_FLAGS
+# matters because the bundled plugins build as MODULE targets.
+if(APPLE)
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,-dead_strip")
+    string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,-dead_strip")
+    string(APPEND CMAKE_MODULE_LINKER_FLAGS " -Wl,-dead_strip")
+else()
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,--gc-sections")
+    string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--gc-sections")
+    string(APPEND CMAKE_MODULE_LINKER_FLAGS " -Wl,--gc-sections")
 endif()
 
 # --- Platform gate -----------------------------------------------------------
@@ -212,11 +249,29 @@ set(MINIMAL_CLIENT_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins/c
 set(MINIMAL_RUNTIME_DEP_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/runtime"
     CACHE STRING "Install location for the gathered third-party runtime libraries")
 
+# Split debug info (.debug / .dSYM, see cmake/StripDebugInfo.cmake) installs
+# here rather than alongside its binary, for the same class of reason
+# MINIMAL_RUNTIME_DEP_INSTALL_DIR sits outside lib/: the bundled plugin scan
+# (plugin_discovery.cpp) walks MINIMAL_PLUGIN_INSTALL_DIR with a RECURSIVE
+# directory iterator, and a macOS .dSYM bundle contains its own copy of the
+# binary at the identical filename one level down
+# (foo.so.dSYM/Contents/Resources/DWARF/foo.so) -- colocating it inside the
+# plugin dir makes every plugin scan as "found more than once". Mirrored
+# under this dir by each target's own dest_subdir instead, so it never sits
+# inside a directory anything else in the tree scans.
+set(MINIMAL_DEBUG_INFO_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/debug"
+    CACHE STRING "Install location for split-out debug info")
+
 # Bundled + user plugin construction helpers (minimal_add_plugin,
 # minimal_add_client_plugin, minimal_add_user_plugin). Included here so the
 # functions are visible to every add_subdirectory below, including the
 # user-plugins/ tree registered at the bottom of this file.
 include(cmake/MinimalPlugins.cmake)
+
+# Install-time debug-symbol splitting (minimal_strip_debug_info). Included
+# here, alongside the plugin helpers, so it's visible to every
+# add_subdirectory below.
+include(cmake/StripDebugInfo.cmake)
 
 # bundled/ is copied into the USER'S CONFIG DIR at install time, not installed
 # under the prefix and read from there. Everything in it -- prompts, presets,
