@@ -88,6 +88,7 @@ function(minimal_add_plugin name)
     install(TARGETS ${name}
         RUNTIME_DEPENDENCY_SET minimal_runtime_deps
         LIBRARY DESTINATION "${MINIMAL_PLUGIN_INSTALL_DIR}")
+    minimal_strip_debug_info(${name} "${MINIMAL_PLUGIN_INSTALL_DIR}")
 endfunction()
 
 # The client twin: MODULE, links the SHARED minimal::client_core (one copy in
@@ -115,6 +116,7 @@ function(minimal_add_client_plugin name)
     install(TARGETS ${name}
         RUNTIME_DEPENDENCY_SET minimal_runtime_deps
         LIBRARY DESTINATION "${MINIMAL_CLIENT_PLUGIN_INSTALL_DIR}")
+    minimal_strip_debug_info(${name} "${MINIMAL_CLIENT_PLUGIN_INSTALL_DIR}")
 endfunction()
 
 # --- User --------------------------------------------------------------------

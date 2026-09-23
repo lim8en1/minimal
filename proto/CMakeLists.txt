@@ -62,3 +62,4 @@ protobuf_generate(
 install(TARGETS minimal_proto
     RUNTIME_DEPENDENCY_SET minimal_runtime_deps
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+minimal_strip_debug_info(minimal_proto "${CMAKE_INSTALL_LIBDIR}")
