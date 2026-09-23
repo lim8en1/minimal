@@ -950,7 +950,8 @@ TEST_CASE("LoadMessages on an empty or unknown session is empty, not an error",
     CHECK(SessionReader(db).LoadAll("no-such-session").empty());
 }
 
-TEST_CASE("compaction checkpoints round-trip, upsert, and clear", "[session][checkpoint]") {
+TEST_CASE("compaction checkpoints round-trip, latest-boundary wins, and clear",
+          "[session][checkpoint]") {
     TempDir dir;
     SessionDatabase db(dir.path() / "ckpt.db");
     const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
@@ -972,7 +973,7 @@ TEST_CASE("compaction checkpoints round-trip, upsert, and clear", "[session][che
     CHECK(loaded->created_at_unix_ms > 0);
     REQUIRE(MessagesEqual(loaded->summary, summary));
 
-    // Upsert: the second compaction replaces, never stacks.
+    // Records stack; the checkpoint is the one with the highest boundary.
     const llm::Message newer{llm::Role::User, {llm::TextBlock{"covers more"}}};
     db.SaveCompactionCheckpoint(id, 1, newer);
     const auto replaced = db.LoadCompactionCheckpoint(id);
@@ -1401,9 +1402,9 @@ TEST_CASE("the startup orphan sweep removes rows whose session is gone",
                              " '{\"role\":\"user\",\"content\":[]}', 0, 0);",
                              nullptr, nullptr, &err) == SQLITE_OK);
         REQUIRE(sqlite3_exec(raw,
-                             "INSERT INTO compactions (session_id, boundary_seq,"
+                             "INSERT INTO compactions (session_id, boundary_seq, at_seq,"
                              " summary_content_json, created_at) VALUES ('ghost-session', 0,"
-                             " '{}', 0);",
+                             " 0, '{}', 0);",
                              nullptr, nullptr, &err) == SQLITE_OK);
         sqlite3_close(raw);
     }
@@ -2104,10 +2105,17 @@ TEST_CASE("ForkSession copies the compaction checkpoint only when it covers the 
     CHECK(covering_checkpoint->boundary_seq == 1);
     CHECK(MessagesEqual(covering_checkpoint->summary, summary));
 
-    // boundary (2) >= target (2): the summary over-covers -- leave it behind.
+    // boundary (2) >= target (2): that summary over-covers -- it stays behind,
+    // and the earlier record (boundary 1) is the child's checkpoint.
     fx.db.SaveCompactionCheckpoint(fx.source, /*boundary_seq=*/2, summary);
     const auto over = fx.db.ForkSession(fx.source, 2, "", std::nullopt);
-    CHECK_FALSE(fx.db.LoadCompactionCheckpoint(over.session_id).has_value());
+    const auto over_checkpoint = fx.db.LoadCompactionCheckpoint(over.session_id);
+    REQUIRE(over_checkpoint.has_value());
+    CHECK(over_checkpoint->boundary_seq == 1);
+
+    // A fork below every record's boundary carries none.
+    const auto under = fx.db.ForkSession(fx.source, 0, "", std::nullopt);
+    CHECK_FALSE(fx.db.LoadCompactionCheckpoint(under.session_id).has_value());
 }
 
 TEST_CASE("a forked session's discard state is its own: rewind in the fork leaves the "
@@ -2135,4 +2143,141 @@ TEST_CASE("ForkSession with a negative target copies the whole active transcript
     REQUIRE(child.size() == 3);
     CHECK(child[2].seq == 2);
     CHECK(MessagesEqual(child[2].message, UserMsg("second")));
+}
+
+TEST_CASE("every compaction is a scrollback record positioned at its last message",
+          "[session][checkpoint][compaction]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "records.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    for (const char* text : {"m0", "m1", "m2"}) db.AppendMessage(id, UserMsg(text));
+
+    const llm::Message first{llm::Role::User, {llm::TextBlock{"first summary"}}};
+    db.SaveCompactionCheckpoint(id, 1, first,
+                                CompactionMeta{.folded_messages = 2, .tokens_before = 700000,
+                                               .tokens_after = 150000, .trigger = "auto"});
+    db.AppendMessage(id, UserMsg("m3"));
+    const llm::Message second{llm::Role::User, {llm::TextBlock{"second summary"}}};
+    db.SaveCompactionCheckpoint(id, 2, second, CompactionMeta{.trigger = "manual"});
+
+    const auto records = db.LoadCompactionRecords(id, 0, 100);
+    REQUIRE(records.size() == 2);
+    // at_seq: the last active message when each ran.
+    CHECK(records[0].at_seq == 2);
+    CHECK(records[0].boundary_seq == 1);
+    CHECK(records[0].meta.folded_messages == 2);
+    CHECK(records[0].meta.tokens_before == 700000);
+    CHECK(records[0].meta.tokens_after == 150000);
+    CHECK(records[0].meta.trigger == "auto");
+    CHECK(MessagesEqual(records[0].summary, first));
+    CHECK(records[1].at_seq == 3);
+    CHECK(records[1].meta.trigger == "manual");
+
+    // Range-bounded: a page holding seqs [3, 3] carries only the second.
+    const auto page_records = db.LoadCompactionRecords(id, 3, 3);
+    REQUIRE(page_records.size() == 1);
+    CHECK(page_records[0].at_seq == 3);
+
+    // Scrollback pages carry the records that ran at one of their seqs.
+    SessionReader reader(db);
+    const auto newest = reader.GetMessages(id, std::nullopt, 2);   // seqs 3, 2
+    REQUIRE(newest.compactions.size() == 2);
+    const auto older = reader.GetMessages(id, std::optional<std::int64_t>{2}, 10);  // 1, 0
+    CHECK(older.compactions.empty());
+    const auto delta = reader.GetMessagesAfter(id, 2, 10);         // seq 3
+    REQUIRE(delta.compactions.size() == 1);
+    CHECK(delta.compactions[0].at_seq == 3);
+
+    // /clear deactivates the checkpoint but keeps the records for scrollback.
+    db.ClearCompactionCheckpoint(id);
+    CHECK_FALSE(db.LoadCompactionCheckpoint(id).has_value());
+    CHECK(db.LoadCompactionRecords(id, 0, 100).size() == 2);
+}
+
+TEST_CASE("compactions on a rewound-away branch are reclaimed with it",
+          "[session][checkpoint][compaction][rewind]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "records-rewind.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    for (const char* text : {"m0", "m1", "m2", "m3"}) db.AppendMessage(id, UserMsg(text));
+    const llm::Message summary{llm::Role::User, {llm::TextBlock{"s"}}};
+    db.SaveCompactionCheckpoint(id, 0, summary);   // at_seq 3
+
+    // Rewound but not yet forked: the record is out of every active page's
+    // range, and survives for a redo.
+    db.SetDiscardedAfter(id, 2);
+    CHECK(SessionReader(db).GetMessages(id, std::nullopt, 10).compactions.empty());
+    CHECK(db.LoadCompactionRecords(id, 0, 100).size() == 1);
+
+    // The first append after the rewind reclaims the branch -- and its seq 2
+    // is reused, so the old record must not attach to the new message.
+    db.AppendMessage(id, UserMsg("new m2"));
+    CHECK(db.LoadCompactionRecords(id, 0, 100).empty());
+}
+
+TEST_CASE("migration 11 carries a v10 checkpoint over as an active record",
+          "[session][migrations][checkpoint]") {
+    TempDir dir;
+    const auto path = dir.path() / "v10.db";
+    std::string id;
+    {
+        SessionDatabase db(path);
+        id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+        for (const char* text : {"m0", "m1", "m2"}) db.AppendMessage(id, UserMsg(text));
+    }
+    // Put the compactions table back to its v4..v10 shape, with one row, and
+    // stamp v10 -- everything else in the schema is identical at v10.
+    {
+        const std::string json =
+            MessageToJson(llm::Message{llm::Role::User, {llm::TextBlock{"old summary"}}}).dump();
+        sqlite3* raw = RawOpen(path);
+        REQUIRE(sqlite3_exec(raw, "DROP TABLE compactions;", nullptr, nullptr, nullptr) ==
+                SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw,
+                             "CREATE TABLE compactions ("
+                             "  session_id TEXT PRIMARY KEY REFERENCES sessions(id)"
+                             "    ON DELETE CASCADE,"
+                             "  boundary_seq INTEGER NOT NULL,"
+                             "  summary_content_json TEXT NOT NULL,"
+                             "  created_at INTEGER NOT NULL);",
+                             nullptr, nullptr, nullptr) == SQLITE_OK);
+        const std::string insert = "INSERT INTO compactions VALUES ('" + id + "', 1, '" + json +
+                                   "', 1700000000000);";
+        REQUIRE(sqlite3_exec(raw, insert.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw, "PRAGMA user_version = 10;", nullptr, nullptr, nullptr) ==
+                SQLITE_OK);
+        sqlite3_close(raw);
+    }
+
+    SessionDatabase db(path);
+    CHECK(RawScalar(path, "PRAGMA user_version;") ==
+          std::to_string(SessionDatabase::kSchemaVersion));
+    const auto checkpoint = db.LoadCompactionCheckpoint(id);
+    REQUIRE(checkpoint.has_value());
+    CHECK(checkpoint->boundary_seq == 1);
+    const auto records = db.LoadCompactionRecords(id, 0, 100);
+    REQUIRE(records.size() == 1);
+    CHECK(records[0].at_seq == 1);   // the only position a v10 row knows
+    CHECK(llm::TextOf(records[0].summary) == "old summary");
+}
+
+TEST_CASE("a skipped compaction is a scrollback notice, never the checkpoint",
+          "[session][checkpoint][compaction]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "notice.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    for (const char* text : {"m0", "m1"}) db.AppendMessage(id, UserMsg(text));
+    db.SaveCompactionCheckpoint(id, 0, llm::Message{llm::Role::User, {llm::TextBlock{"s"}}});
+    db.SaveCompactionCheckpoint(id, -1, llm::Message{llm::Role::User, {}},
+                                CompactionMeta{.trigger = "auto",
+                                               .warning = "auto-compaction stopped",
+                                               .skipped = true});
+
+    const auto checkpoint = db.LoadCompactionCheckpoint(id);
+    REQUIRE(checkpoint.has_value());
+    CHECK(checkpoint->boundary_seq == 0);
+    const auto records = db.LoadCompactionRecords(id, 0, 100);
+    REQUIRE(records.size() == 2);
+    CHECK(records[1].meta.skipped);
+    CHECK(records[1].meta.warning == "auto-compaction stopped");
 }

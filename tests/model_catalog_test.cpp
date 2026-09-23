@@ -108,17 +108,20 @@ TEST_CASE("ParseModelList reads OpenRouter's context_length and keeps metadata",
 TEST_CASE("ParseModelList degrades a missing output cap to nullopt", "[model_catalog]") {
     // top_provider is OpenRouter-shaped; a plain OpenAI-shape /models body (and
     // an OpenRouter entry without the field, or with a non-positive one) must
-    // yield no cap rather than a fabricated or poisoned one.
+    // yield no cap rather than a fabricated or poisoned one. "fractional-cap"
+    // is a regression case: 65536.5 used to pass is_number() and get<T>()
+    // silently truncated it instead of treating it as a misparse.
     const auto models = ParseModelList(R"({"data":[
         {"id": "no-top-provider", "context_length": 8192},
         {"id": "empty-top-provider", "top_provider": {}, "context_length": 8192},
         {"id": "no-cap-field", "top_provider": {"is_moderated": false}},
         {"id": "garbage-cap", "top_provider": {"max_completion_tokens": "lots"}},
         {"id": "zero-cap", "top_provider": {"max_completion_tokens": 0}},
-        {"id": "negative-cap", "top_provider": {"max_completion_tokens": -5}}
+        {"id": "negative-cap", "top_provider": {"max_completion_tokens": -5}},
+        {"id": "fractional-cap", "top_provider": {"max_completion_tokens": 65536.5}}
     ]})");
 
-    REQUIRE(models.size() == 6);
+    REQUIRE(models.size() == 7);
     for (const auto& model : models) {
         CHECK_FALSE(model.max_tokens.has_value());
     }
@@ -158,13 +161,17 @@ TEST_CASE("ParseModelList degrades a missing window to nullopt, never a guess",
           "[model_catalog][invariant]") {
     // A model without any window field must not fabricate one: the alternative
     // is compaction firing against a made-up number.
+    // Regression: "context_length": 131072.9 used to pass is_number() and
+    // get<int64_t>() silently truncated it to 131072 instead of treating a
+    // fractional value the same as any other misparse.
     const auto models = ParseModelList(R"({"data":[
         {"id": "bare"},
         {"id": "bad-window", "context_length": "unknown"},
-        {"id": "null-window", "context_length": null}
+        {"id": "null-window", "context_length": null},
+        {"id": "fractional-window", "context_length": 131072.9}
     ]})");
 
-    REQUIRE(models.size() == 3);
+    REQUIRE(models.size() == 4);
     for (const auto& model : models) {
         CHECK_FALSE(model.context_window_tokens.has_value());
     }

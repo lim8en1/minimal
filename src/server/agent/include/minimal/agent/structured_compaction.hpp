@@ -10,6 +10,16 @@
 
 namespace minimal::agent {
 
+// The structured summary tool. The agent loop puts its definition on EVERY
+// main request (so the summarizer request, which reuses that request's tools,
+// keeps the prompt cache) and answers a stray call outside compaction with a
+// no-op error result instead of executing anything.
+inline constexpr std::string_view kRecordSummaryToolName = "record_summary";
+
+// strict: true, schema strict-compatible (all properties required,
+// additionalProperties false throughout).
+llm::ToolDefinition MakeRecordSummaryToolDefinition();
+
 // One entry of the structured summary's `important` section. `name` must be a
 // verbatim identifier -- a file path, tool name, MCP call, or a `topics` entry
 // -- the key the continuing model can resolve without guessing; that contract

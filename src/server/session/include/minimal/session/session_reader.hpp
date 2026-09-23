@@ -43,9 +43,7 @@ public:
     // delta-fetch path. has_more means more NEWER rows remain, not older
     // pages (see SessionDatabase::GetMessagesPageAfter).
     MessagePage GetMessagesAfter(const std::string& session_id, std::int64_t after_seq,
-                                 int limit) const {
-        return db_.GetMessagesPageAfter(session_id, after_seq, limit);
-    }
+                                 int limit) const;
 
     // The full transcript, ascending by seq -- the one-shot load resume seeds
     // the loop's working history with when no compaction checkpoint exists.

@@ -172,6 +172,40 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
          {
              "ALTER TABLE sessions ADD COLUMN subagent_model TEXT;",
          }},
+        // Every compaction becomes a record, not a latest-wins checkpoint:
+        // scrollback renders each one where it happened (at_seq -- the last
+        // active message seq when it ran), with the token figures that make
+        // it legible. `active` separates "the checkpoint resume seeds from"
+        // (highest boundary among active rows) from "what scrollback shows":
+        // /clear deactivates, it no longer deletes. SQLite cannot drop a
+        // PRIMARY KEY in place, hence the rebuild. Pre-v11 rows backfill
+        // at_seq = boundary_seq (the only position known) and zero figures.
+        {11,
+         {
+             "CREATE TABLE compactions_v11 ("
+             "  id INTEGER PRIMARY KEY,"
+             "  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,"
+             "  boundary_seq INTEGER NOT NULL,"
+             "  at_seq INTEGER NOT NULL,"
+             "  summary_content_json TEXT NOT NULL,"
+             "  folded_messages INTEGER NOT NULL DEFAULT 0,"
+             "  tokens_before INTEGER NOT NULL DEFAULT 0,"
+             "  tokens_after INTEGER NOT NULL DEFAULT 0,"
+             "  trigger_kind TEXT NOT NULL DEFAULT '',"
+             "  warning TEXT NOT NULL DEFAULT '',"
+             "  skipped INTEGER NOT NULL DEFAULT 0,"
+             "  active INTEGER NOT NULL DEFAULT 1,"
+             "  created_at INTEGER NOT NULL"
+             ");",
+             "INSERT INTO compactions_v11 (session_id, boundary_seq, at_seq,"
+             " summary_content_json, created_at)"
+             " SELECT session_id, boundary_seq, boundary_seq, summary_content_json, created_at"
+             " FROM compactions;",
+             "DROP TABLE compactions;",
+             "ALTER TABLE compactions_v11 RENAME TO compactions;",
+             "CREATE INDEX IF NOT EXISTS idx_compactions_session"
+             " ON compactions(session_id, at_seq);",
+         }},
     }};
     // The invariant the version arithmetic depends on, checked where the list
     // is built: kSchemaVersion is the TARGET of ApplyMigrations, so it must
@@ -610,6 +644,17 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
         sqlite3_bind_text(reclaim.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
         if (sqlite3_step(reclaim.stmt) != SQLITE_DONE) {
             ThrowSqliteError(db_, "failed to reclaim discarded messages");
+        }
+        // Compactions that ran on the discarded branch go with it: their
+        // at_seq positions are about to be reused by the new branch's seqs.
+        CachedStmt reclaim_compactions(
+            db_, prepared_,
+            "DELETE FROM compactions WHERE session_id = ?1 AND at_seq >"
+            " COALESCE((SELECT MAX(seq) FROM messages WHERE session_id = ?1), -1);",
+            "failed to reclaim discarded compactions");
+        sqlite3_bind_text(reclaim_compactions.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(reclaim_compactions.stmt) != SQLITE_DONE) {
+            ThrowSqliteError(db_, "failed to reclaim discarded compactions");
         }
 
         // Validate the session and touch last-activity first: appending to a
@@ -1264,7 +1309,8 @@ std::int64_t SessionDatabase::LastMessageSeq(const std::string& session_id) cons
 
 void SessionDatabase::SaveCompactionCheckpoint(const std::string& session_id,
                                                std::int64_t boundary_seq,
-                                               const llm::Message& summary) {
+                                               const llm::Message& summary,
+                                               const CompactionMeta& meta) {
     // Encode outside the mutex, same ruling as AppendMessage: the summary is
     // model output and dump() throws type_error.316 on invalid UTF-8, so the
     // replace handler is required -- but the DOM plus dump need not run while
@@ -1273,35 +1319,43 @@ void SessionDatabase::SaveCompactionCheckpoint(const std::string& session_id,
         MessageToJson(summary).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     std::lock_guard lock(mu_);
 
-    // Upsert, not INSERT: each successful compaction REPLACES the previous
-    // checkpoint -- its covered range is a strict superset (the new summary
-    // range always contains the old one, since compaction folds from the head)
-    // and only the latest is ever read.
-    CachedStmt upsert(db_, prepared_,
-                      "INSERT INTO compactions (session_id, boundary_seq, summary_content_json,"
-                      " created_at) VALUES (?, ?, ?, ?)"
-                      " ON CONFLICT(session_id) DO UPDATE SET boundary_seq = excluded.boundary_seq,"
-                      " summary_content_json = excluded.summary_content_json,"
-                      " created_at = excluded.created_at;",
+    // A new record per compaction. at_seq is read here, in the same statement,
+    // from the ACTIVE transcript: the compaction ran after its last message.
+    CachedStmt insert(db_, prepared_,
+                      "INSERT INTO compactions (session_id, boundary_seq, at_seq,"
+                      " summary_content_json, folded_messages, tokens_before, tokens_after,"
+                      " trigger_kind, warning, skipped, active, created_at)"
+                      " VALUES (?1, ?2,"
+                      " COALESCE((SELECT MAX(seq) FROM messages"
+                      "           WHERE session_id = ?1 AND discarded = 0), ?2),"
+                      " ?3, ?4, ?5, ?6, ?7, ?9, ?10, ?11, ?8);",
                       "failed to save compaction checkpoint");
-    sqlite3_bind_text(upsert.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(upsert.stmt, 2, boundary_seq);
+    sqlite3_bind_text(insert.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(insert.stmt, 2, boundary_seq);
     // STATIC + explicit length, same reasoning as the append path: content can
     // be large, ~CachedStmt clears bindings, nothing retains the pointer.
-    sqlite3_bind_text(upsert.stmt, 3, content_json.data(), static_cast<int>(content_json.size()),
+    sqlite3_bind_text(insert.stmt, 3, content_json.data(), static_cast<int>(content_json.size()),
                       SQLITE_STATIC);
-    sqlite3_bind_int64(upsert.stmt, 4, NextTimestamp());
-    if (sqlite3_step(upsert.stmt) != SQLITE_DONE) {
+    sqlite3_bind_int64(insert.stmt, 4, meta.folded_messages);
+    sqlite3_bind_int64(insert.stmt, 5, meta.tokens_before);
+    sqlite3_bind_int64(insert.stmt, 6, meta.tokens_after);
+    sqlite3_bind_text(insert.stmt, 7, meta.trigger.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(insert.stmt, 8, NextTimestamp());
+    sqlite3_bind_text(insert.stmt, 9, meta.warning.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(insert.stmt, 10, meta.skipped ? 1 : 0);
+    // A skipped record is a notice, never a checkpoint.
+    sqlite3_bind_int(insert.stmt, 11, meta.skipped ? 0 : 1);
+    if (sqlite3_step(insert.stmt) != SQLITE_DONE) {
         ThrowSqliteError(db_, "failed to save compaction checkpoint");
     }
 }
 
 void SessionDatabase::ClearCompactionCheckpoint(const std::string& session_id) {
     std::lock_guard lock(mu_);
-    CachedStmt del(db_, prepared_, "DELETE FROM compactions WHERE session_id = ?;",
-                   "failed to clear compaction checkpoint");
-    sqlite3_bind_text(del.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(del.stmt) != SQLITE_DONE) {
+    CachedStmt clear(db_, prepared_, "UPDATE compactions SET active = 0 WHERE session_id = ?;",
+                     "failed to clear compaction checkpoint");
+    sqlite3_bind_text(clear.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(clear.stmt) != SQLITE_DONE) {
         ThrowSqliteError(db_, "failed to clear compaction checkpoint");
     }
 }
@@ -1313,8 +1367,9 @@ std::optional<CompactionCheckpoint> SessionDatabase::LoadCompactionCheckpoint(
     {
         std::lock_guard lock(mu_);
         CachedStmt query(db_, prepared_,
-                         "SELECT boundary_seq, summary_content_json, created_at"
-                         " FROM compactions WHERE session_id = ?;",
+                         "SELECT boundary_seq, summary_content_json, created_at, at_seq"
+                         " FROM compactions WHERE session_id = ? AND active = 1"
+                         " ORDER BY boundary_seq DESC, id DESC LIMIT 1;",
                          "failed to load compaction checkpoint");
         sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
         const int rc = sqlite3_step(query.stmt);
@@ -1323,8 +1378,9 @@ std::optional<CompactionCheckpoint> SessionDatabase::LoadCompactionCheckpoint(
         out.boundary_seq = sqlite3_column_int64(query.stmt, 0);
         json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
         out.created_at_unix_ms = sqlite3_column_int64(query.stmt, 2);
-        // session_id is a PRIMARY KEY, so exactly one row; confirm the scan is
-        // over rather than trusting that (BUSY/IOERR must not read as "done").
+        out.at_seq = sqlite3_column_int64(query.stmt, 3);
+        // LIMIT 1, so exactly one row; confirm the scan is over rather than
+        // trusting that (BUSY/IOERR must not read as "done").
         CheckRowLoopEnd(db_, sqlite3_step(query.stmt), "failed to load compaction checkpoint");
     }
     // Strict decode outside the lock, same as the message read paths: an
@@ -1332,6 +1388,54 @@ std::optional<CompactionCheckpoint> SessionDatabase::LoadCompactionCheckpoint(
     // truncate the resumed view.
     out.summary = JsonToMessage(nlohmann::json::parse(json));
     out.session_id = session_id;
+    return out;
+}
+
+std::vector<CompactionRecord> SessionDatabase::LoadCompactionRecords(
+    const std::string& session_id, std::int64_t from_seq, std::int64_t to_seq) const {
+    struct Raw {
+        CompactionRecord record;
+        std::string json;
+    };
+    std::vector<Raw> raw;
+    {
+        std::lock_guard lock(mu_);
+        CachedStmt query(db_, prepared_,
+                         "SELECT boundary_seq, at_seq, summary_content_json, folded_messages,"
+                         " tokens_before, tokens_after, trigger_kind, created_at, warning, skipped"
+                         " FROM compactions WHERE session_id = ? AND at_seq >= ? AND at_seq <= ?"
+                         " ORDER BY at_seq ASC, id ASC;",
+                         "failed to load compaction records");
+        sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(query.stmt, 2, from_seq);
+        sqlite3_bind_int64(query.stmt, 3, to_seq);
+        int rc = SQLITE_ROW;
+        while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
+            Raw row;
+            row.record.boundary_seq = sqlite3_column_int64(query.stmt, 0);
+            row.record.at_seq = sqlite3_column_int64(query.stmt, 1);
+            row.json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 2));
+            row.record.meta.folded_messages = sqlite3_column_int64(query.stmt, 3);
+            row.record.meta.tokens_before = sqlite3_column_int64(query.stmt, 4);
+            row.record.meta.tokens_after = sqlite3_column_int64(query.stmt, 5);
+            if (const auto* trigger = sqlite3_column_text(query.stmt, 6)) {
+                row.record.meta.trigger = reinterpret_cast<const char*>(trigger);
+            }
+            row.record.created_at_unix_ms = sqlite3_column_int64(query.stmt, 7);
+            if (const auto* warning = sqlite3_column_text(query.stmt, 8)) {
+                row.record.meta.warning = reinterpret_cast<const char*>(warning);
+            }
+            row.record.meta.skipped = sqlite3_column_int(query.stmt, 9) != 0;
+            raw.push_back(std::move(row));
+        }
+        CheckRowLoopEnd(db_, rc, "failed to load compaction records");
+    }
+    std::vector<CompactionRecord> out;
+    out.reserve(raw.size());
+    for (auto& row : raw) {
+        row.record.summary = JsonToMessage(nlohmann::json::parse(row.json));
+        out.push_back(std::move(row.record));
+    }
     return out;
 }
 
@@ -1629,34 +1733,30 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
         }
         copied = sqlite3_changes(db_);
 
-        // The compaction checkpoint rides along only when it covers part of
-        // the copied prefix: the summary represents everything <= boundary_seq,
-        // and the copied tail is (boundary, target). If the boundary sits at
-        // or above the target, the summary over-covers -- leave it behind, and
-        // the child seeds from the full copied prefix (compacting on demand if
-        // that overflows its window). CONFLICT-safe: compactions' PK is the
-        // session id, and the child's row was just minted with none.
-        Stmt checkpoint(db_, "SELECT boundary_seq, summary_content_json FROM compactions"
-                             " WHERE session_id = ?1;",
-                       "failed to read the source compaction checkpoint");
-        sqlite3_bind_text(checkpoint.stmt, 1, source_session_id.c_str(), -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(checkpoint.stmt) == SQLITE_ROW) {
-            const std::int64_t boundary_seq = sqlite3_column_int64(checkpoint.stmt, 0);
-            const auto* summary_json =
-                reinterpret_cast<const char*>(sqlite3_column_text(checkpoint.stmt, 1));
-            if ((fork_all || boundary_seq < target_seq) && summary_json != nullptr) {
-                Stmt copy_checkpoint(db_, "INSERT INTO compactions"
-                                          " (session_id, boundary_seq, summary_content_json,"
-                                          " created_at) VALUES (?1, ?2, ?3, ?4);",
-                                    "failed to copy the compaction checkpoint");
-                sqlite3_bind_text(copy_checkpoint.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_int64(copy_checkpoint.stmt, 2, boundary_seq);
-                sqlite3_bind_text(copy_checkpoint.stmt, 3, summary_json, -1, SQLITE_STATIC);
-                sqlite3_bind_int64(copy_checkpoint.stmt, 4, now);
-                if (sqlite3_step(copy_checkpoint.stmt) != SQLITE_DONE) {
-                    ThrowSqliteError(db_, "failed to copy the compaction checkpoint");
-                }
-            }
+        // Compaction records ride along when their summary covers only part
+        // of the copied prefix (boundary_seq < the copy bound); the others
+        // summarize history the child does not have. A record that ran past
+        // the bound is re-positioned to the child's last copied seq -- its
+        // summary still describes that prefix. `active` is copied too: a
+        // record the source had deactivated (/clear) must not become the
+        // child's checkpoint.
+        Stmt copy_compactions(db_, "INSERT INTO compactions (session_id, boundary_seq, at_seq,"
+                                   " summary_content_json, folded_messages, tokens_before,"
+                                   " tokens_after, trigger_kind, warning, skipped, active,"
+                                   " created_at)"
+                                   " SELECT ?1, boundary_seq, MIN(at_seq, ?3 - 1),"
+                                   " summary_content_json,"
+                                   " folded_messages, tokens_before, tokens_after, trigger_kind,"
+                                   " warning, skipped, active, created_at"
+                                   " FROM compactions WHERE session_id = ?2 AND boundary_seq < ?3"
+                                   " ORDER BY id;",
+                              "failed to copy the compaction records");
+        sqlite3_bind_text(copy_compactions.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(copy_compactions.stmt, 2, source_session_id.c_str(), -1,
+                          SQLITE_TRANSIENT);
+        sqlite3_bind_int64(copy_compactions.stmt, 3, copy_upper);
+        if (sqlite3_step(copy_compactions.stmt) != SQLITE_DONE) {
+            ThrowSqliteError(db_, "failed to copy the compaction records");
         }
 
         // Maintain the count the same way every other path does.

@@ -106,6 +106,18 @@ class _Cap(io.TextIOBase):
 
 def _main():
     proto_in = os.fdopen(os.dup(0), "r", encoding="utf-8", errors="replace")
+    # The original fd 0 is dup'd away above and then REPLACED (not just
+    # left open): sys.stdin is reassigned to user_stdin (fd 5) below, but
+    # code that does raw fd I/O -- subprocess.run() with no stdin=
+    # argument, os.system(), a prompt that reads fd 0 directly -- inherits
+    # the OS-level fd, not the sys.stdin object. Left as the real request
+    # pipe, that fd 0 lets a spawned subprocess silently consume or block on
+    # the next queued python_exec request frame; /dev/null makes it an
+    # ordinary, harmless empty stdin instead, matching what a fully-detached
+    # subprocess should see by default.
+    devnull_in = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(devnull_in, 0)
+    os.close(devnull_in)
     # Dup'd to a private fd and the original closed -- see the SABOTAGE
     # HARDENING note above. Leaving fd 3 itself open under proto_out let
     # executed code (os.write(3, ...)) inject its own protocol lines
@@ -146,8 +158,17 @@ def _main():
             continue
         try:
             req = json.loads(line)
-        except Exception as exc:
-            emit({"bad_request": str(exc)})
+        except BaseException as exc:
+            # BaseException, not Exception: a SIGINT landing exactly here
+            # (the parent's soft interrupt is aimed at whatever is running,
+            # and the loop is always running SOMETHING) raises
+            # KeyboardInterrupt, which Exception does not catch -- letting it
+            # escape would exit _main() over a signal that hit request
+            # parsing rather than the request itself.
+            try:
+                emit({"bad_request": str(exc)})
+            except BaseException:
+                pass
             continue
         code = req.get("code")
         if not isinstance(code, str):
@@ -177,6 +198,15 @@ def _main():
                 value = eval(compile(ast.Expression(trailing), "<python-tool>", "eval"), G)
                 has_value = True
                 result = repr(value)
+                # Uncapped, unlike stdout/stderr/result_json just below: a
+                # harmless `list(range(10**7))` or a big file's `.read()` as
+                # the trailing expression built a repr past the parent's
+                # kMaxLineBytes protocol-line cap, which the parent reads as
+                # CORRUPTION and kills the whole interpreter over -- the same
+                # _MAX budget every other captured field already respects.
+                if len(result) > _MAX:
+                    result = result[:_MAX] + "\n[... %d bytes truncated ...]" % (
+                        len(result) - _MAX)
         except BaseException as e:
             # KeyboardInterrupt included: a soft interrupt fails THIS request
             # only -- the interpreter and its state survive.
@@ -186,21 +216,37 @@ def _main():
             err.write(traceback.format_exc())
         finally:
             sys.stdout, sys.stderr, sys.stdin = old
-        response = {"id": req.get("id"), "ok": ok, "result": result,
-                    "stdout": out.value(), "stderr": err.value()}
-        if exc_type is not None:
-            response["exc"] = exc_type
-            response["exc_msg"] = exc_msg
-        if has_value:
-            # The structured return: JSON when the value serializes cheaply,
-            # absent otherwise (the repr above is the fallback display).
+        try:
+            response = {"id": req.get("id"), "ok": ok, "result": result,
+                        "stdout": out.value(), "stderr": err.value()}
+            if exc_type is not None:
+                response["exc"] = exc_type
+                response["exc_msg"] = exc_msg
+            if has_value:
+                # The structured return: JSON when the value serializes cheaply,
+                # absent otherwise (the repr above is the fallback display).
+                try:
+                    rendered = json.dumps(value)
+                    if len(rendered) <= _MAX:
+                        response["result_json"] = rendered
+                except BaseException:
+                    pass
+            emit(response)
+        except BaseException:
+            # The code above already ran to completion -- ok/result/stdout/
+            # stderr are decided. Only reply BOOKKEEPING happens here
+            # (json.dumps, the write+flush inside emit), and it is NOT
+            # wrapped by the per-request catch above, so a SIGINT landing in
+            # exactly this window used to escape _main() entirely and take
+            # the whole interpreter down over how a result was reported, not
+            # what the result was. Best-effort fallback reply; if even that
+            # fails, drop it and keep serving -- the parent's own wait on
+            # this id times out instead of losing every other pending state.
             try:
-                rendered = json.dumps(value)
-                if len(rendered) <= _MAX:
-                    response["result_json"] = rendered
-            except Exception:
+                emit({"id": req.get("id"), "ok": False, "exc": "InternalError",
+                      "exc_msg": "driver interrupted while replying"})
+            except BaseException:
                 pass
-        emit(response)
 
 
 try:

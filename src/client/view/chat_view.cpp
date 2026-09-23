@@ -82,6 +82,7 @@ bool ClickCollapsible(ChatRowKind kind) {
         case ChatRowKind::Thinking:
         case ChatRowKind::ToolActivity:
         case ChatRowKind::UserAttachment:
+        case ChatRowKind::Compaction:
             return true;
         case ChatRowKind::UserText:
         case ChatRowKind::AgentMarkdown:
@@ -101,6 +102,7 @@ ftxui::Color GutterColor(ChatRowKind kind, const Theme& theme) {
         case ChatRowKind::UserAttachment:
             return theme.ColorFor("user_message");
         case ChatRowKind::System:
+        case ChatRowKind::Compaction:
             return theme.ColorFor("system_message");
         case ChatRowKind::AgentMarkdown:
         case ChatRowKind::Thinking:
@@ -192,6 +194,7 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
         collapse_overrides_.clear();
         focused_row_.reset();
         materialized_page_.reset();   // a different session's page is a different key space
+        materialized_compactions_.reset();
         row_box_slots_.clear();       // likewise the box slots, keyed by that key space
         row_spans_.clear();           // spans are keyed by that key space too
     }
@@ -205,9 +208,12 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
     // rebuilt it, so it is exactly the right cache key -- the per-row
     // Elements cache below already handles "which RENDERS to skip"; this is
     // "skip re-deriving the ChatRows to render in the first place".
-    if (materialized_page_ != snapshot.scrollback_page) {
-        materialized_rows_ = ChatRowsFromMessages(*snapshot.scrollback_page);
+    if (materialized_page_ != snapshot.scrollback_page ||
+        materialized_compactions_ != snapshot.compactions) {
+        materialized_rows_ =
+            ChatRowsFromMessages(*snapshot.scrollback_page, snapshot.compactions.get());
         materialized_page_ = snapshot.scrollback_page;
+        materialized_compactions_ = snapshot.compactions;
     }
     const std::vector<ChatRow>& rows = materialized_rows_;
     // Row windowing bookkeeping, part 1 -- captured BEFORE row_keys_ is

@@ -68,6 +68,10 @@ void WatchBackgroundTask(TaskRegistry::TaskState& task,
     // by design, the capped record lives in the sink.
     sinks[0].emit = handles.emit_output;
     sinks[1].mode = PipeSink::Mode::kDiscard;
+    // Same exemption as the synchronous path (bash_tool.cpp): the state
+    // channel is internal bookkeeping a daemon inherits by accident, never
+    // evidence that the task's OWN stdio was left un-redirected.
+    sinks[1].detect_detached_grandchild = false;
 
     minimal::sidecar::DrainOptions options;
     options.timeout_ms = timeout_ms;
@@ -179,6 +183,23 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
     const std::string& session_id, const std::string& command, const SessionShellState& state,
     const BashSettings& settings, std::int64_t timeout_ms, WatchHandles handles,
     std::string* error) {
+    // Cheap pre-check: the AUTHORITATIVE limit check happens inside
+    // TaskRegistry::Start, but only after the fork+exec below has already
+    // happened -- a session already at the limit paid for a spawn (and any
+    // side effects a short-lived command completes before the immediate
+    // SIGKILL) just to be told it never ran. This can still race a
+    // concurrent Start (TOCTOU: nothing is held between the two checks), so
+    // the real enforcement stays where it is; this only skips the common
+    // case of "already full" outright.
+    if (settings.max_background_tasks > 0 &&
+        registry_.CountRunning(session_id) >=
+            static_cast<std::size_t>(settings.max_background_tasks)) {
+        *error = "background task limit reached (" +
+                 std::to_string(settings.max_background_tasks) +
+                 " running); wait for one to finish";
+        return std::nullopt;
+    }
+
     minimal::sidecar::LaunchSpec spec;
     // Same launch shape as the synchronous path (bash_process.cpp): merged
     // stdout+stderr, plus the fd-9 state channel -- drained and discarded

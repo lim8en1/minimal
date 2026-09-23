@@ -235,6 +235,14 @@ public:
     const ToolSpec& spec() const override { return spec_; }
     bool path_confinement_supported() const override { return true; }
     bool default_dotenv_protected() const override { return true; }
+    // The default (true) assumes independent calls touch independent state;
+    // write reads the whole file, applies the model's change, then writes
+    // the whole file back with no lock in between, so two calls against the
+    // SAME path in one turn race: both load the pre-write content, and
+    // whichever atomic rename lands second silently discards the other's
+    // change while both report success. See tools-bash's own parallel_safe
+    // comment for the shape of this contract.
+    bool parallel_safe() const override { return false; }
     std::optional<std::string> ExtractPath(const nlohmann::json& input) const override {
         return ExtractPathField(input);
     }
@@ -269,9 +277,6 @@ public:
             return Error("missing required string field: content");
         }
 
-        const auto parents = CreateParents(resolved.absolute_path);
-        if (parents.is_error) return Error(parents.content_text);
-
         const auto content = input.at("content").get<std::string>();
 
         // The same ceiling edit enforces (edit_max_editable_file_bytes), not a
@@ -280,12 +285,17 @@ public:
         // hands over megabytes and the whole payload sits in memory twice
         // (input JSON plus the string) before a single byte lands. Named in
         // the error so the model can adapt rather than retry blind.
+        // Checked BEFORE CreateParents: a rejected write must not leave empty
+        // directory debris behind it (`new/deep/dir` created, then refused).
         if (static_cast<std::int64_t>(content.size()) > settings_.edit_max_editable_file_bytes) {
             return Error("content is " + std::to_string(content.size()) +
                          " bytes, over the " +
                          std::to_string(settings_.edit_max_editable_file_bytes) +
                          "-byte write limit; build the file with a shell command instead");
         }
+
+        const auto parents = CreateParents(resolved.absolute_path);
+        if (parents.is_error) return Error(parents.content_text);
 
         const auto previous = FileEditor::ReadForDiff(resolved.absolute_path,
                                                       settings_.edit_max_editable_file_bytes);
@@ -338,6 +348,10 @@ public:
     const ToolSpec& spec() const override { return spec_; }
     bool path_confinement_supported() const override { return true; }
     bool default_dotenv_protected() const override { return true; }
+    // Same race as WriteTool (see its comment): str_replace/insert are also
+    // read-modify-write over the whole file with no lock, so two edit calls
+    // against the same path in one turn can silently lose one of them.
+    bool parallel_safe() const override { return false; }
     std::optional<std::string> ExtractPath(const nlohmann::json& input) const override {
         return ExtractPathField(input);
     }
@@ -387,11 +401,7 @@ public:
         if (!error.empty()) return Error(error);
 
         if (command == "view") return View(input, resolved.absolute_path);
-        if (command == "create") {
-            const auto parents = CreateParents(resolved.absolute_path);
-            if (parents.is_error) return Error(parents.content_text);
-            return Create(input, resolved.absolute_path);
-        }
+        if (command == "create") return Create(input, resolved.absolute_path);
         if (command == "str_replace") return StrReplace(input, resolved.absolute_path);
         if (command == "insert") return Insert(input, resolved.absolute_path);
         return Error("unknown command: " + command);
@@ -478,6 +488,11 @@ private:
                          std::to_string(settings_.edit_max_editable_file_bytes) +
                          "-byte write limit; build the file with a shell command instead");
         }
+        // CreateParents runs here, AFTER the size check (moved out of the
+        // execute() dispatcher): a rejected create must not leave empty
+        // directory debris behind it (`new/deep/dir` created, then refused).
+        const auto parents = CreateParents(path);
+        if (parents.is_error) return Error(parents.content_text);
         // Overwrites, matching text_editor_20250728's `create`. Diverging would
         // defeat the point of adopting that vocabulary, and it is FileWrite-gated
         // either way.

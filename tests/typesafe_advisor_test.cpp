@@ -379,6 +379,39 @@ TEST_CASE("typesafe-advisor retries a 429 then answers", "[typesafe_advisor][ret
     CHECK(outcome.total < std::chrono::milliseconds(settings.budget_ms));
 }
 
+TEST_CASE("typesafe-advisor a huge backoff_initial_ms still clamps to backoff_max_ms",
+          "[typesafe_advisor][retry]") {
+    // Regression: `backoff_initial_ms * (1 << attempt)` was computed in a
+    // plain `int`, which overflows (UB) for a realistic large configured
+    // value well before the backoff_max_ms clamp below it ever runs -- the
+    // clamp then sees a wrapped/garbage value instead of the real one. With
+    // backoff_initial_ms already far past backoff_max_ms at attempt 0, every
+    // retry delay must clamp to exactly backoff_max_ms; three retries should
+    // take close to 3*backoff_max_ms, not hang or race through instantly on
+    // a wrapped negative delay.
+    const auto too_many = HttpResponseOf(429, "Too Many Requests", R"({"error":{}})");
+    LoopbackServer server({too_many, too_many, too_many, too_many});
+
+    auto settings = FastSettings();
+    settings.endpoint = server.url();
+    settings.backoff_initial_ms = 2000000000;  // near INT_MAX
+    settings.backoff_max_ms = 50;
+    settings.retry_after_cap_ms = 50;
+    settings.max_retries = 3;
+    const auto started = std::chrono::steady_clock::now();
+    const auto outcome = AskJev(net::HttpClient{}, settings, "k", nlohmann::json::object(),
+                                [] { return false; });
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK_FALSE(outcome.ok);
+    CHECK(outcome.attempts == 4);
+    // 3 backoffs at ~50ms each: comfortably bounded, and long enough that a
+    // wrapped-to-near-zero delay (the old bug's likely outcome) would fail
+    // the lower bound.
+    CHECK(elapsed >= std::chrono::milliseconds(120));
+    CHECK(elapsed < std::chrono::seconds(5));
+}
+
 TEST_CASE("typesafe-advisor gives up after max_retries and abstains", "[typesafe_advisor][retry]") {
     const auto too_many = HttpResponseOf(429, "Too Many Requests", R"({"error":{}})");
     LoopbackServer server({too_many, too_many, too_many, too_many});

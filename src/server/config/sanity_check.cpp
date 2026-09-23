@@ -471,6 +471,10 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
     // The default compaction prompt: absence degrades every session's compaction
     // to a log line, and making that loud is this check's job (ARCHITECTURE.md,
     // "Bundled assets").
+    if (!std::filesystem::exists(inputs_.config_dir / "prompts" / "compression-structured.md", ec)) {
+        results.push_back(Warning("presets", "prompts/compression-structured.md not found -- the "
+                             "structured compaction strategy runs as free text"));
+    }
     if (!std::filesystem::exists(inputs_.config_dir / "prompts" / "compression.md", ec)) {
         results.push_back(Warning("presets", "prompts/compression.md not found -- compaction is disabled "
                              "for every preset that does not override it"));

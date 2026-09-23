@@ -242,17 +242,34 @@ void TitlerObserver::OnTurnCompleted(const agent::SessionInfo& info,
         std::lock_guard<std::mutex> lock(state->workers_mu);
         state->workers += 1;
     }
-    std::thread([state, provider = std::move(provider), model = std::move(model),
-                 session_id = std::move(session_id), text = std::move(first_text), support,
-                 logger = std::move(logger_copy)]() mutable {
-        TitlerObserver::GenerateTitle(state->config, logger, *provider, model, session_id,
-                                      text, *support);
+    // If std::thread's constructor throws (thread-creation resource
+    // exhaustion), the increment above is never undone by the lambda body
+    // below (it never runs) -- ~TitlerObserver's drain then waits on
+    // workers_cv for a worker that was never actually started, hanging
+    // plugin/server teardown indefinitely. Titling is best-effort by design
+    // (see GenerateTitle's own silent-degrade contract); losing one title to
+    // resource exhaustion is fine, a hung teardown is not.
+    try {
+        std::thread([state, provider = std::move(provider), model = std::move(model),
+                     session_id = std::move(session_id), text = std::move(first_text), support,
+                     logger = std::move(logger_copy)]() mutable {
+            TitlerObserver::GenerateTitle(state->config, logger, *provider, model, session_id,
+                                          text, *support);
+            {
+                std::lock_guard<std::mutex> lock(state->workers_mu);
+                state->workers -= 1;
+            }
+            state->workers_cv.notify_all();
+        }).detach();
+    } catch (const std::exception& e) {
         {
             std::lock_guard<std::mutex> lock(state->workers_mu);
             state->workers -= 1;
         }
         state->workers_cv.notify_all();
-    }).detach();
+        state_->logger->warn("session-titler: could not start a title worker for {}: {}",
+                             info.session_id, e.what());
+    }
 }
 
 void TitlerObserver::OnSessionEnded(const agent::SessionInfo& info) {

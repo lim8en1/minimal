@@ -164,14 +164,30 @@ public:
     // interpreter and its state survive. Returns after sending.
     void SoftInterrupt();
 
+    // The two counters WaitForInterrupt compares against, captured as one
+    // unit so a caller can snapshot them BEFORE calling SoftInterrupt.
+    // Capturing the baseline INSIDE WaitForInterrupt (after the signal was
+    // already sent) raced a driver that replies within microseconds: the
+    // bump could land in the gap between SoftInterrupt returning and
+    // WaitForInterrupt's own snapshot, so it never observed a change and
+    // reported a real, delivered interrupt as kNoReaction.
+    struct ProgressSnapshot {
+        std::uint64_t progress = 0;
+        std::uint64_t idle_interrupts = 0;
+    };
+    ProgressSnapshot Progress() const;
+
     // Soft-interrupt observability: waits up to `grace` for the SIGINT to
     // land, also waking on cancellation. The driver reports which of three
     // things happened: the running request failed and replied (kResponse --
     // the demonstrable interrupt), the signal landed with NOTHING running
     // (kIdleInterrupt -- the driver spends it and says so), or nothing was
     // heard (kNoReaction -- likely a non-interruptible C extension).
+    // `baseline` must be captured via Progress() BEFORE calling
+    // SoftInterrupt(), not after -- see ProgressSnapshot's comment.
     enum class InterruptOutcome { kResponse, kIdleInterrupt, kNoReaction };
-    InterruptOutcome WaitForInterrupt(std::chrono::milliseconds grace,
+    InterruptOutcome WaitForInterrupt(const ProgressSnapshot& baseline,
+                                      std::chrono::milliseconds grace,
                                       const tools::CancelTokenPtr& cancel);
 
     // Feeds the user-stdin pipe (the driver's sys.stdin reads it; python_input
@@ -296,6 +312,14 @@ private:
     std::string version_;
     std::string diag_tail_;  // last diagnostics seen, reported on death
     std::atomic<bool> dead_{false};
+    // Guards HardKill's kill+reap+forget the same way `dead_` guards
+    // MarkDead's body: HardKill can run more than once for one interpreter
+    // (a reader-thread death detection, an explicit /python restart, and
+    // ~Interpreter's own teardown call can each reach it), and without this,
+    // every call after the first repeats waitpid()+killpg() on a pid the
+    // first call already reaped -- a pid the OS is free to have recycled for
+    // an unrelated process by then.
+    std::atomic<bool> reaped_{false};
     // JOINED in the destructor; holds no reference to the interpreter.
     std::thread reader_;
 };

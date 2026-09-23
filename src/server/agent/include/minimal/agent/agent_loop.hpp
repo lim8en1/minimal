@@ -43,6 +43,18 @@ struct LoopConfig {
     // preset's context_window_tokens at trigger time -- see compaction_trigger.
     config::CompactionTriggerSettings compaction_trigger;
     std::int64_t compaction_keep_recent_tokens = 0;
+    // settings.json memory.compaction_replace_percent. When keep_recent is 0,
+    // Compact() turns this into a keep-recent token budget of
+    // (100 - percent)% of the working history's estimate, so the cut is by
+    // token weight rather than message count. 0 (the default for hand-built
+    // configs) keeps the legacy history.size()/2 halving.
+    int compaction_replace_percent = 0;
+    // Put record_summary on every main request, so the structured
+    // summarizer's request (the main request + one instruction) keeps the
+    // tools array -- and the prompt cache -- intact. main.cpp turns it on;
+    // off for hand-built configs, whose structured summarizer then appends the
+    // tool to its own request (a cache miss, nothing worse).
+    bool offer_summary_tool = false;
     int max_retries = 3;
     int max_turns = 0;  // 0 = unbounded; subagents bound their own life
 
@@ -188,6 +200,26 @@ struct ToolLifecycleEvent {
     std::chrono::milliseconds duration{0};
 };
 
+// One successful compaction, surfaced to the client as a CompactionEvent and
+// persisted beside the checkpoint so scrollback can render it after resume.
+// boundary_seq is the last transcript seq the summary replaced (-1 when the
+// loop has no persisted mapping -- direct-API loops). Token figures are the
+// whole-context occupancy before and the bytes/4 estimate after.
+struct CompactionEvent {
+    std::int64_t at_seq = -1;  // the last persisted seq when it ran
+    std::int64_t boundary_seq = -1;
+    std::int64_t folded_messages = 0;
+    std::int64_t tokens_before = 0;
+    std::int64_t tokens_after = 0;
+    std::string summary_text;
+    std::string trigger;  // "auto" | "manual"
+    std::int64_t created_at_unix_ms = 0;
+    // A guard's message: why a compaction was skipped (skipped = true: nothing
+    // was folded, no summary) or why a completed one looks ineffective.
+    std::string warning;
+    bool skipped = false;
+};
+
 // Session-scoped, as distinct from the preset (which is switchable via /agent)
 // and the config (which is tuning). project_root in particular is per-session,
 // not server-global: it is the boundary for path confinement, @-mentions, and
@@ -206,6 +238,10 @@ struct SessionContext {
     // Start/finish brackets for each tool call. Optional: unset in tests that
     // only care about the transcript.
     std::function<void(const ToolLifecycleEvent&)> tool_lifecycle_sink;
+
+    // Fired once per successful compaction, on the worker, after the fold.
+    // Optional: unset in tests that only care about the working set.
+    std::function<void(const CompactionEvent&)> compaction_sink;
 
     // Handed to every ToolContext this session builds. Session-scoped rather than
     // a free function so a later per-session sink (session-id prefix) is an
@@ -319,6 +355,13 @@ struct ResumeSeed {
     // MAX(seq)+1 and compaction only ever folds from the head.
     std::optional<std::int64_t> first_persisted_seq;
     bool head_is_summary = false;
+    // With a checkpoint seed: the last seq the compaction KEPT verbatim (its
+    // at_seq). Messages up to it were produced against the pre-fold prefix,
+    // so the loop drops their thinking when the provider binds thinking to
+    // its prefix -- exactly what the live fold did. Later messages were
+    // produced after the fold, against the prefix a resume reproduces, and
+    // keep theirs. -1 = none.
+    std::int64_t kept_through_seq = -1;
 };
 
 // Runs on the session worker thread. Blocks freely -- permission waits, provider
@@ -514,6 +557,12 @@ private:
     };
     SystemAndTools BuildSystemAndTools() const;
 
+    // Drops ThinkingBlocks from history_[first, last) -- the messages a
+    // compaction kept verbatim -- when the provider rejects replaying
+    // thinking whose prefix changed (LlmProvider::BindsThinkingToPrefix).
+    // Working set only; the transcript keeps them.
+    void DropStaleThinking(std::size_t first, std::size_t last);
+
     // The estimate's real body, taking an already-built system/tools pair
     // instead of calling BuildSystemAndTools() itself. The public
     // EstimateContextTokens() delegates to this after building its own pair;
@@ -632,6 +681,21 @@ private:
     // name nothing registered: one actionable line per session, not one per
     // compaction attempt.
     bool compaction_strategy_warned_ = false;
+    // Auto-compaction sanity guards (MaybeCompact). `auto_compacted_last_check_`:
+    // the previous trigger check compacted, so a trigger firing again at the
+    // very next check means the fold cannot get the context under the trigger
+    // -- auto-compaction halts (`auto_compaction_halted_`) with a notice
+    // instead of re-summarizing every tool round, until occupancy drops below
+    // the trigger again. `compaction_floor_warned_`: the trigger sits at or
+    // below the context no compaction can remove (system prompt, tools,
+    // project context), noticed once.
+    bool auto_compacted_last_check_ = false;
+    bool auto_compaction_halted_ = false;
+    bool compaction_floor_warned_ = false;
+
+    // A compaction that did NOT fold (a guard stopped it): logged, sent to the
+    // client as a skipped CompactionEvent, and recorded for scrollback.
+    void EmitCompactionNotice(std::string_view trigger, std::string warning);
 };
 
 }  // namespace minimal::agent

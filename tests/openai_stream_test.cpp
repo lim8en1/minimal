@@ -559,3 +559,30 @@ TEST_CASE("a flood of distinct tool_call indices is refused, not accumulated wit
     }
     CHECK(threw);
 }
+
+TEST_CASE("a flood of alternating 1-byte content/reasoning deltas is refused, not "
+         "accumulated without bound",
+         "[openai_stream][invariant]") {
+    // Unlike the tool_calls flood above, each of these frames DOES carry a
+    // byte of delta content -- but alternating content/reasoning_content
+    // flips Block::Kind every frame, opening a NEW Block each time (the
+    // existing-block-of-the-same-kind check fails), so tens of millions of
+    // 1-byte deltas can grow blocks_ far past any real response's block
+    // count while still trickling well under the 64 MiB Accumulate() budget.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    bool threw = false;
+    try {
+        for (int i = 0; i < 5000; ++i) {
+            const std::string frame = (i % 2 == 0)
+                ? R"({"choices":[{"delta":{"content":"x"}}]})"
+                : R"({"choices":[{"delta":{"reasoning_content":"x"}}]})";
+            reassembler.FeedFrame(frame, sink);
+        }
+    } catch (const OpenAiParseError&) {
+        threw = true;
+    }
+    CHECK(threw);
+}

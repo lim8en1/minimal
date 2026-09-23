@@ -380,3 +380,16 @@ TEST_CASE("SessionIdHeaderValue: the parameters contract", "[anthropic_request][
     stat.parameters = {{"session_id", "my-static-key"}};
     CHECK(SessionIdHeaderValue(stat).empty());
 }
+
+TEST_CASE("BuildRequestBody: a strict tool carries strict:true, others carry no field",
+          "[anthropic_request]") {
+    Fixture fixture = BaseRequest();
+    llm::ToolDefinition strict_tool{"record_summary", "d", nlohmann::json::object()};
+    strict_tool.strict = true;
+    fixture.request.tools = {{"read", "d", nlohmann::json::object()}, strict_tool};
+
+    const nlohmann::json tools = ParseBody(fixture.request)["tools"];
+    REQUIRE(tools.size() == 2);
+    CHECK_FALSE(tools[0].contains("strict"));
+    CHECK(tools[1]["strict"] == true);
+}

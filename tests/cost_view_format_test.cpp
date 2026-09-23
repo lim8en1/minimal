@@ -140,3 +140,39 @@ TEST_CASE("FormatTokenDetail renders nothing for an all-zero or malformed payloa
                                                               {"output_tokens", 10}},
                                            })}}).value_or("") == "o 10");
 }
+
+// Regression: these formatters run unguarded inside a background poller's
+// std::thread entry function (cost_view_plugin.cpp's RunLoop) -- an
+// exception escaping there is std::terminate(), not a caught error. The
+// totals payload arrives over PluginCall from another plugin's RPC reply, a
+// shape this process does not control, so a field present with the WRONG
+// type (an int where a bool was expected, a null entry in "models") must
+// degrade the segment, never throw. nlohmann's own `.value(key, fallback)`
+// throws type_error.302/.306 for exactly these shapes.
+TEST_CASE("FormatTotals degrades instead of throwing on a wrong-typed field") {
+    // total_cost_known present as an int, not a bool.
+    CHECK_NOTHROW(FormatTotals(nlohmann::json{{"turns", 3}, {"total_cost_known", 1}}));
+    CHECK(FormatTotals(nlohmann::json{{"turns", 3}, {"total_cost_known", 1}}).value_or("") ==
+          "cost? · 0/0 tok");
+    // total_cost present as a string.
+    CHECK_NOTHROW(FormatTotals(
+        nlohmann::json{{"turns", 3}, {"total_cost_known", true}, {"total_cost", "oops"}}));
+    // turns present as a string.
+    CHECK_NOTHROW(FormatTotals(nlohmann::json{{"turns", "oops"}}));
+    CHECK(FormatTotals(nlohmann::json{{"turns", "oops"}}) == std::nullopt);
+    // A non-object entry inside "models" (e.g. a malformed row is null).
+    CHECK_NOTHROW(FormatTotals(nlohmann::json{
+        {"turns", 3}, {"models", nlohmann::json::array({nullptr})}}));
+    // A model row whose input_tokens is the wrong type.
+    CHECK_NOTHROW(FormatTotals(nlohmann::json{
+        {"turns", 3},
+        {"models", nlohmann::json::array({nlohmann::json{{"input_tokens", "oops"}}})}}));
+}
+
+TEST_CASE("FormatTokenDetail degrades instead of throwing on a wrong-typed field") {
+    CHECK_NOTHROW(FormatTokenDetail(nlohmann::json{
+        {"models", nlohmann::json::array({nullptr})}}));
+    CHECK_NOTHROW(FormatTokenDetail(nlohmann::json{
+        {"models", nlohmann::json::array({nlohmann::json{{"input_tokens", "oops"},
+                                                          {"output_tokens", true}}})}}));
+}

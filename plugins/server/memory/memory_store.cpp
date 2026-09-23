@@ -1,6 +1,7 @@
 #include "memory_store.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -114,15 +115,31 @@ std::vector<float> DecodeBlob(const void* data, int bytes) {
     return out;
 }
 
-// FTS5 MATCH syntax is not model-controlled (the query field is quoted), but a
-// stray quote inside would still break the expression -- escape by doubling.
-std::string FtsQuote(std::string_view text) {
-    std::string out = "\"";
-    for (const char c : text) {
-        if (c == '"') out += "\"\"";
-        out += c;
+// FTS5 MATCH syntax is not model-controlled, but a stray quote inside a term
+// would still break the expression -- escape by doubling. Each term is
+// qualified to the `text` column: `memory_fts` also indexes `project_root`
+// (for the project-scope filter), and an UNQUALIFIED match tested the query
+// against both columns, so a query that happened to be a substring of the
+// worktree path (e.g. a directory name) matched every entry in that project
+// regardless of its actual text. Terms are ANDed independently rather than
+// quoted as one phrase, so word order in the query need not match word order
+// in the text ("compose docker" now finds "use docker compose").
+std::string FtsQuery(std::string_view text) {
+    std::string out;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+        const std::size_t start = i;
+        while (i < text.size() && !std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+        if (start == i) continue;
+        if (!out.empty()) out += ' ';
+        out += "text:\"";
+        for (std::size_t k = start; k < i; ++k) {
+            if (text[k] == '"') out += "\"\"";
+            out += text[k];
+        }
+        out += '"';
     }
-    out += "\"";
     return out;
 }
 
@@ -387,7 +404,7 @@ void MemoryStore::SetSummary(const std::string& id, const std::string& summary) 
 
 bool MemoryStore::BindTopic(const std::string& entry_id, int scope,
                             const std::string& project_root, const std::string& name,
-                            bool create_if_missing) {
+                            bool create_if_missing, int max_topics) {
     std::lock_guard<std::mutex> lock(mu_);
     const std::int64_t now = common::NowMillis();
     std::int64_t topic_id = 0;
@@ -419,7 +436,7 @@ bool MemoryStore::BindTopic(const std::string& entry_id, int scope,
             if (sqlite3_step(stmt.stmt) != SQLITE_ROW) {
                 common::ThrowSqliteError(db_, "memory: count topics");
             }
-            if (sqlite3_column_int64(stmt.stmt, 0) >= 4096) return false;
+            if (sqlite3_column_int64(stmt.stmt, 0) >= max_topics) return false;
         }
         {
             Stmt stmt(db_, "INSERT INTO memory_topics (scope, project_root, name, created_ms, "
@@ -521,15 +538,32 @@ void MemoryStore::MarkEmbedFailed(const std::vector<std::string>& ids, const std
     }
 }
 
-void MemoryStore::StoreEmbedding(const std::string& id, const Embedding& embedding) {
+int MemoryStore::ResetFailedEmbeddings() {
     std::lock_guard<std::mutex> lock(mu_);
-    Stmt stmt(db_, "UPDATE memory_entries SET embedding = ?2, embed_status = 1, dim = ?3 "
-                   "WHERE id = ?1;",
+    Stmt stmt(db_, "UPDATE memory_entries SET embed_status = 0, embed_error = NULL "
+                   "WHERE embed_status = 2;",
+              "memory: reset failed embeddings");
+    if (sqlite3_step(stmt.stmt) != SQLITE_DONE) {
+        common::ThrowSqliteError(db_, "memory: reset failed embeddings");
+    }
+    return sqlite3_changes(db_);
+}
+
+void MemoryStore::StoreEmbedding(const std::string& id, const Embedding& embedding,
+                                 const std::string& signature) {
+    std::lock_guard<std::mutex> lock(mu_);
+    // signature must be set here, not left to a later pass: LoadVectors
+    // filters on `signature = ?1`, which is never true for NULL, so a row
+    // stored without one is invisible to the near-duplicate hint and to
+    // every sim-sorted search regardless of how recently it was embedded.
+    Stmt stmt(db_, "UPDATE memory_entries SET embedding = ?2, embed_status = 1, dim = ?3, "
+                   "signature = ?4 WHERE id = ?1;",
               "memory: store embedding");
     sqlite3_bind_text(stmt.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_blob(stmt.stmt, 2, embedding.values.data(),
                       static_cast<int>(embedding.values.size() * sizeof(float)), SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt.stmt, 3, embedding.dim);
+    sqlite3_bind_text(stmt.stmt, 4, signature.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(stmt.stmt) != SQLITE_DONE) {
         common::ThrowSqliteError(db_, "memory: store embedding");
     }
@@ -606,7 +640,7 @@ std::vector<SearchHit> MemoryStore::Search(const SearchQuery& query) {
     sqlite3_bind_int(stmt.stmt, bind++, query.scope);
     sqlite3_bind_text(stmt.stmt, bind++, query.project_root.c_str(), -1, SQLITE_TRANSIENT);
     if (query.query && !full_scan) {
-        sqlite3_bind_text(stmt.stmt, bind++, FtsQuote(*query.query).c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt.stmt, bind++, FtsQuery(*query.query).c_str(), -1, SQLITE_TRANSIENT);
     }
     for (std::size_t i = 0; i < query.keywords.size(); ++i) {
         std::string lowered = query.keywords[i];
@@ -640,6 +674,7 @@ std::vector<SearchHit> MemoryStore::Search(const SearchQuery& query) {
             hit.topic = reinterpret_cast<const char*>(sqlite3_column_text(stmt.stmt, 3));
         }
         hit.created_ms = sqlite3_column_int64(stmt.stmt, 4);
+        hit.created_at = Iso8601(hit.created_ms);
         hit.project_root = reinterpret_cast<const char*>(sqlite3_column_text(stmt.stmt, 5));
         hits.push_back(std::move(hit));
     }
@@ -704,12 +739,22 @@ std::optional<MemoryStore::Entry> MemoryStore::Get(const std::string& id) {
     return entry;
 }
 
-Digest MemoryStore::DigestInfo(const std::string& backend, const std::string& enrichment) {
+Digest MemoryStore::DigestInfo(const std::string& backend, const std::string& enrichment,
+                               const std::string& project_root) {
     Digest digest;
     std::lock_guard<std::mutex> lock(mu_);
+    // Every query below keeps GLOBAL-scope rows (visible from any project by
+    // design) but restricts PROJECT-scope rows to this project's root --
+    // unscoped, the digest summed every other project's entries into
+    // "project", listed their topic names, and counted their pending-reindex
+    // rows, none of which describes the project the model is actually in.
     {
-        Stmt stmt(db_, "SELECT scope, COUNT(*) FROM memory_entries GROUP BY scope;",
+        Stmt stmt(db_,
+                  "SELECT scope, COUNT(*) FROM memory_entries "
+                  "WHERE scope != ?1 OR project_root = ?2 GROUP BY scope;",
                   "memory: digest counts");
+        sqlite3_bind_int(stmt.stmt, 1, kScopeProject);
+        sqlite3_bind_text(stmt.stmt, 2, project_root.c_str(), -1, SQLITE_TRANSIENT);
         while (sqlite3_step(stmt.stmt) == SQLITE_ROW) {
             const int scope = sqlite3_column_int(stmt.stmt, 0);
             digest.entries_by_scope[scope == kScopeProject ? "project" : "global"] =
@@ -717,18 +762,26 @@ Digest MemoryStore::DigestInfo(const std::string& backend, const std::string& en
         }
     }
     {
-        Stmt stmt(db_, "SELECT origin, COUNT(*) FROM memory_entries GROUP BY origin;",
+        Stmt stmt(db_,
+                  "SELECT origin, COUNT(*) FROM memory_entries "
+                  "WHERE scope != ?1 OR project_root = ?2 GROUP BY origin;",
                   "memory: digest origins");
+        sqlite3_bind_int(stmt.stmt, 1, kScopeProject);
+        sqlite3_bind_text(stmt.stmt, 2, project_root.c_str(), -1, SQLITE_TRANSIENT);
         while (sqlite3_step(stmt.stmt) == SQLITE_ROW) {
             digest.by_origin[reinterpret_cast<const char*>(sqlite3_column_text(stmt.stmt, 0))] =
                 sqlite3_column_int(stmt.stmt, 1);
         }
     }
     {
-        Stmt stmt(db_, "SELECT t.name, COUNT(*) FROM memory_entries e "
-                       "JOIN memory_topics t ON t.id = e.topic_id GROUP BY t.name "
-                       "ORDER BY COUNT(*) DESC LIMIT 12;",
+        Stmt stmt(db_,
+                  "SELECT t.name, COUNT(*) FROM memory_entries e "
+                  "JOIN memory_topics t ON t.id = e.topic_id "
+                  "WHERE e.scope != ?1 OR e.project_root = ?2 "
+                  "GROUP BY t.name ORDER BY COUNT(*) DESC LIMIT 12;",
                   "memory: digest topics");
+        sqlite3_bind_int(stmt.stmt, 1, kScopeProject);
+        sqlite3_bind_text(stmt.stmt, 2, project_root.c_str(), -1, SQLITE_TRANSIENT);
         while (sqlite3_step(stmt.stmt) == SQLITE_ROW) {
             digest.top_topics.emplace_back(
                 reinterpret_cast<const char*>(sqlite3_column_text(stmt.stmt, 0)),
@@ -736,8 +789,12 @@ Digest MemoryStore::DigestInfo(const std::string& backend, const std::string& en
         }
     }
     {
-        Stmt stmt(db_, "SELECT COUNT(*) FROM memory_entries WHERE embed_status = 0;",
+        Stmt stmt(db_,
+                  "SELECT COUNT(*) FROM memory_entries "
+                  "WHERE embed_status = 0 AND (scope != ?1 OR project_root = ?2);",
                   "memory: digest pending");
+        sqlite3_bind_int(stmt.stmt, 1, kScopeProject);
+        sqlite3_bind_text(stmt.stmt, 2, project_root.c_str(), -1, SQLITE_TRANSIENT);
         if (sqlite3_step(stmt.stmt) == SQLITE_ROW) {
             digest.pending_reindex = sqlite3_column_int(stmt.stmt, 0);
         }

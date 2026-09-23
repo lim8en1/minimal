@@ -41,6 +41,14 @@ bool IsReservedWord(std::string_view word) {
     return std::find(std::begin(kReserved), std::end(kReserved), word) != std::end(kReserved);
 }
 
+// `command`/`builtin` are ordinary builtins, not shell reserved words, so the
+// grammar records them as an ordinary literal command_name -- but like
+// `time`/`coproc` they run their own next argument as a program rather than
+// being a program themselves. Handled alongside IsReservedWord below.
+bool IsProgramWrapper(std::string_view word) {
+    return word == "command" || word == "builtin";
+}
+
 struct ParserDeleter {
     void operator()(TSParser* p) const { ts_parser_delete(p); }
 };
@@ -87,22 +95,30 @@ bool RedirectWrites(TSNode redirect, std::string_view src) {
         if (op == "<") {
             return false;  // input redirect: opens for reading, writes nothing
         }
-        if (op == ">&" || op == ">&-") continue;  // fd-dup / fd-close: inert
-        if (op == ">" || op == ">>" || op == "&>" || op == "&>>" || op == ">|") {
+        if (op == ">&-") continue;  // fd-close: inert, no destination to inspect
+        if (op == ">" || op == ">>" || op == "&>" || op == "&>>" || op == ">|" || op == ">&") {
             output_op = op;
             break;
         }
     }
     if (!output_op) return false;  // no redirect operator at all (or fd-only)
-    // Output operator: inert only when the destination is /dev/null. The
-    // destination is the next named child after the operator (word/expansion);
-    // an fd-dup NUMBER target was excluded above by the operator set.
+    // Output operator: inert when the destination is /dev/null, OR the
+    // operator is the ambiguous `>&` AND the destination is pure digits --
+    // bash reads `>&1` as a duplication (the same target `2>&1` names), never
+    // a filename, but `>&word`/`>&file` writes exactly like `&>` does. The
+    // destination is the next named child after the operator (word/
+    // expansion); the leading file_descriptor field (`2>...`) is skipped.
     const std::uint32_t n = ts_node_named_child_count(redirect);
     for (std::uint32_t i = 0; i < n; ++i) {
         const TSNode child = ts_node_named_child(redirect, i);
         const std::string type = ts_node_type(child);
         if (type == "file_descriptor") continue;
-        if (type == "word" && NodeText(child, src) == "/dev/null") return false;
+        const std::string_view text = NodeText(child, src);
+        if (*output_op == ">&" && !text.empty() &&
+            text.find_first_not_of("0123456789") == std::string_view::npos) {
+            return false;  // >&N: fd duplication, not a write
+        }
+        if (type == "word" && text == "/dev/null") return false;
         return true;  // destination exists and is a real file (or unreadable shape)
     }
     return true;  // operator with no recognizable destination: assume a write
@@ -117,6 +133,23 @@ bool IsLiteralKind(std::string_view type) {
     return type == "word" || type == "string" || type == "raw_string" ||
            type == "ansi_c_string" || type == "string_content" ||
            type == "concatenation" || type == "number";
+}
+
+// A "word" node is bash's UNQUOTED literal: outside quotes, a backslash
+// escapes the next character, a leading `~` triggers tilde expansion, and
+// `* ? [ {` are glob/brace metacharacters -- the shell resolves all of these
+// to something other than the node's own spelling before exec ever sees it.
+// `\rm`, `~/bin/deploy` and `/usr/bin/r?` all parse as a single "word" node
+// with that literal text, so recording the text verbatim would record a
+// string nothing on disk answers to while the program that actually runs
+// (rm, the file `~/bin/deploy` expands to, whatever matches `r?`) goes
+// unnamed -- the exact invariant violation this file's header warns about.
+// Rejecting these as non-plain is conservative, not a decode attempt: it can
+// only make the scanner ask more, never grant more.
+bool IsPlainWord(std::string_view text) {
+    if (text.empty()) return true;
+    if (text.front() == '~') return false;
+    return text.find_first_of("\\*?[{") == std::string_view::npos;
 }
 
 // True iff `node`'s subtree is entirely literal kinds; the dequoted text of
@@ -137,9 +170,22 @@ bool CollectLiteral(TSNode node, std::string_view src, std::string& out_text, in
         // rm, or a program spelled in quotes could never be granted.
         const std::string_view text = NodeText(node, src);
         if (type == "string" || type == "raw_string") {
+            // Single/double quotes: bash does not tilde-expand or glob a
+            // quoted spelling, and a single-quoted backslash is literal --
+            // only the unquoted "word" case below needs the escape check.
             if (text.size() >= 2) out_text.append(text.substr(1, text.size() - 2));
         } else if (type == "ansi_c_string") {
-            if (text.size() >= 3) out_text.append(text.substr(2, text.size() - 3));
+            // $'...': backslash IS a live escape here. An undecoded sequence
+            // ($'\x72m') would misname the program as the literal text
+            // "\x72m" instead of failing closed on the real one ("rm").
+            // Decoding every C escape is out of scope; refusing is safe.
+            if (text.size() < 3) return true;  // malformed -- nothing to decode
+            const std::string_view inner = text.substr(2, text.size() - 3);
+            if (inner.find('\\') != std::string_view::npos) return false;
+            out_text.append(inner);
+        } else if (type == "word") {
+            if (!IsPlainWord(text)) return false;
+            out_text.append(text);
         } else {
             out_text.append(text);
         }
@@ -260,21 +306,49 @@ private:
             out_.complete = false;
             return;
         }
-        if (IsReservedWord(text)) {
-            // time/coproc sit in the command slot without being commands, and
-            // this grammar does not structure them, so the real program is
-            // among the arguments. Recording every literal argument
+        if (IsReservedWord(text) || IsProgramWrapper(text)) {
+            // time/coproc sit in the command slot without being commands
+            // because this grammar does not structure them; `command` and
+            // `builtin` ARE ordinary literal command names to the grammar,
+            // but run their own next argument as a program exactly the way
+            // `time` does. Either way the real program is the FIRST word
+            // after this one. Recording every literal argument that follows
             // over-discloses (non-programs like `-rf` fail PATH resolution
             // and contribute no grant offer), which errs toward more keys in
             // the conjunction -- the direction this design already accepts
-            // everywhere else.
+            // everywhere else. But if that first word is not itself a
+            // literal (`time $X foo`), the real program was never named at
+            // all: falling through to "record the literal args that follow"
+            // would report complete=true on a disclosure that silently
+            // dropped the one program that matters, the exact invariant
+            // violation the header comment calls out.
             const TSNode parent = ts_node_parent(node);
             const std::uint32_t n = ts_node_named_child_count(parent);
+            const bool wrapper = IsProgramWrapper(text);
+            bool seen_reserved = false;
+            bool is_program_slot = true;  // first child strictly after `node`
             for (std::uint32_t i = 0; i < n; ++i) {
                 const TSNode child = ts_node_named_child(parent, i);
-                if (child.id == node.id) continue;  // the reserved word itself
+                if (child.id == node.id) {
+                    seen_reserved = true;
+                    continue;  // the reserved word itself
+                }
+                if (!seen_reserved) continue;  // a leading variable_assignment
                 std::string arg;
-                if (CollectLiteral(child, src_, arg)) Record(out_, std::move(arg));
+                const bool ok = CollectLiteral(child, src_, arg);
+                if (ok && is_program_slot && wrapper && !arg.empty() && arg.front() == '-') {
+                    // `command`/`builtin` accept option flags (-p/-v/-V)
+                    // before the real program; this scanner does not parse
+                    // them, so a flag-shaped word right here means the real
+                    // program is a slot further than assumed -- fail closed
+                    // rather than naming the flag as if it were the program.
+                    out_.complete = false;
+                } else if (ok) {
+                    Record(out_, std::move(arg));
+                } else if (is_program_slot) {
+                    out_.complete = false;
+                }
+                is_program_slot = false;
             }
             return;
         }

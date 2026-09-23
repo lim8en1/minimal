@@ -287,6 +287,27 @@ TEST_CASE("AnthropicStreamReassembler: sink returning false stops feeding and is
         refusing_sink));
 }
 
+TEST_CASE("AnthropicStreamReassembler: an implausible content_block_stop index throws, "
+         "like every other block-indexed event",
+         "[anthropic_stream]") {
+    // content_block_start/content_block_delta route their index through
+    // CheckedBlockIndex; content_block_stop read `index` directly until this
+    // fix, so a negative wire index (wrapping to a huge size_t) or an index
+    // past kMaxBlocks silently passed through as a plausible-looking
+    // ContentBlockStopEvent instead of raising the same ParseError.
+    AnthropicStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+    CHECK_THROWS_AS(
+        reassembler.FeedFrame(R"({"type":"content_block_stop","index":-1})", sink),
+        AnthropicParseError);
+
+    AnthropicStreamReassembler reassembler2;
+    CHECK_THROWS_AS(
+        reassembler2.FeedFrame(R"({"type":"content_block_stop","index":999999})", sink),
+        AnthropicParseError);
+}
+
 TEST_CASE("AnthropicStreamReassembler: present-but-null fields degrade, never throw",
           "[anthropic_stream][invariant]") {
     // value() on a key that is PRESENT but null throws type_error -- only

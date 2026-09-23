@@ -112,6 +112,33 @@ TEST_CASE("ParseCommandFile: declaring run and sh together throws, and so does a
     CHECK_THROWS_AS(write("bad3.md", "---\nargs: 42\n---\nb\n"), std::runtime_error);
 }
 
+TEST_CASE("ParseCommandFile: a source sharing a name with a declared argument throws",
+          "[commands_md]") {
+    // Regression: a source's output lands in the render map under its own
+    // name, the same map a typed positional argument is bound into under
+    // theirs -- so `args: [query]` plus `sources: {query: {...}}` silently
+    // rendered the generator's stdout in {query} instead of what the user
+    // typed, with no error or warning.
+    testing::TempDir dir;
+    std::filesystem::create_directories(dir.path());
+    auto write = [&dir](const std::string& name, const std::string& contents) {
+        std::ofstream(dir.path() / name) << contents;
+        return ParseCommandFile(dir.path() / name, /*trusted=*/true);
+    };
+    CHECK_THROWS_AS(
+        write("required.md",
+              "---\nargs: [query]\nsources:\n  query:\n    run: [\"echo\", \"x\"]\n---\n{query}\n"),
+        std::runtime_error);
+    CHECK_THROWS_AS(
+        write("optional.md",
+              "---\noptional: [query]\nsources:\n  query:\n    run: [\"echo\", \"x\"]\n---\n{query}\n"),
+        std::runtime_error);
+    // A source name that does NOT collide is unaffected.
+    CHECK_NOTHROW(write(
+        "ok.md",
+        "---\nargs: [query]\nsources:\n  results:\n    run: [\"echo\", \"x\"]\n---\n{query} {results}\n"));
+}
+
 TEST_CASE("ParseCommandFile: per-turn model/agent frontmatter is carried, malformed model "
           "throws",
           "[commands_md][compat]") {
@@ -569,6 +596,46 @@ TEST_CASE("commands-md: over-cap output asks the operator; cancel submits nothin
     CHECK(result.status == commands::CommandResult::Status::kOk);
     REQUIRE_FALSE(fixture.submitted_turns().empty());
     CHECK(fixture.submitted_turns().front().find("0123456789") != std::string::npos);
+}
+
+TEST_CASE("commands-md: output_cap max:0 means zero tolerance, not uncapped",
+          "[commands_md]") {
+    // Regression: `cap_bytes = source.cap_tokens * 4` made an explicit
+    // `max: 0` produce cap_bytes=0, and the old check
+    // `cap_bytes > 0 && out_buf.size() > cap_bytes` treated cap_bytes==0 the
+    // same as "no cap configured" -- an author asking for zero tolerance got
+    // fully uncapped output instead.
+    testing::CommandFixture fixture;
+    commands::CommandRegistry registry;
+    testing::TempDir files;
+    auto commands = WriteAndLoad(
+        files.path(), "zero.md",
+        "---\nsources:\n  x:\n    run: [\"/bin/echo\", \"x\"]\n"
+        "    output_cap: {max: 0, on_exceed: fail}\n---\n{x}\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "zero", {});
+    CHECK(result.status == commands::CommandResult::Status::kError);
+    CHECK(result.message.find("cap") != std::string::npos);
+    CHECK(fixture.submitted_turns().empty());
+}
+
+TEST_CASE("ParseCommandFile: an absurd timeout is clamped at parse time",
+          "[commands_md]") {
+    // Regression: RunProcess's remaining_ms() narrows timeout_seconds*1000
+    // milliseconds into an `int` for poll()'s deadline; a value near
+    // INT_MAX overflowed that cast to a negative int, which poll() reads as
+    // "wait forever" -- the opposite of a declared timeout. Checked at parse
+    // time directly: an execution-level test can't tell "clamped correctly"
+    // from "still broken" for a fast-finishing source, since both finish
+    // before either deadline is reached.
+    testing::TempDir dir;
+    std::filesystem::create_directories(dir.path());
+    std::ofstream(dir.path() / "big.md")
+        << "---\nsources:\n  x:\n    run: [\"echo\"]\n    timeout: 999999999\n---\n{x}\n";
+    const auto spec = ParseCommandFile(dir.path() / "big.md", /*trusted=*/true);
+    REQUIRE(spec.sources.size() == 1);
+    CHECK(spec.sources[0].timeout_seconds <= 86400);
 }
 
 TEST_CASE("commands-md: a timed-out source errors and submits nothing", "[commands_md]") {

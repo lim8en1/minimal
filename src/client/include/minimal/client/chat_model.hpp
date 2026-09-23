@@ -36,6 +36,9 @@ enum class ChatRowKind {
     Switch,          // synthetic divider: the agent and/or model changed
                      // between two assistant messages (agent/model = new,
                      // switch_from_* = old). Never collapsible.
+    Compaction,      // the server compacted the working context after this
+                     // row's seq: collapsed to a one-line header, expands to
+                     // the summary (markdown) the model now sees.
 };
 
 // Stable diagnostic name -- registry collision reports and startup warnings
@@ -80,6 +83,15 @@ struct ChatRow {
     // Switch only: the attribution of the previous assistant message.
     std::string switch_from_agent;
     std::string switch_from_model;
+    // Compaction only: what the fold did. `text` holds the summary.
+    int64_t compaction_folded_messages = 0;
+    int64_t compaction_tokens_before = 0;
+    int64_t compaction_tokens_after = 0;
+    std::string compaction_trigger;   // "auto" | "manual"
+    // A sanity guard's message, shown even collapsed; skipped = nothing was
+    // folded (the row is a notice, `text` is empty).
+    std::string compaction_warning;
+    bool compaction_skipped = false;
 };
 
 // The speaker label for an assistant row: "build (sonnet-4-5)" -- the agent
@@ -115,7 +127,19 @@ inline constexpr std::string_view kAskUserToolName = "ask_user";
 // exactly what GetMessages returns, so no caller re-sorts. User messages that
 // are tool-result-only are tool activity, EXCEPT the ones keyed to a
 // spawn_subagent call: those are the harness speaking, and render as System.
-std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& descending);
+//
+// `compactions` (ascending by at_seq, may be null) interleave as Compaction
+// rows right after the rows of the message whose seq is their at_seq; one
+// whose message is not in the page is skipped (it belongs to another page).
+std::vector<ChatRow> ChatRowsFromMessages(
+    const std::vector<v1::StoredMessage>& descending,
+    const std::vector<v1::CompactionEvent>* compactions = nullptr);
+
+// The compaction row's one-line header: "context compacted (auto): 412
+// messages summarized, ~712k -> ~168k tokens", or "compaction skipped (auto)"
+// for a guard's notice (the warning renders on its own line). Shared by the
+// core renderer and tests.
+std::string CompactionHeadline(const ChatRow& row);
 
 // Parallel to `rows`: true for an AgentMarkdown row that should NOT repeat the
 // speaker label, because an earlier assistant text row of the same turn

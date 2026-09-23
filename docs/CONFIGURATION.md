@@ -76,7 +76,7 @@ Full example (`bundled/settings.json`):
 |---|---|---|---|
 | `default_agent_preset` | string | `""` | file stem of an `agents/<name>.md` preset; unresolvable value → **fatal** |
 | `default_model` | string | `""` | `"<provider>/<model>"` (see providers.json); a typo → warning at startup, first use fails |
-| `small_model` | string | `""` | opencode-compat: `"<provider>/<model>"` for the compaction summarizer only; unset/unresolvable → each session compacts on its own model |
+| `small_model` | string | `""` | opencode-compat: `"<provider>/<model>"` for the compaction summarizer only; unset/unresolvable → each session compacts on its own model. The summarizer reads the whole working history, so the small model's window must fit the compaction trigger; a different model also gets no prompt-cache reuse |
 | `default_theme` | string | `""` | client theme name (`themes/<name>.json`) |
 | `max_concurrent_subagents` | int | `4` | `<= 0` or `> 8` → warning |
 | `background_wake` | bool | `false` | |
@@ -90,10 +90,34 @@ Full example (`bundled/settings.json`):
 | `auto_compact` | bool | `true` | |
 | `context_compaction_trigger` | object | absent = never | **exactly one** of `percent` (1–100), `tokens` (> 0), `buffer_tokens` (> 0) |
 | `context_compaction_trigger_tokens` | int | `0` | legacy flat key, honored only when the object form is absent; `0` = never |
-| `compaction_keep_recent_tokens` | int | `0` | |
-| `compaction_strategy` | string | `"structured"` | name of a registered strategy (core built-in `structured`/`summarize` or plugin-registered); unknown name → warning, falls back. An agent preset's `compaction_strategy:` frontmatter overrides this per agent |
+| `compaction_keep_recent_tokens` | int | `0` | absolute keep-verbatim budget (estimated tokens, newest first); when > 0 it overrides `compaction_replace_percent`. Keep it well below the trigger |
+| `compaction_replace_percent` | int | `80` | 1–100. Share of the working history (by estimated tokens, oldest first) that a compaction **replaces** with the summary; the rest stays verbatim after it. The summarizer always reads the **whole** history — its request is the session's own system prompt, tools and messages plus one appended instruction, so a provider with prefix caching serves it from cache. `100` replaces everything but the newest message. On the Anthropic provider, thinking blocks in the kept part are dropped from the working set (newer Claude models reject replaying thinking after the preceding context changed); chat-completions backends never replay thinking, so nothing changes there |
+| `compaction_strategy` | string | `"structured"` | name of a registered strategy (core built-in `structured`/`summarize` or plugin-registered); unknown name → warning, falls back. An agent preset's `compaction_strategy:` frontmatter overrides this per agent. `structured` asks the model to call the strict `record_summary` tool, which is therefore declared on every request (names and types only, ~190 tokens; the field guidance is sent with the compaction instruction; a stray call outside compaction is a no-op); a model that answers in text instead degrades to the free-text summary. A custom `compression_prompt:` (preset frontmatter or `/compact <name>`) always runs as free text |
 | `estimate_zero_usage` | bool | `true` | when a turn's backend usage is all zero (some OpenAI-compatible proxies), seed occupancy from the request's bytes/4 estimate so the compaction trigger arms, and flag the turn's wire usage `usage_estimated`. Estimates are never priced by cost tracking and never enter cumulative totals |
 | `scrollback_page_size` | int | `0` | |
+
+Compaction instructions are prompt files in the config dir, sent verbatim as
+the last message of the summarizer request: `prompts/compression.md` (free
+text; also the fallback) and `prompts/compression-structured.md` (the
+`structured` strategy's `record_summary` instruction and field guidance).
+Both are seeded from `bundled/prompts/` and never overwritten; a missing
+`compression-structured.md` is a startup warning and the structured strategy
+runs as free text.
+
+Auto-compaction guards (manual `/compact` skips the first two):
+
+- The trigger must be above the context no compaction can remove (system
+  prompt, project context, tool definitions). At or below it, auto-compaction
+  does not run and the session shows one notice.
+- If the trigger fires again at the very next check after an auto compaction,
+  the fold cannot get the context under the trigger: auto-compaction stops
+  with a notice (instead of summarizing every tool round) and re-arms once
+  the context is back under the trigger.
+- A compaction that shrank the history (context minus the fixed part) by
+  less than 10% carries a warning.
+
+Notices and warnings render as compaction rows in the TUI, are kept in
+scrollback, and appear on the headless `compaction` JSONL line.
 
 ### `tools.*`
 

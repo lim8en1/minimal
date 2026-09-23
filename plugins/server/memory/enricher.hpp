@@ -18,6 +18,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "memory_settings.hpp"
 
@@ -45,16 +46,23 @@ public:
     void SetLlm(std::shared_ptr<llm::LlmProvider> provider, std::string model);
 
     // Enqueue one entry for enrichment. Runs detached; safe from any thread.
-    void Enqueue(std::string entry_id, std::string text, int scope, std::string project_root);
+    // `also_bind`: sibling entry IDs (an ingest group's other chunks) that
+    // should receive the SAME summary/topic once resolved, without an extra
+    // provider call each -- the sample this asks about (entry_id) already
+    // stands in for the whole group.
+    void Enqueue(std::string entry_id, std::string text, int scope, std::string project_root,
+                std::vector<std::string> also_bind = {});
 
     // The job body, synchronous -- the testing seam. One provider call:
     // strict-JSON {summary, topic}; retry once on malformed; attribute
-    // (case-insensitive) / create-under-cap / null -> unfiled.
+    // (case-insensitive) / create-under-cap / null -> unfiled. Applied to
+    // `entry_id` and every id in `also_bind` alike.
     static void RunEnrichment(const MemorySettings& settings, MemoryStore& store,
                               llm::LlmProvider* provider, const std::string& model,
                               common::Logger& logger, const std::string& entry_id,
                               const std::string& text, int scope,
-                              const std::string& project_root);
+                              const std::string& project_root,
+                              const std::vector<std::string>& also_bind = {});
 
     // Drain: joins outstanding workers. Destructor calls it.
     void Drain();

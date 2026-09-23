@@ -128,7 +128,11 @@ public:
         nlohmann::json request;
         request["id"] = ++next_id_;
         request["texts"] = inputs;
-        if (!WriteAll(in_fd_.get(), request.dump() + "\n")) {
+        // replace: `inputs` is ingested text, not guaranteed valid UTF-8 --
+        // see embedding_http.cpp's identical fix.
+        if (!WriteAll(in_fd_.get(),
+                     request.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) +
+                         "\n")) {
             const std::string reason = death_reason_.empty() ? "write failed" : death_reason_;
             alive_ = false;
             throw std::runtime_error("memory: sidecar write failed (" + reason + ")");

@@ -187,10 +187,12 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_response.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_stream_reassembler.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_error_mapping.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_variant_params.cpp"
     anthropic_request_test.cpp
     anthropic_response_test.cpp
     anthropic_stream_test.cpp
     anthropic_error_mapping_test.cpp
+    anthropic_variant_params_test.cpp
     # Same pattern for tools-fs: pure logic depending only on core headers, so
     # linked directly rather than exercised through dlopen.
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/fs_tools.cpp"

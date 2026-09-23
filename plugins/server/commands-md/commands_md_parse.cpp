@@ -166,7 +166,14 @@ Source DecodeSource(const std::string& name, const YAML::Node& node) {
         if (value < 0) {
             throw std::runtime_error("command file: source '" + name + "' timeout must be >= 0");
         }
-        source.timeout_seconds = value;
+        // Clamped, not just floored: RunProcess's remaining_ms() narrows
+        // timeout_seconds*1000 milliseconds into an `int` for poll()'s
+        // deadline, and a value near INT_MAX overflowed that cast to a
+        // negative int -- which poll() reads as "wait forever", the exact
+        // opposite of a declared timeout. 86400s (24h) is generous for a
+        // command generator and comfortably inside the safe range.
+        constexpr int kMaxTimeoutSeconds = 86400;
+        source.timeout_seconds = std::min(value, kMaxTimeoutSeconds);
     }
 
     const YAML::Node cap = node["output_cap"];
@@ -236,6 +243,25 @@ MdCommandSpec DecodeSpec(const std::string& stem, const config::ParsedFrontmatte
         if (sources && sources.IsMap()) {
             for (const auto& entry : sources) {
                 spec.sources.push_back(DecodeSource(entry.first.as<std::string>(), entry.second));
+            }
+        }
+
+        // A source's output lands in the render map under its own name
+        // (commands_md.cpp's bind step), the same map the user's typed
+        // positional arguments are bound into under theirs -- so a source
+        // sharing a name with a declared arg silently overwrites the user's
+        // value with the generator's stdout in `{name}`, with no error or
+        // warning. Reject at load time rather than let the two collide.
+        for (const auto& source : spec.sources) {
+            const bool shadows_required =
+                std::find(spec.args.begin(), spec.args.end(), source.name) != spec.args.end();
+            const bool shadows_optional =
+                std::find(spec.optional.begin(), spec.optional.end(), source.name) !=
+                spec.optional.end();
+            if (shadows_required || shadows_optional) {
+                throw std::runtime_error("command '" + spec.name + "': source '" + source.name +
+                                         "' has the same name as a declared argument -- rename "
+                                         "one of them");
             }
         }
     }

@@ -66,6 +66,36 @@ std::int64_t estimate_tokens(std::span<const llm::Message> messages) {
     return bytes / 4;
 }
 
+llm::ChatRequest BuildSummarizerRequest(std::span<const llm::Message> history,
+                                        const CompactionRequest& params,
+                                        std::string instruction,
+                                        std::vector<llm::Message>& storage) {
+    // A copy, once per compaction: the span contract (chat.hpp) needs one
+    // contiguous range, and the appended instruction cannot go into the
+    // loop's own history_. Byte-identical to what the main loop sent, so the
+    // provider's prefix cache covers everything before the instruction.
+    storage.assign(history.begin(), history.end());
+    storage.push_back(llm::Message{llm::Role::User, {llm::TextBlock{std::move(instruction)}}});
+
+    llm::ChatRequest request;
+    request.system = params.system;
+    request.tools = params.tools;
+    request.messages = storage;
+    request.model = std::string(params.model_name);
+    request.stream = true;
+    // The preset's, not defaults. A summarization call running with different
+    // sampling than the conversation it summarizes is a silent inconsistency
+    // -- and a cache miss -- and an absent max_tokens is worse than
+    // inconsistent -- see the header.
+    request.parameters = params.parameters;
+    request.max_tokens = params.max_tokens;
+    // Same routing key as the conversation being summarized -- whether the
+    // call is served by the session's own provider or small_model, emission
+    // is decided by the parameters riding this request (see chat.hpp).
+    request.session_id = params.session_id;
+    return request;
+}
+
 std::optional<CompactionResult> compact_messages(
     std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
     const CompactionRequest& params) {
@@ -84,20 +114,9 @@ std::optional<CompactionResult> compact_messages(
         return std::nullopt;
     }
 
-    llm::ChatRequest request;
-    request.system = std::string(params.compression_prompt);
-    request.messages = messages_to_compact;
-    request.model = std::string(params.model_name);
-    request.stream = true;
-    // The preset's, not defaults. A summarization call running with different
-    // sampling than the conversation it summarizes is a silent inconsistency,
-    // and an absent max_tokens is worse than inconsistent -- see the header.
-    request.parameters = params.parameters;
-    request.max_tokens = params.max_tokens;
-    // Same routing key as the conversation being summarized -- whether the
-    // call is served by the session's own provider or small_model, emission
-    // is decided by the parameters riding this request (see chat.hpp).
-    request.session_id = params.session_id;
+    std::vector<llm::Message> storage;
+    const llm::ChatRequest request = BuildSummarizerRequest(
+        messages_to_compact, params, std::string(params.compression_prompt), storage);
 
     llm::ChatResponse response;
     try {

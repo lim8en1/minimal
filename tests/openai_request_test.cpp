@@ -199,6 +199,31 @@ TEST_CASE("BuildRequestBody: ThinkingBlock is dropped silently", "[openai_reques
     CHECK(messages[0]["content"] == "answer");
 }
 
+TEST_CASE("BuildRequestBody: an assistant message whose only content was a dropped "
+         "ThinkingBlock is skipped entirely, not sent as empty content",
+         "[openai_request]") {
+    // Same rule provider-anthropic's request builder applies for its own
+    // equivalent case: {"role":"assistant","content":""} with no tool_calls
+    // either is a content-less, tool-call-less turn a strict OpenAI-
+    // compatible backend can 400 on. Surrounded by user turns so the fix's
+    // effect (the assistant message vanishing, not just its content) is
+    // observable in the message COUNT, and to prove the two user turns
+    // don't accidentally fold into one in its absence.
+    Fixture fixture({
+        llm::Message{llm::Role::User, {llm::TextBlock{"question one"}}},
+        llm::Message{llm::Role::Assistant, {llm::ThinkingBlock{"pondering", std::nullopt}}},
+        llm::Message{llm::Role::User, {llm::TextBlock{"question two"}}},
+    });
+
+    const nlohmann::json messages = ParseBody(fixture.request)["messages"];
+
+    REQUIRE(messages.size() == 2);
+    CHECK(messages[0]["role"] == "user");
+    CHECK(messages[0]["content"] == "question one");
+    CHECK(messages[1]["role"] == "user");
+    CHECK(messages[1]["content"] == "question two");
+}
+
 TEST_CASE("BuildRequestBody: text that needs JSON escaping survives a round-trip",
           "[openai_request]") {
     // Hand-rolled serialization is where escaping bugs live: quotes, backslashes,
@@ -511,4 +536,17 @@ TEST_CASE("SessionIdRoutingValue: the parameters contract", "[openai_request][se
     stat.session_id = "01ABCDEF";
     stat.parameters = {{"session_id", "my-static-key"}};
     CHECK(SessionIdRoutingValue(stat).empty());
+}
+
+TEST_CASE("BuildRequestBody: a strict tool carries function.strict:true", "[openai_request]") {
+    Fixture fixture = BaseRequest();
+    auto& request = fixture.request;
+    llm::ToolDefinition strict_tool{"record_summary", "d", nlohmann::json::object()};
+    strict_tool.strict = true;
+    request.tools = {{"read", "d", nlohmann::json::object()}, strict_tool};
+
+    const nlohmann::json tools = ParseBody(request)["tools"];
+    REQUIRE(tools.size() == 2);
+    CHECK_FALSE(tools[0]["function"].contains("strict"));
+    CHECK(tools[1]["function"]["strict"] == true);
 }

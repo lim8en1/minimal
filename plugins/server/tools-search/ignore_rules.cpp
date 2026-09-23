@@ -9,23 +9,6 @@
 namespace minimal::tools_search {
 namespace {
 
-// Unescape `\X` -> X. Handles `\#`, `\!`, `\ ` and general `\c`. A lone
-// trailing backslash stays a literal backslash (and will make the pattern
-// untranslatable, which is the right failure for it).
-std::string Unescape(std::string_view s) {
-    std::string out;
-    out.reserve(s.size());
-    for (std::size_t i = 0; i < s.size(); ++i) {
-        if (s[i] == '\\' && i + 1 < s.size()) {
-            out += s[i + 1];
-            i += 1;
-        } else {
-            out += s[i];
-        }
-    }
-    return out;
-}
-
 }  // namespace
 
 struct GitignoreSet::Rule {
@@ -56,8 +39,10 @@ GitignoreSet GitignoreSet::Parse(std::string_view content) {
         pos = end + 1;
 
         // git strips trailing spaces unless backslash-escaped; the escaped
-        // case is rare enough that letting Unescape recover the common `\ `
-        // via the rule body below is fine, and we only trim unescaped runs.
+        // case is recovered by GlobToRegex itself (it unescapes `\c` to a
+        // literal `c` as part of translating the pattern, the same place
+        // every other escape in the line is resolved), so we only trim
+        // unescaped runs here.
         while (!line.empty() && (line.back() == ' ' || line.back() == '\r') &&
                (line.size() < 2 || line[line.size() - 2] != '\\')) {
             line.remove_suffix(1);
@@ -95,7 +80,12 @@ GitignoreSet GitignoreSet::Parse(std::string_view content) {
         rule->negated = negated;
         rule->dir_only = dir_only;
         rule->anchored = anchored;
-        const auto body = GlobToRegex(Unescape(line), GlobFlags::kNone);
+        // Passed directly, not pre-unescaped: GlobToRegex already turns a
+        // backslash-escaped character into its literal self as part of
+        // translating the pattern. Unescaping first double-processed every
+        // escape -- `\*.log` (a literal file named "*.log") became `*.log`
+        // and ignored every .log file; `foo\[1\]` became a character class.
+        const auto body = GlobToRegex(line, GlobFlags::kNone);
         if (body) {
             // FullMatch pins both ends; the `^`/`$` on anchored rules are for
             // readability. Unanchored rules get the any-depth prefix and are

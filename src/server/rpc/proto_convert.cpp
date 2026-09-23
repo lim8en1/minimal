@@ -614,6 +614,18 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 auto* canceled = out.mutable_turn_canceled();
                 canceled->set_turn_id(value.turn_id);
                 canceled->set_removed(value.removed);
+            } else if constexpr (std::is_same_v<T, agent::CompactionEvent>) {
+                auto* compaction = out.mutable_compaction();
+                compaction->set_at_seq(value.at_seq);
+                compaction->set_boundary_seq(value.boundary_seq);
+                compaction->set_folded_messages(value.folded_messages);
+                compaction->set_tokens_before(value.tokens_before);
+                compaction->set_tokens_after(value.tokens_after);
+                compaction->set_summary(value.summary_text);
+                compaction->set_trigger(value.trigger);
+                compaction->set_created_at_unix_ms(value.created_at_unix_ms);
+                compaction->set_warning(value.warning);
+                compaction->set_skipped(value.skipped);
             } else {
                 // Same guarantee as every other domain->wire visit in this file: a
                 // new SessionEvent alternative must not compile into PAYLOAD_NOT_SET.
@@ -665,6 +677,21 @@ tools::PermissionResponse FromProto(const v1::PermissionResponse& response,
             common::DefaultLogger().warn("proto_convert: ignoring ungranted key '{}'", key);
         }
     }
+    return out;
+}
+
+v1::CompactionEvent ToProto(const session::CompactionRecord& record) {
+    v1::CompactionEvent out;
+    out.set_at_seq(record.at_seq);
+    out.set_boundary_seq(record.boundary_seq);
+    out.set_folded_messages(record.meta.folded_messages);
+    out.set_tokens_before(record.meta.tokens_before);
+    out.set_tokens_after(record.meta.tokens_after);
+    out.set_summary(llm::TextOf(record.summary.content));
+    out.set_trigger(record.meta.trigger);
+    out.set_created_at_unix_ms(record.created_at_unix_ms);
+    out.set_warning(record.meta.warning);
+    out.set_skipped(record.meta.skipped);
     return out;
 }
 

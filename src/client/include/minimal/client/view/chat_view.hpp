@@ -263,6 +263,7 @@ private:
     // identity (see RebuildRows): a collapse-epoch-only rebuild reuses this
     // instead of re-walking the page.
     std::shared_ptr<const std::vector<v1::StoredMessage>> materialized_page_;
+    std::shared_ptr<const std::vector<v1::CompactionEvent>> materialized_compactions_;
     std::vector<ChatRow> materialized_rows_;
     // Aligned with the rows of the current snapshot (oldest first).
     std::vector<ftxui::Elements> rendered_rows_;

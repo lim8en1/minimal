@@ -266,7 +266,13 @@ RunOutcome RunProcess(const std::vector<std::string>& argv, const std::string& s
                 out_open = false;
             } else {
                 out_buf.append(chunk, static_cast<std::size_t>(got));
-                if (cap_bytes > 0 && out_buf.size() > cap_bytes) {
+                // No "0 means unset" case to protect: cap_bytes is always a
+                // concrete size (defaulting to source.cap_tokens's own
+                // non-zero default), so 0 only ever means an author wrote
+                // `output_cap: {max: 0}` -- zero tolerance for any output,
+                // not "no cap". The old `cap_bytes > 0` guard read the two
+                // the same way, silently uncapping the former.
+                if (out_buf.size() > cap_bytes) {
                     killed_for_cap = true;
                     break;
                 }

@@ -149,7 +149,7 @@ void Enricher::SetLlm(std::shared_ptr<llm::LlmProvider> provider, std::string mo
 }
 
 void Enricher::Enqueue(std::string entry_id, std::string text, int scope,
-                       std::string project_root) {
+                       std::string project_root, std::vector<std::string> also_bind) {
     if (!enabled() || entry_id.empty() || text.empty()) return;
     auto state = state_;
     std::shared_ptr<llm::LlmProvider> provider;
@@ -168,7 +168,7 @@ void Enricher::Enqueue(std::string entry_id, std::string text, int scope,
     }
     std::thread([state, provider = std::move(provider), model = std::move(model),
                  id = std::move(entry_id), text = std::move(text), scope,
-                 root = std::move(project_root)]() mutable {
+                 root = std::move(project_root), also_bind = std::move(also_bind)]() mutable {
         // Enrichment is garnish (enricher.hpp's "failure is always
         // silent-degrade" invariant): a SQLite write failure in
         // RunEnrichment (SetSummary/BindTopic) must not escape a detached
@@ -177,7 +177,7 @@ void Enricher::Enqueue(std::string entry_id, std::string text, int scope,
         // would hang Drain() forever.
         try {
             RunEnrichment(state->config, *state->store, provider.get(), model, state->logger, id,
-                          text, scope, root);
+                          text, scope, root, also_bind);
         } catch (const std::exception& error) {
             state->logger.warn("memory: enrichment worker failed: {}", error.what());
         }
@@ -195,7 +195,8 @@ void Enricher::RunEnrichment(const MemorySettings& settings, MemoryStore& store,
                              llm::LlmProvider* provider, const std::string& model,
                              common::Logger& logger, const std::string& entry_id,
                              const std::string& text, int scope,
-                             const std::string& project_root) {
+                             const std::string& project_root,
+                             const std::vector<std::string>& also_bind) {
     const auto topics = store.TopicNames(scope, project_root, /*cap=*/200);
     const auto answer = AskSummarizer(settings, provider, model, text, topics, logger);
     if (!answer) return;
@@ -211,10 +212,16 @@ void Enricher::RunEnrichment(const MemorySettings& settings, MemoryStore& store,
             summary.pop_back();
         }
     }
-    if (!summary.empty()) store.SetSummary(entry_id, summary);
+    if (!summary.empty()) {
+        store.SetSummary(entry_id, summary);
+        for (const auto& sibling_id : also_bind) store.SetSummary(sibling_id, summary);
+    }
 
     // Topic: existing (case-insensitive), {"new": ...} under cap, else null ->
-    // unfiled (topic_id stays NULL -- no sentinel row, by design).
+    // unfiled (topic_id stays NULL -- no sentinel row, by design). Every
+    // sibling gets the SAME resolved name/create decision -- one provider
+    // call stands in for the whole ingest group, so a second sibling must
+    // not re-roll "create" and end up with its own topic row.
     if (auto it = answer->find("topic"); it != answer->end()) {
         std::string topic_name;
         bool create = false;
@@ -227,7 +234,12 @@ void Enricher::RunEnrichment(const MemorySettings& settings, MemoryStore& store,
             }
         }
         if (!topic_name.empty() && topic_name.size() <= 64) {
-            store.BindTopic(entry_id, scope, project_root, topic_name, create);
+            store.BindTopic(entry_id, scope, project_root, topic_name, create, settings.max_topics);
+            for (const auto& sibling_id : also_bind) {
+                // The topic now exists (or already did): never create twice.
+                store.BindTopic(sibling_id, scope, project_root, topic_name, /*create_if_missing=*/false,
+                                settings.max_topics);
+            }
         }
     }
 }

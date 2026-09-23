@@ -157,11 +157,14 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
             // running" for WNOHANG.
         }
         if (child_exited) {
-            bool any_pipe_open = false;
-            for (bool pipe_open : open) {
-                if (pipe_open) {
+            bool any_pipe_open = false;       // counts toward the idle-kill below
+            bool any_exempt_open = false;     // open, but never a kill reason on its own
+            for (std::size_t i = 0; i < open.size(); ++i) {
+                if (!open[i]) continue;
+                if (outcome.sinks[i].detect_detached_grandchild) {
                     any_pipe_open = true;
-                    break;
+                } else {
+                    any_exempt_open = true;
                 }
             }
             if (any_pipe_open) {
@@ -175,6 +178,15 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
                 }
             } else {
                 idle_deadline = {};
+                if (any_exempt_open) {
+                    // Every WATCHED pipe is closed; only an exempt one (bash's
+                    // fd-9 state channel) remains, held by a grandchild that
+                    // doesn't even know the fd exists and so will never close
+                    // it. Waiting further only costs time up to the overall
+                    // deadline for a close that is never coming -- stop here,
+                    // exactly as if it had hit EOF like the others.
+                    break;
+                }
             }
         }
     }

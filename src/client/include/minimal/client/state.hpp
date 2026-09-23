@@ -261,6 +261,11 @@ public:
         // scrollback_max_messages_ messages per event -- per-delta copies
         // during a busy turn were the render freeze. Never null.
         std::shared_ptr<const std::vector<v1::StoredMessage>> scrollback_page;
+        // Context compactions known for this session (from scrollback pages
+        // and live CompactionEvents), ascending by at_seq. Shared,
+        // copy-on-change like scrollback_page; never null. The chat view
+        // renders each after the message at its at_seq.
+        std::shared_ptr<const std::vector<v1::CompactionEvent>> compactions;
         bool has_earlier_messages = false;   // paging back will yield more
         int64_t last_loaded_seq = -1;        // cursor for the next "load older"
 
@@ -736,6 +741,12 @@ public:
     // row will retire it in the normal way.
     void OnTurnCanceled(std::uint64_t turn_id, bool removed);
 
+    // The server compacted this session's working context (CompactionEvent).
+    // Records it for the chat view's compaction row and resets the status
+    // bar's occupancy to the post-compaction size -- the next turn's usage
+    // would otherwise be the first sign the context shrank.
+    void OnCompaction(const v1::CompactionEvent& evt);
+
     // Resolves an outstanding async scrollback refresh that came back EMPTY
     // or failed: bumps refresh_seq without touching any content, so the frame
     // that requested it can tell "resolved, nothing changed" from "still
@@ -828,6 +839,15 @@ private:
     // the only mutation site -- so every snapshot between applies shares it.
     std::shared_ptr<const std::vector<v1::StoredMessage>> scrollback_page_shared_ =
         std::make_shared<const std::vector<v1::StoredMessage>>();
+    // See Snapshot::compactions. Deduplicated on (at_seq, created_at): a live
+    // event and the page that later carries the same record are one row.
+    std::vector<v1::CompactionEvent> compactions_;
+    std::shared_ptr<const std::vector<v1::CompactionEvent>> compactions_shared_ =
+        std::make_shared<const std::vector<v1::CompactionEvent>>();
+    // Merges `incoming` into compactions_ and republishes the shared view
+    // when anything changed. Caller holds mtx_.
+    template <typename Range>
+    void MergeCompactionsLocked(const Range& incoming);
     int64_t last_loaded_seq_ = -1;      // oldest seq loaded so far (descending)
     bool has_earlier_ = false;
     uint64_t transcript_version_ = 0;

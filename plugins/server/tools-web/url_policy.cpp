@@ -33,6 +33,13 @@ bool IsPrivateOrLocalIPv4(const in_addr& addr) {
     // infrastructure, and nowhere near a legitimate fetch target.
     if ((ip & 0xFFFFFF00u) == 0xC0000000u) return true;
     if ((ip & 0xFF000000u) == 0x00000000u) return true;  // 0.0.0.0/8 "this network"
+    // 198.18.0.0/15 (RFC 2544) -- benchmarking space that internal test
+    // networks and some VPN/fake-IP setups route on regardless.
+    if ((ip & 0xFFFE0000u) == 0xC6120000u) return true;
+    if ((ip & 0xF0000000u) == 0xE0000000u) return true;  // 224.0.0.0/4 multicast
+    // 240.0.0.0/4 (RFC 1112) reserved -- also covers 255.255.255.255, the
+    // limited broadcast address, as its top subnet.
+    if ((ip & 0xF0000000u) == 0xF0000000u) return true;
     return false;
 }
 
@@ -57,6 +64,10 @@ bool IsPrivateOrLocalIPv6(const in6_addr& addr) {
                     [](std::uint8_t b) { return b == 0; })) {
         return true;
     }
+    if (addr.s6_addr[0] == 0xFF) return true;  // ff00::/8 multicast
+    // 2002::/16 (RFC 3056) 6to4 -- the next 32 bits embed an IPv4 address
+    // literally, the same smuggling shape as the NAT64 prefix above.
+    if (addr.s6_addr[0] == 0x20 && addr.s6_addr[1] == 0x02) return true;
     return false;
 }
 
@@ -76,9 +87,17 @@ std::optional<ParsedUrl> ParseUrl(const std::string& url) {
     parsed.scheme = url.substr(0, scheme_end);
 
     std::string rest = url.substr(scheme_end + 3);
-    // Strip userinfo ("user:pass@host") before the host, if present.
-    const auto slash = rest.find('/');
-    if (const auto at = rest.find('@'); at != std::string::npos && (slash == std::string::npos || at < slash)) {
+    // Strip userinfo ("user:pass@host") before the host, if present. The
+    // authority ends at the first of '/', '?' or '#' -- matching only up to
+    // '/' let an '@' planted in the query or fragment
+    // ("http://127.0.0.1?@example.com/") be read as userinfo here, vetting
+    // "example.com" while libcurl (which ends the authority the same way)
+    // connects to 127.0.0.1: the policy and the transport disagreeing about
+    // which host a URL names is exactly the SSRF bypass this function exists
+    // to prevent.
+    const auto authority_end = rest.find_first_of("/?#");
+    if (const auto at = rest.find('@');
+        at != std::string::npos && (authority_end == std::string::npos || at < authority_end)) {
         rest = rest.substr(at + 1);
     }
 
@@ -198,13 +217,20 @@ UrlCheck CheckUrl(const std::string& url, bool allow_private_hosts) {
     // ambiguous.
     const std::string host_part =
         parsed->host.find(':') != std::string::npos ? "[" + parsed->host + "]" : parsed->host;
-    out.resolve_entries.reserve(resolved_addresses.size());
-    for (const auto& address : resolved_addresses) {
+    // ONE entry, every address comma-joined -- not one entry per address.
+    // CURLOPT_RESOLVE keys entries by host:port, and libcurl discards the
+    // earlier entry for a repeated key, so pushing one per address silently
+    // dropped every address but the last. A dual-stack host with the AAAA
+    // record last (common with no working IPv6 route) then pinned to v6
+    // only and failed to connect, when the v4 fallback was right there.
+    std::string entry = host_part + ":" + port + ":";
+    for (std::size_t i = 0; i < resolved_addresses.size(); ++i) {
+        if (i != 0) entry += ',';
         // CURLOPT_RESOLVE wants IPv6 addresses bracketed.
-        const std::string addr_part =
-            address.find(':') != std::string::npos ? "[" + address + "]" : address;
-        out.resolve_entries.push_back(host_part + ":" + port + ":" + addr_part);
+        const auto& address = resolved_addresses[i];
+        entry += address.find(':') != std::string::npos ? "[" + address + "]" : address;
     }
+    out.resolve_entries.push_back(std::move(entry));
     return out;
 }
 

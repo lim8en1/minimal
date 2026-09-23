@@ -411,6 +411,9 @@ ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id,
             seed.history.push_back(std::move(stored.message));
         }
         seed.head_is_summary = true;
+        // The loop drops the thinking of the messages the fold kept, as the
+        // live fold did (AgentLoop::DropStaleThinking).
+        seed.kept_through_seq = checkpoint->at_seq;
         if (!seed.first_persisted_seq) {
             // Empty tail: the boundary is still exactly where the persisted
             // portion will resume on the next append.

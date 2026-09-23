@@ -110,6 +110,9 @@ void BuildCompactedLoop(LoopHarness& h) {
         compactor);
     h.loop->RunTurn(testing::UserText("a"));
     h.loop->RunTurn(testing::UserText("b"));
+    // Manual: a third-turn AUTO compaction right after the second-turn one is
+    // halted by design (AgentLoop::MaybeCompact); the working set ends the same.
+    h.loop->CompactNow();
     h.loop->RunTurn(testing::UserText("c"));
 }
 

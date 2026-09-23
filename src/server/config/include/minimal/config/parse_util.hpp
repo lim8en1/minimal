@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 
@@ -17,5 +18,18 @@ namespace minimal::config {
 // this rejects rather than silently mangling it).
 std::unordered_map<std::string, std::string> ParseStringMap(const nlohmann::json& doc,
                                                              const char* field);
+
+// Reads an integer field of `parent`, clamped into [min, max]; falls back to
+// `fallback` when `parent` is not an object, the field is absent, or the
+// field is not an INTEGER json number. Deliberately `is_number_integer()`,
+// not `is_number()`: `is_number()` accepts a float like 131072.9, which
+// `get<int64_t>()` then silently truncates rather than rejecting -- a
+// repeated mistake across plugin settings parsers this exists to end in one
+// place. `min`/`max` bound a value before it reaches arithmetic that can
+// overflow (a chrono duration conversion, a bit-shifted backoff delay);
+// clamping here is cheaper than clamping at every such use site downstream
+// and cannot be forgotten by a future one.
+std::int64_t ReadClampedInt64(const nlohmann::json& parent, const char* key,
+                              std::int64_t fallback, std::int64_t min, std::int64_t max);
 
 }  // namespace minimal::config

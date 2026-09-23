@@ -52,8 +52,13 @@ LoadedFile LoadWholeFile(const std::filesystem::path& path, std::int64_t max_byt
 std::size_t CountOccurrences(const std::string& haystack, std::string_view needle) {
     if (needle.empty()) return 0;
     std::size_t count = 0;
+    // Advance by 1, not needle.size(): str_replace's whole contract is
+    // "occurs exactly once", and skipping past a just-found match undercounts
+    // OVERLAPPING occurrences ("aa" in "aaa" is at offsets 0 and 1; skipping
+    // to offset 2 sees only one). Undercounting here means the uniqueness
+    // check passes and edits a location the caller never uniquely identified.
     for (std::size_t pos = haystack.find(needle); pos != std::string::npos;
-         pos = haystack.find(needle, pos + needle.size())) {
+         pos = haystack.find(needle, pos + 1)) {
         ++count;
     }
     return count;

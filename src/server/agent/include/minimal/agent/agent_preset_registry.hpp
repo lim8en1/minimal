@@ -295,6 +295,7 @@ private:
     ToolPermissionKeys tool_permission_keys_;
     std::string subagent_prefix_;
     std::string default_compression_prompt_;
+    std::string structured_compression_prompt_;  // prompts/compression-structured.md
     // Startup-only in practice (main.cpp wires builders beside the tool
     // registrations), but guarded because ResolveUncached reads it from
     // session-creation threads and a stray late SetDefinitionBuilder must not

@@ -88,6 +88,15 @@ MemorySettings ParseMemory(const nlohmann::json& doc) {
     result.context_compaction_trigger = ParseCompactionTrigger(memory);
     result.compaction_keep_recent_tokens =
         memory.value("compaction_keep_recent_tokens", result.compaction_keep_recent_tokens);
+    if (memory.contains("compaction_replace_percent")) {
+        const auto& value = memory.at("compaction_replace_percent");
+        const std::int64_t percent = value.is_number_integer() ? value.get<std::int64_t>() : 0;
+        if (percent < 1 || percent > 100) {
+            throw std::runtime_error(
+                "settings.json: memory.compaction_replace_percent must be between 1 and 100");
+        }
+        result.compaction_replace_percent = static_cast<int>(percent);
+    }
     result.scrollback_page_size = memory.value("scrollback_page_size", result.scrollback_page_size);
     result.compaction_strategy = memory.value("compaction_strategy", result.compaction_strategy);
     result.estimate_zero_usage = memory.value("estimate_zero_usage", result.estimate_zero_usage);

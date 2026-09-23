@@ -168,6 +168,10 @@ public:
         options.is_cancelled = ctx.is_cancelled;
         // No max_file_bytes: the walker only stats files; content is never
         // read, so size cannot bound memory here.
+        // A `path` scoped to a subdirectory must still honor the project
+        // root's .gitignore, or `glob(path="packages/x")` returns hits inside
+        // `packages/x/build/` that a root-level search would have excluded.
+        options.boundary_root = ctx.project_root;
 
         std::vector<MatchedPath> matches;
         const auto stats = WalkTree(
@@ -195,7 +199,31 @@ public:
                 return static_cast<int>(matches.size()) < settings_.glob_max_results;
             });
 
-        if (matches.empty()) return ToolResult{false, "No files found"};
+        if (matches.empty()) {
+            // A walker stat explaining an empty result is far more honest
+            // than a flat "No files found", which reads as a confident
+            // negative even when the walk actually timed out, was
+            // cancelled, or skipped entries it never got to enumerate --
+            // exactly the footer already reported below for a NON-empty
+            // result. (limit_stopped cannot fire with zero matches: the
+            // walker only stops at the cap after collecting some.)
+            if (stats.timed_out || stats.cancelled || stats.skipped_entries > 0 ||
+                stats.skipped_deep > 0) {
+                std::string out = "No files found";
+                if (stats.timed_out) out += " (stopped early: timeout)";
+                if (stats.cancelled) out += " (stopped early: cancelled)";
+                if (stats.skipped_entries > 0) {
+                    out += " (" + std::to_string(stats.skipped_entries) +
+                           " director(y entries) skipped: over the per-directory cap)";
+                }
+                if (stats.skipped_deep > 0) {
+                    out += " (" + std::to_string(stats.skipped_deep) +
+                           " director(ies) skipped: deeper than the walk depth cap)";
+                }
+                return ToolResult{false, out};
+            }
+            return ToolResult{false, "No files found"};
+        }
 
         std::sort(matches.begin(), matches.end(), [](const MatchedPath& a, const MatchedPath& b) {
             if (a.mtime_ns != b.mtime_ns) return a.mtime_ns > b.mtime_ns;
@@ -210,10 +238,24 @@ public:
             out += '\n';
         }
 
+        // "total"/"newest" are honest only when the walk saw every match.
+        // Once the walker's own result cap stopped it early (limit_stopped),
+        // `matches` is a name-sorted-DFS-order PREFIX of the real match set,
+        // not the whole thing sorted by time -- calling it a "total" and its
+        // head "newest" overstates what was actually collected.
         const bool more = matches.size() > static_cast<std::size_t>(shown);
         if (more) {
-            out += "(" + std::to_string(matches.size()) + " total; showing newest " +
+            out += "(" + std::to_string(matches.size()) +
+                   (stats.limit_stopped ? " collected; showing first " : " total; showing newest ") +
                    std::to_string(shown) + ")\n";
+        }
+        if (stats.limit_stopped) {
+            // Fires even when head_limit >= glob_max_results (every
+            // collected match is shown, `more` is false): the cap still
+            // stopped the WALK, so files beyond it were never even seen,
+            // let alone counted -- silence here read as a complete result.
+            out += "(stopped early: result cap reached; more files may exist beyond the " +
+                   std::to_string(matches.size()) + " collected)\n";
         }
         // A walk that stopped early is said so -- a partial result presented
         // as complete is the one failure mode worse than a truncation.

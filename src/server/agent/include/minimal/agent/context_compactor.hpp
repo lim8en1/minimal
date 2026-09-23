@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/llm/chat.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
 
@@ -22,7 +23,8 @@ namespace minimal::agent {
 // cannot drift (the resumed working set must not depend on which strategy
 // happened to write the head).
 inline constexpr std::string_view kSummaryFraming =
-    "The earlier part of this conversation was compacted into the following summary.\n\n";
+    "This conversation was compacted. The summary below covers the whole session up to the "
+    "compaction; the most recent messages follow it verbatim.\n\n";
 
 // Whitespace-only check shared by both compacters' refusal chains.
 inline bool IsBlank(std::string_view text) {
@@ -58,7 +60,25 @@ struct CompactionResult {
 // compact using the previous preset's prompt and sampling settings.
 struct CompactionRequest {
     std::string_view model_name;
+    // The instruction appended after the conversation, verbatim -- the text
+    // lives in the config dir's prompts/, not here. The free-text compactor
+    // sends compression_prompt; the structured one sends structured_prompt,
+    // unless `custom_prompt` is set or structured_prompt is blank, in which
+    // case it degrades to free text.
     std::string_view compression_prompt;
+    std::string_view structured_prompt;
+    // True when compression_prompt is not the bundled default -- a preset's
+    // `compression_prompt:` frontmatter or a /compact <name> override. A
+    // custom prompt describes its own output shape, so it runs unstructured.
+    bool custom_prompt = false;
+
+    // The session's own request prefix -- system prompt and tool definitions,
+    // exactly as the main loop sends them. The summarizer request is that
+    // request plus one appended instruction message, so a provider with
+    // prefix caching reads the whole history from cache. Both may be empty
+    // (direct-API callers, tests): the request then carries no system/tools.
+    std::optional<std::string> system;
+    std::vector<llm::ToolDefinition> tools;
 
     // The preset's own sampling knobs and output cap. Both are load-bearing
     // rather than tidiness: without `parameters` the summarization call runs
@@ -78,7 +98,10 @@ struct CompactionRequest {
     // small_model's) actually serves the call.
     std::string session_id;
 
-    // The backend's count for the last real request, or 0 if it reported none.
+    // The whole-context size going into this compaction: the backend-reported
+    // occupancy of the last request (input + cache read/creation + output),
+    // or 0 if none was reported. NOT the uncached input_tokens alone -- with
+    // prompt caching that is a small fraction of the context.
     std::int64_t last_reported_input_tokens = 0;
     // Everything currently in context, used only for the fallback estimate when
     // the backend reported nothing. Measured over the same span as the ground
@@ -97,11 +120,11 @@ struct CompactionRequest {
     std::function<bool()> is_cancelled;
 };
 
-// The production compactor: summarizes `messages_to_compact` into one synthetic
-// message by calling the provider with `compression_prompt` as the system prompt.
-// The messages go through verbatim -- tool blocks included -- because both wire
-// formats accept them in history without a tools array, and flattening would lose
-// fidelity for more code than it saves.
+// The production free-text compactor: summarizes `messages_to_compact` (the
+// WHOLE working history -- the caller decides separately how much of it the
+// summary replaces) into one synthetic message. The request is the session's
+// own (system, tools, messages) plus one appended user message carrying
+// `compression_prompt` verbatim.
 //
 // Returns nullopt when no compaction should happen: empty prompt, provider error,
 // cancellation, a response with no usable text, or a summary the model ran out of
@@ -125,6 +148,15 @@ std::int64_t estimate_tokens(std::span<const llm::Message> messages);
 // the occupancy estimate has the same shape as the compactor's fallback --
 // sized, not serialized -- over the tools array's input schemas.
 std::int64_t JsonSizeEstimate(const nlohmann::json& value);
+
+// The shared request builder behind both compactors: `params`' system/tools,
+// the history copied, `instruction` appended as a user message. `storage`
+// owns the messages the returned request's span points into, and must
+// outlive the provider call.
+llm::ChatRequest BuildSummarizerRequest(std::span<const llm::Message> history,
+                                        const CompactionRequest& params,
+                                        std::string instruction,
+                                        std::vector<llm::Message>& storage);
 
 // Summarizes a message range into one synthetic message. Injected so the
 // compaction path is testable without a live summarizer; production supplies

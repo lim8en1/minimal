@@ -63,12 +63,19 @@ std::optional<std::chrono::milliseconds> ParseRetryAfter(const std::vector<net::
         std::size_t consumed = 0;
         const long long parsed = std::stoll(*value, &consumed);
         if (parsed <= 0 || consumed != value->size()) return std::nullopt;
-        const auto duration = std::chrono::milliseconds(
-            is_ms ? parsed : parsed * 1000LL);
-        // 10 minutes is above any real rate-limit window and below any
-        // overflow of the ms arithmetic on 64-bit.
-        if (duration > std::chrono::minutes(10)) return std::nullopt;
-        return duration;
+        // The bound is checked on `parsed` itself, BEFORE the *1000
+        // multiply below, not on the resulting duration: a value
+        // std::stoll can parse but that is still absurd (e.g.
+        // "9999999999999999" seconds) overflowed the signed 64-bit
+        // multiply -- UB -- before a post-multiply `duration > minutes(10)`
+        // check ever ran. 10 minutes is above any real rate-limit window.
+        constexpr long long kMaxMs = 10 * 60 * 1000LL;
+        if (is_ms) {
+            if (parsed > kMaxMs) return std::nullopt;
+            return std::chrono::milliseconds(parsed);
+        }
+        if (parsed > kMaxMs / 1000) return std::nullopt;
+        return std::chrono::milliseconds(parsed * 1000LL);
     } catch (const std::exception&) {
         return std::nullopt;  // non-numeric (e.g. an HTTP-date) -- leave unset
     }

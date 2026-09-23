@@ -1,5 +1,6 @@
 #include "memory_tool.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <fstream>
 #include <unordered_set>
@@ -86,6 +87,7 @@ void MaybeDrainReindex(MemoryRuntime& rt) {
     std::vector<std::string> texts;
     texts.reserve(pending.size());
     for (const auto& row : pending) texts.push_back(row.text);
+    std::size_t stored = 0;  // how far the per-row store loop got
     try {
         std::vector<Embedding> embeddings = rt.embedder->Embed(texts);
         if (embeddings.size() != pending.size()) {
@@ -93,23 +95,24 @@ void MaybeDrainReindex(MemoryRuntime& rt) {
                                      " embeddings for " + std::to_string(pending.size()) +
                                      " inputs");
         }
-        for (std::size_t i = 0; i < pending.size(); ++i) {
-            rt.store->StoreEmbedding(pending[i].id, embeddings[i]);
+        for (; stored < pending.size(); ++stored) {
+            rt.store->StoreEmbedding(pending[stored].id, embeddings[stored], rt.signature);
         }
     } catch (const std::exception& error) {
-        rt.store->MarkEmbedFailed(
-            [&] {
-                std::vector<std::string> ids;
-                for (const auto& row : pending) ids.push_back(row.id);
-                return ids;
-            }(),
-            error.what());
+        // Only the rows NOT yet stored in THIS batch: a row at index <
+        // `stored` already has a correct embed_status=1 from the loop above,
+        // and marking it failed too would overwrite that real success with a
+        // spurious failure just because a LATER row's own store call threw.
+        std::vector<std::string> failed_ids;
+        for (std::size_t i = stored; i < pending.size(); ++i) failed_ids.push_back(pending[i].id);
+        rt.store->MarkEmbedFailed(failed_ids, error.what());
     }
 }
 
 // The digest: first memory call of a session only (memoized by session id,
 // fresh every session). Empty string = already shown / disabled.
-std::string DigestJson(MemoryRuntime& rt, const std::string& session_id) {
+std::string DigestJson(MemoryRuntime& rt, const std::string& session_id,
+                       const std::filesystem::path& project_root) {
     if (!rt.settings.digest_enabled) return "";
     {
         std::lock_guard<std::mutex> lock(rt.digest_mu);
@@ -117,7 +120,8 @@ std::string DigestJson(MemoryRuntime& rt, const std::string& session_id) {
     }
     const Digest digest = rt.store->DigestInfo(
         rt.embedder ? rt.embedder->Describe() : "lexical only",
-        rt.enricher->enabled() ? "on (" + rt.settings.summarizer_model + ")" : "off");
+        rt.enricher->enabled() ? "on (" + rt.settings.summarizer_model + ")" : "off",
+        WorktreeRoot(project_root).string());
     nlohmann::json topics = nlohmann::json::array();
     for (const auto& [name, count] : digest.top_topics) {
         topics.push_back({{"topic", name}, {"n", count}});
@@ -129,12 +133,12 @@ std::string DigestJson(MemoryRuntime& rt, const std::string& session_id) {
                           {"backend", digest.backend},
                           {"enrichment", digest.enrichment},
                           {"pending_reindex", digest.pending_reindex}};
-    return j.dump();
+    return j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
 // Result body with the digest riding on the first memory call of a session.
 std::string WithDigest(MemoryRuntime& rt, tools::ToolContext& ctx, std::string body) {
-    std::string digest = DigestJson(rt, ctx.session_id);
+    std::string digest = DigestJson(rt, ctx.session_id, ctx.project_root);
     if (digest.empty()) return body;
     return digest + "\n" + body;
 }
@@ -249,6 +253,14 @@ public:
                 } catch (const std::exception&) {
                     // Embedding the query failed: fall through with the
                     // lexical candidates, recency order, score absent.
+                    // `hits` here is still Search()'s full-scan result (no
+                    // FTS gate, LIMIT INT_MAX -- the whole point of a sim
+                    // sort is to rerank before truncating), so it must be
+                    // capped here the same way the success path caps it
+                    // above, or the fallback returns every row in scope.
+                    if (static_cast<int>(hits.size()) > query.limit) {
+                        hits.resize(static_cast<std::size_t>(std::max(query.limit, 0)));
+                    }
                 }
             }
 
@@ -257,7 +269,7 @@ public:
             nlohmann::json body;
             body["results"] = results;
             if (results.empty()) body["note"] = "no matches";
-            result.content_text = WithDigest(rt, ctx, body.dump());
+            result.content_text = WithDigest(rt, ctx, body.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
         } catch (const std::exception& error) {
             result.is_error = true;
             result.content_text = error.what();
@@ -423,7 +435,7 @@ private:
                     hint = {row.id, score};
                 }
             }
-            rt.store->StoreEmbedding(id, embedding);
+            rt.store->StoreEmbedding(id, embedding, rt.signature);
             return hint;
         } catch (const std::exception&) {
             return std::nullopt;  // row stays embed_status=0; next drain retries
@@ -457,7 +469,7 @@ private:
                                         "and store again if this supersedes it"}};
         }
         rt.enricher->Enqueue(id, text, scope.scope, scope.project_root);
-        result.content_text = body.dump();
+        result.content_text = body.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
         return result;
     }
 
@@ -506,8 +518,12 @@ private:
 
         // One enrichment call per STORE OPERATION, not per chunk: sample =
         // first chunk (headings travel with their body, so it carries the
-        // structure); its topic applies to the whole group.
-        rt.enricher->Enqueue(ingest.ids.front(), chunks[0], scope.scope, scope.project_root);
+        // structure); its topic applies to the whole group, so every other
+        // chunk's id rides along as also_bind and gets the same
+        // summary/topic without a provider call each.
+        const std::vector<std::string> also_bind(ingest.ids.begin() + 1, ingest.ids.end());
+        rt.enricher->Enqueue(ingest.ids.front(), chunks[0], scope.scope, scope.project_root,
+                             also_bind);
 
         tools::ToolResult result;
         nlohmann::json body;
@@ -516,7 +532,7 @@ private:
         if (ingest.replaced > 0) body["replaced"] = ingest.replaced;
         body["preview"] = PreviewOf(chunks[0], 128);
         body["summary_pending"] = rt.enricher->enabled();
-        result.content_text = body.dump();
+        result.content_text = body.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
         return result;
     }
 };
@@ -567,7 +583,7 @@ public:
                               {"siblings", entry->sibling_ids}};
             }
             j["created_at"] = entry->created_at;
-            result.content_text = WithDigest(rt, ctx, j.dump());
+            result.content_text = WithDigest(rt, ctx, j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
         } catch (const std::exception& error) {
             result.is_error = true;
             result.content_text = error.what();

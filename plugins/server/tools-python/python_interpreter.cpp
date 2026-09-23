@@ -440,6 +440,16 @@ std::optional<std::string> Interpreter::Submit(const std::string& code, bool asy
 
     {
         std::lock_guard<std::mutex> lock(mu_);
+        // Rechecked under mu_: the outer check above and this insert are two
+        // separate critical sections, so MarkDead (dead_ := true, THEN locks
+        // mu_ to clear pending_) can land in between -- without this, the
+        // entry inserted here lands in a map MarkDead already cleared, with
+        // no reader left alive to ever mark it done. Acked "started" and
+        // never completed or failed.
+        if (dead_.load(std::memory_order_acquire)) {
+            *error = "interpreter is not running";
+            return std::nullopt;
+        }
         auto p = std::make_shared<Pending>(static_cast<std::size_t>(settings_.stream_head_bytes),
                                            static_cast<std::size_t>(settings_.stream_tail_bytes));
         p->id = id;
@@ -536,7 +546,14 @@ void Interpreter::StampRunningLocked(const std::shared_ptr<Pending>& p,
     if (p->running_since) return;
     p->running_since = now;
     if (p->max_runtime_seconds > 0) {
-        p->deadline = now + std::chrono::seconds(p->max_runtime_seconds);
+        // Clamped here too, not just at python_tools.cpp's parse site: this
+        // is the actual computation that overflows (converting
+        // std::chrono::seconds to a nanosecond-resolution duration multiplies
+        // by 1e9, wrapping above ~9.2e9 seconds), so Submit is not the only
+        // caller this needs to be safe against.
+        constexpr std::int64_t kMaxSaneRuntimeSeconds = 100'000'000;  // ~3.2 years
+        const auto seconds = std::min(p->max_runtime_seconds, kMaxSaneRuntimeSeconds);
+        p->deadline = now + std::chrono::seconds(seconds);
     }
 }
 
@@ -635,16 +652,20 @@ OutputRead Interpreter::ReadTaskOutput(const std::string& id, std::uint64_t offs
     return out;
 }
 
+Interpreter::ProgressSnapshot Interpreter::Progress() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return {progress_, idle_interrupts_};
+}
+
 Interpreter::InterruptOutcome Interpreter::WaitForInterrupt(
-    std::chrono::milliseconds grace, const tools::CancelTokenPtr& cancel) {
+    const ProgressSnapshot& baseline, std::chrono::milliseconds grace,
+    const tools::CancelTokenPtr& cancel) {
     std::unique_lock<std::mutex> lock(mu_);
-    const std::uint64_t start = progress_;
-    const std::uint64_t start_idle = idle_interrupts_;
     const auto deadline = std::chrono::steady_clock::now() + grace;
     while (true) {
-        if (progress_ != start) {
-            return idle_interrupts_ != start_idle ? InterruptOutcome::kIdleInterrupt
-                                                   : InterruptOutcome::kResponse;
+        if (progress_ != baseline.progress) {
+            return idle_interrupts_ != baseline.idle_interrupts ? InterruptOutcome::kIdleInterrupt
+                                                                 : InterruptOutcome::kResponse;
         }
         if (dead_.load(std::memory_order_acquire)) return InterruptOutcome::kNoReaction;
         const auto now = std::chrono::steady_clock::now();
@@ -680,14 +701,29 @@ void Interpreter::MarkDead(std::string reason, bool session_dead) {
     std::vector<std::shared_ptr<Pending>> to_fail;
     {
         std::lock_guard<std::mutex> lock(mu_);
-        for (auto& [id, p] : pending_) {
+        for (auto it = pending_.begin(); it != pending_.end();) {
+            auto& p = it->second;
+            // A done-but-unclaimed entry (a sync request DeliverResponse
+            // already filled with its REAL outcome, whose WaitSync just
+            // hasn't run the `p->done` check yet) must be left ALONE, in the
+            // map, not just un-overwritten: WaitSync's very first lookup is
+            // `pending_.find(id)` -- a caller that has not reached its
+            // while-loop yet (this death can predate the caller by any
+            // amount) needs the entry still findABLE, not merely intact in
+            // memory, or it reads as kDead on a request that actually
+            // completed successfully. Only NOT-done entries are converted to
+            // a failure and removed; they are no longer "pending" anything.
+            if (p->done) {
+                ++it;
+                continue;
+            }
             // Filled UNDER mu_: sync waiters read these fields under it.
             p->outcome = RequestOutcome{};
             p->outcome.error = reason;
             p->done = true;
             to_fail.push_back(p);
+            it = pending_.erase(it);
         }
-        pending_.clear();
         ++progress_;
         cv_.notify_all();
     }
@@ -720,6 +756,12 @@ void Interpreter::MarkDead(std::string reason, bool session_dead) {
 
 void Interpreter::HardKill(const char* reason) {
     MarkDead(reason, config_.session_lifetime.expired());
+    // Idempotent the same way MarkDead is: a second HardKill call (session
+    // teardown racing an explicit kill, or ~Interpreter calling it again
+    // after an earlier death already reaped pid_) must not re-kill/re-reap a
+    // pid the OS may have recycled for an unrelated process since.
+    bool expected = false;
+    if (!reaped_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
     // ReapAfterKill includes the group kill (plus the fork-to-setsid window
     // via the plain kill). An unreaped child (D state) is logged, never
     // waited on forever.

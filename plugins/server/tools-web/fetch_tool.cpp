@@ -43,6 +43,63 @@ bool ContentTypeIsHtml(const std::vector<net::HttpHeader>& headers) {
     return content_type->find("html") != std::string::npos;
 }
 
+// A conservative, substring-based deny-list: enough to catch the common
+// binary formats (images, archives, PDFs) that show up as U+FFFD junk (or
+// raw bytes) in the model's context if returned as "text". Not exhaustive --
+// an unrecognized Content-Type still passes through, same as today, so this
+// only ever narrows what gets dumped raw, never blocks a legitimate text
+// response the check doesn't recognize.
+bool ContentTypeLooksBinary(const std::vector<net::HttpHeader>& headers) {
+    const auto content_type = net::FindHeaderCI(headers, "Content-Type");
+    if (!content_type) return false;
+    static const char* kBinaryMarkers[] = {
+        "image/",  "audio/",     "video/",  "font/",
+        "application/octet-stream", "application/pdf", "application/zip",
+        "application/gzip", "application/x-",
+    };
+    for (const char* marker : kBinaryMarkers) {
+        if (content_type->find(marker) != std::string::npos) return true;
+    }
+    return false;
+}
+
+// Never end a truncation mid-codepoint: a byte cut inside a UTF-8 multi-byte
+// sequence emits invalid UTF-8 (U+FFFD junk downstream, or a hard error from
+// a strict consumer) instead of a clean prefix. Drops the WHOLE partial
+// sequence rather than any part of it.
+std::size_t Utf8SafeLength(std::string_view text, std::size_t max_bytes) {
+    const std::size_t cut = std::min(max_bytes, text.size());
+    if (cut == 0 || cut == text.size()) return cut;
+    // A UTF-8 sequence is at most 4 bytes (a leader plus up to 3
+    // continuation bytes, 10xxxxxx); walk back at most that far to find the
+    // leader of whatever codepoint is open at the cut point.
+    std::size_t start = cut;
+    int back = 0;
+    while (start > 0 && back < 3 &&
+           (static_cast<unsigned char>(text[start - 1]) & 0xC0) == 0x80) {
+        --start;
+        ++back;
+    }
+    if (start == 0) return cut;
+    const unsigned char lead = static_cast<unsigned char>(text[start - 1]);
+    std::size_t seq_len = 1;
+    if ((lead & 0x80) == 0x00) {
+        seq_len = 1;
+    } else if ((lead & 0xE0) == 0xC0) {
+        seq_len = 2;
+    } else if ((lead & 0xF0) == 0xE0) {
+        seq_len = 3;
+    } else if ((lead & 0xF8) == 0xF0) {
+        seq_len = 4;
+    } else {
+        return cut;  // not a recognizable leader byte -- not ours to fix
+    }
+    // The sequence starting at `lead` doesn't fully fit before `cut`: drop
+    // it whole rather than truncate it.
+    if (start - 1 + seq_len > cut) return start - 1;
+    return cut;
+}
+
 // An ABSOLUTE Location header only. A relative one ("/login") would need
 // full RFC 3986 resolution against the current URL to follow correctly;
 // getting that wrong silently (e.g. dropping the scheme/host) is worse than
@@ -146,6 +203,17 @@ public:
                 return Error("web_fetch: HTTP " + std::to_string(response.status));
             }
 
+            // A binary body (image, archive, PDF, ...) returned as "text"
+            // shows up as raw bytes or U+FFFD junk in the model's context;
+            // refuse it up front rather than dumping it in, truncated or
+            // not -- this tool has no rendering or extraction for it.
+            if (!ContentTypeIsHtml(response.headers) && ContentTypeLooksBinary(response.headers)) {
+                const auto content_type = net::FindHeaderCI(response.headers, "Content-Type");
+                return Error("web_fetch: response is not text (Content-Type: " +
+                             content_type.value_or("unknown") +
+                             "); this tool returns text only");
+            }
+
             return Finish(ctx, url, ContentTypeIsHtml(response.headers)
                                         ? HtmlToText(response.body)
                                         : response.body,
@@ -173,8 +241,12 @@ private:
         std::filesystem::create_directories(dir, ec);
         const std::string name = SpillName(url);
         const auto outcome = ec ? tools::WriteOutcome{} : tools::write_file(dir / name, text);
+        // Backed up to a UTF-8 boundary, not a raw byte cut: a cut landing
+        // inside a multi-byte sequence emitted invalid UTF-8 into the
+        // model's context.
+        const auto safe_len = Utf8SafeLength(text, static_cast<std::size_t>(max_bytes));
         if (outcome.ok) {
-            text.resize(static_cast<std::size_t>(max_bytes));
+            text.resize(safe_len);
             return ToolResult{false,
                               std::move(text) + "\n[Showing the first " +
                                   std::to_string(max_bytes) + " of " + std::to_string(total) +
@@ -184,7 +256,7 @@ private:
         }
         // The spill failed: truncate anyway, and say the pointer is missing
         // rather than returning one that leads nowhere.
-        text.resize(static_cast<std::size_t>(max_bytes));
+        text.resize(safe_len);
         return ToolResult{false,
                           std::move(text) + "\n[Truncated to the first " +
                               std::to_string(max_bytes) + " of " + std::to_string(total) +

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <fstream>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <thread>
 
@@ -157,6 +158,37 @@ TEST_CASE("CheckUrl: loopback and private literal addresses are refused by defau
     CHECK(CheckUrl("http://100.128.0.1/", true).ok);
 }
 
+TEST_CASE("CheckUrl: newly-added special-purpose ranges are refused by default",
+         "[tools_web][url_policy]") {
+    CHECK_FALSE(CheckUrl("http://198.18.0.1/", false).ok);   // RFC 2544 benchmarking
+    CHECK_FALSE(CheckUrl("http://198.19.255.254/", false).ok);
+    CHECK_FALSE(CheckUrl("http://224.0.0.1/", false).ok);    // multicast
+    CHECK_FALSE(CheckUrl("http://240.0.0.1/", false).ok);    // reserved
+    CHECK_FALSE(CheckUrl("http://255.255.255.255/", false).ok);
+    CHECK_FALSE(CheckUrl("http://[ff02::1]/", false).ok);    // IPv6 multicast
+    CHECK_FALSE(CheckUrl("http://[2002:c000:0204::1]/", false).ok);  // 6to4 (embeds 192.0.2.4)
+    // Just outside 198.18.0.0/15: a real public address.
+    CHECK(CheckUrl("http://198.20.0.1/", true).ok);
+}
+
+TEST_CASE("CheckUrl: an '@' inside the query or fragment does not rename the host",
+         "[tools_web][url_policy]") {
+    // Regression: the userinfo-stripping search looked only for '/' as the
+    // end of the authority, so an '@' placed in the query or fragment was
+    // read as "user@host", vetting the string AFTER it (a public-looking
+    // name) while libcurl -- which ends the authority at '/', '?' or '#' --
+    // connects to the loopback/metadata address before it. Both must now
+    // name the same (refused) host.
+    const auto query = CheckUrl("http://127.0.0.1:8080?@example.com/", false);
+    CHECK_FALSE(query.ok);
+    const auto fragment = CheckUrl("http://169.254.169.254/latest/meta-data#@example.com/", false);
+    CHECK_FALSE(fragment.ok);
+    // A real userinfo before the authority ends is still stripped correctly.
+    const auto real_userinfo = CheckUrl("https://user:pass@93.184.216.34/", false);
+    CHECK(real_userinfo.ok);
+    CHECK(real_userinfo.host == "93.184.216.34");
+}
+
 TEST_CASE("CheckUrl: a public literal address is allowed by default",
          "[tools_web][url_policy]") {
     // A literal IP needs no DNS resolution (getaddrinfo parses it directly),
@@ -260,6 +292,63 @@ TEST_CASE("HtmlToText: malformed markup does not hang or crash", "[tools_web][ht
     CHECK_NOTHROW(HtmlToText("<script>never closed"));
 }
 
+TEST_CASE("HtmlToText: a stray '<' is a literal, not the start of eaten markup",
+          "[tools_web][html_text]") {
+    // Regression: ANY '<' was assumed to start a tag and everything up to
+    // the next unrelated '>' was silently eaten -- "if x < 5 then y > 3
+    // done" lost "< 5 then y >" entirely, becoming "if x 3 done".
+    const auto text = HtmlToText("if x < 5 then y > 3 done");
+    CHECK(text.find("x < 5") != std::string::npos);
+    CHECK(text.find("y > 3") != std::string::npos);
+}
+
+TEST_CASE("HtmlToText: a comment ends at '-->', not at the first '>' inside it",
+          "[tools_web][html_text]") {
+    // Regression: a comment containing a literal '>' ("<!-- note > hidden
+    // -->") had its "tag" end at that inner '>', leaking the comment's tail
+    // ("hidden -->") into the output as ordinary text.
+    const auto text = HtmlToText("before<!-- note > hidden -->visible");
+    CHECK(text.find("before") != std::string::npos);
+    CHECK(text.find("visible") != std::string::npos);
+    CHECK(text.find("hidden") == std::string::npos);
+    CHECK(text.find("note") == std::string::npos);
+}
+
+TEST_CASE("HtmlToText: a '>' inside a quoted attribute does not end the tag",
+          "[tools_web][html_text]") {
+    // Regression: `<a title="a>b">` ended the "tag" at the '>' inside the
+    // quoted value, leaking `b">` into the output.
+    const auto text = HtmlToText("<a title=\"a>b\">link text</a>");
+    CHECK(text.find("link text") != std::string::npos);
+    CHECK(text.find("b\">") == std::string::npos);
+}
+
+TEST_CASE("HtmlToText: a paragraph gap keeps its one blank line",
+          "[tools_web][html_text]") {
+    // Regression: pending_newlines could only ever reach 1 (gating the
+    // increment on line_has_content, which the SAME newline event flips
+    // false before a second consecutive one is counted), so the min(...,2)
+    // cap was dead and every paragraph boundary collapsed to a single "\n"
+    // instead of the documented "runs of blank lines to at most one".
+    const auto text = HtmlToText("<p>a</p><p>b</p>");
+    CHECK(text.find("a\n\nb") != std::string::npos);
+}
+
+TEST_CASE("HtmlToText: a malformed numeric entity stays literal, not silently decoded",
+          "[tools_web][html_text]") {
+    // Regression: stoul with a null `pos` out-param doesn't throw on a
+    // PARTIAL parse ("12abc" -> 12, silently swallowing "abc"), and an
+    // unchecked static_cast<uint32_t> wrapped an out-of-range value
+    // ("x100000041" = 4294967361) to 'A' instead of rejecting it.
+    const auto partial = HtmlToText("&#12abc;done");
+    CHECK(partial.find("abc") != std::string::npos);  // not swallowed into the entity
+    CHECK(partial.find("done") != std::string::npos);
+
+    const auto overflow = HtmlToText("&#x100000041;done");
+    CHECK(overflow.find('A') == std::string::npos);  // not silently wrapped
+    CHECK(overflow.find("done") != std::string::npos);
+}
+
 TEST_CASE("HtmlToText: a flood of '&' stays literal and does not decode a garbage tail",
           "[tools_web][html_text]") {
     // The ';' search used to run unbounded from every '&': a page of '&'s was
@@ -354,6 +443,19 @@ TEST_CASE("web_fetch: allow_private_hosts opts a loopback target back in",
     CHECK(result.content_text == "local");
 }
 
+TEST_CASE("web_fetch: a binary content-type is refused, not dumped as text",
+          "[tools_web][fetch]") {
+    // Regression: a binary body (image, PDF, archive, ...) returned "as
+    // text" ends up as raw bytes or U+FFFD junk in the model's context;
+    // this tool has no rendering or extraction for it.
+    LoopbackServer server({HttpResponseOf(200, "OK", "image/png", "\x89PNG\r\n\x1a\n")});
+    auto tool = MakeWebFetchTool(LocalSettings(), net::HttpClient{});
+    auto ctx = Context();
+    const auto result = tool->execute({{"url", server.url()}}, ctx);
+    CHECK(result.is_error);
+    CHECK(result.content_text.find("image/png") != std::string::npos);
+}
+
 TEST_CASE("web_fetch: 'url' is required", "[tools_web][fetch]") {
     auto tool = MakeWebFetchTool(WebSettings{}, net::HttpClient{});
     auto ctx = Context();
@@ -392,6 +494,32 @@ TEST_CASE("web_fetch: an oversized response is truncated, and the full text is s
     const std::string spilled((std::istreambuf_iterator<char>(spill)),
                               std::istreambuf_iterator<char>());
     CHECK(spilled == body);
+
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("web_fetch: truncation backs up to a UTF-8 boundary, never splits a codepoint",
+          "[tools_web][fetch]") {
+    // Regression: a raw byte cut could land inside a multi-byte UTF-8
+    // sequence, emitting an invalid trailing byte into the model's context.
+    const std::string euro = "\xE2\x82\xAC";  // one 3-byte codepoint
+    const std::string body = std::string(9, 'x') + euro + std::string(100, 'y');
+    LoopbackServer server({HttpResponseOf(200, "OK", "text/plain", body)});
+    WebSettings settings = LocalSettings();
+    settings.fetch_default_max_bytes = 10;  // cuts right after the euro's first byte
+    auto tool = MakeWebFetchTool(settings, net::HttpClient{});
+
+    const auto root = std::filesystem::temp_directory_path() / "minimal-webfetch-utf8-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    auto ctx = Context();
+    ctx.project_root = root;
+
+    const auto result = tool->execute({{"url", server.url()}}, ctx);
+    CHECK_FALSE(result.is_error);
+    // The whole partial codepoint is dropped, not a truncated prefix of it.
+    CHECK(result.content_text.substr(0, 9) == std::string(9, 'x'));
+    CHECK(result.content_text.find('\xE2') == std::string::npos);
 
     std::filesystem::remove_all(root);
 }
@@ -491,6 +619,31 @@ TEST_CASE("web_search: a configured backend's results are formatted", "[tools_we
     CHECK(result.content_text.find("a page") != std::string::npos);
 }
 
+TEST_CASE("web_search: a row with a wrong-typed field degrades, not fails the whole search",
+         "[tools_web][search]") {
+    // Regression: result.value("snippet", "") throws nlohmann type_error.302
+    // when the field is PRESENT but the wrong type (null instead of a
+    // string), unlike the existing non-object-row guard -- one malformed
+    // row used to take every good result down with it.
+    LoopbackServer server({HttpResponseOf(
+        200, "OK", "application/json",
+        R"({"results":[
+              {"title":"Good","url":"https://example.com/good","snippet":"fine"},
+              {"title":"Bad","url":"https://example.com/bad","snippet":null},
+              {"title":123,"url":"https://example.com/badtitle","snippet":"x"}
+            ]})")});
+
+    WebSettings settings;
+    settings.search_api_url = server.url();
+    auto tool = MakeWebSearchTool(settings, net::HttpClient{});
+    auto ctx = Context();
+    const auto result = tool->execute({{"query", "test"}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.find("Good") != std::string::npos);
+    CHECK(result.content_text.find("example.com/bad") != std::string::npos);
+    CHECK(result.content_text.find("example.com/badtitle") != std::string::npos);
+}
+
 TEST_CASE("web_search: an unexpected backend shape is a clear tool error",
          "[tools_web][search]") {
     LoopbackServer server(
@@ -549,4 +702,20 @@ TEST_CASE("ParseWebSettings: reads fetch.* and search.*", "[tools_web][settings]
 TEST_CASE("ParseWebSettings: an unset search.api_key_env throws", "[tools_web][settings]") {
     const nlohmann::json config = {{"search", {{"api_key_env", "MINIMAL_TEST_UNSET_VAR_XYZ"}}}};
     CHECK_THROWS_AS(ParseWebSettings(config), std::runtime_error);
+}
+
+TEST_CASE("ParseWebSettings: a fractional or absurdly large value falls back, never wraps",
+          "[tools_web][settings]") {
+    // Regression: is_number() accepted a float (1500.7, silently truncated
+    // by get<T>()) and an unclamped get<T>() narrowing let a huge value
+    // (4294967297) wrap to 1 when cast to `int` -- both instead of falling
+    // back to the struct default.
+    const auto defaults = ParseWebSettings(nlohmann::json::object());
+    const auto fractional =
+        ParseWebSettings(nlohmann::json{{"fetch", {{"timeout_ms", 1500.7}}}});
+    CHECK(fractional.fetch_timeout_ms == defaults.fetch_timeout_ms);
+    const auto huge =
+        ParseWebSettings(nlohmann::json{{"fetch", {{"max_redirects", 4294967297LL}}}});
+    CHECK(huge.fetch_max_redirects > 0);  // never the wrap-to-1 the old code produced
+    CHECK(huge.fetch_max_redirects == std::numeric_limits<int>::max());  // clamped, not wrapped
 }

@@ -98,6 +98,7 @@ void WriteGoodConfig(const std::filesystem::path& dir) {
               "---\nname: build\nmodel: fixture-main/test-model\nallowed_tools:\n  - bash\n---\n"
               "You are a test preset.\n");
     WriteFile(dir / "prompts/compression.md", "# compression\nSummarize the earlier messages.\n");
+    WriteFile(dir / "prompts/compression-structured.md", "Call record_summary.\n");
 }
 
 struct Fixture {
@@ -440,6 +441,7 @@ void WriteDiscoverConfig(const std::filesystem::path& dir, const char* backend =
               "---\nname: build\nmodel: disc/some-model\nallowed_tools:\n  - bash\n---\n"
               "You are a test preset.\n");
     WriteFile(dir / "prompts/compression.md", "# compression\nSummarize the earlier messages.\n");
+    WriteFile(dir / "prompts/compression-structured.md", "Call record_summary.\n");
 }
 
 class FakeCatalog : public llm::ModelCatalog {
@@ -531,6 +533,7 @@ TEST_CASE("a cold start with no presets is fatal", "[sanity_check][presets]") {
             R"({"providers":{"fixture-main":{"backend":"fixture",)"
             R"("url":"http://localhost:1/v1","models":{"m":{}}}}})");
     f.Write("prompts/compression.md", "# compression\nSummarize.\n");
+    f.Write("prompts/compression-structured.md", "Call record_summary.\n");
     ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
 
     const auto results = RunChecks(f);
@@ -600,6 +603,18 @@ TEST_CASE("an absent compression prompt is loud", "[sanity_check][presets]") {
         REQUIRE(hits.size() == 1);
         CHECK(hits[0]->severity == CheckSeverity::Warning);
         CHECK(hits[0]->message.find("compression.md") != std::string::npos);
+    }
+    // The structured prompt: the structured strategy degrades to free text.
+    {
+        Fixture f;
+        WriteGoodConfig(f.config_dir);
+        ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+        std::filesystem::remove(f.config_dir / "prompts" / "compression-structured.md");
+
+        const auto results = RunChecks(f);
+        const auto hits = ByCheck(results, "presets");
+        REQUIRE(hits.size() == 1);
+        CHECK(hits[0]->message.find("compression-structured.md") != std::string::npos);
     }
     // A preset override pointing at a missing file. The frontmatter value is
     // the stem -- ".md" is appended by the resolver (see ResolveUncached).

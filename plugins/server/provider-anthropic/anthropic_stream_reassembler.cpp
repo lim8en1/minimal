@@ -157,7 +157,7 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
     }
 
     if (type == "content_block_stop") {
-        const std::size_t index = IndexOr(event, "index");
+        const std::size_t index = CheckedBlockIndex(IndexOr(event, "index"));
         if (index < blocks_.size()) blocks_[index].stopped = true;
         if (sink && !sink(llm::ContentBlockStopEvent{static_cast<int>(index)})) return false;
         return true;

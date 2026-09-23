@@ -3,9 +3,16 @@
 // the test binary like every other bundled plugin's pure logic (plugin.cpp,
 // the extern "C" entry points, stays out -- the loader tests cover that shape).
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+
 #include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -40,6 +47,74 @@ struct Harness {
     plugins::PluginStorage storage{dir.path() / "plugin_storage.db"};
     CostStore store{&storage};
     InFlightUsage in_flight;
+};
+
+// One-shot loopback HTTP server, the same shape as http_client_test.cpp's
+// LoopbackServer: binds an ephemeral 127.0.0.1 port, serves one canned
+// response, then stops. Used here to give exactly ONE of the two rate
+// sources a real, successful fetch while the other's URL stays unroutable --
+// the partial-success shape FetchAndUpdateRates must not collapse to total
+// failure.
+class LoopbackJsonServer {
+public:
+    explicit LoopbackJsonServer(std::string json_body, std::chrono::milliseconds delay = {})
+        : delay_(delay) {
+        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        REQUIRE(listen_fd_ >= 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        REQUIRE(::bind(listen_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        REQUIRE(::listen(listen_fd_, 1) == 0);
+        socklen_t length = sizeof(address);
+        REQUIRE(::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&address), &length) == 0);
+        port_ = ntohs(address.sin_port);
+        thread_ = std::thread([this, body = std::move(json_body)] { Serve(body); });
+    }
+
+    ~LoopbackJsonServer() {
+        if (listen_fd_ >= 0) ::close(listen_fd_);
+        if (thread_.joinable()) thread_.join();
+    }
+
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(port_) + "/x.json"; }
+
+private:
+    void Serve(const std::string& body) {
+        timeval tv{5, 0};
+        (void)::setsockopt(listen_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        const int fd = ::accept(listen_fd_, nullptr, nullptr);
+        if (fd < 0) return;
+        std::string request;
+        char buffer[4096];
+        while (request.find("\r\n\r\n") == std::string::npos) {
+            const ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (n <= 0) break;
+            request.append(buffer, static_cast<std::size_t>(n));
+        }
+        if (delay_.count() > 0) std::this_thread::sleep_for(delay_);
+        const std::string response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                     "Content-Length: " +
+                                     std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" +
+                                     body;
+        std::size_t sent = 0;
+        while (sent < response.size()) {
+#ifdef MSG_NOSIGNAL
+            const ssize_t n = ::send(fd, response.data() + sent, response.size() - sent, MSG_NOSIGNAL);
+#else
+            const ssize_t n = ::write(fd, response.data() + sent, response.size() - sent);
+#endif
+            if (n <= 0) break;
+            sent += static_cast<std::size_t>(n);
+        }
+        ::close(fd);
+    }
+
+    int listen_fd_ = -1;
+    int port_ = 0;
+    std::chrono::milliseconds delay_;
+    std::thread thread_;
 };
 
 TurnRecord Turn(const std::string& model, std::int64_t in, std::int64_t out,
@@ -687,6 +762,44 @@ TEST_CASE("/cost all lists every session with subagents adjacent to their parent
     CHECK(result.message.find("(subagent of root1)") != std::string::npos);
 }
 
+TEST_CASE("/cost all interleaves subagents with MULTIPLE roots, not grouped by parent id",
+          "[cost_tracker][commands]") {
+    // Regression: the old comparator bucketed ALL children into one trailing
+    // block sorted by parent id (a string), decoupled from the roots'
+    // spend-based order. With a lexically-late root (zroot, $10) outspending
+    // a lexically-early one (aroot, $1), the old order was zroot, aroot,
+    // achild, zchild -- zchild ends up dead last, nowhere near its actual
+    // parent zroot, which sorted first. A single-child fixture (the older
+    // test above) can't tell the two shapes apart; this needs two.
+    Harness harness;
+    RateSources sources;
+    sources.config_rates = nlohmann::json::parse(R"({"m1": {"input": 2.0, "output": 0.0}})");
+    RateTable rates(sources, &harness.storage);
+    harness.store.AppendTurn("zroot", "", Turn("m1", 5000000, 0));       // $10
+    harness.store.AppendTurn("zchild", "zroot", Turn("m1", 500000, 0));  // $1
+    harness.store.AppendTurn("aroot", "", Turn("m1", 500000, 0));        // $1
+    harness.store.AppendTurn("achild", "aroot", Turn("m1", 500000, 0));  // $1
+
+    testing::CommandFixture fixture;
+    fixture.registry.Register(std::make_unique<CostCommand>(harness.store, rates));
+    const auto result = fixture.Run("cost", {"all"});
+    REQUIRE(result.status == Status::kOk);
+
+    const auto zroot = result.message.find("zroot");
+    const auto zchild = result.message.find("zchild");
+    const auto aroot = result.message.find("aroot");
+    const auto achild = result.message.find("achild");
+    REQUIRE(zroot != std::string::npos);
+    REQUIRE(zchild != std::string::npos);
+    REQUIRE(aroot != std::string::npos);
+    REQUIRE(achild != std::string::npos);
+    // zroot outspends aroot, so it sorts first; each child sits immediately
+    // after its OWN parent, not after every root.
+    CHECK(zroot < zchild);
+    CHECK(zchild < aroot);
+    CHECK(aroot < achild);
+}
+
 TEST_CASE("the .rpc service answers totals, list and malformed calls",
           "[cost_tracker][rpc]") {
     Harness harness;
@@ -897,6 +1010,76 @@ TEST_CASE("a failed rates fetch keeps the old table", "[cost_tracker]") {
     const auto totals = Aggregate("s1", "", harness.store.Load("s1").turns,
                                   [&rates](const std::string& m) { return rates.Resolve(m); });
     CHECK(totals.total_cost == 2.0);
+}
+
+TEST_CASE("one snapshot fetching successfully still refreshes the table when the other fails",
+          "[cost_tracker]") {
+    // The regression: FetchAndUpdateRates used to wrap BOTH cache writes in
+    // one try/catch, so a persisted LiteLLM snapshot was reported as a total
+    // failure (and RateTable::RefreshFetched() was skipped) whenever
+    // anything about the OTHER source's handling went wrong afterward. Here
+    // one source genuinely fetches (a real loopback server) while the other's
+    // URL is unroutable, exercising the exact partial-success path end to end:
+    // the successful snapshot must reach the live table regardless.
+    Harness harness;
+    RateSources sources;
+    RateTable rates(sources, &harness.storage);
+    harness.store.AppendTurn("s1", "", Turn("only-litellm", 1000000, 0));
+
+    LoopbackJsonServer litellm_server(R"({
+        "only-litellm": {"input_cost_per_token": 0.000001, "output_cost_per_token": 0.000002}
+    })");
+
+    CostSettings settings;
+    settings.rates_fetch_url = litellm_server.url();
+    settings.openrouter_rates_fetch_url = "http://127.0.0.1:1/or.json";  // unroutable
+    settings.rates_fetch_timeout_ms = 2000;
+
+    const auto outcome = FetchAndUpdateRates(settings, harness.store, rates);
+    CHECK(outcome.ok);                       // partial success is still success
+    CHECK(outcome.litellm_updated == 1);
+    CHECK(outcome.openrouter_updated == 0);
+    CHECK_FALSE(outcome.warning.empty());    // the OpenRouter failure is surfaced...
+    CHECK(outcome.error.empty());            // ...but does not read as a hard error
+
+    // The live table actually picked up the fresh price -- RefreshFetched()
+    // ran despite the other source's failure.
+    const auto totals = Aggregate("s1", "", harness.store.Load("s1").turns,
+                                  [&rates](const std::string& m) { return rates.Resolve(m); });
+    CHECK(totals.total_cost == 1.0);  // 1e6 tokens * $1/mtok input
+}
+
+TEST_CASE("LiteLLM and OpenRouter are fetched concurrently, not sequentially",
+          "[cost_tracker]") {
+    // Both loopback servers sleep 300ms before answering. Sequential fetches
+    // (the pre-fix shape) would take >=600ms end to end; concurrent fetches
+    // take ~300ms plus overhead. The threshold is set well below 2x the
+    // per-source delay to tolerate scheduling jitter while still failing
+    // clearly if the two GETs ever go back to running one after the other.
+    Harness harness;
+    RateSources sources;
+    RateTable rates(sources, &harness.storage);
+
+    constexpr auto kDelay = std::chrono::milliseconds(300);
+    LoopbackJsonServer litellm_server(
+        R"({"m1": {"input_cost_per_token": 0.000001, "output_cost_per_token": 0.000001}})",
+        kDelay);
+    LoopbackJsonServer openrouter_server(
+        R"({"data":[{"id":"m2","pricing":{"prompt":"0.000001","completion":"0.000001"}}]})", kDelay);
+
+    CostSettings settings;
+    settings.rates_fetch_url = litellm_server.url();
+    settings.openrouter_rates_fetch_url = openrouter_server.url();
+    settings.rates_fetch_timeout_ms = 5000;
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto outcome = FetchAndUpdateRates(settings, harness.store, rates);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    CHECK(outcome.ok);
+    CHECK(outcome.litellm_updated == 1);
+    CHECK(outcome.openrouter_updated == 1);
+    CHECK(elapsed < kDelay * 3 / 2);  // well under 2x kDelay's sequential-sum shape
 }
 
 TEST_CASE("the startup refresh gate fetches only when a snapshot is stale", "[cost_tracker]") {

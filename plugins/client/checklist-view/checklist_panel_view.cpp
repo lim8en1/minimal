@@ -85,12 +85,17 @@ ftxui::Element ChecklistPanelView::SummarySurface() const {
     using namespace ftxui;
     Elements rows;
 
-    if (!poller_->AllEverFetched()) {
+    // One locked read, not three: RunLoop writes items/valid/ever_fetched
+    // together, so independently-locked calls could pair a stale items map
+    // with a fresh valid/ever_fetched flag (or vice versa) if a poll landed
+    // between them -- the same reasoning Focused() already follows.
+    const ChecklistPoller::AllSnapshot snapshot = poller_->AllSnapshotOf();
+    if (!snapshot.ever_fetched) {
         rows.push_back(text(" fetching…") | color(ColorFor("system_message")));
         return vbox(std::move(rows));
     }
-    const auto all_items = poller_->AllItems();
-    if (!poller_->AllValid()) {
+    const auto& all_items = snapshot.items;
+    if (!snapshot.valid) {
         rows.push_back(text(" last update failed; retrying") | color(ColorFor("error")));
     }
 

@@ -27,6 +27,27 @@ bool MatchesCi(std::string_view html, std::size_t pos, std::string_view needle) 
     return true;
 }
 
+// The tag-ending `>`, skipping over quoted attribute values: `<a title="a>b">`
+// has a `>` inside the quoted value that is not the tag's own end. A naive
+// `find('>', start)` stops at the first one, leaking `b">` into the output as
+// ordinary text. `start` is the position of `<`.
+std::size_t FindTagEnd(std::string_view html, std::size_t start) {
+    std::size_t i = start + 1;
+    char quote = '\0';
+    for (; i < html.size(); ++i) {
+        if (quote != '\0') {
+            if (html[i] == quote) quote = '\0';
+            continue;
+        }
+        if (html[i] == '"' || html[i] == '\'') {
+            quote = html[i];
+        } else if (html[i] == '>') {
+            return i;
+        }
+    }
+    return std::string_view::npos;
+}
+
 const std::unordered_set<std::string>& BlockTags() {
     static const std::unordered_set<std::string> tags = {
         "p",  "div",  "br",  "li",     "h1",     "h2",     "h3",     "h4",
@@ -99,9 +120,21 @@ std::size_t DecodeEntity(std::string_view html, std::size_t pos, std::string& ou
             return 1;
         }
         try {
-            const std::uint32_t codepoint =
-                static_cast<std::uint32_t>(std::stoul(std::string(digits), nullptr, hex ? 16 : 10));
-            AppendUtf8(out, codepoint);
+            // `pos` (the consumed-length out-param), not nullptr: stoul does
+            // not throw for a PARTIAL parse ("12abc" -> 12, silently
+            // swallowing "abc" into the entity's consumed span instead of
+            // leaving it as literal text) -- consumed must cover the whole
+            // digit run. The value is also bounds-checked before narrowing:
+            // "&#x100000041;" fits in stoul's own (wider) return type without
+            // throwing, but static_cast<uint32_t> used to wrap it to 'A'
+            // instead of rejecting a codepoint past the valid Unicode range.
+            std::size_t consumed = 0;
+            const unsigned long value = std::stoul(std::string(digits), &consumed, hex ? 16 : 10);
+            if (consumed != digits.size() || value > 0x10FFFFUL) {
+                out += '&';
+                return 1;
+            }
+            AppendUtf8(out, static_cast<std::uint32_t>(value));
             return semi - pos + 1;
         } catch (const std::exception&) {
             out += '&';
@@ -129,7 +162,16 @@ std::string CollapseWhitespace(const std::string& text) {
 
     for (const char c : text) {
         if (c == '\n') {
-            if (line_has_content) {
+            // Regression: gating the increment on `line_has_content` alone
+            // meant the FIRST newline after real content flipped it false
+            // immediately, so a SECOND (or third) consecutive newline in
+            // the very same gap was never counted -- pending_newlines could
+            // only ever reach 1, and the min(..., 2) cap below was dead
+            // code. Counting continues as long as a gap is already open
+            // (pending_newlines > 0), not just on the first newline of it;
+            // it still never starts counting before any real content, so a
+            // leading blank line is not introduced.
+            if (line_has_content || pending_newlines > 0) {
                 pending_newlines = std::min(pending_newlines + 1, 2);
             }
             pending_space = false;
@@ -164,8 +206,32 @@ std::string HtmlToText(std::string_view html) {
 
     while (i < n) {
         if (html[i] == '<') {
+            // A genuine tag/closing-tag/comment/doctype/processing-instruction
+            // starts with a letter, `/`, `!` or `?`; anything else (a stray
+            // "x < 5") is a literal less-than, not markup -- treating it as
+            // one silently ate everything up to the next unrelated `>`
+            // ("if x < 5 then y > 3 done" became "if x 3 done").
             const std::size_t tag_start = i + 1;
-            const bool closing = tag_start < n && html[tag_start] == '/';
+            const bool maybe_markup =
+                tag_start < n && (std::isalpha(static_cast<unsigned char>(html[tag_start])) ||
+                                  html[tag_start] == '/' || html[tag_start] == '!' ||
+                                  html[tag_start] == '?');
+            if (!maybe_markup) {
+                out += '<';
+                ++i;
+                continue;
+            }
+
+            // A comment can contain a literal `>` before its real close
+            // ("<!-- note > hidden -->"); only `-->` ends it, never the
+            // first `>` a naive scan would find.
+            if (MatchesCi(html, i, "<!--")) {
+                const std::size_t close = html.find("-->", i + 4);
+                i = (close == std::string_view::npos) ? n : close + 3;
+                continue;
+            }
+
+            const bool closing = html[tag_start] == '/';
             const std::size_t name_start = closing ? tag_start + 1 : tag_start;
             std::size_t name_end = name_start;
             while (name_end < n &&
@@ -174,7 +240,7 @@ std::string HtmlToText(std::string_view html) {
             }
             const std::string tag_name = ToLowerCopy(html.substr(name_start, name_end - name_start));
 
-            const std::size_t gt = html.find('>', i);
+            const std::size_t gt = FindTagEnd(html, i);
             if (gt == std::string_view::npos) break;  // malformed tail; stop rather than hang
 
             if (!closing && (tag_name == "script" || tag_name == "style")) {

@@ -101,4 +101,17 @@ DeclaredDiff ClassifyDiff(const std::vector<std::string>& current,
 // "requirements:x" -> itself). Lowercased; -/_ folded, as pip treats them.
 std::string SpecName(const std::string& spec);
 
+// Splits a declared/additive set into plain pip specs and requirements-file
+// paths (the "requirements:<path>" entries MakeEnvPlan emits for a preset's
+// `requirements:` list). Both EnsureEnvironment and EnsurePackages need this
+// same split before building an install argv: a "requirements:x" entry
+// handed to pip/uv as a literal spec fails as an invalid requirement.
+// `requirement_paths` are relative, not yet resolved against a project root.
+// Pure; no I/O.
+struct SplitSpecs {
+    std::vector<std::string> package_specs;
+    std::vector<std::string> requirement_paths;
+};
+SplitSpecs SplitDeclared(const std::vector<std::string>& entries);
+
 }  // namespace minimal::tools_python

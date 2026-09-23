@@ -109,6 +109,7 @@ nlohmann::json ToOpenAiTools(const std::vector<llm::ToolDefinition>& tools) {
         out.push_back({{"type", "function"},
                         {"function",
                          {{"name", tool.name}, {"description", tool.description}, {"parameters", tool.input_schema}}}});
+        if (tool.strict) out.back()["function"]["strict"] = true;
     }
     return out;
 }
@@ -322,6 +323,14 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream,
 
         if (message.role == llm::Role::User) {
             flush_user_text();
+        } else if (pending_text.empty() && first_tool_call) {
+            // Every block was dropped (an assistant turn consisting only of
+            // ThinkingBlocks, or a zero-block message): skip the message
+            // entirely rather than serialize {"role":"assistant","content":
+            // ""}, the same rule provider-anthropic's request builder
+            // applies for its own equivalent case. A content-less,
+            // tool-call-less assistant turn is exactly the shape a strict
+            // OpenAI-compatible backend (llama.cpp/vLLM) can 400 on.
         } else {
             WireMessage assistant;
             assistant.head = R"({"role":"assistant","content":)";

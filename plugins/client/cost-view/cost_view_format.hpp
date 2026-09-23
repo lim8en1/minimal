@@ -18,10 +18,39 @@
 #include <cstdio>
 #include <optional>
 #include <string>
+#include <type_traits>
 
 #include <nlohmann/json.hpp>
 
 namespace minimal::client::cost_view {
+
+// Like nlohmann's own `j.value(key, fallback)`, but never throws: `j.value()`
+// raises type_error.302 if the field is present with the WRONG type (an int
+// where a bool was expected) and type_error.306 if `j` itself is not an
+// object at all (a non-object entry inside a "models" array). The totals
+// payload these formatters read comes over PluginCall from another plugin's
+// RPC reply -- a shape this process does not control -- and the caller here
+// is a background poller's std::thread entry function, where an uncaught
+// exception is std::terminate(), not a caught error: a malformed reply must
+// degrade the segment, never kill the client. `find()` (unlike `value()`) is
+// itself safe on a non-object `j`, returning end() rather than throwing.
+template <typename T>
+T SafeValue(const nlohmann::json& j, const char* key, T fallback) {
+    const auto it = j.find(key);
+    if (it == j.end()) return fallback;
+    bool compatible;
+    if constexpr (std::is_same_v<T, bool>) {
+        compatible = it->is_boolean();
+    } else if constexpr (std::is_integral_v<T>) {
+        compatible = it->is_number_integer();
+    } else if constexpr (std::is_floating_point_v<T>) {
+        compatible = it->is_number();
+    } else {
+        compatible = it->is_string();
+    }
+    if (!compatible) return fallback;
+    return it->get<T>();
+}
 
 // "1234567" -> "1.2M", "12345" -> "12.3k", "123" -> "123", >=1e9 -> G tier.
 inline std::string FormatTokens(std::int64_t tokens) {
@@ -57,14 +86,14 @@ inline std::string FormatCost(double usd) {
 // nothing for those, same as any other unfilled segment.
 inline std::optional<std::string> FormatTotals(const nlohmann::json& totals) {
     if (!totals.is_object()) return std::nullopt;
-    const auto turns = totals.value("turns", 0);
+    const auto turns = SafeValue<int>(totals, "turns", 0);
     if (turns <= 0) return std::nullopt;   // nothing spent yet -- not "$0.00"
 
     std::int64_t input_tokens = 0, output_tokens = 0;
     if (const auto models = totals.find("models"); models != totals.end() && models->is_array()) {
         for (const auto& model : *models) {
-            input_tokens += model.value("input_tokens", 0LL);
-            output_tokens += model.value("output_tokens", 0LL);
+            input_tokens += SafeValue<std::int64_t>(model, "input_tokens", 0LL);
+            output_tokens += SafeValue<std::int64_t>(model, "output_tokens", 0LL);
         }
     }
 
@@ -74,8 +103,8 @@ inline std::optional<std::string> FormatTotals(const nlohmann::json& totals) {
     // The DEFAULT is unknown: the field's own default-true made any blob
     // written before the field existed (or with the fields missing) render
     // "$0.0000" -- free. A NEGATIVE total is the same kind of anomaly.
-    const bool known = totals.value("total_cost_known", false);
-    const double total = totals.value("total_cost", 0.0);
+    const bool known = SafeValue<bool>(totals, "total_cost_known", false);
+    const double total = SafeValue<double>(totals, "total_cost", 0.0);
     if (known && total >= 0.0) {
         text = FormatCost(total);
     } else if (total > 0.0) {
@@ -87,7 +116,7 @@ inline std::optional<std::string> FormatTotals(const nlohmann::json& totals) {
         text = "cost?";
     }
     text += " · " + FormatTokens(input_tokens) + "/" + FormatTokens(output_tokens) + " tok";
-    if (totals.value("unpriced_turns", 0) > 0) text += " (+unpriced)";
+    if (SafeValue<int>(totals, "unpriced_turns", 0) > 0) text += " (+unpriced)";
     return text;
 }
 
@@ -107,10 +136,10 @@ inline std::optional<std::string> FormatTokenDetail(const nlohmann::json& totals
     std::int64_t cache_read = 0, cache_write = 0;
     if (const auto models = totals.find("models"); models != totals.end() && models->is_array()) {
         for (const auto& model : *models) {
-            input_tokens += model.value("input_tokens", 0LL);
-            output_tokens += model.value("output_tokens", 0LL);
-            cache_read += model.value("cache_read_tokens", 0LL);
-            cache_write += model.value("cache_write_tokens", 0LL);
+            input_tokens += SafeValue<std::int64_t>(model, "input_tokens", 0LL);
+            output_tokens += SafeValue<std::int64_t>(model, "output_tokens", 0LL);
+            cache_read += SafeValue<std::int64_t>(model, "cache_read_tokens", 0LL);
+            cache_write += SafeValue<std::int64_t>(model, "cache_write_tokens", 0LL);
         }
     }
     std::string text;

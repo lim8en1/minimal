@@ -16,10 +16,15 @@
 
 #include "memory_settings.hpp"
 #include "memory_store.hpp"
+#include "memory_tool.hpp"
 #include "embedding_sidecar.hpp"
 #include "enricher.hpp"
 
+#include "fakes.hpp"
+
+#include "minimal/common/logger.hpp"
 #include "minimal/sidecar/process.hpp"
+#include "minimal/tools/tool.hpp"
 
 namespace fs = std::filesystem;
 using namespace minimal::memory;
@@ -214,6 +219,61 @@ TEST_CASE("memory purge by origin_ref", "[memory]") {
     (void)group;
 }
 
+TEST_CASE("memory purge by origin_ref: an empty project_root matches nothing",
+          "[memory]") {
+    // Regression: /memory purge's command wiring called PurgeByOriginRef for
+    // the project scope with project_root="" (memory_command.cpp), but every
+    // project-scope row stores the session's real worktree root (as this
+    // fixture's entries do, "/proj") -- so the command always reported
+    // "purged 0 entries" for project-scope groups. This pins the store-level
+    // behavior the fix now depends on: only the CORRECT root matches.
+    Fixture fx("purge-empty-root");
+    fx.store->Ingest(MakeEntry("# A\nbody"), {}, "/tmp/notes.md");
+    CHECK(fx.store->PurgeByOriginRef("/tmp/notes.md", MemoryStore::kScopeProject, "") == 0);
+    CHECK(fx.store->PurgeByOriginRef("/tmp/notes.md", MemoryStore::kScopeProject, "/proj") == 1);
+}
+
+TEST_CASE("StoreEmbedding sets the signature LoadVectors filters on", "[memory]") {
+    // Regression: StoreEmbedding set embed_status=1 but never wrote
+    // `signature`, so LoadVectors's `signature = ?1` filter (never true for
+    // NULL) made every eagerly-embedded row invisible to the near-duplicate
+    // hint and to sim-sorted search, regardless of how recently it was
+    // embedded.
+    Fixture fx("store-embedding-signature");
+    const std::string id = fx.store->Insert(MakeEntry("eagerly embedded"));
+    Embedding e;
+    e.values = {1.0f, 0.0f};
+    e.dim = 2;
+    fx.store->StoreEmbedding(id, e, "sig-v1");
+
+    const auto vectors =
+        fx.store->LoadVectors("sig-v1", MemoryStore::kScopeProject, "/proj");
+    REQUIRE(vectors.size() == 1);
+    CHECK(vectors[0].id == id);
+    // A different signature (a strategy change) correctly finds nothing.
+    CHECK(fx.store->LoadVectors("sig-v2", MemoryStore::kScopeProject, "/proj").empty());
+}
+
+TEST_CASE("ResetFailedEmbeddings requeues failed rows for the next drain", "[memory]") {
+    // Regression: a failed embed (embed_status=2) was excluded from semantic
+    // search permanently -- ClaimPendingEmbeddings only claims status=0, and
+    // nothing reset a failed row back to 0 except a signature change. This is
+    // the escape hatch /memory reindex now calls.
+    Fixture fx("reset-failed-embeddings");
+    const std::string id = fx.store->Insert(MakeEntry("will fail then retry"));
+    const auto pending = fx.store->ClaimPendingEmbeddings("sig-v1", 10);
+    REQUIRE(pending.size() == 1);
+    fx.store->MarkEmbedFailed({id}, "simulated backend outage");
+
+    // Still excluded: another claim at the same signature finds nothing.
+    CHECK(fx.store->ClaimPendingEmbeddings("sig-v1", 10).empty());
+
+    CHECK(fx.store->ResetFailedEmbeddings() == 1);
+    const auto reclaimed = fx.store->ClaimPendingEmbeddings("sig-v1", 10);
+    REQUIRE(reclaimed.size() == 1);
+    CHECK(reclaimed[0].id == id);
+}
+
 TEST_CASE("memory topics: create, case-insensitive match, no fake no-topic row", "[memory]") {
     Fixture fx("topics");
     const std::string id = fx.store->Insert(MakeEntry("lesson about docker layers"));
@@ -236,14 +296,30 @@ TEST_CASE("memory topics: create, case-insensitive match, no fake no-topic row",
 
 TEST_CASE("memory topic cap: at max_topics creation is refused", "[memory]") {
     Fixture fx("cap");
-    // The cap is enforced in BindTopic; fill a scope to the cap via its own
-    // API by monkey-patching around the constant -- the test asserts the
-    // refusal path by exhausting through many small topics would be slow, so
-    // exercise the no-create path and trust the count check (covered by
-    // review); the cap's constant is 4096, out of unit range.
+    // The no-create path, trusting the count check (covered below with a
+    // real configured cap now that max_topics is plumbed through).
     const std::string id = fx.store->Insert(MakeEntry("lesson"));
     REQUIRE_FALSE(fx.store->BindTopic(id, MemoryStore::kScopeProject, "/proj", "x", false));
     REQUIRE(fx.store->AllTopics(MemoryStore::kScopeProject, "/proj").empty());
+}
+
+TEST_CASE("memory topic cap: the configured max_topics is actually enforced", "[memory]") {
+    // Regression: BindTopic's cap was a hard-coded 4096, so the documented
+    // `max_topics` setting was parsed but had no effect -- out of unit-test
+    // range to exercise honestly. Now that BindTopic takes it as a
+    // parameter, a small configured cap is directly testable.
+    Fixture fx("configured-cap");
+    const std::string id1 = fx.store->Insert(MakeEntry("lesson one"));
+    const std::string id2 = fx.store->Insert(MakeEntry("lesson two"));
+    REQUIRE(fx.store->BindTopic(id1, MemoryStore::kScopeProject, "/proj", "a",
+                                /*create_if_missing=*/true, /*max_topics=*/1));
+    // At cap: a second NEW topic is refused; the entry stays unfiled.
+    REQUIRE_FALSE(fx.store->BindTopic(id2, MemoryStore::kScopeProject, "/proj", "b",
+                                      /*create_if_missing=*/true, /*max_topics=*/1));
+    // An EXISTING topic (case-insensitive) is still bindable at cap -- the
+    // count only gates CREATION.
+    REQUIRE(fx.store->BindTopic(id2, MemoryStore::kScopeProject, "/proj", "A",
+                                /*create_if_missing=*/false, /*max_topics=*/1));
 }
 
 TEST_CASE("memory settings: defaults, clamps, lenient parse", "[memory]") {
@@ -282,13 +358,43 @@ TEST_CASE("memory settings: defaults, clamps, lenient parse", "[memory]") {
     REQUIRE(settings.sidecar_request_timeout_ms == 2000);
 }
 
+TEST_CASE("memory settings: reindex_budget_rows and the timeouts/budgets are ceilinged",
+          "[memory]") {
+    // Regression: these had a floor (via IntOr's is_number_integer() check,
+    // already correct) but no ceiling. reindex_budget_rows=-1 in particular
+    // becomes `LIMIT -1` in ClaimPendingEmbeddings, which SQLite reads as no
+    // limit at all -- one lazy drain would embed every pending row.
+    const auto negative = ParseMemorySettings(nlohmann::json{{"reindex_budget_rows", -1}});
+    CHECK(negative.reindex_budget_rows == 0);
+
+    const auto huge = ParseMemorySettings(nlohmann::json{
+        {"reindex_budget_rows", 999999999},
+        {"timeout_ms", 999999999},
+        {"sidecar_startup_timeout_ms", 999999999},
+        {"sidecar_request_timeout_ms", 999999999},
+        {"summarize_max_tokens", 999999999},
+        {"summarize_input_char_budget", 999999999}});
+    CHECK(huge.reindex_budget_rows <= 10000);
+    CHECK(huge.timeout_ms <= 600000);
+    CHECK(huge.sidecar_startup_timeout_ms <= 600000);
+    CHECK(huge.sidecar_request_timeout_ms <= 600000);
+    CHECK(huge.summarize_max_tokens <= 4096);
+    CHECK(huge.summarize_input_char_budget <= (1 << 20));
+
+    // A negative char budget cast to size_t elsewhere would disable
+    // truncation entirely by wrapping to a huge unsigned value.
+    const auto negative_budget =
+        ParseMemorySettings(nlohmann::json{{"summarize_input_char_budget", -5}});
+    CHECK(negative_budget.summarize_input_char_budget == 0);
+}
+
 TEST_CASE("memory digest info", "[memory]") {
     Fixture fx("digest");
     fx.store->Insert(MakeEntry("a lesson"));
     const auto id = fx.store->Insert(MakeEntry("another"));
     fx.store->BindTopic(id, MemoryStore::kScopeProject, "/proj", "docker", true);
 
-    const auto digest = fx.store->DigestInfo("lexical only", "off");
+    const auto digest = fx.store->DigestInfo("lexical only", "off", "/proj");
     REQUIRE(digest.entries_by_scope.at("project") == 2);
     REQUIRE(digest.by_origin.at("model") == 2);
     REQUIRE(digest.top_topics.size() == 1);
@@ -368,4 +474,131 @@ TEST_CASE("enrichment: fake summarizer drives summary + topic", "[memory]") {
     REQUIRE(entry->summary == "Releases go through make release.");
     REQUIRE(entry->topic == "deploy");
     (void)enricher;
+}
+
+TEST_CASE("enrichment: also_bind applies the same summary/topic to sibling chunks", "[memory]") {
+    Fixture fx("enrich-siblings");
+    MemorySettings settings;
+    settings.summarizer_model = "fake/model";  // enabled
+
+    const std::string sample_id = fx.store->Insert(MakeEntry("# Deploy\nrelease via make release"));
+    const std::string sibling_id = fx.store->Insert(MakeEntry("more body for the same group"));
+
+    minimal::testing::FakeLlmProvider provider;
+    provider.PushResponse(
+        minimal::testing::TextResponse(R"({"summary": "Releases go through make release.",)"
+                                       R"( "topic": {"new": "deploy"}})"));
+
+    Enricher::RunEnrichment(settings, *fx.store, &provider, "fake/model",
+                            minimal::common::DefaultLogger(), sample_id,
+                            "# Deploy\nrelease via make release", MemoryStore::kScopeProject,
+                            "/proj", {sibling_id});
+
+    const auto sample = fx.store->Get(sample_id);
+    const auto sibling = fx.store->Get(sibling_id);
+    REQUIRE(sample->summary == "Releases go through make release.");
+    REQUIRE(sample->topic == "deploy");
+    // The sibling was never itself asked -- only ONE provider call happened
+    // (PushResponse queued exactly one) -- yet it carries the same
+    // summary/topic as the sample it rode in with.
+    REQUIRE(sibling->summary == "Releases go through make release.");
+    REQUIRE(sibling->topic == "deploy");
+
+    // Exactly one topic row was created, not two: the sibling's BindTopic
+    // call must not re-create "deploy" a second time.
+    const auto topics = fx.store->AllTopics(MemoryStore::kScopeProject, "/proj");
+    REQUIRE(topics.size() == 1);
+    REQUIRE(topics[0].second == 2);  // both entries bound to it
+}
+
+TEST_CASE("memory search: sim-search fallback truncates to the requested limit", "[memory]") {
+    Fixture fx("sim-fallback");
+    for (int i = 0; i < 5; ++i) {
+        fx.store->Insert(MakeEntry("lesson number " + std::to_string(i), MemoryStore::kScopeGlobal, ""));
+    }
+
+    class ThrowingEmbedder final : public EmbeddingFunction {
+    public:
+        std::vector<Embedding> Embed(const std::vector<std::string>&) override {
+            throw std::runtime_error("embedder unavailable");
+        }
+        std::string Describe() const override { return "throwing"; }
+        std::string Signature() const override { return "throwing:v1"; }
+    };
+
+    auto runtime = std::make_shared<MemoryRuntime>();
+    runtime->settings = ParseMemorySettings(nlohmann::json::object());
+    runtime->store = std::move(fx.store);
+    runtime->embedder = std::make_unique<ThrowingEmbedder>();
+    runtime->enricher = std::make_unique<Enricher>(runtime->settings, runtime->store.get());
+    runtime->signature = "throwing:v1";
+
+    auto tool = MakeMemorySearchTool(runtime);
+    minimal::common::Logger logger = minimal::common::DefaultLogger();
+    minimal::tools::ToolContext ctx(logger);  // session_id empty: no digest, no enricher touch
+
+    const auto result =
+        tool->execute({{"scope", "global"}, {"sort", "sim"}, {"query", "lesson"}, {"limit", 2}}, ctx);
+    REQUIRE_FALSE(result.is_error);
+    const auto body = nlohmann::json::parse(result.content_text);
+    REQUIRE(body["results"].size() == 2);  // capped, not all 5 (the pre-fix bug)
+
+    fx.store = std::move(runtime->store);  // Fixture's destructor still cleans up the dir
+}
+
+TEST_CASE("memory search: created_at is populated on hits", "[memory]") {
+    Fixture fx("created-at");
+    fx.store->Insert(MakeEntry("a lesson worth remembering"));
+
+    MemoryStore::SearchQuery q;
+    q.scope = MemoryStore::kScopeProject;
+    q.project_root = "/proj";
+    q.sort = "time";
+    const auto hits = fx.store->Search(q);
+    REQUIRE(hits.size() == 1);
+    REQUIRE_FALSE(hits[0].created_at.empty());
+    REQUIRE_THAT(hits[0].created_at, Catch::Matchers::ContainsSubstring("T"));
+}
+
+TEST_CASE("memory search: FTS match is scoped to the text column, not project_root", "[memory]") {
+    Fixture fx("fts-scope");
+    const std::string root = "/proj/zephyrproject";
+    fx.store->Insert(MakeEntry("just a note about cats", MemoryStore::kScopeProject, root));
+    fx.store->Insert(MakeEntry("another note about dogs", MemoryStore::kScopeProject, root));
+
+    MemoryStore::SearchQuery q;
+    q.scope = MemoryStore::kScopeProject;
+    q.project_root = root;
+    q.sort = "time";
+
+    // "zephyrproject" only appears in project_root, shared by every row in
+    // scope -- an unqualified MATCH would hit both entries regardless of
+    // their text. Qualified to the text column, neither matches.
+    q.query = "zephyrproject";
+    REQUIRE(fx.store->Search(q).empty());
+
+    // A real text match still works.
+    q.query = "cats";
+    auto hits = fx.store->Search(q);
+    REQUIRE(hits.size() == 1);
+    REQUIRE(hits[0].preview.find("cats") != std::string::npos);
+
+    // Multi-word queries are split into terms, ANDed: "cats" and "dogs" never
+    // co-occur in one entry's text.
+    q.query = "cats dogs";
+    REQUIRE(fx.store->Search(q).empty());
+}
+
+TEST_CASE("memory digest info: project scope is scoped to the caller's project_root", "[memory]") {
+    Fixture fx("digest-scope");
+    fx.store->Insert(MakeEntry("mine", MemoryStore::kScopeProject, "/proj/a"));
+    fx.store->Insert(MakeEntry("also mine", MemoryStore::kScopeProject, "/proj/a"));
+    fx.store->Insert(MakeEntry("someone else's", MemoryStore::kScopeProject, "/proj/b"));
+    const auto other_id = fx.store->Insert(MakeEntry("theirs too", MemoryStore::kScopeProject, "/proj/b"));
+    fx.store->BindTopic(other_id, MemoryStore::kScopeProject, "/proj/b", "unrelated", true);
+
+    const auto digest = fx.store->DigestInfo("lexical only", "off", "/proj/a");
+    REQUIRE(digest.entries_by_scope.at("project") == 2);  // not 4 -- /proj/b excluded
+    REQUIRE(digest.by_origin.at("model") == 2);
+    REQUIRE(digest.top_topics.empty());  // "unrelated" belongs to /proj/b, not /proj/a
 }

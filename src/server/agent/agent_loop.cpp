@@ -9,6 +9,7 @@
 
 #include "minimal/agent/compaction_boundary.hpp"
 #include "minimal/agent/compaction_trigger.hpp"
+#include "minimal/agent/structured_compaction.hpp"
 #include "minimal/agent/transcript_repair.hpp"
 
 namespace minimal::agent {
@@ -160,6 +161,26 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
         // excluding them under-triggered compaction on exactly the sessions
         // this seed exists for.
         tokens_.SeedOccupancy(EstimateContextTokens());
+    }
+    // A checkpoint resume reproduces the live post-fold working set, which
+    // had the kept messages' thinking dropped (see Compact()).
+    if (head_is_summary_ && first_persisted_seq_.has_value() && seed.kept_through_seq >= 0) {
+        const std::int64_t kept = seed.kept_through_seq - *first_persisted_seq_ + 1;
+        if (kept > 0) {
+            DropStaleThinking(1, std::min(history_.size(), static_cast<std::size_t>(kept) + 1));
+        }
+    }
+}
+
+void AgentLoop::DropStaleThinking(std::size_t first, std::size_t last) {
+    if (!provider_.get().BindsThinkingToPrefix()) return;
+    for (std::size_t i = first; i < last && i < history_.size(); ++i) {
+        auto& blocks = history_[i].content;
+        blocks.erase(std::remove_if(blocks.begin(), blocks.end(),
+                                    [](const llm::ContentBlock& block) {
+                                        return std::holds_alternative<llm::ThinkingBlock>(block);
+                                    }),
+                     blocks.end());
     }
 }
 
@@ -324,6 +345,12 @@ AgentLoop::SystemAndTools AgentLoop::BuildSystemAndTools() const {
         std::vector<llm::ToolDefinition> mcp_defs =
             registry_.DefinitionsForMcpServers(mcp_servers_);
         out.tools.insert(out.tools.end(), mcp_defs.begin(), mcp_defs.end());
+        // record_summary rides every request, whatever the preset allows: the
+        // summarizer request reuses this exact tools array (plus one appended
+        // instruction), so the tool must already be in it for the prompt
+        // cache to cover the history. A stray call outside compaction is
+        // answered with a no-op error in RunToolRound, never executed.
+        if (config_.offer_summary_tool) out.tools.push_back(MakeRecordSummaryToolDefinition());
         std::sort(out.tools.begin(), out.tools.end(),
                   [](const llm::ToolDefinition& a, const llm::ToolDefinition& b) {
                       return a.name < b.name;
@@ -445,8 +472,88 @@ void AgentLoop::MaybeCompact() {
         }
         return;
     }
-    if (tokens_.last_occupancy() < trigger) return;
-    Compact("auto");
+    if (tokens_.last_occupancy() < trigger) {
+        // Back under the trigger: the "right after a compaction" window is
+        // over, and a halted auto-compaction re-arms.
+        auto_compacted_last_check_ = false;
+        auto_compaction_halted_ = false;
+        return;
+    }
+    if (auto_compaction_halted_) return;
+
+    // GUARD 1: the trigger must sit above the part of the context no
+    // compaction can remove -- system prompt, project context, tool
+    // definitions. At or below it, every fold leaves the context over the
+    // trigger and the next check fires again.
+    const SystemAndTools system_and_tools = BuildSystemAndTools();
+    const std::int64_t fixed_tokens =
+        EstimateContextTokens(system_and_tools.system, system_and_tools.tools) -
+        estimate_tokens(history_);
+    if (trigger <= fixed_tokens) {
+        if (!compaction_floor_warned_) {
+            compaction_floor_warned_ = true;
+            EmitCompactionNotice(
+                "auto", "auto-compaction disabled: the trigger (" + std::to_string(trigger) +
+                            " tokens) is not above the fixed context (system prompt, project "
+                            "context, tools: ~" +
+                            std::to_string(fixed_tokens) +
+                            " tokens), which no compaction can remove; raise "
+                            "memory.context_compaction_trigger");
+        }
+        return;
+    }
+
+    // GUARD 2: over the trigger again at the very next check after an auto
+    // compaction -- the fold did not get the context under the trigger (or
+    // one round refilled it). Compacting again would summarize every tool
+    // round for little gain; halt with a notice until occupancy drops below
+    // the trigger (a manual /compact or /clear, or a smaller next response).
+    if (auto_compacted_last_check_) {
+        auto_compaction_halted_ = true;
+        EmitCompactionNotice(
+            "auto", "auto-compaction stopped: the context (~" +
+                        std::to_string(tokens_.last_occupancy()) +
+                        " tokens) is still over the trigger (" + std::to_string(trigger) +
+                        " tokens) right after the previous compaction; run /compact, raise the "
+                        "trigger, or raise memory.compaction_replace_percent");
+        return;
+    }
+    auto_compacted_last_check_ = Compact("auto").has_value();
+}
+
+void AgentLoop::EmitCompactionNotice(std::string_view trigger, std::string warning) {
+    session_.logger.warn("session {}: {}", session_.session_id, warning);
+    CompactionEvent event;
+    event.trigger = std::string(trigger);
+    event.skipped = true;
+    event.warning = std::move(warning);
+    event.tokens_before = tokens_.last_occupancy();
+    event.tokens_after = event.tokens_before;
+    event.created_at_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
+    if (first_persisted_seq_.has_value()) {
+        event.at_seq = store_.last_appended_seq();
+        try {
+            // A notice record: boundary -1, never the checkpoint (skipped rows
+            // are stored inactive), but scrollback renders it where it happened.
+            store_.SaveCompactionCheckpoint(
+                -1, llm::Message{llm::Role::User, {}},
+                session::CompactionMeta{0, event.tokens_before, event.tokens_after, event.trigger,
+                                        event.warning, true});
+        } catch (const std::exception& error) {
+            session_.logger.warn("session {}: failed to record compaction notice: {}",
+                                 session_.session_id, error.what());
+        }
+    }
+    if (session_.compaction_sink) {
+        try {
+            session_.compaction_sink(event);
+        } catch (const std::exception& error) {
+            session_.logger.warn("session {}: compaction notice dropped: {}",
+                                 session_.session_id, error.what());
+        }
+    }
 }
 
 std::optional<std::size_t> AgentLoop::CompactNow(std::string_view prompt_override) {
@@ -629,10 +736,23 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // set -- honoring memory.compaction_keep_recent_tokens (W11) via a
     // token-budget walk from the tail, instead of the legacy plain halving
     // -- else the boundary snap below is what makes ANY candidate safe.
-    std::size_t candidate = config_.compaction_strategy.cut_selector
-                                ? config_.compaction_strategy.cut_selector(
-                                      history_, config_.compaction_keep_recent_tokens)
-                                : history_.size() / 2;
+    //
+    // compaction_replace_percent is expressed to the selector as the
+    // keep-recent budget it already understands: (100 - percent)% of the
+    // working history's token estimate stays verbatim. Counting messages (the
+    // legacy halving) kept ~40% of a tool-heavy context, whose newest
+    // messages carry most of the bytes. An explicit keep_recent_tokens wins.
+    std::int64_t keep_recent_tokens = config_.compaction_keep_recent_tokens;
+    if (keep_recent_tokens <= 0 && config_.compaction_replace_percent > 0) {
+        const std::int64_t total = estimate_tokens(history_);
+        keep_recent_tokens =
+            std::max<std::int64_t>(1, total * (100 - config_.compaction_replace_percent) / 100);
+    }
+    std::size_t candidate =
+        config_.compaction_strategy.cut_selector
+            ? config_.compaction_strategy.cut_selector(history_, keep_recent_tokens)
+        : keep_recent_tokens > 0 ? ProposeSummarizeCut(history_, keep_recent_tokens)
+                                 : history_.size() / 2;
 
     // The STRATEGY declining to cut anything is a DIFFERENT situation from
     // "no safe structural cut exists" below, and must not be handled by the
@@ -713,24 +833,39 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
         return std::nullopt;
     }
 
-    // A SPAN, not a copy: the range being compacted is the oldest half of the
-    // working history, and copying it duplicated the session's whole working
-    // set of strings for the duration of the summarization call. The compactor
-    // only reads, and nothing mutates history_ while it runs -- compaction is
-    // sequential with the turn that triggered it, on this same worker thread.
-    const std::span to_compact(history_.begin(), history_.begin() + static_cast<long>(cut));
+    // The summarizer reads the WHOLE working history; only [0, cut) is
+    // replaced by its summary. A summary written knowing the recent messages
+    // describes the current state rather than the state at the cut, and the
+    // request -- the session's own system/tools/history plus one appended
+    // instruction -- is a prefix-cache hit on everything the last request
+    // sent. A SPAN, not a copy: the compactor only reads, and nothing mutates
+    // history_ while it runs -- compaction is sequential with the turn that
+    // triggered it, on this same worker thread.
+    const std::span<const llm::Message> to_compact(history_);
     CompactionRequest params;
     params.model_name = preset_.provider.model_name;
     // A non-empty override (/compact <name>) wins for THIS invocation only --
     // auto-compact and bare /compact keep the preset's prompt.
     params.compression_prompt =
         prompt_override.empty() ? preset_.compression_prompt : prompt_override;
+    params.custom_prompt = !prompt_override.empty() || preset_.custom_compression_prompt;
+    params.structured_prompt = preset_.structured_compression_prompt;
+    {
+        SystemAndTools system_and_tools = BuildSystemAndTools();
+        params.system = std::move(system_and_tools.system);
+        params.tools = std::move(system_and_tools.tools);
+    }
     params.parameters = preset_.parameters;
     params.max_tokens = preset_.max_tokens;
     // The summarizer call sticks to the same routing key as the conversation
     // it summarizes -- see CompactionRequest::session_id.
     params.session_id = session_.session_id;
-    params.last_reported_input_tokens = tokens_.last_input_tokens();
+    // Whole-context occupancy, not last_input_tokens(): with prompt caching
+    // the uncached input is a small fraction of the context, which is how a
+    // 700k context used to log as a few thousand tokens.
+    params.last_reported_input_tokens = tokens_.last_occupancy() > 0
+                                            ? tokens_.last_occupancy()
+                                            : EstimateContextTokens(params.system, params.tools);
     params.full_history = &history_;
     // The session's logger, not DefaultLogger: compaction lines belong beside
     // this loop's own compaction diagnostics, session id and all.
@@ -793,25 +928,41 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // (appends continue at MAX(seq)+1; compaction only folds from the head).
     // Persisted messages folded away = `cut` minus the synthetic head, so the
     // new first persisted seq is the boundary, +1.
-    if (first_persisted_seq_.has_value()) {
-        const std::int64_t persisted_removed =
-            static_cast<std::int64_t>(cut) - (head_is_summary_ ? 1 : 0);
-        const std::int64_t boundary_seq = *first_persisted_seq_ + persisted_removed - 1;
-        try {
-            store_.SaveCompactionCheckpoint(boundary_seq, result->summary_message);
-        } catch (const std::exception& error) {
-            // Resume falls back to the full-transcript load: today's behavior,
-            // degraded only in cost, never in correctness.
-            session_.logger.warn("session {}: failed to save compaction checkpoint: {}",
-                                 session_.session_id, error.what());
-        }
-        first_persisted_seq_ = boundary_seq + 1;
-    }
+    // The history's share of the context before and after, for GUARD 3 below
+    // -- estimates on both sides (bytes/4), so the comparison is like for like,
+    // with the fixed part (system prompt, tools) taken out: it is the same on
+    // both sides and would make any fold look ineffective at small sizes.
+    const std::int64_t history_tokens_before = estimate_tokens(history_);
+    const std::int64_t fixed_tokens =
+        EstimateContextTokens(params.system, params.tools) - history_tokens_before;
+
+    CompactionEvent event;
+    event.trigger = std::string(trigger);
+    event.folded_messages = static_cast<std::int64_t>(cut);
+    // Before and after on ONE basis -- the loop's estimate of the context as
+    // the fold sees it. The backend-reported occupancy is the previous
+    // response's, so it lags the tool results appended since (a fold could
+    // show as "10.7k -> 10.3k" while the history actually halved), and it is
+    // in real tokens where the after-figure can only be estimated. Not the
+    // compactor's number either: a plugin compactor may report anything.
+    event.tokens_before = fixed_tokens + history_tokens_before;
+    event.summary_text = llm::TextOf(result->summary_message.content);
+    event.created_at_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
+
     // The summary is now the head WHATEVER the persisted bookkeeping did:
     // a loop constructed without a first-persisted seq (the direct-API case;
     // every Session seeding path sets one) still folds the summary into
     // history_[0], and leaving head_is_summary_ false would make every later
     // seq mapping -- and CheckpointBoundary() -- mis-count the synthetic head.
+    std::optional<std::int64_t> boundary_seq;
+    if (first_persisted_seq_.has_value()) {
+        const std::int64_t persisted_removed =
+            static_cast<std::int64_t>(cut) - (head_is_summary_ ? 1 : 0);
+        boundary_seq = *first_persisted_seq_ + persisted_removed - 1;
+        first_persisted_seq_ = *boundary_seq + 1;
+    }
     head_is_summary_ = true;
 
     // Rebuilt with moves, not copies: the kept tail is shifted once (moving
@@ -819,34 +970,78 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // message lands at the head, replacing everything the cut removed.
     std::vector<llm::Message> rebuilt;
     rebuilt.reserve(history_.size() - cut + 1);
-    rebuilt.push_back(std::move(result->summary_message));
+    rebuilt.push_back(result->summary_message);
     std::move(history_.begin() + static_cast<long>(cut), history_.end(),
               std::back_inserter(rebuilt));
     history_.swap(rebuilt);
 
+    // The kept tail's THINKING goes, on backends that bind it to its prefix
+    // (working set only; the transcript keeps it). Its blocks were produced
+    // against the full, pre-fold prefix, and newer Claude models reject a
+    // replay after that prefix changed ("preserved thinking" -- keep-tail
+    // compaction is the documented breaking shape). Text and tool calls stay.
+    // Chat-completions backends never replay thinking, so nothing changes.
+    DropStaleThinking(1, history_.size());
+
     // RE-SEED the occupancy estimate: the one site that never did. The fold
-    // just halved the working set, but the accumulator still described the
+    // just shrank the working set, but the accumulator still described the
     // pre-fold context -- so the next MaybeCompact (the same turn's next tool
     // cycle, or the next turn before any response reported usage) fired on a
     // number that no longer existed. A manual /compact was guaranteed one
     // spurious second summarization; an auto one could chain. SeedOccupancy
     // touches only the last-turn estimate, so the backend-reported counts the
     // accumulator carries stay intact.
-    tokens_.SeedOccupancy(EstimateContextTokens());
+    event.tokens_after = EstimateContextTokens();
+    tokens_.SeedOccupancy(event.tokens_after);
 
-    // The numbers that make a compaction legible after the fact. There is no
-    // wire event for this -- nothing in the protocol specifies one and no client
-    // could render it yet -- so the log is the only place it exists. That
-    // belongs with the TUI.
-    //
-    // Says "context was" rather than "compacted N tokens", because that is what
-    // the number is: the size of the whole request that tripped the trigger, not
-    // the size of the prefix replaced. Claiming the latter overstated it by
-    // everything the cut kept.
+    // GUARD 3: a fold that barely shrank the history (the summary is about as
+    // large as what it replaced, or the kept tail is most of the history).
+    // Not refused -- the summary is already in -- but said out loud.
+    const std::int64_t history_tokens_after = event.tokens_after - fixed_tokens;
+    if (history_tokens_before > 0 && history_tokens_after * 10 >= history_tokens_before * 9) {
+        event.warning = "compaction freed little: the history went from ~" +
+                        std::to_string(history_tokens_before) + " to ~" +
+                        std::to_string(history_tokens_after) +
+                        " tokens (plus ~" + std::to_string(fixed_tokens) +
+                        " tokens of system prompt and tools)";
+        session_.logger.warn("session {}: {}", session_.session_id, event.warning);
+    }
+
+    // Persist the record (the checkpoint resume seeds from, and the row
+    // scrollback renders) only now that the after-size is known.
+    if (boundary_seq.has_value()) {
+        event.boundary_seq = *boundary_seq;
+        event.at_seq = store_.last_appended_seq();
+        try {
+            store_.SaveCompactionCheckpoint(
+                *boundary_seq, result->summary_message,
+                session::CompactionMeta{event.folded_messages, event.tokens_before,
+                                        event.tokens_after, event.trigger, event.warning});
+        } catch (const std::exception& error) {
+            // Resume falls back to the full-transcript load: today's behavior,
+            // degraded only in cost, never in correctness.
+            session_.logger.warn("session {}: failed to save compaction checkpoint: {}",
+                                 session_.session_id, error.what());
+        }
+    }
+
+    // "context was" rather than "compacted N tokens", because that is what the
+    // number is: the size of the whole context that tripped the trigger, not
+    // the size of the prefix replaced.
     session_.logger.info(
-        "session {}: context was ~{} tokens; compacted the oldest {} of {} messages into one "
-        "summary",
-        session_.session_id, result->context_tokens_before, cut, history_.size() + cut - 1);
+        "session {}: context was ~{} tokens, now ~{}; compacted the oldest {} of {} messages "
+        "into one summary",
+        session_.session_id, event.tokens_before, event.tokens_after, cut,
+        history_.size() + cut - 1);
+
+    if (session_.compaction_sink) {
+        try {
+            session_.compaction_sink(event);
+        } catch (const std::exception& error) {
+            session_.logger.warn("session {}: compaction event dropped: {}", session_.session_id,
+                                 error.what());
+        }
+    }
 
     if (config_.hooks != nullptr) {
         config_.hooks->EmitAsync(hooks::kPostCompact,
@@ -854,14 +1049,14 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
                                                 {"project_root", session_.project_root.string()},
                                                 {"trigger", trigger},
                                                 {"folded_messages", cut},
-                                                {"context_tokens_before",
-                                                 result->context_tokens_before}});
+                                                {"context_tokens_before", event.tokens_before},
+                                                {"context_tokens_after", event.tokens_after}});
     }
 
     // NO COOLDOWN ON SUCCESS, deliberately. Repeated compaction inside one turn
-    // looks unbounded but is not: each pass replaces the first `cut` ~= size/2
-    // messages with one, so history halves every time and `history_.size() < 2`
-    // is the floor -- it terminates in log2(n) passes. Across turns, compacting
+    // looks unbounded but is not: each pass replaces at least one message (the
+    // cut is >= 1) and the estimate is re-seeded smaller, and `history_.size()
+    // < 2` is the floor. Across turns, compacting
     // again once new messages have pushed occupancy back over the trigger is the
     // intended behaviour, not a runaway.
 
@@ -1171,6 +1366,15 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                 // Not prompted, not run: see stop_requested above. Takes the
                 // same skip-Prepare path as an oversized input.
                 prepared.denial = stopped_by_user(use->id);
+                denied_for_input = true;
+            } else if (use->name == kRecordSummaryToolName) {
+                // Declared on every request for the summarizer's sake (see
+                // BuildSystemAndTools); outside a compaction it records nothing.
+                prepared.denial = llm::ToolResultBlock{
+                    use->id,
+                    {llm::TextBlock{"record_summary is only used when the harness asks for a "
+                                    "context summary; nothing was recorded. Continue the task."}},
+                    true};
                 denied_for_input = true;
             } else if (config_.max_tool_input_bytes > 0) {
                 const std::size_t input_bytes = use->input.dump().size();

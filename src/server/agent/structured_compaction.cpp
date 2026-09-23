@@ -13,19 +13,15 @@
 namespace minimal::agent {
 namespace {
 
-// The forced tool call whose input carries the structured summary. The schema's
-// description text is the prompt: every rule the free-text compression prompt
-// states that survives structuring lives on the field it governs, where a
-// provider synthesizing tool context will see it next to the field it shapes.
-// `request.system` stays the preset's compression prompt, so a manual
-// /compact <name> override keeps steering section emphasis.
-constexpr std::string_view kRecordSummaryTool = "record_summary";
-
+// The tool call whose input carries the structured summary. Declared on EVERY
+// main-loop request (see MakeRecordSummaryToolDefinition) so the summarizer
+// request -- the session's own prefix plus one instruction -- keeps the tools
+// array byte-identical and reads the history from the prompt cache. Because it
+// rides every request, the definition is kept to names and types: the
+// guidance for each field lives in prompts/compression-structured.md, which
+// is only sent in the compaction-time instruction.
 constexpr std::string_view kRecordSummaryDescription =
-    "Record the structured summary replacing the conversation prefix. Every "
-    "identifier -- file paths, tool names, commands, MCP calls -- must be "
-    "verbatim; a paraphrased identifier is a broken one. Be dense and factual: "
-    "this summary replaces the original messages.";
+    "Record the context summary. Only call this when the harness asks for one.";
 
 // One source of truth for the wire property order and the render order; the
 // parser walks the declared fields of StructuredSummary directly, so this is
@@ -33,97 +29,42 @@ constexpr std::string_view kRecordSummaryDescription =
 constexpr std::array<std::string_view, 7> kFields = {
     "current_task", "done", "next_steps", "topics", "important", "lessons", "future_tasks"};
 
-nlohmann::json FieldSchema(const char* description) {
-    return nlohmann::json{{"type", "string"}, {"description", description}};
+nlohmann::json StringField() { return nlohmann::json{{"type", "string"}}; }
+
+nlohmann::json StringArray() {
+    return nlohmann::json{{"type", "array"}, {"items", StringField()}};
 }
 
-nlohmann::json StringArraySchema(const char* description) {
-    return nlohmann::json{{"type", "array"},
-                          {"items", nlohmann::json{{"type", "string"}}},
-                          {"description", description}};
-}
-
-// Built once: the schema is identical on every compaction attempt, and
-// compaction is infrequent enough that this is about clarity, not perf.
+// Built once. Strict-mode shape (the definition is sent with strict: true):
+// every property required, additionalProperties false at every level, no
+// minItems. "Nothing to say" is an empty array or string, which the parse
+// treats as "section absent". Backends that do not enforce strict still get
+// the schema as a hint, and the parse degrades rather than refusing.
 const nlohmann::json& RecordSummarySchema() {
     static const nlohmann::json schema{
         {"type", "object"},
-        // The only hard requirement. required/minItems are prompt intentions
-        // at runtime -- enforcement varies by backend (OpenAI strict mode
-        // honors them, Anthropic treats input_schema as a hint, llama.cpp
-        // varies) -- and the .cpp's parse degrades rather than refusing on
-        // their absence for exactly that reason. They stay declared for the
-        // backends that do enforce.
-        {"required", nlohmann::json::array({"current_task"})},
+        {"required", nlohmann::json::array({"current_task", "done", "next_steps", "topics",
+                                            "important", "lessons", "future_tasks"})},
         {"additionalProperties", false},
         {"properties",
          nlohmann::json{
-             {"current_task",
-              FieldSchema("Brief description of what the agent was doing "
-                          "before compaction and why: the task itself, what "
-                          "was done so far, and what is currently failing or "
-                          "waiting on what. The summary's keystone.")},
-             {"done",
-              StringArraySchema("Concrete completed work, each item factual: "
-                                "file paths verbatim, commands with their "
-                                "outcomes, decisions made and why. Oldest to "
-                                "newest.")},
-             {"next_steps",
-              StringArraySchema("What to do next, in order; may reference "
-                                "files, topics, or tools by verbatim name. "
-                                "Empty ONLY when the task is complete or the "
-                                "agent is awaiting the user.")},
-             {"topics",
-              nlohmann::json{{"type", "array"},
-                             {"items", nlohmann::json{{"type", "string"}}},
-                             {"minItems", 1},
-                             {"description",
-                              "One sentence per distinct topic the session "
-                              "touched. These are the index keys `important` "
-                              "hangs off -- list a topic only if the "
-                              "continuing session may need to find its way "
-                              "back to it."}}},
+             {"current_task", StringField()},
+             {"done", StringArray()},
+             {"next_steps", StringArray()},
+             {"topics", StringArray()},
              {"important",
               nlohmann::json{
                   {"type", "array"},
                   {"items",
                    nlohmann::json{
                        {"type", "object"},
-                       {"required", nlohmann::json::array({"name", "why"})},
+                       {"required", nlohmann::json::array({"name", "why", "how"})},
                        {"additionalProperties", false},
-                       {"properties",
-                        nlohmann::json{
-                            {"name",
-                             FieldSchema("Verbatim identifier: a file path, "
-                                         "tool name, MCP call, or a topics "
-                                         "entry.")},
-                            {"why", FieldSchema("Why it is important.")},
-                            {"how",
-                             FieldSchema("How to use it when continuing. "
-                                         "Optional.")}}}}},
-                  {"description",
-                   "Associative knowledge: links a topic, tool, MCP call, or "
-                   "file path to why it is important and how to use it when "
-                   "continuing."}}},
-             {"lessons",
-              StringArraySchema("Solutions to problems actually encountered in "
-                                "this session worth keeping so the same work "
-                                "is less painful next time; user-defined rules "
-                                "and restrictions that apply to this session. "
-                                "Not generic best practices -- 'always run "
-                                "tests' is filler. Knowledge meant to outlive "
-                                "the session belongs in the memory plugin, not "
-                                "here.")},
-             {"future_tasks",
-              StringArraySchema("Work left for after the current task. Free "
-                                "text and verbose -- what the task is, why, "
-                                "open questions. The complement of the "
-                                "checklist tool: the checklist holds the short "
-                                "immediate steps of the current task, this "
-                                "field holds the longer-horizon work between "
-                                "them. File-backed plans (a path a future "
-                                "session can read) are strongly advised in "
-                                "plan->execute flows.")}}}};
+                       {"properties", nlohmann::json{{"name", StringField()},
+                                                     {"why", StringField()},
+                                                     {"how", StringField()}}}}}}},
+             {"lessons", StringArray()},
+             {"future_tasks", StringArray()}}}};
     return schema;
 }
 
@@ -290,6 +231,13 @@ std::int64_t TokensBefore(const CompactionRequest& params,
 
 }  // namespace
 
+llm::ToolDefinition MakeRecordSummaryToolDefinition() {
+    llm::ToolDefinition definition{std::string(kRecordSummaryToolName),
+                                   std::string(kRecordSummaryDescription), RecordSummarySchema()};
+    definition.strict = true;
+    return definition;
+}
+
 std::optional<CompactionResult> compact_messages_structured(
     std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
     const CompactionRequest& params) {
@@ -302,28 +250,34 @@ std::optional<CompactionResult> compact_messages_structured(
                                   ? std::string{}
                                   : "session " + std::string(params.session_label) + ": ";
 
-    if (IsBlank(params.compression_prompt)) {
-        logger.error("{}compaction skipped: no compression prompt configured", where);
-        return std::nullopt;
+    // A custom prompt (preset frontmatter, /compact <name>) describes its own
+    // output shape; the schema would override it. Free text honors it. So does
+    // a missing prompts/compression-structured.md (the sanity check says so).
+    if (params.custom_prompt || IsBlank(params.structured_prompt)) {
+        return compact_messages(messages_to_compact, provider, params);
     }
-    llm::ChatRequest request;
-    request.system = std::string(params.compression_prompt);
-    request.messages = messages_to_compact;
-    request.model = std::string(params.model_name);
-    request.stream = true;
-    request.parameters = params.parameters;
-    request.max_tokens = params.max_tokens;
-    request.session_id = params.session_id;
-    // THE structural difference from compact_messages: the output is
-    // constrained by a forced tool call, not asked for in prose. The schema
-    // rides the request; the tool is never EXECUTED -- the loop never sees
-    // this response, the harness consumes the tool call's input as the
-    // summary payload.
-    request.tools.push_back(llm::ToolDefinition{std::string(kRecordSummaryTool),
-                                                std::string(kRecordSummaryDescription),
-                                                RecordSummarySchema()});
-    request.tool_choice = llm::ToolChoiceSpec{llm::ToolChoiceKind::Specific,
-                                              std::string{kRecordSummaryTool}};
+
+    // THE structural difference from compact_messages: the output is a
+    // record_summary call, not prose. Not FORCED -- a forced tool_choice
+    // invalidates the messages cache and is a 400 on newer Claude models --
+    // but strict, so when the model calls it the arguments match the schema.
+    // The tool is never EXECUTED: the loop never sees this response, the
+    // harness consumes the call's input as the summary payload.
+    std::vector<llm::Message> storage;
+    llm::ChatRequest request = BuildSummarizerRequest(
+        messages_to_compact, params, std::string(params.structured_prompt), storage);
+    // The loop's own tools already carry it; a direct caller's may not.
+    const bool has_tool = std::any_of(request.tools.begin(), request.tools.end(),
+                                      [](const llm::ToolDefinition& def) {
+                                          return def.name == kRecordSummaryToolName;
+                                      });
+    if (!has_tool) {
+        request.tools.push_back(MakeRecordSummaryToolDefinition());
+        std::sort(request.tools.begin(), request.tools.end(),
+                  [](const llm::ToolDefinition& a, const llm::ToolDefinition& b) {
+                      return a.name < b.name;
+                  });
+    }
 
     llm::ChatResponse response;
     try {
@@ -351,10 +305,11 @@ std::optional<CompactionResult> compact_messages_structured(
 
     const auto call = std::find_if(response.content.begin(), response.content.end(),
                                    [](const llm::ContentBlock& block) {
-                                       return ToolUseName(block) == kRecordSummaryTool;
+                                       return ToolUseName(block) == kRecordSummaryToolName;
                                    });
 
-    // A provider that ignored tool_choice. If it produced text, degrade to the
+    // The model answered without calling the tool (tool_choice is auto, and
+    // some backends do not do tools well). If it produced text, degrade to the
     // free-text head rather than refuse: every refusal here re-fires next turn
     // while occupancy climbs toward a hard 400, and a non-conforming backend
     // would otherwise turn EVERY compaction into a failure spiral. Logged so
@@ -367,9 +322,8 @@ std::optional<CompactionResult> compact_messages_structured(
             return std::nullopt;
         }
         logger.warn(
-            "{}compaction: the provider ignored tool_choice; using the free-text summary it "
-            "returned",
-            where);
+            "{}compaction: the model did not call {}; using the free-text summary it returned",
+            where, kRecordSummaryToolName);
         CompactionResult degraded;
         degraded.summary_message =
             llm::Message{llm::Role::User, {llm::TextBlock{std::string(kSummaryFraming) + text}}};

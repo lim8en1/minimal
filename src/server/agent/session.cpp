@@ -198,6 +198,13 @@ Session::Session(SessionParams params, AgentPreset preset,
         }
     };
 
+    // A compaction rewrites only the working set, never a transcript row, so
+    // this event is the client's one live signal that it happened (the same
+    // record rides scrollback pages via the compactions table).
+    context.compaction_sink = [sink = event_sink_](const CompactionEvent& compaction) {
+        sink(SessionEvent{compaction});
+    };
+
     context.tool_lifecycle_sink = [this, sink = event_sink_](const ToolLifecycleEvent& lifecycle) {
         sink(SessionEvent{lifecycle});
 

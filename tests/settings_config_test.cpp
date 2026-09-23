@@ -345,3 +345,15 @@ TEST_CASE("LoadSettingsConfig: reads and parses a real file", "[settings_config]
 TEST_CASE("LoadSettingsConfig: missing file throws", "[settings_config]") {
     CHECK_THROWS_AS(LoadSettingsConfig("/nonexistent/settings.json"), std::runtime_error);
 }
+
+TEST_CASE("ParseSettingsConfig: compaction_replace_percent defaults to 80, accepts 1..100",
+          "[settings_config]") {
+    CHECK(ParseSettingsConfig(nlohmann::json::object()).memory.compaction_replace_percent == 80);
+    CHECK(ParseSettingsConfig({{"memory", {{"compaction_replace_percent", 60}}}})
+              .memory.compaction_replace_percent == 60);
+    CHECK_THROWS(ParseSettingsConfig({{"memory", {{"compaction_replace_percent", 0}}}}));
+    CHECK(ParseSettingsConfig({{"memory", {{"compaction_replace_percent", 100}}}})
+              .memory.compaction_replace_percent == 100);
+    CHECK_THROWS(ParseSettingsConfig({{"memory", {{"compaction_replace_percent", 101}}}}));
+    CHECK_THROWS(ParseSettingsConfig({{"memory", {{"compaction_replace_percent", "80"}}}}));
+}

@@ -180,15 +180,9 @@ std::string EnsureEnvironment(const EnvPlan& plan, const PythonSettings& setting
     // INSTALL the declared contract, additively and idempotently. uv makes the
     // satisfied-check near-instant; the venv's own pip costs a few seconds.
     if (!plan.declared.empty()) {
-        std::vector<std::string> specs;
-        std::vector<std::string> requirement_paths;
-        for (const auto& entry : plan.declared) {
-            if (entry.rfind(kRequirementsPrefix, 0) == 0) {
-                requirement_paths.push_back(entry.substr(std::strlen(kRequirementsPrefix)));
-            } else {
-                specs.push_back(entry);
-            }
-        }
+        const auto split = SplitDeclared(plan.declared);
+        const auto& specs = split.package_specs;
+        const auto& requirement_paths = split.requirement_paths;
         std::vector<std::string> argv;
         std::string via;
         if (const std::string uv = ResolveUv(settings); !uv.empty()) {
@@ -229,6 +223,16 @@ std::string EnsurePackages(const std::filesystem::path& project_root,
     const auto guard = ProjectInstallMutex::Instance().Lock(project_root);
     (void)guard;
 
+    // ClassifyDiff's additive set (the only caller, via ApplyDiff) can carry
+    // "requirements:<path>" entries same as EnsureEnvironment's own declared
+    // set -- switching to a preset that newly declares a requirements file
+    // sent that literal string to pip as a package spec, which fails as an
+    // invalid requirement and errors every python_exec until a clean
+    // restart. Same split EnsureEnvironment uses.
+    const auto split = SplitDeclared(specs);
+    const auto& package_specs = split.package_specs;
+    const auto& requirement_paths = split.requirement_paths;
+
     std::vector<std::string> argv;
     std::string via;
     if (const std::string uv = ResolveUv(settings); !uv.empty()) {
@@ -238,7 +242,11 @@ std::string EnsurePackages(const std::filesystem::path& project_root,
         argv = {venv_python, "-m", "pip", "install"};
         via = "pip";
     }
-    for (const auto& spec : specs) argv.push_back(spec);
+    for (const auto& spec : package_specs) argv.push_back(spec);
+    for (const auto& req : requirement_paths) {
+        argv.push_back("-r");
+        argv.push_back((project_root / req).string());
+    }
 
     EnvPlan plan_like;
     plan_like.project_root = project_root;
@@ -254,6 +262,18 @@ std::string EnsurePackages(const std::filesystem::path& project_root,
     logger.info("python: auto-ensured [{}] in {}", Join(specs, ", "), venv_python);
     *error = "";
     return "installed: " + Join(specs, ", ");
+}
+
+SplitSpecs SplitDeclared(const std::vector<std::string>& entries) {
+    SplitSpecs out;
+    for (const auto& entry : entries) {
+        if (entry.rfind(kRequirementsPrefix, 0) == 0) {
+            out.requirement_paths.push_back(entry.substr(std::strlen(kRequirementsPrefix)));
+        } else {
+            out.package_specs.push_back(entry);
+        }
+    }
+    return out;
 }
 
 std::string SpecName(const std::string& spec) {

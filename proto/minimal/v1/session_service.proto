@@ -568,7 +568,33 @@ message ServerEvent {
     // popped -- it must run, and the pending echo stays until its own row
     // lands in a fetched page.
     TurnCanceledEvent turn_canceled = 19;
+    // The session's working context was compacted: the oldest part of the
+    // history was replaced by one summary message. Transcript rows are
+    // untouched (compaction rewrites only the model's working set), so this
+    // event is the only live signal -- the same record also rides
+    // GetMessagesResponse.compactions for scrollback and resume.
+    CompactionEvent compaction = 20;
   }
+}
+
+// One context compaction. at_seq is the last transcript seq when it ran (a
+// client renders it right after that message); boundary_seq is the last seq
+// the summary replaced. Token figures are whole-context sizes, both the
+// server's bytes/4 estimate (one basis, so the two compare).
+message CompactionEvent {
+  int64 at_seq = 1;
+  int64 boundary_seq = 2;
+  int64 folded_messages = 3;
+  int64 tokens_before = 4;
+  int64 tokens_after = 5;
+  string summary = 6;      // the summary text the model now sees, markdown
+  string trigger = 7;      // "auto" | "manual"
+  int64 created_at_unix_ms = 8;
+  // A sanity guard's message: why this compaction was skipped (skipped =
+  // true: nothing folded, no summary), or why a completed one looks
+  // ineffective. Empty when there is nothing to say.
+  string warning = 9;
+  bool skipped = 10;
 }
 
 message TurnQueuedEvent {
@@ -625,6 +651,9 @@ message GetMessagesRequest {
 message GetMessagesResponse {
   repeated StoredMessage messages = 1; // descending by seq (ascending on an after_seq fetch)
   bool has_more = 2;
+  // The compactions that ran at one of this page's seqs (at_seq within the
+  // page), ascending by at_seq. Each belongs to exactly one page.
+  repeated CompactionEvent compactions = 3;
 }
 
 // --- @-mention autocomplete (server-resolved so matching strategy can be

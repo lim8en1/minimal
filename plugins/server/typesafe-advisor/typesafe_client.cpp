@@ -71,6 +71,19 @@ std::chrono::milliseconds ApplyJitter(std::chrono::milliseconds delay, double ji
     return std::chrono::milliseconds(static_cast<int64_t>(std::max(0.0, scaled)));
 }
 
+// Exponential backoff, capped by backoff_max_ms. int64_t, not int: both
+// operator-configured (backoff_initial_ms) and computed here, `initial *
+// 2^attempt` overflows a 32-bit int for realistic values well before the
+// backoff_max_ms clamp below ever runs -- e.g. 50000ms at attempt=16 is
+// ~3.3 billion, past INT_MAX. Computing in a wider type first means the
+// clamp always sees the real (possibly huge) value, never a wrapped one.
+std::chrono::milliseconds BackoffFor(int attempt, const Settings& settings) {
+    const std::int64_t raw = static_cast<std::int64_t>(settings.backoff_initial_ms) *
+                             (std::int64_t{1} << std::min(attempt, 16));
+    return std::min(std::chrono::milliseconds(settings.backoff_max_ms),
+                    std::chrono::milliseconds(raw));
+}
+
 nlohmann::json BuildBody(const Settings& settings, const nlohmann::json& state) {
     // Identical shape for both backends (verified live): {"state", "model",
     // "questions"} with the model id VALUE carrying the backend namespace.
@@ -155,11 +168,7 @@ JevOutcome AskJev(const net::HttpClient& http, const Settings& settings,
             if (transport_retryable && attempt + 1 < total_attempts) {
                 const auto budget_left_now = std::chrono::duration_cast<std::chrono::milliseconds>(
                     deadline - std::chrono::steady_clock::now());
-                const auto backoff = ApplyJitter(
-                    std::min(std::chrono::milliseconds(settings.backoff_max_ms),
-                             std::chrono::milliseconds(settings.backoff_initial_ms *
-                                                       (1 << std::min(attempt, 16)))),
-                    settings.jitter);
+                const auto backoff = ApplyJitter(BackoffFor(attempt, settings), settings.jitter);
                 common::DefaultLogger().warn(
                     "typesafe-advisor: attempt {} to {} failed ({}); retrying",
                     attempt + 1, request.url, transport_error);
@@ -200,10 +209,7 @@ JevOutcome AskJev(const net::HttpClient& http, const Settings& settings,
             const auto budget_left_now = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now());
             auto delay = RetryAfterOf(*response).value_or(
-                ApplyJitter(std::min(std::chrono::milliseconds(settings.backoff_max_ms),
-                                     std::chrono::milliseconds(settings.backoff_initial_ms *
-                                                               (1 << std::min(attempt, 16)))),
-                            settings.jitter));
+                ApplyJitter(BackoffFor(attempt, settings), settings.jitter));
             // Two clamps, one purpose: no server header and no policy backoff
             // can stretch one Advise past its budget.
             delay = std::min(delay, std::chrono::milliseconds(settings.retry_after_cap_ms));

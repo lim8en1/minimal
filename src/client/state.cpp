@@ -3,6 +3,7 @@
 #include "minimal/client/plugins/registries.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <iterator>
@@ -164,6 +165,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.display_name = display_name_;
     s.state = state_;
     s.scrollback_page = scrollback_page_shared_;   // shared, copy-on-apply
+    s.compactions = compactions_shared_;
     s.pending_user_messages = pending_user_messages_;
     s.pending_user_text =
         pending_user_messages_.empty() ? std::string{} : pending_user_messages_.front().text;
@@ -1006,6 +1008,21 @@ void SessionState::OnResyncRequired(const std::string& reason) {
 // the discarded rows. Not a turn terminator, so state_ is left alone.
 void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_last_seq) {
     std::lock_guard lk(mtx_);
+    // Compactions that ran on the rewound-away rows go with them (a redo's
+    // restored rows bring theirs back on the refetch).
+    {
+        const auto keep_up_to = truncated_to_seq < 0 ? int64_t{-2} : active_last_seq;
+        const std::size_t before = compactions_.size();
+        compactions_.erase(std::remove_if(compactions_.begin(), compactions_.end(),
+                                          [keep_up_to](const v1::CompactionEvent& evt) {
+                                              return evt.at_seq() > keep_up_to;
+                                          }),
+                           compactions_.end());
+        if (compactions_.size() != before) {
+            compactions_shared_ =
+                std::make_shared<const std::vector<v1::CompactionEvent>>(compactions_);
+        }
+    }
     if (truncated_to_seq < 0) {
         // REDO: the restored rows are unknown client-side -- clear the whole
         // window so the refresh refetches them from the top.
@@ -1339,10 +1356,48 @@ void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
 
 // Scrollback -----------------------------------------------------------------
 
+template <typename Range>
+void SessionState::MergeCompactionsLocked(const Range& incoming) {
+    bool changed = false;
+    for (const auto& evt : incoming) {
+        const bool held = std::any_of(compactions_.begin(), compactions_.end(),
+                                      [&evt](const v1::CompactionEvent& have) {
+                                          return have.at_seq() == evt.at_seq() &&
+                                                 have.created_at_unix_ms() ==
+                                                     evt.created_at_unix_ms();
+                                      });
+        if (held) continue;
+        compactions_.push_back(evt);
+        changed = true;
+    }
+    if (!changed) return;
+    std::stable_sort(compactions_.begin(), compactions_.end(),
+                     [](const v1::CompactionEvent& a, const v1::CompactionEvent& b) {
+                         return a.at_seq() != b.at_seq()
+                                    ? a.at_seq() < b.at_seq()
+                                    : a.created_at_unix_ms() < b.created_at_unix_ms();
+                     });
+    compactions_shared_ = std::make_shared<const std::vector<v1::CompactionEvent>>(compactions_);
+}
+
+void SessionState::OnCompaction(const v1::CompactionEvent& evt) {
+    std::lock_guard lk(mtx_);
+    MergeCompactionsLocked(std::array<v1::CompactionEvent, 1>{evt});
+    // The status bar reads last-turn occupancy; the compaction just replaced
+    // it. The server's after-figure is an estimate, but so is any number the
+    // bar could show before the next response reports real usage.
+    input_tokens_ = evt.tokens_after();
+    output_tokens_ = 0;
+    cache_read_tokens_ = 0;
+    cache_write_tokens_ = 0;
+    ++transcript_version_;
+}
+
 void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp, bool delta) {
     std::lock_guard lk(mtx_);
     refresh_succeeded_ = true;   // resolved OK, even when the page is empty
     scrollback_failures_ = 0;   // a success ends any failure streak (and its notice)
+    MergeCompactionsLocked(resp.compactions());
     if (resp.messages().empty()) {
         // A delta fetch that returns nothing proves nothing about OLDER
         // history -- has_more on an after_seq response means "more newer
@@ -2240,6 +2295,8 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         target->OnTurnQueued(event.turn_queued().turn_id(), event.turn_queued().text());
     } else if (event.has_turn_canceled()) {
         target->OnTurnCanceled(event.turn_canceled().turn_id(), event.turn_canceled().removed());
+    } else if (event.has_compaction()) {
+        target->OnCompaction(event.compaction());
     } else if (event.has_stream_event()) {
         const auto& se = event.stream_event();
         if (se.has_text_delta()) {

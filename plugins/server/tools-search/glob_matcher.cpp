@@ -54,6 +54,18 @@ bool TranslateBody(std::string_view glob, std::string& out) {
         const char c = glob[i];
         if (c == '*') {
             if (i + 1 < n && glob[i + 1] == '*') {
+                // A bare `**` (the WHOLE pattern, no leading/trailing `/` to
+                // anchor it into one of the three special placements below)
+                // hit none of them and fell to the "collapses to a single
+                // `*`" rule, so it matched only a single path segment
+                // instead of the whole tree the way ripgrep and VS Code
+                // treat it. Every real `**` placement pairs with a `/`; the
+                // whole-pattern case is the one with none at all to pair.
+                if (i == 0 && i + 2 == n) {
+                    out += ".*";
+                    i += 2;
+                    continue;
+                }
                 // `**/` at the very start: zero or more leading directories.
                 if (i == 0 && i + 2 < n && glob[i + 2] == '/') {
                     out += "(?:.*/)?";

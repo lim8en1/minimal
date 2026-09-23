@@ -21,8 +21,9 @@ void SqliteHistoryStore::Append(const llm::Message& message, std::optional<int> 
 }
 
 void SqliteHistoryStore::SaveCompactionCheckpoint(std::int64_t boundary_seq,
-                                                  const llm::Message& summary) {
-    db_.SaveCompactionCheckpoint(session_id_, boundary_seq, summary);
+                                                  const llm::Message& summary,
+                                                  const CompactionMeta& meta) {
+    db_.SaveCompactionCheckpoint(session_id_, boundary_seq, summary, meta);
 }
 
 void SqliteHistoryStore::ClearCompactionCheckpoint() {

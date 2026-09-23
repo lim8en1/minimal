@@ -115,13 +115,17 @@ struct SessionSummary {
 // -- summary + everything after boundary_seq -- instead of re-summarizing from
 // the full uncompacted transcript. NOT part of the conversation: `messages`
 // stays the exact record of what was said, and this row is a cache of a view
-// over it. One row per session, latest-wins; the prefix it covers is immutable
-// (appends only), so no invalidation exists beyond /clear and session deletion.
+// over it. Every compaction appends a record (scrollback renders them all);
+// the ACTIVE record with the highest boundary_seq is the checkpoint. /clear
+// deactivates, rewind below a record's position deletes it.
 struct CompactionCheckpoint {
     std::string session_id;
     // The summary covers every message with seq <= boundary_seq; the working
     // set resumes with seq > boundary_seq.
     std::int64_t boundary_seq = 0;
+    // The last message seq when the compaction ran: (boundary_seq, at_seq]
+    // is the tail it kept verbatim.
+    std::int64_t at_seq = 0;
     llm::Message summary;  // the synthetic User message at the head of the view
     std::int64_t created_at_unix_ms = 0;
 };
@@ -168,7 +172,7 @@ struct OpenOptions {
 // (Default naming is NOT part of the append transaction; see SetDefaultName.)
 class SessionDatabase {
 public:
-    static constexpr int kSchemaVersion = 10;
+    static constexpr int kSchemaVersion = 11;
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on any
     // failure, including a database whose user_version is newer than this
@@ -393,16 +397,24 @@ public:
 
     // --- Compaction checkpoints (see CompactionCheckpoint above) -------------
 
-    // Upsert: one checkpoint per session, the latest compaction's. Throws on
-    // I/O failure -- the CALLER (AgentLoop::Compact) treats that as an
-    // optimization miss and carries on, because the transcript itself is
-    // unaffected either way.
+    // Appends a record; at_seq is the session's last ACTIVE message seq at
+    // insert time. Throws on I/O failure -- the CALLER (AgentLoop::Compact)
+    // treats that as an optimization miss and carries on, because the
+    // transcript itself is unaffected either way.
     void SaveCompactionCheckpoint(const std::string& session_id, std::int64_t boundary_seq,
-                                  const llm::Message& summary);
+                                  const llm::Message& summary, const CompactionMeta& meta = {});
 
     // /clear drops the working set; a checkpoint surviving it would resurrect
-    // a summary of a conversation the user deliberately wiped from view.
+    // a summary of a conversation the user deliberately wiped from view. The
+    // records are only deactivated -- scrollback still shows them.
     void ClearCompactionCheckpoint(const std::string& session_id);
+
+    // Every record with at_seq in [from_seq, to_seq], ascending by at_seq,
+    // active or not. Records past the active transcript (a rewound-away
+    // branch not yet reclaimed) are excluded by the caller's seq range.
+    std::vector<CompactionRecord> LoadCompactionRecords(const std::string& session_id,
+                                                        std::int64_t from_seq,
+                                                        std::int64_t to_seq) const;
 
     // nullopt = no checkpoint (a session that never compacted, or one from
     // before checkpoints existed -- those resume the old way, from the full

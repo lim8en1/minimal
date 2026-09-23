@@ -156,6 +156,8 @@ AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
     subagent_prefix_ = common::ReadFileOrEmpty(config_dir_ / "prompts" / "subagent.md");
     default_compression_prompt_ =
         config::parse_frontmatter_markdown(common::ReadFileOrEmpty(config_dir_ / "prompts" / "compression.md")).body;
+    structured_compression_prompt_ = config::parse_frontmatter_markdown(
+        common::ReadFileOrEmpty(config_dir_ / "prompts" / "compression-structured.md")).body;
 }
 
 AgentPreset AgentPresetRegistry::Resolve(
@@ -529,9 +531,11 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     if (!raw.compression_prompt.empty()) {
         preset.compression_prompt =
             LoadCompressionPromptFile(raw.compression_prompt, "agent preset '" + preset_name + "'");
+        preset.custom_compression_prompt = true;
     } else {
         preset.compression_prompt = default_compression_prompt_;
     }
+    preset.structured_compression_prompt = structured_compression_prompt_;
     // The NAME travels verbatim; resolving it against the strategy registry is
     // the loop's job at compaction time (the registry is still filling here --
     // plugins register after presets load -- and /agent re-resolution must

@@ -93,6 +93,15 @@ TEST_CASE("ClassifyHttpFailure: hostile Retry-After values leave the hint unset"
         ClassifyHttpFailure(429, "{}", {{"Retry-After", "http://date"}}).retry_after().has_value());
     // Trailing garbage is not a value the server stated.
     CHECK_FALSE(ClassifyHttpFailure(429, "{}", {{"retry-after-ms", "12x"}}).retry_after().has_value());
+
+    // "9999999999999999" (seconds) is well within std::stoll's range (unlike
+    // the "99999999999999999999" case above, which throws out_of_range and
+    // never reaches the multiply) but overflows the SIGNED 64-bit `parsed *
+    // 1000LL` -- UB -- if that multiply runs before the sanity bound is
+    // checked. The bound must reject it on `parsed` itself, pre-multiply.
+    CHECK_FALSE(ClassifyHttpFailure(429, "{}", {{"Retry-After", "9999999999999999"}})
+                    .retry_after()
+                    .has_value());
 }
 
 TEST_CASE("ClassifyErrorEventData: an event:error frame becomes a classified error",

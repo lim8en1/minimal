@@ -136,11 +136,26 @@ struct GrepRun {
             }
             const int shown_matches = block_matches - std::max(0, remaining_offset);
             if (emitted + shown_matches > head_limit) {
-                // A block is atomic: emitting a fraction of it would present
-                // context with no match, so the budget stops the walk here.
-                budget_exhausted = true;
-                return false;
+                if (emitted > 0) {
+                    // A block is atomic: emitting a fraction of it would
+                    // present context with no match, so the budget stops
+                    // the walk here.
+                    budget_exhausted = true;
+                    return false;
+                }
+                // Nothing shown yet at ALL: refusing this one oversized
+                // block would report "no matches" (or re-hit the same
+                // block forever via the offset=N hint) on a search that
+                // found real matches, with no way to ever page past it.
+                // Force it through -- the walk still stops right after
+                // (below): exceeding head_limit by one block is the
+                // least-bad option, not a license to keep going.
             }
+            // A partial in-block skip must count toward offset_consumed too
+            // -- otherwise the same remaining offset is applied AGAIN to
+            // later blocks/files and silently drops matches that were never
+            // shown, plus corrupts the "showing X of Y" footer arithmetic.
+            offset_consumed += std::max(0, remaining_offset);
             remaining_offset = 0;
             if (emitted_any) Append("--\n");  // ripgrep's group separator
             for (int line = block.start_line; line <= block.end_line; ++line) {
@@ -159,6 +174,13 @@ struct GrepRun {
             }
             emitted += shown_matches;
             emitted_any = true;
+            if (emitted > head_limit) {
+                // Only reachable via the forced-oversized-block case above
+                // (the normal over-budget path already returned false
+                // before emitting anything for this block).
+                budget_exhausted = true;
+                return false;
+            }
         }
         return true;
     }
@@ -355,6 +377,10 @@ public:
             std::chrono::milliseconds(settings_.grep_timeout_ms)};
         options.max_file_bytes = settings_.grep_max_file_bytes;
         options.is_cancelled = ctx.is_cancelled;
+        // A `path` scoped to a subdirectory must still honor the project
+        // root's .gitignore, or `grep(path="src")` returns hits inside
+        // `src/build/` that a root-level search would have excluded.
+        options.boundary_root = ctx.project_root;
 
         const auto stats = WalkTree(
             resolved.absolute_path, options, [&](const WalkEntry& entry) {

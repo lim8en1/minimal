@@ -44,6 +44,20 @@ struct PipeSink {
     std::int64_t cap = 0;
     std::function<void(std::string_view)> emit;  // kCapped only; may be empty
 
+    // Whether this pipe counts toward DrainOptions::idle_after_reap_ms's
+    // "detached grandchild" check. True for a sink a caller's OWN child is
+    // expected to hold open only for as long as ITS OWN stdio stays
+    // connected (stdout/stderr) -- a grandchild still holding one of those
+    // open after the shell exits means the user's own command left
+    // something backgrounded without redirecting its stdio, which is
+    // exactly the "fully redirect the child's stdio" advice that outcome
+    // exists to give. False for an internal-only channel a caller adds for
+    // its OWN bookkeeping (bash's fd-9 state trailer): the user never
+    // redirects it and has no way to close it, so a grandchild inheriting
+    // it says nothing about the user's command and must never trigger a
+    // kill or that advice on its own.
+    bool detect_detached_grandchild = true;
+
     // Results (filled by DrainAndReap):
     std::string text;        // kCapped: rendered (with the omission marker);
                              // kBounded: raw payload (empty once overflowed)

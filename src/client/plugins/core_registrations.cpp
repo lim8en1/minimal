@@ -528,6 +528,35 @@ public:
     }
 };
 
+// A compaction: the harness replaced the older part of the model's context
+// with a summary. Collapsed, one "[minimal]"-styled line with the numbers;
+// expanded, the summary itself -- exactly what the model now reads in place
+// of those messages -- through the markdown engine (structured summaries are
+// "## Section" markdown).
+class CoreCompactionRenderer final : public MessageRenderer {
+public:
+    explicit CoreCompactionRenderer(const MarkdownEngine& engine) : engine_(engine) {}
+    Element Render(const ChatRow& row, const Theme& theme,
+                   const RowRenderContext& ctx) const override {
+        using namespace ftxui;
+        Elements parts;
+        parts.push_back(hbox({Disclosure(ctx, theme),
+                              text("[minimal] ") | color(theme.ColorFor("system_message")) | bold,
+                              text(CompactionHeadline(row)) |
+                                  color(theme.ColorFor("system_message"))}));
+        // A guard's warning is the point of the row: shown collapsed too.
+        if (!row.compaction_warning.empty()) {
+            parts.push_back(paragraph("  " + row.compaction_warning) |
+                            color(theme.ColorForOr("warning", "error")));
+        }
+        if (!ctx.collapsed && !row.text.empty()) parts.push_back(engine_.Render(row.text, theme));
+        return parts.size() == 1 ? std::move(parts.front()) : vbox(std::move(parts));
+    }
+
+private:
+    const MarkdownEngine& engine_;
+};
+
 // The one renderer that needs the engine is registered separately below, so
 // the macro above stays uniform.
 class CoreAgentMarkdownRenderer final : public MessageRenderer {
@@ -625,6 +654,13 @@ void RegisterCoreMessageRenderers(MessageRendererRegistry& registry) {
 
 void RegisterCoreAgentMarkdownRenderer(MessageRendererRegistry& registry,
                                        const MarkdownEngine& engine) {
+    // Compaction renders its summary through the same engine, so it is
+    // registered at the same point -- independently: a plugin claiming one
+    // kind must not suppress core's renderer for the other.
+    if (registry.Find(ChatRowKind::Compaction) == nullptr) {
+        registry.Register(ChatRowKind::Compaction,
+                          std::make_unique<CoreCompactionRenderer>(engine));
+    }
     if (registry.Find(ChatRowKind::AgentMarkdown) != nullptr) return;
     registry.Register(ChatRowKind::AgentMarkdown,
                       std::make_unique<CoreAgentMarkdownRenderer>(engine));

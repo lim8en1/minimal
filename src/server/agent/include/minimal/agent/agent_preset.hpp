@@ -77,6 +77,15 @@ struct AgentPreset {
     tools::McpPermissionPolicy mcp_permissions;
     tools::PermissionRunMode run_mode = tools::PermissionRunMode::Normal;
     std::string compression_prompt;  // loaded text, not a filename
+    // True when compression_prompt came from the preset's own
+    // `compression_prompt:` frontmatter rather than the bundled default: a
+    // custom prompt describes its own output shape, so compaction runs it as
+    // free text even under the structured strategy.
+    bool custom_compression_prompt = false;
+    // prompts/compression-structured.md: the instruction the structured
+    // strategy appends (it asks for a record_summary call). Empty when the
+    // file is missing -- the structured strategy then runs as free text.
+    std::string structured_compression_prompt;
     // The resolved `compaction_strategy:` frontmatter, verbatim: a NAME, not a
     // strategy object -- the preset cache is built before the strategy
     // registry is fully loaded, and the loop resolves the name at each

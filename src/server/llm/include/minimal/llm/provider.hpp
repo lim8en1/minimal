@@ -95,6 +95,14 @@ public:
     // the agent loop owns backoff and attempt limits, since only it knows
     // whether a retry is still wanted.
     virtual ChatResponse StreamComplete(const ChatRequest& request, const StreamEventSink& sink) = 0;
+
+    // True when the backend binds a replayed thinking block to the exact
+    // conversation prefix that produced it and rejects the replay once that
+    // prefix changed (newer Claude models). The agent loop then drops the
+    // thinking of the messages a compaction keeps verbatim. Backends that
+    // never replay thinking (chat completions drops it on the wire) keep the
+    // default.
+    virtual bool BindsThinkingToPrefix() const { return false; }
 };
 
 }  // namespace minimal::llm

@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -352,6 +353,33 @@ TEST_CASE("the per-session background task limit refuses without blocking",
                     std::chrono::seconds(10)));
     (void)first;
     (void)second;
+}
+
+TEST_CASE("a refused background start never spawns the command",
+          "[tools_bash][background]") {
+    // Regression: Start() forked+exec'd the command BEFORE the per-session
+    // limit was checked (the authoritative check lives inside
+    // TaskRegistry::Start, reached only after the spawn), so a refused call
+    // still ran -- a short command like `touch` completes before the
+    // immediate SIGKILL, leaving its side effect despite the model being
+    // told it never ran.
+    Harness h;
+    h.settings.max_background_tasks = 1;
+    const auto first = h.Start("sleep 30");
+    REQUIRE(h.background.CountRunning("s1") == 1);
+
+    const auto marker = h.dir.path() / "should-not-exist";
+    auto refused = h.Start("touch " + marker.string(), {}, "s1", /*expect_ok=*/false);
+    CHECK(refused.result.content_text.find("background task limit reached") !=
+          std::string::npos);
+    // Give a would-be spawn every chance to land before asserting its absence.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK_FALSE(std::filesystem::exists(marker));
+
+    h.lifetime.reset();
+    REQUIRE(WaitFor([&] { return h.background.CountRunning("s1") == 0; },
+                    std::chrono::seconds(10)));
+    (void)first;
 }
 
 TEST_CASE("a background command never adopts session cwd or environment",

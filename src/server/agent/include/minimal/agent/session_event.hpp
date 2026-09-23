@@ -129,7 +129,7 @@ using SessionEvent = std::variant<llm::StreamEvent, ToolLifecycleEvent, tools::B
                                   llm::LlmError, SessionCommandResult, ToolOutputDelta,
                                   SubagentStarted, SessionMetadataChanged, SessionEnded,
                                   SessionRewound, TurnCompleted, SessionError, TurnQueued,
-                                  TurnCanceled>;
+                                  TurnCanceled, CompactionEvent>;
 
 // Returns whether the transport accepted the event -- mirrors
 // EventBroadcaster::Publish's own return exactly (false only means the

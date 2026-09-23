@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "fakes.hpp"
+#include "minimal/config/hooks_config.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -431,6 +433,117 @@ TEST_CASE("allow eligibility: output redirects disqualify, inert ones do not",
     CHECK(HasStage(body, "echo $l"));
 }
 
+TEST_CASE("allow eligibility: >& writes a file unless the destination is pure digits",
+          "[tools_bash][scanner][stages]") {
+    // Regression: `>&` used to be treated as an inert fd-dup unconditionally,
+    // so `cmd >& file` (bash reads a non-digit destination after `>&` exactly
+    // like `&>`) silently disqualified nothing -- an allow rule on the
+    // command let it overwrite a file with no prompt.
+    CHECK_FALSE(ScanCommand("git status >& /tmp/out").allow_eligible);
+    CHECK_FALSE(ScanCommand("echo x >& out").allow_eligible);
+    CHECK_FALSE(ScanCommand("echo x >&out").allow_eligible);
+    // A pure-digit (or `-`) destination after `>&` really is a duplication,
+    // not a filename, and must stay eligible.
+    CHECK(ScanCommand("make 2>&1 | head").allow_eligible);
+    CHECK(ScanCommand("echo x >&2").allow_eligible);
+    CHECK(ScanCommand("cat f 2>&-").allow_eligible);
+    // >& to /dev/null writes nothing anyone wants a rule about.
+    CHECK(ScanCommand("make >& /dev/null").allow_eligible);
+}
+
+TEST_CASE("scanner reports incomplete when time/coproc's program is not a literal",
+          "[tools_bash][scanner]") {
+    // Regression: `time`/`coproc` demote their next word to arguments
+    // unconditionally, even when that word is not itself a literal -- so
+    // `time $X foo` recorded {foo} and reported complete=true, satisfying a
+    // grant conjunction that never named the actual program ($X).
+    const auto computed = ScanCommand("time $X foo");
+    CHECK_FALSE(computed.complete);
+    const auto piped = ScanCommand("ls && time $SHELL -c 'rm -rf x'");
+    CHECK_FALSE(piped.complete);
+    // A literal program after time/coproc is unaffected.
+    CHECK(ScanCommand("time rm -rf /").complete);
+    CHECK(Names(ScanCommand("time rm -rf /"), "rm"));
+}
+
+TEST_CASE("scanner does not let command/builtin hide their real program",
+          "[tools_bash][scanner]") {
+    // Regression: `command`/`builtin` are ordinary literal command_names to
+    // the grammar (unlike time/coproc, which the grammar leaves unstructured),
+    // so `command rm -rf x` recorded {command} and never named rm -- a grant
+    // on an unrelated command like `ls` then satisfied the conjunction for a
+    // line that actually ran rm.
+    const auto result = ScanCommand("ls && command rm -rf x");
+    CHECK(result.complete);
+    CHECK(Names(result, "rm"));
+    CHECK_FALSE(Names(result, "command"));
+    const auto builtin = ScanCommand("builtin cd /tmp");
+    CHECK(builtin.complete);
+    CHECK(Names(builtin, "cd"));
+    // An option flag (-p/-v/-V) right after the wrapper is not parsed, so the
+    // scanner fails closed rather than naming the flag as the program.
+    CHECK_FALSE(ScanCommand("command -p rm -rf x").complete);
+}
+
+TEST_CASE("scanner rejects escaped/expanded literals as unnamed programs",
+          "[tools_bash][scanner]") {
+    // Regression: a backslash-escaped, tilde-led, or glob/brace-bearing word
+    // in command position recorded its RAW spelling as the program (`\rm`,
+    // `~/bin/deploy`, `/usr/bin/r?`) -- a string nothing on disk answers to --
+    // while reporting complete=true, so a grant on an unrelated command (ls)
+    // satisfied the conjunction for a line that actually ran rm.
+    CHECK_FALSE(ScanCommand("ls && \\rm -rf x").complete);
+    CHECK_FALSE(ScanCommand("r\\m -rf x").complete);
+    CHECK_FALSE(ScanCommand("~/bin/deploy").complete);
+    CHECK_FALSE(ScanCommand("/usr/bin/r? -rf x").complete);
+    CHECK_FALSE(ScanCommand("/bin/{rm,ls}").complete);
+    // An ANSI-C string with an undecoded escape sequence is the same hazard:
+    // the driver would run `rm`, but the recorded text is the raw `\x72m`.
+    CHECK_FALSE(ScanCommand("$'\\x72m' -rf x").complete);
+    // Plain literals, including ANSI-C ones with no escape, are unaffected.
+    CHECK((ScanCommand("$'rm' -rf /").command_words == std::vector<std::string>{"rm"}));
+    CHECK(ScanCommand("ls -la").complete);
+}
+
+TEST_CASE("before_command hook sees every resolved program, not just the first",
+          "[tools_bash][hooks]") {
+    // Regression: the hook payload carried only the FIRST resolved program
+    // and stopped, so a guard hook filtering on a LATER program in the line
+    // (program=<rm's path>) never matched "echo start && rm -rf x" -- echo
+    // resolves first.
+    if (!std::filesystem::exists("/bin/echo") || !std::filesystem::exists("/bin/rm")) return;
+    const auto rm_path = std::filesystem::canonical("/bin/rm").string();
+
+    hooks::HookDispatcher dispatcher(common::DefaultLogger());
+    const auto point = dispatcher.RegisterPoint(
+        {tools_bash::kBeforeCommandPoint, /*veto_capable=*/true, {"program"}});
+    config::HookActionConfig action;
+    action.on = tools_bash::kBeforeCommandPoint;
+    action.command = "exit 2";  // unconditional block when the filter matches
+    action.filter = {{"program", rm_path}};
+    action.timeout_ms = 2000;
+    config::HooksConfig hooks_config;
+    hooks_config.default_timeout_ms = 2000;
+    hooks_config.hooks.push_back(action);
+    (void)dispatcher.Configure(hooks_config);
+
+    Fixture f;
+    auto tool = tools_bash::MakeBashTool(f.settings, f.store, f.background, point);
+    tools::ToolContext ctx{common::DefaultLogger()};
+    ctx.session_id = "hook-s1";
+    ctx.project_root = f.dir.path();
+    ctx.tool_use_id = "tu-hook";
+
+    const auto blocked = tool->execute(
+        {{"command", "/bin/echo start && " + rm_path + " -rf /tmp/definitely-not-here"}}, ctx);
+    CHECK(blocked.is_error);
+    CHECK(blocked.content_text.find("blocked by hook") != std::string::npos);
+
+    // A command that never resolves rm at all is unaffected.
+    const auto passed = tool->execute({{"command", "/bin/echo only"}}, ctx);
+    CHECK_FALSE(passed.is_error);
+}
+
 TEST_CASE("allow eligibility follows completeness", "[tools_bash][scanner][stages]") {
     CHECK_FALSE(ScanCommand("eval \"$CMD\"").allow_eligible);
     CHECK_FALSE(ScanCommand("$X args").allow_eligible);
@@ -654,6 +767,26 @@ TEST_CASE("a corrupted state payload leaves state unchanged", "[tools_bash][stat
     CHECK(f.Cwd() == before);  // the cd is discarded along with the bad payload
 }
 
+TEST_CASE("the state trailer captures env even after the command replaces PATH",
+          "[tools_bash][state]") {
+    // Regression: the trailer resolved `env` via a PATH lookup, so a command
+    // that replaces PATH without keeping the directory holding `env`
+    // appended a spurious "env: command not found" to the model-visible
+    // output and silently dropped the WHOLE state update (no env entries ->
+    // ParseStatePayload's ok=false discards cwd and env alike).
+    Fixture f;
+    const auto out = f.Run({{"command", "export PATH=/nonexistent-only && echo done"}});
+    CHECK_FALSE(out.result.is_error);
+    CHECK(out.result.content_text == "done\n");  // no "env: command not found" appended
+
+    // Read the persisted session state directly: a second Run() would itself
+    // need something on the now-PATH=/nonexistent-only session to resolve.
+    const auto env = f.store.Snapshot("s1", f.dir.path()).env;
+    const auto it = env.find("PATH");
+    REQUIRE(it != env.end());
+    CHECK(it->second == "/nonexistent-only");
+}
+
 // --- background execution ----------------------------------------------------------------
 
 TEST_CASE("detach acks immediately and runs as a background task",
@@ -735,6 +868,26 @@ TEST_CASE("a command that leaves a pipe-holding child returns promptly with the 
     CHECK(out.result.content_text.find("detach=true") != std::string::npos);
     CHECK(out.result.display.at("detached_grandchild") == true);
     CHECK(out.result.display.at("exit_code") == 0);
+}
+
+TEST_CASE("a fully-redirected daemon is not killed by the state channel it never knew about",
+          "[tools_bash][background][invariant]") {
+    // Regression: the documented escape hatch ("fully redirect the child's
+    // stdio: cmd > log 2>&1 < /dev/null &") covers only fds 0-2, but the
+    // state trailer's fd 9 is inherited by the daemon too and the drain
+    // treated IT as evidence of a live grandchild just the same, so
+    // following the teaching note's own advice still got the group killed
+    // ~2s later -- the note telling the model to do what it had just done.
+    Fixture f;
+    f.settings.timeout_ms = 30000;
+
+    const auto out = f.Run({{"command", "sleep 5 > /dev/null 2>&1 < /dev/null &"}});
+
+    CHECK_FALSE(out.result.is_error);
+    CHECK(out.elapsed_ms < 5000);  // does not wait out the idle window either
+    CHECK(out.result.display.at("exit_code") == 0);
+    CHECK(out.result.display.value("detached_grandchild", false) == false);
+    CHECK(out.result.content_text.find("holding the output pipe") == std::string::npos);
 }
 
 TEST_CASE("a quiet but live command is not killed by the idle rule",

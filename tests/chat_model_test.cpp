@@ -621,3 +621,54 @@ TEST_CASE("a page that applied during a successful refresh marks the applied ver
     REQUIRE(state.rendered_version.has_value());
     CHECK(*state.rendered_version == 5);
 }
+
+TEST_CASE("compactions interleave right after the message they ran at", "[chat_model][compaction]") {
+    // Descending, as GetMessages returns it.
+    const std::vector<v1::StoredMessage> page = {
+        MakeMessage(v1::ROLE_ASSISTANT, {TextBlock("second answer")}, 3),
+        MakeMessage(v1::ROLE_USER, {TextBlock("second question")}, 2),
+        MakeMessage(v1::ROLE_ASSISTANT, {TextBlock("first answer")}, 1),
+        MakeMessage(v1::ROLE_USER, {TextBlock("first question")}, 0),
+    };
+    v1::CompactionEvent compaction;
+    compaction.set_at_seq(1);
+    compaction.set_boundary_seq(0);
+    compaction.set_folded_messages(1);
+    compaction.set_tokens_before(712'000);
+    compaction.set_tokens_after(168'000);
+    compaction.set_summary("## Current task\nthe task");
+    compaction.set_trigger("auto");
+    v1::CompactionEvent elsewhere;   // ran at a seq this page does not hold
+    elsewhere.set_at_seq(40);
+    const std::vector<v1::CompactionEvent> compactions = {compaction, elsewhere};
+
+    const auto rows = client::ChatRowsFromMessages(page, &compactions);
+    REQUIRE(rows.size() == 5);
+    CHECK(rows[1].kind == ChatRowKind::AgentMarkdown);
+    CHECK(rows[2].kind == ChatRowKind::Compaction);
+    CHECK(rows[2].seq == 1);
+    CHECK(rows[2].text == "## Current task\nthe task");
+    CHECK(rows[3].kind == ChatRowKind::UserText);
+    CHECK(client::CollapsedByDefault(rows[2]));
+    CHECK(client::CompactionHeadline(rows[2]) ==
+          "context compacted (auto): 1 messages summarized, ~712k -> ~168k tokens");
+
+    // Without compactions, the same page is untouched.
+    CHECK(client::ChatRowsFromMessages(page).size() == 4);
+}
+
+TEST_CASE("a skipped compaction renders as a notice with its warning", "[chat_model][compaction]") {
+    const std::vector<v1::StoredMessage> page = {MakeMessage(v1::ROLE_USER, {TextBlock("q")}, 0)};
+    v1::CompactionEvent notice;
+    notice.set_at_seq(0);
+    notice.set_trigger("auto");
+    notice.set_skipped(true);
+    notice.set_warning("auto-compaction stopped: ...");
+    const std::vector<v1::CompactionEvent> compactions = {notice};
+
+    const auto rows = client::ChatRowsFromMessages(page, &compactions);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[1].compaction_skipped);
+    CHECK(rows[1].compaction_warning == "auto-compaction stopped: ...");
+    CHECK(client::CompactionHeadline(rows[1]) == "compaction skipped (auto)");
+}

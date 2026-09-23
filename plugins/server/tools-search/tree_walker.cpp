@@ -15,6 +15,17 @@ bool DeadlineExceeded(const WalkOptions& options,
     return std::chrono::steady_clock::now() - start >= options.timeout;
 }
 
+// Component-wise, not a string prefix: "/foo/ba" is not an ancestor of
+// "/foo/bar" even though the raw string is a prefix of it.
+bool IsAncestorOf(const std::filesystem::path& ancestor, const std::filesystem::path& descendant) {
+    auto a = ancestor.begin();
+    auto d = descendant.begin();
+    for (; a != ancestor.end(); ++a, ++d) {
+        if (d == descendant.end() || *d != *a) return false;
+    }
+    return true;
+}
+
 // The walk's allocation ceilings (disclosed via WalkStats, never silent):
 constexpr int kMaxWalkDepth = 1024;
 constexpr int kMaxDirEntries = 10000;
@@ -274,6 +285,27 @@ WalkStats WalkTree(const std::filesystem::path& root, const WalkOptions& options
     }
 
     if (status.type() == std::filesystem::file_type::directory) {
+        if (!options.boundary_root.empty()) {
+            std::error_code canon_ec;
+            const auto boundary = std::filesystem::weakly_canonical(options.boundary_root, canon_ec);
+            const auto walk_root =
+                canon_ec ? root : std::filesystem::weakly_canonical(root, canon_ec);
+            if (!canon_ec && boundary != walk_root && IsAncestorOf(boundary, walk_root)) {
+                // Farthest first, nearest last: IsIgnored gives a LATER
+                // entry precedence over an earlier one, so this ordering
+                // makes a closer ancestor's rules override a farther one's,
+                // and the walk root's own .gitignore (pushed next, by the
+                // normal Walk flow below) override all of them -- git's
+                // closer-wins precedence, preserved.
+                std::vector<std::filesystem::path> ancestors;
+                for (auto dir = walk_root.parent_path();; dir = dir.parent_path()) {
+                    ancestors.push_back(dir);
+                    if (dir == boundary) break;
+                }
+                std::reverse(ancestors.begin(), ancestors.end());
+                for (const auto& dir : ancestors) state.PushGitignore(dir, "");
+            }
+        }
         // The root's .gitignore is pushed by MakeFrame (via PushGitignore) at
         // depth 0, along with every other directory's -- pushing it here as
         // well recorded the same file twice, and the depth-1 duplicate made

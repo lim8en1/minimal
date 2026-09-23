@@ -1,5 +1,6 @@
 #include "checklist_poller.hpp"
 
+#include <thread>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -59,6 +60,11 @@ bool ChecklistPoller::AllEverFetched() const {
     return all_ever_fetched_;
 }
 
+ChecklistPoller::AllSnapshot ChecklistPoller::AllSnapshotOf() const {
+    std::lock_guard<std::mutex> lock(mtx_);
+    return AllSnapshot{all_items_, all_valid_, all_ever_fetched_};
+}
+
 void ChecklistPoller::RunLoop() {
     std::unique_lock<std::mutex> lock(mtx_);
     int get_failures = 0;
@@ -79,8 +85,16 @@ void ChecklistPoller::RunLoop() {
         lock.unlock();
 
         if (!pending.session_id.empty() && api_ != nullptr) {
-            // get(focused): the focused surface AND the segment's text.
+            // get(focused) and list run CONCURRENTLY, not one after the
+            // other: they feed independent surfaces (the focused panel/
+            // segment vs. the summary panel), so a slow list call used to
+            // add its own latency on top of get's before the focused
+            // surface's own result -- freshly available sooner -- could be
+            // applied. list runs on its own thread; get runs here.
+            std::optional<std::map<std::string, std::vector<Item>>> all;
+            std::thread list_thread([&] { all = FetchList(); });
             auto items = FetchGet(pending.session_id);
+            list_thread.join();
             {
                 std::lock_guard<std::mutex> apply(mtx_);
                 // Only apply if still the same focus -- a slow call
@@ -112,9 +126,8 @@ void ChecklistPoller::RunLoop() {
                 }
             }
 
-            // list: the summary surface. Independent of the get above -- one
+            // list: the summary surface, fetched concurrently above. One
             // failing must not starve the other's cache.
-            auto all = FetchList();
             {
                 std::lock_guard<std::mutex> apply(mtx_);
                 if (all.has_value()) {

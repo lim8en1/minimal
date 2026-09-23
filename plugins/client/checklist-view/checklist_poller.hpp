@@ -70,6 +70,18 @@ public:
     bool AllValid() const;
     bool AllEverFetched() const;
 
+    // A consistent snapshot of the summary surface's data, the AllItems()/
+    // AllValid()/AllEverFetched() trio mirroring Focused()'s single-lock
+    // shape: RunLoop writes all three fields together under one lock, so
+    // three independently-locked reads can pair a stale `items` with a fresh
+    // `valid`/`ever_fetched` (or vice versa) if a poll lands between them.
+    struct AllSnapshot {
+        std::map<std::string, std::vector<Item>> items;
+        bool valid = false;
+        bool ever_fetched = false;
+    };
+    AllSnapshot AllSnapshotOf() const;
+
 private:
     void SwitchFocusLocked(const std::string& session_id);
     void RunLoop();

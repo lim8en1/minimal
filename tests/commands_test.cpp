@@ -729,7 +729,17 @@ TEST_CASE("/connect stores a credential in the data dir's auth.json and refuses 
 
     // Usage and validation: no silent junk in the credentials file.
     CHECK(fixture.Run("connect", {"local"}).status == Status::kError);
+    // "/" is the ONLY disallowed character (docs/CONFIGURATION.md: provider
+    // names are addressed as "<provider>/<model>"); "../evil" is refused for
+    // its "/", not because "." or "-" are themselves disallowed.
     CHECK(fixture.Run("connect", {"../evil", "key"}).status == Status::kError);
+
+    // An underscore is a valid provider name per that same contract -- the
+    // old allowlist (alnum, "-", ".") rejected it despite providers.json
+    // itself allowing any non-"/" key.
+    CHECK(fixture.Run("connect", {"my_provider", "sk-u"}).status == Status::kOk);
+    stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK(stored.at("my_provider").at("key") == "sk-u");
 }
 
 TEST_CASE("/connect writes auth.json 0600, never group/other-readable",
@@ -921,4 +931,24 @@ TEST_CASE("/think refuses an undeclared variant by name, listing what exists",
     const auto none = fixture.Run("think");
     REQUIRE(none.status == Status::kOk);
     CHECK(none.message.find("declares no reasoning variants") != std::string::npos);
+}
+
+TEST_CASE("/think off switches to a declared variant literally named \"off\" instead of "
+         "resetting to the base model",
+         "[commands][think]") {
+    // The object form of "variants" accepts any non-empty, "@"-free name
+    // with an explicit parameter body (unlike the array form, which is
+    // restricted to the known effort ladder) -- "off" is unusual but valid.
+    // The hardcoded "off means reset" shortcut must not shadow a declared
+    // variant actually named that.
+    CommandFixture fixture;
+    fixture.WriteProviders(
+        R"({"providers":{"main":{"backend":"openai","url":"http://x/v1",
+             "models":{"fast":{"context_window_tokens":1000,
+                               "variants":{"off":{"parameters":{"x":1}}}}}}}})");
+    fixture.ReloadPresets();
+
+    const auto switched = fixture.Run("think", {"off"});
+    REQUIRE(switched.status == Status::kOk);
+    CHECK(fixture.preset().model_ref.str() == "main/fast@off");
 }

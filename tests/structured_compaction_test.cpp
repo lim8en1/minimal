@@ -39,6 +39,7 @@ agent::CompactionRequest Params(std::int64_t last_reported = 0) {
     agent::CompactionRequest params;
     params.model_name = "model-x";
     params.compression_prompt = "THE PROMPT";
+    params.structured_prompt = "STRUCTURED PROMPT";
     params.last_reported_input_tokens = last_reported;
     return params;
 }
@@ -132,8 +133,8 @@ TEST_CASE("RenderStructuredSummary: a missing current_task renders the visible m
     CHECK(rendered.find("## Done") != std::string::npos);
 }
 
-TEST_CASE("compact_messages_structured sends the preset prompt as system and the schema as a "
-          "forced tool",
+TEST_CASE("compact_messages_structured sends the session prefix plus an instruction, with "
+          "record_summary offered but not forced",
           "[structured]") {
     FakeLlmProvider provider;
     provider.PushResponse(
@@ -141,31 +142,82 @@ TEST_CASE("compact_messages_structured sends the preset prompt as system and the
 
     auto params = Params(1234);
     params.session_id = "s1";
+    params.system = "SESSION SYSTEM";
+    params.tools = {llm::ToolDefinition{"read", "reads", nlohmann::json{{"type", "object"}}}};
     const auto result = compact_messages_structured(MixedHistory(), provider, params);
     REQUIRE(result.has_value());
     CHECK(result->context_tokens_before == 1234);
 
     const auto& request = SingleRequest(provider);
     REQUIRE(request.system.has_value());
-    CHECK(*request.system == "THE PROMPT");
-    REQUIRE(request.tools.size() == 1);
-    CHECK(request.tools.front().name == "record_summary");
-    CHECK(request.tools.front().input_schema.is_object());
-    CHECK(request.tools.front().input_schema["properties"].contains("current_task"));
-    // The forced call: a Specific tool_choice, never a prose request.
-    CHECK(request.tool_choice.kind == llm::ToolChoiceKind::Specific);
-    CHECK(request.tool_choice.tool_name == "record_summary");
+    CHECK(*request.system == "SESSION SYSTEM");
+    // The session's tools plus record_summary, sorted -- a loop configured with
+    // offer_summary_tool already carries it and the array is left untouched.
+    REQUIRE(request.tools.size() == 2);
+    CHECK(request.tools[0].name == "read");
+    CHECK(request.tools[1].name == "record_summary");
+    CHECK(request.tools[1].strict);
+    CHECK(request.tools[1].input_schema["properties"].contains("current_task"));
+    CHECK(request.tools[1].input_schema["required"].size() == 7);
+    // Offered, never forced: a forced tool_choice invalidates the messages
+    // cache and is rejected outright by newer Claude models.
+    CHECK(request.tool_choice.kind == llm::ToolChoiceKind::Auto);
     // Same sampling/routing passthrough contract as compact_messages.
     CHECK(request.model == "model-x");
     CHECK(request.session_id == "s1");
     CHECK(request.stream);
 
-    // Raw pass-through of the compacted range, tool blocks included.
+    // Raw pass-through of the WHOLE history, then one instruction message
+    // naming the tool.
     const auto expected = MixedHistory();
-    REQUIRE(request.messages.size() == expected.size());
+    REQUIRE(request.messages.size() == expected.size() + 1);
     const auto* use = std::get_if<llm::ToolUseBlock>(&request.messages[1].content.front());
     REQUIRE(use != nullptr);
     CHECK(use->id == "tu1");
+    // prompts/compression-structured.md, verbatim.
+    const auto& instruction = std::get<llm::TextBlock>(request.messages.back().content.front()).text;
+    CHECK(instruction == "STRUCTURED PROMPT");
+}
+
+TEST_CASE("compact_messages_structured without a structured prompt runs as free text",
+          "[structured]") {
+    FakeLlmProvider provider;
+    provider.PushResponse(TextResponse("plain summary"));
+    auto params = Params(1);
+    params.structured_prompt = "";
+    const auto result = compact_messages_structured(MixedHistory(), provider, params);
+    REQUIRE(result.has_value());
+    const auto& request = SingleRequest(provider);
+    CHECK(request.tools.empty());
+    CHECK(std::get<llm::TextBlock>(request.messages.back().content.front()).text == "THE PROMPT");
+}
+
+TEST_CASE("compact_messages_structured leaves an already-offered record_summary alone",
+          "[structured]") {
+    FakeLlmProvider provider;
+    provider.PushResponse(SummaryResponse(nlohmann::json{{"current_task", "t"}}));
+    auto params = Params(1);
+    params.tools = {llm::ToolDefinition{"a", "", nlohmann::json::object()},
+                    MakeRecordSummaryToolDefinition()};
+    REQUIRE(compact_messages_structured(MixedHistory(), provider, params).has_value());
+    const auto& request = SingleRequest(provider);
+    REQUIRE(request.tools.size() == 2);
+    CHECK(request.tools[1].name == "record_summary");
+}
+
+TEST_CASE("compact_messages_structured runs a custom prompt as free text", "[structured]") {
+    FakeLlmProvider provider;
+    provider.PushResponse(TextResponse("custom-shaped summary"));
+    auto params = Params(1);
+    params.custom_prompt = true;
+    const auto result = compact_messages_structured(MixedHistory(), provider, params);
+    REQUIRE(result.has_value());
+    const auto& text = std::get<llm::TextBlock>(result->summary_message.content.front()).text;
+    CHECK(text.ends_with("custom-shaped summary"));
+    const auto& request = SingleRequest(provider);
+    CHECK(request.tools.empty());
+    const auto& instruction = std::get<llm::TextBlock>(request.messages.back().content.front()).text;
+    CHECK(instruction.starts_with("THE PROMPT"));
 }
 
 TEST_CASE("compact_messages_structured parses the tool call into the summary head",
@@ -273,7 +325,7 @@ TEST_CASE("compact_messages_structured refuses a truncated summary before parsin
     CHECK_FALSE(compact_messages_structured(MixedHistory(), provider, Params(10)).has_value());
 }
 
-TEST_CASE("compact_messages_structured: a provider that ignored tool_choice degrades to the "
+TEST_CASE("compact_messages_structured: a model that did not call the tool degrades to the "
           "free-text head",
           "[structured][invariant]") {
     // A non-conforming backend must degrade to yesterday's behavior, not
@@ -302,10 +354,12 @@ TEST_CASE("compact_messages_structured: no tool call and no text is refused",
 }
 
 TEST_CASE("compact_messages_structured shares compact_messages' refusal chain", "[structured]") {
-    // Blank prompt: skip the provider entirely.
+    // Blank custom prompt: skip the provider entirely. (The default prompt is
+    // not used by the structured path, so only a custom one can be blank.)
     FakeLlmProvider blank;
     auto blank_params = Params(10);
     blank_params.compression_prompt = "  \n\t";
+    blank_params.custom_prompt = true;
     CHECK_FALSE(compact_messages_structured(MixedHistory(), blank, blank_params).has_value());
     CHECK(blank.call_count() == 0);
 

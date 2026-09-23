@@ -31,9 +31,16 @@ struct MemorySettings {
     bool auto_compact = true;
     CompactionTriggerSettings context_compaction_trigger;
     std::int64_t compaction_keep_recent_tokens = 0;
+    // Share of the working history (by estimated tokens, oldest first) that a
+    // compaction REPLACES with the summary; the rest stays verbatim after it.
+    // The summarizer itself always reads the whole history. 1..100; 100
+    // replaces everything but the newest message (always kept whole, and the
+    // cut never splits a tool call from its result). Ignored when
+    // compaction_keep_recent_tokens is set (an absolute budget wins).
+    int compaction_replace_percent = 80;
     std::int64_t scrollback_page_size = 0;
     // S4: selects a CompactionStrategyRegistry entry by name. "summarize"
-    // (free-text summary head) and "structured" (a forced record_summary
+    // (free-text summary head) and "structured" (a strict record_summary
     // tool call parsed into typed sections) are core's own built-ins
     // (registered in main.cpp, not plugins, so this never resolves to nothing
     // on a bundled-only install); "structured" is the default. A name naming

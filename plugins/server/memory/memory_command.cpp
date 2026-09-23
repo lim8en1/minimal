@@ -19,9 +19,11 @@ public:
 
     std::string_view Name() const override { return "memory"; }
     std::string_view Summary() const override { return "memory store status (digest)"; }
-    std::string_view Usage() const override { return "/memory [purge <source path>]"; }
+    std::string_view Usage() const override {
+        return "/memory [purge <source path>] [reindex]";
+    }
     bool RequiresSession() const override { return false; }
-    bool ReadOnly() const override { return false; }  // purge writes
+    bool ReadOnly() const override { return false; }  // purge/reindex write
 
     commands::CommandResult Execute(commands::CommandContext& context,
                                     const commands::CommandArgs& args) override {
@@ -31,16 +33,43 @@ public:
                 return commands::CommandResult::Error("usage: /memory purge <source path>");
             }
             const std::string ref = args.positional[1];
-            const int removed =
-                rt.store->PurgeByOriginRef(ref, MemoryStore::kScopeGlobal, "") +
-                rt.store->PurgeByOriginRef(ref, MemoryStore::kScopeProject, "");
+            // Project-scope rows store the session's worktree root (see
+            // StorePath), never "" -- purging with an empty project_root
+            // matched zero rows and silently reported success. Without a
+            // bound session there is no root to purge project-scope entries
+            // under, so only the global scope is covered (same degrade the
+            // digest below already has).
+            int removed = rt.store->PurgeByOriginRef(ref, MemoryStore::kScopeGlobal, "");
+            if (context.has_session()) {
+                const std::string project_root =
+                    WorktreeRoot(context.session().project_root()).string();
+                removed += rt.store->PurgeByOriginRef(ref, MemoryStore::kScopeProject, project_root);
+            }
             return commands::CommandResult::Ok("purged " + std::to_string(removed) +
                                                " entries from " + ref);
         }
+        if (!args.positional.empty() && args.positional.front() == "reindex") {
+            // The escape hatch MarkEmbedFailed's own comment promises: a row
+            // that failed to embed (a transient backend outage, one
+            // unserializable text) sits at embed_status=2 until either the
+            // embedding signature changes or this runs -- there was no path
+            // to the latter before this command existed, so a single bad
+            // batch during an outage excluded those rows from semantic
+            // search permanently.
+            const int reset = rt.store->ResetFailedEmbeddings();
+            return commands::CommandResult::Ok(
+                "reindex: " + std::to_string(reset) + " failed row(s) queued for re-embedding");
+        }
 
+        // "" without a bound session (an operator may run /memory
+        // sessionless): DigestInfo then reports zero project-scope entries
+        // rather than every project's summed together.
+        const std::string digest_project_root =
+            context.has_session() ? WorktreeRoot(context.session().project_root()).string() : "";
         const Digest digest = rt.store->DigestInfo(
             rt.embedder ? rt.embedder->Describe() : "lexical only",
-            rt.enricher->enabled() ? "on (" + rt.settings.summarizer_model + ")" : "off");
+            rt.enricher->enabled() ? "on (" + rt.settings.summarizer_model + ")" : "off",
+            digest_project_root);
 
         std::ostringstream out;
         out << "memory: ";

@@ -106,6 +106,14 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
             // -> text -> reasoning must stay three blocks in arrival order,
             // not fuse into one.
             if (blocks_.empty() || blocks_.back().kind != Block::Kind::Thinking) {
+                // Same DoS class kMaxBlocks exists to close for tool_calls: a
+                // backend alternating 1-byte content/reasoning_content deltas
+                // flips Block::Kind every frame, opening a new Block each
+                // time with no delta content large enough to trip
+                // Accumulate()'s 64 MiB budget on its own.
+                if (blocks_.size() >= kMaxBlocks) {
+                    throw OpenAiParseError("stream opened an implausible number of content blocks");
+                }
                 blocks_.push_back(Block{Block::Kind::Thinking, {}, {}, {}, {}, {}, false});
             }
             Accumulate(accumulated_bytes_, reasoning.size());
@@ -126,6 +134,10 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
                 // re-emitted a TextDelta for a block the client had already seen
                 // closed. The unified model carries multi-block content natively.
                 if (!text_block_index_ || blocks_.back().kind != Block::Kind::Text) {
+                    if (blocks_.size() >= kMaxBlocks) {
+                        throw OpenAiParseError(
+                            "stream opened an implausible number of content blocks");
+                    }
                     text_block_index_ = blocks_.size();
                     blocks_.push_back(Block{Block::Kind::Text, {}, {}, {}, {}, {}, false});
                 }

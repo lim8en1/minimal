@@ -95,6 +95,13 @@ TEST_CASE("glob translation: ** spans directories in its three placements",
     // Middle: the preceding slash was already emitted literally.
     CHECK(Matches(*tools_search::GlobToRegex("a/**/c", GlobFlags::kNone), "a/c"));
     CHECK(Matches(*tools_search::GlobToRegex("a/**/c", GlobFlags::kNone), "a/b/c"));
+    // Regression: a BARE "**" (the whole pattern, no leading/trailing `/` to
+    // land it in one of the three placements above) fell through to the
+    // "consecutive asterisks collapse to one" rule and matched only a single
+    // path segment, not the whole tree the way ripgrep/VS Code treat it.
+    CHECK(Matches(*tools_search::GlobToRegex("**", GlobFlags::kNone), "b"));
+    CHECK(Matches(*tools_search::GlobToRegex("**", GlobFlags::kNone), "x/b"));
+    CHECK(Matches(*tools_search::GlobToRegex("**", GlobFlags::kNone), "x/y/b"));
 }
 
 TEST_CASE("glob translation: braces alternate only when asked",
@@ -164,6 +171,24 @@ TEST_CASE("gitignore: anchoring, dir-only and comments", "[tools_search][gitigno
     CHECK_FALSE(set.Match("other/pair", false).has_value());   // interior slash anchors
     CHECK(set.Match("#literal", false) == tools_search::GitignoreSet::Verdict::kIgnore);
     CHECK(set.Match("!kept", false) == tools_search::GitignoreSet::Verdict::kIgnore);
+}
+
+TEST_CASE("gitignore: an escaped glob metacharacter stays literal, not double-processed",
+          "[tools_search][gitignore]") {
+    // Regression: the pattern was run through a hand-rolled Unescape() AND
+    // THEN GlobToRegex (which already un-escapes as part of translating),
+    // double-processing every escape. `\*.log` (a file literally named
+    // "*.log") became the LIVE glob `*.log` and ignored every .log file
+    // instead of matching only the one literal name.
+    const auto set = tools_search::GitignoreSet::Parse("\\*.log\n");
+    CHECK(set.Match("*.log", false) == tools_search::GitignoreSet::Verdict::kIgnore);
+    CHECK_FALSE(set.Match("a.log", false).has_value());  // NOT a live wildcard anymore
+
+    // `foo\[1\]` (a literal name containing brackets) must not become the
+    // character class `foo[1]` (which would match "foo1").
+    const auto brackets = tools_search::GitignoreSet::Parse("foo\\[1\\]\n");
+    CHECK(brackets.Match("foo[1]", false) == tools_search::GitignoreSet::Verdict::kIgnore);
+    CHECK_FALSE(brackets.Match("foo1", false).has_value());
 }
 
 TEST_CASE("gitignore: the last matching rule in a set decides (negation)",
@@ -353,6 +378,69 @@ TEST_CASE("glob: head_limit truncates with a footer stating the total",
     CHECK(result.content_text.find("(10 total; showing newest 3)") != std::string::npos);
 }
 
+TEST_CASE("glob: a result-cap stop is reported, never called a plain total",
+          "[tools_search][glob_tool]") {
+    // Regression: when the walker stopped at glob_max_results, stats.limit_stopped
+    // went unreported and the footer called the collected (capped) count a
+    // "total" and its head the "newest" -- both overstate what was actually
+    // seen (a name-sorted-DFS prefix, not the real total sorted by time).
+    Fixture f;
+    for (int i = 0; i < 10; ++i) f.Write("f" + std::to_string(i) + ".txt", "x");
+    f.settings.glob_max_results = 3;
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute({{"pattern", "*.txt"}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.find(" total;") == std::string::npos);
+    CHECK(result.content_text.find("newest") == std::string::npos);
+    CHECK(result.content_text.find("stopped early: result cap reached") != std::string::npos);
+
+    // Even with head_limit large enough to show every collected match (no
+    // truncation from THAT budget), the cap notice must still appear -- the
+    // walk itself stopped early, which head_limit alone cannot see.
+    const auto shown_all =
+        tool->execute({{"pattern", "*.txt"}, {"head_limit", 1000}}, ctx);
+    CHECK(shown_all.content_text.find("stopped early: result cap reached") != std::string::npos);
+}
+
+TEST_CASE("glob: an empty result caused by cancellation says so, not a flat negative",
+          "[tools_search][glob_tool]") {
+    // Regression: `if (matches.empty()) return {false, "No files found"}` ran
+    // BEFORE checking the walker's own stats, so a cancelled/timed-out walk
+    // with nothing collected yet reported a confident "No files found"
+    // instead of admitting it never finished looking.
+    Fixture f;
+    for (int i = 0; i < 50; ++i) f.Write("f" + std::to_string(i) + ".txt", "x");
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+    ctx.is_cancelled = [] { return true; };
+
+    const auto result = tool->execute({{"pattern", "*.txt"}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.find("No files found") != std::string::npos);
+    CHECK(result.content_text.find("stopped early: cancelled") != std::string::npos);
+}
+
+TEST_CASE("glob/grep: a subdirectory search still honors the project root's .gitignore",
+          "[tools_search][glob_tool][gitignore]") {
+    // Regression: WalkTree started with an EMPTY gitignore stack at whatever
+    // root it was given, so a search scoped to a subdirectory never loaded
+    // ancestor .gitignore files -- the project root's `build/` (unanchored,
+    // matches at any depth in real git) excluded nothing inside `src/`.
+    Fixture f;
+    f.WriteIgnore("", "build/\n");
+    f.Write("src/keep.txt", "x");
+    f.Write("src/build/drop.txt", "x");
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute({{"pattern", "**/*.txt"}, {"path", "src"}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.find("keep.txt") != std::string::npos);
+    CHECK(result.content_text.find("drop.txt") == std::string::npos);
+}
+
 TEST_CASE("glob: invalid pattern is an error, not a silent empty result",
           "[tools_search][glob_tool]") {
     Fixture f;
@@ -481,6 +569,67 @@ TEST_CASE("grep: content mode separates blocks that have a gap", "[tools_search]
     CHECK(lines[2] == "--");
     CHECK(lines[3] == "code.py-5:");
     CHECK(lines[4] == "code.py:6:match");
+}
+
+TEST_CASE("grep: a block bigger than head_limit is still shown, not dropped whole",
+          "[tools_search][grep_tool]") {
+    // Regression: a merged block larger than the remaining head_limit was
+    // dropped WHOLE and stopped the walk -- with nothing else emitted, the
+    // result read as "no matches" on a file that had real ones, with no way
+    // to ever page past it (the offset=N hint pointed at the same block).
+    Fixture f;
+    f.Write("code.py", "match\nmatch\nmatch\nmatch\nmatch\n");
+    auto tool = tools_search::MakeGrepTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute(
+        {{"pattern", "match"}, {"output_mode", "content"}, {"head_limit", 2}}, ctx);
+    CHECK_FALSE(result.is_error);
+    const auto lines = f.Lines(result);
+    // All 5 matches merge into one block (no gaps, no context); forced
+    // through whole despite head_limit=2, rather than emitting zero.
+    int match_lines = 0;
+    for (const auto& line : lines) {
+        if (line.find(":match") != std::string::npos) ++match_lines;
+    }
+    CHECK(match_lines == 5);
+}
+
+TEST_CASE("grep: an offset landing inside a block does not double-drop a later file",
+          "[tools_search][grep_tool]") {
+    // Regression: a block straddling the offset boundary is rendered WHOLE
+    // by design (a comment right above calls out that partial blocks would
+    // strand context) -- offset only trims the BUDGET count charged against
+    // it (shown_matches), not which lines print. The bug was that this
+    // partial consumption was never added to offset_consumed, so a LATER
+    // file's fresh `remaining_offset = offset - offset_consumed` came out
+    // wrong: it still thought 2 more needed skipping, and since b.py's
+    // block (1 match) is entirely behind that phantom remainder, b.py's
+    // real match was skipped and never rendered at all.
+    Fixture f;
+    // File A: one block of 3 consecutive matches -- already past offset=2
+    // once rendered. File B: one match that must not be swallowed by it.
+    f.Write("a.py", "match\nmatch\nmatch\n");
+    f.Write("b.py", "match\n");
+    auto tool = tools_search::MakeGrepTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute(
+        {{"pattern", "match"}, {"output_mode", "content"}, {"offset", 2}}, ctx);
+    CHECK_FALSE(result.is_error);
+    const auto lines = f.Lines(result);
+    int match_lines = 0;
+    for (const auto& line : lines) {
+        if (line.find(":match") != std::string::npos) ++match_lines;
+    }
+    // a.py's whole block (3) plus b.py's match (1). Before the fix, b.py's
+    // block was wrongly skipped entirely, leaving only 3.
+    CHECK(match_lines == 4);
+    bool has_b = false;
+    for (const auto& line : lines) {
+        if (line.rfind("b.py:", 0) == 0) has_b = true;
+    }
+    CHECK(has_b);
 }
 
 TEST_CASE("grep: count mode", "[tools_search][grep_tool]") {
@@ -661,6 +810,13 @@ TEST_CASE("search settings: absent or invalid values keep defaults",
     CHECK(custom.grep_timeout_ms == 5000);
     CHECK(custom.grep_max_results == 1000);  // non-positive falls back
     CHECK(custom.glob_default_limit == 42);
+
+    // Regression: is_number() accepted a float and get<T>() silently
+    // truncated it (99.9 -> 99) instead of falling back to the default
+    // (250) -- a distinct value from the truncation proves which happened.
+    const auto fractional = tools_search::ParseSearchSettings(
+        nlohmann::json{{"grep", {{"default_head_limit", 99.9}}}});
+    CHECK(fractional.grep_default_head_limit == 250);
 }
 
 // --- executor integration ------------------------------------------------------

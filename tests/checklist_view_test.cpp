@@ -72,11 +72,22 @@ public:
 
     std::optional<std::string> PluginCall(const std::string& plugin, const std::string& method,
                                           const std::string& payload) override {
+        std::chrono::milliseconds delay{};
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            ++calls;
+            last_plugin = plugin;
+            last_method = method;
+            last_payload = payload;
+            if (method == "get") delay = get_delay;
+            if (method == "list") delay = list_delay;
+        }
+        // Outside the lock: a delayed call must not block the OTHER method's
+        // concurrent call (or the test's own SetResponses/SetFail) for its
+        // own delay's duration -- the exact concurrency this stub exists to
+        // let a test observe.
+        if (delay.count() > 0) std::this_thread::sleep_for(delay);
         std::lock_guard<std::mutex> lock(mtx_);
-        ++calls;
-        last_plugin = plugin;
-        last_method = method;
-        last_payload = payload;
         if (fail) return std::nullopt;
         if (method == "get") return get_response;
         if (method == "list") return list_response;
@@ -107,6 +118,11 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
         fail = value;
     }
+    void SetDelays(std::chrono::milliseconds get, std::chrono::milliseconds list) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        get_delay = get;
+        list_delay = list;
+    }
     int Calls() const {
         std::lock_guard<std::mutex> lock(mtx_);
         return calls;
@@ -126,6 +142,8 @@ private:
     std::string last_plugin;
     std::string last_method;
     std::string last_payload;
+    std::chrono::milliseconds get_delay{};
+    std::chrono::milliseconds list_delay{};
 };
 
 class StubFocusProvider final : public plugins::FocusProvider {
@@ -267,6 +285,68 @@ TEST_CASE("a fetch failure marks the snapshot stale without losing the cache",
     // marker, never blanks it.
     CHECK(poller.AllItems().size() == 2);
     CHECK(poller.Focused().items.size() == 3);
+}
+
+TEST_CASE("get and list are fetched concurrently each poll iteration, not one after the "
+         "other",
+         "[checklist_view][poller]") {
+    // A slow list call used to add its OWN latency on top of get's before
+    // the focused surface's result -- ready sooner -- could be applied.
+    // Both loopback-style delays here are well above the poll cadence so a
+    // single concurrent iteration is what's actually being timed; a
+    // sequential implementation would take >=(get_delay + list_delay).
+    StubClientApi api;
+    StubFocusProvider focus;
+    focus.focused = "s1";
+    api.SetResponses(kGetTwo, kListTwo);
+    constexpr auto kDelay = 150ms;
+    api.SetDelays(kDelay, kDelay);
+
+    const auto start = std::chrono::steady_clock::now();
+    ChecklistPoller poller(&api, &focus, 5s);  // long cadence: time the FIRST iteration only
+    REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched && poller.AllEverFetched(); },
+                    1s));
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    // Well under the sequential sum (2x kDelay); comfortably above a single
+    // kDelay to tolerate scheduling jitter without a hair-trigger threshold.
+    CHECK(elapsed < kDelay * 3 / 2);
+}
+
+TEST_CASE("AllSnapshotOf returns one consistent triple, matching the individually-locked "
+         "accessors at every point in the poller's lifecycle",
+         "[checklist_view][poller]") {
+    // Not a race reproduction (RunLoop's write is already one locked
+    // assignment of all three fields; a torn read needs a poll to land
+    // between two SEPARATE reader locks, which is timing-dependent and not
+    // reliably forced from a test). Instead this pins the contract the
+    // combined accessor exists to guarantee: at any point where the
+    // individually-locked trio agrees, AllSnapshotOf's single locked read
+    // must report the exact same triple.
+    StubClientApi api;
+    StubFocusProvider focus;
+    focus.focused = "s1";
+    api.SetResponses(kGetTwo, kListTwo);
+
+    ChecklistPoller poller(&api, &focus, 20ms);
+    REQUIRE(WaitFor([&] { return poller.AllEverFetched(); }));
+    {
+        const auto snapshot = poller.AllSnapshotOf();
+        CHECK(snapshot.ever_fetched == poller.AllEverFetched());
+        CHECK(snapshot.valid == poller.AllValid());
+        CHECK(snapshot.items.size() == poller.AllItems().size());
+        CHECK(snapshot.valid);
+        CHECK(snapshot.items.size() == 2);
+    }
+
+    api.SetFail(true);
+    REQUIRE(WaitFor([&] { return !poller.AllValid(); }));
+    {
+        const auto snapshot = poller.AllSnapshotOf();
+        CHECK_FALSE(snapshot.valid);
+        CHECK(snapshot.ever_fetched);          // still true: a failure doesn't unset it
+        CHECK(snapshot.items.size() == 2);     // stale data survives, same as AllItems()
+    }
 }
 
 TEST_CASE("a null api or focus degrades to a quiet poller", "[checklist_view][poller]") {

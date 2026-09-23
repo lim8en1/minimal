@@ -1,5 +1,9 @@
 #include "search_settings.hpp"
 
+#include <limits>
+
+#include "minimal/config/parse_util.hpp"
+
 namespace minimal::tools_search {
 namespace {
 
@@ -7,9 +11,16 @@ template <typename T>
 T ValueOr(const nlohmann::json& parent, const char* section, const char* key, T fallback) {
     auto section_it = parent.find(section);
     if (section_it == parent.end() || !section_it->is_object()) return fallback;
-    auto key_it = section_it->find(key);
-    if (key_it == section_it->end() || !key_it->is_number()) return fallback;
-    return key_it->get<T>();
+    // config::ReadClampedInt64 rejects a non-integer number (`is_number()`
+    // accepted 250.9 and get<T>() silently truncated it) and clamps into T's
+    // own range, so a huge configured value narrows safely instead of
+    // wrapping. The floor of 0 is harmless here: every field below is a
+    // non-negative count/timeout, and PositiveOr's own `value > 0` check
+    // already rejected a negative the same way a not-positive one is.
+    const auto value =
+        config::ReadClampedInt64(*section_it, key, static_cast<std::int64_t>(fallback), 0,
+                                 static_cast<std::int64_t>(std::numeric_limits<T>::max()));
+    return static_cast<T>(value);
 }
 
 template <typename T>

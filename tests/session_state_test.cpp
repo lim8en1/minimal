@@ -2118,3 +2118,38 @@ TEST_CASE("convergence commands: the confirming metadata event silences the diff
     CHECK(snap.agent_preset == "alt");
     CHECK(snap.desired_agent_preset == "alt");   // sticky: the user's choice stands
 }
+
+TEST_CASE("compactions merge from pages and live events, once each",
+          "[session_state][compaction]") {
+    SessionState state("s-1");
+    v1::CompactionEvent live;
+    live.set_at_seq(19);
+    live.set_created_at_unix_ms(1000);
+    live.set_tokens_after(1234);
+    state.OnCompaction(live);
+
+    auto snap = state.TakeSnapshot();
+    REQUIRE(snap.compactions->size() == 1);
+    // The status bar's occupancy drops to the post-compaction size at once.
+    CHECK(snap.input_tokens == 1234);
+    CHECK(snap.cache_read_tokens == 0);
+
+    // The page that later carries the same record does not duplicate it.
+    auto page = PageOf({20, 19, 18}, /*has_more=*/true);
+    *page.add_compactions() = live;
+    v1::CompactionEvent older;
+    older.set_at_seq(18);
+    older.set_created_at_unix_ms(500);
+    *page.add_compactions() = older;
+    state.ApplyScrollbackPage(page);
+    snap = state.TakeSnapshot();
+    REQUIRE(snap.compactions->size() == 2);
+    CHECK((*snap.compactions)[0].at_seq() == 18);   // ascending by at_seq
+    CHECK((*snap.compactions)[1].at_seq() == 19);
+
+    // A rewind drops the compactions of the rewound-away rows.
+    state.OnSessionRewound(/*truncated_to_seq=*/19, /*active_last_seq=*/18);
+    snap = state.TakeSnapshot();
+    REQUIRE(snap.compactions->size() == 1);
+    CHECK((*snap.compactions)[0].at_seq() == 18);
+}

@@ -25,12 +25,19 @@ namespace minimal::checklist {
 
 class ChecklistRpcService : public plugins::PluginRpcHandler {
 public:
-    explicit ChecklistRpcService(std::shared_ptr<ChecklistStore> store);
+    // A REFERENCE to the caller's shared_ptr slot, not a copy: plugin.cpp's
+    // SharedStore() slot may still be null at THIS constructor's call time
+    // if the loader ever registered services before tools (its own comment
+    // says it doesn't today, but nothing enforces that order). Capturing by
+    // value froze that null forever, even after the tool later filled the
+    // slot in; binding to the slot itself means every Handle() call sees
+    // whatever SharedStore() currently holds.
+    explicit ChecklistRpcService(std::shared_ptr<ChecklistStore>& store);
 
     Reply Handle(const std::string& method, std::string_view json_payload) override;
 
 private:
-    std::shared_ptr<ChecklistStore> store_;
+    std::shared_ptr<ChecklistStore>& store_;
 };
 
 }  // namespace minimal::checklist

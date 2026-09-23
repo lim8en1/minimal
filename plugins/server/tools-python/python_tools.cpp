@@ -154,17 +154,26 @@ public:
             return Error("code exceeds " + std::to_string(kMaxCodeBytes) + " bytes; write it to a "
                          "file with the write tool and exec the file instead");
         }
+        // Both feed `now() + std::chrono::seconds(N)` downstream (here for
+        // `wait`, and in StampRunningLocked for max_runtime); converting
+        // std::chrono::seconds to a nanosecond-resolution duration multiplies
+        // by 1e9, which overflows a 64-bit rep above ~9.2e9 seconds (~292
+        // years) and wraps to a deadline in the PAST -- an interpreter is
+        // then SIGINT'd and hard-killed almost immediately despite the
+        // caller asking for MORE time, not a past one. Clamped well under
+        // that threshold and far past any real deadline.
+        constexpr std::int64_t kMaxSaneRuntimeSeconds = 100'000'000;  // ~3.2 years
         std::int64_t timeout = 0;
         if (auto it = input.find("timeout"); it != input.end() && it->is_number_integer() &&
                                                 it->get<std::int64_t>() >= 0) {
-            timeout = it->get<std::int64_t>();
+            timeout = std::min(it->get<std::int64_t>(), kMaxSaneRuntimeSeconds);
         }
         // The request's own kill deadline: absent -> the operator's setting
         // (default unlimited); explicit 0 = unlimited; negative is ignored.
         std::int64_t max_runtime = settings_.background_max_runtime;
         if (auto it = input.find("max_runtime"); it != input.end() && it->is_number_integer() &&
                                                        it->get<std::int64_t>() >= 0) {
-            max_runtime = it->get<std::int64_t>();
+            max_runtime = std::min(it->get<std::int64_t>(), kMaxSaneRuntimeSeconds);
         }
         const bool clean = BoolField(input, "clean");
 
@@ -295,14 +304,19 @@ private:
         } else if (plan.wants_venv) {
             // Bare interpreter, but the environment now wants the venv (the
             // preset declares packages, or .venv appeared). Materialize it for
-            // the restart; the RUNNING interpreter cannot use it.
-            std::string ensure_error;
-            EnsureEnvironment(plan, settings_, ctx.logger, &ensure_error);
-            if (!ensure_error.empty()) {
-                ctx.logger.warn("python[{}]: venv materialization failed: {}", ctx.session_id,
-                                ensure_error);
-            }
+            // the restart; the RUNNING interpreter cannot use it. Gated on
+            // NoticeShown (one-shot per interpreter): interp->config().venv
+            // stays empty until the restart actually happens, so without
+            // this gate EnsureEnvironment's full venv-creation-and-install
+            // ran again on EVERY python_exec call until clean=true, blocking
+            // the session worker under the project install mutex each time.
             if (interp->NoticeShown("bare_drift")) {
+                std::string ensure_error;
+                EnsureEnvironment(plan, settings_, ctx.logger, &ensure_error);
+                if (!ensure_error.empty()) {
+                    ctx.logger.warn("python[{}]: venv materialization failed: {}", ctx.session_id,
+                                    ensure_error);
+                }
                 text += "[this interpreter runs system python; the project venv now exists -- "
                         "python_exec(clean=true) to move into it]";
             }
@@ -364,8 +378,11 @@ public:
                 false, "interpreter killed; all state discarded. The next python_exec starts a "
                        "fresh interpreter in the current environment."};
         }
+        // Captured BEFORE SoftInterrupt, not after: see ProgressSnapshot's
+        // comment for why the order matters.
+        const auto baseline = interp->Progress();
         interp->SoftInterrupt();
-        switch (interp->WaitForInterrupt(std::chrono::seconds(settings_.grace_seconds),
+        switch (interp->WaitForInterrupt(baseline, std::chrono::seconds(settings_.grace_seconds),
                                          ctx.cancel_token)) {
             case Interpreter::InterruptOutcome::kResponse:
                 return ToolResult{false,

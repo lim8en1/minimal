@@ -33,15 +33,19 @@ std::string ModelsUrl(const std::string& base_url) {
 // trigger fire on every turn (occupancy < negative threshold is never true).
 std::optional<std::int64_t> ContextWindow(const json& entry) {
     static const char* kFields[] = {"context_length", "max_model_len"};
+    // is_number_integer(), not is_number(): a catalog entry reporting
+    // "context_length": 131072.9 is a misparse the same as a negative one,
+    // and is_number() let get<int64_t>() silently truncate it instead of
+    // rejecting it the way SafeTokenCount already does for usage fields.
     for (const char* field : kFields) {
-        if (entry.contains(field) && entry.at(field).is_number()) {
+        if (entry.contains(field) && entry.at(field).is_number_integer()) {
             const std::int64_t value = entry.at(field).get<std::int64_t>();
             if (value > 0) return value;
         }
     }
     if (entry.contains("meta") && entry.at("meta").is_object()) {
         const json& meta = entry.at("meta");
-        if (meta.contains("n_ctx_train") && meta.at("n_ctx_train").is_number()) {
+        if (meta.contains("n_ctx_train") && meta.at("n_ctx_train").is_number_integer()) {
             const std::int64_t value = meta.at("n_ctx_train").get<std::int64_t>();
             if (value > 0) return value;
         }
@@ -59,7 +63,7 @@ std::optional<int> MaxCompletionTokens(const json& entry) {
         return std::nullopt;
     }
     const json& top = entry.at("top_provider");
-    if (top.contains("max_completion_tokens") && top.at("max_completion_tokens").is_number()) {
+    if (top.contains("max_completion_tokens") && top.at("max_completion_tokens").is_number_integer()) {
         const std::int64_t value = top.at("max_completion_tokens").get<std::int64_t>();
         if (value > 0 && value <= std::numeric_limits<int>::max()) {
             return static_cast<int>(value);

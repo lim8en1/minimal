@@ -15,6 +15,10 @@ struct ToolDefinition {
     std::string name;
     std::string description;
     nlohmann::json input_schema;
+    // Grammar-constrained arguments (Anthropic `strict`, OpenAI
+    // `function.strict`). The schema must then be strict-compatible: every
+    // property required, additionalProperties false at every level.
+    bool strict = false;
 };
 
 enum class ToolChoiceKind { Auto, None, Required, Specific };

@@ -37,6 +37,20 @@ struct WalkOptions {
 
     // Polled per entry. Null is legal -- the walker never cancels then.
     std::function<bool()> is_cancelled;
+
+    // Empty (default): unchanged behavior -- only .gitignore files AT OR
+    // BELOW the walk root are honored. Set to the project root when the walk
+    // root is a SUBDIRECTORY of it: a root .gitignore's UNANCHORED patterns
+    // (no interior `/`, the common case -- `build/`, `*.log`, `node_modules`)
+    // apply at any depth in git, so a search scoped to a subdirectory that
+    // never loads the project root's .gitignore returns hits inside
+    // `<subdir>/build/` that a root-level search would have excluded, and the
+    // ".gitignore-aware" tool description promises otherwise. Loaded as
+    // depth-0 rules of the walk root itself, which is exactly correct for
+    // unanchored patterns; an ANCHORED ancestor pattern (rare in a top-level
+    // .gitignore) is applied at the walk root's level too, an approximation
+    // rather than true git semantics for that narrower case.
+    std::filesystem::path boundary_root;
 };
 
 struct WalkEntry {

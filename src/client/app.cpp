@@ -213,6 +213,16 @@ nlohmann::json ServerEventToJsonLine(const minimal::v1::ServerEvent& event) {
         line["hit_max_turns"] = event.turn_completed().hit_max_turns();
     } else if (event.has_session_ended()) {
         line["type"] = "session_ended";
+    } else if (event.has_compaction()) {
+        const auto& compaction = event.compaction();
+        line["type"] = "compaction";
+        line["trigger"] = compaction.trigger();
+        line["folded_messages"] = compaction.folded_messages();
+        line["tokens_before"] = compaction.tokens_before();
+        line["tokens_after"] = compaction.tokens_after();
+        line["summary"] = compaction.summary();
+        line["skipped"] = compaction.skipped();
+        if (!compaction.warning().empty()) line["warning"] = compaction.warning();
     } else {
         line["type"] = "event";
     }

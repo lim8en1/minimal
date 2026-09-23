@@ -15,6 +15,7 @@
 #include "deadline.hpp"
 #include "fakes.hpp"
 #include "minimal/agent/agent_loop.hpp"
+#include "minimal/agent/structured_compaction.hpp"
 #include "minimal/config/skill_registry.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/tools/skill_tool.hpp"
@@ -166,6 +167,7 @@ struct Harness {
     std::unique_ptr<tools::ToolExecutor> executor;
     std::unique_ptr<agent::AgentLoop> loop;
     std::vector<llm::StreamEvent> seen_events;
+    std::vector<agent::CompactionEvent> compaction_events;
     // Atomic because the backoff test flips it from the main thread while the
     // loop polls it mid-sleep; every other test sets it from the same thread.
     std::atomic<bool> cancel_flag{false};
@@ -222,6 +224,9 @@ struct Harness {
                 throw std::runtime_error("simulated sink failure");
             };
         }
+        session.compaction_sink = [this](const agent::CompactionEvent& event) {
+            compaction_events.push_back(event);
+        };
 
         loop = std::make_unique<agent::AgentLoop>(
             provider, *executor, registry, store, std::move(preset), config, std::move(session),
@@ -913,17 +918,18 @@ TEST_CASE("a zero-usage turn seeds occupancy from the request estimate",
         ++compactions;
         return agent::CompactionResult{UserText("[summary]"), 0};
     };
-    // The trigger is deliberately tiny: the estimate of this small context
-    // (system + tool schemas + history) crosses it, the all-zero report does
-    // not -- the test fails if the estimate never lands.
+    // The trigger sits above the fixed context (tool schemas) and below the
+    // estimate of this context (fixed + a ~100-token user message): the
+    // estimate crosses it, the all-zero report does not -- the test fails if
+    // the estimate never lands.
     h.Build({}, agent::LoopConfig{.auto_compact = true,
-                                  .compaction_trigger = FixedTrigger(2),
+                                  .compaction_trigger = FixedTrigger(50),
                                   .estimate_zero_usage = true},
             compactor);
     h.provider.PushResponse(zero_tool);
     h.provider.PushResponse(zero_text);
 
-    const agent::TurnResult result = h.loop->RunTurn(UserText("go"));
+    const agent::TurnResult result = h.loop->RunTurn(UserText(std::string(400, 'g')));
 
     CHECK(result.usage_estimated);
     // The estimate is mirrored into the wire usage so the status bar can
@@ -1079,14 +1085,17 @@ TEST_CASE("the occupancy estimate covers the system prompt and the tools array",
         ++compactions;
         return agent::CompactionResult{UserText("[summary]"), 0};
     };
-    // ~2 tokens of history: the trigger is crossed by the context, not the
-    // transcript.
-    std::vector<llm::Message> seeded = {UserText("x"), UserText("y")};
+    // ~100 tokens of history under a trigger of 550: only the ~500-token
+    // system prompt on top of it crosses the trigger. (The trigger must sit
+    // above the system prompt itself -- below it, compaction could never get
+    // under the trigger and the floor guard refuses to run.)
+    std::vector<llm::Message> seeded = {UserText(std::string(200, 'x')),
+                                        UserText(std::string(200, 'y'))};
     agent::AgentPreset preset;
     preset.system_prompt = std::string(2000, 's');
     h.provider.PushResponse(TextResponse("done"));
     h.Build(preset, agent::LoopConfig{.auto_compact = true,
-                                      .compaction_trigger = FixedTrigger(10)},
+                                      .compaction_trigger = FixedTrigger(550)},
             compactor, agent::ResumeSeed{.history = std::move(seeded)});
 
     h.loop->RunTurn(UserText("go"));
@@ -1116,11 +1125,14 @@ TEST_CASE("a successful compaction persists a checkpoint with a correct boundary
     CHECK_FALSE(h.store.checkpoint_cleared);
 
     h.loop->RunTurn(UserText("b"));
+    // Manual, not a third-turn auto compaction: an auto trigger firing again
+    // right after an auto compaction is halted by design (MaybeCompact).
+    REQUIRE(h.loop->CompactNow().has_value());
     h.loop->RunTurn(UserText("c"));
 
     // The fake store assigns seq = row index, so the transcript is
     // {a=0, one=1, b=2, two=3, c=4, three=5}. Turn two compacted [a] into
-    // summary-1 (checkpoint covers seq <= 0). Turn three folded
+    // summary-1 (checkpoint covers seq <= 0). The manual compaction folded
     // [summary-1, one] -- one synthetic head, one persisted message -- into
     // summary-2, extending coverage to seq <= 1.
     REQUIRE(h.store.checkpoint_boundary.has_value());
@@ -1324,10 +1336,26 @@ bool ToolPairsIntact(const std::vector<llm::Message>& messages) {
     return uses == results;
 }
 
+// The summarizer's request is the session's own plus one appended user
+// message carrying the compression prompt verbatim; every prompt these tests
+// configure contains "PROMPT" or "OVERRIDE", which no main-turn message does.
+// Returns that message's text, or "" for a main-turn request.
+std::string CompactionInstruction(const llm::ChatRequest& request) {
+    if (request.messages.empty()) return {};
+    const auto& last = request.messages.back();
+    if (last.role != llm::Role::User || last.content.empty()) return {};
+    const auto* text = std::get_if<llm::TextBlock>(&last.content.front());
+    if (text == nullptr || (text->text.find("PROMPT") == std::string::npos &&
+                            text->text.find("OVERRIDE") == std::string::npos)) {
+        return {};
+    }
+    return text->text;
+}
+
 int CountCompactionRequests(const FakeLlmProvider& provider) {
     int count = 0;
     for (const auto& request : provider.requests()) {
-        if (request.system.has_value() && !request.system->empty()) ++count;
+        if (!CompactionInstruction(request).empty()) ++count;
     }
     return count;
 }
@@ -1341,41 +1369,43 @@ TEST_CASE("the production compactor runs end to end and never splits a tool pair
     agent::AgentPreset preset;
     preset.compression_prompt = "DEFAULT PROMPT";
     // TextResponse/ToolUseResponse report 10 in + 5 out = occupancy 15, past the
-    // trigger of 12, so compaction is armed from the second loop iteration on.
+    // trigger of 12, so compaction is armed from the second loop iteration on
+    // -- and every response stays over it, so the fold can never get under
+    // the trigger: iteration 3 halts auto-compaction instead of re-summarizing.
     h.Build(std::move(preset), agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(12)},
             &agent::compact_messages);
 
-    // Main calls: tu1, tu2, tu3, done. Compaction calls interleave wherever the
-    // trigger fires; the queue is shared, so order matters:
+    // Main calls: tu1, tu2, tu3, done; the one compaction call interleaves at
+    // iteration 2 (the queue is shared, so order matters).
     h.provider.PushResponse(ToolUseResponse("tu1", "read"));
     h.provider.PushResponse(TextResponse("SUMMARY ONE"));   // compaction, iter 2
     h.provider.PushResponse(ToolUseResponse("tu2", "read"));
-    h.provider.PushResponse(TextResponse("SUMMARY TWO"));   // compaction, iter 3
     h.provider.PushResponse(ToolUseResponse("tu3", "read"));
-    h.provider.PushResponse(TextResponse("SUMMARY THREE"));  // compaction, iter 4
     h.provider.PushResponse(SmallTextResponse("done"));
 
     const auto result = h.loop->RunTurn(UserText("go"));
 
     CHECK(result.stop_reason == llm::StopReason::EndTurn);
-    // Compacted working set: [summary, A2(tu2), U2(tr2), A3(tu3), U3(tr3), A4].
+    // [summary, A1(tu1), U1(tr1), A2(tu2), U2(tr2), A3(tu3), U3(tr3), A4].
     const auto& history = h.loop->history();
-    REQUIRE(history.size() == 6);
-    CHECK(history.front().role == llm::Role::User);
+    REQUIRE(history.size() == 8);
     const auto* summary_text = std::get_if<llm::TextBlock>(&history.front().content.front());
     REQUIRE(summary_text != nullptr);
-    CHECK(summary_text->text.find("SUMMARY THREE") != std::string::npos);
+    CHECK(summary_text->text.find("SUMMARY ONE") != std::string::npos);
     // The load-bearing invariant, end to end through the production path: no cut
     // may separate a tool_use from its tool_result.
     CHECK(ToolPairsIntact(history));
     // Compaction rewrites only the working set; the durable record is complete.
     CHECK(h.store.messages.size() == 8);
-    // Three compaction calls, each carrying the preset's prompt as system; the
-    // four main-turn calls carry none.
-    CHECK(CountCompactionRequests(h.provider) == 3);
+    // One compaction call, carrying the preset's prompt as its instruction.
+    CHECK(CountCompactionRequests(h.provider) == 1);
     for (const auto& request : h.provider.requests()) {
-        if (request.system.has_value()) CHECK(*request.system == "DEFAULT PROMPT");
+        const std::string instruction = CompactionInstruction(request);
+        if (!instruction.empty()) CHECK(instruction == "DEFAULT PROMPT");
     }
+    // Then the halt notice, once.
+    REQUIRE(h.compaction_events.size() == 2);
+    CHECK(h.compaction_events[1].skipped);
 }
 
 TEST_CASE("a provider error during compaction leaves history untouched and cools down",
@@ -1430,8 +1460,10 @@ TEST_CASE("the preset's compression_prompt reaches the summarization request",
     h.loop->RunTurn(UserText("a"));
 
     REQUIRE(h.provider.requests().size() == 3);
-    REQUIRE(h.provider.requests()[1].system.has_value());
-    CHECK(*h.provider.requests()[1].system == "OVERRIDE PROMPT");
+    CHECK(CompactionInstruction(h.provider.requests()[1]).starts_with("OVERRIDE PROMPT"));
+    // The summarizer read everything the main call before it had, plus the
+    // tool result: the whole history, not only the part it replaced.
+    CHECK(h.provider.requests()[1].messages.size() == 4);
 }
 
 TEST_CASE("CompactNow with a prompt override uses it for that call only, and a bare "
@@ -1452,15 +1484,13 @@ TEST_CASE("CompactNow with a prompt override uses it for that call only, and a b
     const auto folded = h.loop->CompactNow("MANUAL OVERRIDE");
     REQUIRE(folded.has_value());
     REQUIRE(h.provider.requests().size() == 2);
-    REQUIRE(h.provider.requests()[1].system.has_value());
-    CHECK(*h.provider.requests()[1].system == "MANUAL OVERRIDE");
+    CHECK(CompactionInstruction(h.provider.requests()[1]).starts_with("MANUAL OVERRIDE"));
 
     // Bare CompactNow falls back to the preset's prompt, untouched by the
     // earlier override.
     h.provider.PushResponse(TextResponse("SUMMARY TWO"));
     REQUIRE(h.loop->CompactNow().has_value());
-    REQUIRE(h.provider.requests()[2].system.has_value());
-    CHECK(*h.provider.requests()[2].system == "PRESET PROMPT");
+    CHECK(CompactionInstruction(h.provider.requests()[2]).starts_with("PRESET PROMPT"));
 }
 
 TEST_CASE("small_model: the summarizer alone runs on the alternate provider, and the "
@@ -1485,12 +1515,12 @@ TEST_CASE("small_model: the summarizer alone runs on the alternate provider, and
     const auto result = h.loop->RunTurn(UserText("go"));
 
     CHECK(result.stop_reason == llm::StopReason::EndTurn);
-    // The summarization call (identified by its system prompt) happened
+    // The summarization call (identified by its instruction message) happened
     // exactly once, on the small provider, under the small model's name.
     CHECK(CountCompactionRequests(*small) == 1);
     REQUIRE(small->requests().size() == 1);
     CHECK(small->requests()[0].model == "small-model");
-    CHECK(*small->requests()[0].system == "DEFAULT PROMPT");
+    CHECK(CompactionInstruction(small->requests()[0]).starts_with("DEFAULT PROMPT"));
     // The summarizer sticks to the session's own routing key (OpenRouter
     // session_id), even though the small entry supplies its own parameters.
     CHECK(small->requests()[0].session_id == "s1");
@@ -1499,8 +1529,8 @@ TEST_CASE("small_model: the summarizer alone runs on the alternate provider, and
     // call ran the small provider's copy-assignment THROUGH the main
     // provider's reference -- corrupting the session's own provider state.
     REQUIRE(h.provider.requests().size() == 2);
+    CHECK(CountCompactionRequests(h.provider) == 0);
     for (const auto& request : h.provider.requests()) {
-        CHECK_FALSE(request.system.has_value());
         CHECK(request.model != "small-model");
     }
     // The turn still compacted with the small provider's output.
@@ -2306,7 +2336,10 @@ TEST_CASE("LoopConfig.cut_selector is consulted instead of the legacy history.si
     const auto cut = h.loop->CompactNow();
     REQUIRE(cut.has_value());
     CHECK(*cut == 1);
-    CHECK(seen_size == 1);  // the summarizer received exactly the proposed (already-safe) range
+    // The summarizer reads the whole working history; the cut only decides how
+    // much of it the summary replaces.
+    CHECK(seen_size == 4);
+    REQUIRE(h.loop->history().size() == 4);  // [summary, b, c, d]
 }
 
 TEST_CASE("a proposed cut is still snapped to a safe tool-call boundary, never trusted "
@@ -2603,4 +2636,300 @@ TEST_CASE("a tool that declares no namespace never sees a slice",
     // the delivery path neither crashes nor serves another namespace's data --
     // exercised above. This test pins the default-config_namespace() path.
     SUCCEED("no-namespace tool completed a turn with tool_config present on the preset");
+}
+
+// ---------------------------------------------------------------------------
+// Whole-history summarizer, token-weighted replace share, compaction events
+// ---------------------------------------------------------------------------
+
+namespace {
+
+agent::Compactor RecordingCompactor(std::size_t& seen_size) {
+    return [&seen_size](std::span<const llm::Message> messages, llm::LlmProvider&,
+                        const agent::CompactionRequest&) -> std::optional<agent::CompactionResult> {
+        seen_size = messages.size();
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+}
+
+llm::Message AssistantText(std::string text) {
+    return llm::Message{llm::Role::Assistant, {llm::TextBlock{std::move(text)}}};
+}
+
+}  // namespace
+
+TEST_CASE("compaction_replace_percent cuts by token weight, not message count",
+          "[agent_loop][compaction]") {
+    // Three small messages and one huge recent one: halving by COUNT keeps
+    // the huge one plus a small one (~all the tokens); 80% by WEIGHT folds
+    // everything but the newest message, because that alone exceeds the 20%
+    // keep budget -- and the newest message is always kept whole.
+    Harness h;
+    std::size_t seen_size = 0;
+    agent::LoopConfig config;
+    config.compaction_replace_percent = 80;
+    h.Build({}, config, RecordingCompactor(seen_size),
+            agent::ResumeSeed{.history = {UserText(std::string(40, 'a')),
+                                          AssistantText(std::string(40, 'b')),
+                                          UserText(std::string(40, 'c')),
+                                          AssistantText(std::string(4000, 'd'))}});
+
+    const auto cut = h.loop->CompactNow();
+    REQUIRE(cut.has_value());
+    CHECK(*cut == 3);
+    CHECK(seen_size == 4);  // the summarizer read the whole history
+    REQUIRE(h.loop->history().size() == 2);
+    CHECK(std::get<llm::TextBlock>(h.loop->history()[1].content.front()).text.size() == 4000);
+}
+
+TEST_CASE("the production cut selector honors compaction_replace_percent too",
+          "[agent_loop][compaction]") {
+    // main.cpp always sets the strategy's cut_selector (ProposeSummarizeCut);
+    // the percent must reach it as a keep budget, not only the fallback path.
+    Harness h;
+    std::size_t seen_size = 0;
+    agent::LoopConfig config;
+    config.compaction_replace_percent = 50;
+    config.compaction_strategy = agent::MakeSummarizeCompactionStrategy();
+    h.Build({}, config, RecordingCompactor(seen_size),
+            agent::ResumeSeed{.history = {UserText(std::string(400, 'a')),
+                                          AssistantText(std::string(400, 'b')),
+                                          UserText(std::string(400, 'c')),
+                                          AssistantText(std::string(400, 'd'))}});
+
+    const auto cut = h.loop->CompactNow();
+    REQUIRE(cut.has_value());
+    CHECK(*cut == 2);  // half the weight, equal-sized messages: two folded
+}
+
+TEST_CASE("an explicit compaction_keep_recent_tokens wins over the replace percent",
+          "[agent_loop][compaction]") {
+    Harness h;
+    std::size_t seen_size = 0;
+    agent::LoopConfig config;
+    config.compaction_replace_percent = 80;
+    config.compaction_keep_recent_tokens = 1'000'000;  // covers everything
+    h.Build({}, config, RecordingCompactor(seen_size),
+            agent::ResumeSeed{.history = {UserText("a"), AssistantText("b"), UserText("c"),
+                                          AssistantText("d")}});
+
+    CHECK_FALSE(h.loop->CompactNow().has_value());
+    CHECK(h.loop->history().size() == 4);
+}
+
+TEST_CASE("the kept tail loses its thinking blocks when the provider binds them to the prefix",
+          "[agent_loop][compaction]") {
+    // Thinking in the verbatim tail was produced against the pre-fold prefix;
+    // newer Claude models reject replaying it once that prefix changed.
+    Harness h;
+    h.provider.binds_thinking = true;
+    std::size_t seen_size = 0;
+    agent::LoopConfig config;
+    config.compaction_strategy.cut_selector = [](const std::vector<llm::Message>&,
+                                                 std::int64_t) { return std::size_t{2}; };
+    llm::Message thought{llm::Role::Assistant,
+                         {llm::ThinkingBlock{"reasoning", std::string("sig")},
+                          llm::TextBlock{"answer"}}};
+    h.Build({}, config, RecordingCompactor(seen_size),
+            agent::ResumeSeed{.history = {UserText("q1"), thought, UserText("q2"), thought}});
+
+    REQUIRE(h.loop->CompactNow().has_value());
+    // The summarizer still saw the original blocks.
+    CHECK(seen_size == 4);
+    const auto& history = h.loop->history();
+    REQUIRE(history.size() == 3);  // [summary, q2, answer]
+    REQUIRE(history[2].content.size() == 1);
+    CHECK(std::holds_alternative<llm::TextBlock>(history[2].content.front()));
+}
+
+TEST_CASE("a successful compaction reports one CompactionEvent with before/after sizes",
+          "[agent_loop][compaction]") {
+    Harness h;
+    std::size_t seen_size = 0;
+    h.Build({}, agent::LoopConfig{}, RecordingCompactor(seen_size));
+
+    h.provider.PushResponse(TextResponse("ok"));
+    h.loop->RunTurn(UserText(std::string(400, 'x')));   // ~100 estimated tokens
+
+    REQUIRE(h.loop->CompactNow().has_value());
+    REQUIRE(h.compaction_events.size() == 1);
+    const auto& event = h.compaction_events.front();
+    CHECK(event.trigger == "manual");
+    CHECK(event.folded_messages == 1);
+    // Both figures are the loop's estimate of the whole context (same basis),
+    // not the backend's lagging 10 + 5 reported for the last response.
+    CHECK(event.tokens_before >= 100);
+    CHECK(event.tokens_after > 0);
+    CHECK(event.tokens_after < event.tokens_before);
+    CHECK(event.summary_text == "[summary]");
+    // The record reached the store with the same figures.
+    CHECK(h.store.checkpoint_meta.tokens_before == event.tokens_before);
+    CHECK(h.store.checkpoint_meta.folded_messages == 1);
+    CHECK(event.at_seq == h.store.last_appended_seq());
+}
+
+TEST_CASE("offer_summary_tool puts record_summary on main requests; a stray call is a no-op",
+          "[agent_loop][compaction]") {
+    Harness h;
+    h.AddTool("read");
+    agent::LoopConfig config;
+    config.offer_summary_tool = true;
+    h.provider.PushResponse(ToolUseResponse("rs1", std::string(agent::kRecordSummaryToolName)));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build({}, config);
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+
+    const auto& first = h.provider.requests().front();
+    REQUIRE(first.tools.size() == 2);
+    CHECK(first.tools[0].name == "read");
+    CHECK(first.tools[1].name == "record_summary");
+    CHECK(first.tools[1].strict);
+
+    // The stray call was answered, not executed.
+    REQUIRE(h.store.messages.size() == 4);
+    const auto* answered = std::get_if<llm::ToolResultBlock>(&h.store.messages[2].content.front());
+    REQUIRE(answered != nullptr);
+    CHECK(answered->is_error);
+    CHECK(std::get<llm::TextBlock>(answered->content.front()).text.find("only used") !=
+          std::string::npos);
+}
+
+TEST_CASE("a provider that does not bind thinking keeps the tail's thinking",
+          "[agent_loop][compaction]") {
+    Harness h;   // binds_thinking = false: every chat-completions backend
+    std::size_t seen_size = 0;
+    agent::LoopConfig config;
+    config.compaction_strategy.cut_selector = [](const std::vector<llm::Message>&,
+                                                 std::int64_t) { return std::size_t{2}; };
+    llm::Message thought{llm::Role::Assistant,
+                         {llm::ThinkingBlock{"reasoning", std::string("sig")},
+                          llm::TextBlock{"answer"}}};
+    h.Build({}, config, RecordingCompactor(seen_size),
+            agent::ResumeSeed{.history = {UserText("q1"), thought, UserText("q2"), thought}});
+
+    REQUIRE(h.loop->CompactNow().has_value());
+    REQUIRE(h.loop->history().size() == 3);
+    CHECK(h.loop->history()[2].content.size() == 2);
+}
+
+TEST_CASE("a checkpoint resume drops thinking only from the messages the fold kept",
+          "[agent_loop][compaction]") {
+    // Seed = [summary, seq 5 (kept by the fold), seq 6 (after the fold)]:
+    // seq 6's thinking was produced against the post-fold prefix the resume
+    // reproduces, so it stays.
+    Harness h;
+    h.provider.binds_thinking = true;
+    llm::Message thought{llm::Role::Assistant,
+                         {llm::ThinkingBlock{"reasoning", std::string("sig")},
+                          llm::TextBlock{"answer"}}};
+    h.Build({}, agent::LoopConfig{}, {},
+            agent::ResumeSeed{.history = {UserText("[summary]"), thought, thought},
+                              .first_persisted_seq = 5,
+                              .head_is_summary = true,
+                              .kept_through_seq = 5});
+
+    const auto& history = h.loop->history();
+    REQUIRE(history.size() == 3);
+    CHECK(history[1].content.size() == 1);
+    CHECK(history[2].content.size() == 2);
+}
+
+TEST_CASE("the record_summary definition stays small: it rides every request",
+          "[agent_loop][compaction]") {
+    const auto definition = agent::MakeRecordSummaryToolDefinition();
+    const auto bytes = definition.description.size() + definition.input_schema.dump().size();
+    CHECK(bytes < 800);   // ~200 estimated tokens at most
+}
+
+// ---------------------------------------------------------------------------
+// Auto-compaction sanity guards
+// ---------------------------------------------------------------------------
+
+TEST_CASE("a trigger at or below the fixed context never compacts and says so once",
+          "[agent_loop][compaction]") {
+    Harness h;
+    std::size_t seen_size = 0;
+    agent::AgentPreset preset;
+    preset.system_prompt = std::string(4000, 's');   // ~1000 estimated tokens, unremovable
+    h.provider.PushResponse(ToolUseResponse("tu1", "read"));
+    h.provider.PushResponse(ToolUseResponse("tu2", "read"));
+    h.provider.PushResponse(TextResponse("done"));
+    h.AddTool("read");
+    h.Build(std::move(preset),
+            agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(12)},
+            RecordingCompactor(seen_size));
+
+    h.loop->RunTurn(UserText("go"));
+
+    CHECK(seen_size == 0);   // the summarizer never ran
+    REQUIRE(h.compaction_events.size() == 1);   // one notice, not one per round
+    CHECK(h.compaction_events[0].skipped);
+    CHECK(h.compaction_events[0].warning.find("not above the fixed context") !=
+          std::string::npos);
+    CHECK(h.store.checkpoint_meta.skipped);
+}
+
+TEST_CASE("an auto trigger firing right after an auto compaction halts with a notice",
+          "[agent_loop][compaction]") {
+    Harness h;
+    int calls = 0;
+    auto compactor = [&calls](std::span<const llm::Message>, llm::LlmProvider&,
+                              const agent::CompactionRequest&) {
+        ++calls;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    h.AddTool("read");
+    // Every response reports 10 in + 5 out = 15 > trigger 12: the fold can
+    // never get under it.
+    for (int i = 0; i < 4; ++i) h.provider.PushResponse(ToolUseResponse("tu" + std::to_string(i), "read"));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(12)},
+            compactor);
+
+    h.loop->RunTurn(UserText("go"));
+
+    CHECK(calls == 1);   // compacted once, then stopped instead of every round
+    REQUIRE(h.compaction_events.size() == 2);
+    CHECK_FALSE(h.compaction_events[0].skipped);
+    CHECK(h.compaction_events[1].skipped);
+    CHECK(h.compaction_events[1].warning.find("right after the previous compaction") !=
+          std::string::npos);
+}
+
+TEST_CASE("a compaction that barely shrinks the history carries a warning",
+          "[agent_loop][compaction]") {
+    Harness h;
+    // The summary is as large as everything it replaced.
+    auto compactor = [](std::span<const llm::Message>, llm::LlmProvider&,
+                        const agent::CompactionRequest&) {
+        return agent::CompactionResult{UserText(std::string(800, 'x')), 0};
+    };
+    agent::LoopConfig config;
+    config.compaction_strategy.cut_selector = [](const std::vector<llm::Message>&,
+                                                 std::int64_t) { return std::size_t{2}; };
+    h.Build({}, config, compactor,
+            agent::ResumeSeed{.history = {UserText(std::string(400, 'a')),
+                                          AssistantText(std::string(400, 'b')),
+                                          UserText("c"), AssistantText("d")}});
+
+    REQUIRE(h.loop->CompactNow().has_value());
+    REQUIRE(h.compaction_events.size() == 1);
+    CHECK_FALSE(h.compaction_events[0].skipped);
+    CHECK(h.compaction_events[0].warning.find("freed little") != std::string::npos);
+}
+
+TEST_CASE("an effective compaction carries no warning", "[agent_loop][compaction]") {
+    Harness h;
+    std::size_t seen_size = 0;
+    agent::LoopConfig config;
+    config.compaction_replace_percent = 80;
+    h.Build({}, config, RecordingCompactor(seen_size),
+            agent::ResumeSeed{.history = {UserText(std::string(4000, 'a')),
+                                          AssistantText(std::string(4000, 'b')),
+                                          UserText("c"), AssistantText("d")}});
+    REQUIRE(h.loop->CompactNow().has_value());
+    REQUIRE(h.compaction_events.size() == 1);
+    CHECK(h.compaction_events[0].warning.empty());
 }

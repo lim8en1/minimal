@@ -317,6 +317,33 @@ TEST_CASE("a null-storage service degrades like the tool", "[checklist][rpc]") {
     CHECK(reply.error.find("storage is not available") != std::string::npos);
 }
 
+TEST_CASE("the service binds to the caller's shared_ptr SLOT, not a value captured at "
+         "construction -- a later assignment into the same variable is visible",
+         "[checklist][rpc]") {
+    // plugin.cpp's real risk: SharedRpcService() constructs once, from
+    // SharedStore()'s value AT THAT MOMENT. If that moment ever preceded the
+    // tool filling the slot in (registration order plugin.cpp's own comment
+    // says doesn't happen today, but isn't enforced either), a by-value
+    // capture would freeze a null store forever. Reproduced directly here:
+    // start with a null-storage store, construct the service, THEN replace
+    // the variable's value with a real, populated store -- the service must
+    // see the replacement.
+    Fixture f;
+    std::shared_ptr<checklist::ChecklistStore> slot =
+        std::make_shared<checklist::ChecklistStore>(nullptr);
+    checklist::ChecklistRpcService service(slot);
+    CHECK_FALSE(Call(service, "get", Fixture::Get("s1")).ok);  // still null at this point
+
+    auto ctx = f.Context();
+    (void)f.tool->execute(Fixture::SetInput({{{"text", "late-bound"}}}), ctx);
+    slot = f.store;  // the "tool registers after services" scenario, corrected later
+
+    const auto reply = Call(service, "get", Fixture::Get("s1"));
+    CHECK(reply.ok);
+    const auto body = nlohmann::json::parse(reply.payload);
+    CHECK(body.at("items")[0].at("text") == "late-bound");
+}
+
 TEST_CASE("the dispatch convention routes PluginCall to the service", "[checklist][rpc]") {
     Fixture f;
     auto ctx = f.Context();

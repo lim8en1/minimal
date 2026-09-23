@@ -23,8 +23,8 @@ nlohmann::json ItemsJson(const std::vector<Item>& items) {
 
 }  // namespace
 
-ChecklistRpcService::ChecklistRpcService(std::shared_ptr<ChecklistStore> store)
-    : store_(std::move(store)) {}
+ChecklistRpcService::ChecklistRpcService(std::shared_ptr<ChecklistStore>& store)
+    : store_(store) {}
 
 plugins::PluginRpcHandler::Reply ChecklistRpcService::Handle(const std::string& method,
                                                              std::string_view json_payload) {

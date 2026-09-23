@@ -65,7 +65,12 @@ std::vector<Embedding> HttpEmbeddingFunction::EmbedChunk(const std::vector<std::
     net::HttpRequest request;
     request.url = settings_.api_base + "/embeddings";
     request.headers = std::move(request_headers);
-    request.body = body.dump();
+    // replace, not the default (throwing): the text being embedded is
+    // whatever memory_store ingested, which is not guaranteed valid UTF-8 --
+    // a Latin-1 file must degrade this one embedding call, not throw out of
+    // the whole reindex batch and (via MarkEmbedFailed) mark every OTHER row
+    // in it failed too.
+    request.body = body.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     request.request_timeout = std::chrono::milliseconds(settings_.timeout_ms);
     request.connect_timeout = std::chrono::milliseconds(5000);
 

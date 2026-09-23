@@ -387,7 +387,13 @@ public:
         }
 
         const std::string& wanted = args.positional.front();
-        if (wanted == "off") {
+        // "off" is the hardcoded reset UNLESS the model's own providers.json
+        // "variants" list declares a variant actually NAMED "off" -- an
+        // unusual but valid free-form name, and the declared list wins over
+        // the built-in meaning so it stays reachable by name.
+        const bool declares_off =
+            std::find(declared.begin(), declared.end(), "off") != declared.end();
+        if (wanted == "off" && !declares_off) {
             if (current_variant.empty()) {
                 return CommandResult::Ok("reasoning variant: none (base model already active)");
             }
@@ -598,9 +604,12 @@ public:
         }
         const std::string& provider = args.positional[0];
         const std::string& key = args.positional[1];
-        if (provider.empty() || key.empty() ||
-            provider.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
-                                       "456789-.") != std::string::npos) {
+        // docs/CONFIGURATION.md's actual rule: a provider name is anything
+        // except `/` (it's a JSON object key here, not a path segment). The
+        // old allowlist (alnum, `-`, `.`) was stricter than that contract --
+        // a validly configured `my_provider` (underscore) could never be
+        // connected by name.
+        if (provider.empty() || key.empty() || provider.find('/') != std::string::npos) {
             return CommandResult::Error("invalid provider name or key");
         }
 

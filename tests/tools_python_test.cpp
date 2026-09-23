@@ -37,6 +37,7 @@ using tools_python::RequestHandles;
 using tools_python::RequestOutcome;
 using tools_python::ResolveOnPath;
 using tools_python::SpecName;
+using tools_python::SplitDeclared;
 using tools_python::TaskStatus;
 using tools_python::FormatOutcome;
 
@@ -182,6 +183,13 @@ TEST_CASE("python settings parse with defaults and clamps", "[tools_python][sett
     CHECK(tuned.background_max_runtime == 60);
     CHECK(ParsePythonSettings(nlohmann::json{{"background_max_runtime", -5}})
               .background_max_runtime == 0);
+
+    // Regression: background_max_runtime feeds `now() + seconds(N)`
+    // (StampRunningLocked); converting to nanoseconds overflows a 64-bit rep
+    // above ~9.2e9 seconds and wraps to a deadline in the PAST, hard-killing
+    // the interpreter almost immediately despite asking for MORE time.
+    CHECK(ParsePythonSettings(nlohmann::json{{"background_max_runtime", 9999999999LL}})
+              .background_max_runtime <= 100'000'000);
 }
 
 TEST_CASE("python slice: null-safe parse of packages and requirements", "[tools_python][slice]") {
@@ -240,6 +248,23 @@ TEST_CASE("ClassifyDiff separates additive entries from spec conflicts",
                                           running);
     REQUIRE(req_changed.additive.size() == 1);
     CHECK(req_changed.conflicts.empty());
+}
+
+TEST_CASE("SplitDeclared routes requirements: entries away from plain specs",
+          "[tools_python][env]") {
+    // Regression: EnsurePackages (the auto-ensure-on-preset-switch path)
+    // handed every additive entry straight to pip/uv as a package spec, so a
+    // "requirements:x" entry -- valid for EnsureEnvironment's own declared
+    // set -- failed as an invalid requirement and errored every python_exec
+    // until a clean restart. Both call sites now share this split.
+    const auto split = SplitDeclared(
+        {"impacket", "requirements:reqs.txt", "pefile==2023.2.7", "requirements:dev.txt"});
+    CHECK((split.package_specs == std::vector<std::string>{"impacket", "pefile==2023.2.7"}));
+    CHECK((split.requirement_paths == std::vector<std::string>{"reqs.txt", "dev.txt"}));
+
+    const auto none = SplitDeclared({});
+    CHECK(none.package_specs.empty());
+    CHECK(none.requirement_paths.empty());
 }
 
 TEST_CASE("MakeEnvPlan: the declared contract drives venv intent", "[tools_python][env]") {
@@ -338,6 +363,92 @@ TEST_CASE("the interpreter execs, evals, captures output and keeps state",
     CHECK(outcome.stdout_text == "on stdout\n");
     CHECK(outcome.result == "None");
     CHECK(outcome.ok);
+}
+
+TEST_CASE("an absurdly large max_runtime does not overflow into an immediate kill",
+          "[tools_python][interpreter]") {
+    // Regression: `now() + std::chrono::seconds(max_runtime_seconds)` had no
+    // range check; python_tools.cpp accepted any non-negative integer, and a
+    // value like 9999999999 (~317 years) overflowed the nanosecond rep and
+    // wrapped to a deadline in the PAST -- the interpreter was SIGINT'd and
+    // hard-killed almost immediately despite the caller asking for MORE
+    // time, not less.
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()},
+                  {"PYTHONUNBUFFERED", "1"}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    RequestHandles handles;
+    handles.tool_use_id = "tu1";
+    handles.session_lifetime = kLifetimeToken;
+    std::string submit_error;
+    const auto id = interp->Submit("'ok'", false, handles, &submit_error,
+                                   /*max_runtime_seconds=*/9999999999LL);
+    REQUIRE(id.has_value());
+    RequestOutcome outcome;
+    REQUIRE(interp->WaitSync(*id, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result == "'ok'");
+    CHECK_FALSE(outcome.deadline_interrupted);
+    CHECK(interp->alive());
+}
+
+TEST_CASE("an oversized trailing repr is truncated, not left to kill the interpreter",
+          "[tools_python][interpreter]") {
+    // Regression: the trailing expression's repr was the only captured field
+    // with no cap (stdout/stderr/result_json all respect _MINIMAL_PY_CAPTURE),
+    // so a harmless expression like a big string built a protocol line past
+    // the parent's 64 MiB "corrupt line" threshold, which killed the whole
+    // interpreter and lost all state over a completely well-formed reply.
+    // A small capture budget here reproduces the same shape without needing
+    // a multi-megabyte literal.
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = std::map<std::string, std::string>{{"PATH", "/usr/bin:/bin:/usr/local/bin"},
+                                                    {"HOME", dir.path().string()},
+                                                    {"PYTHONUNBUFFERED", "1"},
+                                                    {"_MINIMAL_PY_CAPTURE", "1024"}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    RequestHandles handles;
+    handles.tool_use_id = "tu1";
+    handles.session_lifetime = kLifetimeToken;
+    std::string submit_error;
+    const auto id = interp->Submit("'x' * 5000", false, handles, &submit_error);
+    REQUIRE(id.has_value());
+    RequestOutcome outcome;
+    REQUIRE(interp->WaitSync(*id, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result.size() < 5010);           // capped, not the full ~5002-byte repr
+    CHECK(outcome.result.find("truncated") != std::string::npos);
+    CHECK(interp->alive());                        // the interpreter survives
+
+    // The interpreter's state and protocol are intact for the next request.
+    const auto id2 = interp->Submit("2 + 2", false, handles, &submit_error);
+    REQUIRE(id2.has_value());
+    REQUIRE(interp->WaitSync(*id2, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result == "4");
 }
 
 TEST_CASE("a trailing expression's value is returned even when statements precede it",
@@ -497,8 +608,9 @@ TEST_CASE("input() parks until the stdin channel is fed, then the protocol survi
     const auto id3 = interp->Submit("input()", true, killer, &submit_error);
     REQUIRE(id3.has_value());
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto baseline1 = interp->Progress();
     interp->SoftInterrupt();
-    CHECK(interp->WaitForInterrupt(std::chrono::seconds(5), nullptr) ==
+    CHECK(interp->WaitForInterrupt(baseline1, std::chrono::seconds(5), nullptr) ==
           Interpreter::InterruptOutcome::kResponse);
     WaitFor([&] { return killed->Has("KeyboardInterrupt"); }, std::chrono::seconds(10));
     CHECK(interp->alive());
@@ -599,8 +711,9 @@ TEST_CASE("the stream ring bounds retention: gap markers, tail reads, paging",
     CHECK(paged.slice.text == "4567");
 
     // Completion folds to the authoritative capture: no gaps there.
+    const auto baseline2 = interp->Progress();
     interp->SoftInterrupt();
-    REQUIRE(interp->WaitForInterrupt(std::chrono::seconds(5), nullptr) ==
+    REQUIRE(interp->WaitForInterrupt(baseline2, std::chrono::seconds(5), nullptr) ==
             Interpreter::InterruptOutcome::kResponse);
     WaitFor([&] {
         const auto r = interp->ReadTaskOutput(*id, 0, 0);
@@ -767,6 +880,124 @@ TEST_CASE("finished tasks stay visible through the completion->injection gap",
     CHECK(read.finished);
 }
 
+TEST_CASE("a death arriving after completion does not overwrite the real result",
+          "[tools_python][interpreter]") {
+    // Regression: MarkDead unconditionally overwrote EVERY pending entry's
+    // outcome, including a sync request DeliverResponse had already filled
+    // with its real result (done=true) but whose WaitSync just hadn't run
+    // yet. WaitSync's dead_ branch reads outcome straight off that object,
+    // so it reported the interpreter died on a request that had actually
+    // completed successfully.
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()},
+                  {"PYTHONUNBUFFERED", "1"}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    RequestHandles handles;
+    handles.tool_use_id = "tu1";
+    handles.session_lifetime = kLifetimeToken;
+    std::string submit_error;
+    const auto id = interp->Submit("1 + 1", false, handles, &submit_error);
+    REQUIRE(id.has_value());
+    // Let the trivial request actually complete (done=true, unclaimed) before
+    // the death -- the exact window the bug depended on. PendingIds() omits
+    // done-but-unclaimed entries, so its absence IS "done".
+    WaitFor(
+        [&] {
+            const auto ids = interp->PendingIds();
+            return std::find(ids.begin(), ids.end(), *id) == ids.end();
+        },
+        std::chrono::seconds(10));
+
+    interp->HardKill("simulated death after completion");
+
+    RequestOutcome outcome;
+    const auto result = interp->WaitSync(
+        *id, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(5), &outcome);
+    CHECK(result == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result == "2");
+    CHECK(outcome.error != "simulated death after completion");
+}
+
+TEST_CASE("HardKill is safe to call more than once for one interpreter",
+          "[tools_python][interpreter]") {
+    // Regression: HardKill re-ran waitpid()+killpg() on every call, even
+    // after an earlier call already reaped the pid -- a pid the OS is free
+    // to recycle for an unrelated process by the time a SECOND call (session
+    // teardown racing an explicit kill, or a repeated destructor-path call)
+    // runs. This can't observe the recycled-pid hazard directly, but it
+    // pins the safe contract: a second HardKill must not hang, crash, or
+    // throw on a resource the first call already released.
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()},
+                  {"PYTHONUNBUFFERED", "1"}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    interp->HardKill("first kill");
+    CHECK_FALSE(interp->alive());
+    interp->HardKill("second kill");  // must not hang, crash, or throw
+    interp->HardKill("third kill");
+    CHECK_FALSE(interp->alive());
+}
+
+TEST_CASE("executed code's raw fd 0 is not the live request pipe",
+          "[tools_python][interpreter]") {
+    // Regression: the driver dup'd fd 0 for its own request reader but never
+    // closed or redirected the original, so a subprocess spawned by executed
+    // code (or code reading fd 0 directly, bypassing sys.stdin) inherited
+    // the live protocol request pipe -- consuming or blocking on the next
+    // queued python_exec request frame. `os.read(0, ...)` reads the raw fd
+    // directly the same way an inherited-stdin subprocess would; it must see
+    // /dev/null (immediate EOF, b''), not the request pipe (which has
+    // nothing available and would block this call until the deadline).
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()},
+                  {"PYTHONUNBUFFERED", "1"}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    RequestHandles handles;
+    handles.tool_use_id = "tu1";
+    handles.session_lifetime = kLifetimeToken;
+    std::string submit_error;
+    const auto id = interp->Submit("import os; os.read(0, 100)", false, handles, &submit_error);
+    REQUIRE(id.has_value());
+    RequestOutcome outcome;
+    // A short deadline: if fd 0 were still the live pipe, this read blocks
+    // and the case would time out (kDemoted) instead of completing.
+    REQUIRE(interp->WaitSync(*id, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(5),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result == "b''");
+}
+
 TEST_CASE("an async request injects its result keyed to the original tool_use_id",
           "[tools_python][interpreter]") {
     if (!HavePython3()) SKIP("python3 not available");
@@ -810,6 +1041,58 @@ TEST_CASE("an async request injects its result keyed to the original tool_use_id
     CHECK(interp->alive());
 }
 
+TEST_CASE("a signal landing outside the request try/except does not kill the driver",
+          "[tools_python][interpreter][interrupt]") {
+    // Regression: only the exec/eval block was guarded against
+    // KeyboardInterrupt; a SIGINT landing in response assembly (json.dumps,
+    // emit()'s write+flush) or in request-line parsing escaped _main()
+    // entirely and exited the driver -- losing the whole interpreter over a
+    // signal that hit reply bookkeeping, not the request itself. The exact
+    // window is a race that no fixed delay lands reliably, so this fires
+    // SoftInterrupt at many different points relative to a fast, repeated
+    // request and asserts the interpreter survives the whole run: a single
+    // window miss says nothing, but the bug reproduces as death anywhere in
+    // the run, and this sweeps enough iterations to hit every phase of the
+    // request loop many times over.
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()},
+                  {"PYTHONUNBUFFERED", "1"}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    RequestHandles handles;
+    handles.session_lifetime = kLifetimeToken;
+
+    for (int i = 0; i < 15 && interp->alive(); ++i) {
+        std::string submit_error;
+        const auto id = interp->Submit("1 + 1", false, handles, &submit_error);
+        if (!id.has_value()) break;  // died mid-loop -- caught by the CHECK below
+        interp->SoftInterrupt();
+        RequestOutcome outcome;
+        interp->WaitSync(*id, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(1),
+                         &outcome);
+    }
+    CHECK(interp->alive());
+
+    // Still serving correctly afterward -- state and protocol both intact.
+    std::string submit_error;
+    const auto id = interp->Submit("40 + 2", false, handles, &submit_error);
+    REQUIRE(id.has_value());
+    RequestOutcome outcome;
+    REQUIRE(interp->WaitSync(*id, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result == "42");
+}
+
 TEST_CASE("a soft interrupt fails the running request and preserves the interpreter",
           "[tools_python][interpreter][interrupt]") {
     if (!HavePython3()) SKIP("python3 not available");
@@ -841,8 +1124,9 @@ TEST_CASE("a soft interrupt fails the running request and preserves the interpre
     REQUIRE(id.has_value());
     std::this_thread::sleep_for(std::chrono::milliseconds(300));  // let the spin start
 
+    const auto baseline = interp->Progress();
     interp->SoftInterrupt();
-    const auto landed = interp->WaitForInterrupt(std::chrono::seconds(5), nullptr);
+    const auto landed = interp->WaitForInterrupt(baseline, std::chrono::seconds(5), nullptr);
     CHECK(landed == Interpreter::InterruptOutcome::kResponse);
     CHECK(interp->alive());
 
@@ -876,8 +1160,9 @@ TEST_CASE("a soft interrupt with nothing running is reported, not lethal",
     auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
     REQUIRE(interp != nullptr);
 
+    const auto baseline = interp->Progress();
     interp->SoftInterrupt();
-    CHECK(interp->WaitForInterrupt(std::chrono::seconds(5), nullptr) ==
+    CHECK(interp->WaitForInterrupt(baseline, std::chrono::seconds(5), nullptr) ==
           Interpreter::InterruptOutcome::kIdleInterrupt);
     CHECK(interp->alive());
 
@@ -915,8 +1200,9 @@ TEST_CASE("consecutive idle interrupts are each reported as idle, never as a res
     // This test pins the outcome CLASSIFICATION, not the delivery latency --
     // a genuinely wedged interpreter still fails here, just slower.
     for (int round = 0; round < 2; ++round) {
+        const auto baseline = interp->Progress();
         interp->SoftInterrupt();
-        CHECK(interp->WaitForInterrupt(std::chrono::seconds(30), nullptr) ==
+        CHECK(interp->WaitForInterrupt(baseline, std::chrono::seconds(30), nullptr) ==
               Interpreter::InterruptOutcome::kIdleInterrupt);
         CHECK(interp->alive());
     }

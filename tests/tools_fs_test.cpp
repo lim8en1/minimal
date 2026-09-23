@@ -216,6 +216,31 @@ TEST_CASE("str_replace requires exactly one match", "[tools_fs][edit][invariant]
         CHECK(result.content_text.find("exactly once") != std::string::npos);
         CHECK(f.Read("a.txt") == "x = 1\ny = 1\n");
     }
+
+    SECTION("overlapping matches also fail, not just adjacent ones") {
+        // Regression: counting by skipping needle.size() bytes past each hit
+        // missed OVERLAPPING occurrences -- "aa" in "aaa" is at offsets 0 and
+        // 1, but skipping to offset 2 only ever saw the first, so the
+        // uniqueness check passed and replaced a location the caller never
+        // uniquely identified.
+        f.Write("a.txt", "aaa\n");
+        const auto result = tool->execute(
+            {{"command", "str_replace"}, {"path", "a.txt"}, {"old_str", "aa"}, {"new_str", "Z"}},
+            ctx);
+        CHECK(result.is_error);
+        CHECK(result.content_text.find("exactly once") != std::string::npos);
+        CHECK(f.Read("a.txt") == "aaa\n");
+    }
+}
+
+TEST_CASE("write and edit are not parallel-safe", "[tools_fs][invariant]") {
+    // Regression: both default(true)d, though each is a read-modify-write of
+    // the whole file with no lock -- two calls against the same path in one
+    // turn race, and whichever atomic rename lands second silently discards
+    // the other's change while both report success.
+    Fixture f;
+    CHECK_FALSE(tools_fs::MakeWriteTool(f.settings)->parallel_safe());
+    CHECK_FALSE(tools_fs::MakeEditTool(f.settings)->parallel_safe());
 }
 
 TEST_CASE("insert places text at the requested line", "[tools_fs][edit]") {
@@ -355,6 +380,40 @@ TEST_CASE("edit create refuses file_text over the byte cap, same as write",
     CHECK(result.is_error);
     CHECK(result.content_text.find("limit") != std::string::npos);
     CHECK_FALSE(std::filesystem::exists(f.dir.path() / "new.txt"));
+}
+
+TEST_CASE("edit create over the byte cap leaves no directory debris",
+         "[tools_fs][edit][invariant]") {
+    // Regression: CreateParents ran BEFORE the size check, so a rejected
+    // create with a nested path still left the empty parent directories
+    // behind it.
+    Fixture f;
+    f.settings.edit_max_editable_file_bytes = 16;
+    auto tool = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute(
+        {{"command", "create"},
+         {"path", "new/deep/dir/file.txt"},
+         {"file_text", std::string(100, 'z')}},
+        ctx);
+
+    CHECK(result.is_error);
+    CHECK_FALSE(std::filesystem::exists(f.dir.path() / "new"));
+}
+
+TEST_CASE("write over the byte cap leaves no directory debris",
+         "[tools_fs][write][invariant]") {
+    Fixture f;
+    f.settings.edit_max_editable_file_bytes = 16;
+    auto tool = tools_fs::MakeWriteTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute(
+        {{"path", "new/deep/dir/file.txt"}, {"content", std::string(100, 'z')}}, ctx);
+
+    CHECK(result.is_error);
+    CHECK_FALSE(std::filesystem::exists(f.dir.path() / "new"));
 }
 
 TEST_CASE("edit rejects an unknown command", "[tools_fs][edit]") {

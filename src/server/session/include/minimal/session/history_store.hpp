@@ -55,9 +55,13 @@ public:
     // Compact and Clear from /clear; session deletion cascades at the SQL
     // layer.
 
-    // Upsert: the latest compaction replaces any earlier one.
-    virtual void SaveCompactionCheckpoint(std::int64_t boundary_seq,
-                                          const llm::Message& summary) = 0;
+    // Appends a compaction record; the one with the highest boundary_seq among
+    // the active records is the checkpoint a resume seeds from. Every record
+    // stays visible to scrollback (see CompactionRecord).
+    virtual void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary,
+                                          const CompactionMeta& meta) = 0;
+    // Deactivates the checkpoint (resume goes back to the full transcript);
+    // the records stay for scrollback -- the compactions did happen.
     virtual void ClearCompactionCheckpoint() = 0;
 
     // --- Session traversal (rewind) ------------------------------------------

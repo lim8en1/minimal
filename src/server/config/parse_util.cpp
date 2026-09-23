@@ -32,4 +32,15 @@ std::unordered_map<std::string, std::string> ParseStringMap(const nlohmann::json
     return out;
 }
 
+std::int64_t ReadClampedInt64(const nlohmann::json& parent, const char* key,
+                              std::int64_t fallback, std::int64_t min, std::int64_t max) {
+    if (!parent.is_object()) return fallback;
+    const auto it = parent.find(key);
+    if (it == parent.end() || !it->is_number_integer()) return fallback;
+    const std::int64_t value = it->get<std::int64_t>();
+    if (value < min) return min;
+    if (value > max) return max;
+    return value;
+}
+
 }  // namespace minimal::config

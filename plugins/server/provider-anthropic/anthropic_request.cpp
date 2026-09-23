@@ -85,6 +85,7 @@ nlohmann::json ToAnthropicTools(const std::vector<llm::ToolDefinition>& tools) {
         out.push_back({{"name", tool.name},
                        {"description", tool.description},
                        {"input_schema", tool.input_schema}});
+        if (tool.strict) out.back()["strict"] = true;
     }
     return out;
 }

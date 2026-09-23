@@ -108,6 +108,12 @@ RunOutcome RunProcess(const LaunchedProcess& proc, const BashSettings& settings,
     if (ctx.emit_output) sinks[0].emit = ctx.emit_output;
     sinks[1].mode = minimal::sidecar::PipeSink::Mode::kBounded;
     sinks[1].cap = kMaxStatePayloadBytes;
+    // The state channel is internal bookkeeping the user's command never
+    // knows about and cannot redirect or close; a daemon that inherits it
+    // says nothing about whether the command's OWN stdio was left connected,
+    // so it must not trip the idle-after-reap "detached grandchild" kill
+    // meant for exactly that (see bash_process.cpp's fd-9 comment).
+    sinks[1].detect_detached_grandchild = false;
 
     minimal::sidecar::DrainOptions options;
     options.timeout_ms = timeout_ms;
@@ -401,19 +407,35 @@ public:
         // session's cwd and environment on its way out -- the same rule the
         // restart line's own comment states.
         if (before_command_.enabled()) {
-            nlohmann::json payload{{"session_id", ctx.session_id}, {"command", command}};
             const auto hook_state = store_.Snapshot(ctx.session_id, ctx.project_root);
             const auto scan = ScanCommand(command);
+            std::vector<std::string> resolved_programs;
             for (const auto& word : scan.command_words) {
                 if (auto program = ResolveOnPath(hook_state, word)) {
-                    payload["program"] = program->string();
-                    break;
+                    resolved_programs.push_back(program->string());
                 }
             }
-            if (auto blocked = before_command_.Emit(std::move(payload), ctx.is_cancelled)) {
-                ctx.logger.warn("bash[{}] before_command hook blocked '{}': {}", ctx.session_id,
-                                command, *blocked);
-                return Error("blocked by hook: " + *blocked);
+            // Filters match one string field exactly (docs/EXTENSIBILITY.md:
+            // "exact equality on declared string fields"), so a single
+            // payload can carry only one "program" value. Emitting once per
+            // resolved program -- instead of once with just the first -- is
+            // what makes a filter on `program` see every program the line
+            // will exec: "echo starting && rm -rf build" resolves `echo`
+            // first, so stopping at the first resolution let a guard hook
+            // written for rm never fire. First Block wins, same rule a
+            // hooks.json action list already uses for one payload.
+            // A command with no resolvable program (an assignment, a
+            // builtin) still emits once with no "program" field, matching
+            // hooks that filter on something else or nothing at all.
+            if (resolved_programs.empty()) resolved_programs.emplace_back();
+            for (const auto& program : resolved_programs) {
+                nlohmann::json payload{{"session_id", ctx.session_id}, {"command", command}};
+                if (!program.empty()) payload["program"] = program;
+                if (auto blocked = before_command_.Emit(std::move(payload), ctx.is_cancelled)) {
+                    ctx.logger.warn("bash[{}] before_command hook blocked '{}': {}",
+                                    ctx.session_id, command, *blocked);
+                    return Error("blocked by hook: " + *blocked);
+                }
             }
         }
 

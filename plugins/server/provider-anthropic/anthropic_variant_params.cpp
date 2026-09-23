@@ -41,12 +41,26 @@ std::pair<nlohmann::json, bool> AnthropicVariantParams::DeriveParameters(
     }
     bool clamped = false;
     int value = *budget;
-    if (max_tokens && value > *max_tokens - 1024) {
-        // The one cross-field constraint the parser can see coming: the API
-        // rejects budget_tokens >= max_tokens. Leave the model 1k of visible
-        // output; a named warning beats a first-turn 400.
-        value = *max_tokens - 1024;
-        clamped = true;
+    if (max_tokens) {
+        // The API rejects budget_tokens >= max_tokens; the ceiling below
+        // leaves the model 1k of visible output, and a named warning beats a
+        // first-turn 400. But the API ALSO rejects a budget under its own
+        // minimum (1024) -- the ceiling alone had no floor, so a small
+        // enough max_tokens (<=1024) drove `value` negative instead of just
+        // small. A max_tokens too tight to hold both the minimum budget AND
+        // the reserved output can't be salvaged by clamping: skip thinking
+        // for this request rather than send a budget guaranteed invalid
+        // either way, the same degrade "none"/"minimal" already use above.
+        constexpr int kAnthropicMinBudgetTokens = 1024;
+        constexpr int kReservedVisibleOutput = 1024;
+        if (*max_tokens < kAnthropicMinBudgetTokens + kReservedVisibleOutput) {
+            return {nlohmann::json::object(), false};
+        }
+        const int ceiling = *max_tokens - kReservedVisibleOutput;
+        if (value > ceiling) {
+            value = ceiling;
+            clamped = true;
+        }
     }
     return {nlohmann::json{{"thinking", {{"type", "enabled"}, {"budget_tokens", value}}}}, clamped};
 }

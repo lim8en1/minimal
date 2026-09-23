@@ -18,6 +18,9 @@ public:
     llm::ChatResponse Complete(const llm::ChatRequest& request) override;
     llm::ChatResponse StreamComplete(const llm::ChatRequest& request,
                                      const llm::StreamEventSink& sink) override;
+    // Signed thinking is replayed, and newer Claude models reject a replay
+    // whose prefix changed -- which every keep-tail compaction does.
+    bool BindsThinkingToPrefix() const override { return true; }
 
 private:
     net::HttpRequest BuildHttpRequest(std::string body, bool streaming,

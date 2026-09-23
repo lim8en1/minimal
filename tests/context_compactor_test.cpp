@@ -45,29 +45,40 @@ agent::CompactionResult RunOk(FakeLlmProvider& provider, std::int64_t last_repor
 
 }  // namespace
 
-TEST_CASE("compact_messages sends the prompt as system and passes messages through verbatim",
+TEST_CASE("compact_messages sends the session prefix verbatim plus one instruction message",
           "[compactor]") {
     FakeLlmProvider provider;
     provider.PushResponse(TextResponse("SUMMARY TEXT"));
 
-    const auto result = RunOk(provider, 1234);
+    auto params = Params(1234);
+    params.system = "SESSION SYSTEM";
+    params.tools = {llm::ToolDefinition{"read", "reads", nlohmann::json{{"type", "object"}}}};
+    const auto result = agent::compact_messages(MixedHistory(), provider, params);
+    REQUIRE(result.has_value());
 
-    CHECK(result.context_tokens_before == 1234);
+    CHECK(result->context_tokens_before == 1234);
     // The summary is a user message: it stands in for the compacted prefix of the
     // conversation, and that is the shape both wire formats accept at the head.
-    REQUIRE(result.summary_message.role == llm::Role::User);
-    REQUIRE(result.summary_message.content.size() == 1);
-    const auto& text = std::get<llm::TextBlock>(result.summary_message.content.front()).text;
+    REQUIRE(result->summary_message.role == llm::Role::User);
+    REQUIRE(result->summary_message.content.size() == 1);
+    const auto& text = std::get<llm::TextBlock>(result->summary_message.content.front()).text;
+    CHECK(text.starts_with(agent::kSummaryFraming));
     CHECK(text.ends_with("SUMMARY TEXT"));
 
     REQUIRE(provider.requests().size() == 1);
     const auto& request = provider.requests().front();
+    // The session's own system prompt and tools, so the provider's prefix
+    // cache covers the history: the compression prompt is NOT the system.
     REQUIRE(request.system.has_value());
-    CHECK(*request.system == "THE PROMPT");
-    // Raw pass-through: tool blocks included, no flattening. (No synthesized
-    // operator== on Message under the pinned toolchain, so compare structurally.)
+    CHECK(*request.system == "SESSION SYSTEM");
+    REQUIRE(request.tools.size() == 1);
+    CHECK(request.tools.front().name == "read");
+    CHECK(request.tool_choice.kind == llm::ToolChoiceKind::Auto);
+    // Raw pass-through of the WHOLE history, then exactly one appended user
+    // message carrying the prompt. (No synthesized operator== on Message under
+    // the pinned toolchain, so compare structurally.)
     const auto expected = MixedHistory();
-    REQUIRE(request.messages.size() == expected.size());
+    REQUIRE(request.messages.size() == expected.size() + 1);
     for (std::size_t i = 0; i < expected.size(); ++i) {
         CHECK(request.messages[i].role == expected[i].role);
         CHECK(request.messages[i].content.size() == expected[i].content.size());
@@ -80,9 +91,22 @@ TEST_CASE("compact_messages sends the prompt as system and passes messages throu
     const auto* result_block = std::get_if<llm::ToolResultBlock>(&request.messages[2].content.front());
     REQUIRE(result_block != nullptr);
     CHECK(result_block->tool_use_id == "tu1");
+    const auto& instruction = request.messages.back();
+    CHECK(instruction.role == llm::Role::User);
+    const auto& instruction_text = std::get<llm::TextBlock>(instruction.content.front()).text;
+    // Verbatim: the text lives in prompts/compression.md, not in the harness.
+    CHECK(instruction_text == "THE PROMPT");
     CHECK(request.model == "model-x");
-    CHECK(request.tools.empty());
     CHECK(request.stream);
+}
+
+TEST_CASE("compact_messages with no session prefix sends no system and no tools", "[compactor]") {
+    FakeLlmProvider provider;
+    provider.PushResponse(TextResponse("SUMMARY TEXT"));
+    RunOk(provider, 0);
+    REQUIRE(provider.requests().size() == 1);
+    CHECK_FALSE(provider.requests().front().system.has_value());
+    CHECK(provider.requests().front().tools.empty());
 }
 
 TEST_CASE("compact_messages forwards the session id onto the summarizer's request",

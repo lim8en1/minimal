@@ -20,6 +20,19 @@ using tools::ToolSpec;
 
 ToolResult Error(std::string message) { return ToolResult{true, std::move(message)}; }
 
+// Like nlohmann's own `j.value(key, fallback)`, but never throws:
+// `.value()` raises type_error.302 when the field is present with the WRONG
+// type (a null "snippet" instead of a string), which -- since these fields
+// come from a whole ARRAY of rows processed in one loop -- used to fail the
+// entire search over one malformed row, taking every good result down with
+// it, exactly the failure mode the surrounding comment already guards
+// against for a non-object row.
+std::string SafeString(const nlohmann::json& j, const char* key, std::string fallback) {
+    const auto it = j.find(key);
+    if (it == j.end() || !it->is_string()) return fallback;
+    return it->get<std::string>();
+}
+
 std::string PercentEncode(std::string_view text) {
     static const char kHex[] = "0123456789ABCDEF";
     std::string out;
@@ -145,9 +158,9 @@ public:
             // whole search over one malformed row, taking every good result
             // down with it.
             if (!result.is_object()) continue;
-            const std::string title = result.value("title", "");
-            const std::string result_url = result.value("url", "");
-            const std::string snippet = result.value("snippet", "");
+            const std::string title = SafeString(result, "title", "");
+            const std::string result_url = SafeString(result, "url", "");
+            const std::string snippet = SafeString(result, "snippet", "");
             if (result_url.empty()) continue;   // a result naming no URL is useless to the model
             out << (count + 1) << ". " << (title.empty() ? result_url : title) << "\n" << result_url;
             if (!snippet.empty()) out << "\n" << snippet;

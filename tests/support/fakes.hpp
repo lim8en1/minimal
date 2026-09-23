@@ -34,6 +34,11 @@ namespace minimal::testing {
 // loop should see them; every ChatRequest is recorded for assertion.
 class FakeLlmProvider : public llm::LlmProvider {
 public:
+    // What BindsThinkingToPrefix reports: off like every non-Claude backend,
+    // on to exercise the compaction thinking drop.
+    bool binds_thinking = false;
+    bool BindsThinkingToPrefix() const override { return binds_thinking; }
+
     struct Step {
         std::optional<llm::ChatResponse> response;
         std::optional<llm::LlmError> error;
@@ -386,8 +391,11 @@ public:
     }
     // Checkpoint tracking mirrors the real store, so compaction tests can
     // assert what a resume would consume.
-    void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary) override {
+    void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary,
+                                  const session::CompactionMeta& meta) override {
         std::lock_guard<std::mutex> lock(mu_);
+        checkpoint_meta = meta;
+        if (meta.skipped) return;   // a guard's notice, never a checkpoint (as in SQLite)
         checkpoint_boundary = boundary_seq;
         checkpoint_summary = summary;
         checkpoint_cleared = false;
@@ -411,6 +419,7 @@ public:
     std::vector<session::MessageAttribution> attributions;   // parallel to messages
     std::optional<std::int64_t> checkpoint_boundary;
     llm::Message checkpoint_summary;
+    session::CompactionMeta checkpoint_meta;
     bool checkpoint_cleared = false;
     mutable std::mutex mu_;
 };

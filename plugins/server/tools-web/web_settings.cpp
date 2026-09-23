@@ -1,7 +1,10 @@
 #include "web_settings.hpp"
 
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
+
+#include "minimal/config/parse_util.hpp"
 
 namespace minimal::tools_web {
 namespace {
@@ -10,9 +13,16 @@ template <typename T>
 T ValueOr(const nlohmann::json& parent, const char* section, const char* key, T fallback) {
     auto section_it = parent.find(section);
     if (section_it == parent.end() || !section_it->is_object()) return fallback;
-    auto key_it = section_it->find(key);
-    if (key_it == section_it->end() || !key_it->is_number()) return fallback;
-    return key_it->get<T>();
+    // config::ReadClampedInt64: `is_number()` accepted a float (1500.7,
+    // silently truncated by get<T>()) and a value like 4294967297 wrapped to
+    // 1 when narrowed to `int` -- rejecting non-integers and clamping into
+    // T's range before narrowing closes both. Floor 0 is harmless: every
+    // field here is a non-negative count/timeout, same as PositiveOr's own
+    // `value > 0` check already required.
+    const auto value =
+        config::ReadClampedInt64(*section_it, key, static_cast<std::int64_t>(fallback), 0,
+                                 static_cast<std::int64_t>(std::numeric_limits<T>::max()));
+    return static_cast<T>(value);
 }
 
 template <typename T>

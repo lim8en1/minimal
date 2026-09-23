@@ -1100,6 +1100,9 @@ grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext* context,
             for (const auto& stored : page.messages) {
                 *response->add_messages() = ToProto(stored);
             }
+            for (const auto& record : page.compactions) {
+                *response->add_compactions() = ToProto(record);
+            }
             // Note the flipped meaning vs. the before_seq path: more NEWER
             // rows remain (the page was full), not older pages -- see the
             // proto comment.
@@ -1112,6 +1115,9 @@ grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext* context,
         const auto page = reader_.GetMessages(request->session_id(), cursor, limit);
         for (const auto& stored : page.messages) {
             *response->add_messages() = ToProto(stored);
+        }
+        for (const auto& record : page.compactions) {
+            *response->add_compactions() = ToProto(record);
         }
         response->set_has_more(page.has_more);
     } catch (const std::exception& e) {

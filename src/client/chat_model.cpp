@@ -272,6 +272,7 @@ std::string_view ToString(ChatRowKind kind) {
         case ChatRowKind::ToolActivity: return "tool_activity";
         case ChatRowKind::System: return "system";
         case ChatRowKind::Switch: return "switch";
+        case ChatRowKind::Compaction: return "compaction";
     }
     return "unknown";
 }
@@ -287,7 +288,32 @@ std::string AssistantLabel(const std::string& agent, const std::string& model) {
     return "assistant";
 }
 
-std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& descending) {
+std::string CompactionHeadline(const ChatRow& row) {
+    const auto tokens = [](int64_t n) -> std::string {
+        if (n >= 1'000'000) {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%.1fM", static_cast<double>(n) / 1'000'000.0);
+            return buf;
+        }
+        if (n >= 1'000) return std::to_string((n + 500) / 1'000) + "k";
+        return std::to_string(n);
+    };
+    std::string out = row.compaction_skipped ? "compaction skipped" : "context compacted";
+    if (!row.compaction_trigger.empty()) out += " (" + row.compaction_trigger + ")";
+    if (row.compaction_skipped) return out;
+    if (row.compaction_folded_messages > 0) {
+        out += ": " + std::to_string(row.compaction_folded_messages) + " messages summarized";
+    }
+    if (row.compaction_tokens_before > 0 || row.compaction_tokens_after > 0) {
+        out += row.compaction_folded_messages > 0 ? ", " : ": ";
+        out += "~" + tokens(row.compaction_tokens_before) + " -> ~" +
+               tokens(row.compaction_tokens_after) + " tokens";
+    }
+    return out;
+}
+
+std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& descending,
+                                          const std::vector<v1::CompactionEvent>* compactions) {
     // Identify the spawn_subagent tool_use ids first: the completion
     // injections are distinguishable ONLY by echoing one of these.
     // unordered_set, not a linear-scanned vector: a scrollback window can
@@ -494,6 +520,26 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                 r->model = it->model();
             }
         }
+
+        // The compactions that ran right after this message. Appended LAST
+        // within the seq, so they take the highest occurrence indexes and a
+        // live compaction arriving later never shifts the render-cache keys
+        // of rows already drawn.
+        if (compactions != nullptr) {
+            for (const auto& evt : *compactions) {
+                if (evt.at_seq() != message_seq) continue;
+                ChatRow row{.seq = message_seq, .kind = ChatRowKind::Compaction,
+                            .text = evt.summary()};
+                row.created_at_unix_ms = evt.created_at_unix_ms();
+                row.compaction_folded_messages = evt.folded_messages();
+                row.compaction_tokens_before = evt.tokens_before();
+                row.compaction_tokens_after = evt.tokens_after();
+                row.compaction_trigger = evt.trigger();
+                row.compaction_warning = evt.warning();
+                row.compaction_skipped = evt.skipped();
+                rows.push_back(std::move(row));
+            }
+        }
     }
     return rows;
 }
@@ -507,6 +553,7 @@ std::vector<bool> LabelContinuations(const std::vector<ChatRow>& rows) {
             case ChatRowKind::UserAttachment:
             case ChatRowKind::System:
             case ChatRowKind::Switch:
+            case ChatRowKind::Compaction:
                 labeled_in_turn = false;
                 break;
             case ChatRowKind::AgentMarkdown:
@@ -525,6 +572,7 @@ bool CollapsedByDefault(const ChatRow& row) {
     constexpr std::size_t kAttachmentCollapseThresholdChars = 2000;
     switch (row.kind) {
         case ChatRowKind::Thinking:
+        case ChatRowKind::Compaction:
             return true;
         case ChatRowKind::ToolActivity:
             // ask_user's result body is the user's recorded choices ("the

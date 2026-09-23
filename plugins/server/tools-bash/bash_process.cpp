@@ -15,9 +15,19 @@ std::string WrapCommand(const std::string& command) {
     // backslash count consumes the first newline as continuation and the second
     // ends the (now empty) logical line; an even count is a literal backslash,
     // the first newline ends the command, and the second is a no-op empty line.
+    // The absolute path, not a PATH lookup: the command itself may replace
+    // PATH (`export PATH=$HOME/bin`), which otherwise fails to resolve `env`
+    // (appending a spurious "env: command not found" to the model-visible
+    // output and silently dropping the whole state update -- ParseStatePayload
+    // sees no env entries and discards the payload wholesale). `command -p
+    // env` was tried first and rejected: POSIX leaves it unspecified whether
+    // `-p`'s guaranteed PATH is also substituted into the child's OWN
+    // environment, and on this shell it is -- `env -0`'s report of PATH
+    // itself came back as the fixed default, not the session's real one,
+    // which is exactly the state this trailer exists to capture correctly.
     const bool trailing_backslash = !command.empty() && command.back() == '\\';
     return command + (trailing_backslash ? "\n\n" : "\n") +
-           "__minimal_rc=$?\n{ pwd -P; printf '\\0'; env -0; } >&" +
+           "__minimal_rc=$?\n{ pwd -P; printf '\\0'; /usr/bin/env -0; } >&" +
            std::to_string(kStateFd) + "\nexit $__minimal_rc\n";
 }
 

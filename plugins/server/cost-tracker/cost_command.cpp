@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <iomanip>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 #include "minimal/commands/command_context.hpp"
@@ -90,18 +91,64 @@ std::string FormatAllSessions(const std::vector<std::string>& session_ids, CostS
             // per-session /cost path surfaces the error with its name.
         }
     }
-    // Root sessions first (most spend first), then their subagents adjacent to
-    // their parent -- the same adjacency the tab bar uses.
-    std::stable_sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
-        const bool a_child = !a.parent.empty();
-        const bool b_child = !b.parent.empty();
-        if (a_child != b_child) return !a_child;
-        if (a_child && b_child) return a.parent < b.parent;
-        return a.totals.total_cost > b.totals.total_cost;
-    });
+    // Root sessions first (most spend first), then their subagents adjacent
+    // to their parent -- the same adjacency the tab bar uses. Grouping by
+    // parent id (not sorting by it as a string) and walking depth-first is
+    // what actually interleaves them: sorting alone can only ever produce
+    // "all roots, then all children" or "all children, then all roots" as
+    // two blocks, never a child immediately after ITS OWN parent's row.
+    std::unordered_map<std::string, std::vector<std::size_t>> children_by_parent;
+    std::vector<std::size_t> roots;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        if (rows[i].parent.empty()) {
+            roots.push_back(i);
+        } else {
+            children_by_parent[rows[i].parent].push_back(i);
+        }
+    }
+    const auto by_cost_desc = [&rows](std::size_t a, std::size_t b) {
+        return rows[a].totals.total_cost > rows[b].totals.total_cost;
+    };
+    std::stable_sort(roots.begin(), roots.end(), by_cost_desc);
+    for (auto& [parent, kids] : children_by_parent) {
+        std::stable_sort(kids.begin(), kids.end(), by_cost_desc);
+    }
+
+    // Explicit stack, not recursion: a subagent-of-a-subagent chain's depth
+    // is model-influenced (the same reasoning tools-bash's command scanner
+    // walk uses), and this is a report path, not a place to trust the data
+    // to stay shallow.
+    std::vector<std::size_t> ordered;
+    ordered.reserve(rows.size());
+    std::vector<std::size_t> stack(roots.rbegin(), roots.rend());
+    while (!stack.empty()) {
+        const std::size_t i = stack.back();
+        stack.pop_back();
+        ordered.push_back(i);
+        if (auto it = children_by_parent.find(rows[i].session_id); it != children_by_parent.end()) {
+            for (auto rit = it->second.rbegin(); rit != it->second.rend(); ++rit) {
+                stack.push_back(*rit);
+            }
+        }
+    }
+    // A "parent" pointing at a session not present in `rows` at all (its own
+    // blob was corrupt and skipped above, or a parent/child cycle) is never
+    // reached from a root -- append it rather than silently drop it from the
+    // report, most-spend-first like the roots.
+    if (ordered.size() != rows.size()) {
+        std::vector<bool> placed(rows.size(), false);
+        for (const std::size_t i : ordered) placed[i] = true;
+        std::vector<std::size_t> orphans;
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            if (!placed[i]) orphans.push_back(i);
+        }
+        std::stable_sort(orphans.begin(), orphans.end(), by_cost_desc);
+        ordered.insert(ordered.end(), orphans.begin(), orphans.end());
+    }
 
     std::ostringstream out;
-    for (const auto& row : rows) {
+    for (const std::size_t row_index : ordered) {
+        const auto& row = rows[row_index];
         out << CostCell(row.totals.total_cost, row.totals.total_cost_known);
         out << "  " << row.session_id;
         if (!row.parent.empty()) out << "  (subagent of " << row.parent << ")";

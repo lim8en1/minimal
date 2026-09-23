@@ -98,18 +98,30 @@ public:
     void SetSummary(const std::string& id, const std::string& summary);
     // Topic by name; binds the entry to it. Match is case-insensitive;
     // create_if_missing creates the topic when under cap (returns false at
-    // cap, entry stays unfiled -- the taxonomy's one hard rule).
+    // cap, entry stays unfiled -- the taxonomy's one hard rule). `max_topics`
+    // was a hard-coded 4096 (the settings field of the same name was parsed
+    // but never reached here); a caller with no opinion can pass 4096 itself.
     bool BindTopic(const std::string& entry_id, int scope, const std::string& project_root,
-                   const std::string& name, bool create_if_missing);
+                   const std::string& name, bool create_if_missing, int max_topics = 4096);
 
     // --- embedding pipeline ---
     // Rows with embed_status=0 (pending) after a strategy-signature change,
     // up to a budget; id + text. Marks them in-flight (3).
     struct PendingRow { std::string id; std::string text; };
     std::vector<PendingRow> ClaimPendingEmbeddings(const std::string& signature, int budget);
-    // Marks failed rows back to pending and stores the reason.
+    // Marks failed rows (status 2) and stores the reason. Despite this
+    // comment's old promise, they do NOT go back to pending on their own --
+    // see ResetFailedEmbeddings, the deliberate retry this plugin actually
+    // has (via `/memory reindex`), and MaybeDrainReindex's own comment for
+    // why an automatic retry every drain is the wrong default (it would
+    // spend the whole budget retrying the same broken rows on every call
+    // during a real outage instead of embedding new ones).
     void MarkEmbedFailed(const std::vector<std::string>& ids, const std::string& error);
-    void StoreEmbedding(const std::string& id, const Embedding& embedding);
+    // Resets every failed (status 2) row back to pending (status 0) so the
+    // next drain retries them. Returns the count reset.
+    int ResetFailedEmbeddings();
+    void StoreEmbedding(const std::string& id, const Embedding& embedding,
+                        const std::string& signature);
     // Returns nearest by cosine over rows matching signature; empty when no
     // embeddings exist yet. Used by search (sim sort) and the similar-hint.
     struct VectorRow { std::string id; std::vector<float> values; };
@@ -142,7 +154,12 @@ public:
     };
     std::optional<Entry> Get(const std::string& id);
 
-    Digest DigestInfo(const std::string& backend, const std::string& enrichment);
+    // `project_root` scopes PROJECT-scope rows to this project only; GLOBAL
+    // rows are always included, matching the scope's own cross-project
+    // visibility. Pass "" for a sessionless caller with no project bound
+    // (project counts then read as zero, same as an empty project).
+    Digest DigestInfo(const std::string& backend, const std::string& enrichment,
+                      const std::string& project_root);
 
     // Topics for the enrichment prompt: names by recency of use, capped.
     std::vector<std::string> TopicNames(int scope, const std::string& project_root, int cap);

@@ -65,8 +65,12 @@ void minimal_plugin_register_services(
     minimal::plugins::ServiceRegistry& registry,
     const minimal::plugins::PluginRegistrationContext&) {
     // The loader invokes tools registration before services registration, so
-    // the store exists by now; the guard keeps the service's captured pointer
-    // non-null even if that ordering ever changed.
+    // the store exists by now; this guard is belt-and-braces for a
+    // sessionless/toolless host that skips tool registration entirely.
+    // ChecklistRpcService binds to SharedStore()'s SLOT by reference (not a
+    // copy of its value), so even if this guard ever ran too late, a later
+    // write here or from the tool registration path is still visible to the
+    // service -- unlike the by-value capture this replaced.
     if (!SharedStore()) SharedStore() = std::make_shared<minimal::checklist::ChecklistStore>(nullptr);
     registry.Provide(minimal::plugins::PluginRpcServiceName(minimal::checklist::kPluginName),
                      &SharedRpcService());

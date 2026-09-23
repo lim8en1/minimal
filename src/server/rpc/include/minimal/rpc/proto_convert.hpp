@@ -137,6 +137,7 @@ tools::PermissionResponse FromProto(const v1::PermissionResponse& response,
 // that could drift without anything noticing.
 
 v1::StoredMessage ToProto(const session::StoredMessage& stored);
+v1::CompactionEvent ToProto(const session::CompactionRecord& record);
 v1::SessionSummary ToProto(const session::SessionSummary& summary);
 
 // CommandArgs: already structured on the wire, so this is a straight copy rather
