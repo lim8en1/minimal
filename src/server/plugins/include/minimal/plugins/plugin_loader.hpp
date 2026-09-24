@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/agent/compaction_strategy.hpp"
+#include "minimal/agent/context_contributor.hpp"
 #include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
@@ -77,6 +78,7 @@ struct PluginRecord {
     bool registered_session_observer = false;
     bool registered_auth_provider = false;
     bool registered_mention_resolver = false;
+    bool registered_context_contributor = false;
     // True when the plugin registered an advisor that actually landed (a
     // duplicate from the same plugin is refused and does not count twice).
     bool registered_permission_advisor = false;
@@ -142,7 +144,8 @@ public:
                  agent::MentionResolverRegistry* mention_resolvers = nullptr,
                  agent::CompactionStrategyRegistry* compaction_strategies = nullptr,
                  llm::MetadataCatalogRegistry* metadata_catalogs = nullptr,
-                 llm::VariantParamsRegistry* variant_params = nullptr);
+                 llm::VariantParamsRegistry* variant_params = nullptr,
+                 agent::ContextContributorRegistry* context_contributors = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -186,6 +189,10 @@ private:
     // wins) and the registry itself carries the core default, so null just
     // means plugins cannot override the resolver.
     agent::MentionResolverRegistry* mention_resolvers_ = nullptr;
+    // Optional like the others; null means plugins cannot pre-fill session
+    // context. Additive, with a removal seam (count snapshot) so a throwing
+    // plugin's contributors are rolled back like its observers.
+    agent::ContextContributorRegistry* context_contributors_ = nullptr;
     // Optional like the others; null means plugins cannot register a permission
     // advisor. Additive across plugins; permissions.json selects one by name.
     tools::PermissionAdvisorRegistry* permission_advisors_ = nullptr;

@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/agent/context_contributor.hpp"
 #include "minimal/agent/provider_instance_cache.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
@@ -161,6 +162,14 @@ public:
     // the process. Same optionality rule as set_commands: unset (tests)
     // means no signal cleanup runs, matching today's behavior exactly.
     void set_signal_router(SignalRouter* signal_router) { signal_router_ = signal_router; }
+
+    // Plugin context contributors (context_contributor.hpp), asked once per
+    // session in CreateResolved -- the same funnel as project context. Unset
+    // (tests) means no contributed sections, matching set_signal_router's
+    // optionality rule.
+    void set_context_contributors(const ContextContributorRegistry* contributors) {
+        context_contributors_ = contributors;
+    }
 
     // Project context (AGENTS.md/CLAUDE.md) settings, read once at startup.
     // Optional but DEFAULTS TO DISABLED: until main wires the parsed settings
@@ -311,6 +320,7 @@ private:
     // structural split, not a behavior change.
     void ApplyProjectContext(SessionParams& params) const;
     void AppendSignalContext(SessionParams& params) const;
+    void AppendContributedContext(SessionParams& params, const AgentPreset& preset) const;
     AgentPreset ResolveModel(AgentPreset preset,
                              const std::optional<config::ModelRef>& model_override) const;
     std::shared_ptr<llm::LlmProvider> ResolveProvider(const AgentPreset& preset,
@@ -341,6 +351,7 @@ private:
     const commands::CommandRegistry* commands_ = nullptr;
     const commands::ProjectCommandSource* project_commands_ = nullptr;
     SignalRouter* signal_router_ = nullptr;
+    const ContextContributorRegistry* context_contributors_ = nullptr;
     tools::ToolRegistry& tools_;
     const llm::ProviderFactoryRegistry& providers_;
     // Shared provider instances across every session this registry creates.

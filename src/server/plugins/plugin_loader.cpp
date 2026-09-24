@@ -42,6 +42,8 @@ using RegisterAuthProviderFn =
     void (*)(rpc::AuthProviderRegistry&, const PluginRegistrationContext&);
 using RegisterMentionResolverFn =
     void (*)(agent::MentionResolverRegistry&, const PluginRegistrationContext&);
+using RegisterContextContributorsFn =
+    void (*)(agent::ContextContributorRegistry&, const PluginRegistrationContext&);
 using RegisterPermissionAdvisorFn =
     void (*)(tools::PermissionAdvisorRegistry&, const PluginRegistrationContext&);
 using RegisterModelCatalogsFn =
@@ -145,7 +147,8 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
                            agent::MentionResolverRegistry* mention_resolvers,
                            agent::CompactionStrategyRegistry* compaction_strategies,
                            llm::MetadataCatalogRegistry* metadata_catalogs,
-                           llm::VariantParamsRegistry* variant_params)
+                           llm::VariantParamsRegistry* variant_params,
+                           agent::ContextContributorRegistry* context_contributors)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
@@ -154,6 +157,7 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
       commands_(commands),
       auth_providers_(auth_providers),
       mention_resolvers_(mention_resolvers),
+      context_contributors_(context_contributors),
       permission_advisors_(permission_advisors),
       services_(services),
       storage_(storage),
@@ -267,14 +271,17 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // command maps are still keyed by original attribution names here.
     const std::size_t observers_before =
         observers_ != nullptr ? observers_->observer_count() : 0;
-    auto rollback = [this, &record, observers_before] {
+    const std::size_t contributors_before =
+        context_contributors_ != nullptr ? context_contributors_->count() : 0;
+    auto rollback = [this, &record, observers_before, contributors_before] {
         tools_.RemoveByAttribution(record.name);
         if (commands_ != nullptr) commands_->RemoveByAttribution(record.name);
         if (services_ != nullptr) services_->RemoveByAttribution(record.name);
         if (observers_ != nullptr) observers_->RemoveAfter(observers_before);
+        if (context_contributors_ != nullptr) context_contributors_->RemoveAfter(contributors_before);
         common::DefaultLogger().warn(
             "plugin '{}': registration threw; PARTIALLY rolled back -- its tools, "
-            "commands, services and session observers were removed, but any hook "
+            "commands, services, session observers and context contributors were removed, but any hook "
             "points, provider factories, model catalogs, compaction strategies, "
             "permission advisors, mention resolvers or auth providers it registered "
             "remain live",
@@ -386,6 +393,21 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
                 return record;
             }
             record.registered_auth_provider = true;
+        }
+    }
+
+    if (context_contributors_ != nullptr) {
+        if (auto register_contributors = Lookup<RegisterContextContributorsFn>(
+                handle, "minimal_plugin_register_context_contributors")) {
+            const std::size_t before = context_contributors_->count();
+            if (!GuardedRegistration(
+                    record, "minimal_plugin_register_context_contributors",
+                    [&] { context_contributors_->SetAttribution(record.name); },
+                    [&] { register_contributors(*context_contributors_, context); },
+                    [&] { context_contributors_->ClearAttribution(); }, rollback)) {
+                return record;
+            }
+            record.registered_context_contributor = context_contributors_->count() > before;
         }
     }
 

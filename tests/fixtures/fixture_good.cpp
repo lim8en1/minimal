@@ -3,6 +3,14 @@
 
 namespace {
 
+class FixtureContributor : public minimal::agent::ContextContributor {
+public:
+    std::optional<minimal::agent::ContextSection> Contribute(
+        const minimal::agent::ContextRequest&) override {
+        return minimal::agent::ContextSection{"Fixture", "fixture context"};
+    }
+};
+
 class FixtureTool : public minimal::tools::Tool {
 public:
     explicit FixtureTool(std::string echo) : echo_(std::move(echo)) {
@@ -93,6 +101,11 @@ void minimal_plugin_register_mention_resolver(
     minimal::agent::MentionResolverRegistry& registry,
     const minimal::plugins::PluginRegistrationContext&) {
     registry.TrySetOverride(std::make_shared<FixtureResolver>());
+}
+void minimal_plugin_register_context_contributors(
+    minimal::agent::ContextContributorRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
+    registry.Register(std::make_shared<FixtureContributor>());
 }
 void minimal_plugin_register_model_catalogs(
     minimal::llm::ModelCatalogRegistry& registry,

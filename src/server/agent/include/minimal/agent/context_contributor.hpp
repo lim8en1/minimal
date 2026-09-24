@@ -1,0 +1,110 @@
+#pragma once
+
+// Context contributors: plugins that PRE-FILL a session's system context.
+//
+// A contributor is asked once per session, in the SessionRegistry funnel every
+// session passes through (top-level creation, resume, subagent spawn), right
+// after AGENTS.md and the signal-channel context. Its section is appended to
+// the same system-prompt tail and FROZEN for the session: the request prefix
+// the provider's prompt cache keys on never shifts mid-session. A resume asks
+// again, so a contributor whose content changed between runs is picked up at
+// the next natural cache break.
+//
+// Reachable from the plugin ABI:
+// minimal_plugin_register_context_contributors(ContextContributorRegistry&) --
+// see plugin_abi.h. The memory plugin's index is the first consumer; nothing
+// here knows about it.
+//
+// CONTRACT for implementers:
+//   - Contribute() runs SYNCHRONOUSLY on the session-creation path (a gRPC
+//     handler or a subagent spawn). Keep it cheap: read local state, no
+//     network, no provider calls. It blocks the session from starting.
+//   - Throwing is contained: the registry logs and skips that contributor.
+//   - nullopt, or an empty body, contributes nothing (the normal state).
+//   - The body is capped by settings.json context_contributors
+//     .max_bytes_per_section; an over-budget body is cut at a UTF-8 boundary
+//     with a visible marker. Budget your own content; the cap is a backstop.
+
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "minimal/common/logger.hpp"
+#include "minimal/config/settings_config.hpp"
+
+namespace minimal::agent {
+
+struct ContextRequest {
+    std::string session_id;
+    std::string parent_session_id;  // empty for a top-level session
+    std::filesystem::path project_root;
+    std::string preset_name;
+    bool is_subagent = false;
+    bool resume = false;
+};
+
+struct ContextSection {
+    std::string title;  // rendered as a "## <title>" heading
+    std::string body;
+};
+
+class ContextContributor {
+public:
+    virtual ~ContextContributor() = default;
+    virtual std::optional<ContextSection> Contribute(const ContextRequest& request) = 0;
+};
+
+// settings.json context_contributors: {disabled: [plugin names],
+// max_bytes_per_section}.
+using ContextContributorSettings = config::ContextContributorSettings;
+
+// Additive: every plugin may register any number of contributors. Sections
+// render in registration order (plugins.json load order), which is
+// deterministic -- again the prompt-cache argument.
+class ContextContributorRegistry {
+public:
+    explicit ContextContributorRegistry(common::Logger& logger);
+
+    ContextContributorRegistry(const ContextContributorRegistry&) = delete;
+    ContextContributorRegistry& operator=(const ContextContributorRegistry&) = delete;
+
+    // Attribution window, the loader's shape for tools/commands: every
+    // contributor registered while it is open belongs to `plugin_name`, which
+    // is what `disabled` matches and what a failure log names.
+    void SetAttribution(std::string plugin_name);
+    void ClearAttribution();
+
+    // Startup-only in production (plugin load). A contributor registered
+    // outside an attribution window is attributed to "core".
+    void Register(std::shared_ptr<ContextContributor> contributor);
+
+    // Registration-time rollback for a plugin whose hook threw (the loader's
+    // partial-registration rollback). Safe only before any session exists.
+    void RemoveAfter(std::size_t existing_count);
+    std::size_t count() const;
+
+    void Configure(ContextContributorSettings settings);
+
+    // Every enabled contributor's section, rendered and joined; "" when none
+    // contributed.
+    std::string Render(const ContextRequest& request) const;
+
+private:
+    struct Entry {
+        std::string plugin;
+        std::shared_ptr<ContextContributor> contributor;
+    };
+
+    mutable std::mutex mutex_;
+    std::vector<Entry> entries_;
+    std::string attribution_;
+    ContextContributorSettings settings_;
+    common::Logger& logger_;
+};
+
+}  // namespace minimal::agent

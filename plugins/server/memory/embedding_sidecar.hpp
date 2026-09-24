@@ -16,12 +16,17 @@
 
 namespace minimal::memory {
 
-// Null on any failure -- python not found, spawn failure, fastembed
-// import/model-load failure -- so the plugin loads and the strategy degrades
-// to lexical (the tools self-describe through /memory). `data_dir` is the
-// plugin's own storage dir; the sidecar's fastembed model cache lives under
-// it rather than the user's home cache.
-std::unique_ptr<EmbeddingFunction> TryMakeSidecarEmbeddingFunction(
+// Spawns the sidecar and waits for its ready handshake. Throws
+// std::runtime_error naming the reason (python not found, spawn failure,
+// fastembed import/model-load failure): the EmbeddingService logs it, trips
+// its breaker and reports it through /memory -- never a silent null. Called
+// on the embedding worker, never at plugin registration (a first run may
+// download model weights). `data_dir` is the plugin's own storage dir; the
+// fastembed model cache lives under it rather than the user's home cache.
+std::unique_ptr<EmbeddingFunction> MakeSidecarEmbeddingFunction(
     const MemorySettings& settings, const std::filesystem::path& data_dir);
+
+// "sidecar:<model>", without spawning anything.
+std::string SidecarSignatureFor(const MemorySettings& settings);
 
 }  // namespace minimal::memory

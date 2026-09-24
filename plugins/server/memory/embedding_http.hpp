@@ -18,6 +18,9 @@ public:
     std::vector<Embedding> Embed(const std::vector<std::string>& inputs) override;
     std::string Describe() const override;
     std::string Signature() const override;
+    // The same signature without constructing a client: the runtime knows
+    // which rows need re-embedding before the backend exists.
+    static std::string SignatureFor(const MemorySettings& settings);
 
 private:
     // One POST for inputs[start, end). Split out so Embed() can chunk by

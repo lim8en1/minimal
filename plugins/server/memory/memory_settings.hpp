@@ -30,26 +30,37 @@ struct MemorySettings {
     int sidecar_startup_timeout_ms = 60000;  // first run may download model weights
     int sidecar_request_timeout_ms = 30000;  // per Embed() round trip
 
-    // --- enrichment (small LLM summary + topic attribution) ---
+    // --- tagging (a cheap model files entries into the tag vocabulary) ---
     // "<provider>/<model>" resolved through SessionSupportService. EMPTY =
-    // enrichment off (the session-titler inversion: titler's empty means
-    // "session's own model" because titling is its whole job; memory's
-    // enrichment is optional garnish on a fully-functional store, so empty
-    // means off and naming a model opts in).
-    std::string summarizer_model;
-    int summarize_max_tokens = 64;
-    int summarize_input_char_budget = 2000;  // code-point budget, titler rule
-    int max_topics = 4096;                   // per scope; creation refused at cap
+    // tagging off: entries stay untagged and remain fully searchable. The
+    // key is still called summarizer_model in plugins.json for compatibility
+    // with v1 configs; `tagger_model` is accepted and wins when both are set.
+    std::string tagger_model;
+    int tagger_max_tokens = 512;             // per tagging call (a batch of entries)
+    int tagger_timeout_ms = 60000;           // bounds one provider call
+    int max_tags = 100;                      // vocabulary cap per scope
+    int max_tags_per_entry = 5;
+    double tag_merge_similarity = 0.85;      // embed-dedup threshold for a proposed new tag
 
     // --- store limits ---
     bool allow_inline = true;    // false = file-ingestion-only, DB-backed mode
-    int max_text_bytes = 8192;
+    int max_text_bytes = 8192;   // per entry body (and per ingest chunk)
     int batch_size = 64;         // inputs per embeddings request
-    int reindex_budget_rows = 50;   // lazy re-embed cap per idle drain
     int default_limit = 12;      // search result count; ceiling 64
+    // Write tools (store/update/delete) are FileWrite by default so they
+    // follow the operator's write-permission policy -- a stored memory
+    // outlives the session and, at global scope, follows the user into every
+    // project. false restores the old prompt-free (ReadOnly) behavior.
+    bool writes_prompt = true;
 
-    // Digest gate: first memory call of a session prepends the digest.
-    bool digest_enabled = true;
+    // --- context index (the "Memory" section pre-filled into sessions) ---
+    bool index_enabled = true;
+    // ONE budget for the whole section (~4 bytes/token for English), filled
+    // in priority order: pinned bodies (up to half), the tag vocabulary, then
+    // recent one-liners. Whatever does not fit is announced with a count and
+    // how to fetch it, never silently dropped.
+    int index_budget_bytes = 4000;
+    bool index_in_subagents = false;
 };
 
 MemorySettings ParseMemorySettings(const nlohmann::json& config);

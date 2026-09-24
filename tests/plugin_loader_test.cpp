@@ -153,6 +153,33 @@ TEST_CASE("the loader dlsyms the mention-resolver seam into a real registry",
     CHECK(resolvers.Active().Suggest("", {}, 50) == std::vector<std::string>{"fixture-resolved"});
 }
 
+TEST_CASE("the loader dlsyms the context-contributor seam, attributed to the plugin",
+          "[plugin_loader][context]") {
+    tools::ToolRegistry tool_registry;
+    llm::ProviderFactoryRegistry provider_registry;
+    agent::ContextContributorRegistry contributors(common::DefaultLogger());
+    plugins::PluginLoader loader(tool_registry, provider_registry, nlohmann::json::object(),
+                                 /*observers=*/nullptr, /*commands=*/nullptr,
+                                 /*auth_providers=*/nullptr, /*permission_advisors=*/nullptr,
+                                 /*model_catalogs=*/nullptr, /*services=*/nullptr,
+                                 /*storage=*/nullptr, /*plugin_data_root=*/{},
+                                 /*hook_points=*/nullptr, /*mention_resolvers=*/nullptr,
+                                 /*compaction_strategies=*/nullptr,
+                                 /*metadata_catalogs=*/nullptr, /*variant_params=*/nullptr,
+                                 /*context_contributors=*/&contributors);
+    const auto records = loader.LoadAll({Enabled("fixture-good")});
+
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().registered_context_contributor);
+    CHECK(contributors.Render({}) == "## Fixture\nfixture context");
+
+    // Attribution is the plugin's own name, which is what `disabled` keys on.
+    agent::ContextContributorSettings settings;
+    settings.disabled = {"fixture-good"};
+    contributors.Configure(settings);
+    CHECK(contributors.Render({}).empty());
+}
+
 TEST_CASE("a loader without the registry leaves the seam unoffered", "[plugin_loader][mention]") {
     Harness h;  // default-constructed: no mention-resolver registry attached
     const auto records = h.loader.LoadAll({Enabled("fixture-good")});

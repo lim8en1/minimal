@@ -138,6 +138,15 @@ struct ProjectContextSettings {
     bool search_ancestors = false;
 };
 
+// Plugin context contributors (agent/context_contributor.hpp).
+struct ContextContributorSettings {
+    // Plugin names whose contributed sections are skipped -- the operator's off
+    // switch that does not require disabling the whole plugin.
+    std::vector<std::string> disabled;
+    // Per-section body cap in bytes. 0 = uncapped.
+    std::int64_t max_bytes_per_section = 16384;
+};
+
 struct LoggingSettings {
     std::string level = "info";
     std::string path;
@@ -212,6 +221,7 @@ struct SettingsConfig {
     ToolsSettings tools;
     ToolsViewSettings tools_view;
     ProjectContextSettings project_context;
+    ContextContributorSettings context_contributors;
     SessionSettings sessions;
     ServerSettings server;
     std::string session_db_path;

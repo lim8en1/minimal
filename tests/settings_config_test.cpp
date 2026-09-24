@@ -357,3 +357,21 @@ TEST_CASE("ParseSettingsConfig: compaction_replace_percent defaults to 80, accep
     CHECK_THROWS(ParseSettingsConfig({{"memory", {{"compaction_replace_percent", 101}}}}));
     CHECK_THROWS(ParseSettingsConfig({{"memory", {{"compaction_replace_percent", "80"}}}}));
 }
+
+TEST_CASE("ParseSettingsConfig: context_contributors", "[settings_config][context]") {
+    const auto defaults = ParseSettingsConfig(nlohmann::json::object());
+    CHECK(defaults.context_contributors.disabled.empty());
+    CHECK(defaults.context_contributors.max_bytes_per_section == 16384);
+
+    const auto parsed = ParseSettingsConfig(
+        {{"context_contributors", {{"disabled", {"memory"}}, {"max_bytes_per_section", 0}}}});
+    REQUIRE(parsed.context_contributors.disabled.size() == 1);
+    CHECK(parsed.context_contributors.disabled[0] == "memory");
+    CHECK(parsed.context_contributors.max_bytes_per_section == 0);
+
+    CHECK_THROWS(ParseSettingsConfig({{"context_contributors", 1}}));
+    CHECK_THROWS(ParseSettingsConfig({{"context_contributors", {{"disabled", "memory"}}}}));
+    CHECK_THROWS(ParseSettingsConfig({{"context_contributors", {{"disabled", {""}}}}}));
+    CHECK_THROWS(
+        ParseSettingsConfig({{"context_contributors", {{"max_bytes_per_section", -1}}}}));
+}

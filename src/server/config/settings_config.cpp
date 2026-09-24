@@ -197,6 +197,35 @@ ProjectContextSettings ParseProjectContext(const nlohmann::json& doc) {
     return result;
 }
 
+ContextContributorSettings ParseContextContributors(const nlohmann::json& doc) {
+    ContextContributorSettings result;
+    if (!doc.contains("context_contributors")) return result;
+    const auto& cc = doc.at("context_contributors");
+    if (!cc.is_object()) {
+        throw std::runtime_error("settings.json: context_contributors must be an object");
+    }
+    result.max_bytes_per_section = cc.value("max_bytes_per_section", result.max_bytes_per_section);
+    if (result.max_bytes_per_section < 0) {
+        throw std::runtime_error(
+            "settings.json: context_contributors.max_bytes_per_section must not be negative");
+    }
+    if (cc.contains("disabled")) {
+        const auto& disabled = cc.at("disabled");
+        if (!disabled.is_array()) {
+            throw std::runtime_error(
+                "settings.json: context_contributors.disabled must be an array of plugin names");
+        }
+        for (const auto& entry : disabled) {
+            if (!entry.is_string() || entry.get<std::string>().empty()) {
+                throw std::runtime_error(
+                    "settings.json: context_contributors.disabled must contain non-empty strings");
+            }
+            result.disabled.push_back(entry.get<std::string>());
+        }
+    }
+    return result;
+}
+
 LoggingSettings ParseLogging(const nlohmann::json& doc) {
     LoggingSettings result;
     if (!doc.contains("logging")) return result;
@@ -279,6 +308,7 @@ SettingsConfig ParseSettingsConfig(const nlohmann::json& doc) {
         config.tools = ParseTools(doc);
         config.tools_view = ParseToolsView(doc);
         config.project_context = ParseProjectContext(doc);
+        config.context_contributors = ParseContextContributors(doc);
         config.sessions = ParseSessions(doc);
         config.server = ParseServer(doc);
         config.session_db_path = doc.value("session_db_path", config.session_db_path);

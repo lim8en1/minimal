@@ -200,6 +200,7 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // session (top-level, resume, subagent) passes through after that point.
     rpc::FinishSessionWiring(params);
     AppendSignalContext(params);
+    AppendContributedContext(params, preset);
 
     // The user's model outranks the preset's. Applied here rather than inside
     // the preset registry because it is a property of this SESSION, not of the
@@ -345,6 +346,29 @@ void SessionRegistry::AppendSignalContext(SessionParams& params) const {
         params.project_context += "\n\n" + params.signal_context;
     }
     params.signal_context.clear();
+}
+
+void SessionRegistry::AppendContributedContext(SessionParams& params,
+                                               const AgentPreset& preset) const {
+    // Plugin-contributed sections ride LAST in the same system tail: after the
+    // operator-authored framing (project context, signal channels), so a
+    // plugin can never push the operator's own instructions further from the
+    // front. Rendered once here and frozen with the rest of project_context.
+    if (context_contributors_ == nullptr) return;
+    ContextRequest request;
+    request.session_id = params.session_id;
+    request.parent_session_id = params.parent_session_id;
+    request.project_root = params.project_root;
+    request.preset_name = preset.name;
+    request.is_subagent = !params.parent_session_id.empty();
+    request.resume = params.resume;
+    const std::string contributed = context_contributors_->Render(request);
+    if (contributed.empty()) return;
+    if (params.project_context.empty()) {
+        params.project_context = contributed;
+    } else {
+        params.project_context += "\n\n" + contributed;
+    }
 }
 
 AgentPreset SessionRegistry::ResolveModel(

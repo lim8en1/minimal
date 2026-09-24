@@ -305,6 +305,11 @@ int main(int argc, char** argv) {
     // local-only single-user topology.
     minimal::rpc::AuthProviderRegistry auth_providers;
     minimal::agent::MentionResolverRegistry mention_resolvers(minimal::common::DefaultLogger());
+    // Additive across plugins: sections pre-filled into each session's system
+    // context (context_contributor.hpp). Configured from settings.json below,
+    // once settings are parsed; asked per session by the SessionRegistry.
+    minimal::agent::ContextContributorRegistry context_contributors(
+        minimal::common::DefaultLogger());
     // Additive across plugins: each may contribute one advisor keyed by its
     // name; permissions.json's "advisor" selects one. An empty registry is the
     // default -- every Ask reaches the human.
@@ -400,7 +405,7 @@ int main(int argc, char** argv) {
                                           &services, plugin_storage.get(), plugin_data_root,
                                           &hook_dispatcher, &mention_resolvers,
                                           &compaction_strategies, &metadata_catalogs,
-                                          &variant_params);
+                                          &variant_params, &context_contributors);
     const auto records = loader.LoadAll(candidates);
     // The load thread is the only writer; from here the map is read-only, which
     // is what makes unguarded Find from session workers and the command pool
@@ -481,6 +486,9 @@ int main(int argc, char** argv) {
         }
         if (record.registered_mention_resolver) {
             std::printf("      mention resolver\n");
+        }
+        if (record.registered_context_contributor) {
+            std::printf("      context  session prefill\n");
         }
         if (record.registered_permission_advisor) {
             std::printf("      advisor  permission prompts\n");
@@ -737,6 +745,8 @@ int main(int argc, char** argv) {
     // its own project_root, at creation/resume/spawn -- never at startup, since
     // the server serves many project roots and no file belongs to all of them.
     sessions.set_project_context(settings.project_context);
+    context_contributors.Configure(settings.context_contributors);
+    sessions.set_context_contributors(&context_contributors);
     if (!settings.small_model.empty()) sessions.set_small_model(settings.small_model);
     sessions.set_prompt_timeout(
         std::chrono::seconds(settings.sessions.unattended_prompt_timeout_seconds));

@@ -952,3 +952,55 @@ TEST_CASE("ForkSession persists an explicit model override to the child's row",
     REQUIRE(row->model.has_value());
     CHECK(*row->model == "main/other-model");
 }
+
+TEST_CASE("plugin context contributors land in the system prompt, after project context",
+          "[session_registry][context]") {
+    // The funnel end to end: a registered contributor's section reaches the
+    // provider request's system field, and the contributor sees the session's
+    // identity.
+    struct Contributor final : agent::ContextContributor {
+        std::optional<agent::ContextSection> Contribute(const agent::ContextRequest& request) override {
+            seen = request;
+            return agent::ContextSection{"Memory", "remembered fact"};
+        }
+        std::optional<agent::ContextRequest> seen;
+    };
+
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    testing::FakeLlmProvider* provider = nullptr;
+    fixture.providers.Register("fake", [&provider](const llm::ProviderConfig&) {
+        auto owned = std::make_unique<testing::FakeLlmProvider>();
+        provider = owned.get();
+        return owned;
+    });
+    fixture.Build(/*register_provider_kind=*/false);
+
+    agent::ContextContributorRegistry contributors(common::DefaultLogger());
+    auto contributor = std::make_shared<Contributor>();
+    contributors.Register(contributor);
+    fixture.registry->set_context_contributors(&contributors);
+
+    const auto row = fixture.db->CreateSession("ctx", std::nullopt, "/proj", "build");
+    auto params = Params(row.session_id);
+    params.resume = true;
+    auto session = fixture.registry->Create(std::move(params));
+    REQUIRE(session != nullptr);
+
+    REQUIRE(contributor->seen.has_value());
+    CHECK(contributor->seen->session_id == row.session_id);
+    CHECK(contributor->seen->preset_name == "build");
+    CHECK(contributor->seen->resume);
+    CHECK_FALSE(contributor->seen->is_subagent);
+
+    REQUIRE(provider != nullptr);
+    provider->PushResponse(testing::TextResponse("ok"));
+    session->SubmitTurn("hi");
+    REQUIRE(session->WaitForIdleForTesting(5s));
+    const auto& requests = provider->requests();
+    REQUIRE(requests.size() == 1);
+    REQUIRE(requests[0].system.has_value());
+    const std::string& system = *requests[0].system;
+    CHECK(system.rfind("You are a build agent.", 0) == 0);
+    CHECK(system.find("## Memory\nremembered fact") != std::string::npos);
+}

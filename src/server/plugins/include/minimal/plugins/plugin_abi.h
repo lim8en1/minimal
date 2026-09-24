@@ -35,6 +35,7 @@
 
 // --- Half 2: utilities plugins consume -------------------------------------
 #include "minimal/agent/compaction_strategy.hpp"
+#include "minimal/agent/context_contributor.hpp"
 #include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_observer.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
@@ -276,6 +277,17 @@ void minimal_plugin_register_services(minimal::plugins::ServiceRegistry&,
 
 void minimal_plugin_register_mention_resolver(minimal::agent::MentionResolverRegistry&,
                                               const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL, additive: contributes CONTEXT SECTIONS pre-filled into every
+// session's system prompt (after AGENTS.md and signal-channel context). Asked
+// once per session at creation/resume/spawn and frozen for the session, so
+// the prompt-cache prefix never shifts. Contribute() runs synchronously on
+// the session-creation path -- keep it local and cheap. See
+// context_contributor.hpp for the full contract; settings.json
+// context_contributors.disabled turns one plugin's sections off.
+void minimal_plugin_register_context_contributors(
+    minimal::agent::ContextContributorRegistry&,
+    const minimal::plugins::PluginRegistrationContext&);
 
 
 // Exclusive: one global choice. First registration wins; a second logs a

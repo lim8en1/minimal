@@ -1,19 +1,26 @@
 #pragma once
 
-// MemoryStore -- the plugin's own SQLite database. PluginStorage is the KV
-// escape hatch; this needs FTS5 ranking, structured provenance columns and
-// migrations, so it owns its own connection under data_dir (the per-plugin
-// DB precedent: "a plugin needing SQL opens its own database there").
+// MemoryStore -- the plugin's own SQLite database (schema v2). PluginStorage
+// is the KV escape hatch; this needs FTS5 ranking, structured provenance and
+// migrations, so it owns its own connection under data_dir.
+//
+// One connection, guarded by mu_: tool threads, the embedding worker and the
+// tagging worker all come through here. The store also owns the in-memory
+// vector cache, because it is the single writer and so the one place that can
+// keep the cache coherent with the rows.
 
 #include <cstdint>
+#include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "embedding.hpp"
-#include "memory_settings.hpp"
 
 struct sqlite3;
 
@@ -23,160 +30,226 @@ class ExclusiveFileLock;
 
 namespace minimal::memory {
 
-struct SearchHit {
-    std::string id;
-    std::string preview;      // first 128 code points of text
-    std::optional<std::string> summary;
-    std::optional<std::string> topic;
-    std::string created_at;   // ISO-8601 UTC
-    std::int64_t created_ms = 0;
-    std::string project_root; // scope=project only
-    double score = 0.0;       // similarity 0..1 (sim) or recency rank 1..n (time)
+inline constexpr int kScopeGlobal = 0;
+inline constexpr int kScopeProject = 1;
+
+// Which rows a caller may see. Global rows are visible from everywhere;
+// project rows only from their own project root.
+struct ScopeFilter {
+    bool include_global = true;
+    bool include_project = true;
+    std::string project_root;
 };
 
-struct Digest {
-    std::map<std::string, int> entries_by_scope;   // "project"/"global"
-    std::map<std::string, int> by_origin;          // model/ingest/compaction
-    std::vector<std::pair<std::string, int>> top_topics;  // count > 0, desc
-    std::string backend;                           // Describe() or "lexical only"
-    std::string enrichment;                        // "on (<model>)" / "off"
-    int pending_reindex = 0;
-};
-
-// One entry to store: a lesson. The store decides nothing about scope
-// resolution -- the caller (tool) resolves project root and passes it in.
 struct NewEntry {
-    int scope = 0;               // 0 global, 1 project
-    std::string project_root;    // worktree root when scope==1
-    std::string session_id;      // provenance, may be empty
-    std::string origin;          // "model" | "ingest" | "compaction"
-    std::string origin_ref;      // provenance pointer (path / session id), may be empty
-    std::string text;
-    std::optional<std::string> group_id;  // set for ingest chunks
+    int scope = kScopeProject;
+    std::string project_root;  // worktree root when scope == project, "" for global
+    std::string session_id;    // provenance, may be empty
+    std::string origin = "model";  // "model" | "ingest"
+    std::string origin_ref;    // source path for ingest, may be empty
+    std::string title;
+    std::string description;
+    std::string body;
+    bool pinned = false;
 };
 
-// Cosine similarity over two equal-length vectors; 0.0 when empty/mismatched.
-double Cosine(const std::vector<float>& a, const std::vector<float>& b);
+struct EntryRow {
+    std::string id;
+    int scope = kScopeProject;
+    std::string project_root;
+    std::string session_id;
+    std::string origin;
+    std::string origin_ref;
+    std::optional<std::string> group_id;
+    int chunk_index = 0;
+    int chunk_count = 0;
+    std::string title;
+    std::string description;
+    std::string body;
+    bool pinned = false;
+    std::vector<std::string> tags;
+    std::int64_t created_ms = 0;
+    std::int64_t updated_ms = 0;
+};
+
+struct EntryPatch {
+    std::optional<std::string> title, description, body;
+    std::optional<bool> pinned;
+};
+
+enum class WriteOutcome { kDone, kNotFound, kIngestChunk };
+
+struct LexicalHit {
+    std::string id;
+    double rank = 0;      // bm25 (lower is better) or substring term count (higher)
+    std::string snippet;  // body excerpt with [matches]; empty for substring hits
+};
+
+struct VectorHit {
+    std::string id;
+    double score = 0;  // cosine
+};
+
+struct TagInfo {
+    std::int64_t id = 0;
+    int scope = kScopeProject;
+    std::string project_root;
+    std::string name;
+    std::string description;
+    int count = 0;
+};
+
+struct PendingEmbedRow {
+    std::string id;
+    std::string text;  // title + description + body, the embedded form
+};
+
+struct PendingTagRow {
+    std::string id;
+    int scope = kScopeProject;
+    std::string project_root;
+    std::optional<std::string> group_id;
+    std::string title, description, body;
+};
+
+struct StoreStats {
+    std::map<std::string, int> entries_by_scope;  // "project" / "global"
+    std::map<std::string, int> by_origin;
+    int pinned = 0;
+    int pending_embed = 0;
+    int failed_embed = 0;
+    int pending_tagging = 0;
+    int tags = 0;
+};
+
+// Tag names: lowercase kebab, <= 32 bytes, UTF-8 letters kept. The match key
+// additionally folds a plural "s", so "Unit-Tests", "unit_test" and
+// "unit tests" are one tag.
+std::string NormalizeTagName(std::string_view raw);
+std::string TagMatchKey(std::string_view normalized);
+
+// The text an embedding is computed over. One definition, used by the store
+// (pending rows) and the tools (eager embedding on store).
+std::string EmbedText(const std::string& title, const std::string& description,
+                      const std::string& body);
 
 class MemoryStore {
 public:
-    // Opens (creating if needed) and migrates. Throws std::runtime_error on
-    // any failure, including a newer-user_version database (the
-    // PluginStorage/SessionDatabase discipline: never rebuild over a newer
-    // store). One connection, guarded by mu_: the tools and the enrichment
-    // worker hit it from different threads.
+    // Opens (creating if needed) and migrates (v1 -> v2 in one transaction).
+    // Throws std::runtime_error on any failure, including a newer-user_version
+    // database: never rebuild over a newer store.
     explicit MemoryStore(const std::filesystem::path& db_path);
     ~MemoryStore();
 
     MemoryStore(const MemoryStore&) = delete;
     MemoryStore& operator=(const MemoryStore&) = delete;
 
-    // --- writes (tool thread) ---
-    // Returns the new entry id (ULID).
+    static constexpr int kSchemaVersion = 2;
+
+    // ---------------------------------------------------------------- writes
     std::string Insert(const NewEntry& entry);
 
-    // Ingest: replaces the entries of `origin_ref` (same path) in one
-    // transaction, creating the group row; returns {group_id, ids}. The
-    // replace is the refinement loop -- a re-ingested file updates rather
-    // than accumulates.
+    // Replaces every entry previously ingested from `origin_ref` in this scope
+    // (the refinement loop: re-ingesting a file updates, never accumulates).
     struct IngestResult {
         std::string group_id;
         std::vector<std::string> ids;
         int replaced = 0;
     };
-    IngestResult Ingest(const NewEntry& first, const std::vector<NewEntry>& chunks,
-                        const std::string& origin_ref);
+    IngestResult Ingest(const std::vector<NewEntry>& chunks, const std::string& origin_ref);
 
-    bool Delete(const std::string& id);
+    // In place: id, created_at and provenance survive. Text edits re-queue
+    // embedding and tagging. Ingest chunks are refused (edit the file).
+    WriteOutcome Update(const std::string& id, const EntryPatch& patch, const ScopeFilter& filter);
+    // Ingest chunks are refused: deleting one would be undone by the next
+    // re-ingest of its file. DeleteGroup removes a whole file's entries.
+    WriteOutcome Delete(const std::string& id, const ScopeFilter& filter);
+    // By group id or by origin_ref (the source path). Returns entries removed.
+    int DeleteGroup(const std::string& group_or_ref, const ScopeFilter& filter);
 
-    // /memory purge: remove every entry of one ingest group (by origin_ref),
-    // across scopes of the caller's choosing -- scoped to the given pair.
-    int PurgeByOriginRef(const std::string& origin_ref, int scope,
-                         const std::string& project_root);
+    // ----------------------------------------------------------------- reads
+    std::optional<EntryRow> Get(const std::string& id, const ScopeFilter& filter);
+    // Order-preserving; ids not visible under `filter` are skipped.
+    std::vector<EntryRow> GetMany(const std::vector<std::string>& ids, const ScopeFilter& filter);
 
-    // Enrichment write-back: sets summary and/or topic on existing rows.
-    void SetSummary(const std::string& id, const std::string& summary);
-    // Topic by name; binds the entry to it. Match is case-insensitive;
-    // create_if_missing creates the topic when under cap (returns false at
-    // cap, entry stays unfiled -- the taxonomy's one hard rule). `max_topics`
-    // was a hard-coded 4096 (the settings field of the same name was parsed
-    // but never reached here); a caller with no opinion can pass 4096 itself.
-    bool BindTopic(const std::string& entry_id, int scope, const std::string& project_root,
-                   const std::string& name, bool create_if_missing, int max_topics = 4096);
+    struct Filters {
+        ScopeFilter scope;
+        std::vector<std::string> tags;  // AND; matched by tag match key
+    };
+    // Word-level FTS5 with bm25 over title/description/tags/body (OR of the
+    // query's words, prefix-matched). When that finds nothing -- a
+    // language without word boundaries, a substring of a longer word -- a
+    // substring scan ranks rows by how many query terms they contain.
+    std::vector<LexicalHit> Lexical(const std::string& query, const Filters& filters, int limit);
+    // Filter-only listing, pinned first, then most recently updated.
+    std::vector<std::string> Browse(const Filters& filters, int limit);
+    // Ids passing `filters`, for intersecting vector candidates. nullopt when
+    // there is no tag filter (the vector scan checks scope itself).
+    std::optional<std::unordered_set<std::string>> AllowedIds(const Filters& filters);
 
-    // --- embedding pipeline ---
-    // Rows with embed_status=0 (pending) after a strategy-signature change,
-    // up to a budget; id + text. Marks them in-flight (3).
-    struct PendingRow { std::string id; std::string text; };
-    std::vector<PendingRow> ClaimPendingEmbeddings(const std::string& signature, int budget);
-    // Marks failed rows (status 2) and stores the reason. Despite this
-    // comment's old promise, they do NOT go back to pending on their own --
-    // see ResetFailedEmbeddings, the deliberate retry this plugin actually
-    // has (via `/memory reindex`), and MaybeDrainReindex's own comment for
-    // why an automatic retry every drain is the wrong default (it would
-    // spend the whole budget retrying the same broken rows on every call
-    // during a real outage instead of embedding new ones).
-    void MarkEmbedFailed(const std::vector<std::string>& ids, const std::string& error);
-    // Resets every failed (status 2) row back to pending (status 0) so the
-    // next drain retries them. Returns the count reset.
-    int ResetFailedEmbeddings();
+    // Cosine nearest neighbors over cached unit vectors of `signature`.
+    std::vector<VectorHit> Nearest(const std::vector<float>& query, const std::string& signature,
+                                   const ScopeFilter& filter, int k,
+                                   const std::unordered_set<std::string>* allowed = nullptr);
+
+    // ------------------------------------------------------ embedding pipeline
+    std::vector<PendingEmbedRow> PendingEmbeddings(int limit);
     void StoreEmbedding(const std::string& id, const Embedding& embedding,
                         const std::string& signature);
-    // Returns nearest by cosine over rows matching signature; empty when no
-    // embeddings exist yet. Used by search (sim sort) and the similar-hint.
-    struct VectorRow { std::string id; std::vector<float> values; };
-    std::vector<VectorRow> LoadVectors(const std::string& signature, int scope,
-                                       const std::string& project_root);
-    int SetSignatureForAll(const std::string& signature, int dim);
+    void MarkEmbedFailed(const std::vector<std::string>& ids, const std::string& error);
+    int ResetFailedEmbeddings();
+    // The ONE re-embed trigger: rows embedded under another signature go back
+    // to pending. Run once when the runtime starts.
+    int ResetStaleSignatures(const std::string& signature);
 
-    // --- reads (tool thread) ---
-    struct SearchQuery {
-        int scope = 0;
-        std::string project_root;
-        std::optional<std::string> query;       // FTS match text
-        std::vector<std::string> keywords;      // AND, substring vs text/origin_ref
-        std::optional<std::string> topic;
-        std::string sort;                        // "sim" | "time"
-        int limit = 12;
-        std::string signature;                   // current strategy signature
-        bool has_embeddings = false;             // whether sim sort is possible
-    };
-    std::vector<SearchHit> Search(const SearchQuery& query);
+    // ------------------------------------------------------------------ tags
+    std::vector<TagInfo> Tags(int scope, const std::string& project_root);
+    std::optional<TagInfo> FindTag(int scope, const std::string& project_root,
+                                   const std::string& name);
+    int TagCount(int scope, const std::string& project_root);
+    // Creates, or returns the existing tag with the same match key.
+    std::int64_t CreateTag(int scope, const std::string& project_root, const std::string& name,
+                           const std::string& description);
+    // Replaces the entry's tags and marks it tagged.
+    void SetEntryTags(const std::string& entry_id, const std::vector<std::int64_t>& tag_ids);
+    // 0 = pending, 1 = tagged, 2 = skipped (the tagger gave up on it).
+    void SetTagStatus(const std::vector<std::string>& ids, int status);
+    std::vector<PendingTagRow> PendingTagging(int limit);
+    // Operator maintenance. Merge moves every entry of `from` onto `to` and
+    // drops `from`; both must exist in the scope.
+    bool MergeTags(int scope, const std::string& project_root, const std::string& from,
+                   const std::string& to);
+    bool RenameTag(int scope, const std::string& project_root, const std::string& from,
+                   const std::string& to);
 
-    struct Entry {
-        std::string id, text, scope_name, project_root, session_id, origin, origin_ref;
-        std::optional<std::string> summary, topic, origin_ref_display;
-        std::int64_t created_ms = 0;
-        std::string created_at;
-        std::optional<std::string> group_id;
-        int chunk_index = 0, chunk_count = 0;
-        std::vector<std::string> sibling_ids;
-    };
-    std::optional<Entry> Get(const std::string& id);
-
-    // `project_root` scopes PROJECT-scope rows to this project only; GLOBAL
-    // rows are always included, matching the scope's own cross-project
-    // visibility. Pass "" for a sessionless caller with no project bound
-    // (project counts then read as zero, same as an empty project).
-    Digest DigestInfo(const std::string& backend, const std::string& enrichment,
-                      const std::string& project_root);
-
-    // Topics for the enrichment prompt: names by recency of use, capped.
-    std::vector<std::string> TopicNames(int scope, const std::string& project_root, int cap);
-    std::vector<std::pair<std::string, int>> AllTopics(int scope, const std::string& project_root);
-
-    static constexpr int kScopeGlobal = 0;
-    static constexpr int kScopeProject = 1;
+    // ---------------------------------------------------- index + operator
+    std::vector<EntryRow> Pinned(const ScopeFilter& filter);
+    std::vector<EntryRow> Recent(const ScopeFilter& filter, int limit);
+    StoreStats Stats(const ScopeFilter& filter);
 
 private:
     void Migrate();
-    std::string Iso8601(std::int64_t ms) const;
-    void SyncFts(std::int64_t rowid, const std::string& text);
+    void MigrateV1ToV2();
+    std::vector<EntryRow> HydrateLocked(const std::vector<std::string>& ids,
+                                        const ScopeFilter& filter);
+    void DropUnusedTagsLocked();
+    void EnsureVectorCacheLocked(const std::string& signature);
+    void RefreshTagsTextLocked(std::int64_t rowid);
 
-    sqlite3* db_ = nullptr;
+    struct CachedVector {
+        int scope = kScopeProject;
+        std::string project_root;
+        std::vector<float> unit;
+    };
+
     std::unique_ptr<common::ExclusiveFileLock> lock_;  // declared before db_: outlives it
+    sqlite3* db_ = nullptr;
     mutable std::mutex mu_;
     std::filesystem::path path_;
+
+    std::string cache_signature_;
+    bool cache_loaded_ = false;
+    std::unordered_map<std::string, CachedVector> cache_;
 };
 
 }  // namespace minimal::memory

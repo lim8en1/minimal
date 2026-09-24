@@ -1,24 +1,34 @@
-// memory plugin tests: store, search ranking, scopes, topics, ingest groups,
-// the sidecar embedding backend's protocol, enrichment pipeline with a fake
-// summarizer. The plugin sources compile in directly (checklist_test.cpp's
+// memory plugin tests: store (schema v2 + v1 migration), lexical and hybrid
+// search, tags, ingest chunking, the embedding service's breaker and poison-
+// row isolation, the tagger with a fake provider, the context index, and the
+// tools end to end. The plugin sources compile in directly (checklist_test's
 // pattern); plugin.cpp and its extern "C" entry points stay out.
 
 #include <unistd.h>
 
+#include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <sqlite3.h>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "embedding_service.hpp"
+#include "embedding_sidecar.hpp"
+#include "ingest.hpp"
+#include "memory_runtime.hpp"
 #include "memory_settings.hpp"
 #include "memory_store.hpp"
-#include "memory_tool.hpp"
-#include "embedding_sidecar.hpp"
-#include "enricher.hpp"
+#include "search.hpp"
+#include "tagger.hpp"
 
 #include "fakes.hpp"
 
@@ -28,45 +38,71 @@
 
 namespace fs = std::filesystem;
 using namespace minimal::memory;
+using Catch::Matchers::ContainsSubstring;
 
 namespace {
 
-// Deterministic fake embedder: hash-seeded unit vectors, so cosine between
-// identical inputs is 1.0 and different inputs are far apart.
+constexpr int kDim = 16;
+
+std::vector<float> HashVector(const std::string& input) {
+    std::vector<float> values(kDim, 0.0f);
+    unsigned hash = 7;
+    for (const char c : input) hash = hash * 31 + static_cast<unsigned char>(c);
+    for (int i = 0; i < kDim; ++i) {
+        hash = hash * 1103515245u + 12345u;
+        values[static_cast<std::size_t>(i)] = static_cast<float>(static_cast<int>(hash % 2000) - 1000);
+    }
+    return values;
+}
+
+// Deterministic embedder. Unrelated inputs get hash-seeded (near-orthogonal)
+// vectors; texts containing a registered keyword get that keyword's vector,
+// so a test can declare "these two mean the same" without real semantics.
 class FakeEmbedder final : public EmbeddingFunction {
 public:
+    std::map<std::string, std::vector<float>> concepts;
+    std::atomic<int> calls{0};
+    bool down = false;
+    std::string poison;  // any input containing this throws
+
     std::vector<Embedding> Embed(const std::vector<std::string>& inputs) override {
+        ++calls;
+        if (down) throw std::runtime_error("backend down");
         std::vector<Embedding> out;
         for (const auto& input : inputs) {
-            Embedding e;
-            e.values.resize(kDim, 0.0f);
-            unsigned hash = 7;
-            for (const char c : input) hash = hash * 31 + static_cast<unsigned char>(c);
-            for (int i = 0; i < kDim; ++i) {
-                hash = hash * 1103515245u + 12345u;
-                e.values[static_cast<std::size_t>(i)] = static_cast<float>(hash % 2000 - 1000);
+            if (!poison.empty() && input.find(poison) != std::string::npos) {
+                throw std::runtime_error("cannot embed this input");
             }
-            double norm = 0;
-            for (const auto v : e.values) norm += static_cast<double>(v) * v;
-            norm = std::sqrt(norm);
-            for (auto& v : e.values) v = static_cast<float>(v / norm);
+            Embedding e;
+            e.values = HashVector(input);
+            for (const auto& [keyword, vector] : concepts) {
+                if (input.find(keyword) != std::string::npos) {
+                    e.values = vector;
+                    break;
+                }
+            }
             e.dim = kDim;
             out.push_back(std::move(e));
         }
         return out;
     }
     std::string Describe() const override { return "fake"; }
-    std::string Signature() const override { return "fake:v1:32"; }
-    static constexpr int kDim = 32;
+    std::string Signature() const override { return "fake:v1"; }
 };
+
+std::vector<float> Axis(int i) {
+    std::vector<float> v(kDim, 0.0f);
+    v[static_cast<std::size_t>(i)] = 1.0f;
+    return v;
+}
 
 struct Fixture {
     fs::path dir;
     std::unique_ptr<MemoryStore> store;
 
     explicit Fixture(const std::string& name)
-        : dir(fs::temp_directory_path() / ("memory-test-" + name + "-" +
-                                           std::to_string(getpid()))) {
+        : dir(fs::temp_directory_path() /
+              ("memory-test-" + name + "-" + std::to_string(getpid()))) {
         fs::remove_all(dir);
         fs::create_directories(dir);
         store = std::make_unique<MemoryStore>(dir / "memory.sqlite3");
@@ -78,350 +114,353 @@ struct Fixture {
     }
 };
 
-NewEntry MakeEntry(const std::string& text, int scope = MemoryStore::kScopeProject,
-                                const std::string& root = "/proj") {
-    NewEntry entry;
-    entry.scope = scope;
-    entry.project_root = root;
-    entry.session_id = "s1";
-    entry.origin = "model";
-    entry.text = text;
-    return entry;
+NewEntry Entry(std::string title, std::string description, std::string body,
+               int scope = kScopeProject, std::string root = "/proj") {
+    NewEntry e;
+    e.scope = scope;
+    e.project_root = scope == kScopeGlobal ? "" : std::move(root);
+    e.title = std::move(title);
+    e.description = std::move(description);
+    e.body = std::move(body);
+    return e;
+}
+
+ScopeFilter From(std::string root = "/proj") {
+    ScopeFilter f;
+    f.project_root = std::move(root);
+    return f;
+}
+
+MemoryStore::Filters Filters(std::string root = "/proj") {
+    MemoryStore::Filters f;
+    f.scope = From(std::move(root));
+    return f;
+}
+
+// An EmbeddingService over a FakeEmbedder the test keeps a handle to. The
+// breaker backoff is an hour, so an open breaker stays open for the test.
+std::unique_ptr<EmbeddingService> FakeService(MemoryStore& store, FakeEmbedder*& handle) {
+    EmbeddingPlan plan;
+    plan.strategy = "fake";
+    plan.signature = "fake:v1";
+    plan.factory = [&handle]() -> std::unique_ptr<EmbeddingFunction> {
+        auto owned = std::make_unique<FakeEmbedder>();
+        handle = owned.get();
+        return owned;
+    };
+    EmbeddingService::Options options;
+    options.breaker_base = std::chrono::hours(1);
+    options.breaker_max = std::chrono::hours(1);
+    return std::make_unique<EmbeddingService>(&store, std::move(plan),
+                                              minimal::common::DefaultLogger(), options);
+}
+
+const std::string& PromptOf(const minimal::llm::ChatRequest& request) {
+    return std::get<minimal::llm::TextBlock>(request.messages[0].content[0]).text;
 }
 
 }  // namespace
 
-TEST_CASE("memory store get round-trip", "[memory]") {
+// ------------------------------------------------------------------ settings
+
+TEST_CASE("memory settings: defaults, clamps, v1 key compatibility", "[memory]") {
+    const auto defaults = ParseMemorySettings(nlohmann::json::object());
+    CHECK(defaults.tagger_model.empty());
+    CHECK(defaults.max_tags == 100);
+    CHECK(defaults.writes_prompt);
+    CHECK(defaults.index_enabled);
+
+    const auto v1 = ParseMemorySettings({{"summarizer_model", "p/m"}, {"max_topics", 7}});
+    CHECK(v1.tagger_model == "p/m");
+    CHECK(v1.max_tags == 7);
+    const auto both = ParseMemorySettings({{"summarizer_model", "old/m"}, {"tagger_model", "new/m"}});
+    CHECK(both.tagger_model == "new/m");
+
+    const auto clamped = ParseMemorySettings({{"batch_size", -3},
+                                              {"default_limit", 1000},
+                                              {"max_text_bytes", 1},
+                                              {"timeout_ms", -1},
+                                              {"tag_merge_similarity", 5.0}});
+    CHECK(clamped.batch_size == 1);
+    CHECK(clamped.default_limit == 64);
+    CHECK(clamped.max_text_bytes == 256);
+    CHECK(clamped.timeout_ms == 1);
+    CHECK(clamped.tag_merge_similarity == 1.0);
+    CHECK(ParseMemorySettings({{"strategy", "bogus"}}).strategy == StrategyKind::kAuto);
+}
+
+// ---------------------------------------------------------------------- tags
+
+TEST_CASE("memory tags: normalization and match keys", "[memory]") {
+    CHECK(NormalizeTagName("Unit-Tests") == "unit-tests");
+    CHECK(NormalizeTagName("  unit_test ") == "unit-test");
+    CHECK(NormalizeTagName("Docker / Compose!") == "docker-compose");
+    CHECK(TagMatchKey(NormalizeTagName("Unit-Tests")) == TagMatchKey(NormalizeTagName("unit test")));
+    CHECK(TagMatchKey("notes") == TagMatchKey("note"));
+    // Short and unrelated names never collide (no edit distance).
+    CHECK(TagMatchKey("qa") != TagMatchKey("db"));
+    // The plural fold leaves these alone.
+    CHECK(TagMatchKey("status") == "status");
+    CHECK(TagMatchKey("analysis") == "analysis");
+    CHECK(TagMatchKey("class") == "class");
+    // UTF-8 names survive.
+    CHECK(NormalizeTagName("Caf\xC3\xA9 Notes") == "caf\xC3\xA9-notes");
+}
+
+TEST_CASE("memory tags: create dedups by match key; merge, rename, GC", "[memory]") {
+    Fixture fx("tags");
+    const auto a = fx.store->CreateTag(kScopeProject, "/proj", "Unit-Tests", "testing");
+    CHECK(fx.store->CreateTag(kScopeProject, "/proj", "unit test", "") == a);
+    const auto b = fx.store->CreateTag(kScopeProject, "/proj", "testing", "also testing");
+    CHECK(a != b);
+    // Same name, other scope: a different tag.
+    CHECK(fx.store->CreateTag(kScopeGlobal, "", "unit-tests", "") != a);
+
+    const auto id = fx.store->Insert(Entry("t", "d", "b"));
+    fx.store->SetEntryTags(id, {a, b});
+    CHECK(fx.store->Get(id, From())->tags == std::vector<std::string>{"testing", "unit-tests"});
+
+    REQUIRE(fx.store->MergeTags(kScopeProject, "/proj", "unit-tests", "testing"));
+    CHECK(fx.store->Get(id, From())->tags == std::vector<std::string>{"testing"});
+    CHECK_FALSE(fx.store->FindTag(kScopeProject, "/proj", "unit-tests").has_value());
+
+    REQUIRE(fx.store->RenameTag(kScopeProject, "/proj", "testing", "qa"));
+    CHECK(fx.store->Get(id, From())->tags == std::vector<std::string>{"qa"});
+
+    // GC: deleting the last entry drops its now-unused tags.
+    REQUIRE(fx.store->Delete(id, From()) == WriteOutcome::kDone);
+    CHECK(fx.store->TagCount(kScopeProject, "/proj") == 0);
+}
+
+// ------------------------------------------------------------- store basics
+
+TEST_CASE("memory store: round trip and scope visibility", "[memory]") {
     Fixture fx("roundtrip");
-    const std::string id = fx.store->Insert(MakeEntry("tests need --exclude integration"));
-    const auto entry = fx.store->Get(id);
-    REQUIRE(entry.has_value());
-    REQUIRE(entry->text == "tests need --exclude integration");
-    REQUIRE(entry->scope_name == "project");
-    REQUIRE(entry->project_root == "/proj");
-    REQUIRE(entry->origin == "model");
-    REQUIRE(!entry->created_at.empty());
-    REQUIRE_FALSE(fx.store->Get("missing").has_value());
+    auto pinned = Entry("Prefers tabs", "The user wants tabs, not spaces", "Always tabs.");
+    pinned.pinned = true;
+    const auto a = fx.store->Insert(pinned);
+    const auto b = fx.store->Insert(Entry("Other project", "d", "b", kScopeProject, "/other"));
+    const auto g = fx.store->Insert(Entry("Global fact", "d", "b", kScopeGlobal));
+
+    const auto row = fx.store->Get(a, From());
+    REQUIRE(row);
+    CHECK(row->title == "Prefers tabs");
+    CHECK(row->description == "The user wants tabs, not spaces");
+    CHECK(row->body == "Always tabs.");
+    CHECK(row->pinned);
+    CHECK(row->created_ms > 0);
+
+    CHECK_FALSE(fx.store->Get(b, From()).has_value());  // another project's
+    CHECK(fx.store->Get(g, From()).has_value());        // global is everywhere
+    ScopeFilter global_only = From();
+    global_only.include_project = false;
+    CHECK_FALSE(fx.store->Get(a, global_only).has_value());
+    // Update/delete are scope-checked too.
+    CHECK(fx.store->Delete(b, From()) == WriteOutcome::kNotFound);
 }
 
-TEST_CASE("memory delete", "[memory]") {
-    Fixture fx("delete");
-    const std::string id = fx.store->Insert(MakeEntry("obsolete lesson"));
-    REQUIRE(fx.store->Delete(id));
-    REQUIRE_FALSE(fx.store->Delete(id));  // second delete: gone
+TEST_CASE("memory store: update keeps id and created_at, re-queues embed and tag", "[memory]") {
+    Fixture fx("update");
+    const auto id = fx.store->Insert(Entry("Old", "old description", "old body"));
+    fx.store->StoreEmbedding(id, Embedding{HashVector("x"), kDim}, "sig");
+    fx.store->SetEntryTags(id, {});
+    const auto before = fx.store->Get(id, From());
+    REQUIRE(fx.store->PendingEmbeddings(10).empty());
+    REQUIRE(fx.store->PendingTagging(10).empty());
+
+    EntryPatch pin_only;
+    pin_only.pinned = true;
+    REQUIRE(fx.store->Update(id, pin_only, From()) == WriteOutcome::kDone);
+    CHECK(fx.store->PendingEmbeddings(10).empty());  // no text change, no re-embed
+
+    EntryPatch patch;
+    patch.body = "new body";
+    REQUIRE(fx.store->Update(id, patch, From()) == WriteOutcome::kDone);
+    const auto after = fx.store->Get(id, From());
+    CHECK(after->id == id);
+    CHECK(after->created_ms == before->created_ms);
+    CHECK(after->body == "new body");
+    CHECK(after->title == "Old");
+    CHECK(after->pinned);
+    CHECK(fx.store->PendingEmbeddings(10).size() == 1);
+    CHECK(fx.store->PendingTagging(10).size() == 1);
+    CHECK(fx.store->Update("nope", patch, From()) == WriteOutcome::kNotFound);
 }
 
-TEST_CASE("memory scope isolation", "[memory]") {
-    Fixture fx("scopes");
-    fx.store->Insert(MakeEntry("project lesson", MemoryStore::kScopeProject, "/proj"));
-    fx.store->Insert(MakeEntry("other project lesson", MemoryStore::kScopeProject, "/other"));
-    fx.store->Insert(MakeEntry("global lesson", MemoryStore::kScopeGlobal, ""));
+// ----------------------------------------------------------------- lexical
 
-    MemoryStore::SearchQuery q;
-    q.scope = MemoryStore::kScopeProject;
-    q.project_root = "/proj";
-    q.sort = "time";
-    auto hits = fx.store->Search(q);
-    REQUIRE(hits.size() == 1);
-    REQUIRE(hits[0].preview == "project lesson");
-
-    q.scope = MemoryStore::kScopeGlobal;
-    q.project_root = "";
-    hits = fx.store->Search(q);
-    REQUIRE(hits.size() == 1);
-    REQUIRE(hits[0].preview == "global lesson");
-}
-
-TEST_CASE("memory keyword prefilter: text, origin_ref and topic", "[memory]") {
-    Fixture fx("keywords");
-    const auto docker = MakeEntry("how to rebuild the container quickly");
-    const auto git = MakeEntry("use rebase --autostash before pulls");
-    const std::string docker_id = fx.store->Insert(docker);
-    const std::string git_id = fx.store->Insert(git);
-    fx.store->BindTopic(docker_id, MemoryStore::kScopeProject, "/proj", "docker", true);
-    fx.store->BindTopic(git_id, MemoryStore::kScopeProject, "/proj", "workflow", true);
-
-    MemoryStore::SearchQuery q;
-    q.scope = MemoryStore::kScopeProject;
-    q.project_root = "/proj";
-    q.sort = "time";
-
-    // Keyword matching the topic but not the text.
-    q.keywords = {"docker"};
-    auto hits = fx.store->Search(q);
-    REQUIRE(hits.size() == 1);
-    REQUIRE(hits[0].preview.find("container") != std::string::npos);
-
-    // Keyword matching neither.
-    q.keywords = {"kubernetes"};
-    REQUIRE(fx.store->Search(q).empty());
-
-    // AND semantics across two keywords.
-    q.keywords = {"rebase", "pulls"};
-    hits = fx.store->Search(q);
-    REQUIRE(hits.size() == 1);
-    REQUIRE(hits[0].preview.find("rebase") != std::string::npos);
-}
-
-TEST_CASE("memory ingest: group, siblings, replace-on-re-ingest", "[memory]") {
-    Fixture fx("ingest");
-    auto chunk = MakeEntry("# Alpha\nfirst body");
-    auto chunk2 = chunk;
-    chunk2.text = "# Beta\nsecond body";
-
-    const auto first = fx.store->Ingest(chunk, {chunk2}, "/tmp/notes.md");
-    REQUIRE(first.ids.size() == 2);
-    REQUIRE(first.replaced == 0);
-
-    // Sibling pointers through Get.
-    const auto e0 = fx.store->Get(first.ids[0]);
-    REQUIRE(e0.has_value());
-    REQUIRE(e0->group_id.has_value());
-    REQUIRE(e0->chunk_count == 2);
-    REQUIRE(e0->chunk_index == 0);
-    REQUIRE(e0->sibling_ids == first.ids);
-    REQUIRE(e0->origin_ref == "/tmp/notes.md");
-
-    // Re-ingest the same path: replaces, no accumulation.
-    auto chunk3 = chunk;
-    chunk3.text = "# Alpha\nrevised body";
-    const auto second = fx.store->Ingest(chunk3, {chunk2}, "/tmp/notes.md");
-    REQUIRE(second.replaced == 2);
-    REQUIRE(second.ids.size() == 2);
-
-    MemoryStore::SearchQuery q;
-    q.scope = MemoryStore::kScopeProject;
-    q.project_root = "/proj";
-    q.sort = "time";
-    auto hits = fx.store->Search(q);
-    REQUIRE(hits.size() == 2);  // not 4 -- replaced, not accumulated
-    bool found_revised = false;
-    for (const auto& hit : hits) {
-        if (hit.preview.find("revised body") != std::string::npos) found_revised = true;
-    }
-    REQUIRE(found_revised);
-}
-
-TEST_CASE("memory purge by origin_ref", "[memory]") {
-    Fixture fx("purge");
-    auto chunk = MakeEntry("# A\nbody");
-    const auto group = fx.store->Ingest(chunk, {}, "/tmp/notes.md");
-    fx.store->Insert(MakeEntry("unrelated"));
-    REQUIRE(fx.store->PurgeByOriginRef("/tmp/notes.md", MemoryStore::kScopeProject, "/proj") == 1);
-    MemoryStore::SearchQuery q;
-    q.scope = MemoryStore::kScopeProject;
-    q.project_root = "/proj";
-    q.sort = "time";
-    auto hits = fx.store->Search(q);
-    REQUIRE(hits.size() == 1);  // one ingest chunk purged, one model entry left
-    // The remaining row is NOT from the purged group.
-    REQUIRE(std::find(group.ids.begin(), group.ids.end(), hits[0].id) == group.ids.end());
-    (void)group;
-}
-
-TEST_CASE("memory purge by origin_ref: an empty project_root matches nothing",
+TEST_CASE("memory lexical: natural-language queries with short words find ranked hits",
           "[memory]") {
-    // Regression: /memory purge's command wiring called PurgeByOriginRef for
-    // the project scope with project_root="" (memory_command.cpp), but every
-    // project-scope row stores the session's real worktree root (as this
-    // fixture's entries do, "/proj") -- so the command always reported
-    // "purged 0 entries" for project-scope groups. This pins the store-level
-    // behavior the fix now depends on: only the CORRECT root matches.
-    Fixture fx("purge-empty-root");
-    fx.store->Ingest(MakeEntry("# A\nbody"), {}, "/tmp/notes.md");
-    CHECK(fx.store->PurgeByOriginRef("/tmp/notes.md", MemoryStore::kScopeProject, "") == 0);
-    CHECK(fx.store->PurgeByOriginRef("/tmp/notes.md", MemoryStore::kScopeProject, "/proj") == 1);
+    // v1 ANDed every query word through a trigram index, so "do"/"I" (under
+    // three characters) matched nothing and the whole query returned zero.
+    Fixture fx("lexical");
+    const auto tests = fx.store->Insert(
+        Entry("Running the tests", "How to run the test suite", "Use make check; it runs ctest."));
+    fx.store->Insert(Entry("Deployment", "Shipping releases", "Deploy via make release."));
+    fx.store->Insert(Entry("Tea preference", "The user likes green tea", "Sencha, no sugar."));
+
+    const auto hits = fx.store->Lexical("how do I run the tests", Filters(), 10);
+    REQUIRE_FALSE(hits.empty());
+    CHECK(hits.front().id == tests);
+
+    // Prefix matching: "deploy" finds "Deployment".
+    const auto deploy = fx.store->Lexical("deploy", Filters(), 10);
+    REQUIRE(deploy.size() == 1);
+    CHECK_THAT(deploy.front().snippet, ContainsSubstring("[Deploy]"));
+
+    CHECK(fx.store->Lexical("kubernetes", Filters(), 10).empty());
 }
 
-TEST_CASE("StoreEmbedding sets the signature LoadVectors filters on", "[memory]") {
-    // Regression: StoreEmbedding set embed_status=1 but never wrote
-    // `signature`, so LoadVectors's `signature = ?1` filter (never true for
-    // NULL) made every eagerly-embedded row invisible to the near-duplicate
-    // hint and to sim-sorted search, regardless of how recently it was
-    // embedded.
-    Fixture fx("store-embedding-signature");
-    const std::string id = fx.store->Insert(MakeEntry("eagerly embedded"));
-    Embedding e;
-    e.values = {1.0f, 0.0f};
-    e.dim = 2;
-    fx.store->StoreEmbedding(id, e, "sig-v1");
-
-    const auto vectors =
-        fx.store->LoadVectors("sig-v1", MemoryStore::kScopeProject, "/proj");
-    REQUIRE(vectors.size() == 1);
-    CHECK(vectors[0].id == id);
-    // A different signature (a strategy change) correctly finds nothing.
-    CHECK(fx.store->LoadVectors("sig-v2", MemoryStore::kScopeProject, "/proj").empty());
+TEST_CASE("memory lexical: a title hit outranks a body-only hit", "[memory]") {
+    Fixture fx("weights");
+    const auto body_only =
+        fx.store->Insert(Entry("Misc notes", "assorted", "somewhere in here: gardening"));
+    const auto titled = fx.store->Insert(Entry("Gardening", "plants and soil", "water weekly"));
+    const auto hits = fx.store->Lexical("gardening", Filters(), 10);
+    REQUIRE(hits.size() == 2);
+    CHECK(hits[0].id == titled);
+    CHECK(hits[1].id == body_only);
 }
 
-TEST_CASE("ResetFailedEmbeddings requeues failed rows for the next drain", "[memory]") {
-    // Regression: a failed embed (embed_status=2) was excluded from semantic
-    // search permanently -- ClaimPendingEmbeddings only claims status=0, and
-    // nothing reset a failed row back to 0 except a signature change. This is
-    // the escape hatch /memory reindex now calls.
-    Fixture fx("reset-failed-embeddings");
-    const std::string id = fx.store->Insert(MakeEntry("will fail then retry"));
-    const auto pending = fx.store->ClaimPendingEmbeddings("sig-v1", 10);
-    REQUIRE(pending.size() == 1);
-    fx.store->MarkEmbedFailed({id}, "simulated backend outage");
+TEST_CASE("memory lexical: substring fallback for text without word boundaries", "[memory]") {
+    Fixture fx("cjk");
+    const auto id = fx.store->Insert(Entry("\xE6\x97\x85\xE8\xA1\x8C",
+                                           "\xE6\x9D\xB1\xE4\xBA\xAC\xE3\x82\xBF\xE3\x83\xAF\xE3\x83\xBC",
+                                           "\xE6\x9D\xB1\xE4\xBA\xAC\xE3\x82\xBF\xE3\x83\xAF\xE3\x83\xBC"));
+    // unicode61 sees the whole run as one token, so a word query for a part
+    // of it misses; the substring scan finds it.
+    const auto hits = fx.store->Lexical("\xE6\x9D\xB1\xE4\xBA\xAC", Filters(), 10);
+    REQUIRE(hits.size() == 1);
+    CHECK(hits.front().id == id);
+}
 
-    // Still excluded: another claim at the same signature finds nothing.
-    CHECK(fx.store->ClaimPendingEmbeddings("sig-v1", 10).empty());
+TEST_CASE("memory lexical: the tag filter; project_root never matches text", "[memory]") {
+    Fixture fx("filters");
+    const auto a = fx.store->Insert(Entry("Compose setup", "docker compose", "compose up -d"));
+    const auto b = fx.store->Insert(Entry("Compose music", "writing songs", "compose a melody"));
+    const auto tag = fx.store->CreateTag(kScopeProject, "/proj", "docker", "containers");
+    fx.store->SetEntryTags(a, {tag});
 
+    auto filters = Filters();
+    filters.tags = {"Docker"};
+    auto hits = fx.store->Lexical("compose", filters, 10);
+    REQUIRE(hits.size() == 1);
+    CHECK(hits.front().id == a);
+
+    CHECK(fx.store->Lexical("compose", Filters(), 10).size() == 2);
+    CHECK(fx.store->Lexical("melody", Filters(), 10).front().id == b);
+
+    // A query that is only a substring of the project root matches nothing.
+    CHECK(fx.store->Lexical("proj", Filters(), 10).empty());
+}
+
+// ------------------------------------------------------------------ hybrid
+
+TEST_CASE("memory hybrid search: semantic hits without lexical overlap, fused with RRF",
+          "[memory]") {
+    Fixture fx("hybrid");
+    FakeEmbedder* embedder = nullptr;
+    auto service = FakeService(*fx.store, embedder);
+    REQUIRE_FALSE(service->RunOnce());  // creates the backend; nothing pending yet
+    REQUIRE(embedder != nullptr);
+    embedder->concepts = {{"cat", Axis(0)}, {"feline", Axis(0)}};  // synonyms
+    const auto feline = fx.store->Insert(Entry("Pets", "a feline rests on the rug", "whiskers"));
+    const auto both = fx.store->Insert(Entry("Cat care", "the cat sat on the mat", "brush daily"));
+    fx.store->Insert(Entry("Earnings", "quarterly report", "numbers"));
+    REQUIRE(service->RunOnce());
+    REQUIRE(fx.store->PendingEmbeddings(10).empty());
+
+    SearchRequest request;
+    request.query = "cat";
+    request.filters = Filters();
+    const auto results = HybridSearch(*fx.store, service.get(), request);
+    REQUIRE(results.size() == 2);
+    // Both lists agree on `both`; `feline` is found by meaning alone.
+    CHECK(results[0].row.id == both);
+    CHECK(results[0].score == 1.0);
+    CHECK(results[1].row.id == feline);
+    CHECK(results[1].semantic);
+
+    // Without an embedder the same query is lexical only.
+    const auto lexical = HybridSearch(*fx.store, nullptr, request);
+    REQUIRE(lexical.size() == 1);
+    CHECK(lexical[0].row.id == both);
+}
+
+TEST_CASE("memory hybrid search: browse lists pinned first, then most recent", "[memory]") {
+    Fixture fx("browse");
+    auto pinned = Entry("Pinned", "d", "b");
+    pinned.pinned = true;
+    const auto old_pinned = fx.store->Insert(pinned);
+    const auto recent = fx.store->Insert(Entry("Recent", "d", "b"));
+    SearchRequest request;
+    request.filters = Filters();
+    const auto results = HybridSearch(*fx.store, nullptr, request);
+    REQUIRE(results.size() == 2);
+    CHECK(results[0].row.id == old_pinned);
+    CHECK(results[1].row.id == recent);
+}
+
+// ------------------------------------------------------- embedding service
+
+TEST_CASE("memory embeddings: the breaker skips a dead backend after one failure", "[memory]") {
+    Fixture fx("breaker");
+    FakeEmbedder* embedder = nullptr;
+    auto service = FakeService(*fx.store, embedder);
+    fx.store->Insert(Entry("a", "b", "c"));
+    REQUIRE(service->RunOnce());
+    REQUIRE(fx.store->PendingEmbeddings(10).empty());
+
+    embedder->down = true;
+    fx.store->Insert(Entry("d", "e", "f"));
+    const int before = embedder->calls;
+    CHECK(service->RunOnce());  // batch fails, canary fails: an outage
+    CHECK(fx.store->PendingEmbeddings(10).size() == 1);  // left pending, not failed
+    CHECK(fx.store->Stats(From()).failed_embed == 0);
+    const int after_outage = embedder->calls;
+    CHECK(after_outage > before);
+
+    // Breaker open: no further calls, no waiting -- lexical only.
+    CHECK_FALSE(service->RunOnce());
+    CHECK_FALSE(service->EmbedNow("query").has_value());
+    CHECK(embedder->calls == after_outage);
+    CHECK_THAT(service->Describe(), ContainsSubstring("unavailable"));
+}
+
+TEST_CASE("memory embeddings: one poison row is marked failed, its batch-mates embed",
+          "[memory]") {
+    Fixture fx("poison");
+    FakeEmbedder* embedder = nullptr;
+    auto service = FakeService(*fx.store, embedder);
+    REQUIRE_FALSE(service->RunOnce());  // creates the backend; nothing pending
+    REQUIRE(embedder != nullptr);
+    embedder->poison = "POISON";
+    fx.store->Insert(Entry("good one", "d", "b"));
+    fx.store->Insert(Entry("bad POISON", "d", "b"));
+    fx.store->Insert(Entry("good two", "d", "b"));
+    REQUIRE(service->RunOnce());
+    CHECK(fx.store->PendingEmbeddings(10).empty());
+    CHECK(fx.store->Stats(From()).failed_embed == 1);
+    CHECK_THAT(service->Describe(), !ContainsSubstring("unavailable"));
     CHECK(fx.store->ResetFailedEmbeddings() == 1);
-    const auto reclaimed = fx.store->ClaimPendingEmbeddings("sig-v1", 10);
-    REQUIRE(reclaimed.size() == 1);
-    CHECK(reclaimed[0].id == id);
 }
 
-TEST_CASE("memory topics: create, case-insensitive match, no fake no-topic row", "[memory]") {
-    Fixture fx("topics");
-    const std::string id = fx.store->Insert(MakeEntry("lesson about docker layers"));
-
-    REQUIRE(fx.store->BindTopic(id, MemoryStore::kScopeProject, "/proj", "docker", true));
-    auto entry = fx.store->Get(id);
-    REQUIRE(entry->topic == "docker");
-
-    // Case-insensitive re-attribution hits the same topic (no duplicate).
-    const std::string id2 = fx.store->Insert(MakeEntry("more docker"));
-    REQUIRE(fx.store->BindTopic(id2, MemoryStore::kScopeProject, "/proj", "DOCKER", false));
-    REQUIRE(fx.store->AllTopics(MemoryStore::kScopeProject, "/proj").size() == 1);
-
-    // Unknown topic without create: stays unfiled, no sentinel row.
-    const std::string id3 = fx.store->Insert(MakeEntry("unfiled lesson"));
-    REQUIRE_FALSE(fx.store->BindTopic(id3, MemoryStore::kScopeProject, "/proj", "missing", false));
-    REQUIRE_FALSE(fx.store->Get(id3)->topic.has_value());
-    REQUIRE(fx.store->AllTopics(MemoryStore::kScopeProject, "/proj").size() == 1);
-}
-
-TEST_CASE("memory topic cap: at max_topics creation is refused", "[memory]") {
-    Fixture fx("cap");
-    // The no-create path, trusting the count check (covered below with a
-    // real configured cap now that max_topics is plumbed through).
-    const std::string id = fx.store->Insert(MakeEntry("lesson"));
-    REQUIRE_FALSE(fx.store->BindTopic(id, MemoryStore::kScopeProject, "/proj", "x", false));
-    REQUIRE(fx.store->AllTopics(MemoryStore::kScopeProject, "/proj").empty());
-}
-
-TEST_CASE("memory topic cap: the configured max_topics is actually enforced", "[memory]") {
-    // Regression: BindTopic's cap was a hard-coded 4096, so the documented
-    // `max_topics` setting was parsed but had no effect -- out of unit-test
-    // range to exercise honestly. Now that BindTopic takes it as a
-    // parameter, a small configured cap is directly testable.
-    Fixture fx("configured-cap");
-    const std::string id1 = fx.store->Insert(MakeEntry("lesson one"));
-    const std::string id2 = fx.store->Insert(MakeEntry("lesson two"));
-    REQUIRE(fx.store->BindTopic(id1, MemoryStore::kScopeProject, "/proj", "a",
-                                /*create_if_missing=*/true, /*max_topics=*/1));
-    // At cap: a second NEW topic is refused; the entry stays unfiled.
-    REQUIRE_FALSE(fx.store->BindTopic(id2, MemoryStore::kScopeProject, "/proj", "b",
-                                      /*create_if_missing=*/true, /*max_topics=*/1));
-    // An EXISTING topic (case-insensitive) is still bindable at cap -- the
-    // count only gates CREATION.
-    REQUIRE(fx.store->BindTopic(id2, MemoryStore::kScopeProject, "/proj", "A",
-                                /*create_if_missing=*/false, /*max_topics=*/1));
-}
-
-TEST_CASE("memory settings: defaults, clamps, lenient parse", "[memory]") {
-    auto settings = ParseMemorySettings(nlohmann::json::object());
-    REQUIRE(settings.strategy == StrategyKind::kAuto);
-    REQUIRE(settings.allow_inline);
-    REQUIRE(settings.max_topics == 4096);
-    REQUIRE(settings.summarizer_model.empty());
-    REQUIRE(settings.default_limit == 12);
-    REQUIRE(settings.sidecar_python_path.empty());
-    REQUIRE(settings.sidecar_model.empty());
-    REQUIRE(settings.sidecar_startup_timeout_ms == 60000);
-    REQUIRE(settings.sidecar_request_timeout_ms == 30000);
-
-    // Bad values clamp, never throw (a bad optional number must not disable
-    // the plugin).
-    settings = ParseMemorySettings(nlohmann::json{
-        {"default_limit", 9999}, {"batch_size", 0}, {"max_text_bytes", 1}});
-    REQUIRE(settings.default_limit == 64);
-    REQUIRE(settings.batch_size == 1);
-    REQUIRE(settings.max_text_bytes == 256);
-
-    settings = ParseMemorySettings(nlohmann::json{{"strategy", "nonsense"}});
-    REQUIRE(settings.strategy == StrategyKind::kAuto);
-
-    settings = ParseMemorySettings(nlohmann::json{
-        {"strategy", "sidecar"},
-        {"sidecar_python_path", "/usr/bin/python3"},
-        {"sidecar_model", "BAAI/bge-small-en-v1.5"},
-        {"sidecar_startup_timeout_ms", 5000},
-        {"sidecar_request_timeout_ms", 2000}});
-    REQUIRE(settings.strategy == StrategyKind::kSidecar);
-    REQUIRE(settings.sidecar_python_path == "/usr/bin/python3");
-    REQUIRE(settings.sidecar_model == "BAAI/bge-small-en-v1.5");
-    REQUIRE(settings.sidecar_startup_timeout_ms == 5000);
-    REQUIRE(settings.sidecar_request_timeout_ms == 2000);
-}
-
-TEST_CASE("memory settings: reindex_budget_rows and the timeouts/budgets are ceilinged",
-          "[memory]") {
-    // Regression: these had a floor (via IntOr's is_number_integer() check,
-    // already correct) but no ceiling. reindex_budget_rows=-1 in particular
-    // becomes `LIMIT -1` in ClaimPendingEmbeddings, which SQLite reads as no
-    // limit at all -- one lazy drain would embed every pending row.
-    const auto negative = ParseMemorySettings(nlohmann::json{{"reindex_budget_rows", -1}});
-    CHECK(negative.reindex_budget_rows == 0);
-
-    const auto huge = ParseMemorySettings(nlohmann::json{
-        {"reindex_budget_rows", 999999999},
-        {"timeout_ms", 999999999},
-        {"sidecar_startup_timeout_ms", 999999999},
-        {"sidecar_request_timeout_ms", 999999999},
-        {"summarize_max_tokens", 999999999},
-        {"summarize_input_char_budget", 999999999}});
-    CHECK(huge.reindex_budget_rows <= 10000);
-    CHECK(huge.timeout_ms <= 600000);
-    CHECK(huge.sidecar_startup_timeout_ms <= 600000);
-    CHECK(huge.sidecar_request_timeout_ms <= 600000);
-    CHECK(huge.summarize_max_tokens <= 4096);
-    CHECK(huge.summarize_input_char_budget <= (1 << 20));
-
-    // A negative char budget cast to size_t elsewhere would disable
-    // truncation entirely by wrapping to a huge unsigned value.
-    const auto negative_budget =
-        ParseMemorySettings(nlohmann::json{{"summarize_input_char_budget", -5}});
-    CHECK(negative_budget.summarize_input_char_budget == 0);
-}
-
-TEST_CASE("memory digest info", "[memory]") {
-    Fixture fx("digest");
-    fx.store->Insert(MakeEntry("a lesson"));
-    const auto id = fx.store->Insert(MakeEntry("another"));
-    fx.store->BindTopic(id, MemoryStore::kScopeProject, "/proj", "docker", true);
-
-    const auto digest = fx.store->DigestInfo("lexical only", "off", "/proj");
-    REQUIRE(digest.entries_by_scope.at("project") == 2);
-    REQUIRE(digest.by_origin.at("model") == 2);
-    REQUIRE(digest.top_topics.size() == 1);
-    REQUIRE(digest.top_topics[0].first == "docker");
-    REQUIRE(digest.backend == "lexical only");
-    REQUIRE(digest.enrichment == "off");
-}
-
-TEST_CASE("memory sidecar embedder: unconfigured or unusable python degrades to null", "[memory]") {
-    // No sidecar_model at all: TryMake returns null without even trying to
-    // spawn -- same "degrade to lexical, never fail plugin load" contract
-    // the http/onnx backends had.
+TEST_CASE("memory embeddings: an unusable sidecar throws its reason", "[memory]") {
     MemorySettings settings;
-    REQUIRE(TryMakeSidecarEmbeddingFunction(settings, fs::temp_directory_path()) == nullptr);
-
-    // A python_path that does not exist: the spawn itself fails.
+    CHECK_THROWS_WITH(MakeSidecarEmbeddingFunction(settings, fs::temp_directory_path()),
+                      ContainsSubstring("sidecar_model"));
     settings.sidecar_model = "some/model";
     settings.sidecar_python_path = "/definitely/not/a/real/python/binary";
-    REQUIRE(TryMakeSidecarEmbeddingFunction(settings, fs::temp_directory_path()) == nullptr);
+    CHECK_THROWS(MakeSidecarEmbeddingFunction(settings, fs::temp_directory_path()));
+
+    // The plan resolves without constructing anything.
+    const auto plan = MakeEmbeddingPlan(settings, fs::temp_directory_path());
+    CHECK(plan.strategy == "sidecar");
+    CHECK(plan.signature == "sidecar:some/model");
+    CHECK(MakeEmbeddingPlan(MemorySettings{}, fs::temp_directory_path()).strategy == "none");
 }
 
 TEST_CASE("memory sidecar embedder: real fastembed round trip", "[memory][sidecar]") {
-    // Real end-to-end: spawns the actual driver against a real python3 with
-    // fastembed installed. Skips rather than fails when either is missing,
-    // the same convention tools_python_test.cpp uses for its interpreter
-    // tests -- a python3-less or fastembed-less machine is a normal dev/CI
-    // state, not a broken build.
     const std::string python_path = minimal::sidecar::ResolveOnPath("python3");
     if (python_path.empty()) SKIP("python3 not available");
     const std::string check = python_path + " -c \"import fastembed\" >/dev/null 2>&1";
@@ -431,174 +470,634 @@ TEST_CASE("memory sidecar embedder: real fastembed round trip", "[memory][sideca
     settings.sidecar_python_path = python_path;
     settings.sidecar_model = "BAAI/bge-small-en-v1.5";
     settings.sidecar_startup_timeout_ms = 120000;  // first run downloads the model
-    settings.sidecar_request_timeout_ms = 30000;
-
-    const fs::path dir =
-        fs::temp_directory_path() / ("memory-sidecar-" + std::to_string(getpid()));
-    auto embedder = TryMakeSidecarEmbeddingFunction(settings, dir);
-    REQUIRE(embedder != nullptr);
-
+    const fs::path dir = fs::temp_directory_path() / ("memory-sidecar-" + std::to_string(getpid()));
+    auto embedder = MakeSidecarEmbeddingFunction(settings, dir);
     const auto vectors = embedder->Embed(
         {"the cat sat on the mat", "a feline rested on a rug", "quarterly earnings report"});
     REQUIRE(vectors.size() == 3);
-    REQUIRE(vectors[0].dim > 0);
-    REQUIRE(vectors[0].dim == vectors[1].dim);
-
-    // The semantically close (but lexically dissimilar) pair scores higher
-    // than the unrelated one -- the whole point of the fix to Search()'s
-    // full_scan path earlier in this pass.
-    const double close = Cosine(vectors[0].values, vectors[1].values);
-    const double far = Cosine(vectors[0].values, vectors[2].values);
-    REQUIRE(close > far);
-
-    REQUIRE_THAT(embedder->Describe(), Catch::Matchers::ContainsSubstring("fastembed"));
-
+    auto cosine = [](const std::vector<float>& a, const std::vector<float>& b) {
+        double dot = 0, na = 0, nb = 0;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            dot += a[i] * b[i];
+            na += a[i] * a[i];
+            nb += b[i] * b[i];
+        }
+        return dot / (std::sqrt(na) * std::sqrt(nb));
+    };
+    CHECK(cosine(vectors[0].values, vectors[1].values) > cosine(vectors[0].values, vectors[2].values));
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
 
-TEST_CASE("enrichment: fake summarizer drives summary + topic", "[memory]") {
-    Fixture fx("enrich");
-    MemorySettings settings;
-    settings.summarizer_model = "fake/model";  // enabled
-    Enricher enricher(settings, fx.store.get());
+// ------------------------------------------------------------------ ingest
 
-    // RunEnrichment is the synchronous testing seam; the provider seam is
-    // exercised through the strict-JSON parse path -- a real provider call is
-    // out of unit scope, so drive the store effects directly and assert the
-    // API surface (summary write-back, topic binding) behaves.
-    const std::string id = fx.store->Insert(MakeEntry("deploy via make release"));
-    fx.store->SetSummary(id, "Releases go through make release.");
-    REQUIRE(fx.store->BindTopic(id, MemoryStore::kScopeProject, "/proj", "deploy", true));
-    const auto entry = fx.store->Get(id);
-    REQUIRE(entry->summary == "Releases go through make release.");
-    REQUIRE(entry->topic == "deploy");
-    (void)enricher;
+TEST_CASE("memory ingest: headings inside code fences do not split", "[memory]") {
+    const std::string doc =
+        "# Build\n"
+        "Run the build like this.\n"
+        "```bash\n"
+        "# configure first\n"
+        "cmake -B build\n"
+        "## not a heading either\n"
+        "```\n"
+        "## Staging\n"
+        "Deploy to staging first.\n";
+    const auto chunks = ChunkMarkdown(doc, "notes", "", 8192);
+    REQUIRE(chunks.size() == 2);
+    CHECK(chunks[0].title == "Build");
+    CHECK_THAT(chunks[0].body, ContainsSubstring("# configure first"));
+    CHECK_THAT(chunks[0].body, ContainsSubstring("## not a heading either"));
+    CHECK(chunks[0].description == "Run the build like this.");
+    CHECK(chunks[1].title == "Build > Staging");  // breadcrumb
+    CHECK(chunks[1].description == "Deploy to staging first.");
 }
 
-TEST_CASE("enrichment: also_bind applies the same summary/topic to sibling chunks", "[memory]") {
-    Fixture fx("enrich-siblings");
-    MemorySettings settings;
-    settings.summarizer_model = "fake/model";  // enabled
+TEST_CASE("memory ingest: front matter, preamble, heading-only sections", "[memory]") {
+    const std::string doc =
+        "---\n"
+        "title: Garden journal\n"
+        "description: What grows where\n"
+        "tags: [ignored]\n"
+        "---\n"
+        "Intro before any heading. More text.\n"
+        "# Beds\n"
+        "## North bed\n"
+        "- Tomatoes do well here.\n";
+    const auto chunks = ChunkMarkdown(doc, "file-stem", "", 8192);
+    REQUIRE(chunks.size() == 2);
+    CHECK(chunks[0].title == "Garden journal");
+    CHECK(chunks[0].description == "Intro before any heading.");
+    // "# Beds" has no body of its own: it lives on in the breadcrumb.
+    CHECK(chunks[1].title == "Beds > North bed");
+    CHECK(chunks[1].description == "Tomatoes do well here.");
 
-    const std::string sample_id = fx.store->Insert(MakeEntry("# Deploy\nrelease via make release"));
-    const std::string sibling_id = fx.store->Insert(MakeEntry("more body for the same group"));
+    // One chunk: the document description wins; the tool argument is the
+    // fallback when the file has none.
+    const auto single = ChunkMarkdown("---\ndescription: Doc level\n---\nJust text.\n", "stem", "", 8192);
+    REQUIRE(single.size() == 1);
+    CHECK(single[0].title == "stem");
+    CHECK(single[0].description == "Doc level");
+    CHECK(ChunkMarkdown("Just text.\n", "stem", "From the tool", 8192)[0].description ==
+          "From the tool");
 
-    minimal::testing::FakeLlmProvider provider;
-    provider.PushResponse(
-        minimal::testing::TextResponse(R"({"summary": "Releases go through make release.",)"
-                                       R"( "topic": {"new": "deploy"}})"));
-
-    Enricher::RunEnrichment(settings, *fx.store, &provider, "fake/model",
-                            minimal::common::DefaultLogger(), sample_id,
-                            "# Deploy\nrelease via make release", MemoryStore::kScopeProject,
-                            "/proj", {sibling_id});
-
-    const auto sample = fx.store->Get(sample_id);
-    const auto sibling = fx.store->Get(sibling_id);
-    REQUIRE(sample->summary == "Releases go through make release.");
-    REQUIRE(sample->topic == "deploy");
-    // The sibling was never itself asked -- only ONE provider call happened
-    // (PushResponse queued exactly one) -- yet it carries the same
-    // summary/topic as the sample it rode in with.
-    REQUIRE(sibling->summary == "Releases go through make release.");
-    REQUIRE(sibling->topic == "deploy");
-
-    // Exactly one topic row was created, not two: the sibling's BindTopic
-    // call must not re-create "deploy" a second time.
-    const auto topics = fx.store->AllTopics(MemoryStore::kScopeProject, "/proj");
-    REQUIRE(topics.size() == 1);
-    REQUIRE(topics[0].second == 2);  // both entries bound to it
+    CHECK_THROWS(ChunkMarkdown("# Only a heading\n", "stem", "", 8192));
 }
 
-TEST_CASE("memory search: sim-search fallback truncates to the requested limit", "[memory]") {
-    Fixture fx("sim-fallback");
-    for (int i = 0; i < 5; ++i) {
-        fx.store->Insert(MakeEntry("lesson number " + std::to_string(i), MemoryStore::kScopeGlobal, ""));
+TEST_CASE("memory ingest: an oversized section splits on paragraphs, never inside a fence",
+          "[memory]") {
+    std::string doc = "# Big\n";
+    for (int i = 0; i < 6; ++i) doc += "Paragraph " + std::to_string(i) + " " + std::string(60, 'x') + "\n\n";
+    doc += "```\n" + std::string(40, 'a') + "\n\n" + std::string(40, 'b') + "\n```\n";
+    const auto chunks = ChunkMarkdown(doc, "stem", "", 200);
+    REQUIRE(chunks.size() > 1);
+    bool fence_whole = false;
+    for (const auto& chunk : chunks) {
+        CHECK(chunk.body.size() <= 200);
+        CHECK_THAT(chunk.title, ContainsSubstring("Big (part "));
+        if (chunk.body.find("```") != std::string::npos) {
+            fence_whole = chunk.body.find(std::string(40, 'a')) != std::string::npos &&
+                          chunk.body.find(std::string(40, 'b')) != std::string::npos;
+        }
+    }
+    CHECK(fence_whole);
+}
+
+TEST_CASE("memory ingest: re-ingest replaces; chunks refuse delete/update; group delete",
+          "[memory]") {
+    Fixture fx("ingest");
+    auto chunk = [](std::string title) { return Entry(std::move(title), "d", "b"); };
+    const auto first = fx.store->Ingest({chunk("A"), chunk("B")}, "/proj/notes.md");
+    CHECK(first.replaced == 0);
+    const auto second = fx.store->Ingest({chunk("A2"), chunk("B2"), chunk("C2")}, "/proj/notes.md");
+    CHECK(second.replaced == 2);
+    CHECK_FALSE(fx.store->Get(first.ids[0], From()).has_value());
+
+    const auto row = fx.store->Get(second.ids[1], From());
+    REQUIRE(row);
+    CHECK(row->group_id == second.group_id);
+    CHECK(row->chunk_index == 1);
+    CHECK(row->chunk_count == 3);
+    CHECK(row->origin == "ingest");
+    CHECK(row->origin_ref == "/proj/notes.md");
+
+    CHECK(fx.store->Delete(second.ids[0], From()) == WriteOutcome::kIngestChunk);
+    EntryPatch patch;
+    patch.body = "x";
+    CHECK(fx.store->Update(second.ids[0], patch, From()) == WriteOutcome::kIngestChunk);
+
+    CHECK(fx.store->DeleteGroup("/proj/notes.md", From("/elsewhere")) == 0);  // not visible
+    CHECK(fx.store->DeleteGroup(second.group_id, From()) == 3);
+    CHECK(fx.store->Stats(From()).entries_by_scope.empty());
+}
+
+// --------------------------------------------------------------- migration
+
+TEST_CASE("memory migration: a v1 store upgrades in place", "[memory]") {
+    const fs::path dir = fs::temp_directory_path() / ("memory-v1-" + std::to_string(getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const fs::path db_path = dir / "memory.sqlite3";
+    {
+        sqlite3* db = nullptr;
+        REQUIRE(sqlite3_open(db_path.string().c_str(), &db) == SQLITE_OK);
+        const char* v1 = R"sql(
+CREATE TABLE memory_entries (
+    rowid_ INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, scope INTEGER NOT NULL,
+    project_root TEXT NOT NULL DEFAULT '', session_id TEXT NOT NULL DEFAULT '',
+    origin TEXT NOT NULL DEFAULT 'model', origin_ref TEXT, ingest_group TEXT,
+    created_ms INTEGER NOT NULL, text TEXT NOT NULL, summary TEXT,
+    topic_id INTEGER REFERENCES memory_topics(id), embedding BLOB,
+    embed_status INTEGER NOT NULL DEFAULT 0, signature TEXT, dim INTEGER, embed_error TEXT);
+CREATE INDEX memory_entries_scope ON memory_entries(scope, project_root);
+CREATE INDEX memory_entries_pending ON memory_entries(embed_status) WHERE embed_status = 0;
+CREATE INDEX memory_entries_by_group ON memory_entries(ingest_group);
+CREATE TABLE memory_topics (id INTEGER PRIMARY KEY, scope INTEGER NOT NULL,
+    project_root TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, created_ms INTEGER NOT NULL,
+    last_used_ms INTEGER NOT NULL DEFAULT 0, UNIQUE(scope, project_root, name));
+CREATE TABLE memory_ingest_groups (id TEXT PRIMARY KEY, scope INTEGER NOT NULL,
+    project_root TEXT NOT NULL DEFAULT '', origin_ref TEXT NOT NULL,
+    chunk_count INTEGER NOT NULL, created_ms INTEGER NOT NULL);
+CREATE TABLE memory_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE VIRTUAL TABLE memory_fts USING fts5(text, project_root, content='memory_entries',
+    content_rowid='rowid_', tokenize='trigram');
+CREATE TRIGGER memory_fts_insert AFTER INSERT ON memory_entries BEGIN
+    INSERT INTO memory_fts(rowid, text, project_root) VALUES (new.rowid_, new.text, new.project_root);
+END;
+CREATE TRIGGER memory_fts_delete AFTER DELETE ON memory_entries BEGIN
+    INSERT INTO memory_fts(memory_fts, rowid, text, project_root)
+        VALUES ('delete', old.rowid_, old.text, old.project_root);
+END;
+INSERT INTO memory_topics (id, scope, project_root, name, created_ms) VALUES (1, 1, '/proj', 'Docker Stuff', 1);
+INSERT INTO memory_entries (id, scope, project_root, origin, created_ms, text, summary, topic_id, embed_status, signature)
+    VALUES ('E1', 1, '/proj', 'model', 1000, '# Compose tips
+Use docker compose up -d for the stack.', 'Run the stack with compose.', 1, 1, 'old');
+INSERT INTO memory_entries (id, scope, project_root, origin, created_ms, text)
+    VALUES ('E2', 0, '', 'model', 2000, 'The user prefers metric units.');
+INSERT INTO memory_ingest_groups VALUES ('igX', 1, '/proj', '/proj/a.md', 2, 3000);
+INSERT INTO memory_entries (id, scope, project_root, origin, origin_ref, ingest_group, created_ms, text)
+    VALUES ('E3', 1, '/proj', 'ingest', '/proj/a.md', 'igX', 3000, '# One
+first');
+INSERT INTO memory_entries (id, scope, project_root, origin, origin_ref, ingest_group, created_ms, text)
+    VALUES ('E4', 1, '/proj', 'ingest', '/proj/a.md', 'igX', 3000, '# Two
+second');
+PRAGMA user_version = 1;
+)sql";
+        REQUIRE(sqlite3_exec(db, v1, nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(db);
     }
 
-    class ThrowingEmbedder final : public EmbeddingFunction {
-    public:
-        std::vector<Embedding> Embed(const std::vector<std::string>&) override {
-            throw std::runtime_error("embedder unavailable");
+    {
+        MemoryStore store(db_path);
+        const auto e1 = store.Get("E1", From());
+        REQUIRE(e1);
+        CHECK(e1->title == "Compose tips");
+        CHECK(e1->description == "Run the stack with compose.");  // the v1 summary
+        CHECK(e1->created_ms == 1000);
+        CHECK(e1->tags == std::vector<std::string>{"docker-stuff"});
+        const auto e2 = store.Get("E2", From());
+        REQUIRE(e2);
+        CHECK(e2->title == "The user prefers metric units.");
+        CHECK(e2->scope == kScopeGlobal);
+        const auto e4 = store.Get("E4", From());
+        REQUIRE(e4);
+        CHECK(e4->chunk_index == 1);
+        CHECK(e4->chunk_count == 2);
+        // Everything re-embeds; only the untagged rows await the tagger.
+        CHECK(store.PendingEmbeddings(10).size() == 4);
+        CHECK(store.PendingTagging(10).size() == 3);
+        // The new FTS index works over migrated rows, tags included.
+        CHECK(store.Lexical("docker", Filters(), 10).size() == 1);
+        CHECK(store.Lexical("stuff", Filters(), 10).size() == 1);
+    }
+    {
+        MemoryStore again(db_path);  // reopening a v2 store is a no-op migration
+        CHECK(again.Get("E1", From()).has_value());
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+// ------------------------------------------------------------------ tagger
+
+namespace {
+
+struct TaggerFixture {
+    Fixture fx;
+    MemorySettings settings;
+    std::shared_ptr<minimal::testing::FakeLlmProvider> provider =
+        std::make_shared<minimal::testing::FakeLlmProvider>();
+    std::unique_ptr<EmbeddingService> service;
+    FakeEmbedder* embedder = nullptr;
+    std::unique_ptr<Tagger> tagger;
+
+    explicit TaggerFixture(const std::string& name, bool with_embeddings = false) : fx(name) {
+        settings.tagger_model = "fake/tagger";
+        if (with_embeddings) {
+            service = FakeService(*fx.store, embedder);
+            service->RunOnce();  // creates the backend
         }
-        std::string Describe() const override { return "throwing"; }
-        std::string Signature() const override { return "throwing:v1"; }
-    };
+        Build();
+    }
+    void Build() {
+        tagger = std::make_unique<Tagger>(
+            settings, fx.store.get(), service.get(),
+            [this]() -> std::optional<TaggerLlm> { return TaggerLlm{provider, "tagger-model"}; },
+            minimal::common::DefaultLogger());
+    }
+    void Reply(const nlohmann::json& body) {
+        // Fenced, as models do despite instructions.
+        provider->PushResponse(minimal::testing::TextResponse("```json\n" + body.dump() + "\n```"));
+    }
+};
 
-    auto runtime = std::make_shared<MemoryRuntime>();
-    runtime->settings = ParseMemorySettings(nlohmann::json::object());
-    runtime->store = std::move(fx.store);
-    runtime->embedder = std::make_unique<ThrowingEmbedder>();
-    runtime->enricher = std::make_unique<Enricher>(runtime->settings, runtime->store.get());
-    runtime->signature = "throwing:v1";
+}  // namespace
 
-    auto tool = MakeMemorySearchTool(runtime);
-    minimal::common::Logger logger = minimal::common::DefaultLogger();
-    minimal::tools::ToolContext ctx(logger);  // session_id empty: no digest, no enricher touch
+TEST_CASE("memory tagger: files entries, reuses existing tags, creates described new ones",
+          "[memory]") {
+    TaggerFixture t("tagger");
+    const auto existing = t.fx.store->CreateTag(kScopeProject, "/proj", "cooking", "recipes and food");
+    const auto seed = t.fx.store->Insert(Entry("Pasta", "how to cook pasta", "salt the water"));
+    t.fx.store->SetEntryTags(seed, {existing});
+    const auto id = t.fx.store->Insert(Entry("Risotto", "stir constantly", "arborio rice"));
 
-    const auto result =
-        tool->execute({{"scope", "global"}, {"sort", "sim"}, {"query", "lesson"}, {"limit", 2}}, ctx);
+    t.Reply({{"entries",
+              {{{"n", 1},
+                {"tags", {"Cooking"}},
+                {"new", {{{"name", "Italian Food"}, {"description", "dishes from Italy"}}}}}}}});
+    REQUIRE(t.tagger->RunOnce());
+
+    const auto row = t.fx.store->Get(id, From());
+    CHECK(row->tags == std::vector<std::string>{"cooking", "italian-food"});
+    const auto created = t.fx.store->FindTag(kScopeProject, "/proj", "italian food");
+    REQUIRE(created);
+    CHECK(created->description == "dishes from Italy");
+    CHECK(t.fx.store->PendingTagging(10).empty());
+
+    // The prompt carried the vocabulary and the full body.
+    REQUIRE(t.provider->requests().size() == 1);
+    const auto& request = t.provider->requests()[0];
+    CHECK_THAT(PromptOf(request), ContainsSubstring("- cooking: recipes and food [1]"));
+    CHECK_THAT(PromptOf(request), ContainsSubstring("arborio rice"));
+    CHECK(request.model == "tagger-model");
+    CHECK_FALSE(t.tagger->RunOnce());  // nothing left
+}
+
+TEST_CASE("memory tagger: similar entries' tags are offered as a hint", "[memory]") {
+    TaggerFixture t("tagger-neighbors");
+    const auto tag = t.fx.store->CreateTag(kScopeProject, "/proj", "gardening", "plants");
+    const auto seed = t.fx.store->Insert(Entry("Tomatoes", "tomato watering schedule", "daily"));
+    t.fx.store->SetEntryTags(seed, {tag});
+    t.fx.store->Insert(Entry("Tomato pests", "tomato hornworms", "pick them off"));
+    t.Reply({{"entries", {{{"n", 1}, {"tags", {"gardening"}}}}}});
+    REQUIRE(t.tagger->RunOnce());
+    CHECK_THAT(PromptOf(t.provider->requests()[0]),
+               ContainsSubstring("Similar entries were tagged: gardening"));
+}
+
+TEST_CASE("memory tagger: a new tag that means an existing one maps onto it", "[memory]") {
+    TaggerFixture t("tagger-dedup", /*with_embeddings=*/true);
+    REQUIRE(t.embedder != nullptr);
+    // The fake's notion of synonyms: anything mentioning "verification".
+    t.embedder->concepts = {{"verification", Axis(3)}};
+    const auto existing =
+        t.fx.store->CreateTag(kScopeProject, "/proj", "qa", "testing and verification");
+    t.fx.store->SetEntryTags(t.fx.store->Insert(Entry("x", "y", "z")), {existing});
+    const auto id = t.fx.store->Insert(Entry("CI flakes", "flaky tests", "retry"));
+    t.Reply({{"entries",
+              {{{"n", 1},
+                {"new", {{{"name", "checks"}, {"description", "verification of the code"}},
+                         {{"name", "db"}, {"description", "databases"}}}}}}}});
+    REQUIRE(t.tagger->RunOnce());
+    // "checks" folded into qa; "db" -- two edits from "qa" -- stays its own tag.
+    CHECK(t.fx.store->Get(id, From())->tags == std::vector<std::string>{"db", "qa"});
+    CHECK_FALSE(t.fx.store->FindTag(kScopeProject, "/proj", "checks").has_value());
+}
+
+TEST_CASE("memory tagger: at the cap only existing tags apply", "[memory]") {
+    TaggerFixture t("tagger-cap");
+    t.settings.max_tags = 1;
+    t.Build();
+    const auto only = t.fx.store->CreateTag(kScopeProject, "/proj", "travel", "trips");
+    t.fx.store->SetEntryTags(t.fx.store->Insert(Entry("a", "b", "c")), {only});
+    const auto id = t.fx.store->Insert(Entry("Lisbon", "trip notes", "trams"));
+    t.Reply({{"entries",
+              {{{"n", 1},
+                {"tags", {"travel"}},
+                {"new", {{{"name", "portugal"}, {"description", "pt"}}}}}}}});
+    REQUIRE(t.tagger->RunOnce());
+    CHECK(t.fx.store->Get(id, From())->tags == std::vector<std::string>{"travel"});
+    CHECK(t.fx.store->TagCount(kScopeProject, "/proj") == 1);
+    CHECK_THAT(PromptOf(t.provider->requests()[0]), ContainsSubstring("vocabulary is FULL"));
+}
+
+TEST_CASE("memory tagger: each ingest chunk gets its own tags", "[memory]") {
+    TaggerFixture t("tagger-chunks");
+    const auto ingest =
+        t.fx.store->Ingest({Entry("Soup", "a soup", "broth"), Entry("Taxes", "tax filing", "forms")},
+                           "/proj/misc.md");
+    t.Reply({{"entries",
+              {{{"n", 1}, {"new", {{{"name", "cooking"}, {"description", "food"}}}}},
+               {{"n", 2}, {"new", {{{"name", "finance"}, {"description", "money"}}}}}}}});
+    REQUIRE(t.tagger->RunOnce());
+    CHECK(t.fx.store->Get(ingest.ids[0], From())->tags == std::vector<std::string>{"cooking"});
+    CHECK(t.fx.store->Get(ingest.ids[1], From())->tags == std::vector<std::string>{"finance"});
+    CHECK(t.provider->requests().size() == 1);  // one call for the batch
+}
+
+TEST_CASE("memory tagger: malformed output twice skips the batch, no retry loop", "[memory]") {
+    TaggerFixture t("tagger-malformed");
+    t.fx.store->Insert(Entry("a", "b", "c"));
+    t.provider->PushResponse(minimal::testing::TextResponse("no json here"));
+    t.provider->PushResponse(minimal::testing::TextResponse("{still: not json"));
+    REQUIRE(t.tagger->RunOnce());
+    CHECK(t.provider->requests().size() == 2);
+    CHECK(t.fx.store->PendingTagging(10).empty());
+    CHECK_FALSE(t.tagger->RunOnce());
+}
+
+TEST_CASE("memory tagger: provider errors leave rows pending; no model = disabled", "[memory]") {
+    TaggerFixture t("tagger-errors");
+    t.fx.store->Insert(Entry("a", "b", "c"));
+    t.provider->PushError(minimal::llm::LlmError(minimal::llm::LlmErrorCategory::Transport, "boom"));
+    CHECK_FALSE(t.tagger->RunOnce());
+    CHECK(t.fx.store->PendingTagging(10).size() == 1);
+    CHECK_THAT(t.tagger->Describe(), ContainsSubstring("paused"));
+
+    t.settings.tagger_model.clear();
+    t.Build();
+    CHECK_FALSE(t.tagger->enabled());
+    CHECK_FALSE(t.tagger->RunOnce());
+}
+
+TEST_CASE("memory tagger: suggest-merges keeps only real pairs", "[memory]") {
+    TaggerFixture t("tagger-merges");
+    for (const char* name : {"recipes", "cooking", "travel"}) {
+        const auto tag = t.fx.store->CreateTag(kScopeProject, "/proj", name, "");
+        t.fx.store->SetEntryTags(t.fx.store->Insert(Entry(name, "d", "b")), {tag});
+    }
+    t.provider->PushResponse(minimal::testing::TextResponse(
+        nlohmann::json{{"merges",
+                        {{{"from", "recipes"}, {"to", "cooking"}, {"why", "same subject"}},
+                         {{"from", "invented"}, {"to", "cooking"}}}}}
+            .dump()));
+    const auto merges = t.tagger->SuggestMerges(kScopeProject, "/proj");
+    REQUIRE(merges.size() == 1);
+    CHECK(merges[0].from == "recipes");
+    CHECK(merges[0].to == "cooking");
+}
+
+// ------------------------------------------------------ runtime + tools
+
+namespace {
+
+struct RuntimeFixture {
+    Fixture fx;
+    std::shared_ptr<MemoryRuntime> rt = std::make_shared<MemoryRuntime>();
+    fs::path project;
+
+    explicit RuntimeFixture(const std::string& name, MemorySettings settings = {})
+        : fx(name), project(fx.dir / "project") {
+        fs::create_directories(project / ".git");
+        fs::create_directories(project / "sub");
+        rt->settings = settings;
+        rt->store = std::move(fx.store);
+        rt->embeddings = std::make_unique<EmbeddingService>(rt->store.get(), EmbeddingPlan{},
+                                                            minimal::common::DefaultLogger());
+        rt->tagger = std::make_unique<Tagger>(rt->settings, rt->store.get(), rt->embeddings.get(),
+                                              Tagger::Resolver{}, minimal::common::DefaultLogger());
+        std::call_once(rt->workers_started, [] {});  // tests drive workers by hand
+    }
+    ~RuntimeFixture() { rt.reset(); }
+
+    minimal::tools::ToolResult Run(minimal::tools::Tool& tool, const nlohmann::json& input,
+                                   fs::path root = {}) {
+        minimal::tools::ToolContext ctx{minimal::common::DefaultLogger()};
+        ctx.session_id = "s1";
+        ctx.project_root = root.empty() ? project / "sub" : root;
+        return tool.execute(input, ctx);
+    }
+};
+
+nlohmann::json Parse(const minimal::tools::ToolResult& result) {
+    return nlohmann::json::parse(result.content_text);
+}
+
+}  // namespace
+
+TEST_CASE("memory tools: store, search, get, update, delete end to end", "[memory]") {
+    RuntimeFixture f("tools");
+    auto store = MakeMemoryStoreTool(f.rt);
+    auto search = MakeMemorySearchTool(f.rt);
+    auto get = MakeMemoryGetTool(f.rt);
+    auto update = MakeMemoryUpdateTool(f.rt);
+    auto del = MakeMemoryDeleteTool(f.rt);
+    CHECK(store->spec().category == minimal::tools::ToolCategory::FileWrite);
+    CHECK(search->spec().category == minimal::tools::ToolCategory::ReadOnly);
+
+    // Validation errors the model can act on.
+    auto result = f.Run(*store, {{"scope", "project"}, {"title", "T"}, {"body", "b"}});
+    CHECK(result.is_error);
+    CHECK_THAT(result.content_text, ContainsSubstring("description is empty"));
+    result = f.Run(*store, {{"scope", "project"}, {"title", "T"}, {"description", "d"},
+                            {"body", "b"}, {"path", "x.md"}});
+    CHECK(result.is_error);
+
+    result = f.Run(*store, {{"scope", "project"},
+                            {"title", "Build command"},
+                            {"description", "How this project is built"},
+                            {"body", "Run make -j8 from the root."}});
     REQUIRE_FALSE(result.is_error);
-    const auto body = nlohmann::json::parse(result.content_text);
-    REQUIRE(body["results"].size() == 2);  // capped, not all 5 (the pre-fix bug)
+    const std::string id = Parse(result)["id"];
 
-    fx.store = std::move(runtime->store);  // Fixture's destructor still cleans up the dir
-}
+    // Same title, same scope: flagged as a likely duplicate.
+    result = f.Run(*store, {{"scope", "project"},
+                            {"title", "Build command"},
+                            {"description", "Building"},
+                            {"body", "make"}});
+    REQUIRE_FALSE(result.is_error);
+    const auto dup = Parse(result);
+    REQUIRE(dup.contains("similar"));
+    CHECK(dup["similar"]["id"] == id);
+    const std::string dup_id = dup["id"];
 
-TEST_CASE("memory search: created_at is populated on hits", "[memory]") {
-    Fixture fx("created-at");
-    fx.store->Insert(MakeEntry("a lesson worth remembering"));
+    result = f.Run(*store, {{"scope", "global"},
+                            {"title", "Metric units"},
+                            {"description", "The user prefers metric units"},
+                            {"body", "Always convert to metric."}});
+    REQUIRE_FALSE(result.is_error);
 
-    MemoryStore::SearchQuery q;
-    q.scope = MemoryStore::kScopeProject;
-    q.project_root = "/proj";
-    q.sort = "time";
-    const auto hits = fx.store->Search(q);
+    // Search defaults to project + global, scoped to the worktree root even
+    // from a subdirectory.
+    result = f.Run(*search, {{"query", "how do I build it"}});
+    REQUIRE_FALSE(result.is_error);
+    auto hits = Parse(result)["results"];
+    REQUIRE(hits.size() == 2);
+    CHECK(hits[0]["title"] == "Build command");
+    CHECK(Parse(f.Run(*search, {{"query", "units"}, {"scope", "project"}}))["results"].empty());
+    CHECK(Parse(f.Run(*search, {{"query", "units"}}))["results"].size() == 1);
+    // Another project sees only the global entry.
+    const fs::path other = f.fx.dir / "other";
+    fs::create_directories(other);
+    hits = Parse(f.Run(*search, nlohmann::json::object(), other))["results"];
     REQUIRE(hits.size() == 1);
-    REQUIRE_FALSE(hits[0].created_at.empty());
-    REQUIRE_THAT(hits[0].created_at, Catch::Matchers::ContainsSubstring("T"));
+    CHECK(hits[0]["scope"] == "global");
+
+    result = f.Run(*get, {{"ids", {id, "missing"}}});
+    REQUIRE_FALSE(result.is_error);
+    const auto got = Parse(result);
+    CHECK(got["entries"][0]["body"] == "Run make -j8 from the root.");
+    CHECK(got["not_found"] == nlohmann::json{"missing"});
+
+    result = f.Run(*update, {{"id", id}, {"body", "Run make -j16."}, {"pinned", true}});
+    REQUIRE_FALSE(result.is_error);
+    CHECK(f.rt->store->Get(id, VisibleFrom(f.project))->body == "Run make -j16.");
+
+    REQUIRE_FALSE(f.Run(*del, {{"id", dup_id}}).is_error);
+    CHECK(f.Run(*del, {{"id", dup_id}}).is_error);
 }
 
-TEST_CASE("memory search: FTS match is scoped to the text column, not project_root", "[memory]") {
-    Fixture fx("fts-scope");
-    const std::string root = "/proj/zephyrproject";
-    fx.store->Insert(MakeEntry("just a note about cats", MemoryStore::kScopeProject, root));
-    fx.store->Insert(MakeEntry("another note about dogs", MemoryStore::kScopeProject, root));
+TEST_CASE("memory tools: store by path ingests, re-stores replace, chunk delete points at the group",
+          "[memory]") {
+    RuntimeFixture f("tools-path");
+    auto store = MakeMemoryStoreTool(f.rt);
+    auto del = MakeMemoryDeleteTool(f.rt);
+    std::ofstream(f.project / "notes.md") << "# One\nfirst part\n# Two\nsecond part\n";
+    auto result = f.Run(*store, {{"scope", "project"}, {"path", "../notes.md"}});
+    REQUIRE_FALSE(result.is_error);
+    CHECK(Parse(result)["entries"] == nlohmann::json{"One", "Two"});
 
-    MemoryStore::SearchQuery q;
-    q.scope = MemoryStore::kScopeProject;
-    q.project_root = root;
-    q.sort = "time";
+    result = f.Run(*store, {{"scope", "project"}, {"path", "../notes.md"}});
+    REQUIRE_FALSE(result.is_error);
+    const auto body = Parse(result);
+    CHECK(body["replaced"] == 2);
+    const std::string group = body["group_id"];
 
-    // "zephyrproject" only appears in project_root, shared by every row in
-    // scope -- an unqualified MATCH would hit both entries regardless of
-    // their text. Qualified to the text column, neither matches.
-    q.query = "zephyrproject";
-    REQUIRE(fx.store->Search(q).empty());
-
-    // A real text match still works.
-    q.query = "cats";
-    auto hits = fx.store->Search(q);
-    REQUIRE(hits.size() == 1);
-    REQUIRE(hits[0].preview.find("cats") != std::string::npos);
-
-    // Multi-word queries are split into terms, ANDed: "cats" and "dogs" never
-    // co-occur in one entry's text.
-    q.query = "cats dogs";
-    REQUIRE(fx.store->Search(q).empty());
+    const auto ids = f.rt->store->Browse(Filters(WorktreeRoot(f.project).string()), 10);
+    REQUIRE(ids.size() == 2);
+    result = f.Run(*del, {{"id", ids[0]}});
+    CHECK(result.is_error);
+    CHECK_THAT(result.content_text, ContainsSubstring(group));
+    result = f.Run(*del, {{"group_id", group}});
+    REQUIRE_FALSE(result.is_error);
+    CHECK(Parse(result)["deleted"] == 2);
 }
 
-TEST_CASE("memory digest info: project scope is scoped to the caller's project_root", "[memory]") {
-    Fixture fx("digest-scope");
-    fx.store->Insert(MakeEntry("mine", MemoryStore::kScopeProject, "/proj/a"));
-    fx.store->Insert(MakeEntry("also mine", MemoryStore::kScopeProject, "/proj/a"));
-    fx.store->Insert(MakeEntry("someone else's", MemoryStore::kScopeProject, "/proj/b"));
-    const auto other_id = fx.store->Insert(MakeEntry("theirs too", MemoryStore::kScopeProject, "/proj/b"));
-    fx.store->BindTopic(other_id, MemoryStore::kScopeProject, "/proj/b", "unrelated", true);
+TEST_CASE("memory tools: allow_inline=false and writes_prompt=false", "[memory]") {
+    MemorySettings settings;
+    settings.allow_inline = false;
+    settings.writes_prompt = false;
+    RuntimeFixture f("tools-modes", settings);
+    auto store = MakeMemoryStoreTool(f.rt);
+    CHECK(store->spec().category == minimal::tools::ToolCategory::ReadOnly);
+    CHECK_FALSE(store->spec().definition.input_schema["properties"].contains("body"));
+    const auto result = f.Run(*store, {{"scope", "project"}, {"title", "t"}, {"description", "d"},
+                                       {"body", "b"}});
+    CHECK(result.is_error);
+    CHECK_THAT(result.content_text, ContainsSubstring("allow_inline"));
+}
 
-    const auto digest = fx.store->DigestInfo("lexical only", "off", "/proj/a");
-    REQUIRE(digest.entries_by_scope.at("project") == 2);  // not 4 -- /proj/b excluded
-    REQUIRE(digest.by_origin.at("model") == 2);
-    REQUIRE(digest.top_topics.empty());  // "unrelated" belongs to /proj/b, not /proj/a
+// ---------------------------------------------------------- context index
+
+TEST_CASE("memory context index: counts, pinned bodies, tags, entries, no ids", "[memory]") {
+    RuntimeFixture f("index");
+    const std::string root = WorktreeRoot(f.project).string();
+    CHECK(RenderMemoryIndex(*f.rt, f.project) == "No memories stored yet.\n");
+
+    auto pinned = Entry("Standing preference", "how to address the user", "Call them Sam.",
+                        kScopeGlobal);
+    pinned.pinned = true;
+    f.rt->store->Insert(pinned);
+    const auto id = f.rt->store->Insert(Entry("Build", "how to build", "make", kScopeProject, root));
+    const auto tag = f.rt->store->CreateTag(kScopeProject, root, "tooling", "build tools");
+    f.rt->store->SetEntryTags(id, {tag});
+
+    const std::string index = RenderMemoryIndex(*f.rt, f.project);
+    CHECK_THAT(index, ContainsSubstring("1 project and 1 global entries"));
+    CHECK_THAT(index, ContainsSubstring("### Standing preference (global)\nCall them Sam."));
+    CHECK_THAT(index, ContainsSubstring("\nTags: tooling(1)\n"));
+    // Everything fit: no "of N", no fetch hints, no ids.
+    CHECK_THAT(index, ContainsSubstring("\nEntries:\n- Build -- how to build\n"));
+    CHECK_THAT(index, !ContainsSubstring("more"));
+    CHECK_THAT(index, !ContainsSubstring(id));
+    CHECK_THAT(index, !ContainsSubstring("- Standing preference"));  // pinned: not listed twice
+
+    // The contributor: skipped for subagents by default.
+    auto contributor = MakeMemoryIndexContributor(f.rt);
+    minimal::agent::ContextRequest request;
+    request.project_root = f.project;
+    const auto section = contributor->Contribute(request);
+    REQUIRE(section);
+    CHECK(section->title == "Memory");
+    request.is_subagent = true;
+    CHECK_FALSE(contributor->Contribute(request).has_value());
+}
+
+TEST_CASE("memory context index: over budget, every omission is announced with its fetch path",
+          "[memory]") {
+    MemorySettings settings;
+    settings.index_budget_bytes = 900;
+    RuntimeFixture f("index-overflow", settings);
+    const std::string root = WorktreeRoot(f.project).string();
+    for (int i = 0; i < 8; ++i) {
+        auto e = Entry("Pinned " + std::to_string(i), "pinned description " + std::to_string(i),
+                       std::string(120, 'x'), kScopeGlobal);
+        e.pinned = true;
+        f.rt->store->Insert(e);
+    }
+    for (int i = 0; i < 40; ++i) {
+        const auto id = f.rt->store->Insert(Entry("Entry " + std::to_string(i),
+                                                  "an ordinary description", "b", kScopeProject, root));
+        const auto tag = f.rt->store->CreateTag(kScopeProject, root, "tag-number-" + std::to_string(i), "");
+        f.rt->store->SetEntryTags(id, {tag});
+    }
+    const std::string index = RenderMemoryIndex(*f.rt, f.project);
+    CHECK(index.size() <= 900);
+    CHECK_THAT(index, ContainsSubstring("40 project and 8 global entries"));
+    CHECK_THAT(index, ContainsSubstring("### Pinned "));                         // some in full
+    CHECK_THAT(index, ContainsSubstring("more pinned; memory_search with no query lists pinned"));
+    CHECK_THAT(index, ContainsSubstring("more; memory_search with no query lists all tags"));
+    CHECK_THAT(index, ContainsSubstring(" of 40; memory_search finds the rest)"));
+}
+
+TEST_CASE("memory tools: browsing returns the full tag vocabulary", "[memory]") {
+    RuntimeFixture f("browse-tags");
+    const std::string root = WorktreeRoot(f.project).string();
+    const auto a = f.rt->store->Insert(Entry("A", "d", "b", kScopeProject, root));
+    const auto g = f.rt->store->Insert(Entry("G", "d", "b", kScopeGlobal));
+    f.rt->store->SetEntryTags(a, {f.rt->store->CreateTag(kScopeProject, root, "shared", "")});
+    f.rt->store->SetEntryTags(g, {f.rt->store->CreateTag(kScopeGlobal, "", "shared", ""),
+                                  f.rt->store->CreateTag(kScopeGlobal, "", "global-only", "")});
+    auto search = MakeMemorySearchTool(f.rt);
+    const auto browse = Parse(f.Run(*search, nlohmann::json::object()));
+    CHECK(browse["tags"] == nlohmann::json{{"global-only", 1}, {"shared", 2}});
+    // A query is a search, not a browse: no vocabulary attached.
+    CHECK_FALSE(Parse(f.Run(*search, {{"query", "A"}})).contains("tags"));
+}
+
+TEST_CASE("memory workers: background embedding and tagging, prompt shutdown", "[memory]") {
+    // The real threads, not RunOnce: rows stored after Start() get embedded
+    // and tagged without anyone calling in, and destruction joins promptly.
+    TaggerFixture t("workers");
+    FakeEmbedder* embedder = nullptr;
+    t.service = FakeService(*t.fx.store, embedder);
+    t.Build();
+    t.Reply({{"entries", {{{"n", 1}, {"new", {{{"name", "misc"}, {"description", "anything"}}}}}}}});
+    t.service->Start();
+    t.tagger->Start();
+    const auto id = t.fx.store->Insert(Entry("Background", "stored after start", "body"));
+    t.service->Notify();
+    t.tagger->Notify();
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline &&
+           (!t.fx.store->PendingEmbeddings(10).empty() || !t.fx.store->PendingTagging(10).empty())) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(t.fx.store->PendingEmbeddings(10).empty());
+    CHECK(t.fx.store->Get(id, From())->tags == std::vector<std::string>{"misc"});
+
+    const auto stop_start = std::chrono::steady_clock::now();
+    t.tagger.reset();
+    t.service.reset();
+    CHECK(std::chrono::steady_clock::now() - stop_start < std::chrono::seconds(2));
 }

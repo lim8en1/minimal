@@ -66,6 +66,7 @@ Full example (`bundled/settings.json`):
     "max_bytes": 0,
     "search_ancestors": false
   },
+  "context_contributors": { "disabled": [], "max_bytes_per_section": 16384 },
   "logging": { "level": "info", "max_size_mb": 10, "max_files": 5 }
 }
 ```
@@ -202,6 +203,17 @@ requirements paths), delivered to the tools per invocation. See
 | `files` | string array | `["AGENTS.md", "CLAUDE.md"]` | plain file names only — no `/` or `\`, non-empty |
 | `max_bytes` | int | `0` | `0` = unlimited |
 | `search_ancestors` | bool | `false` | walk up from the project root |
+
+### `context_contributors.*`
+
+Plugin-contributed sections of the system context (e.g. the `memory`
+plugin's index). Rendered after `project_context` and signal-channel
+context, once per session.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `disabled` | string array | `[]` | plugin names whose sections are skipped; non-empty strings |
+| `max_bytes_per_section` | int | `16384` | per-section body cap, cut at a UTF-8 boundary with a marker; `0` = unlimited; negative → **fatal** |
 
 ### `logging.*`
 

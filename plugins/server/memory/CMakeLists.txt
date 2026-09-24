@@ -1,9 +1,14 @@
 minimal_add_plugin(memory
     plugin.cpp
     memory_settings.cpp
+    memory_store.cpp
     embedding_http.cpp
     embedding_sidecar.cpp
-    enricher.cpp
-    memory_store.cpp
-    memory_tool.cpp
-    memory_command.cpp)
+    embedding_service.cpp
+    search.cpp
+    ingest.cpp
+    tagger.cpp
+    tools_read.cpp
+    tools_write.cpp
+    memory_command.cpp
+    context_index.cpp)

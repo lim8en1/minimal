@@ -105,7 +105,7 @@ public:
           startup_timeout_ms_(startup_timeout_ms),
           request_timeout_ms_(request_timeout_ms) {
         std::lock_guard<std::mutex> lock(mu_);
-        Spawn();  // throws on failure; TryMakeSidecarEmbeddingFunction catches
+        Spawn();  // throws on failure; MakeSidecarEmbeddingFunction propagates it
     }
 
     ~SidecarEmbeddingFunction() override {
@@ -354,19 +354,23 @@ private:
 
 }  // namespace
 
-std::unique_ptr<EmbeddingFunction> TryMakeSidecarEmbeddingFunction(
+std::unique_ptr<EmbeddingFunction> MakeSidecarEmbeddingFunction(
     const MemorySettings& settings, const std::filesystem::path& data_dir) {
-    if (settings.sidecar_model.empty()) return nullptr;
+    if (settings.sidecar_model.empty()) {
+        throw std::runtime_error("memory: sidecar_model is not set");
+    }
     std::string python_path = settings.sidecar_python_path;
     if (python_path.empty()) python_path = sidecar::ResolveOnPath("python3");
-    if (python_path.empty()) return nullptr;
-    try {
-        return std::make_unique<SidecarEmbeddingFunction>(
-            python_path, settings.sidecar_model, data_dir / "fastembed_cache",
-            settings.sidecar_startup_timeout_ms, settings.sidecar_request_timeout_ms);
-    } catch (const std::exception&) {
-        return nullptr;  // degrade to lexical; /memory reports the state
+    if (python_path.empty()) {
+        throw std::runtime_error("memory: python3 not found on PATH (set sidecar_python_path)");
     }
+    return std::make_unique<SidecarEmbeddingFunction>(
+        python_path, settings.sidecar_model, data_dir / "fastembed_cache",
+        settings.sidecar_startup_timeout_ms, settings.sidecar_request_timeout_ms);
+}
+
+std::string SidecarSignatureFor(const MemorySettings& settings) {
+    return "sidecar:" + settings.sidecar_model;
 }
 
 }  // namespace minimal::memory

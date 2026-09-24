@@ -1,118 +1,96 @@
-// memory -- the dynamic-skill / dynamic-context plugin: a durable,
-// DB-backed lesson store the model grows itself, with embedding-similarity
-// search (http or sidecar backends behind one seam), a capped per-scope topic
-// taxonomy, and an optional small-LLM enrichment pass (summary + topic).
+// memory -- durable, cross-session memory the model grows itself: a SQLite
+// store with hybrid (bm25 + embedding) search, a controlled tag vocabulary
+// filed by a cheap tagger model, and a "Memory" index pre-filled into every
+// session's context through the core context-contributor seam.
 //
 // SHIPPED DISABLED (DefaultsDisabled in plugin_discovery.cpp): it writes to
 // disk on the model's initiative and, under the http embedding strategy,
 // sends entry text to an external endpoint. Enabling it is one plugins.json
-// edit. With no embedding backend configured the store still works -- search
-// degrades to the lexical prefilter, and the tools report that state.
+// edit. With no embedding backend and no tagger configured the store still
+// works -- search is lexical and entries stay untagged.
 
-#include <atomic>
 #include <filesystem>
 #include <memory>
 #include <mutex>
-#include <optional>
 
-#include <nlohmann/json.hpp>
+#include "memory_runtime.hpp"
 
-#include "embedding.hpp"
-#include "embedding_http.hpp"
-#include "embedding_sidecar.hpp"
-#include "memory_settings.hpp"
-#include "memory_store.hpp"
-#include "memory_tool.hpp"
-#include "minimal/commands/command.hpp"
-#include "minimal/commands/command_registry.hpp"
+#include "minimal/agent/session_support_service.hpp"
 #include "minimal/common/abi_tag.hpp"
+#include "minimal/common/logger.hpp"
 #include "minimal/plugins/plugin_abi.h"
+
+namespace {
+
+// One runtime per process, built by whichever registration hook runs first.
+// Registration is single-threaded; the mutex only makes that assumption
+// cheap to keep.
+std::mutex g_runtime_mu;
+std::shared_ptr<minimal::memory::MemoryRuntime> g_runtime;
+
+std::shared_ptr<minimal::memory::MemoryRuntime> Runtime(
+    const minimal::plugins::PluginRegistrationContext& context) {
+    using namespace minimal::memory;
+    std::lock_guard<std::mutex> lock(g_runtime_mu);
+    if (g_runtime != nullptr) return g_runtime;
+
+    auto runtime = std::make_shared<MemoryRuntime>();
+    runtime->settings = ParseMemorySettings(context.config);
+    runtime->store = std::make_unique<MemoryStore>(context.data_dir / "memory.sqlite3");
+
+    auto plan = MakeEmbeddingPlan(runtime->settings, context.data_dir);
+    // The one re-embed trigger: rows embedded by a different backend or
+    // model go back to pending. With no backend configured, vectors are left
+    // alone -- re-enabling the same backend later finds them intact.
+    if (plan.factory) runtime->store->ResetStaleSignatures(plan.signature);
+    runtime->embeddings = std::make_unique<EmbeddingService>(
+        runtime->store.get(), std::move(plan), minimal::common::DefaultLogger());
+
+    // Resolved lazily on the tagger's worker, by which time core services
+    // are wired (the worker starts on first use, never at registration).
+    minimal::plugins::ServiceRegistry* services = context.services;
+    const std::string model_ref = runtime->settings.tagger_model;
+    Tagger::Resolver resolver = [services, model_ref]() -> std::optional<TaggerLlm> {
+        if (services == nullptr) return std::nullopt;
+        void* raw = services->Find(minimal::agent::kSessionSupportServiceName);
+        if (raw == nullptr) return std::nullopt;
+        auto* support = static_cast<minimal::agent::SessionSupportService*>(raw);
+        auto resolved = support->ResolveModelRef(model_ref);
+        if (!resolved) return std::nullopt;
+        return TaggerLlm{resolved->provider, resolved->model};
+    };
+    runtime->tagger = std::make_unique<Tagger>(runtime->settings, runtime->store.get(),
+                                               runtime->embeddings.get(), std::move(resolver),
+                                               minimal::common::DefaultLogger());
+    g_runtime = runtime;
+    return runtime;
+}
+
+}  // namespace
 
 extern "C" {
 
 MINIMAL_PLUGIN_ABI_SYMBOLS("memory")
 
-namespace {
-
-// The tools are stateless over this shared runtime; the extern "C" callbacks
-// run at registration and at tool dispatch, so one instance per process is
-// the right shape (checklist's static-store pattern). Guarded by mu_ against
-// nothing in practice -- registration is single-threaded -- but a mutex costs
-// less than an argument.
-std::mutex g_runtime_mu;
-std::shared_ptr<minimal::memory::MemoryRuntime> g_runtime;
-std::filesystem::path g_data_dir;
-
-void BuildRuntime(const minimal::plugins::PluginRegistrationContext& context) {
-    std::lock_guard<std::mutex> lock(g_runtime_mu);
-    auto runtime = std::make_shared<minimal::memory::MemoryRuntime>();
-    runtime->settings = minimal::memory::ParseMemorySettings(context.config);
-    runtime->services = context.services;
-
-    runtime->store = std::make_unique<minimal::memory::MemoryStore>(
-        context.data_dir / "memory.sqlite3");
-    runtime->enricher = std::make_unique<minimal::memory::Enricher>(
-        runtime->settings, runtime->store.get());
-
-    // Strategy resolution. "auto" walks sidecar -> http -> none, reporting
-    // the winner through Describe() (never a silent fallback: /memory and
-    // the digest name which backend actually won and the reason the others
-    // were skipped is derivable from config).
-    const auto& s = runtime->settings;
-    auto strategy = s.strategy;
-    if (strategy == minimal::memory::StrategyKind::kAuto) {
-        if (!s.sidecar_model.empty()) {
-            strategy = minimal::memory::StrategyKind::kSidecar;
-        } else if (!s.api_base.empty()) {
-            strategy = minimal::memory::StrategyKind::kHttp;
-        } else {
-            strategy = minimal::memory::StrategyKind::kNone;
-        }
-    }
-    switch (strategy) {
-        case minimal::memory::StrategyKind::kHttp:
-            if (s.api_base.empty()) break;  // unconfigured; degrade to none
-            runtime->embedder = std::make_unique<minimal::memory::HttpEmbeddingFunction>(
-                s, minimal::net::HttpClient{});
-            break;
-        case minimal::memory::StrategyKind::kSidecar:
-            // Spawn/handshake failures leave embedder null: the tools answer
-            // "lexical only" rather than failing the plugin load.
-            runtime->embedder = minimal::memory::TryMakeSidecarEmbeddingFunction(
-                s, context.data_dir);
-            break;
-        default:
-            break;  // kNone / unconfigured auto
-    }
-    runtime->signature = runtime->embedder ? runtime->embedder->Signature() : "none";
-
-    // A strategy change flips existing rows back to pending (the reindex
-    // trigger); the count is what /memory reports.
-    if (runtime->embedder) runtime->store->SetSignatureForAll(runtime->signature, 0);
-
-    g_data_dir = context.data_dir;
-    g_runtime = std::move(runtime);
-}
-
-}  // namespace
-
-void minimal_plugin_register_tools(
-    minimal::tools::ToolRegistry& registry,
-    const minimal::plugins::PluginRegistrationContext& context) {
-    BuildRuntime(context);
-    auto runtime = std::atomic_load(&g_runtime);
+void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
+                                   const minimal::plugins::PluginRegistrationContext& context) {
+    auto runtime = Runtime(context);
     registry.Register(minimal::memory::MakeMemorySearchTool(runtime));
-    registry.Register(minimal::memory::MakeMemoryStoreTool(runtime));
     registry.Register(minimal::memory::MakeMemoryGetTool(runtime));
+    registry.Register(minimal::memory::MakeMemoryStoreTool(runtime));
+    registry.Register(minimal::memory::MakeMemoryUpdateTool(runtime));
     registry.Register(minimal::memory::MakeMemoryDeleteTool(runtime));
 }
 
-void minimal_plugin_register_commands(
-    minimal::commands::CommandRegistry& registry,
+void minimal_plugin_register_commands(minimal::commands::CommandRegistry& registry,
+                                      const minimal::plugins::PluginRegistrationContext& context) {
+    registry.Register(minimal::memory::MakeMemoryCommand(Runtime(context)));
+}
+
+void minimal_plugin_register_context_contributors(
+    minimal::agent::ContextContributorRegistry& registry,
     const minimal::plugins::PluginRegistrationContext& context) {
-    if (g_runtime == nullptr) BuildRuntime(context);
-    registry.Register(minimal::memory::MakeMemoryCommand(std::atomic_load(&g_runtime)));
-    registry.SetAttribution("memory");
+    registry.Register(minimal::memory::MakeMemoryIndexContributor(Runtime(context)));
 }
 
 }  // extern "C"

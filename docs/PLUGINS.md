@@ -182,6 +182,9 @@ object code.
 - `minimal_plugin_register_services` — cross-plugin pull services
   (`ServiceRegistry`)
 - `minimal_plugin_register_mention_resolver` — `@`-mentions (exclusive)
+- `minimal_plugin_register_context_contributors` — sections pre-filled into
+  each session's system context (additive; asked once per session, frozen
+  for it; see `minimal/agent/context_contributor.hpp`)
 - `minimal_plugin_register_auth_provider` — (exclusive)
 - `minimal_plugin_register_permission_advisor` — auto-answers `Ask` decisions
 - `minimal_plugin_register_model_catalogs` — lazy model discovery

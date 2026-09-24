@@ -77,7 +77,7 @@ std::vector<Embedding> HttpEmbeddingFunction::EmbedChunk(const std::vector<std::
     const net::HttpResponse response = http_.Post(request);
     if (response.status < 200 || response.status >= 300) {
         throw std::runtime_error("embedding backend HTTP " + std::to_string(response.status) +
-                                 " from " + settings_.api_base +
+                                 " from " + settings_.api_base + ": " +
                                  (response.body.size() > 256
                                       ? response.body.substr(0, 256) + "…"
                                       : response.body));
@@ -130,8 +130,10 @@ std::string HttpEmbeddingFunction::Describe() const {
     return "http " + settings_.api_base + " (" + settings_.model + ")";
 }
 
-std::string HttpEmbeddingFunction::Signature() const {
-    return "http:" + settings_.api_base + ":" + settings_.model;
+std::string HttpEmbeddingFunction::Signature() const { return SignatureFor(settings_); }
+
+std::string HttpEmbeddingFunction::SignatureFor(const MemorySettings& settings) {
+    return "http:" + settings.api_base + ":" + settings.model;
 }
 
 }  // namespace minimal::memory

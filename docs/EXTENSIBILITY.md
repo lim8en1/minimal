@@ -4,7 +4,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 ## 1. The surface as it exists
 
-**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — thirteen optional `extern "C"` registration hooks (plus the required tag/name/version symbols), each `dlsym`'d by `plugin_loader.cpp`:
+**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — fourteen optional `extern "C"` registration hooks (plus the required tag/name/version symbols), each `dlsym`'d by `plugin_loader.cpp`:
 
 | Symbol | Status | What it grants |
 |---|---|---|
@@ -16,13 +16,14 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `minimal_plugin_register_project_commands(CommandRegistry&, const std::filesystem::path&)` | **live** | project-scoped `/`-commands (`commands-md`'s own project-local discovery is the only caller): unlike every other hook, called LAZILY per project root (`ProjectCommandSource`, cached per root) rather than once at startup -- there is no project root yet then. `registry` is a fresh, per-root instance, never the global one; a name here may shadow a global command for sessions rooted there |
 | `minimal_plugin_register_services(ServiceRegistry&)` | **live** | pull-side access to another plugin's services; consumer side rides `PluginRegistrationContext::services` |
 | `minimal_plugin_register_mention_resolver(...)` | **live** — `plugin_loader.cpp` dlsym's and calls it; `SessionServiceImpl` resolves every `@`-mention through `MentionResolverRegistry::Active()` | pluggable `@`-mention resolution; `PrefixMentionResolver` is the core default, exclusive first-wins |
+| `minimal_plugin_register_context_contributors(ContextContributorRegistry&)` | **live** | sections pre-filled into every session's system context, after AGENTS.md and signal-channel context. Asked once per session in `SessionRegistry::CreateResolved` (creation, resume and subagent spawn alike) and frozen for the session so the prompt-cache prefix never shifts; recomputed on resume. Synchronous on the session-creation path -- a contributor keeps it local and cheap. Additive, rendered in load order; a throwing contributor is logged and skipped; each body is capped by `context_contributors.max_bytes_per_section` and an operator can switch a plugin's sections off with `context_contributors.disabled`. The `memory` plugin's index is the first consumer |
 | `minimal_plugin_register_auth_provider(...)` | live | exclusive connection policy; pass-through default |
 | `minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&)` | **live** | answers `Ask` automatically; abstains/throws to the wire checker — the human |
 | `minimal_plugin_register_model_catalogs(ModelCatalogRegistry&)` | **live** | `"discover": true` providers list their models from the backend, lazily at first resolve; keyed by the same kind string as the provider factory |
 | `minimal_plugin_register_compaction_strategies(CompactionStrategyRegistry&)` | **live (S4)** | plugin compaction strategies keyed by name — `memory.compaction_strategy` in settings.json selects one. Core registers its built-in `"summarize"` strategy directly in `main.cpp` (never through this hook), and always snaps a strategy's proposed cut to a safe tool-call boundary before using it |
 | `minimal_plugin_register_hook_points(HookDispatcher&)` | **live** | named, veto-capable or observe-only events the plugin emits; hooks.json actions answer them — see §5 |
 
-Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`, `PermissionAdvisor` (composing above the wire checker — see §3), and the service interfaces a provider ships (abstract, header-only — see §2.2).
+Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`, `ContextContributor`, `PermissionAdvisor` (composing above the wire checker — see §3), and the service interfaces a provider ships (abstract, header-only — see §2.2).
 
 **Utilities half** — included from `plugin_abi.h`: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `SseParser`, `Logger`, `SessionReader` + `HistoryWindow`, `PluginStorage` (per-plugin KV, plus a per-plugin `data_dir` on the context) and `plugin_rpc.hpp` (the `PluginCall` dispatch convention), plus the registry headers. The frontmatter parser remains reachable through ordinary core linkage (plugins link `minimal_server_core`, a shared library) but is not declared surface.
 

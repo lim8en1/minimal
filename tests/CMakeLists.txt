@@ -98,6 +98,7 @@ add_executable(minimal_tests
     wire_ask_broker_test.cpp
     session_wiring_test.cpp
     session_observer_test.cpp
+    context_contributor_test.cpp
     session_store_test.cpp
     session_naming_test.cpp
     session_test.cpp
@@ -114,18 +115,23 @@ add_executable(minimal_tests
     plugin_storage_test.cpp
     plugin_rpc_test.cpp
     checklist_test.cpp
-    # The memory plugin: store, tools, embedding backends and enricher are
-    # pure plugin logic over core headers; plugin.cpp (the extern "C" entry
-    # points) stays out, like every other bundled plugin. Same pattern as
-    # checklist above.
+    # The memory plugin: store, search, tools, embedding backends, tagger and
+    # context index are pure plugin logic over core headers; plugin.cpp (the
+    # extern "C" entry points) stays out, like every other bundled plugin.
+    # Same pattern as checklist above.
     memory_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_store.cpp"
-    "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_tool.cpp"
-    "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_command.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_settings.cpp"
-    "${CMAKE_SOURCE_DIR}/plugins/server/memory/enricher.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/embedding_http.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/embedding_sidecar.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/embedding_service.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/search.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/ingest.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/tagger.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/tools_read.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/tools_write.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_command.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/context_index.cpp"
     # The checklist-VIEW client plugin: model (header-only), poller and panel
     # view are pure plugin logic over the ClientApi/FocusProvider seams,
     # compiled in with stub seams; checklist_view_plugin.cpp (the extern "C"
