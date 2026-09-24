@@ -34,18 +34,16 @@
 // others from running.
 
 #include <atomic>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <thread>
 #include <vector>
 
 #include "minimal/agent/session_observer.hpp"
-#include "minimal/common/event_queue.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/serial_executor.hpp"
 
 namespace minimal::agent {
 
@@ -123,16 +121,12 @@ private:
     std::vector<std::shared_ptr<SessionObserver>> observers_;
     std::vector<std::string> owners_;  // parallel to observers_
     std::string attribution_;
-    // Notified whenever outstanding_ reaches zero, under mutex_ -- the
-    // decrement itself must happen under the same lock WaitForIdleForTesting
-    // waits on, or the transition-to-zero and the wait can race (classic
-    // lost wakeup).
-    std::condition_variable idle_cv_;
 
     common::Logger& logger_;
-    common::EventQueue<std::function<void()>> tasks_;
-    std::thread dispatcher_;
-    std::atomic<int> outstanding_{0};
+    // One thread, so notifications are delivered in the order they were
+    // dispatched. That ordering IS the contract: OnSessionCreated must be
+    // delivered before the OnSessionEnded for the same session.
+    common::SerialExecutor executor_;
     // Notifications refused because the queue was full or closed. Counted so a
     // plugin missing an OnSessionEnded has evidence other than its own leak.
     std::atomic<std::size_t> dropped_{0};

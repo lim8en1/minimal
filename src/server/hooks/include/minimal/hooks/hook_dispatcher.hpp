@@ -65,6 +65,7 @@
 
 #include "minimal/common/event_queue.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/serial_executor.hpp"
 #include "minimal/config/hooks_config.hpp"
 #include "minimal/llm/chat.hpp"
 
@@ -257,14 +258,11 @@ private:
     std::string attribution_;
     bool sealed_ = false;
 
-    // The async dispatch thread. Runs from construction (the queue parks it)
-    // so Configure needs no thread-start choreography; Close + join in the
-    // destructor. Mutable because Emit/EmitAsync are const: they run after
-    // Configure sealed the ACTION map, but the queue and counters are runtime
-    // state by design.
-    mutable common::EventQueue<std::function<void()>> tasks_;
-    mutable std::thread dispatcher_thread_;
-    mutable std::atomic<int> outstanding_{0};
+    // The async dispatch thread. Runs from construction so Configure needs no
+    // thread-start choreography. Mutable because Emit/EmitAsync are const:
+    // they run after Configure sealed the ACTION map, but the queue is
+    // runtime state by design.
+    mutable common::SerialExecutor executor_;
     mutable std::atomic<std::size_t> dropped_{0};
 };
 

@@ -104,6 +104,7 @@ add_executable(minimal_tests
     session_naming_test.cpp
     session_test.cpp
     attributed_registry_test.cpp
+    serial_executor_test.cpp
     rewind_test.cpp
     session_registry_test.cpp
     session_support_test.cpp

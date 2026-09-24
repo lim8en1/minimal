@@ -6,6 +6,7 @@ add_library(minimal_common STATIC
     file_lock.cpp
     model_ref.cpp
     read_file.cpp
+    serial_executor.cpp
     sqlite_util.cpp
     logger.cpp
     logging_setup.cpp

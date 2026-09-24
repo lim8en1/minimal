@@ -175,15 +175,18 @@ public:
     // paths that must not spend unbounded time draining work whose results
     // nobody can consume anymore (the hook dispatcher's destructor: N queued
     // hooks x up to a 60 s uncancellable floor each). Blocked producers wake
-    // with the queue roomy.
-    void DiscardPending() {
+    // with the queue roomy. Returns how many events were dropped.
+    std::size_t DiscardPending() {
+        std::size_t dropped = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            dropped = events_.size();
             events_.clear();
             bytes_total_ = 0;
         }
         cv_.notify_all();
         space_cv_.notify_all();
+        return dropped;
     }
 
     bool closed() const {

@@ -21,22 +21,7 @@ std::int64_t NowUnixMs() {
 }  // namespace
 
 HookDispatcher::HookDispatcher(common::Logger& logger)
-    : logger_(logger),
-      tasks_(kDefaultTaskQueueSize),
-      dispatcher_thread_([this] {
-          for (;;) {
-              auto task = tasks_.Pop();
-              if (!task) break;  // closed and drained
-              try {
-                  (*task)();
-              } catch (const std::exception& error) {
-                  logger_.warn("hook action task threw: {}", error.what());
-              } catch (...) {
-                  logger_.warn("hook action task threw a non-standard exception");
-              }
-              outstanding_.fetch_sub(1, std::memory_order_acq_rel);
-          }
-      }) {
+    : logger_(logger), executor_("hook action", kDefaultTaskQueueSize, logger) {
     // The harness's own points. Reserved here, before any plugin loads, so a
     // plugin claiming a core.* name is an ordinary fatal collision (the
     // empty attribution marks these as built-ins, like core tools).
@@ -60,9 +45,7 @@ HookDispatcher::~HookDispatcher() {
     // to N x timeout -- for hook results nobody can consume anymore. The
     // in-flight task (at most one) still runs to completion, which bounds
     // shutdown by a single action's timeout instead of the queue's.
-    tasks_.Close();
-    tasks_.DiscardPending();
-    if (dispatcher_thread_.joinable()) dispatcher_thread_.join();
+    executor_.Stop(common::SerialExecutor::Backlog::kDiscard);
 }
 
 HookPoint HookDispatcher::RegisterPoint(HookPointSpec spec) {
@@ -223,11 +206,6 @@ void HookDispatcher::EmitAsync(std::string_view point, nlohmann::json payload) c
     const PointEntry* entry = FindEntry(point);
     if (entry == nullptr || entry->actions.empty()) return;
 
-    // outstanding_ counts queued-plus-running tasks, so WaitForIdleForTesting
-    // is exact: incremented before the push (a consumer may drain it before
-    // TryPush returns), decremented after the task runs, un-incremented when
-    // the push is refused.
-    outstanding_.fetch_add(1, std::memory_order_acq_rel);
     const PointEntry* immutable_entry = entry;
     auto task = [this, immutable_entry, payload = Envelope(point, std::move(payload))]() mutable {
         if (auto blocked = RunActions(*immutable_entry, std::move(payload), nullptr)) {
@@ -238,8 +216,7 @@ void HookDispatcher::EmitAsync(std::string_view point, nlohmann::json payload) c
                          immutable_entry->spec.name, *blocked);
         }
     };
-    if (!tasks_.TryPush(std::function<void()>(std::move(task)))) {
-        outstanding_.fetch_sub(1, std::memory_order_acq_rel);
+    if (!executor_.TryPost(std::move(task))) {
         dropped_.fetch_add(1, std::memory_order_acq_rel);
         logger_.warn("hook notification queue full; emission of '{}' dropped ({} total)",
                      point, dropped_.load(std::memory_order_relaxed));
@@ -251,11 +228,7 @@ const HookDispatcher::PointEntry* HookDispatcher::FindEntry(std::string_view poi
     return it == points_.end() ? nullptr : &it->second;
 }
 
-void HookDispatcher::WaitForIdleForTesting() {
-    while (tasks_.size() > 0 || outstanding_.load(std::memory_order_acquire) > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-}
+void HookDispatcher::WaitForIdleForTesting() { executor_.WaitForIdle(); }
 
 // --- HookPoint ---------------------------------------------------------------
 

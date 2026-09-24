@@ -8,21 +8,7 @@ namespace minimal::agent {
 
 SessionObserverRegistry::SessionObserverRegistry(common::Logger& logger,
                                                  std::size_t task_queue_size)
-    : logger_(logger), tasks_(task_queue_size) {
-    dispatcher_ = std::thread([this] {
-        // One thread, so tasks run in the order they were queued. That ordering
-        // IS the contract: OnSessionCreated must be delivered before the
-        // OnSessionEnded for the same session.
-        while (auto task = tasks_.Pop()) {
-            (*task)();
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                outstanding_.fetch_sub(1, std::memory_order_acq_rel);
-            }
-            idle_cv_.notify_all();
-        }
-    });
-}
+    : logger_(logger), executor_("session observer", task_queue_size, logger) {}
 
 SessionObserverRegistry::~SessionObserverRegistry() { Shutdown(); }
 
@@ -30,8 +16,7 @@ void SessionObserverRegistry::Shutdown() {
     // Closing drains the backlog first, so observer calls already queued still
     // run -- OnSessionEnded at shutdown is exactly the notification a plugin
     // needs in order to release per-session state.
-    tasks_.Close();
-    if (dispatcher_.joinable()) dispatcher_.join();
+    executor_.Stop(common::SerialExecutor::Backlog::kRun);
     // Then release the observers, so their destructors (a plugin joining its
     // own worker) run NOW, while whatever the caller keeps alive past this
     // point is still standing. Swapped out under the lock and destroyed
@@ -88,8 +73,7 @@ void SessionObserverRegistry::Dispatch(std::function<void(SessionObserver&)> cal
         snapshot = observers_;
     }
 
-    outstanding_.fetch_add(1, std::memory_order_acq_rel);
-    // TryPush, NEVER Push, and the containment property this class advertises is
+    // TryPost, NEVER a blocking post, and the containment property this class advertises is
     // the reason. Push blocks at the queue's cap, and the threads that dispatch
     // are not allowed to block: NotifySessionCreated runs inside Session's
     // constructor, which SessionRegistry::CreateResolved calls from the gRPC
@@ -103,7 +87,7 @@ void SessionObserverRegistry::Dispatch(std::function<void(SessionObserver&)> cal
     // correct degradation; stalling the transport is not. Counted rather than
     // silent, because a plugin that misses an OnSessionEnded leaks its
     // per-session state and the only evidence would otherwise be the leak.
-    if (!tasks_.TryPush([this, snapshot = std::move(snapshot), call = std::move(call)] {
+    if (!executor_.TryPost([this, snapshot = std::move(snapshot), call = std::move(call)] {
         for (const auto& observer : snapshot) {
             // Observers are plugin code, so a throw is expected rather than
             // exceptional. One misbehaving observer must not stop the others --
@@ -118,16 +102,10 @@ void SessionObserverRegistry::Dispatch(std::function<void(SessionObserver&)> cal
             }
         }
     })) {
-        // Refused: the queue is full (a wedged observer) or already closed
-        // (shutdown). Undo the outstanding count the task will never decrement,
-        // or WaitForIdleForTesting waits forever on a task that does not exist.
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            outstanding_.fetch_sub(1, std::memory_order_acq_rel);
-        }
-        idle_cv_.notify_all();
+        // Refused: the queue is full (a wedged observer) or already stopped
+        // (shutdown).
         const auto n = dropped_.fetch_add(1, std::memory_order_acq_rel) + 1;
-        if (!tasks_.closed()) {
+        if (!executor_.stopped()) {
             logger_.warn("session observer notification dropped (queue full); {} dropped so far",
                          n);
         }
@@ -172,9 +150,6 @@ void SessionObserverRegistry::NotifySessionEnded(SessionInfo info) {
     });
 }
 
-void SessionObserverRegistry::WaitForIdleForTesting() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    idle_cv_.wait(lock, [this] { return outstanding_.load(std::memory_order_acquire) == 0; });
-}
+void SessionObserverRegistry::WaitForIdleForTesting() { executor_.WaitForIdle(); }
 
 }  // namespace minimal::agent
