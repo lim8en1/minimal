@@ -52,6 +52,51 @@ std::string_view HookCategoryName(const std::string& tool_name, ToolCategory cat
 
 }  // namespace
 
+namespace {
+
+std::string Dimension(std::string_view name, PermissionMode mode) {
+    return std::string(name) + "=" + std::string(mode_name(mode));
+}
+
+// Folds `policy`'s dimension FIELDS -- out_of_workdir (refined by its path
+// patterns) and network -- into the running verdict through `tighten`. These
+// are not categories, so mode_for() never consults them. `outside` is the
+// confinement result when the path is outside the project or unresolvable,
+// null otherwise; an unresolvable path is treated as outside (fail closed) but
+// matches no pattern, since there is no canonical path to match. `scope`
+// prefixes the explanation ("" for this session, "parent session, " for a
+// subagent's ceiling).
+template <typename Tighten>
+void FoldDimensions(const PermissionPolicy& policy, const ConfineResult* outside,
+                    bool network_required, std::string_view scope, Tighten&& tighten) {
+    if (outside != nullptr) {
+        // A matching pattern replaces the scalar: the operator's per-path
+        // intent is the more specific statement.
+        PermissionMode ood = policy.out_of_workdir;
+        std::string detail = Dimension("out_of_workdir", ood);
+        if (outside->ok) {
+            std::optional<PermissionMode> folded;
+            for (const auto& rule : policy.out_of_workdir_patterns) {
+                if (GlobMatch(rule.glob, outside->absolute_path.string(),
+                              /*slash_terminates=*/true) &&
+                    (!folded || rule.mode < *folded)) {
+                    folded = rule.mode;
+                    detail = "pattern `" + rule.glob + "`=" + std::string(mode_name(rule.mode));
+                }
+            }
+            if (folded) ood = *folded;
+        }
+        tighten(ood, [&] { return std::string(scope) + "outside the project: " + detail; });
+    }
+    if (network_required) {
+        tighten(policy.network, [&] {
+            return std::string(scope) + "network access: " + Dimension("network", policy.network);
+        });
+    }
+}
+
+}  // namespace
+
 ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::json& input,
                                            const ToolContext& ctx) const {
     const std::string& name = tool.spec().name;  // surface name: what the model calls it
@@ -65,24 +110,18 @@ ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::js
     const std::string_view permission_key = registry_.PermissionKeyFor(name);
     const std::string mcp_server = mcp_server_of(name);
 
-    // The pattern-matching subject, computed when any CONSUMING policy actually
-    // carries pattern rules (the confine() call below is filesystem work; a
-    // pattern-free pair must not pay it on every invocation). Consumers: this
-    // executor's own pattern_overrides, the subagent ceiling's
-    // pattern_overrides, and the ceiling's out_of_workdir_patterns -- the
-    // ceiling's folds below all read this subject, so a pattern-free CHILD
-    // policy must not suppress it when the PARENT's rules need matching (that
-    // was the bug: the parent's {"git *": "ask"} silently never matched for a
-    // child whose own preset declared no patterns). A canonical path anchors
-    // patterns like "**/.env" at "/" for confinement tools; the raw subject
-    // stands for everything else (bash's command line).
     // Path confinement, canonicalized at most ONCE: for a confinement-
-    // supporting tool, PatternSubject() defaults to (and nothing in this
-    // codebase overrides it away from) ExtractPath() -- see tool.hpp -- so
-    // the pattern-subject use below and the out-of-workdir fold in step 2
-    // always confine() the identical path. Computing it here once, ahead of
-    // both, means a single canonicalization serves both instead of one per
-    // use site.
+    // supporting tool, PatternSubject() defaults to ExtractPath() (tool.hpp),
+    // so the pattern subject below and the out_of_workdir folds in step 2
+    // always use the identical canonical path.
+    //
+    // The pattern subject itself is computed only when a consuming policy
+    // carries pattern_overrides -- this executor's or the subagent ceiling's.
+    // A pattern-free CHILD must still compute it when its PARENT's rules need
+    // matching, or the parent's {"git *": "ask"} would never fire for the
+    // child. A canonical path anchors patterns like "**/.env" at "/" for
+    // confinement tools; the raw subject stands for everything else (bash's
+    // command line).
     std::optional<std::string> confinable_path;
     std::optional<ConfineResult> confined;
     if (tool.path_confinement_supported()) {
@@ -96,9 +135,7 @@ ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::js
     bool subject_is_path = false;
     const bool needs_pattern_subject =
         !policy_.pattern_overrides.empty() ||
-        (policy_ceiling_.has_value() &&
-         (!policy_ceiling_->pattern_overrides.empty() ||
-          !policy_ceiling_->out_of_workdir_patterns.empty()));
+        (policy_ceiling_.has_value() && !policy_ceiling_->pattern_overrides.empty());
     if (needs_pattern_subject) {
         if (tool.path_confinement_supported()) {
             if (confinable_path) {
@@ -130,62 +167,30 @@ ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::js
             why = describe();
         }
     };
-    auto dimension = [](std::string_view name, PermissionMode m) {
-        return std::string(name) + "=" + std::string(mode_name(m));
-    };
-
-    // The confinement verdict of THIS invocation, consumed by the ceiling fold
-    // below and surfaced to Prepare for the execute-time re-check.
+    // The confinement verdict of THIS invocation, consumed by both dimension
+    // folds below and surfaced to Prepare for the execute-time re-check.
     bool checked = false;
     bool inside = false;
+    const ConfineResult* outside = nullptr;
 
-    // 2. Only if permitted, and only for path-bearing tools, fold in
-    //    out_of_workdir. This is a FOLD, never a substitution: substituting
-    //    would mean `file_write: deny` + `out_of_workdir: allow` permits writing
-    //    /etc/foo while denying ./foo.cpp -- exactly inverted. The dimension's
-    //    PATTERN rules (out_of_workdir_patterns) replace the scalar for this
-    //    invocation when any of them matches the canonical path: the operator's
-    //    per-path intent is the more specific statement.
-    if (mode != PermissionMode::AlwaysDeny && tool.path_confinement_supported()) {
-        if (confinable_path) {
-            const ConfineResult& resolved = *confined;
+    // 2. Only if permitted, fold in the dimension fields: out_of_workdir for
+    //    path-bearing tools, network for tools that need it. A FOLD, never a
+    //    substitution: substituting would mean `file_write: deny` +
+    //    `out_of_workdir: allow` permits writing /etc/foo while denying
+    //    ./foo.cpp -- exactly inverted.
+    if (mode != PermissionMode::AlwaysDeny) {
+        if (tool.path_confinement_supported() && confinable_path) {
             checked = true;
-            inside = resolved.ok && !resolved.outside_project_root;
-            if (!inside) {
-                // An unresolvable path is treated as outside: fail closed rather
-                // than silently applying the in-workdir rule to something we
-                // could not place.
-                PermissionMode ood = policy_.out_of_workdir;
-                std::string ood_why = "outside the project: " + dimension("out_of_workdir", ood);
-                if (!policy_.out_of_workdir_patterns.empty() && resolved.ok) {
-                    std::optional<PermissionMode> folded;
-                    for (const auto& rule : policy_.out_of_workdir_patterns) {
-                        if (GlobMatch(rule.glob, resolved.absolute_path.string(),
-                                      /*slash_terminates=*/true) &&
-                            (!folded || rule.mode < *folded)) {
-                            folded = rule.mode;
-                            ood_why = "outside the project: pattern `" + rule.glob + "`=" +
-                                      std::string(mode_name(rule.mode));
-                        }
-                    }
-                    if (folded) ood = *folded;
-                }
-                tighten(ood, [&] { return ood_why; });
-            }
+            inside = confined->ok && !confined->outside_project_root;
+            if (!inside) outside = &*confined;
         }
-    }
-
-    // 2a. Same fold, same reason, for the network dimension: only if still
-    //     permitted, and only for tools that declare network_access_required().
-    if (mode != PermissionMode::AlwaysDeny && tool.network_access_required()) {
-        tighten(policy_.network,
-                [&] { return "network access: " + dimension("network", policy_.network); });
+        FoldDimensions(policy_, outside, tool.network_access_required(), "", tighten);
     }
 
     // 2b. Subagent ceiling, when one was handed down: a child is never more
-    //     permissive than its parent. Folds like out_of_workdir -- it can only
-    //     tighten -- and sits before run mode so the clamped run mode still
-    //     wraps the whole decision.
+    //     permissive than its parent. The same folds against the parent's
+    //     policy -- they can only tighten -- before run mode, so the clamped
+    //     run mode still wraps the whole decision.
     //
     //     Same key rule as the lookup above: the ceiling's per_tool_overrides
     //     are keyed by PERMISSION key (they come from the parent's resolved
@@ -204,37 +209,8 @@ ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::js
                 const PermissionMode ceiling_mode = policy_ceiling_->mode_for(
                     permission_key, category, subjects, subject_is_path, &ceiling_why);
                 tighten(ceiling_mode, [&] { return "parent session: " + ceiling_why; });
-                // out_of_workdir and network are dimension FIELDS, not
-                // categories, so mode_for() never consults them: without this
-                // fold a child could exceed its parent on exactly those axes.
-                // Same conditions as this executor's own folds in 2/2a.
-                if (checked && !inside) {
-                    PermissionMode ceiling_ood = policy_ceiling_->out_of_workdir;
-                    std::string ceiling_ood_why = dimension("out_of_workdir", ceiling_ood);
-                    if (!policy_ceiling_->out_of_workdir_patterns.empty() && subjects.whole &&
-                        subject_is_path) {
-                        std::optional<PermissionMode> folded;
-                        for (const auto& rule : policy_ceiling_->out_of_workdir_patterns) {
-                            if (GlobMatch(rule.glob, *subjects.whole,
-                                          /*slash_terminates=*/true) &&
-                                (!folded || rule.mode < *folded)) {
-                                folded = rule.mode;
-                                ceiling_ood_why = "pattern `" + rule.glob + "`=" +
-                                                  std::string(mode_name(rule.mode));
-                            }
-                        }
-                        if (folded) ceiling_ood = *folded;
-                    }
-                    tighten(ceiling_ood, [&] {
-                        return "parent session, outside the project: " + ceiling_ood_why;
-                    });
-                }
-                if (tool.network_access_required()) {
-                    tighten(policy_ceiling_->network, [&] {
-                        return "parent session, network access: " +
-                               dimension("network", policy_ceiling_->network);
-                    });
-                }
+                FoldDimensions(*policy_ceiling_, outside, tool.network_access_required(),
+                               "parent session, ", tighten);
             }
         } else if (mcp_ceiling_) {
             // McpPermissionPolicy carries no out_of_workdir/network dimensions
@@ -247,7 +223,7 @@ ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::js
                                 : mcp_ceiling_->mode_for(mcp_server);
             tighten(ceiling_mode, [&] {
                 return "parent session: " +
-                       (ceiling_why.empty() ? dimension("mcp " + mcp_server, ceiling_mode)
+                       (ceiling_why.empty() ? Dimension("mcp " + mcp_server, ceiling_mode)
                                             : ceiling_why);
             });
         }

@@ -1149,6 +1149,45 @@ TEST_CASE("external_directory patterns replace the scalar for matching paths",
     CHECK(checker.seen.size() == 1);
 }
 
+TEST_CASE("the ceiling's out_of_workdir patterns match the canonical path for a pattern-free child",
+          "[tool_executor][patterns][invariant]") {
+    // Parent and child fold their dimension fields the same way: the parent's
+    // out_of_workdir patterns match the canonical absolute path, whether or
+    // not the child's own policy carries any pattern rules.
+    testing::TempDir dir;
+    std::filesystem::create_directories(dir.path() / "builds" / "a");
+    std::ofstream(dir.path() / "builds" / "a" / "out.txt") << "x";
+    std::ofstream(dir.path() / "builds" / "other.txt") << "x";
+    const auto base = std::filesystem::canonical(dir.path());
+    std::filesystem::create_directories(base / "root");
+
+    Fixture f;
+    auto& read = f.AddTool("read", ToolCategory::ReadOnly);
+    read.set_path_key("path");
+    AlwaysAllowPermissionChecker checker;
+
+    tools::PermissionPolicy child_policy = AllowAllPolicy();  // no patterns at all
+    child_policy.out_of_workdir = PermissionMode::AlwaysAllow;
+    tools::PermissionPolicy ceiling = AllowAllPolicy();
+    ceiling.out_of_workdir = PermissionMode::AlwaysAllow;
+    ceiling.out_of_workdir_patterns.push_back(
+        {(base / "builds" / "a" / "**").string(), PermissionMode::AlwaysDeny});
+
+    tools::ToolExecutor executor(f.registry, checker, child_policy, {},
+                                 PermissionRunMode::Normal, ceiling);
+    auto ctx = f.Context(base / "root");
+
+    const auto denied =
+        executor.Run("t1", "read", {{"path", (base / "builds" / "a" / "out.txt").string()}}, ctx);
+    CHECK(denied.is_error);
+    CHECK(TextOf(denied).find("parent session, outside the project: pattern") !=
+          std::string::npos);
+    CHECK_FALSE(
+        executor.Run("t2", "read", {{"path", (base / "builds" / "other.txt").string()}}, ctx)
+            .is_error);
+    CHECK(checker.seen.empty());
+}
+
 TEST_CASE("the ceiling's patterns tighten a child's pattern-allow",
           "[tool_executor][patterns][invariant]") {
     Fixture f;
