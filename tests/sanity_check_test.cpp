@@ -14,7 +14,8 @@
 #include "fakes.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "commands_core_fixture.hpp"
-#include "minimal/config/sanity_check.hpp"
+#include "minimal/config/config_bundle.hpp"
+#include "minimal/startup/sanity_check.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "temp_dir.hpp"
@@ -23,7 +24,7 @@ using namespace minimal;
 using namespace minimal::testing;
 using config::CheckResult;
 using config::CheckSeverity;
-using config::StartupSanityCheck;
+using startup::StartupSanityCheck;
 
 namespace {
 
@@ -155,11 +156,11 @@ struct Fixture {
         service_registry.ClearAttribution();
     }
 
-    config::SanityCheckInputs Inputs(const std::vector<plugins::PluginRecord>& records,
+    startup::SanityCheckInputs Inputs(const std::vector<plugins::PluginRecord>& records,
                                      const std::map<std::string, std::string>& aliases,
-                                     const commands::CommandRegistry* command_registry,
-                                     const tools::PermissionAdvisorRegistry* advisors = nullptr,
-                                     const plugins::ServiceRegistry* services = nullptr) {
+                                     commands::CommandRegistry* command_registry,
+                                     tools::PermissionAdvisorRegistry* advisors = nullptr,
+                                     plugins::ServiceRegistry* services = nullptr) {
         // ApplyAliases runs after ALL registration, as it does in main.
         tool_registry.ApplyAliases(aliases);
         auto resolution =
@@ -167,25 +168,39 @@ struct Fixture {
                                               services);
         plugins::PluginConfig plugin_config;
         plugin_config.aliases = aliases;
-        return config::SanityCheckInputs{config_dir,         records, tool_registry,
-                                         provider_factories, skills,  plugin_config,
-                                         resolution,         command_registry, advisors,
-                                         services,           &model_catalogs,
-                                         nullptr,            nullptr,
-                                         &compaction_strategies, &hook_dispatcher};
+        plugins::HostRegistries registries;
+        registries.tools = &tool_registry;
+        registries.providers = &provider_factories;
+        registries.commands = command_registry;
+        registries.permission_advisors = advisors;
+        registries.services = services;
+        registries.model_catalogs = &model_catalogs;
+        registries.compaction_strategies = &compaction_strategies;
+        registries.hooks = &hook_dispatcher;
+        return startup::SanityCheckInputs{config_dir, records, skills, plugin_config, resolution,
+                                          registries};
     }
 };
 
 std::vector<CheckResult> RunChecks(Fixture& f,
                                    const std::vector<plugins::PluginRecord>& records = {},
                                    const std::map<std::string, std::string>& aliases = {},
-                                   const commands::CommandRegistry* commands = nullptr,
-                                   const tools::PermissionAdvisorRegistry* advisors = nullptr) {
+                                   commands::CommandRegistry* commands = nullptr,
+                                   tools::PermissionAdvisorRegistry* advisors = nullptr) {
     // The fixture's service registry is passed always: it is empty unless a
     // test populates it, which is also the shape main() sees for every other
     // registry.
-    return StartupSanityCheck(f.Inputs(records, aliases, commands, advisors,
-                                       &f.service_registry)).RunAll();
+    // What main() does: load, open the database, validate -- every problem in
+    // one list.
+    const config::ConfigBundle bundle =
+        config::LoadConfigBundle(f.config_dir, config::MakeVariantParamsHook(nullptr));
+    std::vector<CheckResult> results = bundle.problems;
+    startup::OpenSessionDatabase(bundle, results);
+    auto validation = StartupSanityCheck(bundle, f.Inputs(records, aliases, commands, advisors,
+                                                          &f.service_registry))
+                          .RunAll();
+    results.insert(results.end(), validation.begin(), validation.end());
+    return results;
 }
 
 std::vector<const CheckResult*> ByCheck(const std::vector<CheckResult>& results, const std::string& name) {

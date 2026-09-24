@@ -66,7 +66,8 @@ minimal/
                 #   the top-level plugins/, which is what gets loaded.
       rpc/      # SessionService impl, server, pending_requests, event_queue,
                 #   wire_permission_checker, proto_convert, auth_interceptor
-      config/   # loaders, frontmatter, skill_registry, sanity_check
+      config/   # loaders (config_bundle), frontmatter, skill_registry
+      startup/  # sanity_check: validates the loaded config against the registries
       mcp/      # cpp-mcp client wrapper, shared server processes
       session/  # SQLite store, migrations, SessionReader, message_codec, ulid
     client/
@@ -1829,9 +1830,9 @@ A subagent is **the same `Session` entity as a top-level conversation** — same
 - **Blocking mode**: the child's own worker runs its single turn — one drive path for both modes — while `execute()` blocks the parent's worker on the completion signal, which fires on every exit path of the child's turn, so a failure unblocks the parent exactly like a success. The child's tab auto-focuses, since the parent is stuck waiting anyway.
 - **Non-blocking mode**: `execute()` returns an acknowledgment immediately and the parent's turn continues; the child runs on its own worker. On completion the result is **queued** for the parent and flushed by the parent's worker **at a turn boundary** — after all tool results for the current assistant turn are appended, before the next provider call. Injecting it truly out-of-band could land a `User` message between a `tool_use` and its `tool_result`, which is a hard 400. This queue-and-flush mechanism is *the* deferred-completion mechanism — background bash (§ Background execution) rides the same generalized channel, `InjectionQueue` on `SessionChannels`, flushed at the same three turn boundaries — and if `background_wake` is set, an injection landing on an **idle** parent runs a seedless turn immediately rather than waiting for the next user message.
 
-## Startup sanity check — `src/server/config/sanity_check.{hpp,cpp}`
+## Startup sanity check — `src/server/startup/sanity_check.{hpp,cpp}`
 
-Runs after config and plugin load, before serving. Behaves like a linter, not a fail-fast validator — **it surfaces every problem found, not just the first** — so a misconfigured setup yields one complete diagnostic instead of a fix-one-rerun-find-the-next loop. It also answers "what happens on a cold start with nothing configured": that is one more failing check with a clear reason, not a bespoke onboarding wizard.
+Runs after config and plugin load, before serving. Loading and validating are separate steps: `config::LoadConfigBundle` parses every file once (a file that fails to load is itself a problem), `startup::OpenSessionDatabase` opens the database, and `StartupSanityCheck` only validates the loaded bundle against the registries. The serve stage reads its config from the same bundle. Behaves like a linter, not a fail-fast validator — **it surfaces every problem found, not just the first** — so a misconfigured setup yields one complete diagnostic instead of a fix-one-rerun-find-the-next loop. It also answers "what happens on a cold start with nothing configured": that is one more failing check with a clear reason, not a bespoke onboarding wizard.
 
 ```cpp
 enum class CheckSeverity { Fatal, Warning };
@@ -1839,6 +1840,7 @@ struct CheckResult { CheckSeverity severity; std::string check_name, message; };
 
 class StartupSanityCheck {
 public:
+    StartupSanityCheck(const config::ConfigBundle& bundle, SanityCheckInputs inputs);
     std::vector<CheckResult> RunAll();   // runs every check regardless of earlier failures
 };
 ```

@@ -32,10 +32,11 @@ add_library(minimal_server_core SHARED
     config/parse_util.cpp
     config/mcps_config.cpp
     config/channels_config.cpp
+    config/config_bundle.cpp
     config/skill_registry.cpp
     config/project_dirs.cpp
     config/project_context.cpp
-    config/sanity_check.cpp
+    startup/sanity_check.cpp
     hooks/hook_dispatcher.cpp
     hooks/hook_shell.cpp
     hooks/hook_observer_bridge.cpp
@@ -118,7 +119,8 @@ target_include_directories(minimal_server_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/commands/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/rpc/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/session/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}/mcp/include")
+    "${CMAKE_CURRENT_SOURCE_DIR}/mcp/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/startup/include")
 
 # cpp-mcp vendors its own older nlohmann/json whose ABI namespace differs from
 # vcpkg's, so the two cannot share a translation unit. The shim is compiled as

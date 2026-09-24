@@ -40,7 +40,7 @@
 #include "minimal/common/logging_setup.hpp"
 #include "minimal/common/read_file.hpp"
 #include "minimal/config/permissions_config.hpp"
-#include "minimal/config/sanity_check.hpp"
+#include "minimal/config/config_bundle.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/skill_registry.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
@@ -59,6 +59,7 @@
 #include "minimal/rpc/session_wiring.hpp"
 #include "minimal/rpc/session_service.hpp"
 #include "minimal/session/session_database.hpp"
+#include "minimal/startup/sanity_check.hpp"
 #include "minimal/tools/atomic_write.hpp"
 #include "minimal/tools/skill_tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -519,27 +520,21 @@ int main(int argc, char** argv) {
     // The reservation is what puts it inside the fatal-collision scan.
     tools.SetPermissionKeys(name_resolution.permission_keys);
 
-    // A linter, not a fail-fast validator: RunAll() surfaces every problem at
-    // once, then a single Fatal result aborts startup. Warnings degrade and
-    // continue.
-    minimal::config::StartupSanityCheck sanity(minimal::config::SanityCheckInputs{
-        config_dir,
-        records,
-        tools,
-        providers,
-        skills,
-        plugin_config,
-        std::move(name_resolution),
-        &commands,
-        &permission_advisors,
-        &services,
-        &model_catalogs,
-        &metadata_catalogs,
-        &variant_params,
-        &compaction_strategies,
-        &hook_dispatcher,
-    });
-    const auto check_results = sanity.RunAll();
+    // Every config file, loaded once; what failed to load is already a
+    // problem. Then the linter: every problem surfaces at once, a single Fatal
+    // aborts startup, warnings degrade and continue.
+    minimal::config::ConfigBundle bundle = minimal::config::LoadConfigBundle(
+        config_dir, minimal::config::MakeVariantParamsHook(&variant_params));
+    std::vector<minimal::config::CheckResult> check_results = bundle.problems;
+    auto session_db = minimal::startup::OpenSessionDatabase(bundle, check_results);
+    {
+        minimal::startup::StartupSanityCheck sanity(
+            bundle, minimal::startup::SanityCheckInputs{config_dir, records, skills, plugin_config,
+                                                        std::move(name_resolution), registries});
+        auto validation = sanity.RunAll();
+        check_results.insert(check_results.end(), std::make_move_iterator(validation.begin()),
+                             std::make_move_iterator(validation.end()));
+    }
 
     bool any_fatal = false;
     if (check_results.empty()) {
@@ -559,23 +554,14 @@ int main(int argc, char** argv) {
     }
 
     // --- Stage 4: serve ------------------------------------------------------
-    // Settings, permissions, mcps, channels, and the session database were
-    // already loaded and validated by the sanity check; take them from there
-    // rather than re-reading the same files. The preset registry used to
-    // reload settings.json AND permissions.json itself (the former a third
-    // parse, main ran the loop on the sanity check's copy while the registry
-    // resolved default_model from its own; the latter a harmless-but-redundant
-    // second parse) -- it receives both from here now (Phase 3). Likewise
-    // McpClientManager below took mcps.json (config_dir / "mcps.json")
-    // independently; it now takes sanity.mcps(). providers.json remains its
-    // own to load: the live, discovery-hooked instance the preset registry
-    // builds is not interchangeable with the sanity check's un-hooked one
-    // (see ProvidersConfig's discovery cache) -- and cannot fail now that its
-    // parsing is proven -- the catch is defense-in-depth.
-    minimal::config::SettingsConfig settings = sanity.settings();
-    minimal::config::PermissionsConfig permissions = sanity.permissions();
+    // Everything below takes its config from the bundle rather than re-reading
+    // the same files. providers.json is the exception, still: the live,
+    // discovery-hooked instance the preset registry builds is not
+    // interchangeable with the bundle's un-hooked one (see ProvidersConfig's
+    // discovery cache).
+    minimal::config::SettingsConfig settings = bundle.settings;
+    minimal::config::PermissionsConfig permissions = bundle.permissions;
     std::unique_ptr<minimal::agent::AgentPresetRegistry> presets;
-    auto session_db = sanity.take_session_db();
     // Resolved once, after ApplyAliases/SetPermissionKeys above, so preset
     // parsing and permission-default resolution see the live tool vocabulary
     // rather than a hardcoded read/write/edit/bash/glob/grep literal list
@@ -705,7 +691,7 @@ int main(int argc, char** argv) {
         for (const auto& result : check_results) {
             if (result.check_name == "hooks") already_reported.insert(result.message);
         }
-        for (const auto& warning : hook_dispatcher.Configure(sanity.hooks())) {
+        for (const auto& warning : hook_dispatcher.Configure(bundle.hooks)) {
             if (already_reported.count(warning) != 0) continue;
             std::printf("  warning [hooks] %s\n", warning.c_str());
         }
@@ -752,7 +738,7 @@ int main(int argc, char** argv) {
     mcp_limits.max_list_pages = settings.tools.mcp.max_list_pages;
     mcp_limits.restart_cooldown = std::chrono::milliseconds(settings.tools.mcp.restart_cooldown_ms);
     minimal::mcp::ChannelWiring channel_wiring;
-    channel_wiring.config = sanity.channels();
+    channel_wiring.config = bundle.channels;
     channel_wiring.on_notification = [&signal_router](const std::string& channel,
                                                       const std::string& raw) {
         // Runs on the channel's read thread: the router's contract is
@@ -764,7 +750,7 @@ int main(int argc, char** argv) {
         signal_router.SetChannelInstructions(channel, instructions);
     };
     auto mcp_manager = std::make_unique<minimal::mcp::McpClientManager>(
-        sanity.mcps(), tools, mcp_limits, minimal::common::DefaultLogger(),
+        bundle.mcps, tools, mcp_limits, minimal::common::DefaultLogger(),
         std::move(channel_wiring));
     minimal::mcp::McpClientManager& mcp = *mcp_manager;
 
@@ -779,7 +765,7 @@ int main(int argc, char** argv) {
     // the config side; this is the enforcement.
     {
         const auto enabled_channels = mcp.EnabledChannelNames();
-        for (const auto& entry : sanity.channels().entries) {
+        for (const auto& entry : bundle.channels.entries) {
             if (std::find(enabled_channels.begin(), enabled_channels.end(), entry.name) !=
                 enabled_channels.end()) {
                 signal_router.RegisterChannel(entry);

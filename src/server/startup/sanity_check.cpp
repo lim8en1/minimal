@@ -1,4 +1,4 @@
-#include "minimal/config/sanity_check.hpp"
+#include "minimal/startup/sanity_check.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -8,14 +8,26 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_set>
 
+#include "minimal/agent/compaction_strategy.hpp"
+#include "minimal/commands/command_registry.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/read_file.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
+#include "minimal/llm/metadata_catalog.hpp"
+#include "minimal/llm/model_catalog.hpp"
+#include "minimal/llm/provider_factory_registry.hpp"
+#include "minimal/llm/variant_params.hpp"
+#include "minimal/plugins/service_registry.hpp"
 #include "minimal/tools/pattern_match.hpp"
+#include "minimal/tools/permission_advisor.hpp"
+#include "minimal/tools/tool_registry.hpp"
 
-namespace minimal::config {
+namespace minimal::startup {
+
+using namespace minimal::config;
 namespace {
 
 CheckResult Fatal(const std::string& check, const std::string& message) {
@@ -79,24 +91,27 @@ bool UrlLooksWellFormed(const std::string& url) {
 
 }  // namespace
 
-StartupSanityCheck::StartupSanityCheck(SanityCheckInputs inputs) : inputs_(std::move(inputs)) {}
+StartupSanityCheck::StartupSanityCheck(const ConfigBundle& bundle, SanityCheckInputs inputs)
+    : bundle_(bundle), inputs_(std::move(inputs)) {
+    if (inputs_.registries.tools == nullptr || inputs_.registries.providers == nullptr) {
+        throw std::invalid_argument("StartupSanityCheck needs the tool and provider registries");
+    }
+}
 
 std::vector<CheckResult> StartupSanityCheck::RunAll() {
     std::vector<CheckResult> results;
     // Order matters only for readability: EVERY check runs regardless of what
-    // the earlier ones found -- that is the linter property. Config files go
-    // first simply because the later checks read whatever they managed to load.
+    // the earlier ones found -- that is the linter property. The checks read
+    // whatever the bundle managed to load.
     auto append = [&results](std::vector<CheckResult> more) {
         results.insert(results.end(), std::make_move_iterator(more.begin()),
                        std::make_move_iterator(more.end()));
     };
-    append(check_config_files());
     append(check_providers());
     append(check_presets());
     append(check_mcp_servers());
     append(check_channels());
     append(check_directories());
-    append(check_session_db());
     append(check_plugins());
     append(check_name_collisions());
     append(check_naming_model());
@@ -110,111 +125,22 @@ std::vector<CheckResult> StartupSanityCheck::RunAll() {
     return results;
 }
 
-std::vector<CheckResult> StartupSanityCheck::check_config_files() {
-    std::vector<CheckResult> results;
-    const auto& dir = inputs_.config_dir;
-
-    try {
-        settings_ = LoadSettingsConfig(dir / "settings.json");
-        settings_loaded_ = true;
-    } catch (const std::exception& e) {
-        // Serving requires this file: the preset registry and the session
-        // service both consume it, so absence is fatal, not degraded.
-        results.push_back(Fatal("config_parse", std::string("settings.json: ") + e.what()));
-    }
-
-    try {
-        permissions_ = LoadPermissionsConfig(dir / "permissions.json");
-        for (const auto& key : permissions_.unknown_keys) {
-            results.push_back(Warning("config_parse", "permissions.json: unknown key '" + key +
-                                                          "' is ignored (typo?)"));
-        }
-    } catch (const std::exception& e) {
-        results.push_back(Fatal("config_parse", std::string("permissions.json: ") + e.what()));
-    }
-
-    try {
-        providers_ = LoadProvidersConfig(dir / "providers.json",
-                                         MakeVariantParamsHook(inputs_.variant_params));
-        providers_loaded_ = true;
-    } catch (const std::exception& e) {
-        results.push_back(Fatal("config_parse", std::string("providers.json: ") + e.what()));
-    }
-
-    try {
-        hooks_ = LoadHooksConfig(dir / "hooks.json");
-    } catch (const std::exception& e) {
-        // Same severity as permissions.json: a hook action is shell code the
-        // user opted into as a guardrail, and a parse error that silently
-        // disabled the file's guard hooks would be the dangerous outcome.
-        // Fatal names the problem; the user fixes or deletes the file.
-        results.push_back(Fatal("config_parse", std::string("hooks.json: ") + e.what()));
-    }
-
-    // plugins.json degrades to empty BY DESIGN -- but a silently degraded file
-    // is exactly what this check exists to make loud. ReadFileOrEmpty can
-    // throw now too (an oversize or unreadable file), and this call used to
-    // sit outside a try: uncaught, that propagates out of RunAll() to
-    // std::terminate, skipping every check still queued below it -- the same
-    // regression shape the hooks.json handler above already guards against.
-    try {
-        const auto plugins_text = common::ReadFileOrEmpty(dir / "plugins.json");
-        if (!plugins_text.empty()) {
-            const auto probe =
-                nlohmann::json::parse(plugins_text, nullptr, /*allow_exceptions=*/false);
-            if (probe.is_discarded() || !probe.is_object()) {
-                results.push_back(
-                    Warning("config_parse", "plugins.json is malformed; treating it as empty "
-                                            "(discovered plugins keep their provenance defaults)"));
-            }
-        }
-    } catch (const std::exception& e) {
-        results.push_back(Fatal("config_parse", std::string("plugins.json: ") + e.what()));
-    }
-
-    // A broken mcps.json degrades to "no MCP servers" plus a warning: MCP is an
-    // optional feature the core serving path does not depend on.
-    try {
-        mcps_ = LoadMcpsConfig(dir / "mcps.json");
-    } catch (const std::exception& e) {
-        results.push_back(Warning("config_parse", std::string("mcps.json: ") + e.what() +
-                                                    "; no MCP servers will be configured"));
-    }
-    for (const auto& error : mcps_.errors) {
-        results.push_back(Warning("mcp_servers", error));
-    }
-
-    // Same degrade-not-die shape as mcps.json: signals are an optional feature
-    // the core serving path does not depend on.
-    try {
-        channels_ = LoadChannelsConfig(dir / "channels.json");
-    } catch (const std::exception& e) {
-        results.push_back(Warning("config_parse", std::string("channels.json: ") + e.what() +
-                                                    "; no signal channels will be configured"));
-    }
-    for (const auto& error : channels_.errors) {
-        results.push_back(Warning("channels", error));
-    }
-
-    return results;
-}
-
 std::vector<CheckResult> StartupSanityCheck::check_providers() {
     std::vector<CheckResult> results;
-    if (!providers_loaded_) return results;  // already Fatal under config_parse
+    if (!bundle_.providers_loaded) return results;  // already Fatal under config_parse
 
     // A provider is a CONNECTION and the addressable unit is <provider>/<model>,
     // so this walks models rather than entries: a provider whose backend no
     // plugin registered makes every model under it unusable, and saying so once
     // per model is what tells the user which references are dead.
-    const auto kinds = inputs_.provider_factories.kinds();
-    const auto refs = providers_.ModelRefs();
+    const auto kinds = inputs_.registries.providers->kinds();
+    const auto refs = bundle_.providers.ModelRefs();
     bool any_usable = false;
     std::unordered_map<std::string, bool> backend_reported;
 
     for (const auto& ref_text : refs) {
         // SplitModelRef, not ParseModelRef: ref_text is ModelRef::str() of an
-        // entry from providers_.ModelRefs(), which includes discovered models
+        // entry from bundle_.providers.ModelRefs(), which includes discovered models
         // whose id can itself contain a slash (e.g. an OpenRouter model under
         // provider "openrouter") -- ParseModelRef rejected those outright, so
         // this check silently skipped validating every backend-registration
@@ -222,7 +148,7 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
         // rejected by ParseProvidersConfig" case the old comment claimed.
         const auto ref = common::SplitModelRef(ref_text);
         if (!ref) continue;  // truly malformed; ParseProvidersConfig rejects those
-        const auto model = providers_.Resolve(*ref);
+        const auto model = bundle_.providers.Resolve(*ref);
         if (model == nullptr) continue;
 
         const bool registered =
@@ -249,7 +175,7 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
     // backend counts as usable: whether the catalog actually answers is a
     // runtime condition, reported at first resolve and by ListModels'
     // discovery refresh (the /model picker's ctrl+r).
-    for (const auto& [name, entry] : providers_.provider_entries()) {
+    for (const auto& [name, entry] : bundle_.providers.provider_entries()) {
         if (!entry.discover) continue;
         const bool backend_registered =
             std::find(kinds.begin(), kinds.end(), entry.backend) != kinds.end();
@@ -265,7 +191,7 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
         }
         any_usable = true;
         const bool catalog_registered =
-            inputs_.model_catalogs != nullptr && inputs_.model_catalogs->Has(entry.backend);
+            inputs_.registries.model_catalogs != nullptr && inputs_.registries.model_catalogs->Has(entry.backend);
         if (!catalog_registered) {
             results.push_back(
                 Warning("usable_provider",
@@ -294,16 +220,16 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
 
     // The default has to name something, or every session that does not override
     // it fails at creation with the same message.
-    if (settings_loaded_ && !settings_.default_model.empty()) {
+    if (bundle_.settings_loaded && !bundle_.settings.default_model.empty()) {
         // SplitModelRef: default_model is the same user-facing surface as
         // --model/`/model` and an agent preset's `model:`, and must accept
         // whatever a discovered catalog's slash-bearing model id those do.
-        const auto ref = common::SplitModelRef(settings_.default_model);
+        const auto ref = common::SplitModelRef(bundle_.settings.default_model);
         if (!ref) {
             results.push_back(Warning("usable_provider",
-                                      "settings.json default_model '" + settings_.default_model +
+                                      "settings.json default_model '" + bundle_.settings.default_model +
                                           "' is not <provider>/<model>"));
-        } else if (providers_.Resolve(*ref) == nullptr) {
+        } else if (bundle_.providers.Resolve(*ref) == nullptr) {
             // Under a discover-entry a non-static model cannot be VERIFIED at
             // startup without a network call, which the check never makes -- the
             // provider exists and discovery answers at first resolve. That is
@@ -312,19 +238,19 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
             // deserves the same heads-up at startup rather than finding out only
             // at first session creation. So this still warns under discovery,
             // worded to say "unverified", not "matches no configured model".
-            const auto entry = providers_.provider_entries().find(ref->provider);
-            const bool unverifiable = entry != providers_.provider_entries().end() &&
+            const auto entry = bundle_.providers.provider_entries().find(ref->provider);
+            const bool unverifiable = entry != bundle_.providers.provider_entries().end() &&
                                       entry->second.discover;
             if (unverifiable) {
                 results.push_back(Warning(
                     "usable_provider",
-                    "settings.json default_model '" + settings_.default_model +
+                    "settings.json default_model '" + bundle_.settings.default_model +
                         "' is not in provider '" + ref->provider +
                         "'s static model list; it may only resolve through discovery, which this "
                         "check cannot verify without a network call -- confirm it after startup"));
             } else {
                 results.push_back(Warning("usable_provider",
-                                          "settings.json default_model '" + settings_.default_model +
+                                          "settings.json default_model '" + bundle_.settings.default_model +
                                               "' matches no configured model" +
                                               (refs.empty() ? "" : " (have: " + JoinNames(refs) + ")")));
             }
@@ -387,7 +313,7 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
             const auto preset_name = entry.path().stem().string();
             try {
                 presets_[preset_name] = agent::LoadAgentPresetFrontmatter(
-                    entry.path(), inputs_.tool_registry.PermissionKeys());
+                    entry.path(), inputs_.registries.tools->PermissionKeys());
                 for (const auto& key : presets_[preset_name].unknown_permission_keys) {
                     results.push_back(Warning("presets", "agents/" + preset_name +
                                                              ".md: unknown permission_mode key '" +
@@ -411,10 +337,10 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
     // preset's own <provider>/<model>, or settings.default_model when it
     // declares none.
     const auto preset_problem = [this](const agent::AgentPresetFrontmatter& raw) -> std::optional<std::string> {
-        if (!providers_loaded_) return std::nullopt;  // config_parse already names it
+        if (!bundle_.providers_loaded) return std::nullopt;  // config_parse already names it
         std::string model_text = raw.model;
         if (model_text.empty()) {
-            model_text = settings_loaded_ ? settings_.default_model : "";
+            model_text = bundle_.settings_loaded ? bundle_.settings.default_model : "";
             if (model_text.empty()) {
                 return "declares no model and settings.json sets no default_model";
             }
@@ -427,15 +353,15 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
         // resolving -- the model list is a runtime answer the check never
         // probes.
         std::string discover_backend;
-        if (auto entry = providers_.provider_entries().find(ref->provider);
-            entry != providers_.provider_entries().end() && entry->second.discover) {
+        if (auto entry = bundle_.providers.provider_entries().find(ref->provider);
+            entry != bundle_.providers.provider_entries().end() && entry->second.discover) {
             discover_backend = entry->second.backend;
         }
-        const auto model = providers_.Resolve(*ref);
+        const auto model = bundle_.providers.Resolve(*ref);
         if (model == nullptr && discover_backend.empty()) {
             return "names unknown model '" + model_text + "'";
         }
-        const auto kinds = inputs_.provider_factories.kinds();
+        const auto kinds = inputs_.registries.providers->kinds();
         const std::string& backend = model != nullptr ? model->backend : discover_backend;
         if (std::find(kinds.begin(), kinds.end(), backend) == kinds.end()) {
             return "model '" + model_text + "' needs backend '" + backend +
@@ -446,20 +372,20 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
 
     // The DEFAULT preset must resolve end to end: every client that does not
     // name a preset (the headless client's common case) would fail otherwise.
-    if (settings_loaded_ && !settings_.default_agent_preset.empty()) {
-        const auto it = presets_.find(settings_.default_agent_preset);
+    if (bundle_.settings_loaded && !bundle_.settings.default_agent_preset.empty()) {
+        const auto it = presets_.find(bundle_.settings.default_agent_preset);
         if (it == presets_.end()) {
-            results.push_back(Fatal("presets", "default_agent_preset '" + settings_.default_agent_preset +
-                                 "' does not resolve: agents/" + settings_.default_agent_preset +
+            results.push_back(Fatal("presets", "default_agent_preset '" + bundle_.settings.default_agent_preset +
+                                 "' does not resolve: agents/" + bundle_.settings.default_agent_preset +
                                  ".md is missing or failed to parse"));
         } else if (auto problem = preset_problem(it->second)) {
-            results.push_back(Fatal("presets", "default_agent_preset '" + settings_.default_agent_preset +
+            results.push_back(Fatal("presets", "default_agent_preset '" + bundle_.settings.default_agent_preset +
                                  "' does not resolve: " + *problem));
         }
     }
 
     for (const auto& [preset_name, raw] : presets_) {
-        const bool is_default = settings_loaded_ && preset_name == settings_.default_agent_preset;
+        const bool is_default = bundle_.settings_loaded && preset_name == bundle_.settings.default_agent_preset;
         // Non-default presets break only the sessions that pick them; a broken
         // provider chain on the DEFAULT preset was just reported as Fatal above,
         // and repeating it as a Warning would read as two problems instead of
@@ -494,7 +420,7 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
 
 std::vector<CheckResult> StartupSanityCheck::check_mcp_servers() {
     std::vector<CheckResult> results;
-    for (const auto& entry : mcps_.entries) {
+    for (const auto& entry : bundle_.mcps.entries) {
         if (!entry.enabled) continue;  // a disabled entry is not going to spawn
         if (entry.transport == McpTransport::Stdio) {
             if (!CommandResolves(entry.command)) {
@@ -511,7 +437,7 @@ std::vector<CheckResult> StartupSanityCheck::check_mcp_servers() {
 
 std::vector<CheckResult> StartupSanityCheck::check_channels() {
     std::vector<CheckResult> results;
-    for (const auto& entry : channels_.entries) {
+    for (const auto& entry : bundle_.channels.entries) {
         if (!entry.enabled) continue;  // a disabled entry is not going to spawn
         if (!CommandResolves(entry.command)) {
             results.push_back(Warning("channels", "channel '" + entry.name + "': command '" +
@@ -528,7 +454,7 @@ std::vector<CheckResult> StartupSanityCheck::check_channels() {
                                 "' is reserved for internal cross-session signals; the channel "
                                 "will not be configured"));
         }
-        if (mcps_.Find(entry.name) != nullptr) {
+        if (bundle_.mcps.Find(entry.name) != nullptr) {
             results.push_back(Warning(
                 "channels", "channel '" + entry.name +
                                 "' is also an mcps.json server name; the channel is skipped and "
@@ -559,24 +485,6 @@ std::vector<CheckResult> StartupSanityCheck::check_directories() {
     }
     if (auto problem = check_dir(common::DataDir(), "data dir")) {
         results.push_back(Fatal("directories", *problem + " -- the session database and logs live there"));
-    }
-    return results;
-}
-
-std::vector<CheckResult> StartupSanityCheck::check_session_db() {
-    std::vector<CheckResult> results;
-    // If settings failed to load, fall back to the default path and still run
-    // the check -- the linter property. The config_parse Fatal already names
-    // the real problem; this one reports whether the database itself is sound.
-    const auto db_path =
-        session::ResolveSessionDbPath(settings_loaded_ ? settings_.session_db_path : std::string{});
-    try {
-        // Opening migrates, and refuses a database this binary is too old to
-        // understand -- fatal by design, since running on would silently drop
-        // every transcript.
-        session_db_ = std::make_unique<session::SessionDatabase>(db_path);
-    } catch (const std::exception& e) {
-        results.push_back(Fatal("session_db", "session database '" + db_path.string() + "': " + e.what()));
     }
     return results;
 }
@@ -653,7 +561,7 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
             }
         };
 
-        for (const auto& attr : inputs_.tool_registry.attributions()) {
+        for (const auto& attr : inputs_.registries.tools->attributions()) {
             std::string s = attr.tool_name;
             const auto qualified = attr.plugin_name + "." + attr.tool_name;
             if (auto it = inputs_.plugin_config.aliases.find(qualified);
@@ -669,8 +577,8 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
 
         // A command collision, then. Its registry has already applied aliases, so
         // surface_name is what to compare -- no second alias lookup here.
-        if (inputs_.command_registry != nullptr) {
-            for (const auto& attr : inputs_.command_registry->attributions()) {
+        if (inputs_.registries.commands != nullptr) {
+            for (const auto& attr : inputs_.registries.commands->attributions()) {
                 if (attr.surface_name == surface) add(attr.plugin_name);
             }
             if (!owners.empty()) kind = ClaimKind::kCommand;
@@ -679,8 +587,8 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
 
         // A service collision, then. Original names register unaliased, so the
         // attribution's name is what to compare.
-        if (inputs_.service_registry != nullptr) {
-            for (const auto& attr : inputs_.service_registry->attributions()) {
+        if (inputs_.registries.services != nullptr) {
+            for (const auto& attr : inputs_.registries.services->attributions()) {
                 if (attr.service_name == surface) add(attr.plugin_name);
             }
             if (!owners.empty()) kind = ClaimKind::kService;
@@ -740,25 +648,25 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
                                         " -- disable one of them; kinds cannot be aliased"));
         }
     };
-    report("provider kind", inputs_.provider_factories.collisions());
-    if (inputs_.model_catalogs != nullptr) {
-        report("model catalog kind", inputs_.model_catalogs->collisions());
+    report("provider kind", inputs_.registries.providers->collisions());
+    if (inputs_.registries.model_catalogs != nullptr) {
+        report("model catalog kind", inputs_.registries.model_catalogs->collisions());
     }
-    if (inputs_.metadata_catalogs != nullptr) {
-        report("metadata catalog kind", inputs_.metadata_catalogs->collisions());
+    if (inputs_.registries.metadata_catalogs != nullptr) {
+        report("metadata catalog kind", inputs_.registries.metadata_catalogs->collisions());
     }
-    if (inputs_.variant_params != nullptr) {
-        report("variant params kind", inputs_.variant_params->collisions());
+    if (inputs_.registries.variant_params != nullptr) {
+        report("variant params kind", inputs_.registries.variant_params->collisions());
     }
-    if (inputs_.compaction_strategies != nullptr) {
-        report("compaction strategy", inputs_.compaction_strategies->collisions());
+    if (inputs_.registries.compaction_strategies != nullptr) {
+        report("compaction strategy", inputs_.registries.compaction_strategies->collisions());
     }
 
     // Per-preset tool_config namespaces: the same fatal rule, one level up.
     // Two plugins claiming one namespace would make which slice a tool read
     // depend on plugin load order -- the exact outcome collision detection
     // exists to prevent. There is no alias mechanism for a namespace.
-    const auto namespace_report = inputs_.tool_registry.ConfigNamespaces();
+    const auto namespace_report = inputs_.registries.tools->ConfigNamespaces();
     for (const auto& collision : namespace_report.collisions) {
         results.push_back(
             Fatal("name_collisions",
@@ -785,7 +693,7 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
     std::unordered_set<std::string> valid_keys;
     for (const auto& entry : resolution.result.entries) valid_keys.insert(entry.permission_key);
     std::unordered_map<std::string, int> original_counts;
-    for (const auto& attr : inputs_.tool_registry.attributions()) ++original_counts[attr.tool_name];
+    for (const auto& attr : inputs_.registries.tools->attributions()) ++original_counts[attr.tool_name];
     const auto ambiguous = [&original_counts](const std::string& name) { return original_counts[name] > 1; };
 
     // per_tool_overrides keys (global and per-preset) must reference a permission key.
@@ -803,7 +711,7 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
                                   "' resolves to no registered tool (typo, or the providing plugin is disabled)"));
         }
     };
-    for (const auto& [key, mode] : permissions_.global_layer.per_tool_overrides) {
+    for (const auto& [key, mode] : bundle_.permissions.global_layer.per_tool_overrides) {
         check_override_key("permissions.json", key);
     }
     for (const auto& [preset_name, raw] : presets_) {
@@ -830,7 +738,7 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
                                   " rules; resolve cost grows with the list"));
         }
     };
-    for (const auto& [key, rules] : permissions_.global_layer.pattern_overrides) {
+    for (const auto& [key, rules] : bundle_.permissions.global_layer.pattern_overrides) {
         check_pattern_rules("permissions.json", key, rules);
     }
     for (const auto& [preset_name, raw] : presets_) {
@@ -838,10 +746,10 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
             check_pattern_rules("agent preset '" + preset_name + "'", key, rules);
         }
     }
-    if (permissions_.global_layer.out_of_workdir_patterns.size() > 200) {
+    if (bundle_.permissions.global_layer.out_of_workdir_patterns.size() > 200) {
         results.push_back(Warning("naming_model",
                                   "permissions.json external_directory_patterns carries " +
-                                      std::to_string(permissions_.global_layer.out_of_workdir_patterns.size()) +
+                                      std::to_string(bundle_.permissions.global_layer.out_of_workdir_patterns.size()) +
                                       " rules; resolve cost grows with the list"));
     }
 
@@ -880,7 +788,7 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
     // allowed_mcp_servers entries must name a configured server.
     for (const auto& [preset_name, raw] : presets_) {
         for (const auto& server : raw.allowed_mcp_servers) {
-            if (mcps_.Find(server) == nullptr) {
+            if (bundle_.mcps.Find(server) == nullptr) {
                 results.push_back(Warning("naming_model", "agent preset '" + preset_name +
                                       "': allowed_mcp_servers entry '" + server + "' matches no mcps.json server"));
             }
@@ -891,7 +799,7 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
     // claims (the allowed_skills-unknown gap, one level up): a typo or a slice
     // stranded by a disabled plugin is silent data -- no tool will ever read
     // it -- and must be loud at startup.
-    const auto claimed_namespaces = inputs_.tool_registry.ConfigNamespaces();
+    const auto claimed_namespaces = inputs_.registries.tools->ConfigNamespaces();
     for (const auto& [preset_name, raw] : presets_) {
         for (const auto& [ns, value] : raw.tool_config.items()) {
             (void)value;
@@ -908,16 +816,16 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
 
 std::vector<CheckResult> StartupSanityCheck::check_advisor() {
     std::vector<CheckResult> results;
-    if (permissions_.advisor) {
-        const bool resolved = inputs_.permission_advisors != nullptr &&
-                              inputs_.permission_advisors->Has(*permissions_.advisor);
+    if (bundle_.permissions.advisor) {
+        const bool resolved = inputs_.registries.permission_advisors != nullptr &&
+                              inputs_.registries.permission_advisors->Has(*bundle_.permissions.advisor);
         if (!resolved) {
             results.push_back(Warning(
-                "advisor", "permissions.json names advisor '" + *permissions_.advisor +
+                "advisor", "permissions.json names advisor '" + *bundle_.permissions.advisor +
                                "' but no loaded plugin registered one (typo, or the providing "
                                "plugin is disabled); prompts fall through to the human"));
         }
-    } else if (permissions_.advisor_inherit) {
+    } else if (bundle_.permissions.advisor_inherit) {
         results.push_back(Warning(
             "advisor", "permissions.json sets advisor_inherit but names no advisor; "
                        "the flag is inert"));
@@ -927,16 +835,16 @@ std::vector<CheckResult> StartupSanityCheck::check_advisor() {
 
 std::vector<CheckResult> StartupSanityCheck::check_compaction_strategy() {
     std::vector<CheckResult> results;
-    if (!settings_loaded_) return results;  // already Fatal under config_parse
+    if (!bundle_.settings_loaded) return results;  // already Fatal under config_parse
 
-    const std::string& name = settings_.memory.compaction_strategy;
+    const std::string& name = bundle_.settings.memory.compaction_strategy;
     // "summarize" and "structured" are core's own built-ins, registered
     // directly in main.cpp before plugin load -- they resolve even when
-    // inputs_.compaction_strategies is null (a test harness that never wires
+    // inputs_.registries.compaction_strategies is null (a test harness that never wires
     // the registry).
     const bool resolved =
         name == "summarize" || name == "structured" ||
-        (inputs_.compaction_strategies != nullptr && inputs_.compaction_strategies->Has(name));
+        (inputs_.registries.compaction_strategies != nullptr && inputs_.registries.compaction_strategies->Has(name));
     if (!resolved) {
         results.push_back(Warning(
             "compaction_strategy", "settings.json memory.compaction_strategy names '" + name +
@@ -949,16 +857,16 @@ std::vector<CheckResult> StartupSanityCheck::check_compaction_strategy() {
 
 std::vector<CheckResult> StartupSanityCheck::check_compaction_keep_recent() {
     std::vector<CheckResult> results;
-    if (!settings_loaded_) return results;  // already Fatal under config_parse
+    if (!bundle_.settings_loaded) return results;  // already Fatal under config_parse
 
-    const auto keep_recent = settings_.memory.compaction_keep_recent_tokens;
+    const auto keep_recent = bundle_.settings.memory.compaction_keep_recent_tokens;
     if (keep_recent <= 0) return results;  // 0 = legacy halving; nothing to compare
 
     // Only FixedTokens has a value comparable without a session's resolved
     // model: PercentOfWindow and WindowBuffer resolve against
     // context_window_tokens, a property of whichever model a session ends
     // up running -- not decidable from settings.json alone at startup.
-    const auto& trigger = settings_.memory.context_compaction_trigger;
+    const auto& trigger = bundle_.settings.memory.context_compaction_trigger;
     if (trigger.kind == CompactionTriggerSettings::Kind::FixedTokens &&
         keep_recent >= trigger.tokens) {
         results.push_back(Warning(
@@ -975,9 +883,9 @@ std::vector<CheckResult> StartupSanityCheck::check_compaction_keep_recent() {
 
 std::vector<CheckResult> StartupSanityCheck::check_small_model() {
     std::vector<CheckResult> results;
-    if (!settings_loaded_) return results;  // already Fatal under config_parse
+    if (!bundle_.settings_loaded) return results;  // already Fatal under config_parse
 
-    const std::string& ref_text = settings_.small_model;
+    const std::string& ref_text = bundle_.settings.small_model;
     if (ref_text.empty()) return results;  // compact on the session's own model: normal
 
     // Same shape check SessionRegistry::set_small_model applies at session
@@ -993,8 +901,8 @@ std::vector<CheckResult> StartupSanityCheck::check_small_model() {
                                        "behaves as if it were unset"));
         return results;
     }
-    if (!providers_loaded_) return results;  // providers.json already Fatal under config_parse
-    if (providers_.Resolve(*ref) == nullptr) {
+    if (!bundle_.providers_loaded) return results;  // providers.json already Fatal under config_parse
+    if (bundle_.providers.Resolve(*ref) == nullptr) {
         results.push_back(Warning("small_model", "settings.json small_model '" + ref_text +
                                       "' resolves to nothing in providers.json; compaction "
                                       "behaves as if it were unset"));
@@ -1004,9 +912,9 @@ std::vector<CheckResult> StartupSanityCheck::check_small_model() {
 
 std::vector<CheckResult> StartupSanityCheck::check_default_subagent_model() {
     std::vector<CheckResult> results;
-    if (!settings_loaded_) return results;  // already Fatal under config_parse
+    if (!bundle_.settings_loaded) return results;  // already Fatal under config_parse
 
-    const std::string& ref_text = settings_.default_subagent_model;
+    const std::string& ref_text = bundle_.settings.default_subagent_model;
     if (ref_text.empty()) return results;  // children inherit the parent's model: normal
 
     // Same shape check the spawn path applies (SplitModelRef, so a discovered
@@ -1020,8 +928,8 @@ std::vector<CheckResult> StartupSanityCheck::check_default_subagent_model() {
                 "'; not a <provider>/<model> reference -- subagents behave as if it were unset"));
         return results;
     }
-    if (!providers_loaded_) return results;  // providers.json already Fatal under config_parse
-    if (providers_.Resolve(*ref) == nullptr) {
+    if (!bundle_.providers_loaded) return results;  // providers.json already Fatal under config_parse
+    if (bundle_.providers.Resolve(*ref) == nullptr) {
         results.push_back(Warning("default_subagent_model",
                                   "settings.json default_subagent_model '" + ref_text +
                                       "' resolves to nothing in providers.json; subagents "
@@ -1032,7 +940,7 @@ std::vector<CheckResult> StartupSanityCheck::check_default_subagent_model() {
 
 std::vector<CheckResult> StartupSanityCheck::check_subagent_limit() {
     std::vector<CheckResult> results;
-    const auto limit = settings_.max_concurrent_subagents;
+    const auto limit = bundle_.settings.max_concurrent_subagents;
     if (limit <= 0) {
         results.push_back(Warning("subagent_limit", "settings.json max_concurrent_subagents is " +
                                  std::to_string(limit) + "; spawn_subagent will always fail"));
@@ -1047,10 +955,10 @@ std::vector<CheckResult> StartupSanityCheck::check_subagent_limit() {
 
 std::vector<CheckResult> StartupSanityCheck::check_hooks() {
     std::vector<CheckResult> results;
-    if (hooks_.hooks.empty()) return results;  // no hooks.json, or none -- both normal
+    if (bundle_.hooks.hooks.empty()) return results;  // no hooks.json, or none -- both normal
 
     // Structural warnings that do not need the point registry.
-    for (const auto& action : hooks_.hooks) {
+    for (const auto& action : bundle_.hooks.hooks) {
         if (action.command.find_first_not_of(" \t\n") == std::string::npos) {
             results.push_back(Warning("hooks", "action on '" + action.on +
                                   "': command is whitespace only and will fail open"));
@@ -1062,14 +970,30 @@ std::vector<CheckResult> StartupSanityCheck::check_hooks() {
     // it reads which points REGISTERED, never fires one. Run before Configure,
     // whose own warnings are the runtime backstop. Shared with Configure via
     // DescribeActionWarnings so the two can never drift.
-    if (inputs_.hook_dispatcher == nullptr) return results;
+    if (inputs_.registries.hooks == nullptr) return results;
 
-    for (const auto& action : hooks_.hooks) {
-        for (const auto& warning : inputs_.hook_dispatcher->DescribeActionWarnings(action)) {
+    for (const auto& action : bundle_.hooks.hooks) {
+        for (const auto& warning : inputs_.registries.hooks->DescribeActionWarnings(action)) {
             results.push_back(Warning("hooks", warning));
         }
     }
     return results;
 }
 
-}  // namespace minimal::config
+std::unique_ptr<session::SessionDatabase> OpenSessionDatabase(const ConfigBundle& bundle,
+                                                              std::vector<CheckResult>& problems) {
+    // A settings.json that failed to load falls back to the default path: the
+    // config_parse Fatal already names that problem, and this one reports
+    // whether the database itself is sound.
+    const auto db_path = session::ResolveSessionDbPath(
+        bundle.settings_loaded ? bundle.settings.session_db_path : std::string{});
+    try {
+        return std::make_unique<session::SessionDatabase>(db_path);
+    } catch (const std::exception& e) {
+        problems.push_back(
+            Fatal("session_db", "session database '" + db_path.string() + "': " + e.what()));
+        return nullptr;
+    }
+}
+
+}  // namespace minimal::startup
