@@ -52,9 +52,12 @@
 #include "cost_store.hpp"
 #include "cost_tracking_service.hpp"
 #include "cost_tracking_service_impl.hpp"
+#include "endpoint.hpp"
 #include "in_flight.hpp"
 #include "rates_refresh.hpp"
 #include "rpc_service.hpp"
+#include "session_index.hpp"
+#include "totals_hub.hpp"
 
 namespace {
 
@@ -81,6 +84,24 @@ std::shared_ptr<minimal::cost_tracker::RateTable>& SharedRates() {
 std::shared_ptr<minimal::cost_tracker::CostSettings>& SharedSettings() {
     static std::shared_ptr<minimal::cost_tracker::CostSettings> settings;
     return settings;
+}
+
+std::shared_ptr<minimal::cost_tracker::SessionIndex>& SharedIndex() {
+    static std::shared_ptr<minimal::cost_tracker::SessionIndex> index;
+    return index;
+}
+
+std::shared_ptr<minimal::cost_tracker::CostRpcService>& SharedRpc() {
+    static std::shared_ptr<minimal::cost_tracker::CostRpcService> rpc;
+    return rpc;
+}
+
+// The totals push hub. Same teardown discipline as the refresher below: its
+// worker reads the store, so Shutdown() runs from TotalsHubOwner's
+// destructor, never from a static destructor after plugin_storage is gone.
+std::shared_ptr<minimal::cost_tracker::TotalsHub>& SharedHub() {
+    static std::shared_ptr<minimal::cost_tracker::TotalsHub> hub;
+    return hub;
 }
 
 // The startup auto-refresh. Not destroyed with the process: Shutdown() runs
@@ -132,6 +153,19 @@ void EnsureSharedState(const minimal::plugins::PluginRegistrationContext& contex
         SharedStore() = std::make_shared<minimal::cost_tracker::CostStore>(context.storage);
     }
     if (!SharedInFlight()) SharedInFlight() = std::make_shared<minimal::cost_tracker::InFlightUsage>();
+    if (!SharedIndex()) {
+        SharedIndex() = std::make_shared<minimal::cost_tracker::SessionIndex>(*SharedStore());
+    }
+    if (!SharedRpc()) {
+        SharedRpc() = std::make_shared<minimal::cost_tracker::CostRpcService>(
+            *SharedStore(), *SharedRates(), *SharedSettings(), *SharedInFlight(), *SharedIndex());
+    }
+    if (!SharedHub()) {
+        SharedHub() = std::make_shared<minimal::cost_tracker::TotalsHub>(
+            *SharedIndex(), [rpc = SharedRpc()](const std::string& session_id) {
+                return rpc->SubtreeTotals(session_id);
+            });
+    }
     if (!SharedRefresher()) {
         SharedRefresher() = std::make_shared<minimal::cost_tracker::RatesRefresher>(
             *SharedSettings(), *SharedStore(), *SharedRates(), context.storage);
@@ -161,9 +195,10 @@ void minimal_plugin_register_session_observer(
     // will join the worker at teardown.
     SharedRefresher()->MaybeStart();
     registry.Register(std::make_shared<minimal::cost_tracker::CostSessionObserver>(
-        *SharedStore(), *SharedInFlight()));
+        *SharedStore(), *SharedInFlight(), SharedIndex().get(), SharedHub().get()));
     registry.Register(std::make_shared<minimal::cost_tracker::RatesRefresherOwner>(
         *SharedRefresher()));
+    registry.Register(std::make_shared<minimal::cost_tracker::TotalsHubOwner>(*SharedHub()));
 }
 
 void minimal_plugin_register_services(
@@ -176,11 +211,16 @@ void minimal_plugin_register_services(
     registry.Provide(minimal::cost_tracker::kCostTrackingServiceName, &tracking);
 
     // The PluginCall dispatch target, under the "<plugin_name>.rpc" convention
-    // (see minimal/plugins/plugin_rpc.hpp). This is the UI data path.
-    static minimal::cost_tracker::CostRpcService rpc(*SharedStore(), *SharedRates(),
-                                                     *SharedSettings(), *SharedInFlight());
+    // (see minimal/plugins/plugin_rpc.hpp). The server's --refresh-cost-rates
+    // flag resolves this one directly.
     registry.Provide(minimal::plugins::PluginRpcServiceName(minimal::cost_tracker::kPluginName),
-                     &rpc);
+                     SharedRpc().get());
+
+    // The UI data path: PluginCall (same methods as .rpc, which the dispatch
+    // now reaches through here) plus the PluginSubscribe "totals" push stream.
+    static minimal::cost_tracker::CostEndpoint endpoint(*SharedRpc(), *SharedHub());
+    registry.Provide(
+        minimal::plugins::PluginEndpointServiceName(minimal::cost_tracker::kPluginName), &endpoint);
 }
 
 }  // extern "C"

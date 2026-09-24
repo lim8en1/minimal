@@ -29,12 +29,14 @@
 // all state sits behind PluginStorage's per-call mutex, RateTable's own, and
 // InFlightUsage's own.
 
+#include <optional>
 #include <string_view>
 
 #include "cost_model.hpp"
 #include "cost_settings.hpp"
 #include "cost_store.hpp"
 #include "in_flight.hpp"
+#include "session_index.hpp"
 #include "minimal/plugins/plugin_rpc.hpp"
 
 namespace minimal::cost_tracker {
@@ -47,17 +49,25 @@ public:
     // A null RateResolver renders costs as unknown rather than crashing --
     // the same degrade-not-crash rule as the store's null storage.
     CostRpcService(CostStore& store, RateTable& rates, const CostSettings& settings,
-                   InFlightUsage& in_flight)
-        : store_(store), rates_(rates), settings_(settings), in_flight_(in_flight) {}
+                   InFlightUsage& in_flight, SessionIndex& index)
+        : store_(store), rates_(rates), settings_(settings), in_flight_(in_flight),
+          index_(index) {}
 
     plugins::PluginRpcHandler::Reply Handle(const std::string& method,
                                             std::string_view json_payload) override;
+
+    // The "totals" body for `session_id` and its subagent subtree, with the
+    // "includes_subagents"/"in_flight" flags; nullopt when nothing is
+    // recorded (stored or live). Shared by the "totals" method and the push
+    // hub (totals_hub.hpp). Corrupt member blobs are skipped and logged.
+    std::optional<nlohmann::json> SubtreeTotals(const std::string& session_id);
 
 private:
     CostStore& store_;
     RateTable& rates_;
     const CostSettings& settings_;
     InFlightUsage& in_flight_;
+    SessionIndex& index_;
 };
 
 }  // namespace minimal::cost_tracker

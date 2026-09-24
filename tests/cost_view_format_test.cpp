@@ -21,6 +21,29 @@ TEST_CASE("FormatTokens tiers at k/M/G and never truncates at extremes") {
     CHECK(FormatTokens(1'234'567'890) == "1.2G");
 }
 
+TEST_CASE("FormatTokens picks the tier by the rounded value") {
+    // 999'950 / 1e3 rounds to 1000.0 -- which must read "1.0M", not "1000.0k".
+    CHECK(FormatTokens(999) == "999");
+    CHECK(FormatTokens(1'000) == "1.0k");
+    CHECK(FormatTokens(999'949) == "999.9k");
+    CHECK(FormatTokens(999'950) == "1.0M");
+    CHECK(FormatTokens(999'949'999) == "999.9M");
+    CHECK(FormatTokens(999'950'000) == "1.0G");
+}
+
+TEST_CASE("a negative per-model token count counts as zero, not a refund") {
+    const nlohmann::json totals{
+        {"turns", 2},
+        {"total_cost_known", true},
+        {"total_cost", 1.0},
+        {"models", nlohmann::json::array({
+                       {{"input_tokens", 5'000}, {"output_tokens", -7'000}},
+                       {{"input_tokens", -2'000}, {"output_tokens", 3'000}},
+                   })}};
+    CHECK(FormatTotals(totals).value_or("") == "$1.00 · 5.0k/3.0k tok");
+    CHECK(FormatTokenDetail(totals).value_or("") == "i 5.0k · o 3.0k");
+}
+
 TEST_CASE("FormatCost keeps sub-cent precision") {
     CHECK(FormatCost(0.0) == "$0.0000");
     CHECK(FormatCost(0.004) == "$0.0040");

@@ -24,6 +24,11 @@
 
 namespace minimal::client::cost_view {
 
+// Appended to a cached segment string the push stream is no longer keeping
+// current (totals_feed.hpp) -- the last-known figure, marked, rather than
+// either blanking it or passing it off as live.
+inline constexpr const char* kStaleSuffix = " (stale)";
+
 // Like nlohmann's own `j.value(key, fallback)`, but never throws: `j.value()`
 // raises type_error.302 if the field is present with the WRONG type (an int
 // where a bool was expected) and type_error.306 if `j` itself is not an
@@ -53,22 +58,17 @@ T SafeValue(const nlohmann::json& j, const char* key, T fallback) {
 }
 
 // "1234567" -> "1.2M", "12345" -> "12.3k", "123" -> "123", >=1e9 -> G tier.
+// The tier is picked by the ROUNDED value: 999'950 rounds to "1.0M", never
+// "1000.0k" (and 999'950'000 to "1.0G").
 inline std::string FormatTokens(std::int64_t tokens) {
-    if (tokens >= 1'000'000'000) {
+    const auto scaled = [](std::int64_t value, double scale, char suffix) {
         char buf[32];
-        std::snprintf(buf, sizeof(buf), "%.1fG", static_cast<double>(tokens) / 1e9);
-        return buf;
-    }
-    if (tokens >= 1'000'000) {
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%.1fM", static_cast<double>(tokens) / 1e6);
-        return buf;
-    }
-    if (tokens >= 1'000) {
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%.1fk", static_cast<double>(tokens) / 1e3);
-        return buf;
-    }
+        std::snprintf(buf, sizeof(buf), "%.1f%c", static_cast<double>(value) / scale, suffix);
+        return std::string(buf);
+    };
+    if (tokens >= 999'950'000) return scaled(tokens, 1e9, 'G');
+    if (tokens >= 999'950) return scaled(tokens, 1e6, 'M');
+    if (tokens >= 1'000) return scaled(tokens, 1e3, 'k');
     return std::to_string(tokens);
 }
 
@@ -95,13 +95,19 @@ struct TokenTotals {
 };
 
 inline TokenTotals AggregateModelTokens(const nlohmann::json& totals) {
+    // A negative per-model count is corruption, not a refund: it counts as
+    // zero rather than eating into the other models' real usage.
+    const auto count = [](const nlohmann::json& model, const char* key) {
+        const auto value = SafeValue<std::int64_t>(model, key, 0LL);
+        return value > 0 ? value : std::int64_t{0};
+    };
     TokenTotals sum;
     if (const auto models = totals.find("models"); models != totals.end() && models->is_array()) {
         for (const auto& model : *models) {
-            sum.input_tokens += SafeValue<std::int64_t>(model, "input_tokens", 0LL);
-            sum.output_tokens += SafeValue<std::int64_t>(model, "output_tokens", 0LL);
-            sum.cache_read += SafeValue<std::int64_t>(model, "cache_read_tokens", 0LL);
-            sum.cache_write += SafeValue<std::int64_t>(model, "cache_write_tokens", 0LL);
+            sum.input_tokens += count(model, "input_tokens");
+            sum.output_tokens += count(model, "output_tokens");
+            sum.cache_read += count(model, "cache_read_tokens");
+            sum.cache_write += count(model, "cache_write_tokens");
         }
     }
     return sum;

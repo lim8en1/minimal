@@ -9,4 +9,7 @@ minimal_add_plugin(cost-tracker
     rates_fetch.cpp
     rates_refresh.cpp
     cost_tracking_service_impl.cpp
-    rpc_service.cpp)
+    rpc_service.cpp
+    session_index.cpp
+    totals_hub.cpp
+    endpoint.cpp)

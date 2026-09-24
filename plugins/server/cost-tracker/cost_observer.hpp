@@ -19,14 +19,19 @@
 #include "cost_store.hpp"
 #include "in_flight.hpp"
 #include "minimal/agent/session_observer.hpp"
+#include "session_index.hpp"
+#include "totals_hub.hpp"
 
 namespace minimal::cost_tracker {
 
 class CostSessionObserver : public agent::SessionObserver {
 public:
-    // Borrowed; process lifetime (plugins are never dlclosed).
-    CostSessionObserver(CostStore& store, InFlightUsage& in_flight)
-        : store_(store), in_flight_(in_flight) {}
+    // Borrowed; process lifetime (plugins are never dlclosed). `index` and
+    // `hub` may be null (tests exercising the ledger alone): the index then
+    // learns edges only from its lazy build, and nothing is pushed.
+    CostSessionObserver(CostStore& store, InFlightUsage& in_flight,
+                        SessionIndex* index = nullptr, TotalsHub* hub = nullptr)
+        : store_(store), in_flight_(in_flight), index_(index), hub_(hub) {}
 
     // A failed turn arrives with StopReason::Unknown and zero usage -- which
     // is exactly the zero-usage shape, so it records as unpriced rather than
@@ -53,8 +58,14 @@ public:
     void OnSessionEnded(const agent::SessionInfo& info) override;
 
 private:
+    // Keeps the parent index current and wakes the push hub -- every hook
+    // that changes a session's totals ends here.
+    void Changed(const agent::SessionInfo& info);
+
     CostStore& store_;
     InFlightUsage& in_flight_;
+    SessionIndex* index_;
+    TotalsHub* hub_;
 };
 
 }  // namespace minimal::cost_tracker

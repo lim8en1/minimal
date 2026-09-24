@@ -11,6 +11,8 @@
 
 #include <chrono>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -35,6 +37,9 @@
 #include "../plugins/server/cost-tracker/rpc_service.hpp"
 #include "../plugins/server/cost-tracker/rates_fetch.hpp"
 #include "../plugins/server/cost-tracker/rates_refresh.hpp"
+#include "../plugins/server/cost-tracker/endpoint.hpp"
+#include "../plugins/server/cost-tracker/session_index.hpp"
+#include "../plugins/server/cost-tracker/totals_hub.hpp"
 
 using namespace minimal;
 using namespace minimal::cost_tracker;
@@ -47,6 +52,7 @@ struct Harness {
     plugins::PluginStorage storage{dir.path() / "plugin_storage.db"};
     CostStore store{&storage};
     InFlightUsage in_flight;
+    SessionIndex index{store};
 };
 
 // One-shot loopback HTTP server, the same shape as http_client_test.cpp's
@@ -807,7 +813,8 @@ TEST_CASE("the .rpc service answers totals, list and malformed calls",
     sources.config_rates = nlohmann::json::parse(R"({"m1": {"input": 2.0, "output": 8.0}})");
     RateTable rates(sources, &harness.storage);
     harness.store.AppendTurn("s1", "root", Turn("m1", 1000000, 500000));
-    CostRpcService service(harness.store, rates, CostSettings{}, harness.in_flight);
+    CostRpcService service(harness.store, rates, CostSettings{}, harness.in_flight,
+                           harness.index);
 
     const auto totals = service.Handle("totals", R"({"session_id": "s1"})");
     REQUIRE(totals.ok);
@@ -931,7 +938,8 @@ TEST_CASE("the .rpc totals roll up the whole subagent subtree and the live round
     harness.store.AppendTurn("child", "root", Turn("m1", 500000, 0));    // $1
     harness.store.AppendTurn("grandchild", "child", Turn("m1", 250000, 0));  // $0.50
     harness.store.AppendTurn("other", "", Turn("m1", 1000000, 0));   // must NOT merge
-    CostRpcService service(harness.store, rates, CostSettings{}, harness.in_flight);
+    CostRpcService service(harness.store, rates, CostSettings{}, harness.in_flight,
+                           harness.index);
 
     agent::RoundUsage round;  // a live round mid-turn on the child
     round.model = "m1";
@@ -958,7 +966,7 @@ TEST_CASE("the .rpc totals roll up the whole subagent subtree and the live round
     // answers -- the first turn's cost must not wait for its record.
     InFlightUsage fresh;
     fresh.RecordRound("new", round);
-    CostRpcService fresh_service(harness.store, rates, CostSettings{}, fresh);
+    CostRpcService fresh_service(harness.store, rates, CostSettings{}, fresh, harness.index);
     const auto live_only = fresh_service.Handle("totals", R"({"session_id": "new"})");
     REQUIRE(live_only.ok);
     CHECK(nlohmann::json::parse(live_only.payload).at("total_cost") == 0.25);
@@ -1134,4 +1142,179 @@ TEST_CASE("the startup refresh runs in the background and teardown joins it", "[
     {
         RatesRefresherOwner owner(refresher);
     }
+}
+
+namespace {
+
+// Collects what the hub pushes; Push() fails once `alive` is cleared -- the
+// subscriber-went-away signal the RPC layer's sink gives.
+class RecordingSink final : public plugins::PluginSubscriptionSink {
+public:
+    bool Push(std::string json_payload) override {
+        std::lock_guard<std::mutex> lock(mtx_);
+        ++pushes_;
+        if (!alive_) return false;
+        payloads_.push_back(nlohmann::json::parse(json_payload));
+        return true;
+    }
+    void Kill() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        alive_ = false;
+    }
+    int PushCount() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return pushes_;
+    }
+    // The latest "totals" push for `session_id`, if any.
+    std::optional<nlohmann::json> Totals(const std::string& session_id) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        for (auto it = payloads_.rbegin(); it != payloads_.rend(); ++it) {
+            if (it->value("type", "") == "totals" && it->value("session_id", "") == session_id) {
+                return *it;
+            }
+        }
+        return std::nullopt;
+    }
+    bool SawHeartbeat() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        for (const auto& payload : payloads_) {
+            if (payload.value("type", "") == "heartbeat") return true;
+        }
+        return false;
+    }
+
+private:
+    std::mutex mtx_;
+    bool alive_ = true;
+    int pushes_ = 0;
+    std::vector<nlohmann::json> payloads_;
+};
+
+template <typename Pred>
+bool WaitUntil(Pred&& pred, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < timeout) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return pred();
+}
+
+}  // namespace
+
+TEST_CASE("the session index walks subtrees and ancestors, learning edges live",
+          "[cost_tracker]") {
+    Harness harness;
+    harness.store.AppendTurn("root", "", Turn("m1", 1, 0));
+    harness.store.AppendTurn("child", "root", Turn("m1", 1, 0));
+    harness.store.AppendTurn("other", "", Turn("m1", 1, 0));
+
+    CHECK(harness.index.Subtree("root") == std::vector<std::string>{"root", "child"});
+    CHECK(harness.index.Ancestors("child") == std::vector<std::string>{"root"});
+    CHECK(harness.index.Ancestors("root").empty());
+
+    // After the lazy build, a new subagent is only known through Note() --
+    // the observer's job; without it the roll-up would silently miss it.
+    harness.index.Note("grandchild", "child");
+    CHECK(harness.index.Subtree("root") ==
+          std::vector<std::string>{"root", "child", "grandchild"});
+    CHECK(harness.index.Ancestors("grandchild") == std::vector<std::string>{"child", "root"});
+
+    // A forged cycle still terminates.
+    harness.index.Note("a", "b");
+    harness.index.Note("b", "a");
+    CHECK(harness.index.Subtree("a").size() == 2);
+    CHECK(harness.index.Ancestors("a").size() == 1);
+}
+
+TEST_CASE("the observer's rounds push live totals to the session and its ancestors",
+          "[cost_tracker][rpc]") {
+    Harness harness;
+    RateSources sources;
+    sources.config_rates = nlohmann::json::parse(R"({"m1": {"input": 2.0, "output": 0.0}})");
+    RateTable rates(sources, &harness.storage);
+    harness.store.AppendTurn("root", "", Turn("m1", 1000000, 0));    // $2
+    CostRpcService service(harness.store, rates, CostSettings{}, harness.in_flight,
+                           harness.index);
+    TotalsHub hub(harness.index,
+                  [&service](const std::string& id) { return service.SubtreeTotals(id); },
+                  std::chrono::milliseconds(10), std::chrono::milliseconds(1));
+    CostSessionObserver observer(harness.store, harness.in_flight, &harness.index, &hub);
+
+    auto sink = std::make_shared<RecordingSink>();
+    hub.AddSink(sink);
+
+    // A subagent the index has never seen spends mid-turn: both it and its
+    // parent's roll-up are pushed.
+    agent::SessionInfo info;
+    info.session_id = "child";
+    info.parent_session_id = "root";
+    agent::RoundUsage round;
+    round.model = "m1";
+    round.usage = llm::Usage{500000, 0, 0, 0};   // $1
+    observer.OnProviderRound(info, round);
+
+    REQUIRE(WaitUntil([&] { return sink->Totals("root").has_value(); }));
+    REQUIRE(WaitUntil([&] { return sink->Totals("child").has_value(); }));
+    CHECK(sink->Totals("root")->at("total_cost") == 3.0);
+    CHECK(sink->Totals("root")->at("includes_subagents") == true);
+    CHECK(sink->Totals("root")->at("in_flight") == true);
+    CHECK(sink->Totals("child")->at("total_cost") == 1.0);
+
+    // Idle: heartbeats keep the stream stoppable.
+    CHECK(WaitUntil([&] { return sink->SawHeartbeat(); }));
+
+    // A subscriber that went away is dropped, not pushed to forever.
+    sink->Kill();
+    REQUIRE(WaitUntil([&] { return sink->PushCount() > 0; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const int after_drop = sink->PushCount();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(sink->PushCount() == after_drop);
+    hub.Shutdown();
+}
+
+TEST_CASE("a rewound-away session pushes turns:0, not its old figure", "[cost_tracker][rpc]") {
+    Harness harness;
+    RateTable rates(RateSources{}, &harness.storage);
+    harness.store.AppendTurn("s1", "", Turn("m1", 1000, 0, 0, 0, true, 5, 6));
+    CostRpcService service(harness.store, rates, CostSettings{}, harness.in_flight,
+                           harness.index);
+    TotalsHub hub(harness.index,
+                  [&service](const std::string& id) { return service.SubtreeTotals(id); },
+                  std::chrono::milliseconds(10), std::chrono::milliseconds(1));
+    CostSessionObserver observer(harness.store, harness.in_flight, &harness.index, &hub);
+    auto sink = std::make_shared<RecordingSink>();
+    hub.AddSink(sink);
+
+    agent::SessionInfo info;
+    info.session_id = "s1";
+    observer.OnSessionRewound(info, 0);
+    REQUIRE(WaitUntil([&] { return sink->Totals("s1").has_value(); }));
+    CHECK(sink->Totals("s1")->at("turns") == 0);
+    hub.Shutdown();
+}
+
+TEST_CASE("the endpoint answers calls like .rpc and serves only the totals stream",
+          "[cost_tracker][rpc]") {
+    Harness harness;
+    RateSources sources;
+    sources.config_rates = nlohmann::json::parse(R"({"m1": {"input": 2.0, "output": 8.0}})");
+    RateTable rates(sources, &harness.storage);
+    harness.store.AppendTurn("s1", "root", Turn("m1", 1000000, 500000));
+    CostRpcService service(harness.store, rates, CostSettings{}, harness.in_flight,
+                           harness.index);
+    TotalsHub hub(harness.index,
+                  [&service](const std::string& id) { return service.SubtreeTotals(id); });
+    CostEndpoint endpoint(service, hub);
+
+    const std::string payload = R"({"session_id": "s1"})";
+    CHECK(nlohmann::json::parse(endpoint.Call("totals", payload)) ==
+          nlohmann::json::parse(service.Handle("totals", payload).payload));
+    // A plugin-domain refusal fails the call, as it did through .rpc.
+    CHECK_THROWS(endpoint.Call("totals", R"({"session_id": "nope"})"));
+
+    CHECK(endpoint.Subscribe("totals", "{}", std::make_shared<RecordingSink>()));
+    CHECK(!endpoint.Subscribe("list", "{}", std::make_shared<RecordingSink>()));
+    hub.Shutdown();
 }

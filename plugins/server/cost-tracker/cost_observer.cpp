@@ -47,6 +47,7 @@ void CostSessionObserver::OnTurnCompleted(const agent::SessionInfo& info,
     // record -- dropped whether or not the append succeeded, so the totals
     // RPC can never count a round twice (live view + turn record).
     in_flight_.Clear(info.session_id);
+    Changed(info);
 }
 
 void CostSessionObserver::OnProviderRound(const agent::SessionInfo& info,
@@ -55,6 +56,7 @@ void CostSessionObserver::OnProviderRound(const agent::SessionInfo& info,
     // few small nodes, and one provisional round lost to a bad_alloc is
     // cosmetic. Everything fallible stays in OnTurnCompleted's path.
     in_flight_.RecordRound(info.session_id, round);
+    Changed(info);
 }
 
 void CostSessionObserver::OnSessionRewound(const agent::SessionInfo& info,
@@ -79,6 +81,7 @@ void CostSessionObserver::OnSessionRewound(const agent::SessionInfo& info,
         if (kept.size() == history.turns.size()) return;  // nothing past the cut
         history.turns = std::move(kept);
         store_.Save(info.session_id, history);
+        Changed(info);
     } catch (const std::exception& error) {
         // Same observer contract as OnTurnCompleted: never wedge the dispatch
         // thread. /cost may over-report until the next successful rewind.
@@ -92,6 +95,11 @@ void CostSessionObserver::OnSessionEnded(const agent::SessionInfo& info) {
     // provisional total outliving its session would be a slow leak keyed by
     // dead ids.
     in_flight_.Clear(info.session_id);
+}
+
+void CostSessionObserver::Changed(const agent::SessionInfo& info) {
+    if (index_ != nullptr) index_->Note(info.session_id, info.parent_session_id);
+    if (hub_ != nullptr) hub_->MarkDirty(info.session_id);
 }
 
 }  // namespace minimal::cost_tracker

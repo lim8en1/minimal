@@ -176,9 +176,12 @@ add_executable(minimal_tests
     # like the server plugins' logic (logo_plugin.cpp itself stays out).
     "${CMAKE_SOURCE_DIR}/plugins/client/logo/logo_generator.cpp"
     logo_generator_test.cpp
-    # The cost-view segment's pure formatters: header-only, so only the
-    # include dir is needed (the plugin TU itself stays out).
+    # The cost-view segments: the pure formatters (header-only) and the
+    # totals feed over stub ClientApi/FocusProvider seams (the plugin TU
+    # itself, the extern "C" entry points, stays out).
     cost_view_format_test.cpp
+    "${CMAKE_SOURCE_DIR}/plugins/client/cost-view/totals_feed.cpp"
+    cost_view_feed_test.cpp
     mention_resolver_test.cpp
     mention_expansion_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
@@ -241,6 +244,9 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/rates_refresh.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_tracking_service_impl.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/rpc_service.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/session_index.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/totals_hub.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/endpoint.cpp"
     # Same pattern for tools-search. The walker forks nothing and needs the
     # real filesystem only, so the whole plugin compiles in directly.
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/search_settings.cpp"

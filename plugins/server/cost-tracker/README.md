@@ -18,8 +18,16 @@ every completed turn (the only writer).
   hatch the old `/cost-update-rates` command was; there is no TUI command for
   refreshing prices.
 - **RPC service**: `cost-tracker.rpc` — serves the same state as JSON over the
-  generic PluginCall channel (the data path a future UI consumes); its
-  `refresh_rates` method is what the server flag drives.
+  generic PluginCall channel; its `refresh_rates` method is what the server
+  flag drives.
+- **Endpoint**: `cost-tracker.endpoint` — the UI data path
+  ([cost-view](../../client/cost-view/)). `PluginCall` answers the `.rpc`
+  methods; `PluginSubscribe("totals")` streams `{"type":"totals", ...}` for
+  every session whose totals change (and for each of its ancestors, since a
+  subagent's spend rolls up), plus a `{"type":"heartbeat"}` every 500 ms
+  while idle. `totals` loads only the requested subagent subtree: an
+  in-memory parent index, built once, replaces a scan of every stored
+  session.
 - **Seed file**: `cost-rates.json` in the config dir, user-editable text —
   never overwritten, never compiled into the plugin.
 - The model has no tool here: cost is the operator's business.
