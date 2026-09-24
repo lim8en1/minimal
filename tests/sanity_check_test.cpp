@@ -392,8 +392,8 @@ TEST_CASE("two plugins registering one provider kind warns", "[sanity_check][pro
     std::vector<plugins::PluginRecord> records = {
         Record("a.so", "plugin-a", plugins::Provenance::User, plugins::LoadStatus::Loaded),
         Record("b.so", "plugin-b", plugins::Provenance::User, plugins::LoadStatus::Loaded)};
-    records[0].registered_provider_kinds = {"fixture"};
-    records[1].registered_provider_kinds = {"fixture"};
+    records[0].registered["provider"] = {"fixture"};
+    records[1].registered["provider"] = {"fixture"};
 
     const auto results = RunChecks(f, records);
     const auto hits = ByCheck(results, "provider_kinds");
@@ -413,8 +413,8 @@ TEST_CASE("two plugins registering one model catalog warns", "[sanity_check][pro
     std::vector<plugins::PluginRecord> records = {
         Record("a.so", "plugin-a", plugins::Provenance::User, plugins::LoadStatus::Loaded),
         Record("b.so", "plugin-b", plugins::Provenance::User, plugins::LoadStatus::Loaded)};
-    records[0].registered_model_catalog_kinds = {"fixture"};
-    records[1].registered_model_catalog_kinds = {"fixture"};
+    records[0].registered["catalog"] = {"fixture"};
+    records[1].registered["catalog"] = {"fixture"};
 
     const auto results = RunChecks(f, records);
     const auto hits = ByCheck(results, "provider_catalogs");

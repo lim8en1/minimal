@@ -83,9 +83,10 @@ public:
     // outside an attribution window is attributed to "core".
     void Register(std::shared_ptr<ContextContributor> contributor);
 
-    // Registration-time rollback for a plugin whose hook threw (the loader's
-    // partial-registration rollback). Safe only before any session exists.
-    void RemoveAfter(std::size_t existing_count);
+    // Registration-time rollback for a plugin whose hook threw. Safe only
+    // before any session exists.
+    void RemoveByAttribution(const std::string& plugin_name);
+    std::size_t CountOwnedBy(const std::string& plugin_name) const;
     std::size_t count() const;
 
     void Configure(ContextContributorSettings settings);

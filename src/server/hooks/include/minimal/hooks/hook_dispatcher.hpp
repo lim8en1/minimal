@@ -186,6 +186,11 @@ public:
     };
     const std::vector<Attribution>& attributions() const { return attributions_; }
 
+    // Rollback for a plugin whose registration hook threw (startup only,
+    // before Configure). Drops the plugin's attributions and every point it
+    // registered FIRST; a point another plugin registered first stays bound.
+    void RemoveByAttribution(const std::string& plugin_name);
+
     // --- Configuration (once, after plugin load; seals registration) ---------
 
     // Resolves hooks.json actions onto registered points and seals the point

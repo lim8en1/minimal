@@ -27,9 +27,16 @@ void ContextContributorRegistry::Register(std::shared_ptr<ContextContributor> co
     entries_.push_back({attribution_.empty() ? "core" : attribution_, std::move(contributor)});
 }
 
-void ContextContributorRegistry::RemoveAfter(std::size_t existing_count) {
+void ContextContributorRegistry::RemoveByAttribution(const std::string& plugin_name) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (existing_count < entries_.size()) entries_.resize(existing_count);
+    std::erase_if(entries_, [&](const Entry& entry) { return entry.plugin == plugin_name; });
+}
+
+std::size_t ContextContributorRegistry::CountOwnedBy(const std::string& plugin_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<std::size_t>(std::count_if(
+        entries_.begin(), entries_.end(),
+        [&](const Entry& entry) { return entry.plugin == plugin_name; }));
 }
 
 std::size_t ContextContributorRegistry::count() const {

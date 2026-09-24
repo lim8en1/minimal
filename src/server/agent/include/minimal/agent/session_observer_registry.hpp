@@ -90,12 +90,17 @@ public:
     // registry here.
     void Register(std::shared_ptr<SessionObserver> observer);
 
-    // Registration-time rollback for a plugin whose hook threw: drops every
-    // observer added after `existing_count`. Safe ONLY before any session
-    // exists -- no dispatched task can still hold a snapshot -- and the
-    // observer objects live in .so files that are never dlclosed, so
-    // destroying them here cannot dangle.
-    void RemoveAfter(std::size_t existing_count);
+    // Attribution window (the loader's shape for every registry): observers
+    // registered while it is open belong to `plugin_name`.
+    void SetAttribution(std::string plugin_name);
+    void ClearAttribution();
+    std::size_t CountOwnedBy(const std::string& plugin_name) const;
+
+    // Registration-time rollback for a plugin whose hook threw. Safe ONLY
+    // before any session exists -- no dispatched task can still hold a
+    // snapshot -- and the observer objects live in .so files that are never
+    // dlclosed, so destroying them here cannot dangle.
+    void RemoveByAttribution(const std::string& plugin_name);
 
     void NotifySessionCreated(SessionInfo info);
     void NotifyProviderRound(SessionInfo info, RoundUsage round);
@@ -116,6 +121,8 @@ private:
 
     mutable std::mutex mutex_;
     std::vector<std::shared_ptr<SessionObserver>> observers_;
+    std::vector<std::string> owners_;  // parallel to observers_
+    std::string attribution_;
     // Notified whenever outstanding_ reaches zero, under mutex_ -- the
     // decrement itself must happen under the same lock WaitForIdleForTesting
     // waits on, or the transition-to-zero and the wait can race (classic

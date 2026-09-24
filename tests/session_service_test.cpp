@@ -109,7 +109,7 @@ struct ServiceFixture {
         const auto records = loader.LoadAll({candidate});
         REQUIRE(records.size() == 1);
         REQUIRE(records.front().ok());
-        REQUIRE(records.front().registered_permission_advisor);
+        REQUIRE(!records.front().Registered("advisor").empty());
     }
 
     // Same, with a config slice for plugins whose registration reads one
@@ -126,7 +126,7 @@ struct ServiceFixture {
         const auto records = loader.LoadAll({candidate});
         REQUIRE(records.size() == 1);
         REQUIRE(records.front().ok());
-        REQUIRE(records.front().registered_permission_advisor);
+        REQUIRE(!records.front().Registered("advisor").empty());
     }
 
     // Loads the generic-channel endpoint fixture through the REAL loader, so
@@ -143,7 +143,7 @@ struct ServiceFixture {
         const auto records = loader.LoadAll({candidate});
         REQUIRE(records.size() == 1);
         REQUIRE(records.front().ok());
-        REQUIRE(records.front().registered_services.size() == 1);
+        REQUIRE(records.front().Registered("service").size() == 1);
     }
 
     // Built after the script and any tools, so a session sees the finished setup.

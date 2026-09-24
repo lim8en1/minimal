@@ -215,6 +215,12 @@ void PermissionAdvisorRegistry::Register(std::shared_ptr<PermissionAdvisor> advi
     attributions_.push_back(Attribution{name});
 }
 
+void PermissionAdvisorRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    advisors_.erase(plugin_name);
+    std::erase_if(attributions_,
+                  [&](const Attribution& entry) { return entry.plugin_name == plugin_name; });
+}
+
 std::shared_ptr<PermissionAdvisor> PermissionAdvisorRegistry::Find(
     std::string_view plugin_name) const {
     auto it = advisors_.find(std::string(plugin_name));

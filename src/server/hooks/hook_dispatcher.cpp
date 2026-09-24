@@ -91,6 +91,21 @@ HookPoint HookDispatcher::RegisterPoint(HookPointSpec spec) {
     return HookPoint{this, it->second.spec};
 }
 
+void HookDispatcher::RemoveByAttribution(const std::string& plugin_name) {
+    for (auto it = points_.begin(); it != points_.end();) {
+        const auto first = std::find_if(
+            attributions_.begin(), attributions_.end(),
+            [&](const Attribution& entry) { return entry.point_name == it->first; });
+        if (first != attributions_.end() && first->plugin_name == plugin_name) {
+            it = points_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    std::erase_if(attributions_,
+                  [&](const Attribution& entry) { return entry.plugin_name == plugin_name; });
+}
+
 const HookPointSpec* HookDispatcher::Find(std::string_view point) const {
     const auto it = points_.find(point);
     return it == points_.end() ? nullptr : &it->second.spec;

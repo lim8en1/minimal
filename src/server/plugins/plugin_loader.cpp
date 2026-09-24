@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <cstring>
 #include <utility>
+#include <functional>
 #include <iterator>
 
 #include "minimal/common/abi_tag.hpp"
+#include "minimal/common/logger.hpp"
 #include "minimal/plugins/plugin_abi.h"
 
 namespace minimal::plugins {
@@ -123,6 +125,75 @@ bool IsSafeDataDirName(const std::string& name) {
 
 }  // namespace
 
+// One registry the loader drives: the ABI symbol that fills it, the label
+// PluginRecord::registered files its entries under, and the uniform
+// attribution/rollback surface every registry now offers.
+struct PluginLoader::Target {
+    Target(const char* symbol_in, const char* label_in) : symbol(symbol_in), label(label_in) {}
+    virtual ~Target() = default;
+    // Runs the plugin's hook if it exports one.
+    virtual void Invoke(void* handle, const PluginRegistrationContext& context) = 0;
+    virtual void Open(const std::string& plugin_name) = 0;
+    virtual void Close() = 0;
+    virtual void Remove(const std::string& plugin_name) = 0;
+    // What `plugin_name` holds in this registry, for the startup listing.
+    virtual std::vector<std::string> Owned(const std::string& plugin_name) const = 0;
+
+    const char* symbol;
+    const char* label;
+};
+
+namespace {
+
+template <typename Registry>
+class TargetFor final : public PluginLoader::Target {
+public:
+    using OwnedFn = std::function<std::vector<std::string>(const Registry&, const std::string&)>;
+
+    TargetFor(const char* symbol, const char* label, Registry& registry, OwnedFn owned)
+        : Target(symbol, label), registry_(registry), owned_(std::move(owned)) {}
+
+    void Invoke(void* handle, const PluginRegistrationContext& context) override {
+        using Fn = void (*)(Registry&, const PluginRegistrationContext&);
+        if (auto fn = Lookup<Fn>(handle, symbol)) fn(registry_, context);
+    }
+    void Open(const std::string& plugin_name) override { registry_.SetAttribution(plugin_name); }
+    void Close() override { registry_.ClearAttribution(); }
+    void Remove(const std::string& plugin_name) override {
+        registry_.RemoveByAttribution(plugin_name);
+    }
+    std::vector<std::string> Owned(const std::string& plugin_name) const override {
+        return owned_(registry_, plugin_name);
+    }
+
+private:
+    Registry& registry_;
+    OwnedFn owned_;
+};
+
+template <typename Registry>
+void AddTarget(std::vector<std::unique_ptr<PluginLoader::Target>>& targets, const char* symbol,
+               const char* label, Registry* registry,
+               typename TargetFor<Registry>::OwnedFn owned) {
+    if (registry == nullptr) return;
+    targets.push_back(
+        std::make_unique<TargetFor<Registry>>(symbol, label, *registry, std::move(owned)));
+}
+
+// Owned() for registries keyed by kind.
+template <typename Registry>
+std::vector<std::string> KindsOwned(const Registry& registry, const std::string& plugin) {
+    return registry.KeysOwnedBy(plugin);
+}
+
+// Owned() for registries whose entries carry no name of their own: one
+// `description` per entry the plugin holds.
+std::vector<std::string> Repeat(std::size_t count, const char* description) {
+    return std::vector<std::string>(count, description);
+}
+
+}  // namespace
+
 std::string_view ToString(LoadStatus status) {
     switch (status) {
         case LoadStatus::Loaded:                return "loaded";
@@ -166,7 +237,81 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
       hook_points_(hook_points),
       compaction_strategies_(compaction_strategies),
       metadata_catalogs_(metadata_catalogs),
-      variant_params_(variant_params) {}
+      variant_params_(variant_params) {
+    BuildTargets();
+}
+
+void PluginLoader::BuildTargets() {
+    AddTarget(targets_, "minimal_plugin_register_hook_points", "hook", hook_points_,
+              [](const hooks::HookDispatcher& registry, const std::string& plugin) {
+                  std::vector<std::string> out;
+                  for (const auto& entry : registry.attributions()) {
+                      if (entry.plugin_name == plugin) out.push_back(entry.point_name);
+                  }
+                  return out;
+              });
+    AddTarget(targets_, "minimal_plugin_register_tools", "tool", &tools_,
+              [](const tools::ToolRegistry& registry, const std::string& plugin) {
+                  std::vector<std::string> out;
+                  for (const auto& entry : registry.attributions()) {
+                      if (entry.plugin_name == plugin) out.push_back(entry.tool_name);
+                  }
+                  return out;
+              });
+    AddTarget(targets_, "minimal_plugin_register_provider_factories", "provider", &providers_,
+              KindsOwned<llm::ProviderFactoryRegistry>);
+    AddTarget(targets_, "minimal_plugin_register_commands", "command", commands_,
+              [](const commands::CommandRegistry& registry, const std::string& plugin) {
+                  std::vector<std::string> out;
+                  for (const auto& entry : registry.attributions()) {
+                      if (entry.plugin_name == plugin) out.push_back(entry.surface_name);
+                  }
+                  return out;
+              });
+    AddTarget(targets_, "minimal_plugin_register_session_observer", "observer", observers_,
+              [](const agent::SessionObserverRegistry& registry, const std::string& plugin) {
+                  return Repeat(registry.CountOwnedBy(plugin), "session lifecycle");
+              });
+    AddTarget(targets_, "minimal_plugin_register_auth_provider", "auth", auth_providers_,
+              [](const rpc::AuthProviderRegistry& registry, const std::string& plugin) {
+                  return Repeat(registry.OwnedBy(plugin) ? 1 : 0, "connection policy");
+              });
+    AddTarget(targets_, "minimal_plugin_register_context_contributors", "context",
+              context_contributors_,
+              [](const agent::ContextContributorRegistry& registry, const std::string& plugin) {
+                  return Repeat(registry.CountOwnedBy(plugin), "session prefill");
+              });
+    AddTarget(targets_, "minimal_plugin_register_mention_resolver", "mention", mention_resolvers_,
+              [](const agent::MentionResolverRegistry& registry, const std::string& plugin) {
+                  return Repeat(registry.OwnedBy(plugin) ? 1 : 0, "@-mention resolver");
+              });
+    AddTarget(targets_, "minimal_plugin_register_permission_advisor", "advisor",
+              permission_advisors_,
+              [](const tools::PermissionAdvisorRegistry& registry, const std::string& plugin) {
+                  return Repeat(registry.Has(plugin) ? 1 : 0, "permission prompts");
+              });
+    AddTarget(targets_, "minimal_plugin_register_model_catalogs", "catalog", model_catalogs_,
+              KindsOwned<llm::ModelCatalogRegistry>);
+    AddTarget(targets_, "minimal_plugin_register_metadata_catalogs", "metadata",
+              metadata_catalogs_,
+              [](const llm::MetadataCatalogRegistry& registry, const std::string& plugin) {
+                  std::vector<std::string> out = registry.KeysOwnedBy(plugin);
+                  if (registry.HasFallbackFrom(plugin)) out.push_back(kMetadataFallbackLabel);
+                  return out;
+              });
+    AddTarget(targets_, "minimal_plugin_register_variant_params", "variant", variant_params_,
+              KindsOwned<llm::VariantParamsRegistry>);
+    AddTarget(targets_, "minimal_plugin_register_compaction_strategies", "compaction",
+              compaction_strategies_, KindsOwned<agent::CompactionStrategyRegistry>);
+    AddTarget(targets_, "minimal_plugin_register_services", "service", services_,
+              [](const ServiceRegistry& registry, const std::string& plugin) {
+                  std::vector<std::string> out;
+                  for (const auto& entry : registry.attributions()) {
+                      if (entry.plugin_name == plugin) out.push_back(entry.service_name);
+                  }
+                  return out;
+              });
+}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -257,309 +402,43 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         }
     }
 
-    // Partial-registration rollback, captured BEFORE the first hook runs. If
-    // any hook throws, everything the plugin registered in the removal-safe
-    // registries is stripped: a user plugin's failure is only a warning, so a
-    // partially-initialized plugin must not leave live, attributed artifacts
-    // behind. Four registries here have a removal seam (observers via a count
-    // snapshot taken here); the REST do not -- hook points, provider
-    // factories, model catalogs, compaction strategies, permission advisors,
-    // mention resolvers and auth providers stay live, which the warning says
-    // loudly. Hook points and permission advisors still carry ATTRIBUTION
-    // windows below -- they simply cannot be rolled back. Removal is
-    // unaffected by aliasing:
-    // ApplyAliases runs after ALL plugin loading (main.cpp), so the tool and
-    // command maps are still keyed by original attribution names here.
-    const std::size_t observers_before =
-        observers_ != nullptr ? observers_->observer_count() : 0;
-    const std::size_t contributors_before =
-        context_contributors_ != nullptr ? context_contributors_->count() : 0;
-    auto rollback = [this, &record, observers_before, contributors_before] {
-        tools_.RemoveByAttribution(record.name);
-        if (commands_ != nullptr) commands_->RemoveByAttribution(record.name);
-        if (services_ != nullptr) services_->RemoveByAttribution(record.name);
-        if (observers_ != nullptr) observers_->RemoveAfter(observers_before);
-        if (context_contributors_ != nullptr) context_contributors_->RemoveAfter(contributors_before);
+    // A user plugin's failure is only a warning, so a plugin whose hook throws
+    // must not leave live, attributed registrations behind: everything it
+    // registered, in every registry, is removed.
+    auto rollback = [this, &record] {
+        for (const auto& target : targets_) target->Remove(record.name);
         common::DefaultLogger().warn(
-            "plugin '{}': registration threw; PARTIALLY rolled back -- its tools, "
-            "commands, services, session observers and context contributors were removed, but any hook "
-            "points, provider factories, model catalogs, compaction strategies, "
-            "permission advisors, mention resolvers or auth providers it registered "
-            "remain live",
-            record.name);
+            "plugin '{}': registration threw; everything it registered was removed", record.name);
     };
 
-    // Attribution window: every tool registered inside it belongs to this
-    // plugin, which is what lets a later collision name both culprits.
-    const std::size_t tools_before = tools_.attributions().size();
-    if (hook_points_ != nullptr) {
-        // FIRST, deliberately, before tools/commands/services: a plugin's tool
-        // registration may want to capture the HookPoint handle its own
-        // register_hook_points just minted (tools-bash's before_command is the
-        // worked example), and capture-before-use requires the point to exist
-        // by the time the tool is constructed.
-        const std::size_t points_before = hook_points_->attributions().size();
-        if (auto register_points = Lookup<RegisterHookPointsFn>(
-                handle, "minimal_plugin_register_hook_points")) {
-            if (!GuardedRegistration(record, "minimal_plugin_register_hook_points",
-                                     [&] { hook_points_->SetAttribution(record.name); },
-                                     [&] { register_points(*hook_points_, context); },
-                                     [&] { hook_points_->ClearAttribution(); }, rollback)) {
-                return record;
-            }
-        }
-        const auto& point_attributions = hook_points_->attributions();
-        for (std::size_t i = points_before; i < point_attributions.size(); ++i) {
-            record.registered_hook_points.push_back(point_attributions[i].point_name);
+    // Each hook runs inside its registry's attribution window, which is what
+    // lets a collision name both plugins and a rollback find what to remove.
+    // Order matters once: hook points go first, so a tool can capture the
+    // HookPoint handle its own plugin just registered.
+    for (const auto& target : targets_) {
+        if (!GuardedRegistration(
+                record, target->symbol, [&] { target->Open(record.name); },
+                [&] { target->Invoke(handle, context); }, [&] { target->Close(); }, rollback)) {
+            return record;
         }
     }
-    if (auto register_tools = Lookup<RegisterToolsFn>(handle, "minimal_plugin_register_tools")) {
-        const bool ok = GuardedRegistration(
-            record, "minimal_plugin_register_tools",
-            [&] { tools_.SetAttribution(record.name); },
-            [&] { register_tools(tools_, context); },
-            [&] { tools_.ClearAttribution(); }, rollback);
-        if (!ok) return record;
+    for (const auto& target : targets_) {
+        std::vector<std::string> owned = target->Owned(record.name);
+        if (!owned.empty()) record.registered[target->label] = std::move(owned);
     }
 
-    const auto& attributions = tools_.attributions();
-    for (std::size_t i = tools_before; i < attributions.size(); ++i) {
-        record.registered_tools.push_back(attributions[i].tool_name);
-    }
-
-    if (auto register_providers = Lookup<RegisterProviderFactoriesFn>(
-            handle, "minimal_plugin_register_provider_factories")) {
-        const auto before = providers_.kinds();
-        const bool ok = GuardedRegistration(
-            record, "minimal_plugin_register_provider_factories",
-            [&] { providers_.SetAttribution(record.name); },
-            [&] { register_providers(providers_, context); },
-            [&] { providers_.ClearAttribution(); }, rollback);
-        if (!ok) return record;
-        const auto after = providers_.kinds();
-        std::set_difference(after.begin(), after.end(), before.begin(), before.end(),
-                            std::back_inserter(record.registered_provider_kinds));
-    }
-
-    if (commands_ != nullptr) {
-        // Same attribution window as tools, and for the same two reasons: a
-        // collision must be able to name both plugins, and an alias is keyed by
-        // "plugin.original_name" so the registry has to know whose it is.
-        const std::size_t commands_before = commands_->attributions().size();
-        if (auto register_commands =
-                Lookup<RegisterCommandsFn>(handle, "minimal_plugin_register_commands")) {
-            const bool ok = GuardedRegistration(
-                record, "minimal_plugin_register_commands",
-                [&] { commands_->SetAttribution(record.name); },
-                [&] { register_commands(*commands_, context); },
-                [&] { commands_->ClearAttribution(); }, rollback);
-            if (!ok) return record;
-        }
-
-        const auto& command_attributions = commands_->attributions();
-        for (std::size_t i = commands_before; i < command_attributions.size(); ++i) {
-            record.registered_commands.push_back(command_attributions[i].surface_name);
-        }
-
-        // The OPTIONAL per-root hook is never CALLED here (there is no project
-        // root at startup) -- only checked for and, if present, remembered
-        // with a copy of this plugin's own `context` for
-        // RegisterProjectCommands to call later, per root, on demand.
-        if (Lookup<RegisterProjectCommandsFn>(handle, "minimal_plugin_register_project_commands") !=
+    // The OPTIONAL per-root commands hook is never CALLED here (there is no
+    // project root at startup) -- only remembered, with a copy of this
+    // plugin's `context`, for RegisterProjectCommands to call later, per root.
+    if (commands_ != nullptr &&
+        Lookup<RegisterProjectCommandsFn>(handle, "minimal_plugin_register_project_commands") !=
             nullptr) {
-            project_command_plugins_.push_back(
-                std::make_unique<ProjectCommandsPlugin>(ProjectCommandsPlugin{
-                    handle, record.name, context}));
-        }
+        project_command_plugins_.push_back(
+            std::make_unique<ProjectCommandsPlugin>(ProjectCommandsPlugin{handle, record.name, context}));
     }
 
-    if (observers_ != nullptr) {
-        if (auto register_observer = Lookup<RegisterSessionObserverFn>(
-                handle, "minimal_plugin_register_session_observer")) {
-            if (!GuardedRegistration(record, "minimal_plugin_register_session_observer",
-                                      [] {}, [&] { register_observer(*observers_, context); },
-                                      [] {}, rollback)) {
-                return record;
-            }
-            record.registered_session_observer = true;
-        }
-    }
-
-    if (auth_providers_ != nullptr) {
-        if (auto register_auth = Lookup<RegisterAuthProviderFn>(
-                handle, "minimal_plugin_register_auth_provider")) {
-            if (!GuardedRegistration(record, "minimal_plugin_register_auth_provider", [] {},
-                                      [&] { register_auth(*auth_providers_, context); }, [] {},
-                                      rollback)) {
-                return record;
-            }
-            record.registered_auth_provider = true;
-        }
-    }
-
-    if (context_contributors_ != nullptr) {
-        if (auto register_contributors = Lookup<RegisterContextContributorsFn>(
-                handle, "minimal_plugin_register_context_contributors")) {
-            const std::size_t before = context_contributors_->count();
-            if (!GuardedRegistration(
-                    record, "minimal_plugin_register_context_contributors",
-                    [&] { context_contributors_->SetAttribution(record.name); },
-                    [&] { register_contributors(*context_contributors_, context); },
-                    [&] { context_contributors_->ClearAttribution(); }, rollback)) {
-                return record;
-            }
-            record.registered_context_contributor = context_contributors_->count() > before;
-        }
-    }
-
-    if (mention_resolvers_ != nullptr) {
-        if (auto register_resolver = Lookup<RegisterMentionResolverFn>(
-                handle, "minimal_plugin_register_mention_resolver")) {
-            if (!GuardedRegistration(record, "minimal_plugin_register_mention_resolver",
-                                      [] {}, [&] { register_resolver(*mention_resolvers_, context); },
-                                      [] {}, rollback)) {
-                return record;
-            }
-            record.registered_mention_resolver = true;
-        }
-    }
-
-    if (permission_advisors_ != nullptr) {
-        // Same attribution window as tools and commands: registrations arriving
-        // inside it are keyed by this plugin's name, which is what
-        // permissions.json's "advisor" field selects on.
-        const std::size_t advisors_before = permission_advisors_->attributions().size();
-        if (auto register_advisor = Lookup<RegisterPermissionAdvisorFn>(
-                handle, "minimal_plugin_register_permission_advisor")) {
-            if (!GuardedRegistration(record, "minimal_plugin_register_permission_advisor",
-                                      [&] { permission_advisors_->SetAttribution(record.name); },
-                                      [&] { register_advisor(*permission_advisors_, context); },
-                                      [&] { permission_advisors_->ClearAttribution(); },
-                                      rollback)) {
-                return record;
-            }
-        }
-        record.registered_permission_advisor =
-            permission_advisors_->attributions().size() > advisors_before;
-    }
-
-    if (model_catalogs_ != nullptr) {
-        // Attributed the same way as tools/commands/provider factories now
-        // (SetAttribution/ClearAttribution): the kinds-before/after diff this
-        // replaced could not see a LOSING registration at all -- a losing
-        // plugin's Register() silently no-ops, so its own kinds_after equals
-        // its kinds_before, and the diff below never even ran for the kind it
-        // tried to claim. attributions_'s Register-time recording (see
-        // ProviderFactoryRegistry's identical seam) is what lets the sanity
-        // check name BOTH claimants instead of silently reporting nothing.
-        const auto kinds_before = model_catalogs_->kinds();
-        if (auto register_catalogs = Lookup<RegisterModelCatalogsFn>(
-                handle, "minimal_plugin_register_model_catalogs")) {
-            if (!GuardedRegistration(record, "minimal_plugin_register_model_catalogs",
-                                      [&] { model_catalogs_->SetAttribution(record.name); },
-                                      [&] { register_catalogs(*model_catalogs_, context); },
-                                      [&] { model_catalogs_->ClearAttribution(); }, rollback)) {
-                return record;
-            }
-        }
-        const auto kinds_after = model_catalogs_->kinds();
-        std::set_difference(kinds_after.begin(), kinds_after.end(), kinds_before.begin(),
-                            kinds_before.end(), std::back_inserter(record.registered_model_catalog_kinds));
-    }
-
-    if (metadata_catalogs_ != nullptr) {
-        // Attribution window like the registries that name both claimants on a
-        // collision; the kinds diff records what landed for the startup print
-        // and the sanity check. Falls in the no-rollback family of the warning
-        // below -- enrichment catalogs hold no config-critical state, but
-        // stripping them from the registry is not a removal seam this loader
-        // offers.
-        const auto kinds_before = metadata_catalogs_->kinds();
-        const std::size_t fallbacks_before = metadata_catalogs_->fallbacks().size();
-        if (auto register_metadata = Lookup<RegisterMetadataCatalogsFn>(
-                handle, "minimal_plugin_register_metadata_catalogs")) {
-            if (!GuardedRegistration(record, "minimal_plugin_register_metadata_catalogs",
-                                     [&] { metadata_catalogs_->SetAttribution(record.name); },
-                                     [&] { register_metadata(*metadata_catalogs_, context); },
-                                     [&] { metadata_catalogs_->ClearAttribution(); }, rollback)) {
-                return record;
-            }
-        }
-        const auto kinds_after = metadata_catalogs_->kinds();
-        std::set_difference(kinds_after.begin(), kinds_after.end(), kinds_before.begin(),
-                            kinds_before.end(),
-                            std::back_inserter(record.registered_metadata_catalog_kinds));
-        record.registered_metadata_fallback = metadata_catalogs_->fallbacks().size() >
-                                              fallbacks_before;
-    }
-
-    if (variant_params_ != nullptr) {
-        // Same attribution/kinds-diff shape as model_catalogs_ above -- see
-        // that block's comment for why the diff (not just Register's bool)
-        // is what lets the sanity check name both claimants on a collision.
-        const auto kinds_before = variant_params_->kinds();
-        if (auto register_variant_params = Lookup<RegisterVariantParamsFn>(
-                handle, "minimal_plugin_register_variant_params")) {
-            if (!GuardedRegistration(record, "minimal_plugin_register_variant_params",
-                                      [&] { variant_params_->SetAttribution(record.name); },
-                                      [&] { register_variant_params(*variant_params_, context); },
-                                      [&] { variant_params_->ClearAttribution(); }, rollback)) {
-                return record;
-            }
-        }
-        const auto kinds_after = variant_params_->kinds();
-        std::set_difference(kinds_after.begin(), kinds_after.end(), kinds_before.begin(),
-                            kinds_before.end(),
-                            std::back_inserter(record.registered_variant_params_kinds));
-    }
-
-    if (compaction_strategies_ != nullptr) {
-        // Same attribution-free, kinds-diff shape as model_catalogs_ above:
-        // CompactionStrategyRegistry has no per-kind attribution tracking
-        // (Register's bool return is enough -- a collision here means the
-        // plugin's OWN registration silently no-op'd, diagnosed the same way
-        // ModelCatalogRegistry's is, by kind-set diffing before/after).
-        const auto kinds_before = compaction_strategies_->kinds();
-        if (auto register_strategies = Lookup<RegisterCompactionStrategiesFn>(
-                handle, "minimal_plugin_register_compaction_strategies")) {
-            if (!GuardedRegistration(record, "minimal_plugin_register_compaction_strategies", [] {},
-                                      [&] { register_strategies(*compaction_strategies_, context); },
-                                      [] {}, rollback)) {
-                return record;
-            }
-        }
-        const auto kinds_after = compaction_strategies_->kinds();
-        std::set_difference(kinds_after.begin(), kinds_after.end(), kinds_before.begin(),
-                            kinds_before.end(),
-                            std::back_inserter(record.registered_compaction_strategy_kinds));
-    }
-
-    if (services_ != nullptr) {
-        // Same attribution window as tools and commands: a duplicate service
-        // name must be diagnosable down to BOTH plugins, which is what the
-        // (plugin, name) pairs feed NameRegistry.
-        const std::size_t services_before = services_->attributions().size();
-        if (auto register_services = Lookup<RegisterServicesFn>(
-                handle, "minimal_plugin_register_services")) {
-            if (!GuardedRegistration(record, "minimal_plugin_register_services",
-                                      [&] { services_->SetAttribution(record.name); },
-                                      [&] { register_services(*services_, context); },
-                                      [&] { services_->ClearAttribution(); }, rollback)) {
-                return record;
-            }
-        }
-
-        const auto& service_attributions = services_->attributions();
-        for (std::size_t i = services_before; i < service_attributions.size(); ++i) {
-            record.registered_services.push_back(service_attributions[i].service_name);
-        }
-    }
-
-    // Marked Loaded HERE, after the LAST registration hook, so "Loaded" means
-    // every hook ran to completion. It used to be set before register_services,
-    // so a plugin whose services hook threw still returned Loaded -- and since
-    // the sanity check skips Loaded records, that failure produced no warning
-    // at all.
+    // Loaded only after the LAST hook completed: the sanity check skips
+    // Loaded records, so a failure must never be reported as one.
     record.status = LoadStatus::Loaded;
 
     return record;

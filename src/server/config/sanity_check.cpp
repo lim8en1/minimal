@@ -336,7 +336,7 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
     for (const auto& record : inputs_.plugin_records) {
         if (record.status != plugins::LoadStatus::Loaded) continue;
         const auto label = record.name.empty() ? record.file.filename().string() : record.name;
-        for (const auto& kind : record.registered_provider_kinds) {
+        for (const auto& kind : record.Registered("provider")) {
             const auto [it, inserted] = kind_owner.try_emplace(kind, label);
             if (!inserted) {
                 results.push_back(Warning("provider_kinds", "provider kind '" + kind + "' is registered by both " +
@@ -352,7 +352,7 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
     for (const auto& record : inputs_.plugin_records) {
         if (record.status != plugins::LoadStatus::Loaded) continue;
         const auto label = record.name.empty() ? record.file.filename().string() : record.name;
-        for (const auto& kind : record.registered_model_catalog_kinds) {
+        for (const auto& kind : record.Registered("catalog")) {
             const auto [it, inserted] = catalog_owner.try_emplace(kind, label);
             if (!inserted) {
                 results.push_back(Warning("provider_catalogs",
@@ -725,36 +725,33 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
                 "the plugins"));
     }
 
-    // THE THIRD REGISTRATION NAMESPACE. Tools and commands both feed
-    // ResolveRegistrationNames and collide fatally; provider kinds were exempt,
-    // because ProviderFactoryRegistry::Register signalled a duplicate only
-    // through a return value the loader ignored. A second plugin registering
-    // `openai` was therefore dropped in silence, and which backend a session
-    // actually got depended on plugin load order -- the precise outcome the
-    // collision rule exists to prevent. Fatal like the other two: there is no
-    // alias mechanism for a kind, so disabling one plugin is the only fix.
-    for (const auto& collision : inputs_.provider_factories.collisions()) {
-        results.push_back(
-            Fatal("name_collisions",
-                  "provider kind '" + collision.kind + "' is registered by both " +
-                      PluginLabel(collision.first_plugin) + " and " +
-                      PluginLabel(collision.second_plugin) +
-                      " -- disable one of them; provider kinds cannot be aliased"));
-    }
-
-    // Model catalogs share the provider kind STRING but are a separate
-    // registration namespace (ModelCatalogRegistry), with the same
-    // load-order-dependent silent-drop failure mode ProviderFactoryRegistry
-    // had before its own attribution landed -- now fixed the same way.
-    if (inputs_.model_catalogs != nullptr) {
-        for (const auto& collision : inputs_.model_catalogs->collisions()) {
-            results.push_back(
-                Fatal("name_collisions",
-                      "model catalog for kind '" + collision.kind + "' is registered by both " +
-                          PluginLabel(collision.first_plugin) + " and " +
-                          PluginLabel(collision.second_plugin) +
-                          " -- disable one of them; model catalog kinds cannot be aliased"));
+    // The kind-keyed registries (AttributedRegistry): first registration wins
+    // and the loser is recorded. Fatal, like tool and command collisions --
+    // otherwise which implementation serves a kind depends on plugin load
+    // order, and there is no alias mechanism for a kind, so disabling one
+    // plugin is the only fix.
+    const auto report = [&](const char* what, const auto& collisions) {
+        for (const auto& collision : collisions) {
+            results.push_back(Fatal("name_collisions",
+                                    std::string(what) + " '" + collision.kind +
+                                        "' is registered by both " +
+                                        PluginLabel(collision.first_plugin) + " and " +
+                                        PluginLabel(collision.second_plugin) +
+                                        " -- disable one of them; kinds cannot be aliased"));
         }
+    };
+    report("provider kind", inputs_.provider_factories.collisions());
+    if (inputs_.model_catalogs != nullptr) {
+        report("model catalog kind", inputs_.model_catalogs->collisions());
+    }
+    if (inputs_.metadata_catalogs != nullptr) {
+        report("metadata catalog kind", inputs_.metadata_catalogs->collisions());
+    }
+    if (inputs_.variant_params != nullptr) {
+        report("variant params kind", inputs_.variant_params->collisions());
+    }
+    if (inputs_.compaction_strategies != nullptr) {
+        report("compaction strategy", inputs_.compaction_strategies->collisions());
     }
 
     // Per-preset tool_config namespaces: the same fatal rule, one level up.

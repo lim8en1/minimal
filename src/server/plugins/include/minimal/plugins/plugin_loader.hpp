@@ -1,8 +1,10 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -34,6 +36,10 @@ struct ProjectCommandsPlugin;
 // distinction, and it drives both the default enablement and the severity of a
 // load failure -- bundled failures are fatal (a harness without tools-fs is
 // useless, not degraded), user failures are warnings.
+// The "metadata" entry for a plugin that appended a fallback enrichment
+// catalog (one that answers for kinds nobody named).
+inline constexpr const char* kMetadataFallbackLabel = "(fallback: kinds nobody named)";
+
 enum class Provenance { Bundled, User };
 
 enum class LoadStatus {
@@ -72,42 +78,18 @@ struct PluginRecord {
     // that was aliased at registration is still listed under the name it
     // registered with, because collision detection and permission keys are
     // computed from "who provided what", which a rename does not change.
-    std::vector<std::string> registered_tools;
-    std::vector<std::string> registered_provider_kinds;
-    std::vector<std::string> registered_commands;  // surface names, after aliasing
-    bool registered_session_observer = false;
-    bool registered_auth_provider = false;
-    bool registered_mention_resolver = false;
-    bool registered_context_contributor = false;
-    // True when the plugin registered an advisor that actually landed (a
-    // duplicate from the same plugin is refused and does not count twice).
-    bool registered_permission_advisor = false;
-    // ORIGINAL service names, as the plugin declared them. Services live in
-    // their own namespace -- no aliasing, no permission keys.
-    std::vector<std::string> registered_services;
-    // Catalog kinds, keyed like registered_provider_kinds (the same kind string
-    // a providers.json `backend` names). Feeds the sanity check's discover-entry
-    // warnings and its duplicate-catalog report.
-    std::vector<std::string> registered_model_catalog_kinds;
-    // Enrichment-catalog kinds, keyed like registered_model_catalog_kinds (a
-    // models.dev-style default source registers under the wire kinds it
-    // knows). Feeds the startup print and the sanity check's metadata report.
-    std::vector<std::string> registered_metadata_catalog_kinds;
-    // True when the plugin appended a fallback enrichment catalog (answers for
-    // kinds nobody named). Recorded for the same diagnostics.
-    bool registered_metadata_fallback = false;
-    // Compaction strategy kinds, keyed like registered_provider_kinds. Feeds
-    // the sanity check's memory.compaction_strategy resolution warning.
-    std::vector<std::string> registered_compaction_strategy_kinds;
-    // Variant-params kinds, keyed like registered_provider_kinds (the same
-    // kind string a providers.json `backend` names). Feeds the startup print;
-    // an unregistered kind is not an error -- it just means that backend uses
-    // the generic reasoning_effort fallback.
-    std::vector<std::string> registered_variant_params_kinds;
-    // FULL hook point names, as the plugin declared them. Points live in their
-    // own namespace -- no aliasing, no permission keys -- and a duplicate is
-    // fatal at startup via the NameRegistry (NameKind::HookPoint).
-    std::vector<std::string> registered_hook_points;
+    // What this plugin holds, per registry label ("tool", "provider",
+    // "command", "observer", ...; see PluginLoader::BuildTargets). Kind- and
+    // name-keyed registries list their keys (commands by surface name, after
+    // aliasing); registries whose entries carry no name list one description
+    // per entry. Absent label: the plugin registered nothing there.
+    std::map<std::string, std::vector<std::string>> registered;
+
+    const std::vector<std::string>& Registered(std::string_view label) const {
+        static const std::vector<std::string> kNone;
+        const auto it = registered.find(std::string(label));
+        return it == registered.end() ? kNone : it->second;
+    }
 
     bool ok() const { return status == LoadStatus::Loaded; }
 };
@@ -173,8 +155,12 @@ public:
     // when this changes. Empty when no plugin exports the hook.
     std::string ProjectCommandsFingerprint(const std::filesystem::path& project_root) const;
 
+    // One registry the loader drives; defined in plugin_loader.cpp.
+    struct Target;
+
 private:
     PluginRecord LoadOne(const PluginCandidate& candidate);
+    void BuildTargets();
 
     tools::ToolRegistry& tools_;
     llm::ProviderFactoryRegistry& providers_;
@@ -242,6 +228,7 @@ private:
     // check. An unregistered kind is not a degraded state -- it is the
     // ordinary case for every backend that needs no per-kind wire shape.
     llm::VariantParamsRegistry* variant_params_ = nullptr;
+    std::vector<std::unique_ptr<Target>> targets_;  // registration order
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 
     // One entry per loaded plugin that exports

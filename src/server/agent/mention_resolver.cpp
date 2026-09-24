@@ -104,7 +104,31 @@ bool MentionResolverRegistry::TrySetOverride(std::shared_ptr<MentionResolver> re
         return false;
     }
     override_ = std::move(resolver);
+    override_owner_ = attribution_;
     return true;
+}
+
+void MentionResolverRegistry::SetAttribution(std::string plugin_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    attribution_ = std::move(plugin_name);
+}
+
+void MentionResolverRegistry::ClearAttribution() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    attribution_.clear();
+}
+
+bool MentionResolverRegistry::OwnedBy(const std::string& plugin_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return override_ != nullptr && override_owner_ == plugin_name;
+}
+
+void MentionResolverRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (override_ != nullptr && override_owner_ == plugin_name) {
+        override_.reset();
+        override_owner_.clear();
+    }
 }
 
 const MentionResolver& MentionResolverRegistry::Active() const {

@@ -18,6 +18,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include <memory>
+#include <string>
 #include <mutex>
 
 namespace minimal::rpc {
@@ -37,6 +38,13 @@ public:
     // First registration wins; later ones are recorded and refused.
     void Register(std::shared_ptr<AuthProvider> provider);
 
+    // The loader's attribution window; the provider remembers its plugin so a
+    // failed plugin's registration can be rolled back (startup only).
+    void SetAttribution(std::string plugin_name);
+    void ClearAttribution();
+    bool OwnedBy(const std::string& plugin_name) const;
+    void RemoveByAttribution(const std::string& plugin_name);
+
     // Null when no provider registered -- the pass-through default. Locked
     // against Register()'s write; note this only serializes the pointer read
     // itself, not the pointee's lifetime past the lock -- safe because
@@ -49,6 +57,8 @@ public:
 
 private:
     std::shared_ptr<AuthProvider> provider_;
+    std::string owner_;
+    std::string attribution_;
     bool claimed_ = false;  // guarded by mu_ (plugin loading is single-threaded;
                             // the mutex makes the claim race-free regardless)
     mutable std::mutex mu_;

@@ -1,6 +1,6 @@
 // Registers one hook point, the way tools-bash registers before_command.
 // The point name is plugin-qualified (the services convention); the handle is
-// captured so the loader test can verify record.registered_hook_points and the
+// captured so the loader test can verify record.Registered("hook") and the
 // registration-order guarantee (points before tools) -- exposed to the test
 // through the service channel, since a dlopen'd plugin's symbols are private.
 #include "minimal/plugins/plugin_abi.h"

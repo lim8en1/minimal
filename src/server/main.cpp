@@ -454,47 +454,10 @@ int main(int argc, char** argv) {
                     record.name.empty() ? record.file.filename().c_str() : record.name.c_str(),
                     std::string(minimal::plugins::ToString(record.status)).c_str(),
                     record.error.c_str());
-        for (const auto& tool : record.registered_tools) {
-            std::printf("      tool     %s\n", tool.c_str());
-        }
-        for (const auto& kind : record.registered_provider_kinds) {
-            std::printf("      provider %s\n", kind.c_str());
-        }
-        for (const auto& kind : record.registered_model_catalog_kinds) {
-            std::printf("      catalog  %s\n", kind.c_str());
-        }
-        for (const auto& kind : record.registered_metadata_catalog_kinds) {
-            std::printf("      metadata %s\n", kind.c_str());
-        }
-        if (record.registered_metadata_fallback) {
-            std::printf("      metadata (fallback: kinds nobody named)\n");
-        }
-        for (const auto& kind : record.registered_variant_params_kinds) {
-            std::printf("      variant  %s\n", kind.c_str());
-        }
-        for (const auto& point : record.registered_hook_points) {
-            std::printf("      hook     %s\n", point.c_str());
-        }
-        for (const auto& command : record.registered_commands) {
-            std::printf("      command  /%s\n", command.c_str());
-        }
-        if (record.registered_session_observer) {
-            std::printf("      observer session lifecycle\n");
-        }
-        if (record.registered_auth_provider) {
-            std::printf("      auth provider registered\n");
-        }
-        if (record.registered_mention_resolver) {
-            std::printf("      mention resolver\n");
-        }
-        if (record.registered_context_contributor) {
-            std::printf("      context  session prefill\n");
-        }
-        if (record.registered_permission_advisor) {
-            std::printf("      advisor  permission prompts\n");
-        }
-        for (const auto& service : record.registered_services) {
-            std::printf("      service  %s\n", service.c_str());
+        for (const auto& [label, names] : record.registered) {
+            for (const auto& name : names) {
+                std::printf("      %-8s %s\n", label.c_str(), name.c_str());
+            }
         }
     }
 

@@ -1,5 +1,6 @@
 #include "minimal/agent/session_observer_registry.hpp"
 
+#include <algorithm>
 #include <exception>
 #include <utility>
 
@@ -39,6 +40,7 @@ void SessionObserverRegistry::Shutdown() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         released.swap(observers_);
+        owners_.clear();
     }
 }
 
@@ -46,11 +48,31 @@ void SessionObserverRegistry::Register(std::shared_ptr<SessionObserver> observer
     if (observer == nullptr) return;
     std::lock_guard<std::mutex> lock(mutex_);
     observers_.push_back(std::move(observer));
+    owners_.push_back(attribution_);
 }
 
-void SessionObserverRegistry::RemoveAfter(std::size_t existing_count) {
+void SessionObserverRegistry::SetAttribution(std::string plugin_name) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (existing_count < observers_.size()) observers_.resize(existing_count);
+    attribution_ = std::move(plugin_name);
+}
+
+void SessionObserverRegistry::ClearAttribution() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    attribution_.clear();
+}
+
+std::size_t SessionObserverRegistry::CountOwnedBy(const std::string& plugin_name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<std::size_t>(std::count(owners_.begin(), owners_.end(), plugin_name));
+}
+
+void SessionObserverRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (std::size_t i = observers_.size(); i-- > 0;) {
+        if (owners_[i] != plugin_name) continue;
+        observers_.erase(observers_.begin() + static_cast<std::ptrdiff_t>(i));
+        owners_.erase(owners_.begin() + static_cast<std::ptrdiff_t>(i));
+    }
 }
 
 std::size_t SessionObserverRegistry::observer_count() const {

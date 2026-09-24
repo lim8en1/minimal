@@ -160,6 +160,9 @@ public:
     };
     const std::vector<Attribution>& attributions() const { return attributions_; }
 
+    // Rollback for a plugin whose registration hook threw (startup only).
+    void RemoveByAttribution(const std::string& plugin_name);
+
 private:
     std::unordered_map<std::string, std::shared_ptr<PermissionAdvisor>> advisors_;
     std::string attribution_;

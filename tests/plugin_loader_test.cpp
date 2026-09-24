@@ -86,10 +86,10 @@ TEST_CASE("a well-formed plugin loads and contributes its registrations", "[plug
     CHECK(record.version == "1.0.0");
     CHECK(record.error.empty());
 
-    CHECK(record.registered_tools == std::vector<std::string>{"fixture_tool"});
-    CHECK(record.registered_provider_kinds == std::vector<std::string>{"fixture"});
-    CHECK(record.registered_model_catalog_kinds == std::vector<std::string>{"fixture"});
-    CHECK(record.registered_variant_params_kinds == std::vector<std::string>{"fixture"});
+    CHECK(record.Registered("tool") == std::vector<std::string>{"fixture_tool"});
+    CHECK(record.Registered("provider") == std::vector<std::string>{"fixture"});
+    CHECK(record.Registered("catalog") == std::vector<std::string>{"fixture"});
+    CHECK(record.Registered("variant") == std::vector<std::string>{"fixture"});
 
     // The registrations reached the real registries, not just the record.
     CHECK(h.tool_registry.Find("fixture_tool") != nullptr);
@@ -146,7 +146,7 @@ TEST_CASE("the loader dlsyms the mention-resolver seam into a real registry",
     const auto records = loader.LoadAll({Enabled("fixture-good")});
 
     REQUIRE(records.size() == 1);
-    CHECK(records.front().registered_mention_resolver);
+    CHECK(!records.front().Registered("mention").empty());
     CHECK(resolvers.has_override());
 
     // The override reached Active(), not just the record: a plugin-registered
@@ -172,7 +172,7 @@ TEST_CASE("the loader dlsyms the context-contributor seam, attributed to the plu
     const auto records = loader.LoadAll({Enabled("fixture-good")});
 
     REQUIRE(records.size() == 1);
-    CHECK(records.front().registered_context_contributor);
+    CHECK(!records.front().Registered("context").empty());
     CHECK(contributors.Render({}) == "## Fixture\nfixture context");
 
     // Attribution is the plugin's own name, which is what `disabled` keys on.
@@ -190,7 +190,7 @@ TEST_CASE("a loader without the registry leaves the seam unoffered", "[plugin_lo
     CHECK(records.front().status == LoadStatus::Loaded);
     // Null registry means the symbol is simply not offered; the plugin treats
     // every registration hook as optional, so the load still succeeds.
-    CHECK_FALSE(records.front().registered_mention_resolver);
+    CHECK(records.front().Registered("mention").empty());
 }
 
 TEST_CASE("an ABI-mismatched plugin is skipped without running its code",
@@ -233,8 +233,8 @@ TEST_CASE("a plugin exporting no optional seams loads cleanly", "[plugin_loader]
 
     REQUIRE(records.size() == 1);
     CHECK(records.front().status == LoadStatus::Loaded);
-    CHECK(records.front().registered_tools.empty());
-    CHECK(records.front().registered_provider_kinds.empty());
+    CHECK(records.front().Registered("tool").empty());
+    CHECK(records.front().Registered("provider").empty());
     CHECK(h.tool_registry.size() == 0);
 }
 
@@ -474,7 +474,7 @@ TEST_CASE("a plugin's hook points register before its tools, and land on the rec
     REQUIRE(records.size() == 1);
     const auto& record = records.front();
     CHECK(record.status == LoadStatus::Loaded);
-    CHECK(record.registered_hook_points == std::vector<std::string>{"fixture-hook.before_thing"});
+    CHECK(record.Registered("hook") == std::vector<std::string>{"fixture-hook.before_thing"});
 
     // The ordering guarantee the worked example (tools-bash) rests on: when the
     // plugin's tools registered, its HookPoint handle was already minted and
@@ -543,7 +543,7 @@ TEST_CASE("an aliased tool is registered under its surface name", "[plugin_loade
     // The record still reports the ORIGINAL name: collision detection and
     // permission keys are computed from "who provided what", which a rename
     // does not change.
-    CHECK(records.front().registered_tools == std::vector<std::string>{"fixture_tool"});
+    CHECK(records.front().Registered("tool") == std::vector<std::string>{"fixture_tool"});
 
     CHECK(tool_registry.Find("ftool") != nullptr);
     CHECK(tool_registry.Find("fixture_tool") == nullptr);
@@ -751,6 +751,33 @@ TEST_CASE("a throwing plugin's registrations are rolled back out of the registri
     CHECK(h.tool_registry.Find("fixture_tool") != nullptr);
 }
 
+TEST_CASE("a throwing plugin is rolled back out of EVERY registry it touched",
+          "[plugin_loader][invariant]") {
+    // fixture-throws registers into six registries and throws from the last
+    // hook. None of it may stay live.
+    tools::ToolRegistry tool_registry;
+    llm::ProviderFactoryRegistry provider_registry;
+    llm::ModelCatalogRegistry model_catalogs;
+    plugins::ServiceRegistry services;
+    agent::MentionResolverRegistry mention_resolvers(common::DefaultLogger());
+    agent::ContextContributorRegistry contributors(common::DefaultLogger());
+    plugins::PluginLoader loader{tool_registry, provider_registry, nlohmann::json::object(),
+                                 nullptr, nullptr, nullptr, nullptr, &model_catalogs, &services,
+                                 nullptr, {}, nullptr, &mention_resolvers, nullptr, nullptr,
+                                 nullptr, &contributors};
+    const auto records = loader.LoadAll({Enabled("fixture-throws")});
+
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().status == LoadStatus::RegistrationThrew);
+    CHECK(records.front().registered.empty());
+    CHECK(tool_registry.Find("registered_before_throw") == nullptr);
+    CHECK_FALSE(provider_registry.Has("throws-kind"));
+    CHECK_FALSE(model_catalogs.Has("throws-kind"));
+    CHECK_FALSE(mention_resolvers.has_override());
+    CHECK(contributors.count() == 0);
+    CHECK(services.attributions().empty());
+}
+
 TEST_CASE("RemoveByAttribution strips one plugin's registrations and leaves the rest",
           "[plugin_loader]") {
     tools::ToolRegistry tools;
@@ -868,7 +895,7 @@ TEST_CASE("a plugin provides a service through the real loader", "[plugin_loader
     // context_ok marker is provided only when PluginRegistrationContext::services
     // was the very registry dispatched into, which is the consumer channel a
     // plugin captures for later Find calls.
-    CHECK(records.front().registered_services ==
+    CHECK(records.front().Registered("service") ==
           std::vector<std::string>{"fixture.service", "fixture.context_services_ok"});
 
     // ...and the registry holds both.
@@ -887,7 +914,7 @@ TEST_CASE("a plugin offering no service seam loads cleanly", "[plugin_loader][se
     Harness h;
     const auto records = h.loader.LoadAll({Enabled("fixture-good")});
     REQUIRE(records.size() == 1);
-    CHECK(records.front().registered_services.empty());
+    CHECK(records.front().Registered("service").empty());
     CHECK(h.service_registry.attributions().empty());
 }
 

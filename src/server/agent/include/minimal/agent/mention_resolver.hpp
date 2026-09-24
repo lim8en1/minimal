@@ -70,6 +70,13 @@ public:
     // relying on the warning log.
     bool TrySetOverride(std::shared_ptr<MentionResolver> resolver);
 
+    // The loader's attribution window; the override remembers its plugin so a
+    // failed plugin's registration can be rolled back (startup only).
+    void SetAttribution(std::string plugin_name);
+    void ClearAttribution();
+    bool OwnedBy(const std::string& plugin_name) const;
+    void RemoveByAttribution(const std::string& plugin_name);
+
     // The plugin override, or the core default when none registered. Never null.
     const MentionResolver& Active() const;
     bool has_override() const;
@@ -78,6 +85,8 @@ private:
     mutable std::mutex mutex_;
     PrefixMentionResolver default_;
     std::shared_ptr<MentionResolver> override_;
+    std::string override_owner_;
+    std::string attribution_;
     common::Logger& logger_;
 };
 

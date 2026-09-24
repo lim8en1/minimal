@@ -117,13 +117,15 @@ TEST_CASE("context contributors: an over-budget body is cut at a UTF-8 boundary"
     CHECK(registry.Render(Request()) == "## T\n\xC3\xA9\xC3\xA9\n[... section truncated]");
 }
 
-TEST_CASE("context contributors: RemoveAfter rolls back a failed plugin's registrations",
+TEST_CASE("context contributors: RemoveByAttribution rolls back a failed plugin's registrations",
           "[context]") {
     agent::ContextContributorRegistry registry(common::DefaultLogger());
     registry.Register(std::make_shared<FixedContributor>("Keep", "k"));
-    const auto before = registry.count();
+    registry.SetAttribution("broken");
     registry.Register(std::make_shared<FixedContributor>("Drop", "d"));
-    registry.RemoveAfter(before);
+    registry.ClearAttribution();
+    CHECK(registry.CountOwnedBy("broken") == 1);
+    registry.RemoveByAttribution("broken");
     CHECK(registry.count() == 1);
     CHECK(registry.Render(Request()) == "## Keep\nk");
 }

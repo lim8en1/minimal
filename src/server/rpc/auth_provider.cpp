@@ -16,7 +16,32 @@ void AuthProviderRegistry::Register(std::shared_ptr<AuthProvider> provider) {
         return;
     }
     provider_ = std::move(provider);
+    owner_ = attribution_;
     claimed_ = true;
+}
+
+void AuthProviderRegistry::SetAttribution(std::string plugin_name) {
+    std::lock_guard<std::mutex> lock(mu_);
+    attribution_ = std::move(plugin_name);
+}
+
+void AuthProviderRegistry::ClearAttribution() {
+    std::lock_guard<std::mutex> lock(mu_);
+    attribution_.clear();
+}
+
+bool AuthProviderRegistry::OwnedBy(const std::string& plugin_name) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return provider_ != nullptr && owner_ == plugin_name;
+}
+
+void AuthProviderRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (provider_ != nullptr && owner_ == plugin_name) {
+        provider_.reset();
+        owner_.clear();
+        claimed_ = false;
+    }
 }
 
 }  // namespace minimal::rpc
