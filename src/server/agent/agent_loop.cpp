@@ -90,6 +90,27 @@ std::size_t CapToolDisplay(llm::ToolResultBlock& block, std::int64_t max_bytes) 
 // occupancy from the regrown context, the trigger re-fires, and this path
 // runs again -- the cost is one oversized request between resume and the next
 // compaction cycle, not unbounded growth.
+// The output cap a request can actually carry. Backends validate
+// input + max_tokens <= context window, and a catalog-reported cap
+// (OpenRouter's top_provider.max_completion_tokens) can be 90% of the window
+// -- sent verbatim, every turn past ~10% occupancy was a hard 400 that no
+// retry or compaction could clear. Clamped to the room left after the input
+// estimate and a margin for the bytes/4 roughness; floored so a near-full
+// context still sends a usable request rather than a non-positive cap. No
+// window or no cap: nothing to clamp against, the cap passes through.
+constexpr std::int64_t kOutputCapMinMarginTokens = 4096;
+constexpr std::int64_t kOutputCapMarginPercent = 2;
+constexpr std::int64_t kOutputCapFloorTokens = 1024;
+
+std::optional<int> FitOutputCap(std::optional<int> cap, std::optional<std::int64_t> window,
+                                std::int64_t input_tokens) {
+    if (!cap || !window || *window <= 0) return cap;
+    const std::int64_t margin =
+        std::max(kOutputCapMinMarginTokens, *window * kOutputCapMarginPercent / 100);
+    const std::int64_t room = std::max(kOutputCapFloorTokens, *window - input_tokens - margin);
+    return static_cast<int>(std::min<std::int64_t>(*cap, room));
+}
+
 constexpr std::int64_t kElisionMinSizeToBother = 1000;  // below this, eliding buys nothing
 constexpr std::int64_t kElisionTargetBytes = 500;
 
@@ -390,12 +411,17 @@ AgentLoop::SystemAndTools AgentLoop::BuildSystemAndTools() const {
 llm::ChatRequest AgentLoop::BuildChatRequest() const {
     llm::ChatRequest request;
     SystemAndTools system_and_tools = BuildSystemAndTools();
+    // The larger of the fresh estimate and the last backend-reported
+    // occupancy: the estimate can undercount, the occupancy lags a round.
+    const std::int64_t input_tokens =
+        std::max(EstimateContextTokens(system_and_tools.system, system_and_tools.tools),
+                 tokens_.last_occupancy());
     request.system = std::move(system_and_tools.system);
     request.tools = std::move(system_and_tools.tools);
     request.messages = history_;
     request.model = preset_.provider.model_name;
     request.parameters = preset_.parameters;
-    request.max_tokens = preset_.max_tokens;
+    request.max_tokens = FitOutputCap(preset_.max_tokens, preset_.context_window_tokens, input_tokens);
     // The harness session id, riding every request this loop builds -- the
     // opt-out (parameters "session_id": false) is the provider builder's
     // decision, made per request from the parameters riding alongside.
@@ -887,6 +913,17 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
         params.model_name = config_.small_model->model_name;
         params.parameters = config_.small_model->parameters;
         params.max_tokens = config_.small_model->max_tokens;
+    }
+    // The summarizer request carries the whole history too, so the same
+    // input + max_tokens <= window rule applies -- against the window of
+    // whichever model serves it.
+    {
+        const bool small = summarizer_provider != &provider_.get();
+        const std::optional<std::int64_t> window =
+            small ? config_.small_model->context_window_tokens : preset_.context_window_tokens;
+        const std::int64_t input_tokens = std::max(
+            params.last_reported_input_tokens, EstimateContextTokens(params.system, params.tools));
+        params.max_tokens = FitOutputCap(params.max_tokens, window, input_tokens);
     }
 
     // core.pre_compact: observe-only, fired once per compaction attempt, after

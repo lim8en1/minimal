@@ -122,6 +122,8 @@ struct LoopConfig {
         std::string model_name;
         nlohmann::json parameters = nlohmann::json::object();
         std::optional<int> max_tokens = std::nullopt;
+        // Clamps max_tokens so the summarizer request fits the window.
+        std::optional<std::int64_t> context_window_tokens = std::nullopt;
     };
     std::optional<SmallModel> small_model;
 

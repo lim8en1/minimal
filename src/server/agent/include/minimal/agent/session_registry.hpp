@@ -221,6 +221,7 @@ public:
         small.model_name = resolved->provider.model_name;
         small.parameters = resolved->parameters;
         small.max_tokens = resolved->max_tokens;
+        small.context_window_tokens = resolved->context_window_tokens;
         loop_config_.small_model = std::move(small);
     }
 

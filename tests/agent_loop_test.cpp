@@ -1493,6 +1493,79 @@ TEST_CASE("CompactNow with a prompt override uses it for that call only, and a b
     CHECK(CompactionInstruction(h.provider.requests()[2]).starts_with("PRESET PROMPT"));
 }
 
+TEST_CASE("the output cap is clamped to the room the window has left",
+          "[agent_loop][invariant]") {
+    // OpenRouter reports top_provider.max_completion_tokens as 90% of a 1M
+    // window; sent verbatim, input + max_tokens overflowed the window at ~105k
+    // of input and every later turn 400'd.
+    constexpr std::int64_t kWindow = 1'048'576;
+    constexpr int kCap = 943'718;
+    const std::string big(440'000, 'x');  // ~110k tokens at bytes/4
+
+    SECTION("a large input shrinks the cap below window - input") {
+        Harness h;
+        h.provider.PushResponse(SmallTextResponse("ok"));
+        agent::AgentPreset preset;
+        preset.context_window_tokens = kWindow;
+        preset.max_tokens = kCap;
+        h.Build(std::move(preset));
+        (void)h.loop->RunTurn(UserText(big));
+        REQUIRE(h.provider.requests().size() == 1);
+        const auto sent = h.provider.requests().front().max_tokens;
+        REQUIRE(sent.has_value());
+        CHECK(*sent + 110'000 < kWindow);
+        CHECK(*sent > 900'000);
+    }
+    SECTION("a small input keeps the reported cap") {
+        Harness h;
+        h.provider.PushResponse(SmallTextResponse("ok"));
+        agent::AgentPreset preset;
+        preset.context_window_tokens = kWindow;
+        preset.max_tokens = 4096;
+        h.Build(std::move(preset));
+        (void)h.loop->RunTurn(UserText("hi"));
+        CHECK(h.provider.requests().front().max_tokens == 4096);
+    }
+    SECTION("no window: the cap passes through") {
+        Harness h;
+        h.provider.PushResponse(SmallTextResponse("ok"));
+        agent::AgentPreset preset;
+        preset.max_tokens = kCap;
+        h.Build(std::move(preset));
+        (void)h.loop->RunTurn(UserText(big));
+        CHECK(h.provider.requests().front().max_tokens == kCap);
+    }
+    SECTION("a full context still sends a positive cap") {
+        Harness h;
+        h.provider.PushResponse(SmallTextResponse("ok"));
+        agent::AgentPreset preset;
+        preset.context_window_tokens = 1000;
+        preset.max_tokens = 900;
+        h.Build(std::move(preset));
+        (void)h.loop->RunTurn(UserText(big));
+        const auto sent = h.provider.requests().front().max_tokens;
+        REQUIRE(sent.has_value());
+        CHECK(*sent > 0);
+        CHECK(*sent <= 900);
+    }
+    SECTION("the summarizer request is clamped too") {
+        Harness h;
+        agent::AgentPreset preset;
+        preset.context_window_tokens = kWindow;
+        preset.max_tokens = kCap;
+        preset.compression_prompt = "SUMMARIZE";
+        h.Build(std::move(preset), agent::LoopConfig{}, &agent::compact_messages);
+        h.provider.PushResponse(SmallTextResponse("ok"));
+        (void)h.loop->RunTurn(UserText(big));
+        h.provider.PushResponse(TextResponse("SUMMARY"));
+        REQUIRE(h.loop->CompactNow().has_value());
+        REQUIRE(h.provider.requests().size() == 2);
+        const auto sent = h.provider.requests()[1].max_tokens;
+        REQUIRE(sent.has_value());
+        CHECK(*sent + 110'000 < kWindow);
+    }
+}
+
 TEST_CASE("small_model: the summarizer alone runs on the alternate provider, and the "
           "session's own provider is left untouched",
           "[agent_loop][compaction][small_model]") {
