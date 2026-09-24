@@ -131,9 +131,15 @@ re-embeds everything.
 
 ## Configuration
 
-Shipped disabled (`DefaultsDisabled`): it writes to disk on the model's
-initiative, and under `http` it sends entry text to an endpoint. Enable it
-in plugins.json:
+Enabled by default. Unconfigured it makes no network calls and spawns
+nothing: search is lexical and entries stay untagged. Writes go through the
+`file_write` permission policy. If the store cannot be opened (corrupt, or
+written by a newer binary), the plugin disables itself for that run and
+`/memory` says why; server startup is never affected.
+
+Installs that already have a `plugins.json` keep their existing
+`"enabled": false` entry, so there memory has to be switched on by hand.
+Full config:
 
 ```json
 { "file": "memory.so", "enabled": true,

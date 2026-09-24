@@ -27,15 +27,15 @@ bool IsPluginFile(const std::filesystem::path& path) {
 // should opt into. Match by basename, the same key plugins.json entries use.
 bool DefaultsDisabled(std::string_view file) {
     // session-titler: spends the user's tokens on its own initiative.
-    // memory: writes to disk on the model's initiative and (under the http
-    // embedding strategy) sends entry text to an external endpoint; enabling
-    // it is the operator's informed decision. typesafe-advisor: sends tool
+    // (memory is NOT here: unconfigured it makes no network calls and spawns
+    // nothing, its writes go through the file_write permission policy, and a
+    // store that cannot open degrades the plugin instead of failing startup.)
+    // typesafe-advisor: sends tool
     // input to an external endpoint AND auto-answers permission prompts on the
     // model's behalf -- the operator's two informed decisions, not defaults.
     // All ship present but disabled; once an entry exists in plugins.json the
     // user's `enabled` governs and this list is never consulted again.
     return file == "session-titler.so" || file == "session-titler.dylib" ||
-           file == "memory.so" || file == "memory.dylib" ||
            file == "typesafe-advisor.so" || file == "typesafe-advisor.dylib";
 }
 

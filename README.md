@@ -109,7 +109,7 @@ Everything interesting ships as a plugin: `tools-fs`, `tools-search`,
 `provider-anthropic`, `commands-core`, `commands-md`, `checklist`,
 `signals-message`, `cost-tracker`, `memory`, `session-titler`,
 `typesafe-advisor` (server), and `logo`, `cost-view`, `checklist-view`
-(client). `memory`, `session-titler` and `typesafe-advisor` ship disabled;
+(client). `session-titler` and `typesafe-advisor` ship disabled;
 `typesafe-advisor` sends tool input to an external endpoint to auto-answer
 permission prompts, so enabling it takes two deliberate edits (see its
 [README](plugins/server/typesafe-advisor/README.md)). Drop your own

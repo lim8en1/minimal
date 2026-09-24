@@ -21,8 +21,8 @@ not confident about falls through to you in the usual permission modal.
 
 ## Ships disabled
 
-`typesafe-advisor` is in the `DefaultsDisabled` list, like `session-titler` and
-`memory`: it sends tool input to an external endpoint and auto-answers
+`typesafe-advisor` is in the `DefaultsDisabled` list, like `session-titler`: it
+sends tool input to an external endpoint and auto-answers
 permission prompts. Enabling it is two deliberate edits:
 
 ```json

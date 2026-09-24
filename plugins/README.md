@@ -23,7 +23,7 @@ Entries are configured in `plugins.json` (see
 
 The `config` object is passed to the plugin verbatim — core imposes no schema;
 each plugin owns its own, and every one documented here treats missing or
-partial config as normal (defaults apply). `session-titler`, `memory` and
+partial config as normal (defaults apply). `session-titler` and
 `typesafe-advisor` ship disabled; everything else is load-bearing for the
 default harness.
 
