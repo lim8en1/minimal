@@ -21,10 +21,15 @@ if(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo" OR CMAKE_BUILD_TYPE STREQUAL "Rele
                              "installed binaries will keep full debug info")
         endif()
     else()
-        if(CMAKE_OBJCOPY)
+        if(CMAKE_READELF)
+            set(_MINIMAL_READELF "${CMAKE_READELF}")
+        else()
+            find_program(_MINIMAL_READELF readelf)
+        endif()
+        if(CMAKE_OBJCOPY AND _MINIMAL_READELF)
             set(_MINIMAL_STRIP_DEBUG_INFO_ENABLED TRUE)
         else()
-            message(WARNING "minimal: CMAKE_OBJCOPY not found -- "
+            message(WARNING "minimal: CMAKE_OBJCOPY or readelf not found -- "
                              "installed binaries will keep full debug info")
         endif()
     endif()
@@ -93,24 +98,37 @@ function(minimal_strip_debug_info target dest_subdir)
             get_filename_component(_msdi_name \"\${_msdi_file}\" NAME)
             file(MAKE_DIRECTORY \"\${_msdi_debug_dir}\")
             set(_msdi_debug \"\${_msdi_debug_dir}/\${_msdi_name}.debug\")
-            message(STATUS \"minimal: splitting debug info for \${_msdi_file}\")
+            # A re-install with nothing rebuilt leaves the already-stripped
+            # copy in place (\"Up-to-date\"); splitting it again would
+            # overwrite the good .debug with an empty one.
             execute_process(
-                COMMAND \"${CMAKE_OBJCOPY}\" --only-keep-debug \"\${_msdi_file}\" \"\${_msdi_debug}\"
-                RESULT_VARIABLE _msdi_rc)
-            if(NOT _msdi_rc EQUAL 0)
-                message(FATAL_ERROR \"minimal: objcopy --only-keep-debug failed for \${_msdi_file}\")
-            endif()
-            execute_process(
-                COMMAND \"${CMAKE_OBJCOPY}\" --strip-debug --strip-unneeded \"\${_msdi_file}\"
-                RESULT_VARIABLE _msdi_rc)
-            if(NOT _msdi_rc EQUAL 0)
-                message(FATAL_ERROR \"minimal: objcopy --strip-debug failed for \${_msdi_file}\")
-            endif()
-            execute_process(
-                COMMAND \"${CMAKE_OBJCOPY}\" --add-gnu-debuglink=\"\${_msdi_debug}\" \"\${_msdi_file}\"
-                RESULT_VARIABLE _msdi_rc)
-            if(NOT _msdi_rc EQUAL 0)
-                message(FATAL_ERROR \"minimal: objcopy --add-gnu-debuglink failed for \${_msdi_file}\")
+                COMMAND \"${_MINIMAL_READELF}\" -S \"\${_msdi_file}\"
+                OUTPUT_VARIABLE _msdi_sections ERROR_QUIET)
+            if(_msdi_sections MATCHES \"\\\\.gnu_debuglink\")
+                message(STATUS \"minimal: debug info already split for \${_msdi_file}\")
+            else()
+                message(STATUS \"minimal: splitting debug info for \${_msdi_file}\")
+                execute_process(
+                    COMMAND \"${CMAKE_OBJCOPY}\" --only-keep-debug \"\${_msdi_file}\" \"\${_msdi_debug}\"
+                    RESULT_VARIABLE _msdi_rc)
+                if(NOT _msdi_rc EQUAL 0)
+                    message(FATAL_ERROR \"minimal: objcopy --only-keep-debug failed for \${_msdi_file}\")
+                endif()
+                execute_process(
+                    COMMAND \"${CMAKE_OBJCOPY}\" --strip-debug --strip-unneeded \"\${_msdi_file}\"
+                    RESULT_VARIABLE _msdi_rc)
+                if(NOT _msdi_rc EQUAL 0)
+                    message(FATAL_ERROR \"minimal: objcopy --strip-debug failed for \${_msdi_file}\")
+                endif()
+                # The whole argument must be quoted: an unquoted
+                # --add-gnu-debuglink=\"...\" keeps the quotes as literal
+                # characters, and objcopy then fails to open the .debug.
+                execute_process(
+                    COMMAND \"${CMAKE_OBJCOPY}\" \"--add-gnu-debuglink=\${_msdi_debug}\" \"\${_msdi_file}\"
+                    RESULT_VARIABLE _msdi_rc)
+                if(NOT _msdi_rc EQUAL 0)
+                    message(FATAL_ERROR \"minimal: objcopy --add-gnu-debuglink failed for \${_msdi_file}\")
+                endif()
             endif()
         " COMPONENT DebugInfo)
     endif()
