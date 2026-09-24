@@ -456,7 +456,7 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
                 refusal = "session backlog is full; turn refused";
             } else {
                 turn.turn_id = next_turn_id_++;
-                work_.push_back(turn);
+                work_.push_back(turn);  // copied: turn_id and text are announced below
             }
         }
     }
@@ -1247,8 +1247,7 @@ void Session::WorkerMain() {
                     // see SetRunMode.)
                     if (!IsPaused(pause_state_.load(std::memory_order_acquire))) return true;
                     for (const auto& candidate : work_) {
-                        if (!std::holds_alternative<std::string>(candidate) &&
-                            !std::holds_alternative<QueuedTurn>(candidate)) {
+                        if (!std::holds_alternative<QueuedTurn>(candidate)) {
                             return true;
                         }
                     }
@@ -1311,8 +1310,7 @@ void Session::WorkerMain() {
                     // The predicate guaranteed a non-turn item exists; find
                     // it and leave any held turns in place.
                     for (auto it = work_.begin(); it != work_.end(); ++it) {
-                        if (std::holds_alternative<std::string>(*it) ||
-                            std::holds_alternative<QueuedTurn>(*it)) {
+                        if (std::holds_alternative<QueuedTurn>(*it)) {
                             continue;
                         }
                         item = std::move(*it);
@@ -1324,8 +1322,7 @@ void Session::WorkerMain() {
                 // "last turn ended paused" record is consumed: leaving it set
                 // would let a LATER unpause spuriously re-run a continuation
                 // for a session that has moved on.
-                if (std::holds_alternative<std::string>(item) ||
-                    std::holds_alternative<QueuedTurn>(item) ||
+                if (std::holds_alternative<QueuedTurn>(item) ||
                     std::holds_alternative<QueuedResume>(item)) {
                     ClearContinuationLocked();
                 }
@@ -1340,7 +1337,7 @@ void Session::WorkerMain() {
                 ClearContinuationLocked();
             }
             // kRunningOther for now; RunOneTurn itself upgrades to kRunningTurn
-            // for turn-shaped items (the string/QueuedTurn/QueuedResume branches
+            // for turn-shaped items (the QueuedTurn/QueuedResume branches
             // below) once it actually starts. Commands and rewinds stay
             // kRunningOther for their whole span.
             worker_activity_ = WorkerActivity::kRunningOther;
@@ -1367,8 +1364,6 @@ void Session::WorkerMain() {
             try {
                 if (wake_turn) {
                     RunOneTurn(std::nullopt);
-                } else if (auto* text = std::get_if<std::string>(&item)) {
-                    RunOneTurn(std::move(*text));
                 } else if (auto* turn = std::get_if<QueuedTurn>(&item)) {
                     RunOneTurn(std::move(turn->text), turn);
                 } else if (std::holds_alternative<QueuedResume>(item)) {

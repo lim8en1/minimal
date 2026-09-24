@@ -366,8 +366,7 @@ struct QueuedTurn {
     std::uint64_t turn_id = 0;
 };
 
-using WorkItem = std::variant<std::string, QueuedTurn, QueuedCommand, QueuedRewind,
-                              QueuedResume>;  // string = a plain user turn
+using WorkItem = std::variant<QueuedTurn, QueuedCommand, QueuedRewind, QueuedResume>;
 
 class Session : public commands::SessionControl {
 public:
