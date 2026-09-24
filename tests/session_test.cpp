@@ -14,6 +14,7 @@
 #include "fakes.hpp"
 #include "session_events.hpp"
 #include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/agent/provider_resolver.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
@@ -79,8 +80,7 @@ struct SessionFixture {
         // A preset registry turns the per-turn /agent borrow path on; tests
         // that only run plain turns leave it null and never touch it.
         if (preset_registry != nullptr) params.presets = preset_registry;
-        params.provider_factories = provider_factories;
-        params.provider_instance_cache = provider_instance_cache;
+        params.provider_resolver = provider_resolver;
         // Builds whatever the test did not inject above: a real transport
         // (unless one already came from rpc::ApplyPermissionAdvisor), the
         // default WirePermissionChecker (unless a fake/advised one was
@@ -139,10 +139,10 @@ struct SessionFixture {
     // Optional preset registry for the per-turn borrow path; must outlive the
     // session (declare it in the test, before Start()).
     const agent::AgentPresetRegistry* preset_registry = nullptr;
-    // Optional provider-construction seams for the per-turn provider-rebind
-    // path; must outlive the session (declare in the test, before Start()).
-    const llm::ProviderFactoryRegistry* provider_factories = nullptr;
-    agent::ProviderInstanceCache* provider_instance_cache = nullptr;
+    // Optional resolver for the provider-switch paths (/model, /agent,
+    // per-turn overrides); must outlive the session (declare in the test,
+    // before Start()).
+    agent::ProviderResolver* provider_resolver = nullptr;
     // The idle-wake setting: an out-of-band injection on an IDLE session runs a
     // seedless turn (the injected messages are the user content).
     bool wake_on_injection = false;
@@ -1645,20 +1645,11 @@ TEST_CASE("a borrowed turn does not revert a SetRunMode switch", "[session][run_
     CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Bypass);
 }
 
-TEST_CASE(
-    "a per-turn provider override with only provider_factories_ set does not dangle "
-    "(regression, use-after-free)",
-    "[session][regression]") {
-    // The bug: RunOneTurn's per-turn provider override built the replacement
-    // provider into a scope-local shared_ptr and called loop_->SetProvider(*that),
-    // which stores a REFERENCE. When provider_instance_cache_ is unset (only
-    // provider_factories_ is wired -- true here, and true of any Session built
-    // without SessionRegistry's cache), that local was the sole owner and was
-    // destroyed at the end of the `if (provider_changed)` block, so the
-    // subsequent RunTurn call ran against a dangling reference. This test's own
-    // assertions can't observe a UAF; the point is to give the ASan job (see the
-    // fix priority plan) a reachable repro of the exact starved-ownership
-    // condition.
+TEST_CASE("a per-turn provider override keeps the borrowed provider alive through the turn",
+          "[session][regression]") {
+    // loop_->SetProvider stores a REFERENCE, so the borrowed instance must be
+    // owned for the whole turn. The assertions cannot observe a use-after-free;
+    // under ASan this is the reachable repro of one.
     testing::TempDir dir;
     std::ofstream(dir.path() / "settings.json")
         << "{\"default_model\": \"main/test-model\"}\n";
@@ -1688,10 +1679,10 @@ TEST_CASE(
         return provider;
     }));
 
+    agent::ProviderResolver resolver(registry.providers(), factories, common::DefaultLogger());
     SessionFixture fixture(dir.path());
     fixture.preset_registry = &registry;
-    // provider_instance_cache left null: the bug's exact condition.
-    fixture.provider_factories = &factories;
+    fixture.provider_resolver = &resolver;
     fixture.preset = registry.Resolve("test");
     fixture.preset.allowed_tools = {"*"};
     fixture.preset.permission_mode = testing::AllowAllPolicy();
@@ -1705,10 +1696,39 @@ TEST_CASE(
     REQUIRE(fixture.session->SubmitTurnWithOverrides(borrowed));
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 
-    // The turn borrowed a fresh provider via provider_factories_ and ran to
-    // completion; under ASan this proves the borrowed provider was not freed
-    // out from under RunTurn.
+    // The turn borrowed a provider through the resolver and ran to completion.
     CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Normal);
+}
+
+TEST_CASE("ApplyPreset rebinds when only the provider entry changes",
+          "[session][provider][regression]") {
+    // Two providers.json entries can share kind, url and key yet own different
+    // cached instances (the cache is keyed by entry name, and each instance
+    // carries its entry's resolved config). Switching between them must
+    // rebind; comparing only the connection fields kept the old instance.
+    llm::ProviderFactoryRegistry factories;
+    REQUIRE(factories.Register("fake", [](const llm::ProviderConfig&) {
+        return std::make_unique<testing::FakeLlmProvider>();
+    }));
+    config::ProvidersConfig catalog;
+    agent::ProviderResolver resolver(catalog, factories, common::DefaultLogger());
+
+    SessionFixture fixture;
+    fixture.provider_resolver = &resolver;
+    fixture.preset.model_ref = {"main", "m"};
+    fixture.preset.provider_kind = "fake";
+    fixture.preset.provider.base_url = "http://localhost/v1";
+    fixture.Start();
+    const auto before = fixture.session->ProviderSnapshot();
+
+    auto switched = fixture.preset;
+    switched.model_ref = {"twin", "m"};  // same kind, url and key; different entry
+    fixture.session->ApplyPreset(switched);
+
+    const auto after = fixture.session->ProviderSnapshot();
+    REQUIRE(after != nullptr);
+    CHECK(after != before);
+    CHECK(after == resolver.cache().GetOrCreate("twin", "fake", switched.provider));
 }
 
 TEST_CASE("SetRunMode is refused on a terminated session and changes nothing",
@@ -1788,7 +1808,7 @@ TEST_CASE(
     // happened -- and the next turn would send the NEW preset's model name
     // to the OLD provider connection. Fixed: the rebuild now runs first, and
     // a failure leaves preset_/the announced metadata untouched.
-    SessionFixture fixture;  // no provider_factories set: any rebuild attempt fails
+    SessionFixture fixture;  // no provider_resolver set: any provider switch fails
     fixture.Start();
 
     const std::string original_name = fixture.session->info().agent_preset;

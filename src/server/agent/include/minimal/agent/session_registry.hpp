@@ -30,7 +30,7 @@
 
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/context_contributor.hpp"
-#include "minimal/agent/provider_instance_cache.hpp"
+#include "minimal/agent/provider_resolver.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/common/logger.hpp"
@@ -190,38 +190,20 @@ public:
     // warning, never fatal: losing the cheap summarizer is a cost regression,
     // not a broken harness).
     void set_small_model(const std::string& provider_model) {
-        // SplitModelRef: small_model is a user-facing settings.json field like
-        // default_model, and must accept a discovered catalog's slash-bearing
-        // model id the same way --model/`/model` do.
-        const auto ref = common::SplitModelRef(provider_model);
-        if (!ref) {
-            common::DefaultLogger().warn("settings.small_model '{}' is not a <provider>/<model> "
-                                         "reference; compaction uses each session's own model",
-                                         provider_model);
-            return;
-        }
-        const auto resolved = presets_.providers().Resolve(*ref);
-        if (resolved == nullptr) {
+        std::string error;
+        auto resolved = resolver_.ResolveLlm(provider_model, error);
+        if (!resolved) {
             common::DefaultLogger().warn(
-                "settings.small_model '{}' resolves to nothing in providers.json; compaction "
-                "uses each session's own model",
-                provider_model);
+                "settings.small_model {}; compaction uses each session's own model", error);
             return;
         }
-        auto provider = provider_cache_.GetOrCreate(ref->provider, resolved->backend,
-                                                    resolved->provider);
-        if (provider == nullptr) {
-            common::DefaultLogger().warn("settings.small_model '{}' failed to construct a "
-                                         "provider; compaction uses each session's own model",
-                                         provider_model);
-            return;
-        }
+        const config::ResolvedModel& model = *resolved->model;
         LoopConfig::SmallModel small;
-        small.provider = std::move(provider);
-        small.model_name = resolved->provider.model_name;
-        small.parameters = resolved->parameters;
-        small.max_tokens = resolved->max_tokens;
-        small.context_window_tokens = resolved->context_window_tokens;
+        small.provider = std::move(resolved->provider);
+        small.model_name = model.provider.model_name;
+        small.parameters = model.parameters;
+        small.max_tokens = model.max_tokens;
+        small.context_window_tokens = model.context_window_tokens;
         loop_config_.small_model = std::move(small);
     }
 
@@ -274,12 +256,10 @@ public:
 
     std::shared_ptr<Session> Find(const std::string& session_id) const;
 
-    // The shared provider instance cache. Borrowed by SessionSupportService's
-    // model-override resolution (a titler resolving a configured
-    // "<provider>/<model>" lands in the same cache session construction uses,
-    // so the instance is shared, never duplicated). The registry outlives
-    // every session and every service call.
-    ProviderInstanceCache& provider_cache() { return provider_cache_; }
+    // The model -> provider path every session uses. Borrowed by
+    // SessionSupportService so a plugin-configured model lands on the same
+    // shared instances. The registry outlives every session and service call.
+    ProviderResolver& resolver() { return resolver_; }
 
     // Sessions of `parent_id` that are still RUNNING: neither terminated nor
     // finished-with-their-seeded-turn. This is the count the subagent
@@ -322,10 +302,6 @@ private:
     void ApplyProjectContext(SessionParams& params) const;
     void AppendSignalContext(SessionParams& params) const;
     void AppendContributedContext(SessionParams& params, const AgentPreset& preset) const;
-    AgentPreset ResolveModel(AgentPreset preset,
-                             const std::optional<config::ModelRef>& model_override) const;
-    std::shared_ptr<llm::LlmProvider> ResolveProvider(const AgentPreset& preset,
-                                                       const std::string& agent_preset_name);
     // `pending_repair`, when set on return, is a synthesized tool-result
     // repair message already folded into the returned seed's history but NOT
     // yet persisted -- the caller must append it via db_.AppendMessage only
@@ -354,10 +330,7 @@ private:
     SignalRouter* signal_router_ = nullptr;
     const ContextContributorRegistry* context_contributors_ = nullptr;
     tools::ToolRegistry& tools_;
-    const llm::ProviderFactoryRegistry& providers_;
-    // Shared provider instances across every session this registry creates.
-    // Declared after providers_ so the factory registry outlives the cache.
-    ProviderInstanceCache provider_cache_;
+    ProviderResolver resolver_;
     SessionObserverRegistry& observers_;
     // Optional and borrowed; every session gets the same one via the
     // CreateResolved funnel.

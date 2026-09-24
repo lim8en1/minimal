@@ -33,19 +33,18 @@ std::optional<SessionLlm> SessionSupport::LlmForSession(const std::string& sessi
     // turn closes its stream the instant TurnCompletedEvent lands, which can
     // terminate and erase the session BEFORE the observer thread delivers
     // OnTurnCompleted -- a queued notification must not race teardown and lose.
-    // The DB row is the authoritative record of which preset the session ran,
-    // and the provider cache is the same shared instance the session held.
-    // Degradation: a session created with a --model override is not
-    // distinguishable from its row, so it titles on the preset's model.
+    // The DB row is the authoritative record of which preset and model the
+    // session ran, and the resolver hands back the same shared instance the
+    // session held.
     if (db_ == nullptr || presets_ == nullptr) return std::nullopt;
     const auto row = db_->GetSession(session_id);
     if (!row) return std::nullopt;
     try {
-        const AgentPreset preset = presets_->Resolve(row->agent_preset);
-        auto provider =
-            sessions_->provider_cache().GetOrCreate(preset.model_ref.provider, preset.provider_kind,
-                                                    preset.provider);
-        if (provider == nullptr) return std::nullopt;
+        ProviderResolver& resolver = sessions_->resolver();
+        const AgentPreset preset = resolver.ResolveModel(
+            presets_->Resolve(row->agent_preset),
+            row->model ? common::SplitModelRef(*row->model) : std::nullopt);
+        auto provider = resolver.Acquire(preset);
         logger_.info("session {}: titling through the preset '{}' (session already ended)",
                      session_id, row->agent_preset);
         return SessionLlm{std::move(provider), preset.provider.model_name};
@@ -57,33 +56,14 @@ std::optional<SessionLlm> SessionSupport::LlmForSession(const std::string& sessi
 }
 
 std::optional<SessionLlm> SessionSupport::ResolveModelRef(const std::string& provider_model) {
-    if (sessions_ == nullptr || presets_ == nullptr) return std::nullopt;
-    // SplitModelRef: this resolves a plugin config's user-facing model override
-    // (session-titler's `model`), the same surface as default_model, and must
-    // accept a discovered catalog's slash-bearing model id the same way.
-    const auto ref = common::SplitModelRef(provider_model);
-    if (!ref) {
-        logger_.warn("session titler model override '{}' is not a <provider>/<model> reference",
-                     provider_model);
+    if (sessions_ == nullptr) return std::nullopt;
+    std::string error;
+    auto resolved = sessions_->resolver().ResolveLlm(provider_model, error);
+    if (!resolved) {
+        logger_.warn("session titler model override {}", error);
         return std::nullopt;
     }
-    const auto resolved = presets_->providers().Resolve(*ref);
-    if (resolved == nullptr) {
-        logger_.warn("session titler model override '{}' resolves to nothing in providers.json",
-                     provider_model);
-        return std::nullopt;
-    }
-    // The cache, not a fresh construct: the same instance the session using
-    // this entry holds. Providers are stateless by contract, so sharing costs
-    // nothing and avoids a second connection to the same backend.
-    auto provider = sessions_->provider_cache().GetOrCreate(ref->provider, resolved->backend,
-                                                            resolved->provider);
-    if (provider == nullptr) {
-        logger_.warn("session titler model override '{}' failed to construct a provider",
-                     provider_model);
-        return std::nullopt;
-    }
-    return SessionLlm{std::move(provider), resolved->provider.model_name};
+    return SessionLlm{std::move(resolved->provider), resolved->model->provider.model_name};
 }
 
 std::shared_ptr<const session::SessionReader> SessionSupport::HistoryFor(

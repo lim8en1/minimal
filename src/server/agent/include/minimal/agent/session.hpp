@@ -67,7 +67,7 @@ class McpClientManager;       // borrowed via SessionParams::mcp_manager
 
 namespace minimal::agent {
 
-class ProviderInstanceCache;  // borrowed via set_provider_instance_cache
+class ProviderResolver;       // borrowed via SessionParams::provider_resolver
 class SignalRouter;           // borrowed via SessionParams::signal_router
 
 // Session's domain-only cross-thread state -- the half of what this block used
@@ -288,12 +288,9 @@ struct SessionParams {
     std::shared_ptr<tools::PermissionAdvisor> selected_advisor;
     std::chrono::milliseconds advisor_timeout{0};
 
-    // --- Constructor-injected wiring (Phase 5 step 3) -------------------------
-    // Formerly set on the live Session by SessionRegistry via set_presets/
-    // set_commands/set_provider_factories/set_provider_instance_cache, AFTER
-    // construction -- a window during which the worker thread already
-    // existed but these were still null. All four borrowed, process-wide;
-    // unset in tests that never exercise /agent or a provider rebuild.
+    // --- Process-wide wiring ---------------------------------------------------
+    // Borrowed, process-wide, set before construction; unset in tests that
+    // never exercise /agent or a provider switch.
     const AgentPresetRegistry* presets = nullptr;
     // Wired for every session, subagents included; a child's surface is
     // READ-ONLY -- the subagent guard (SessionServiceImpl::DispatchCommand
@@ -305,10 +302,11 @@ struct SessionParams {
     // degrades cleanly for tests that never exercise a project command.
     // Owned by the registry/main, process-wide, like `presets`.
     const commands::ProjectCommandSource* project_commands = nullptr;
-    const llm::ProviderFactoryRegistry* provider_factories = nullptr;
-    ProviderInstanceCache* provider_instance_cache = nullptr;
+    // How /model, /agent and per-turn overrides reach a provider instance.
+    // Null: those switches are refused when they need a different provider.
+    ProviderResolver* provider_resolver = nullptr;
     // Borrowed, process-wide, read-only after plugin load; wired by
-    // ApplyConstructorWiring alongside provider_factories. The loop resolves
+    // ApplyConstructorWiring alongside provider_resolver. The loop resolves
     // a preset's `compaction_strategy:` frontmatter against it at COMPACTION
     // TIME -- not construction time -- so a mid-session /agent switch changes
     // the summary format the way it already changes compression_prompt. Null
@@ -833,8 +831,7 @@ private:
     const commands::CommandRegistry* commands_ = nullptr;
     const commands::ProjectCommandSource* project_commands_ = nullptr;
     const AgentPresetRegistry* presets_ = nullptr;
-    const llm::ProviderFactoryRegistry* provider_factories_ = nullptr;
-    ProviderInstanceCache* provider_instance_cache_ = nullptr;
+    ProviderResolver* provider_resolver_ = nullptr;
     mcp::McpClientManager* mcp_manager_ = nullptr;
     // The process-wide hook dispatcher (track O), read from loop_config.hooks
     // in the constructor -- one field, not two (Phase 5 step 8):

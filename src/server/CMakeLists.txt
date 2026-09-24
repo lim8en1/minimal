@@ -53,6 +53,7 @@ add_library(minimal_server_core SHARED
     agent/structured_compaction.cpp
     agent/agent_loop.cpp
     agent/provider_instance_cache.cpp
+    agent/provider_resolver.cpp
     commands/command_registry.cpp
     commands/command_dispatcher.cpp
     commands/project_command_source.cpp

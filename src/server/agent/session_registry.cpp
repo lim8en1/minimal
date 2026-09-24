@@ -20,8 +20,7 @@ SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, tools::Tool
                                  std::chrono::milliseconds initial_attach_guard)
     : presets_(presets),
       tools_(tools),
-      providers_(providers),
-      provider_cache_(providers, logger),
+      resolver_(presets.providers(), providers, logger),
       observers_(observers),
       db_(db),
       history_reader_(std::make_shared<session::SessionReader>(db_)),
@@ -207,7 +206,7 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // preset -- two sessions on one preset can be running different models. In
     // CreateResolved rather than Create so a SUBAGENT spawned with an inherited
     // preset honours it too.
-    preset = ResolveModel(std::move(preset), params.model_override);
+    preset = resolver_.ResolveModel(std::move(preset), params.model_override);
 
     LoopConfig loop_config = loop_config_;
     if (max_turns_override.has_value()) loop_config.max_turns = *max_turns_override;
@@ -218,7 +217,7 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // SessionParams.
     if (loop_config.hooks == nullptr) loop_config.hooks = hooks_;
 
-    auto provider = ResolveProvider(preset, params.agent_preset);
+    auto provider = resolver_.Acquire(preset);
 
     // Track M (docs/EXTENSIBILITY.md §2.1): the read side of the transcript.
     // Set here because this is the one funnel every session passes through --
@@ -371,46 +370,6 @@ void SessionRegistry::AppendContributedContext(SessionParams& params,
     }
 }
 
-AgentPreset SessionRegistry::ResolveModel(
-    AgentPreset preset, const std::optional<config::ModelRef>& model_override) const {
-    if (!model_override) return preset;
-    const auto model = presets_.providers().Resolve(*model_override);
-    if (model == nullptr) {
-        throw std::runtime_error("unknown model '" + model_override->str() +
-                                 "'; providers.json defines " +
-                                 config::DescribeModels(presets_.providers()) +
-                                 config::DescribeDiscovery(presets_.providers(), model_override->provider));
-    }
-    ApplyModel(preset, *model);
-    return preset;
-}
-
-std::shared_ptr<llm::LlmProvider> SessionRegistry::ResolveProvider(
-    const AgentPreset& preset, const std::string& agent_preset_name) {
-    // The kind string is what selects a factory. A preset can only reach this
-    // point with a provider entry that parsed, so an unregistered kind means a
-    // plugin is missing or disabled -- worth naming explicitly, because the
-    // symptom otherwise is a session that fails on its first turn for no stated
-    // reason.
-    if (!providers_.Has(preset.provider_kind)) {
-        throw std::runtime_error("agent preset '" + agent_preset_name + "' needs provider kind '" +
-                                 preset.provider_kind + "', which no loaded plugin registered");
-    }
-
-    // SHARED, not per-session: providers are stateless by contract, so two
-    // sessions on one providers.json entry share one instance instead of each
-    // paying construction. The entry NAME is the key (immutable at runtime);
-    // the model override already applied above does not change it -- two
-    // models on one entry share the connection by design.
-    auto provider = provider_cache_.GetOrCreate(preset.model_ref.provider, preset.provider_kind,
-                                                preset.provider);
-    if (provider == nullptr) {
-        throw std::runtime_error("provider kind '" + preset.provider_kind +
-                                 "' failed to construct");
-    }
-    return provider;
-}
-
 ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id,
                                            std::optional<llm::Message>& pending_repair) {
     // RESUME: load the stored transcript as the loop's working history. Loaded,
@@ -495,8 +454,7 @@ void SessionRegistry::ApplyConstructorWiring(SessionParams& params) {
     // future mutating one is refused without this file learning about it.
     params.commands = commands_;
     params.project_commands = project_commands_;
-    params.provider_factories = &providers_;
-    params.provider_instance_cache = &provider_cache_;
+    params.provider_resolver = &resolver_;
 }
 
 void SessionRegistry::PublishSession(const std::string& session_id,

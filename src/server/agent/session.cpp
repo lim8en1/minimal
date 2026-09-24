@@ -4,7 +4,7 @@
 
 #include "minimal/mcp/mcp_client_manager.hpp"
 
-#include "minimal/agent/provider_instance_cache.hpp"
+#include "minimal/agent/provider_resolver.hpp"
 
 #include <exception>
 #include <stdexcept>
@@ -304,16 +304,11 @@ Session::Session(SessionParams params, AgentPreset preset,
         std::move(stream_event_sink), Compactor{}, std::move(seed),
         std::move(params_.project_context), params_.compaction_strategies);
 
-    // Constructor-injected wiring (Phase 5 step 3): formerly set by
-    // SessionRegistry AFTER construction, via set_presets/set_commands/
-    // set_provider_factories/set_provider_instance_cache -- a window during
-    // which the worker thread below already existed but these were still
-    // null. See SessionParams for what each is borrowed from.
+    // Borrowed process-wide wiring; see SessionParams.
     presets_ = params_.presets;
     commands_ = params_.commands;
     project_commands_ = params_.project_commands;
-    provider_factories_ = params_.provider_factories;
-    provider_instance_cache_ = params_.provider_instance_cache;
+    provider_resolver_ = params_.provider_resolver;
     // Phase 5 step 8: the same copy executor_'s init list above already used,
     // kept here for kUserPromptSubmit -- one field, not a second
     // SessionParams::hooks in sync with LoopConfig::hooks by convention.
@@ -551,49 +546,27 @@ void Session::RunCommandNow(const QueuedCommand& command) {
 
 void Session::ApplyPreset(AgentPreset preset) {
     // THE PROVIDER MAY HAVE CHANGED, and commands must not have to think about
-    // it: /agent to a preset on another backend, or /model across providers,
-    // both land here. Detected by comparing what actually identifies a
-    // connection rather than by asking the caller to say so.
-    const bool provider_changed = preset.provider_kind != preset_.provider_kind ||
-                                  preset.provider.base_url != preset_.provider.base_url ||
-                                  preset.provider.api_key != preset_.provider.api_key;
+    // it: /agent to a preset on another backend or entry, or /model across
+    // providers, both land here.
+    const bool provider_changed = !ProviderResolver::SameConnection(preset, preset_);
 
-    // THE PROVIDER REBUILD RUNS FIRST, before anything below commits. preset_,
-    // loop_'s preset, and EmitMetadataChanged all describe the NEW preset's
-    // model/provider -- committing them ahead of a rebuild that then fails
-    // told clients a model switch had happened when it hadn't, and the next
-    // turn would send the new preset's model name to the OLD provider
-    // connection (possibly a different, incompatible backend). On failure
-    // this returns having changed nothing: preset_, provider_, and every
-    // announcement stay exactly as they were before the call.
+    // THE PROVIDER IS ACQUIRED FIRST, before anything below commits: preset_,
+    // loop_'s preset and EmitMetadataChanged all describe the NEW preset, so a
+    // failed acquisition must return having changed nothing. The previous
+    // instance needs no teardown -- the resolver's cache still holds it for
+    // any other session using it.
     std::shared_ptr<llm::LlmProvider> rebuilt;
     if (provider_changed) {
-        if (provider_factories_ == nullptr) {
-            logger_.warn("session {}: cannot rebuild the provider; keeping the previous one",
+        if (provider_resolver_ == nullptr) {
+            logger_.warn("session {}: cannot switch provider; keeping the previous preset",
                          params_.session_id);
             return;
         }
-        // Through the instance cache, not a fresh construct: entries are
-        // immutable at runtime, so a switch back to an entry this process
-        // already built is a cache hit -- the same instance, shared with any
-        // session using it. The PREVIOUS provider needs no teardown either:
-        // this session only drops its reference, and the cache holds the
-        // instance for whoever else uses it.
-        if (provider_instance_cache_ != nullptr) {
-            rebuilt = provider_instance_cache_->GetOrCreate(preset.model_ref.provider,
-                                                            preset.provider_kind, preset.provider);
-        } else {
-            rebuilt = std::shared_ptr<llm::LlmProvider>(
-                provider_factories_->Create(preset.provider_kind, preset.provider));
-        }
-        if (rebuilt == nullptr) {
-            // The preset resolved, so the kind was known at that point; failing
-            // to construct is still possible. Nothing has been committed yet,
-            // so there is no dangling reference to worry about -- just refuse
-            // the whole switch and keep running the old preset/provider pair.
-            logger_.warn(
-                "session {}: provider kind '{}' failed to construct; keeping the previous preset",
-                params_.session_id, preset.provider_kind);
+        try {
+            rebuilt = provider_resolver_->Acquire(preset);
+        } catch (const std::exception& error) {
+            logger_.warn("session {}: {}; keeping the previous preset", params_.session_id,
+                         error.what());
             return;
         }
     }
@@ -1554,15 +1527,9 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
     } preset_restore;
     preset_restore.session = this;
 
-    // Owns the per-turn borrowed provider (when provider_instance_cache_ is
-    // unset and provider_factories_->Create returns the sole shared_ptr
-    // owner) for the rest of this function, so loop_'s SetProvider(*borrowed)
-    // reference below stays valid through RunTurn and past preset_restore's
-    // rebind back to provider_. Declared at this scope -- not inside the
-    // `if (provider_changed)` block below -- specifically so it outlives
-    // that block; a scope-local shared_ptr there was destroyed the instant
-    // the block ended, leaving loop_ with a dangling reference (UAF) for
-    // every subsequent RunTurn call.
+    // Holds the per-turn borrowed provider for the rest of this function:
+    // loop_->SetProvider stores a reference, which must stay valid through
+    // RunTurn and past preset_restore's rebind back to provider_.
     std::shared_ptr<llm::LlmProvider> borrowed_provider;
 
     if (overrides && (!overrides->model.empty() || !overrides->agent_preset.empty())) {
@@ -1596,51 +1563,30 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
                 model = model_override_;
             }
             if (model) {
-                const std::shared_ptr<const config::ResolvedModel> resolved =
-                    presets_->providers().Resolve(*model);
-                if (resolved == nullptr) {
-                    throw std::runtime_error("unknown model '" + model->str() + "'");
+                if (provider_resolver_ == nullptr) {
+                    throw std::runtime_error("no provider resolver wired; cannot resolve model '" +
+                                             model->str() + "'");
                 }
-                ApplyModel(transient, *resolved);
+                transient = provider_resolver_->ResolveModel(std::move(transient), model);
             }
             // The borrowed turn's run mode can only narrow the session's
             // CURRENT posture -- desired_run_mode_, the sticky record every
             // writer (reader-side SetRunMode included) keeps in sync with the
-            // executor. Basing the clamp on params_/preset_ here (as this once
-            // did) let a borrowed turn run at the session's DEFAULT posture,
-            // ignoring the user's switch for the turn's duration, and the old
-            // restore then re-computed it away afterwards.
+            // executor, not the session's default from params_/preset_.
             executor_.SetRunMode(tools::clamp_run_mode(desired_run_mode(), transient.run_mode));
             // The borrowed preset's gates govern the borrowed turn (restored
             // by preset_restore alongside the preset itself).
             executor_.SetPolicies(transient.permission_mode, transient.mcp_permissions);
             loop_->SetPreset(transient);
-            // Rebind whenever the borrowed preset resolves through a different
-            // provider ENTRY or connection identity. The instance cache shares
-            // providers process-wide, so a borrow of a known entry is a hit
-            // and a restore is a no-op rebind of the same object. NOTE: a
-            // same-url different-entry borrow MUST rebind -- the instance owns
-            // the entry's resolved config (its default model included), and
-            // ChatRequest.model is built from the preset each call, so keeping
-            // the old instance would send the turn to the sticky model.
-            const bool provider_changed =
-                transient.model_ref.provider != preset_.model_ref.provider ||
-                transient.provider_kind != preset_.provider_kind ||
-                transient.provider.base_url != preset_.provider.base_url ||
-                transient.provider.api_key != preset_.provider.api_key;
-            if (provider_changed) {
-                if (provider_instance_cache_ != nullptr) {
-                    borrowed_provider = provider_instance_cache_->GetOrCreate(
-                        transient.model_ref.provider, transient.provider_kind,
-                        transient.provider);
-                } else if (provider_factories_ != nullptr) {
-                    borrowed_provider = std::shared_ptr<llm::LlmProvider>(
-                        provider_factories_->Create(transient.provider_kind, transient.provider));
+            // Rebind whenever the borrowed preset is served by a different
+            // instance. The cache shares instances process-wide, so a borrow of
+            // a known entry is a hit and the restore a no-op rebind.
+            if (!ProviderResolver::SameConnection(transient, preset_)) {
+                if (provider_resolver_ == nullptr) {
+                    throw std::runtime_error("no provider resolver wired; cannot switch provider "
+                                             "for the per-turn override");
                 }
-                if (borrowed_provider == nullptr) {
-                    throw std::runtime_error("provider kind '" + transient.provider_kind +
-                                             "' failed to construct for the per-turn override");
-                }
+                borrowed_provider = provider_resolver_->Acquire(transient);
                 loop_->SetProvider(*borrowed_provider);
             }
             preset_restore.active = true;
