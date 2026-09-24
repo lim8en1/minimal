@@ -2281,3 +2281,27 @@ TEST_CASE("a skipped compaction is a scrollback notice, never the checkpoint",
     CHECK(records[1].meta.skipped);
     CHECK(records[1].meta.warning == "auto-compaction stopped");
 }
+
+TEST_CASE("the SQLite store persists a rename and both model overrides on the session row",
+          "[session][store]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "sessions.db");
+    const auto row = db.CreateSession("", std::nullopt, "/proj", "build");
+    SqliteHistoryStore store(db, row.session_id);
+
+    CHECK(store.Rename("my session"));
+    store.PersistModelOverride(std::string("main/big"));
+    store.PersistSubagentModel(std::string("main/small"));
+
+    auto stored = db.GetSession(row.session_id);
+    REQUIRE(stored.has_value());
+    CHECK(stored->name == "my session");
+    CHECK(stored->name_source == "explicit");
+    CHECK(stored->model == std::optional<std::string>("main/big"));
+    CHECK(stored->subagent_model == std::optional<std::string>("main/small"));
+
+    store.PersistModelOverride(std::nullopt);
+    stored = db.GetSession(row.session_id);
+    REQUIRE(stored.has_value());
+    CHECK_FALSE(stored->model.has_value());
+}

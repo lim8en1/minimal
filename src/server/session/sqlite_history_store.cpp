@@ -42,4 +42,16 @@ bool SqliteHistoryStore::SetDefaultNameIfUnset(const std::string& name) {
     return db_.SetDefaultName(session_id_, name);
 }
 
+bool SqliteHistoryStore::Rename(const std::string& name) {
+    return db_.UpdateSessionName(session_id_, name, "explicit");
+}
+
+void SqliteHistoryStore::PersistModelOverride(const std::optional<std::string>& provider_model) {
+    db_.UpdateSessionModel(session_id_, provider_model);
+}
+
+void SqliteHistoryStore::PersistSubagentModel(const std::optional<std::string>& provider_model) {
+    db_.UpdateSessionSubagentModel(session_id_, provider_model);
+}
+
 }  // namespace minimal::session

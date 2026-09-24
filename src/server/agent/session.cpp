@@ -1181,6 +1181,49 @@ SessionInfo Session::InfoSnapshot() const {
     return info_;
 }
 
+namespace {
+
+std::optional<std::string> RefString(const std::optional<common::ModelRef>& ref) {
+    return ref ? std::optional<std::string>(ref->str()) : std::nullopt;
+}
+
+}  // namespace
+
+// The in-memory override is what this session runs on; the store's record is
+// what a later resume reads. Persisting is best-effort: a failed write only
+// costs a resume the choice.
+void Session::set_model_override(std::optional<common::ModelRef> ref) {
+    model_override_ = std::move(ref);
+    try {
+        store_->PersistModelOverride(RefString(model_override_));
+    } catch (const std::exception& e) {
+        logger_.warn("session {}: persisting model override failed: {}", params_.session_id,
+                     e.what());
+    }
+}
+
+void Session::set_subagent_model_override(std::optional<common::ModelRef> ref) {
+    subagent_model_override_ = std::move(ref);
+    try {
+        store_->PersistSubagentModel(RefString(subagent_model_override_));
+    } catch (const std::exception& e) {
+        logger_.warn("session {}: persisting subagent-model override failed: {}",
+                     params_.session_id, e.what());
+    }
+}
+
+bool Session::RenameSession(const std::string& name) {
+    if (name.empty()) return false;
+    try {
+        if (!store_->Rename(name)) return false;
+    } catch (const std::exception& e) {
+        logger_.warn("session {}: renaming failed: {}", params_.session_id, e.what());
+        return false;
+    }
+    SetName(name);
+    return true;
+}
+
 void Session::SetName(std::string name) {
     {
         std::lock_guard<std::mutex> lock(mutex_);

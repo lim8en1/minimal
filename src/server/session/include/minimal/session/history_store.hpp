@@ -106,6 +106,27 @@ public:
         (void)name;
         return false;
     }
+
+    // --- The session row's user-chosen settings ------------------------------
+    // Durable records a later resume reads back. May throw on a store failure;
+    // the caller decides whether that is worth more than a log line. Defaults
+    // are the in-memory answer: nothing durable to write, so nothing fails.
+
+    // A user rename (/rename): unconditional -- no guard against clobbering,
+    // the user's choice wins -- and marked explicit so later automatic naming
+    // skips the session. False when the row could not be renamed.
+    virtual bool Rename(const std::string& name) {
+        (void)name;
+        return true;
+    }
+    // The pinned "<provider>/<model>" (/model, --model); nullopt clears it.
+    virtual void PersistModelOverride(const std::optional<std::string>& provider_model) {
+        (void)provider_model;
+    }
+    // The pinned model for this session's subagents (/subagent-model).
+    virtual void PersistSubagentModel(const std::optional<std::string>& provider_model) {
+        (void)provider_model;
+    }
 };
 
 }  // namespace minimal::session

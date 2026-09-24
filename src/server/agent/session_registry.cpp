@@ -241,56 +241,8 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // registry-lifetime reader every session shares -- see history_reader_.
     params.history_reader = history_reader_;
 
-    // Durable half of the model override (see SessionParams::model_override):
-    // every funnel path gets the hook, so a runtime /model switch lands in the
-    // row and a later resume re-resolves with the user's choice instead of the
-    // preset default. The registry outlives every session, so capturing `this`
-    // and the (already read) id by value is safe.
-    params.model_override_persist =
-        [this, session_id](const std::optional<config::ModelRef>& ref) {
-            try {
-                db_.UpdateSessionModel(session_id,
-                                       ref ? std::optional<std::string>(ref->str())
-                                           : std::nullopt);
-            } catch (const std::exception& e) {
-                // Best effort: the running session keeps its override; the
-                // cost of a failed write is only a resume losing the choice.
-                logger_.warn("session {}: persisting model override failed: {}", session_id,
-                             e.what());
-            }
-        };
-    // Durable half of the subagent-model override (see
-    // SessionParams::subagent_model_override): the same funnel, the same
-    // best-effort reasoning as the hook above.
-    params.subagent_model_persist =
-        [this, session_id](const std::optional<config::ModelRef>& ref) {
-            try {
-                db_.UpdateSessionSubagentModel(session_id,
-                                               ref ? std::optional<std::string>(ref->str())
-                                                   : std::nullopt);
-            } catch (const std::exception& e) {
-                logger_.warn("session {}: persisting subagent-model override failed: {}",
-                             session_id, e.what());
-            }
-        };
-
-    // Durable half of a USER rename (/rename, see SessionParams::rename_session):
-    // unconditional -- no IsExplicitlyNamed guard, that is titler policy -- and
-    // stamped 'explicit' so a later titler pass skips the session. Returns
-    // false on failure so the command can surface the error.
-    params.rename_session = [this, session_id](const std::string& name) {
-        try {
-            return db_.UpdateSessionName(session_id, name, "explicit");
-        } catch (const std::exception& e) {
-            logger_.warn("session {}: renaming failed: {}", session_id, e.what());
-            return false;
-        }
-    };
-
-    // Constructor-injected (Phase 5 step 3): presets/commands/provider
-    // factories/instance cache reach Session's ctor on `params`, closing the
-    // window a post-construction set_* call used to leave open between the
-    // worker thread starting and these becoming non-null.
+    // Process-wide wiring reaches Session's constructor on `params`, so it is
+    // never null while the worker thread runs.
     ApplyConstructorWiring(params);
 
     std::optional<llm::Message> pending_repair;

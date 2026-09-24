@@ -42,6 +42,9 @@ public:
     std::int64_t UnmarkDiscarded() override;
 
     bool SetDefaultNameIfUnset(const std::string& name) override;
+    bool Rename(const std::string& name) override;
+    void PersistModelOverride(const std::optional<std::string>& provider_model) override;
+    void PersistSubagentModel(const std::optional<std::string>& provider_model) override;
 
 private:
     SessionDatabase& db_;

@@ -159,11 +159,6 @@ struct SessionParams {
     // over whatever the preset resolves to, and is re-applied after a preset
     // switch -- the preset is where a default comes from, not a decision.
     std::optional<config::ModelRef> model_override;
-    // Persistence hook for model_override, wired by the registry (which owns
-    // the database) with the session_id bound. Fired by set_model_override so
-    // a runtime /model switch survives a server restart; null (test sessions,
-    // spawners that persist the override themselves) means memory-only.
-    std::function<void(const std::optional<config::ModelRef>&)> model_override_persist;
     // Set when the user named a model explicitly for this session's spawned
     // subagents (/subagent-model). Consulted by SubagentManager::Spawn when
     // the spawn call itself names no model, and outranks the settings.json
@@ -171,20 +166,9 @@ struct SessionParams {
     // inherited from a parent -- it is this session's own choice for ITS
     // children.
     std::optional<config::ModelRef> subagent_model_override;
-    // Persistence hook for subagent_model_override, wired by the registry like
-    // model_override_persist. Fired by set_subagent_model_override so a
-    // /subagent-model choice survives a server restart; null means
-    // memory-only.
-    std::function<void(const std::optional<config::ModelRef>&)> subagent_model_persist;
-    // Persistence hook for a USER rename (/rename), wired by the registry
-    // (which owns the database) with the session_id bound. Fired by
-    // RenameSession BEFORE SetName -- rename-then-notify, the same order the
-    // titler seam uses, so a client that learns of the rename from the
-    // metadata event can trust it as the durable record. Null (plain test
-    // sessions) means the rename is memory-only. Unlike the titler's seam
-    // this is unconditional: a user rename clobbers any name and stamps
-    // name_source='explicit'.
-    std::function<bool(const std::string& name)> rename_session;
+    // Both overrides are persisted through the session's HistoryStore
+    // (PersistModelOverride/PersistSubagentModel) when changed at runtime, and
+    // so is a /rename (HistoryStore::Rename).
     // The rendered project-context section (AGENTS.md/CLAUDE.md), loaded by the
     // registry from project_root -- a SESSION property, not a preset one, so a
     // mid-session /agent switch cannot drop the project's instructions. The
@@ -583,33 +567,17 @@ public:
     const std::optional<common::ModelRef>& model_override() const override {
         return model_override_;
     }
-    void set_model_override(std::optional<common::ModelRef> ref) override {
-        model_override_ = std::move(ref);
-        // Durable record of the decision, best-effort: the in-memory state is
-        // what this session runs on; the hook is what a later resume reads.
-        if (params_.model_override_persist) params_.model_override_persist(model_override_);
-    }
+    void set_model_override(std::optional<common::ModelRef> ref) override;
     const std::optional<common::ModelRef>& subagent_model_override() const override {
         return subagent_model_override_;
     }
-    void set_subagent_model_override(std::optional<common::ModelRef> ref) override {
-        subagent_model_override_ = std::move(ref);
-        // Same best-effort durability as set_model_override: /subagent-model
-        // must survive a restart the same way /model does.
-        if (params_.subagent_model_persist) params_.subagent_model_persist(subagent_model_override_);
-    }
-    // /rename: persist first (rename-then-notify -- the database row is the
+    void set_subagent_model_override(std::optional<common::ModelRef> ref) override;
+    // /rename: persist first (rename-then-notify -- the stored row is the
     // authoritative record), then SetName for the partial metadata event.
-    // Unconditional, unlike the titler's seam: the user's choice wins. With
-    // no persistence hook (test sessions) the rename is memory-only.
+    // Unconditional, unlike the titler's seam: the user's choice wins.
     // Thread-safe: SetName takes mutex_; a read-only command may call this
     // from the RPC pool.
-    bool RenameSession(const std::string& name) override {
-        if (name.empty()) return false;
-        if (params_.rename_session && !params_.rename_session(name)) return false;
-        SetName(name);
-        return true;
-    }
+    bool RenameSession(const std::string& name) override;
     // The cancel generation as of NOW, not the last popped turn's base: a
     // Cancel that ended an earlier turn must not read as cancelling this
     // command. `this` outlives the probe -- it is used only inside the
