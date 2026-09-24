@@ -22,6 +22,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/agent/session_registry.hpp"
@@ -128,7 +129,7 @@ TEST_CASE("EnsureServerRunning recognises an already-running server without spaw
     session::SessionDatabase db{dir.path() / "sessions.db"};
     config::SettingsConfig settings;
     agent::AgentPresetRegistry presets{dir.path(), skills, settings};
-    agent::SessionRegistry registry{presets,
+    agent::SessionRegistry registry{presets, rpc::FinishSessionWiring,
         plugins::HostRegistries{.tools = &tools,
                                 .providers = &providers,
                                 .observers = &observers},

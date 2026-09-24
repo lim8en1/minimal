@@ -27,6 +27,7 @@
 #include "../plugins/server/commands-core/core_commands.hpp"
 #include "deadline.hpp"
 #include "fakes.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/session_client.hpp"
@@ -137,7 +138,7 @@ struct ClientFixture {
                                                  .commands = &commands,
                                                  .observers = observers.get()};
         sessions = std::make_unique<agent::SessionRegistry>(
-            *presets, registries, *db, agent::LoopConfig{}, common::DefaultLogger(), attach_guard);
+            *presets, rpc::FinishSessionWiring, registries, *db, agent::LoopConfig{}, common::DefaultLogger(), attach_guard);
         service = std::make_unique<rpc::SessionServiceImpl>(
             *sessions, *db, config::SettingsConfig{}, config::PermissionsConfig{},
             common::DefaultLogger(), registries);

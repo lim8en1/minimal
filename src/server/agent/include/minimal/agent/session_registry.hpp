@@ -108,13 +108,20 @@ public:
         std::function<void()> periodic_checkpoint;
     };
 
+    // Fills a session's transport-facing SessionParams -- transport, permission
+    // checker (advisor-composed when one was selected), confirmation and ask
+    // brokers -- once per session, after unattended_prompt_timeout resolved.
+    // Production passes rpc::FinishSessionWiring; agent/ never names rpc/.
+    using SessionWiring = std::function<void(SessionParams&)>;
+
     // `registries`: tools, providers and observers are required (throws
     // std::invalid_argument when null). commands, compaction_strategies,
     // context_contributors and hooks are optional: null means sessions get no
     // command surface, only the built-in compaction, no contributed context
-    // sections, and no hook dispatch.
-    SessionRegistry(const AgentPresetRegistry& presets, const plugins::HostRegistries& registries,
-                    session::SessionDatabase& db, LoopConfig loop_config, common::Logger& logger,
+    // sections, and no hook dispatch. `wire_session` is required.
+    SessionRegistry(const AgentPresetRegistry& presets, SessionWiring wire_session,
+                    const plugins::HostRegistries& registries, session::SessionDatabase& db,
+                    LoopConfig loop_config, common::Logger& logger,
                     std::chrono::milliseconds initial_attach_guard = std::chrono::seconds(10));
     ~SessionRegistry();
 
@@ -300,6 +307,7 @@ private:
                         bool signal_resume);
 
     const AgentPresetRegistry& presets_;
+    SessionWiring wire_session_;
     // Process-wide, borrowed; see the constructor for which may be null.
     plugins::HostRegistries registries_;
     const commands::ProjectCommandSource* project_commands_ = nullptr;

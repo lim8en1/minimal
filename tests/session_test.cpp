@@ -19,7 +19,9 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/skill_registry.hpp"
+#include "minimal/rpc/event_translator.hpp"
 #include "minimal/rpc/session_wiring.hpp"
+#include "minimal/rpc/transport_channels.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "temp_dir.hpp"
 
@@ -67,11 +69,7 @@ struct SessionFixture {
         params.project_root = project_root;
         params.permission_checker = std::move(injected_checker);
         params.advisor_cancel_source = injected_cancel_source;
-        params.transport_handle = injected_transport_handle;
-        params.event_sink = injected_event_sink;
-        params.cancel_pending_requests = injected_cancel_pending_requests;
-        params.shutdown_pending_requests = injected_shutdown_pending_requests;
-        params.close_transport = injected_close_transport;
+        params.transport = injected_transport;
         params.seed_grants = seed_grants;
         params.policy_ceiling = policy_ceiling;
         params.on_turn_finished = on_turn_finished;
@@ -105,15 +103,11 @@ struct SessionFixture {
     // Set alongside an injected AdvisedPermissionChecker: the Session keeps
     // this holder's flag and fires it in Cancel()/Terminate().
     std::shared_ptr<tools::AdvisorCancelSource> injected_cancel_source;
-    // The transport/sink an advised composition (rpc::ApplyPermissionAdvisor)
-    // already built, forwarded to SessionParams at Start() so the checker and
-    // the session publish through the SAME transport. Null keeps
-    // FinishSessionWiring's own default (a fresh transport).
-    std::shared_ptr<void> injected_transport_handle;
-    agent::SessionEventSink injected_event_sink;
-    std::function<void()> injected_cancel_pending_requests;
-    std::function<void()> injected_shutdown_pending_requests;
-    std::function<void()> injected_close_transport;
+    // A transport the test built itself -- the one an advised composition
+    // (FinishSessionWiring with selected_advisor) already made, so checker and
+    // session publish through the SAME transport, or a decorated one. Null
+    // keeps FinishSessionWiring's own default (a fresh transport).
+    std::shared_ptr<agent::SessionTransport> injected_transport;
 
     // Drains everything currently queued for the fixture's subscriber. The
     // writer thread's job, done inline.
@@ -449,11 +443,7 @@ TEST_CASE("an advise thread abandoned at the budget polls a flag that outlives t
         rpc::FinishSessionWiring(temp);
         fixture.injected_checker = std::move(temp.permission_checker);
         fixture.injected_cancel_source = temp.advisor_cancel_source;
-        fixture.injected_transport_handle = temp.transport_handle;
-        fixture.injected_event_sink = temp.event_sink;
-        fixture.injected_cancel_pending_requests = temp.cancel_pending_requests;
-        fixture.injected_shutdown_pending_requests = temp.shutdown_pending_requests;
-        fixture.injected_close_transport = temp.close_transport;
+        fixture.injected_transport = temp.transport;
     }
     fixture.Script(testing::ToolUseResponse("tu1", "slow"));
     fixture.Script(testing::TextResponse("unreached"));
@@ -545,22 +535,19 @@ TEST_CASE("Session::Terminate survives a throwing event sink without aborting",
     SessionFixture fixture;
     fixture.Script(testing::TextResponse("hi"));
 
-    {
-        agent::SessionParams temp;
-        temp.session_id = "sess-throw-terminate";
-        rpc::FinishSessionWiring(temp);
-        agent::SessionEventSink real_sink = temp.event_sink;
-        fixture.injected_event_sink = [real_sink](const agent::SessionEvent& event) {
+    // The real wire transport, except that publishing SessionEnded throws.
+    class ThrowOnEnd : public rpc::EventTranslator {
+    public:
+        using EventTranslator::EventTranslator;
+        bool Publish(const agent::SessionEvent& event) override {
             if (std::holds_alternative<agent::SessionEnded>(event)) {
                 throw std::runtime_error("event sink exploded on SessionEnded");
             }
-            return real_sink(event);
-        };
-        fixture.injected_transport_handle = temp.transport_handle;
-        fixture.injected_cancel_pending_requests = temp.cancel_pending_requests;
-        fixture.injected_shutdown_pending_requests = temp.shutdown_pending_requests;
-        fixture.injected_close_transport = temp.close_transport;
-    }
+            return EventTranslator::Publish(event);
+        }
+    };
+    fixture.injected_transport = std::make_shared<ThrowOnEnd>(
+        "sess-throw-terminate", rpc::MakeTransportChannels("sess-throw-terminate"));
     fixture.Start("sess-throw-terminate");
 
     fixture.session->SubmitTurn("hello");
@@ -976,22 +963,19 @@ TEST_CASE(
     // CommandResult must not hang.
     //
     // A real transport is built (so EmitEvent has somewhere to land, and this
-    // test's DrainQueue can observe it) but close_transport is overridden to
-    // a no-op: this reproduces the window the real bug lives in
+    // test's DrainQueue can observe it) but its Close is overridden to a
+    // no-op: this reproduces the window the real bug lives in
     // (SessionRegistry::Terminate erases the registry entry and flips
     // terminated_ before Session::Terminate gets around to closing the
     // transport) deterministically instead of needing the real race.
     SessionFixture fixture;
-    {
-        agent::SessionParams temp;
-        temp.session_id = "sess-1";
-        rpc::FinishSessionWiring(temp);
-        fixture.injected_transport_handle = temp.transport_handle;
-        fixture.injected_event_sink = temp.event_sink;
-        fixture.injected_cancel_pending_requests = temp.cancel_pending_requests;
-        fixture.injected_shutdown_pending_requests = temp.shutdown_pending_requests;
-        fixture.injected_close_transport = [] {};  // deliberately NOT temp.close_transport
-    }
+    class NeverCloses : public rpc::EventTranslator {
+    public:
+        using EventTranslator::EventTranslator;
+        void Close() override {}
+    };
+    fixture.injected_transport =
+        std::make_shared<NeverCloses>("sess-1", rpc::MakeTransportChannels("sess-1"));
     fixture.Script(testing::TextResponse("hi"));
     fixture.Start();
     fixture.session->Terminate();

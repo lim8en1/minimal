@@ -14,6 +14,7 @@
 
 #include "fakes.hpp"
 #include "session_events.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/agent/session_support.hpp"
 #include "minimal/common/logger.hpp"
@@ -64,7 +65,7 @@ struct SupportFixture {
         });
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir.path() / "sessions.db");
-        registry = std::make_unique<agent::SessionRegistry>(*presets,
+        registry = std::make_unique<agent::SessionRegistry>(*presets, rpc::FinishSessionWiring,
             plugins::HostRegistries{.tools = &tools,
                                     .providers = &providers,
                                     .observers = observers.get()},

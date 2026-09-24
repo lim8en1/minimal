@@ -20,6 +20,7 @@
 #include <thread>
 
 #include "deadline.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "fakes.hpp"
 #include "temp_dir.hpp"
@@ -172,7 +173,7 @@ TEST_CASE("the guard runs on the wire: a denying provider rejects OpenSession",
                                              .providers = &providers,
                                              .observers = &observers,
                                              .auth_providers = &auth};
-    agent::SessionRegistry sessions(*presets, registries, db, agent::LoopConfig{},
+    agent::SessionRegistry sessions(*presets, rpc::FinishSessionWiring, registries, db, agent::LoopConfig{},
                                     common::DefaultLogger());
     rpc::SessionServiceImpl service(sessions, db, config::SettingsConfig{},
                                     config::PermissionsConfig{}, common::DefaultLogger(),
@@ -227,7 +228,7 @@ TEST_CASE("the guard runs on the wire: a denying provider rejects SuggestPaths",
                                              .providers = &providers,
                                              .observers = &observers,
                                              .auth_providers = &auth};
-    agent::SessionRegistry sessions(*presets, registries, db, agent::LoopConfig{},
+    agent::SessionRegistry sessions(*presets, rpc::FinishSessionWiring, registries, db, agent::LoopConfig{},
                                     common::DefaultLogger());
     rpc::SessionServiceImpl service(sessions, db, config::SettingsConfig{},
                                     config::PermissionsConfig{}, common::DefaultLogger(),

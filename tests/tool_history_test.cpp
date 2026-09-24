@@ -161,7 +161,7 @@ struct HistoryFixture {
             return std::make_unique<testing::ScriptedProvider>(script);
         });
         db = std::make_unique<session::SessionDatabase>(db_dir.path() / "sessions.db");
-        registry = std::make_unique<agent::SessionRegistry>(*presets,
+        registry = std::make_unique<agent::SessionRegistry>(*presets, rpc::FinishSessionWiring,
             plugins::HostRegistries{.tools = &tools_registry,
                                     .providers = &providers,
                                     .observers = observers.get()},

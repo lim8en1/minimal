@@ -58,14 +58,18 @@ const agent::MentionResolver& DefaultMentionResolver() {
     return resolver;
 }
 
-// Session's public surface deliberately never names rpc::EventTranslator --
-// this is the one cast back to the concrete type, for the transport
-// operations (Subscribe/Unsubscribe/Pop/Publish/PublishTo/Resolve) that only
-// this layer needs. Safe: `session` owns the referenced EventTranslator for
-// as long as `session` itself is alive (SessionParams::transport_handle is
-// required at construction, never reassigned after).
+// Session only knows its transport as an agent::SessionTransport; the
+// subscriber and pending-request operations (Subscribe/Unsubscribe/Pop/
+// PublishTo/Resolve) belong to the concrete rpc type this layer built for it
+// (FinishSessionWiring). Checked: a session wired with anything else is a
+// programming error, not a cast to trust.
 EventTranslator& Transport(agent::Session& session) {
-    return *static_cast<EventTranslator*>(session.transport().get());
+    auto* translator = dynamic_cast<EventTranslator*>(session.transport().get());
+    if (translator == nullptr) {
+        throw std::logic_error("session " + session.info().session_id +
+                               " has no rpc::EventTranslator transport");
+    }
+    return *translator;
 }
 
 }  // namespace

@@ -18,29 +18,19 @@ namespace minimal::agent {
 namespace {
 
 // Fails construction loudly, before any member is built, rather than letting
-// a missing wiring field surface later as a silently-dropped event or a
-// std::bad_function_call from deep inside a lambda. Every real session gets
-// these from rpc::FinishSessionWiring (SessionRegistry::CreateResolved); a
-// test that constructs a Session directly must call it (or
-// rpc::ApplyPermissionAdvisor + rpc::FinishSessionWiring) itself first.
+// a missing wiring field surface later as a silently-dropped event. Every
+// real session gets these from the registry's wiring step
+// (SessionRegistry::CreateResolved); a test that constructs a Session
+// directly must call rpc::FinishSessionWiring (or supply fakes) itself first.
 SessionParams&& RequireWiring(SessionParams&& params) {
-    if (!params.event_sink) {
-        throw std::invalid_argument("SessionParams::event_sink is required");
+    if (!params.transport) {
+        throw std::invalid_argument("SessionParams::transport is required");
     }
     if (!params.permission_checker) {
         throw std::invalid_argument("SessionParams::permission_checker is required");
     }
     if (!params.confirmation_broker) {
         throw std::invalid_argument("SessionParams::confirmation_broker is required");
-    }
-    if (!params.transport_handle) {
-        throw std::invalid_argument("SessionParams::transport_handle is required");
-    }
-    if (!params.cancel_pending_requests || !params.shutdown_pending_requests ||
-        !params.close_transport) {
-        throw std::invalid_argument(
-            "SessionParams::cancel_pending_requests/shutdown_pending_requests/close_transport are "
-            "required");
     }
     return std::move(params);
 }
@@ -77,11 +67,10 @@ Session::Session(SessionParams params, AgentPreset preset,
       checker_(std::move(params_.permission_checker)),
       confirmations_(std::move(params_.confirmation_broker)),
       ask_broker_(std::move(params_.ask_broker)),
-      event_sink_(std::move(params_.event_sink)),
-      transport_(std::move(params_.transport_handle)),
-      shutdown_pending_requests_(std::move(params_.shutdown_pending_requests)),
-      cancel_pending_requests_(std::move(params_.cancel_pending_requests)),
-      close_transport_(std::move(params_.close_transport)),
+      transport_(std::move(params_.transport)),
+      event_sink_([transport = transport_](const SessionEvent& event) {
+          return transport->Publish(event);
+      }),
       // The run mode the client asked for wins over the configured default: it
       // is a property of the CLIENT, not of the config. A headless run has no
       // human to answer a prompt, so it must be able to say so. apply_run_mode()
@@ -933,7 +922,7 @@ void Session::Cancel() {
     // prompt in the session answering "no answer" instantly, which
     // WirePermissionChecker turns into Deny, so one CancelTurn would silently
     // deny-lock a session that reports itself alive and keeps accepting turns.
-    cancel_pending_requests_();
+    transport_->CancelPending();
     // CANCEL BEATS PAUSE. Cancel is "stop now" -- the operator escalating past
     // a pause they just set (or forgot about). Leaving the paused component
     // set would fence the very next turn behind a state the operator just
@@ -1097,7 +1086,7 @@ void Session::Terminate() {
     // parked on a gate mid-teardown -- including one parked in
     // WirePermissionChecker::check on a question the client will never answer.
     cancel_source_.CancelAll();
-    shutdown_pending_requests_();
+    transport_->ShutdownPending();
     // Refuses future out-of-band pushes: a background task finishing mid-
     // teardown learns "session gone" from its schedule_injection returning
     // false, exactly like a subagent's completion hook. Already-staged
@@ -1133,7 +1122,7 @@ void Session::Terminate() {
     // std::terminate on an ordinary session-lifetime path, not an exotic
     // one). A single try wrapping everything below would trade that hazard
     // for a different correctness bug: JoinWorkerOnce() below MUST run even
-    // if EmitEvent or close_transport_ throws, or the worker thread is never
+    // if EmitEvent or transport_->Close() throws, or the worker thread is never
     // joined and this object is unsafe to destroy. Guarding each step lets an
     // earlier failure skip only its own work, never the later steps'.
     try {
@@ -1153,9 +1142,9 @@ void Session::Terminate() {
     // blocks), so the join below cannot deadlock the way the old
     // blocking-Push design feared.
     try {
-        close_transport_();
+        transport_->Close();
     } catch (...) {
-        logger_.warn("session {}: close_transport threw during teardown", params_.session_id);
+        logger_.warn("session {}: closing the transport threw during teardown", params_.session_id);
     }
 
     if (worker_.get_id() != std::this_thread::get_id()) JoinWorkerOnce();

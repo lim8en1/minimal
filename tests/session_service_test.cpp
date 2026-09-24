@@ -29,6 +29,7 @@
 #include "fakes.hpp"
 #include "temp_dir.hpp"
 #include "../../plugins/server/commands-core/core_commands.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
@@ -165,7 +166,7 @@ struct ServiceFixture {
                                                  .mention_resolvers = &mention_resolvers,
                                                  .services = &services};
         sessions = std::make_unique<agent::SessionRegistry>(
-            *presets, registries, *db, agent::LoopConfig{}, common::DefaultLogger(), attach_guard);
+            *presets, rpc::FinishSessionWiring, registries, *db, agent::LoopConfig{}, common::DefaultLogger(), attach_guard);
         service = std::make_unique<rpc::SessionServiceImpl>(
             *sessions, *db, config::SettingsConfig{}, service_permissions,
             common::DefaultLogger(), registries);

@@ -1,5 +1,6 @@
 #include "minimal/rpc/session_wiring.hpp"
 
+#include <stdexcept>
 #include <utility>
 
 #include "minimal/rpc/event_translator.hpp"
@@ -11,21 +12,12 @@
 namespace minimal::rpc {
 namespace {
 
-// Builds a fresh TransportChannels + EventTranslator and wires every
-// transport-shaped SessionParams field from it. Called by
-// FinishSessionWiring only when a producer did not already supply one
-// (params.transport_handle set) -- a test injecting its own transport.
+// A fresh TransportChannels + EventTranslator, unless the producer already
+// supplied the transport (a test injecting its own).
 std::shared_ptr<EventTranslator> BuildTransport(agent::SessionParams& params) {
-    auto transport = MakeTransportChannels(params.session_id);
-    auto translator = std::make_shared<EventTranslator>(params.session_id, transport);
-    params.transport_handle = translator;
-    params.event_sink = *translator;
-    // Captured by value: the callback must work after the producer that
-    // built it (and Session itself) may be gone, same lifetime rule as
-    // EventTranslator's own copies.
-    params.cancel_pending_requests = [transport] { transport->pending.CancelAll(); };
-    params.shutdown_pending_requests = [transport] { transport->pending.Shutdown(); };
-    params.close_transport = [transport] { transport->queue.CloseAll(); };
+    auto translator = std::make_shared<EventTranslator>(params.session_id,
+                                                        MakeTransportChannels(params.session_id));
+    params.transport = translator;
     return translator;
 }
 
@@ -50,8 +42,11 @@ void ApplyPermissionAdvisor(agent::SessionParams& params,
 
 void FinishSessionWiring(agent::SessionParams& params) {
     std::shared_ptr<EventTranslator> translator =
-        params.transport_handle ? std::static_pointer_cast<EventTranslator>(params.transport_handle)
-                                : BuildTransport(params);
+        params.transport ? std::dynamic_pointer_cast<EventTranslator>(params.transport)
+                         : BuildTransport(params);
+    if (translator == nullptr) {
+        throw std::invalid_argument("FinishSessionWiring needs an rpc::EventTranslator transport");
+    }
 
     if (params.selected_advisor) {
         ApplyPermissionAdvisor(params, std::move(params.selected_advisor), params.advisor_timeout,

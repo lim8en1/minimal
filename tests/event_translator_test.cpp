@@ -23,30 +23,31 @@ TEST_CASE("EventTranslator publishes a translated SessionEvent to the broadcaste
     CHECK(out->has_session_ended());
 }
 
-TEST_CASE("EventTranslator is usable directly as a SessionEventSink", "[event_translator]") {
+TEST_CASE("EventTranslator publishes through the SessionTransport interface",
+          "[event_translator]") {
     auto transport = MakeTransportChannels("sess-2");
-    EventTranslator translator{"sess-2", transport};
-    agent::SessionEventSink sink = translator;
+    auto translator = std::make_shared<EventTranslator>("sess-2", transport);
+    std::shared_ptr<agent::SessionTransport> session_transport = translator;
 
     auto subscriber = transport->queue.Subscribe();
-    CHECK(sink(agent::SessionError{"boom"}));
+    CHECK(session_transport->Publish(agent::SessionError{"boom"}));
 
     const auto out = transport->queue.TryPop(subscriber);
     REQUIRE(out.has_value());
     CHECK(out->error().message() == "boom");
 }
 
-TEST_CASE("EventTranslator copies independently keep the transport alive", "[event_translator]") {
-    // Mirrors the shared_ptr-by-value capture pattern a detached background
-    // watcher relies on: a copy of the translator must go on publishing after
-    // the original (and its owner) is gone.
+TEST_CASE("a sink capturing the transport keeps it alive past its owner", "[event_translator]") {
+    // Mirrors the shared_ptr-by-value capture Session's sinks use: a detached
+    // background watcher must go on publishing after the Session is gone.
     auto transport = MakeTransportChannels("sess-3");
     auto subscriber = transport->queue.Subscribe();
 
     agent::SessionEventSink sink;
     {
-        EventTranslator translator{"sess-3", transport};
-        sink = translator;
+        std::shared_ptr<agent::SessionTransport> owner =
+            std::make_shared<EventTranslator>("sess-3", transport);
+        sink = [owner](const agent::SessionEvent& event) { return owner->Publish(event); };
     }
     CHECK(sink(agent::SessionEnded{}));
     CHECK(transport->queue.TryPop(subscriber).has_value());

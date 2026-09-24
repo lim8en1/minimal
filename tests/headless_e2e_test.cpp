@@ -24,6 +24,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/client/utf8.hpp"
 
 #include "bash_session_state.hpp"
@@ -160,7 +161,7 @@ struct HeadlessFixture {
             std::make_shared<cost_tracker::CostSessionObserver>(*cost_store, *cost_in_flight));
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
         sessions = std::make_unique<agent::SessionRegistry>(
-            *presets,
+            *presets, rpc::FinishSessionWiring,
             plugins::HostRegistries{.tools = &tools,
                                     .providers = &providers,
                                     .observers = observers.get(),

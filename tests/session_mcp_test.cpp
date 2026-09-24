@@ -340,7 +340,7 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
         return std::make_unique<testing::FakeLlmProvider>();
     });
     tools::ToolRegistry tools;
-    agent::SessionRegistry sessions(presets,
+    agent::SessionRegistry sessions(presets, rpc::FinishSessionWiring,
         plugins::HostRegistries{.tools = &tools,
                                 .providers = &providers,
                                 .observers = &observers},

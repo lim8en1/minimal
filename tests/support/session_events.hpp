@@ -25,7 +25,7 @@
 namespace minimal::testing {
 
 inline rpc::EventTranslator& Transport(agent::Session& session) {
-    return *static_cast<rpc::EventTranslator*>(session.transport().get());
+    return dynamic_cast<rpc::EventTranslator&>(*session.transport());
 }
 
 class SessionStream {

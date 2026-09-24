@@ -23,6 +23,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "fakes.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/agent/spawn_subagent_tool.hpp"
 #include "minimal/agent/subagent_manager.hpp"
 #include "minimal/client/session_client.hpp"
@@ -94,7 +95,7 @@ struct SubagentE2EFixture {
         });
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
-        sessions = std::make_unique<agent::SessionRegistry>(*presets,
+        sessions = std::make_unique<agent::SessionRegistry>(*presets, rpc::FinishSessionWiring,
             plugins::HostRegistries{.tools = &tools,
                                     .providers = &providers,
                                     .observers = observers.get()},

@@ -1,24 +1,16 @@
 #pragma once
 
-// The one place agent:: code (SessionRegistry's creation funnel) reaches into
-// rpc:: to wire a session's transport-facing pieces: the EventTranslator
-// behind SessionParams::event_sink, the (possibly advisor-composed)
-// permission checker, and the always-built WireConfirmationBroker. Nothing
-// downstream of this file ever names those concrete types again -- agent/
-// only ever sees SessionEventSink, tools::PermissionChecker,
-// commands::ConfirmationBroker, and an opaque transport_handle.
+// Wires a session's transport-facing pieces: the EventTranslator transport,
+// the (possibly advisor-composed) permission checker, and the confirmation
+// and ask brokers. main.cpp hands this function to SessionRegistry as its
+// SessionWiring step, so agent/ never names rpc/ -- it only ever sees
+// agent::SessionTransport, tools::PermissionChecker,
+// commands::ConfirmationBroker and tools::AskBroker.
 //
-// ONE PHASE, by construction: a composition call site
-// (SessionServiceImpl::ApplyAdvisor, SubagentManager's advisor-inheritance
-// path) only ever SELECTS an advisor -- it sets the plain
-// SessionParams::selected_advisor/advisor_timeout fields and makes no rpc::
-// call at all. FinishSessionWiring, called once per session from
-// SessionRegistry::CreateResolved after SessionParams::unattended_prompt_timeout
-// has resolved, is what actually BUILDS everything: the composed checker (if
-// selected_advisor is set -- its underlying wire checker always waits
-// forever, so it never needed the timeout, but building it early bought
-// nothing once selection and composition were split), the default
-// WirePermissionChecker otherwise, and always the WireConfirmationBroker.
+// Composition call sites (SessionServiceImpl::ApplyAdvisor, SubagentManager's
+// advisor inheritance) only SELECT an advisor, via
+// SessionParams::selected_advisor/advisor_timeout; this is what BUILDS
+// everything, once per session, after unattended_prompt_timeout resolved.
 
 #include <chrono>
 #include <memory>

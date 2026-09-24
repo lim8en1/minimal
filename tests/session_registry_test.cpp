@@ -12,6 +12,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "fakes.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/common/logger.hpp"
@@ -86,7 +87,7 @@ struct RegistryFixture {
         // SqliteHistoryStore does not touch the connection until it appends.
         // What is being tested is registry lifetime, not persistence.
         db = std::make_unique<session::SessionDatabase>(db_dir.path() / "sessions.db");
-        registry = std::make_unique<agent::SessionRegistry>(*presets,
+        registry = std::make_unique<agent::SessionRegistry>(*presets, rpc::FinishSessionWiring,
             plugins::HostRegistries{.tools = &tools_registry,
                                     .providers = &providers,
                                     .observers = observers.get(),

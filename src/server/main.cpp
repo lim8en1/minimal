@@ -55,6 +55,7 @@
 #include "minimal/plugins/plugin_rpc.hpp"
 #include "minimal/plugins/plugin_storage.hpp"
 #include "minimal/rpc/server.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/rpc/session_service.hpp"
 #include "minimal/session/session_database.hpp"
 #include "minimal/tools/atomic_write.hpp"
@@ -712,7 +713,8 @@ int main(int argc, char** argv) {
     // Contributors are configured before the registry exists, so no session
     // can render against unconfigured settings.
     context_contributors.Configure(settings.context_contributors);
-    minimal::agent::SessionRegistry sessions(*presets, registries, *session_db, loop_config,
+    minimal::agent::SessionRegistry sessions(*presets, minimal::rpc::FinishSessionWiring,
+                                             registries, *session_db, loop_config,
                                              minimal::common::DefaultLogger());
     sessions.set_project_commands(&project_commands);
     sessions.set_signal_router(&signal_router);

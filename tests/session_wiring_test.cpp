@@ -32,14 +32,10 @@ TEST_CASE("FinishSessionWiring builds every default when no advisor is selected"
     params.session_id = "s2";
     rpc::FinishSessionWiring(params);
 
-    REQUIRE(params.transport_handle != nullptr);
-    REQUIRE(params.event_sink != nullptr);
+    REQUIRE(params.transport != nullptr);
     REQUIRE(params.permission_checker != nullptr);
     REQUIRE(params.confirmation_broker != nullptr);
     REQUIRE(params.ask_broker != nullptr);
-    REQUIRE(params.cancel_pending_requests != nullptr);
-    REQUIRE(params.shutdown_pending_requests != nullptr);
-    REQUIRE(params.close_transport != nullptr);
     // No advisor applied, so no cancel source was minted for one.
     CHECK(params.advisor_cancel_source == nullptr);
 }
@@ -52,8 +48,7 @@ TEST_CASE("a selected advisor gets composed into a checker with a transport and 
     params.advisor_timeout = std::chrono::milliseconds(1000);
     rpc::FinishSessionWiring(params);
 
-    REQUIRE(params.transport_handle != nullptr);
-    REQUIRE(params.event_sink != nullptr);
+    REQUIRE(params.transport != nullptr);
     REQUIRE(params.permission_checker != nullptr);
     REQUIRE(params.advisor_cancel_source != nullptr);
     REQUIRE(params.confirmation_broker != nullptr);
@@ -79,13 +74,12 @@ TEST_CASE("FinishSessionWiring reuses a producer's transport and leaves its chec
     composed.advisor_timeout = std::chrono::milliseconds(1000);
     rpc::FinishSessionWiring(composed);
     const auto* checker_before = composed.permission_checker.get();
-    const auto transport_before = composed.transport_handle;
+    const auto transport_before = composed.transport;
 
     agent::SessionParams params;
     params.session_id = "s3";
     params.permission_checker = std::move(composed.permission_checker);
-    params.transport_handle = composed.transport_handle;
-    params.event_sink = composed.event_sink;
+    params.transport = composed.transport;
     rpc::FinishSessionWiring(params);
 
     // The advised checker survives untouched -- FinishSessionWiring only
@@ -94,6 +88,20 @@ TEST_CASE("FinishSessionWiring reuses a producer's transport and leaves its chec
     // The SAME transport, not a second one -- an advised session's
     // confirmation broker must publish on the same stream its permission
     // requests already use.
-    CHECK(params.transport_handle == transport_before);
+    CHECK(params.transport == transport_before);
     REQUIRE(params.confirmation_broker != nullptr);
+}
+
+TEST_CASE("FinishSessionWiring refuses a transport it cannot build prompts on",
+          "[session_wiring]") {
+    struct NotWire : agent::SessionTransport {
+        bool Publish(const agent::SessionEvent&) override { return true; }
+        void CancelPending() override {}
+        void ShutdownPending() override {}
+        void Close() override {}
+    };
+    agent::SessionParams params;
+    params.session_id = "s4";
+    params.transport = std::make_shared<NotWire>();
+    CHECK_THROWS_AS(rpc::FinishSessionWiring(params), std::invalid_argument);
 }

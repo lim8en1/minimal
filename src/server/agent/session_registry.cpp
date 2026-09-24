@@ -7,7 +7,6 @@
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/agent/transcript_repair.hpp"
 #include "minimal/config/project_context.hpp"
-#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/session/sqlite_history_store.hpp"
 
@@ -25,12 +24,15 @@ T& Required(T* registry, const char* name) {
 
 }  // namespace
 
-SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets,
+SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, SessionWiring wire_session,
                                  const plugins::HostRegistries& registries,
                                  session::SessionDatabase& db, LoopConfig loop_config,
                                  common::Logger& logger,
                                  std::chrono::milliseconds initial_attach_guard)
     : presets_(presets),
+      wire_session_(wire_session ? std::move(wire_session)
+                                 : throw std::invalid_argument(
+                                       "SessionRegistry needs a session wiring step")),
       registries_(registries),
       tools_(Required(registries.tools, "tool")),
       resolver_(presets.providers(), Required(registries.providers, "provider factory"), logger),
@@ -203,14 +205,11 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     if (params.unattended_prompt_timeout == std::chrono::milliseconds::zero()) {
         params.unattended_prompt_timeout = prompt_timeout_;
     }
-    // Builds whatever the advisor-composition callers (ApplyAdvisor,
-    // SubagentManager) did not already build for this session: the transport
-    // (if no advisor applied), the default WirePermissionChecker (if no
-    // advisor applied), and -- always -- the WireConfirmationBroker. Must run
-    // AFTER unattended_prompt_timeout resolves just above: both of those
-    // defaults are built against it, and this is the one funnel every
-    // session (top-level, resume, subagent) passes through after that point.
-    rpc::FinishSessionWiring(params);
+    // The transport, the (possibly advisor-composed) permission checker and
+    // the confirmation/ask brokers. AFTER unattended_prompt_timeout resolves
+    // just above -- the defaults are built against it -- and here because this
+    // is the one funnel every session (top-level, resume, subagent) passes.
+    wire_session_(params);
     AppendSignalContext(params);
     AppendContributedContext(params, preset);
 

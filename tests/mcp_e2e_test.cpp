@@ -18,6 +18,7 @@ using namespace std::chrono_literals;
 
 #include "fakes.hpp"
 #include "temp_dir.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/config/mcps_config.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
@@ -77,7 +78,7 @@ struct McpE2eFixture {
         });
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
-        sessions = std::make_unique<agent::SessionRegistry>(*presets,
+        sessions = std::make_unique<agent::SessionRegistry>(*presets, rpc::FinishSessionWiring,
             plugins::HostRegistries{.tools = &tools,
                                     .providers = &providers,
                                     .observers = observers.get()},

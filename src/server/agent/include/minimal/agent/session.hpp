@@ -41,6 +41,7 @@
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/injection_queue.hpp"
 #include "minimal/agent/session_event.hpp"
+#include "minimal/agent/session_transport.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
@@ -116,17 +117,17 @@ struct SessionParams {
     // around this shared holder: Session installs its own cancel predicate into
     // it in the constructor body, before the worker starts. Null otherwise.
     std::shared_ptr<tools::AdvisorCancelSource> advisor_cancel_source;
-    // Where every SessionEvent Session emits goes. Built by
-    // rpc::ApplyPermissionAdvisor/FinishSessionWiring against a real
-    // rpc::EventTranslator; a test injects any fake sink. Required -- Session's
-    // constructor throws if this is unset, rather than silently dropping every
-    // event, since nothing about a missing sink is otherwise observable until
-    // a client notices events never arrive.
-    SessionEventSink event_sink;
+    // Where every SessionEvent Session emits goes, and how Cancel/Terminate
+    // reach outstanding client prompts. rpc::EventTranslator in production
+    // (built by the registry's wiring step); a test injects any fake.
+    // Required -- Session's constructor throws if this is unset, rather than
+    // silently dropping every event, since nothing about a missing transport
+    // is otherwise observable until a client notices events never arrive.
+    std::shared_ptr<SessionTransport> transport;
     // Always the wire default (rpc::WireConfirmationBroker) in production --
     // unlike permission_checker, there is no advisor for confirmations to
     // decorate. A test injects any fake. Required, same reasoning as
-    // event_sink.
+    // transport.
     std::unique_ptr<commands::ConfirmationBroker> confirmation_broker;
     // Always the wire default (rpc::WireAskBroker) in production. OPTIONAL,
     // unlike confirmation_broker: a session without it simply exposes no
@@ -134,22 +135,6 @@ struct SessionParams {
     // plugin's tool degrades to an error result. Null keeps test fixtures
     // that care nothing about asks from having to build one.
     std::unique_ptr<tools::AskBroker> ask_broker;
-    // Opaque handle to whatever rpc::EventTranslator backs event_sink, kept
-    // alive here so callers that need the underlying rpc::EventBroadcaster/
-    // PendingRequests (SessionServiceImpl's Subscribe/Unsubscribe/Resolve) can
-    // reach it via Session::transport() without agent/ ever naming the
-    // concrete rpc:: type. Session itself never dereferences this.
-    std::shared_ptr<void> transport_handle;
-    // Terminate()/Cancel()'s hooks into the transport's PendingRequests, which
-    // Session can no longer name directly. See PendingRequests::Shutdown/
-    // CancelAll for what each does and why they are two different calls.
-    std::function<void()> shutdown_pending_requests;
-    std::function<void()> cancel_pending_requests;
-    // Terminate()'s hook to close every subscriber queue on the transport
-    // (EventBroadcaster::CloseAll), which Session can no longer name
-    // directly. Called AFTER the terminal SessionEnded event is published, so
-    // every attached writer drains it before unwinding.
-    std::function<void()> close_transport;
     // Set when the client asked for a specific mode (the headless client asks
     // for AllowOnly); unset means the preset's configured mode stands. For a
     // subagent the spawner has ALREADY clamped it against the parent's via
@@ -491,11 +476,10 @@ public:
     // comment for what the bool means.
     bool EmitEvent(const SessionEvent& event) { return event_sink_(event); }
 
-    // The opaque handle to this session's rpc::EventTranslator, for callers
-    // that must reach the real transport (SessionServiceImpl's
-    // Subscribe/Unsubscribe/Resolve/Pop). Never null once construction
-    // succeeds -- SessionParams::transport_handle is required.
-    std::shared_ptr<void> transport() const { return transport_; }
+    // This session's transport, for the layer that owns it (the RPC service
+    // reaches its subscribers through the concrete type). Never null once
+    // construction succeeds.
+    const std::shared_ptr<SessionTransport>& transport() const { return transport_; }
 
     const SessionInfo& info() const { return info_; }
     // Locked copy of info(), for any reader OFF the session worker that needs
@@ -783,14 +767,11 @@ private:
     std::unique_ptr<commands::ConfirmationBroker> confirmations_;
     // May be null (see SessionParams::ask_broker).
     std::unique_ptr<tools::AskBroker> ask_broker_;
-    // Where every SessionEvent this class emits goes. See EmitEvent() and
-    // SessionParams::event_sink.
+    // See SessionParams::transport.
+    std::shared_ptr<SessionTransport> transport_;
+    // transport_->Publish as a copyable callable: what the loop's and tools'
+    // sinks capture, keeping the transport alive past this Session.
     SessionEventSink event_sink_;
-    // Opaque; see transport() and SessionParams::transport_handle.
-    std::shared_ptr<void> transport_;
-    std::function<void()> shutdown_pending_requests_;
-    std::function<void()> cancel_pending_requests_;
-    std::function<void()> close_transport_;
     // Mirrors the transport's own subscriber count (Session cannot query it
     // directly any more) so has_subscribers()/ever_attached() keep working off
     // NotifyAttached()/NotifyDetached() calls from whoever owns Subscribe/

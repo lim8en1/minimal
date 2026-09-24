@@ -29,6 +29,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "deadline.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "../plugins/server/commands-core/core_commands.hpp"
 #include "fakes.hpp"
@@ -127,7 +128,7 @@ struct SubagentFixture {
         // A long guard: unattached children are normal here (no client in this
         // tier), and a test parked on a permission prompt must not be reaped
         // mid-assertion. Attach-guard behaviour has its own tests.
-        sessions = std::make_unique<agent::SessionRegistry>(*presets,
+        sessions = std::make_unique<agent::SessionRegistry>(*presets, rpc::FinishSessionWiring,
             plugins::HostRegistries{.tools = &tools,
                                     .providers = &providers,
                                     .commands = commands,
@@ -154,7 +155,7 @@ struct SubagentFixture {
             dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir.path() / "sessions.db");
-        sessions = std::make_unique<agent::SessionRegistry>(*presets,
+        sessions = std::make_unique<agent::SessionRegistry>(*presets, rpc::FinishSessionWiring,
             plugins::HostRegistries{.tools = &tools,
                                     .providers = &providers,
                                     .observers = observers.get()},
