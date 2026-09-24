@@ -15,8 +15,7 @@ using namespace std::chrono_literals;
 namespace {
 
 // The three objects an ask round-trip needs -- mirrors
-// wire_confirmation_broker_test.cpp's Harness, which the shared
-// AwaitTypedAnswer rendezvous exists to make uniform.
+// wire_confirmation_broker_test.cpp's Harness, since both run on WirePrompt.
 struct Harness {
     rpc::EventBroadcaster broadcaster{"sess-1"};
     rpc::EventBroadcaster::Handle subscriber = broadcaster.Subscribe();

@@ -2,22 +2,15 @@
 
 // tools::AskBroker over the bidi stream.
 //
-// The ask-side twin of WireConfirmationBroker, built the same way for the
-// same reason: REGISTER BEFORE PUBLISHING. The client can answer the instant
-// the event is written, so the slot must exist first -- otherwise a fast
-// answer arrives with nowhere to go and the worker blocks forever on a
-// question that was already answered.
-//
-// No gRPC types here beyond building the event: this takes the queue and the
-// rendezvous, both of which the session owns, so it is testable in-process
-// with no channel.
+// The ask-side twin of WireConfirmationBroker; WirePrompt does the
+// register/publish/await round trip. Testable in-process with no channel.
 
 #include <chrono>
 #include <string>
 
 #include "minimal/rpc/event_broadcaster.hpp"
 #include "minimal/rpc/pending_requests.hpp"
-#include "minimal/rpc/rendezvous.hpp"
+#include "minimal/rpc/wire_prompt.hpp"
 #include "minimal/tools/ask.hpp"
 #include "minimal/v1/session_service.pb.h"
 
@@ -38,16 +31,7 @@ public:
     tools::AskAnswer Ask(const tools::AskRequest& request) override;
 
 private:
-    std::string session_id_;
-    EventBroadcaster& queue_;
-    PendingRequests& pending_;
-    std::chrono::milliseconds unattended_timeout_;
-    // "ask-" keeps ids distinct from the other brokers' prefixes for logs and
-    // diagnostics. It is NOT the safety mechanism -- the typed PendingAnswer
-    // variant AwaitTypedAnswer narrows against is: an answer of the wrong
-    // broker's type delivered against this id is structurally unreadable at
-    // the waiter.
-    RequestIdGenerator request_ids_{"ask-"};
+    WirePrompt prompt_;
 };
 
 }  // namespace minimal::rpc

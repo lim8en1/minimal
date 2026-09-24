@@ -15,9 +15,7 @@ using namespace std::chrono_literals;
 namespace {
 
 // The three objects a confirmation round-trip needs -- mirrors
-// wire_permission_checker_test.cpp's Harness, the shared skeleton the two
-// brokers' AwaitTypedAnswer factoring (Phase 5 step 10) is meant to make
-// this test suite pin down for both sides, not just the permission one.
+// wire_permission_checker_test.cpp's Harness, since both run on WirePrompt.
 struct Harness {
     rpc::EventBroadcaster broadcaster{"sess-1"};
     rpc::EventBroadcaster::Handle subscriber = broadcaster.Subscribe();

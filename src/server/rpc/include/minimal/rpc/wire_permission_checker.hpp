@@ -19,7 +19,7 @@
 
 #include "minimal/rpc/event_broadcaster.hpp"
 #include "minimal/rpc/pending_requests.hpp"
-#include "minimal/rpc/rendezvous.hpp"
+#include "minimal/rpc/wire_prompt.hpp"
 #include "minimal/tools/permission_checker.hpp"
 #include "minimal/v1/session_service.pb.h"
 
@@ -39,11 +39,7 @@ public:
     tools::PermissionResponse check(const tools::PermissionRequest& request) override;
 
 private:
-    std::string session_id_;
-    EventBroadcaster& queue_;
-    PendingRequests& pending_;
-    std::chrono::milliseconds unattended_timeout_;
-    RequestIdGenerator request_ids_{"perm-"};
+    WirePrompt prompt_;
 };
 
 }  // namespace minimal::rpc

@@ -35,40 +35,28 @@ bool SlotIsValid(const tools::AskQuestion& question, const tools::AskAnswer::Slo
 WireAskBroker::WireAskBroker(std::string session_id, EventBroadcaster& queue,
                              PendingRequests& pending,
                              std::chrono::milliseconds unattended_timeout)
-    : session_id_(std::move(session_id)),
-      queue_(queue),
-      pending_(pending),
-      unattended_timeout_(unattended_timeout) {}
+    : prompt_(std::move(session_id), queue, pending, unattended_timeout, "ask-") {}
 
 tools::AskAnswer WireAskBroker::Ask(const tools::AskRequest& request) {
-    const std::string request_id = request_ids_.Next();
-
-    // Before the push, always -- see the header.
-    auto registration = pending_.Register(request_id);
-
-    v1::ServerEvent event;
-    event.set_session_id(session_id_);
-    auto* wire = event.mutable_ask_request();
-    wire->set_request_id(request_id);
-    for (const auto& question : request.questions) {
-        auto* wire_question = wire->add_questions();
-        wire_question->set_question(question.question);
-        wire_question->set_header(question.header);
-        wire_question->set_multiple(question.multiple);
-        wire_question->set_allow_other(question.allow_other);
-        for (const auto& option : question.options) {
-            auto* wire_option = wire_question->add_options();
-            wire_option->set_label(option.label);
-            wire_option->set_description(option.description);
-        }
-    }
-    queue_.Publish(std::move(event));  // event is moved-from below the publish
-
-    // Cancelled, terminating, timed out, or an answer of the other brokers'
-    // type delivered against this id -- all "no answer", never a choice (see
-    // WireConfirmationBroker for the identical fail-closed shape).
-    const std::optional<AskUserAnswer> answer =
-        AwaitTypedAnswer<AskUserAnswer>(registration, unattended_timeout_);
+    // No usable answer is "not answered", never a choice (the same
+    // fail-closed shape WireConfirmationBroker uses).
+    const std::optional<AskUserAnswer> answer = prompt_.Ask<AskUserAnswer>(
+        [&request](v1::ServerEvent& event, const std::string& request_id) {
+            auto* wire = event.mutable_ask_request();
+            wire->set_request_id(request_id);
+            for (const auto& question : request.questions) {
+                auto* wire_question = wire->add_questions();
+                wire_question->set_question(question.question);
+                wire_question->set_header(question.header);
+                wire_question->set_multiple(question.multiple);
+                wire_question->set_allow_other(question.allow_other);
+                for (const auto& option : question.options) {
+                    auto* wire_option = wire_question->add_options();
+                    wire_option->set_label(option.label);
+                    wire_option->set_description(option.description);
+                }
+            }
+        });
     if (!answer || !answer->answered) return {};
 
     tools::AskAnswer result;

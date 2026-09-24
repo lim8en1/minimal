@@ -8,8 +8,8 @@
 // arrives with nowhere to go and the worker blocks forever on a question that
 // was already answered.
 //
-// No gRPC types here: this takes the queue and the rendezvous, both of which the
-// session owns, so it is testable in-process with no channel.
+// No gRPC types here: this takes the queue and the PendingRequests, both of
+// which the session owns, so it is testable in-process with no channel.
 
 #include <chrono>
 #include <string>
@@ -17,7 +17,7 @@
 #include "minimal/commands/confirmation_broker.hpp"
 #include "minimal/rpc/event_broadcaster.hpp"
 #include "minimal/rpc/pending_requests.hpp"
-#include "minimal/rpc/rendezvous.hpp"
+#include "minimal/rpc/wire_prompt.hpp"
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::rpc {
@@ -38,16 +38,7 @@ public:
         const commands::ConfirmationRequest& request) override;
 
 private:
-    std::string session_id_;
-    EventBroadcaster& queue_;
-    PendingRequests& pending_;
-    std::chrono::milliseconds unattended_timeout_;
-    // "confirm-" keeps ids distinct from WirePermissionChecker's "perm-" for
-    // logs and diagnostics. It is NOT the safety mechanism -- the typed
-    // PendingAnswer variant AwaitTypedAnswer narrows against is: a permission
-    // answer delivered against this id is structurally unreadable at the
-    // waiter.
-    RequestIdGenerator request_ids_{"confirm-"};
+    WirePrompt prompt_;
 };
 
 }  // namespace minimal::rpc
