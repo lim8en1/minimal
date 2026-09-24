@@ -326,7 +326,6 @@ TEST_CASE("two detached quiescent sessions are both reaped by the idle TTL, on s
     agent::SessionRegistry::ReaperConfig config;
     config.initial_attach_guard = 200ms;
     config.detached_idle_ttl = std::chrono::seconds(1);
-    config.idle_shutdown = std::chrono::seconds(0);
     fixture.registry->set_reaper_config(config);
 
     auto first = fixture.registry->Create(Params("s1"));
@@ -358,75 +357,27 @@ TEST_CASE("two detached quiescent sessions are both reaped by the idle TTL, on s
     CHECK(second->terminated());
 }
 
-// --- Idle exit: the Ping half -------------------------------------------------
+// --- What holds the process up (the idle exit's session half) ---------------
+// The timing half -- linger, Ping, the exit callback -- is ServerHousekeeping's
+// and is tested in server_housekeeping_test.cpp.
 
-TEST_CASE("the idle exit holds while a session-less client keeps pinging", "[session_registry]") {
-    // Regression: the idle exit fired once zero sessions were live and zero
-    // streams attached. A live client that holds NEITHER -- the TUI's
-    // empty-state welcome view, before its first session -- attached no
-    // stream and created no session, so the server shut itself down under
-    // the user (the reported "start client, fiddle with /-autocomplete,
-    // submit, server stops"). With client_idle_for wired, a fresh Ping
-    // every beat holds the exit off indefinitely.
-    RegistryFixture fixture(200ms);   // 50ms reaper tick
-    fixture.config.WriteDefaults();
-    fixture.Build();
-
-    std::atomic<int> idle_exits{0};
-    agent::SessionRegistry::ReaperConfig config;
-    config.initial_attach_guard = 200ms;   // 50ms reaper tick
-    config.idle_shutdown = std::chrono::seconds(1);
-    config.attached_clients = [] { return 0; };
-    config.client_idle_for = [] {
-        return std::chrono::milliseconds(0);   // pinged just now, every beat
-    };
-    config.on_idle_expired = [&idle_exits] { idle_exits.fetch_add(1); };
-    fixture.registry->set_reaper_config(config);
-
-    std::this_thread::sleep_for(1600ms);   // several idle_shutdown periods
-    CHECK(idle_exits.load() == 0);
-}
-
-TEST_CASE("the idle exit fires when the last client ping has gone stale", "[session_registry]") {
-    // The counterpart: an absent or long-gone client (its heartbeat stopped
-    // -- the TUI quit) must still let the server exit on its linger. The
-    // old two-halves behavior is unchanged; this only proves the Ping half
-    // does not wedge the exit open forever.
-    RegistryFixture fixture(200ms);
-    fixture.config.WriteDefaults();
-    fixture.Build();
-
-    std::atomic<int> idle_exits{0};
-    agent::SessionRegistry::ReaperConfig config;
-    config.initial_attach_guard = 200ms;   // 50ms reaper tick
-    config.idle_shutdown = std::chrono::seconds(1);
-    config.attached_clients = [] { return 0; };
-    config.client_idle_for = [] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::seconds(3600));   // last beat: an hour ago
-    };
-    config.on_idle_expired = [&idle_exits] { idle_exits.fetch_add(1); };
-    fixture.registry->set_reaper_config(config);
-
-    const auto deadline = std::chrono::steady_clock::now() + 2500ms;
-    while (idle_exits.load() == 0 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(20ms);
-    }
-    CHECK(idle_exits.load() > 0);
-}
-
-// --- Idle exit: the session half (relaxed from "registry empty") --------------
-
-TEST_CASE("a detached busy session holds the idle exit until its work finishes",
+TEST_CASE("a never-attached session holds the process until its guard reaps it",
           "[session_registry]") {
-    // Close-with-detach: the client is gone (zero attached clients, stale
-    // heartbeat) but left a session running a turn or background task. The
-    // old condition demanded an empty registry, pinning the process for the
-    // full detached_idle_ttl; now a detached-quiescent session is
-    // exit-transparent and a detached-busy one holds the exit -- and the
-    // moment its work finishes, the linger expires and the process shuts
-    // down.
-    RegistryFixture fixture(200ms);
+    RegistryFixture fixture(std::chrono::seconds(60));
+    fixture.config.WriteDefaults();
+    fixture.Build();
+    CHECK_FALSE(fixture.registry->AnySessionHolds());
+
+    auto session = fixture.registry->Create(Params("s1"));
+    CHECK(fixture.registry->AnySessionHolds());
+}
+
+TEST_CASE("a detached busy session holds the process until its work finishes",
+          "[session_registry]") {
+    // Close-with-detach: the client is gone but left a background task
+    // running. A detached-busy session holds the exit; the moment its work
+    // finishes it is exit-transparent.
+    RegistryFixture fixture(std::chrono::seconds(60));
     fixture.config.WriteDefaults();
     fixture.Build();
 
@@ -435,89 +386,25 @@ TEST_CASE("a detached busy session holds the idle exit until its work finishes",
         const auto sub = Subscribe(*session);
         Unsubscribe(*session, sub);
     }
-    // A background task with a STARTED and no terminal event yet.
     session->SetBackgroundTasksForTesting(1);
+    CHECK(fixture.registry->AnySessionHolds());
 
-    std::atomic<int> idle_exits{0};
-    agent::SessionRegistry::ReaperConfig config;
-    config.initial_attach_guard = 200ms;   // 50ms reaper tick
-    config.idle_shutdown = std::chrono::seconds(1);
-    config.attached_clients = [] { return 0; };
-    config.client_idle_for = [] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::seconds(3600));   // the TUI quit; heartbeat long stale
-    };
-    config.on_idle_expired = [&idle_exits] { idle_exits.fetch_add(1); };
-    fixture.registry->set_reaper_config(config);
-
-    // Several idle_shutdown periods with the work still live: no exit.
-    std::this_thread::sleep_for(1600ms);
-    CHECK(idle_exits.load() == 0);
-
-    // The work finishes: the next linger window fires the exit.
     session->SetBackgroundTasksForTesting(0);
-    const auto deadline = std::chrono::steady_clock::now() + 2500ms;
-    while (idle_exits.load() == 0 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(20ms);
-    }
-    CHECK(idle_exits.load() > 0);
+    CHECK_FALSE(fixture.registry->AnySessionHolds());
 }
 
-TEST_CASE("a detached idle session no longer blocks the idle exit", "[session_registry]") {
-    // Flow 1: the TUI quits with a session that is open but not doing
-    // anything. The old rule (registry must be empty) held the process for
-    // the whole detached_idle_ttl; the relaxed rule exits on the linger.
-    RegistryFixture fixture(200ms);
+TEST_CASE("an attached session holds the process; a detached idle one does not",
+          "[session_registry]") {
+    RegistryFixture fixture(std::chrono::seconds(60));
     fixture.config.WriteDefaults();
     fixture.Build();
 
     auto session = fixture.registry->Create(Params("s1"));
-    {
-        const auto sub = Subscribe(*session);
-        Unsubscribe(*session, sub);
-    }
-
-    std::atomic<int> idle_exits{0};
-    agent::SessionRegistry::ReaperConfig config;
-    config.initial_attach_guard = 200ms;   // 50ms reaper tick
-    config.detached_idle_ttl = std::chrono::seconds(0);   // TTL reaping off
-    config.idle_shutdown = std::chrono::seconds(1);
-    config.attached_clients = [] { return 0; };
-    config.client_idle_for = [] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::seconds(3600));
-    };
-    config.on_idle_expired = [&idle_exits] { idle_exits.fetch_add(1); };
-    fixture.registry->set_reaper_config(config);
-
-    const auto deadline = std::chrono::steady_clock::now() + 2500ms;
-    while (idle_exits.load() == 0 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(20ms);
-    }
-    CHECK(idle_exits.load() > 0);
-    CHECK_FALSE(session->terminated());   // exited via the linger, not reaping
-}
-
-TEST_CASE("the reaper calls the configured periodic checkpoint callback, not the database directly",
-          "[session_registry]") {
-    // ReaperConfig::periodic_checkpoint replaces a direct SessionDatabase&
-    // call on every reaper tick -- a fake-store-backed registry (no real WAL)
-    // must be able to observe the tick fire without a live SQLite file.
-    RegistryFixture fixture(200ms);
-    fixture.config.WriteDefaults();
-    fixture.Build();
-
-    std::atomic<int> calls{0};
-    agent::SessionRegistry::ReaperConfig config;
-    config.initial_attach_guard = 200ms;
-    config.periodic_checkpoint = [&calls] { calls.fetch_add(1); };
-    fixture.registry->set_reaper_config(config);
-
-    const auto deadline = std::chrono::steady_clock::now() + 1000ms;
-    while (calls.load() == 0 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(20ms);
-    }
-    CHECK(calls.load() > 0);
+    const auto sub = Subscribe(*session);
+    CHECK(fixture.registry->AnySessionHolds());
+    Unsubscribe(*session, sub);
+    CHECK_FALSE(fixture.registry->AnySessionHolds());
+    CHECK_FALSE(session->terminated());
 }
 
 TEST_CASE("TerminateAll stops every live session", "[session_registry]") {

@@ -1,5 +1,6 @@
 #include "minimal/agent/session_registry.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <stdexcept>
 #include <utility>
@@ -42,7 +43,9 @@ SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, SessionWiri
       loop_config_(loop_config),
       logger_(logger),
       initial_attach_guard_(initial_attach_guard) {
-    reaper_ = std::thread([this] { ReaperMain(); });
+    // Started last, once every member it reads exists.
+    reaper_ = std::make_unique<common::PeriodicTask>([this] { return ReapInterval(); },
+                                                     [this] { ReapOnce(); });
 }
 
 SessionRegistry::~SessionRegistry() {
@@ -50,15 +53,9 @@ SessionRegistry::~SessionRegistry() {
     TerminateAll();
 }
 
-// Idempotent by the joinable() check: a second call (or the destructor after
-// an explicit stop) finds the thread already joined and does nothing.
+// Idempotent: PeriodicTask::Stop is.
 void SessionRegistry::StopReaper() {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stopping_ = true;
-    }
-    reaper_cv_.notify_all();
-    if (reaper_.joinable()) reaper_.join();
+    if (reaper_ != nullptr) reaper_->Stop();
 }
 
 std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
@@ -274,7 +271,6 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     }
 
     guard.committed = true;
-    reaper_cv_.notify_all();
     return session;
 }
 
@@ -522,161 +518,113 @@ void SessionRegistry::TerminateAll() {
 void SessionRegistry::set_reaper_config(ReaperConfig config) {
     std::lock_guard<std::mutex> lock(mutex_);
     reaper_config_ = std::move(config);
+    // A shorter guard takes effect on the next tick (ReapInterval is asked
+    // before every wait).
     initial_attach_guard_ = std::chrono::duration_cast<std::chrono::milliseconds>(
         reaper_config_.initial_attach_guard);
-    reaper_cv_.notify_all();   // a shorter guard takes effect on the next tick
 }
 
-void SessionRegistry::ReaperMain() {
-    while (true) {
-        std::vector<std::shared_ptr<Session>> doomed;
-        // Log lines are composed under the lock but emitted after it: the
-        // logger sink can block on I/O, and every other registry operation
-        // would queue behind the sweep while a rotation/hung stderr drains.
-        std::vector<std::string> guard_expired_logs;
-        std::vector<std::string> reaped_logs;
-        bool fire_idle_exit = false;
-        // Set during the sweep when any session still holds the process up:
-        // a never-attached session (its attach guard owns it) or a
-        // detached-but-busy one (a turn in flight, a live background task,
-        // subagent children). Every detached-quiescent session is
-        // exit-transparent -- close-with-detach relies on it: the client is
-        // gone, the turn finishes, and the idle linger below expires.
-        bool any_session_holds = false;
-        {
-            std::unique_lock<std::mutex> lock(mutex_);
-            // Polling at a fraction of the guard keeps every deadline below
-            // within one tick of its target without a timer per session.
-            // Floored: the parser rejects a zero/negative
-            // initial_attach_guard_seconds, but a test or direct construction
-            // that bypasses it must not turn this into a 0ms wait_for, which
-            // spins this thread at 100% CPU under the registry mutex.
-            const auto poll_interval = std::max(initial_attach_guard_ / 4, std::chrono::milliseconds(250));
-            reaper_cv_.wait_for(lock, poll_interval, [this] { return stopping_; });
-            if (stopping_) return;
+std::unordered_map<std::string, std::size_t> SessionRegistry::LiveChildCountsLocked() const {
+    // One O(n) pass: ChildCountLocked rescans the whole map, and calling it
+    // once per session made a sweep O(n^2) under the held mutex. A parent
+    // absent from the result has zero live children.
+    std::unordered_map<std::string, std::size_t> counts;
+    for (const auto& [id, session] : sessions_) {
+        const auto& parent = session->info().parent_session_id;
+        if (parent.empty() || session->terminated() || session->subagent_finished()) continue;
+        ++counts[parent];
+    }
+    return counts;
+}
 
-            // Precomputed ONCE per tick, in one O(n) pass: ChildCountLocked
-            // itself rescans the whole sessions_ map, and the sweep below
-            // used to call it once per session -- O(n^2) per tick under a
-            // held mutex_, blocking every other Find()/size()/Terminate()
-            // call for the duration. A parent absent from this map has zero
-            // live children, the same answer ChildCountLocked(id) == 0 gave.
-            std::unordered_map<std::string, std::size_t> live_child_counts;
-            for (const auto& [id, session] : sessions_) {
-                const auto& parent = session->info().parent_session_id;
-                if (parent.empty() || session->terminated() || session->subagent_finished()) {
-                    continue;
-                }
-                ++live_child_counts[parent];
+// ALL of these must hold, and each one protects in-flight work that reaping
+// would kill:
+//   ever_attached -- the attach guard owns never-attached sessions; this rule
+//     owns everyone else.
+//   no subscribers -- an attached client IS the reason to keep the session;
+//     detachment starts the clock.
+//   idle -- no turn in flight, no queued work. A worker parked on a
+//     permission prompt counts as busy (it is mid-turn), so unattended prompts
+//     are never reaped.
+//   no live background tasks -- reaping would killpg them.
+//   no subagent children -- a reaped parent loses the child's completion
+//     injection.
+bool SessionRegistry::DetachedQuiescentLocked(
+    const std::string& session_id, const Session& session,
+    const std::unordered_map<std::string, std::size_t>& live_child_counts) const {
+    return session.ever_attached() && !session.has_subscribers() && session.idle() &&
+           session.background_tasks_live() == 0 &&
+           live_child_counts.find(session_id) == live_child_counts.end();
+}
+
+bool SessionRegistry::AnySessionHolds() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto live_child_counts = LiveChildCountsLocked();
+    for (const auto& [id, session] : sessions_) {
+        // A never-attached session is owned by its attach guard, and holds
+        // the process until the guard reaps it.
+        if (!session->ever_attached()) return true;
+        if (!DetachedQuiescentLocked(id, *session, live_child_counts)) return true;
+    }
+    return false;
+}
+
+std::chrono::milliseconds SessionRegistry::ReapInterval() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // A fraction of the guard keeps every deadline within one tick of its
+    // target without a timer per session. Floored: a test or direct
+    // construction that bypasses the settings parser must not turn this into
+    // a 0ms wait that spins the thread under the registry mutex.
+    return std::max(initial_attach_guard_ / 4, std::chrono::milliseconds(250));
+}
+
+void SessionRegistry::ReapOnce() {
+    std::vector<std::shared_ptr<Session>> doomed;
+    // Log lines are composed under the lock but emitted after it: the logger
+    // sink can block on I/O, and every other registry operation would queue
+    // behind the sweep.
+    std::vector<std::string> logs;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto live_child_counts = LiveChildCountsLocked();
+        const auto now = std::chrono::steady_clock::now();
+        const auto reap = [&](auto& it, std::string message) {
+            logs.push_back(std::move(message));
+            doomed.push_back(it->second);
+            quiescent_since_.erase(it->first);
+            if (signal_router_ != nullptr) signal_router_->Unsubscribe(it->first);
+            it = sessions_.erase(it);
+        };
+        for (auto it = sessions_.begin(); it != sessions_.end();) {
+            const auto& session = it->second;
+            if (!session->ever_attached() && (now - session->created_at()) > initial_attach_guard_) {
+                reap(it, "session " + it->first +
+                             ": no client attached within the guard period; terminating");
+                continue;
             }
-
-            const auto now = std::chrono::steady_clock::now();
-            for (auto it = sessions_.begin(); it != sessions_.end();) {
-                const auto& session = it->second;
-                const bool guard_expired = !session->ever_attached() &&
-                                           (now - session->created_at()) > initial_attach_guard_;
-                if (guard_expired) {
-                    guard_expired_logs.push_back(
-                        "session " + it->first +
-                        ": no client attached within the guard period; terminating");
-                    doomed.push_back(session);
-                    it = sessions_.erase(it);
-                    quiescent_since_.erase(doomed.back()->info().session_id);
-                    if (signal_router_ != nullptr) {
-                        signal_router_->Unsubscribe(doomed.back()->info().session_id);
-                    }
-                    continue;
-                }
-                // S5: the detached-idle reaper. ALL of these must hold, and
-                // each one protects in-flight work that reaping would kill:
-                //   ever_attached -- the guard above owns never-attached
-                //     sessions; this rule owns everyone else.
-                //   no subscribers -- an attached client IS the reason to
-                //     keep the session; detachment starts the clock.
-                //   idle -- no turn in flight, no queued work. A worker
-                //     parked on a permission prompt counts as busy (it is
-                //     mid-turn), so unattended prompts are never reaped --
-                //     matching "they wait indefinitely" by default.
-                //   no live background tasks -- reaping would killpg them.
-                //   no subagent children -- a reaped parent loses the child's
-                //     completion injection.
-                const bool detached_quiescent =
-                    session->ever_attached() && !session->has_subscribers() &&
-                    session->idle() && session->background_tasks_live() == 0 &&
-                    live_child_counts.find(it->first) == live_child_counts.end();
-                if (!detached_quiescent) {
-                    quiescent_since_.erase(it->first);
-                    any_session_holds = true;
-                    ++it;
-                    continue;
-                }
-                auto since = quiescent_since_.find(it->first);
-                if (since == quiescent_since_.end()) {
-                    quiescent_since_.emplace(it->first, now);
-                    ++it;
-                    continue;
-                }
-                if (reaper_config_.detached_idle_ttl.count() > 0 &&
-                    now - since->second >= reaper_config_.detached_idle_ttl) {
-                    reaped_logs.push_back("session " + it->first + ": detached and quiescent for " +
-                                          std::to_string(reaper_config_.detached_idle_ttl.count()) +
-                                          "s; terminating");
-                    doomed.push_back(session);
-                    it = sessions_.erase(it);
-                    quiescent_since_.erase(doomed.back()->info().session_id);
-                    if (signal_router_ != nullptr) {
-                        signal_router_->Unsubscribe(doomed.back()->info().session_id);
-                    }
-                } else {
-                    ++it;
-                }
+            if (!DetachedQuiescentLocked(it->first, *session, live_child_counts)) {
+                quiescent_since_.erase(it->first);
+                ++it;
+                continue;
             }
-
-            // The process idle exit (S5, relaxed): zero attached clients AND
-            // no session holding the process up, held for
-            // server.idle_shutdown_seconds. The old condition demanded a
-            // fully empty registry, which pinned the process for the whole
-            // detached_idle_ttl whenever a client quit while any session
-            // existed -- even a long-idle one. Now a session is
-            // exit-transparent the moment it is detached AND quiescent (the
-            // reaper's own definition above); a detached-but-busy session
-            // keeps the server alive until its work finishes, and a
-            // never-attached session is owned by its attach guard, not here.
-            //
-            // With a wired client_idle_for, "quiet" must ALSO mean "no recent
-            // Ping": a live session-less client (the TUI's welcome state)
-            // holds neither a stream nor a session, and only its heartbeat
-            // distinguishes it from an empty world. See ReaperConfig::
-            // client_idle_for. The same heartbeat keeps the server up after
-            // /detach-session: the TUI is still running, its Ping still
-            // fresh, so reattach stays possible.
-            if (reaper_config_.idle_shutdown.count() > 0 && reaper_config_.attached_clients &&
-                reaper_config_.on_idle_expired) {
-                bool quiet = !any_session_holds && reaper_config_.attached_clients() == 0;
-                if (quiet && reaper_config_.client_idle_for) {
-                    quiet = reaper_config_.client_idle_for() >= reaper_config_.idle_shutdown;
-                }
-                if (quiet) {
-                    if (!idle_since_) idle_since_ = now;
-                    fire_idle_exit = now - *idle_since_ >= reaper_config_.idle_shutdown;
-                } else {
-                    idle_since_.reset();
-                }
+            const auto since = quiescent_since_.find(it->first);
+            if (since == quiescent_since_.end()) {
+                quiescent_since_.emplace(it->first, now);
+                ++it;
+                continue;
+            }
+            if (reaper_config_.detached_idle_ttl.count() > 0 &&
+                now - since->second >= reaper_config_.detached_idle_ttl) {
+                reap(it, "session " + it->first + ": detached and quiescent for " +
+                             std::to_string(reaper_config_.detached_idle_ttl.count()) +
+                             "s; terminating");
+            } else {
+                ++it;
             }
         }
-        for (const auto& message : guard_expired_logs) logger_.warn("{}", message);
-        for (const auto& message : reaped_logs) logger_.warn("{}", message);
-        for (auto& session : doomed) session->Terminate();
-        // OUTSIDE the lock: RequestShutdown must not run while the registry
-        // mutex is held (it joins RPC handlers that may be inside the
-        // service, waiting on nothing of ours -- but the lock is cheap to
-        // respect and the callback is arbitrary code).
-        if (fire_idle_exit && reaper_config_.on_idle_expired) reaper_config_.on_idle_expired();
-
-        // The tick this thread already runs is the WAL checkpoint's home;
-        // see ReaperConfig::periodic_checkpoint.
-        if (reaper_config_.periodic_checkpoint) reaper_config_.periodic_checkpoint();
     }
+    for (const auto& message : logs) logger_.warn("{}", message);
+    for (auto& session : doomed) session->Terminate();
 }
 
 std::size_t SessionRegistry::size() const {

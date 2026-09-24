@@ -55,6 +55,7 @@
 #include "minimal/plugins/plugin_rpc.hpp"
 #include "minimal/plugins/plugin_storage.hpp"
 #include "minimal/rpc/server.hpp"
+#include "minimal/rpc/server_housekeeping.hpp"
 #include "minimal/rpc/session_wiring.hpp"
 #include "minimal/rpc/session_service.hpp"
 #include "minimal/session/session_database.hpp"
@@ -844,31 +845,32 @@ int main(int argc, char** argv) {
         std::printf("  fd hygiene: %zu descriptor(s) marked close-on-exec\n", cloexec_marked);
     }
 
-    // S5: a session now outlives the client that opened it (detach, not just
-    // terminate), so "last client detached" no longer means "safe to exit" --
-    // a detached session may still be mid-turn. The reaper owns the exit
-    // decision instead: idle_shutdown fires only once zero clients are
-    // attached AND zero sessions are live, linger included. 0 = never (daemon
-    // deployment). RequestShutdown, not Shutdown: this can fire from the
-    // reaper thread or the tail of OpenSession, and the blocking form would
-    // wait for the very RPC that triggered it.
+    // The session reaper: never-attached sessions after the attach guard,
+    // detached-quiescent ones after the idle TTL.
     minimal::agent::SessionRegistry::ReaperConfig reaper_config;
     reaper_config.initial_attach_guard = std::chrono::seconds(settings.sessions.initial_attach_guard_seconds);
     reaper_config.detached_idle_ttl = std::chrono::seconds(settings.sessions.detached_idle_ttl_seconds);
-    reaper_config.idle_shutdown = std::chrono::seconds(settings.server.idle_shutdown_seconds);
-    reaper_config.attached_clients = [&service] { return service.attached_clients(); };
-    // The Ping half of the idle decision: a live client that holds neither a
-    // stream nor a session (the TUI's welcome state) would otherwise read as
-    // fully idle and get its server shut down under it. See PingRequest.
-    reaper_config.client_idle_for = [&service] { return service.client_idle_for(); };
-    reaper_config.on_idle_expired = [&server] { server.RequestShutdown(); };
-    reaper_config.periodic_checkpoint = [&session_db] {
+    sessions.set_reaper_config(std::move(reaper_config));
+
+    // The process's own periodic duties. S5: a session outlives the client
+    // that opened it, so "last client detached" does not mean "safe to exit"
+    // -- the idle exit waits for zero clients, no recent Ping, and no session
+    // holding the process up. RequestShutdown, not Shutdown: this fires from
+    // the housekeeping thread, and the blocking form would wait for itself.
+    minimal::rpc::ServerHousekeeping::Config housekeeping_config;
+    housekeeping_config.idle_shutdown = std::chrono::seconds(settings.server.idle_shutdown_seconds);
+    housekeeping_config.attached_clients = [&service] { return service.attached_clients(); };
+    housekeeping_config.client_idle_for = [&service] { return service.client_idle_for(); };
+    housekeeping_config.sessions_hold = [&sessions] { return sessions.AnySessionHolds(); };
+    housekeeping_config.on_idle_expired = [&server] { server.RequestShutdown(); };
+    // wal_autocheckpoint=0 moved checkpoint I/O off the append path onto this
+    // thread.
+    housekeeping_config.periodic_checkpoint = [&session_db] {
         using CheckpointOutcome = minimal::session::SessionDatabase::CheckpointOutcome;
         const CheckpointOutcome outcome = session_db->MaybeRunPassiveCheckpoint();
         if (outcome != CheckpointOutcome::kFailed) return;
-        // A checkpoint failure used to be silent; the only durable symptom was
-        // a WAL that never shrank. Log at 1 then every doubling (1, 2, 4, 8...)
-        // so a persistently pinned WAL is visible without a line per tick.
+        // Log at 1 then every doubling (1, 2, 4, 8...) so a persistently
+        // pinned WAL is visible without a line per tick.
         const auto failures = session_db->checkpoint_failures();
         if ((failures & (failures - 1)) == 0) {
             minimal::common::DefaultLogger().warn(
@@ -877,7 +879,7 @@ int main(int argc, char** argv) {
                 failures);
         }
     };
-    sessions.set_reaper_config(std::move(reaper_config));
+    minimal::rpc::ServerHousekeeping housekeeping(std::move(housekeeping_config));
 
     std::printf("\nlistening on %s\n", server.target().c_str());
     std::fflush(stdout);
@@ -942,7 +944,7 @@ int main(int argc, char** argv) {
 
     // The signal watcher turns the self-pipe byte (written by the signal
     // handler, which must stay async-signal-safe) into the same graceful
-    // RequestShutdown the idle reaper drives. Joined right after Wait()
+    // RequestShutdown the idle exit drives. Joined right after Wait()
     // returns, so it cannot touch `server` during teardown; its one blocking
     // read happens outside any lock, and its RequestShutdown call happens
     // before Wait() can return -- `server` is alive throughout.
@@ -965,13 +967,12 @@ int main(int argc, char** argv) {
     // that wedged past its transport timeout cannot stall process exit.
     if (discovery_warmup.joinable()) discovery_warmup.join();
 
-    // Stop the reaper BEFORE the exit cascade destroys what its callbacks
-    // capture by reference: attached_clients/client_idle_for capture `service`
-    // and on_idle_expired captures `server`, both declared after `sessions` and
-    // so destroyed before ~SessionRegistry would stop the thread itself. The
-    // reaper ticks every >=250ms, and MCP teardown between server.Wait() and
-    // the registry's destruction takes seconds -- a real window, not a
-    // formality. TerminateAll does not touch the reaper, so it is unaffected.
+    // Stop both periodic threads before the exit cascade: housekeeping's
+    // callbacks capture `service`, `server`, `sessions` and `session_db` by
+    // reference, and the reaper terminates sessions. MCP teardown between
+    // server.Wait() and the registry's destruction takes seconds -- a real
+    // window, not a formality.
+    housekeeping.Stop();
     sessions.StopReaper();
     sessions.TerminateAll();
     // Drain and release the observers NOW, not in ~SessionObserverRegistry:

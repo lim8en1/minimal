@@ -34,6 +34,7 @@
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/periodic_task.hpp"
 #include "minimal/common/model_ref.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
@@ -72,40 +73,6 @@ public:
         // session is lossless: the transcript stays in SQLite, and re-attach
         // becomes resume. 0 = never reap detached sessions.
         std::chrono::seconds detached_idle_ttl = std::chrono::seconds(1800);
-        // Once zero clients are attached AND every remaining session is
-        // detached-quiescent (the reaper's own definition: idle, no live
-        // background tasks, no subagent children; never-attached sessions
-        // are owned by the attach guard instead), fire on_idle_expired
-        // after this linger. 0 = never (daemon deployment). A
-        // detached-but-busy session keeps the process up until its work
-        // finishes; the TUI's Ping heartbeat keeps it up regardless while
-        // any client is running.
-        std::chrono::seconds idle_shutdown = std::chrono::seconds(5);
-        // The service's attached-stream count; empty disables the idle exit.
-        std::function<std::size_t()> attached_clients;
-        // How long since a live client last made itself known -- the age of
-        // the service's most recent Ping (see PingRequest). The idle exit
-        // holds only while this too has exceeded idle_shutdown: a client that
-        // is alive but holds nothing -- a TUI on its empty-state welcome
-        // view, before its first session -- attaches no stream and creates no
-        // session, and without this signal the reaper would read that silence
-        // as "nobody is here" and shut the server down under the user.
-        // Duration::max() (or any value >= idle_shutdown) means "no recent
-        // sign of life". Empty disables this half (the count/session halves
-        // alone decide), which keeps the reaper's tests and any pre-Ping
-        // service on the old behavior.
-        std::function<std::chrono::milliseconds()> client_idle_for;
-        // Wired to Server::RequestShutdown by main. Fired from the reaper
-        // thread; must not block.
-        std::function<void()> on_idle_expired;
-        // Called on every reaper tick, after the sweep, outside the registry
-        // mutex -- production wires this to
-        // SessionDatabase::MaybeRunPassiveCheckpoint() (wal_autocheckpoint=0
-        // moved checkpoint I/O off the append path onto this thread, the
-        // process's periodic one). A callback, not a concrete
-        // SessionDatabase&, so the registry itself does not need a real WAL
-        // to be reaper-testable. Empty (the default) means no periodic work.
-        std::function<void()> periodic_checkpoint;
     };
 
     // Fills a session's transport-facing SessionParams -- transport, permission
@@ -258,23 +225,30 @@ public:
 
     // Stops the reaper thread, exactly as the destructor does. Idempotent --
     // safe to call twice, and the destructor stays safe after an explicit
-    // stop. Exists so a caller whose exit cascade destroys the objects the
-    // ReaperConfig callbacks capture (service, server) BEFORE this registry
-    // can quiesce the reaper first: TerminateAll does not touch the reaper,
-    // and without this the ~250ms tick would evaluate those by-reference
-    // captures on already-destroyed objects while its destructor still waits
-    // behind theirs in reverse destruction order.
+    // stop. Lets an exit cascade stop reaping (and so session termination
+    // from the reaper) before it starts tearing down what sessions use.
     void StopReaper();
+
+    // Whether any session still keeps the process up: a never-attached one
+    // (its attach guard owns it) or one that is attached or busy (a turn in
+    // flight, a live background task, subagent children). Every
+    // detached-quiescent session is exit-transparent. What the server's idle
+    // exit (rpc::ServerHousekeeping) asks.
+    bool AnySessionHolds() const;
 
     std::size_t size() const;
 
 private:
-    void ReaperMain();
-    // The lock-already-held twin of ChildCount(), for ReaperMain -- which
-    // holds mutex_ across its whole sweep. Calling the public ChildCount()
-    // from there would relock a non-recursive std::mutex on the same thread
-    // and deadlock the reaper permanently, wedging every subsequent Find()/
-    // size()/etc. behind a lock nobody will ever release.
+    // One reaper sweep: the never-attach guard, then the detached-idle TTL.
+    void ReapOnce();
+    std::chrono::milliseconds ReapInterval() const;
+    std::unordered_map<std::string, std::size_t> LiveChildCountsLocked() const;
+    bool DetachedQuiescentLocked(
+        const std::string& session_id, const Session& session,
+        const std::unordered_map<std::string, std::size_t>& live_child_counts) const;
+    // The lock-already-held twin of ChildCount(), for callers that already
+    // hold mutex_: ChildCount() would relock a non-recursive mutex on the
+    // same thread and deadlock.
     std::size_t ChildCountLocked(const std::string& parent_id) const;
 
     // --- CreateResolved's builder steps (Phase 5 step 5) ----------------------
@@ -336,11 +310,8 @@ private:
     // reaper-local half of the idle-TTL rule; the session itself carries no
     // timestamps for it). Erased whenever a session is active or attached.
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> quiescent_since_;
-    // When the process first observed zero clients and zero sessions.
-    std::optional<std::chrono::steady_clock::time_point> idle_since_;
 
     mutable std::mutex mutex_;
-    std::condition_variable reaper_cv_;
     std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
     // Ids claimed by an in-flight Create/CreateResolved, before any
     // construction work has run. The old guard was a check at the END of
@@ -349,8 +320,9 @@ private:
     // full work before the loser was refused. A reservation under the same
     // mutex makes the refusal the FIRST thing that happens.
     std::unordered_set<std::string> reserved_;
-    bool stopping_ = false;
-    std::thread reaper_;
+    // Declared last so it is destroyed first: its thread reads everything
+    // above.
+    std::unique_ptr<common::PeriodicTask> reaper_;
 };
 
 }  // namespace minimal::agent

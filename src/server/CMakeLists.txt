@@ -90,6 +90,7 @@ add_library(minimal_server_core SHARED
     rpc/session_wiring.cpp
     rpc/session_service.cpp
     rpc/server.cpp
+    rpc/server_housekeeping.cpp
     agent/session_observer_registry.cpp
     agent/context_contributor.cpp
     agent/session.cpp
