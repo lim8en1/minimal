@@ -77,8 +77,8 @@ struct SessionFixture {
         params.pause_auto_resume_on_submit = pause_auto_resume_on_submit;
         // A preset registry turns the per-turn /agent borrow path on; tests
         // that only run plain turns leave it null and never touch it.
-        if (preset_registry != nullptr) params.presets = preset_registry;
-        params.provider_resolver = provider_resolver;
+        params.environment.presets = preset_registry;
+        params.environment.provider_resolver = provider_resolver;
         // Builds whatever the test did not inject above: a real transport
         // (unless one already came from rpc::ApplyPermissionAdvisor), the
         // default WirePermissionChecker (unless a fake/advised one was

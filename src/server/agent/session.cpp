@@ -291,13 +291,13 @@ Session::Session(SessionParams params, AgentPreset preset,
         *provider_, executor_, registry, *store_, preset_, loop_config, std::move(context),
         [this] { return IsCancelled(); }, [this] { return paused(); },
         std::move(stream_event_sink), Compactor{}, std::move(seed),
-        std::move(params_.project_context), params_.compaction_strategies);
+        std::move(params_.project_context), params_.environment.compaction_strategies);
 
     // Borrowed process-wide wiring; see SessionParams.
-    presets_ = params_.presets;
-    commands_ = params_.commands;
-    project_commands_ = params_.project_commands;
-    provider_resolver_ = params_.provider_resolver;
+    presets_ = params_.environment.presets;
+    commands_ = params_.environment.commands;
+    project_commands_ = params_.environment.project_commands;
+    provider_resolver_ = params_.environment.provider_resolver;
     // Phase 5 step 8: the same copy executor_'s init list above already used,
     // kept here for kUserPromptSubmit -- one field, not a second
     // SessionParams::hooks in sync with LoopConfig::hooks by convention.

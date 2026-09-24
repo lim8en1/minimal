@@ -98,6 +98,35 @@ inline std::shared_ptr<SessionChannels> MakeSessionChannels() {
     return std::make_shared<SessionChannels>();
 }
 
+// The process-wide services every session borrows. SessionRegistry fills one
+// per session (SessionRegistry::ApplyConstructorWiring); all are owned elsewhere and
+// outlive every session. Null members are simply not offered -- tests leave
+// what they do not exercise unset.
+struct SessionEnvironment {
+    const AgentPresetRegistry* presets = nullptr;
+    // Wired for every session, subagents included; a child's surface is
+    // READ-ONLY -- the subagent guard (SessionServiceImpl::DispatchCommand
+    // reader-side, Session::ExecuteCommand as defense in depth) refuses
+    // anything else, which is what keeps /agent's preset re-resolution from
+    // reopening the recursion (see ApplyConstructorWiring's reasoning).
+    const commands::CommandRegistry* commands = nullptr;
+    // Wired alongside `commands` (a child gets both or neither); null also
+    // degrades cleanly for tests that never exercise a project command.
+    // Owned by the registry/main, process-wide, like `presets`.
+    const commands::ProjectCommandSource* project_commands = nullptr;
+    // How /model, /agent and per-turn overrides reach a provider instance.
+    // Null: those switches are refused when they need a different provider.
+    ProviderResolver* provider_resolver = nullptr;
+    // Borrowed, process-wide, read-only after plugin load; wired by
+    // the registry alongside provider_resolver. The loop resolves
+    // a preset's `compaction_strategy:` frontmatter against it at COMPACTION
+    // TIME -- not construction time -- so a mid-session /agent switch changes
+    // the summary format the way it already changes compression_prompt. Null
+    // (tests) skips the preset-name step of the resolution; the settings-level
+    // strategy and the built-in remain.
+    const agent::CompactionStrategyRegistry* compaction_strategies = nullptr;
+};
+
 struct SessionParams {
     std::string session_id;
     std::string parent_session_id;  // empty for a top-level session
@@ -257,31 +286,8 @@ struct SessionParams {
     std::shared_ptr<tools::PermissionAdvisor> selected_advisor;
     std::chrono::milliseconds advisor_timeout{0};
 
-    // --- Process-wide wiring ---------------------------------------------------
-    // Borrowed, process-wide, set before construction; unset in tests that
-    // never exercise /agent or a provider switch.
-    const AgentPresetRegistry* presets = nullptr;
-    // Wired for every session, subagents included; a child's surface is
-    // READ-ONLY -- the subagent guard (SessionServiceImpl::DispatchCommand
-    // reader-side, Session::ExecuteCommand as defense in depth) refuses
-    // anything else, which is what keeps /agent's preset re-resolution from
-    // reopening the recursion (see ApplyConstructorWiring's reasoning).
-    const commands::CommandRegistry* commands = nullptr;
-    // Wired alongside `commands` (a child gets both or neither); null also
-    // degrades cleanly for tests that never exercise a project command.
-    // Owned by the registry/main, process-wide, like `presets`.
-    const commands::ProjectCommandSource* project_commands = nullptr;
-    // How /model, /agent and per-turn overrides reach a provider instance.
-    // Null: those switches are refused when they need a different provider.
-    ProviderResolver* provider_resolver = nullptr;
-    // Borrowed, process-wide, read-only after plugin load; wired by
-    // ApplyConstructorWiring alongside provider_resolver. The loop resolves
-    // a preset's `compaction_strategy:` frontmatter against it at COMPACTION
-    // TIME -- not construction time -- so a mid-session /agent switch changes
-    // the summary format the way it already changes compression_prompt. Null
-    // (tests) skips the preset-name step of the resolution; the settings-level
-    // strategy and the built-in remain.
-    const agent::CompactionStrategyRegistry* compaction_strategies = nullptr;
+    // Process-wide services, filled by SessionRegistry for every session.
+    SessionEnvironment environment;
 };
 
 // One item of work for the session worker. A variant rather than two queues,

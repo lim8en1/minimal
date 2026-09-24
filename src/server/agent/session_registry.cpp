@@ -396,8 +396,9 @@ ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id,
 }
 
 void SessionRegistry::ApplyConstructorWiring(SessionParams& params) {
-    params.presets = &presets_;
-    params.compaction_strategies = registries_.compaction_strategies;
+    params.environment.presets = &presets_;
+    params.environment.compaction_strategies = registries_.compaction_strategies;
+    params.environment.provider_resolver = &resolver_;
     // A SUBAGENT GETS A READ-ONLY COMMAND SURFACE. Commands are a user control
     // channel, and a child has no user: its client attaches to observe, and the
     // spawn was driven by the parent's model rather than by a person with a
@@ -416,9 +417,8 @@ void SessionRegistry::ApplyConstructorWiring(SessionParams& params) {
     // class. The guard is derived from the command object's own ReadOnly()
     // answer, so a future read-only command works on a child for free and a
     // future mutating one is refused without this file learning about it.
-    params.commands = registries_.commands;
-    params.project_commands = project_commands_;
-    params.provider_resolver = &resolver_;
+    params.environment.commands = registries_.commands;
+    params.environment.project_commands = project_commands_;
 }
 
 void SessionRegistry::PublishSession(const std::string& session_id,
