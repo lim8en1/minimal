@@ -128,8 +128,11 @@ TEST_CASE("EnsureServerRunning recognises an already-running server without spaw
     session::SessionDatabase db{dir.path() / "sessions.db"};
     config::SettingsConfig settings;
     agent::AgentPresetRegistry presets{dir.path(), skills, settings};
-    agent::SessionRegistry registry{presets, tools, providers, observers, db,
-                                    agent::LoopConfig{}, common::DefaultLogger()};
+    agent::SessionRegistry registry{presets,
+        plugins::HostRegistries{.tools = &tools,
+                                .providers = &providers,
+                                .observers = &observers},
+        db, agent::LoopConfig{}, common::DefaultLogger()};
     rpc::SessionServiceImpl service{registry, db, settings, config::PermissionsConfig{},
                                     common::DefaultLogger()};
     rpc::Server server{service, socket};

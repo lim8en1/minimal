@@ -15,6 +15,7 @@
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
+#include "minimal/plugins/host_registries.hpp"
 #include "minimal/llm/metadata_catalog.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
@@ -104,30 +105,17 @@ std::string_view ToString(LoadStatus status);
 // surfaces as an unrelated crash much later. Do not "clean this up".
 class PluginLoader {
 public:
+    // `registries`: every seam a plugin may register into; a null member is
+    // simply not offered (plugins treat every registration hook as optional).
     // `tools_settings` is the `tools` object from settings.json, forwarded
-    // verbatim to every plugin's tool registration. Core imposes no schema on
-    // it; each plugin owns the shape of its own slice.
-    // `observers` is a pointer, not a reference, because it is genuinely
-    // optional: a test that only exercises tool or provider registration has no
-    // session lifecycle to observe, and passing a throwaway registry there would
-    // spin up a thread pool for nothing. Null means the seam is simply not
-    // offered -- plugins already treat every registration hook as optional.
-    PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
-                 nlohmann::json tools_settings = nlohmann::json::object(),
-                 agent::SessionObserverRegistry* observers = nullptr,
-                 commands::CommandRegistry* commands = nullptr,
-                 rpc::AuthProviderRegistry* auth_providers = nullptr,
-                 tools::PermissionAdvisorRegistry* permission_advisors = nullptr,
-                 llm::ModelCatalogRegistry* model_catalogs = nullptr,
-                 ServiceRegistry* services = nullptr,
-                 PluginStorage* storage = nullptr,
-                 std::filesystem::path plugin_data_root = {},
-                 hooks::HookDispatcher* hook_points = nullptr,
-                 agent::MentionResolverRegistry* mention_resolvers = nullptr,
-                 agent::CompactionStrategyRegistry* compaction_strategies = nullptr,
-                 llm::MetadataCatalogRegistry* metadata_catalogs = nullptr,
-                 llm::VariantParamsRegistry* variant_params = nullptr,
-                 agent::ContextContributorRegistry* context_contributors = nullptr);
+    // verbatim to every plugin; core imposes no schema on it. `storage` (may be
+    // null) is per-plugin KV storage, forwarded through the registration
+    // context. `plugin_data_root` is where each plugin's own data_dir is
+    // provisioned (<root>/<plugin_name>/); empty disables provisioning.
+    explicit PluginLoader(HostRegistries registries,
+                          nlohmann::json tools_settings = nlohmann::json::object(),
+                          PluginStorage* storage = nullptr,
+                          std::filesystem::path plugin_data_root = {});
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -162,72 +150,10 @@ private:
     PluginRecord LoadOne(const PluginCandidate& candidate);
     void BuildTargets();
 
-    tools::ToolRegistry& tools_;
-    llm::ProviderFactoryRegistry& providers_;
+    HostRegistries registries_;
     nlohmann::json tools_settings_;
-    agent::SessionObserverRegistry* observers_ = nullptr;
-    // Optional like the others; null means plugins cannot register a model
-    // catalog. Additive across plugins, keyed by the provider kind string;
-    // a duplicate kind is refused and reported by the sanity check.
-    llm::ModelCatalogRegistry* model_catalogs_ = nullptr;
-    // Optional for the same reason observers_ is: a test exercising only tool
-    // registration has no command surface to offer, and building one would be
-    // scaffolding for nothing.
-    commands::CommandRegistry* commands_ = nullptr;
-    // Optional like the others; null means plugins cannot register an auth
-    // provider. Exclusive registry: the first plugin to register wins.
-    rpc::AuthProviderRegistry* auth_providers_ = nullptr;
-    // Optional for the same reason again: the seam is exclusive (first plugin
-    // wins) and the registry itself carries the core default, so null just
-    // means plugins cannot override the resolver.
-    agent::MentionResolverRegistry* mention_resolvers_ = nullptr;
-    // Optional like the others; null means plugins cannot pre-fill session
-    // context. Additive, with a removal seam (count snapshot) so a throwing
-    // plugin's contributors are rolled back like its observers.
-    agent::ContextContributorRegistry* context_contributors_ = nullptr;
-    // Optional like the others; null means plugins cannot register a permission
-    // advisor. Additive across plugins; permissions.json selects one by name.
-    tools::PermissionAdvisorRegistry* permission_advisors_ = nullptr;
-    // Optional like the others; null means plugins cannot register services.
-    // Additive across plugins; duplicate names are fatal at startup via the
-    // NameRegistry (a new kind), not shadowed here. Also exposed to every
-    // plugin through PluginRegistrationContext::services as the CONSUMER side.
-    ServiceRegistry* services_ = nullptr;
-    // Optional like the others; null means no per-plugin KV storage is offered
-    // and PluginRegistrationContext::storage is null -- the plugin degrades.
-    // Owned by main (process lifetime, like the registries); the loader only
-    // forwards the pointer.
     PluginStorage* storage_ = nullptr;
-    // Root under which each plugin's own data_dir is provisioned
-    // (<root>/<plugin_name>/, created before its registration hooks run).
-    // Empty disables provisioning.
     std::filesystem::path plugin_data_root_;
-    // Optional like the others; null means plugins cannot register hook points.
-    // Additive across plugins; duplicate point names are fatal at startup via
-    // the NameRegistry (NameKind::HookPoint). The same object is the dispatch
-    // surface the plugin's HookPoint handles emit through, which is why it is
-    // one registry-and-dispatcher rather than two.
-    hooks::HookDispatcher* hook_points_ = nullptr;
-    // Optional like the others; null means plugins cannot register a
-    // compaction strategy. Additive across plugins, keyed by name;
-    // memory.compaction_strategy in settings.json selects one. Core's own
-    // built-in "summarize" strategy is registered directly in main.cpp
-    // before plugin load, not through this hook.
-    agent::CompactionStrategyRegistry* compaction_strategies_ = nullptr;
-    // Optional like the others; null means plugins cannot register an
-    // enrichment (metadata) catalog. Additive across plugins, keyed by the
-    // provider kind string with a first-answering fallback chain for kinds
-    // nobody named; a duplicate kind is refused and reported by the sanity
-    // check. Beside model_catalogs_, not merged with it: the kind slots there
-    // are the listing catalogs', and this seam's contract is per-model Lookup
-    // with a cache, not a pure List.
-    llm::MetadataCatalogRegistry* metadata_catalogs_ = nullptr;
-    // Optional like the others; null means plugins cannot register a
-    // variant-params provider. Additive across plugins, keyed by the provider
-    // kind string; a duplicate kind is refused and reported by the sanity
-    // check. An unregistered kind is not a degraded state -- it is the
-    // ordinary case for every backend that needs no per-kind wire shape.
-    llm::VariantParamsRegistry* variant_params_ = nullptr;
     std::vector<std::unique_ptr<Target>> targets_;  // registration order
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 

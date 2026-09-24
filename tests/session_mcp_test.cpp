@@ -340,8 +340,11 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
         return std::make_unique<testing::FakeLlmProvider>();
     });
     tools::ToolRegistry tools;
-    agent::SessionRegistry sessions(presets, tools, providers, observers, db, agent::LoopConfig{},
-                                    minimal::common::DefaultLogger(), 60s);
+    agent::SessionRegistry sessions(presets,
+        plugins::HostRegistries{.tools = &tools,
+                                .providers = &providers,
+                                .observers = &observers},
+        db, agent::LoopConfig{}, minimal::common::DefaultLogger(), 60s);
 
     const std::string broken_config = WriteMcpsConfig(nlohmann::json::array({StdioEntry("broken", "garbage")}));
     mcp::McpClientManager manager(

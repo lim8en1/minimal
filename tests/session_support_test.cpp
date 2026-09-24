@@ -64,9 +64,11 @@ struct SupportFixture {
         });
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir.path() / "sessions.db");
-        registry = std::make_unique<agent::SessionRegistry>(*presets, tools, providers,
-                                                            *observers, *db, agent::LoopConfig{},
-                                                            common::DefaultLogger());
+        registry = std::make_unique<agent::SessionRegistry>(*presets,
+            plugins::HostRegistries{.tools = &tools,
+                                    .providers = &providers,
+                                    .observers = observers.get()},
+            *db, agent::LoopConfig{}, common::DefaultLogger());
         support = std::make_unique<agent::SessionSupport>(common::DefaultLogger());
         support->Wire(*registry, *db, *presets);
     }

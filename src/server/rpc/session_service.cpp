@@ -75,14 +75,19 @@ SessionServiceImpl::SessionServiceImpl(agent::SessionRegistry& sessions,
                                        config::SettingsConfig settings,
                                        config::PermissionsConfig permissions,
                                        common::Logger& logger,
-                                       const tools::PermissionAdvisorRegistry* permission_advisors)
+                                       const plugins::HostRegistries& registries)
     : sessions_(sessions),
       db_(db),
       reader_(db),
       settings_(std::move(settings)),
-      permission_advisors_(permission_advisors),
+      permission_advisors_(registries.permission_advisors),
       permissions_(std::move(permissions)),
-      logger_(logger) {}
+      logger_(logger) {
+    commands_ = registries.commands;
+    auth_providers_ = registries.auth_providers;
+    mention_resolvers_ = registries.mention_resolvers;
+    services_ = registries.services;
+}
 
 namespace {
 

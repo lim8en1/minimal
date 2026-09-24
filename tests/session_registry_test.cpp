@@ -86,10 +86,16 @@ struct RegistryFixture {
         // SqliteHistoryStore does not touch the connection until it appends.
         // What is being tested is registry lifetime, not persistence.
         db = std::make_unique<session::SessionDatabase>(db_dir.path() / "sessions.db");
-        registry = std::make_unique<agent::SessionRegistry>(*presets, tools_registry, providers,
-                                                            *observers, *db, agent::LoopConfig{},
-                                                            common::DefaultLogger(), guard_);
+        registry = std::make_unique<agent::SessionRegistry>(*presets,
+            plugins::HostRegistries{.tools = &tools_registry,
+                                    .providers = &providers,
+                                    .observers = observers.get(),
+                                    .context_contributors = context_contributors},
+            *db, agent::LoopConfig{}, common::DefaultLogger(), guard_);
     }
+
+    // Optional; set before Build().
+    agent::ContextContributorRegistry* context_contributors = nullptr;
 
     ~RegistryFixture() { registry.reset(); }
 
@@ -974,12 +980,11 @@ TEST_CASE("plugin context contributors land in the system prompt, after project 
         provider = owned.get();
         return owned;
     });
-    fixture.Build(/*register_provider_kind=*/false);
-
     agent::ContextContributorRegistry contributors(common::DefaultLogger());
     auto contributor = std::make_shared<Contributor>();
     contributors.Register(contributor);
-    fixture.registry->set_context_contributors(&contributors);
+    fixture.context_contributors = &contributors;
+    fixture.Build(/*register_provider_kind=*/false);
 
     const auto row = fixture.db->CreateSession("ctx", std::nullopt, "/proj", "build");
     auto params = Params(row.session_id);

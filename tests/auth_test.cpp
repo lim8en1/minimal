@@ -166,14 +166,17 @@ TEST_CASE("the guard runs on the wire: a denying provider rejects OpenSession",
     llm::ProviderFactoryRegistry providers;
     agent::SessionObserverRegistry observers(common::DefaultLogger());
     session::SessionDatabase db(root / "sessions.db");
-    agent::SessionRegistry sessions(*presets, tools, providers, observers, db,
-                                    agent::LoopConfig{}, common::DefaultLogger());
-    rpc::SessionServiceImpl service(sessions, db, config::SettingsConfig{},
-                                    config::PermissionsConfig{}, common::DefaultLogger());
-
     rpc::AuthProviderRegistry auth;
     auth.Register(std::make_shared<DenyingProvider>());
-    service.set_auth_providers(&auth);
+    const plugins::HostRegistries registries{.tools = &tools,
+                                             .providers = &providers,
+                                             .observers = &observers,
+                                             .auth_providers = &auth};
+    agent::SessionRegistry sessions(*presets, registries, db, agent::LoopConfig{},
+                                    common::DefaultLogger());
+    rpc::SessionServiceImpl service(sessions, db, config::SettingsConfig{},
+                                    config::PermissionsConfig{}, common::DefaultLogger(),
+                                    registries);
 
     const auto socket = root / "auth.sock";
     rpc::Server server(service, socket);
@@ -218,14 +221,17 @@ TEST_CASE("the guard runs on the wire: a denying provider rejects SuggestPaths",
     llm::ProviderFactoryRegistry providers;
     agent::SessionObserverRegistry observers(common::DefaultLogger());
     session::SessionDatabase db(root / "sessions.db");
-    agent::SessionRegistry sessions(*presets, tools, providers, observers, db,
-                                    agent::LoopConfig{}, common::DefaultLogger());
-    rpc::SessionServiceImpl service(sessions, db, config::SettingsConfig{},
-                                    config::PermissionsConfig{}, common::DefaultLogger());
-
     rpc::AuthProviderRegistry auth;
     auth.Register(std::make_shared<DenyingProvider>());
-    service.set_auth_providers(&auth);
+    const plugins::HostRegistries registries{.tools = &tools,
+                                             .providers = &providers,
+                                             .observers = &observers,
+                                             .auth_providers = &auth};
+    agent::SessionRegistry sessions(*presets, registries, db, agent::LoopConfig{},
+                                    common::DefaultLogger());
+    rpc::SessionServiceImpl service(sessions, db, config::SettingsConfig{},
+                                    config::PermissionsConfig{}, common::DefaultLogger(),
+                                    registries);
 
     const auto socket = root / "auth_suggest.sock";
     rpc::Server server(service, socket);

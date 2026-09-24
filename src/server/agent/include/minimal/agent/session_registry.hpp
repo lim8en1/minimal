@@ -38,6 +38,7 @@
 #include "minimal/config/settings_config.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
+#include "minimal/plugins/host_registries.hpp"
 #include "minimal/session/session_database.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -107,10 +108,13 @@ public:
         std::function<void()> periodic_checkpoint;
     };
 
-    SessionRegistry(const AgentPresetRegistry& presets, tools::ToolRegistry& tools,
-                    const llm::ProviderFactoryRegistry& providers,
-                    SessionObserverRegistry& observers, session::SessionDatabase& db,
-                    LoopConfig loop_config, common::Logger& logger,
+    // `registries`: tools, providers and observers are required (throws
+    // std::invalid_argument when null). commands, compaction_strategies,
+    // context_contributors and hooks are optional: null means sessions get no
+    // command surface, only the built-in compaction, no contributed context
+    // sections, and no hook dispatch.
+    SessionRegistry(const AgentPresetRegistry& presets, const plugins::HostRegistries& registries,
+                    session::SessionDatabase& db, LoopConfig loop_config, common::Logger& logger,
                     std::chrono::milliseconds initial_attach_guard = std::chrono::seconds(10));
     ~SessionRegistry();
 
@@ -123,29 +127,8 @@ public:
     SessionRegistry(const SessionRegistry&) = delete;
     SessionRegistry& operator=(const SessionRegistry&) = delete;
 
-    // The session row must already exist in the database -- params.session_id
-    // names it -- because the database is what mints session ids. See
-    // SessionServiceImpl::CreateSession, which owns that ordering.
-    //
-    // Throws std::runtime_error naming the problem: an unknown preset, or a
-    // providers.json entry whose `provider` kind no loaded plugin registered.
-    // Both are configuration errors the caller must be able to report back as
-    // such, not conditions to paper over with a null provider.
-    // Optional: sessions created without one answer every command invocation
-    // with "not available". Set before any session exists.
-    void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
-
-    // The strategy registry every session's loop resolves a preset-declared
-    // `compaction_strategy:` frontmatter against at compaction time. Optional
-    // and borrowed, process-wide, read-only after plugin load (main.cpp); null
-    // degrades to the settings-level strategy / built-in, so plain tests skip
-    // it.
-    void set_compaction_strategies(const CompactionStrategyRegistry* strategies) {
-        compaction_strategies_ = strategies;
-    }
-
-    // The project-scoped half of the catalog (ProjectCommandSource). Same
-    // optionality rule as set_commands: unset means every session's
+    // The project-scoped half of the catalog (ProjectCommandSource). Optional:
+    // unset means every session's
     // project_commands is null, and Dispatch simply never sees a project
     // registry to consult -- global commands work exactly as before.
     void set_project_commands(const commands::ProjectCommandSource* project_commands) {
@@ -159,23 +142,13 @@ public:
     // (SignalRouter::Unsubscribe was called from PublishSession alone); a
     // session that terminates normally (the common case, especially for
     // short-lived subagents) left its subs_ entry behind for the life of
-    // the process. Same optionality rule as set_commands: unset (tests)
-    // means no signal cleanup runs, matching today's behavior exactly.
+    // the process. Optional: unset (tests) means no signal cleanup runs.
     void set_signal_router(SignalRouter* signal_router) { signal_router_ = signal_router; }
-
-    // Plugin context contributors (context_contributor.hpp), asked once per
-    // session in CreateResolved -- the same funnel as project context. Unset
-    // (tests) means no contributed sections, matching set_signal_router's
-    // optionality rule.
-    void set_context_contributors(const ContextContributorRegistry* contributors) {
-        context_contributors_ = contributors;
-    }
 
     // Project context (AGENTS.md/CLAUDE.md) settings, read once at startup.
     // Optional but DEFAULTS TO DISABLED: until main wires the parsed settings
-    // in, no session reads anything from its project_root -- the same shape as
-    // set_commands, where a missing producer is a feature that is off rather
-    // than one running on guessed defaults. Loading happens per session in
+    // in, no session reads anything from its project_root -- a missing
+    // producer is a feature that is off, not one running on guessed defaults. Loading happens per session in
     // CreateResolved -- the one funnel top-level creation, resume, and
     // SubagentManager spawns share -- because the file lives in the SESSION's
     // project_root, not in any preset.
@@ -215,11 +188,14 @@ public:
         prompt_timeout_ = timeout;
     }
 
-    // The process-wide hook dispatcher (track O). Optional and borrowed; set
-    // before any session exists. Attached to every LoopConfig::hooks that
-    // arrives null -- the funnel property, like the history reader below.
-    void set_hook_dispatcher(const hooks::HookDispatcher* hooks) { hooks_ = hooks; }
-
+    // The session row must already exist in the database -- params.session_id
+    // names it -- because the database is what mints session ids. See
+    // SessionServiceImpl::CreateSession, which owns that ordering.
+    //
+    // Throws std::runtime_error naming the problem: an unknown preset, or a
+    // providers.json entry whose `provider` kind no loaded plugin registered.
+    // Both are configuration errors the caller must be able to report back as
+    // such, not conditions to paper over with a null provider.
     std::shared_ptr<Session> Create(SessionParams params);
 
     // SESSION FORK: creates a new top-level session whose store was seeded by
@@ -324,20 +300,14 @@ private:
                         bool signal_resume);
 
     const AgentPresetRegistry& presets_;
-    // Optional and borrowed; every session gets the same one.
-    const commands::CommandRegistry* commands_ = nullptr;
+    // Process-wide, borrowed; see the constructor for which may be null.
+    plugins::HostRegistries registries_;
     const commands::ProjectCommandSource* project_commands_ = nullptr;
     SignalRouter* signal_router_ = nullptr;
-    const ContextContributorRegistry* context_contributors_ = nullptr;
     tools::ToolRegistry& tools_;
     ProviderResolver resolver_;
     SessionObserverRegistry& observers_;
-    // Optional and borrowed; every session gets the same one via the
-    // CreateResolved funnel.
-    const hooks::HookDispatcher* hooks_ = nullptr;
     session::SessionDatabase& db_;
-    // See set_compaction_strategies. Borrowed, process-wide, optional.
-    const CompactionStrategyRegistry* compaction_strategies_ = nullptr;
     // Track M: the one SessionReader every session (top-level, resume, and
     // SubagentManager spawns alike) reads its transcript through --
     // stateless (holds only db_, every method takes session_id), so one

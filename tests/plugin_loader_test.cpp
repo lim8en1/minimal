@@ -61,16 +61,15 @@ struct Harness {
     // optional per-root hook (see plugin_loader.cpp). No existing fixture
     // registers commands, so every other test here is unaffected.
     commands::CommandRegistry commands;
-    plugins::PluginLoader loader{tool_registry,      provider_registry,
-                                 nlohmann::json::object(), nullptr,
-                                 &commands,          nullptr,
-                                 nullptr,            &model_catalog_registry,
-                                 &service_registry,  nullptr,
-                                 {},                 &hook_dispatcher,
-                                 /*mention_resolvers=*/nullptr,
-                                 /*compaction_strategies=*/nullptr,
-                                 /*metadata_catalogs=*/nullptr,
-                                 &variant_params_registry};
+    plugins::PluginLoader loader{plugins::HostRegistries{
+        .tools = &tool_registry,
+        .providers = &provider_registry,
+        .commands = &commands,
+        .model_catalogs = &model_catalog_registry,
+        .variant_params = &variant_params_registry,
+        .services = &service_registry,
+        .hooks = &hook_dispatcher,
+    }};
 };
 
 }  // namespace
@@ -137,12 +136,8 @@ TEST_CASE("the loader dlsyms the mention-resolver seam into a real registry",
     tools::ToolRegistry tool_registry;
     llm::ProviderFactoryRegistry provider_registry;
     agent::MentionResolverRegistry resolvers(common::DefaultLogger());
-    plugins::PluginLoader loader(tool_registry, provider_registry, nlohmann::json::object(),
-                                 /*observers=*/nullptr, /*commands=*/nullptr,
-                                 /*auth_providers=*/nullptr, /*permission_advisors=*/nullptr,
-                                 /*model_catalogs=*/nullptr, /*services=*/nullptr,
-                                 /*storage=*/nullptr, /*plugin_data_root=*/{},
-                                 /*hook_points=*/nullptr, /*mention_resolvers=*/&resolvers);
+    plugins::PluginLoader loader(plugins::HostRegistries{
+        .tools = &tool_registry, .providers = &provider_registry, .mention_resolvers = &resolvers});
     const auto records = loader.LoadAll({Enabled("fixture-good")});
 
     REQUIRE(records.size() == 1);
@@ -160,15 +155,9 @@ TEST_CASE("the loader dlsyms the context-contributor seam, attributed to the plu
     tools::ToolRegistry tool_registry;
     llm::ProviderFactoryRegistry provider_registry;
     agent::ContextContributorRegistry contributors(common::DefaultLogger());
-    plugins::PluginLoader loader(tool_registry, provider_registry, nlohmann::json::object(),
-                                 /*observers=*/nullptr, /*commands=*/nullptr,
-                                 /*auth_providers=*/nullptr, /*permission_advisors=*/nullptr,
-                                 /*model_catalogs=*/nullptr, /*services=*/nullptr,
-                                 /*storage=*/nullptr, /*plugin_data_root=*/{},
-                                 /*hook_points=*/nullptr, /*mention_resolvers=*/nullptr,
-                                 /*compaction_strategies=*/nullptr,
-                                 /*metadata_catalogs=*/nullptr, /*variant_params=*/nullptr,
-                                 /*context_contributors=*/&contributors);
+    plugins::PluginLoader loader(plugins::HostRegistries{.tools = &tool_registry,
+                                                         .providers = &provider_registry,
+                                                         .context_contributors = &contributors});
     const auto records = loader.LoadAll({Enabled("fixture-good")});
 
     REQUIRE(records.size() == 1);
@@ -427,7 +416,8 @@ TEST_CASE("each plugin's registration context sees only its own config",
     // outputs would cross.
     tools::ToolRegistry tool_registry;
     llm::ProviderFactoryRegistry provider_registry;
-    plugins::PluginLoader loader{tool_registry, provider_registry};
+    plugins::PluginLoader loader{
+        plugins::HostRegistries{.tools = &tool_registry, .providers = &provider_registry}};
 
     PluginCandidate good = Enabled("fixture-good");
     good.config = nlohmann::json{{"echo_value", "good config"}};
@@ -494,7 +484,9 @@ TEST_CASE("config reaches the tool seam while tools_settings stays verbatim",
     llm::ProviderFactoryRegistry provider_registry;
     const nlohmann::json tools_settings = {
         {"some_third_party_tool", nlohmann::json::object()}};
-    plugins::PluginLoader loader{tool_registry, provider_registry, tools_settings};
+    plugins::PluginLoader loader{
+        plugins::HostRegistries{.tools = &tool_registry, .providers = &provider_registry},
+        tools_settings};
 
     PluginCandidate good = Enabled("fixture-good");
     good.config = nlohmann::json{{"echo_value", "from config"}};
@@ -522,7 +514,8 @@ struct AliasHarness {
     // is what makes a shadowed first registrant recoverable when the second one
     // is the aliased side -- so it happens here, not per plugin.
     std::vector<plugins::PluginRecord> LoadBoth() {
-        auto records = plugins::PluginLoader(tool_registry, provider_registry)
+        auto records = plugins::PluginLoader(
+            plugins::HostRegistries{.tools = &tool_registry, .providers = &provider_registry})
                            .LoadAll({Enabled("fixture-good"), Enabled("fixture-collision")});
         tool_registry.ApplyAliases(aliases);
         return records;
@@ -534,7 +527,8 @@ struct AliasHarness {
 TEST_CASE("an aliased tool is registered under its surface name", "[plugin_loader][alias]") {
     tools::ToolRegistry tool_registry;
     llm::ProviderFactoryRegistry provider_registry;
-    plugins::PluginLoader loader{tool_registry, provider_registry};
+    plugins::PluginLoader loader{
+        plugins::HostRegistries{.tools = &tool_registry, .providers = &provider_registry}};
 
     const auto records = loader.LoadAll({Enabled("fixture-good")});
     tool_registry.ApplyAliases({{"fixture-good.fixture_tool", "ftool"}});
@@ -625,7 +619,8 @@ TEST_CASE("an alias naming nothing registered is dangling, not fatal", "[plugin_
     const std::map<std::string, std::string> aliases = {
         {"fixture-good.no_such_tool", "x"}, {"some-other-plugin.tool", "y"}};
 
-    plugins::PluginLoader loader{tool_registry, provider_registry};
+    plugins::PluginLoader loader{
+        plugins::HostRegistries{.tools = &tool_registry, .providers = &provider_registry}};
     loader.LoadAll({Enabled("fixture-good")});
     tool_registry.ApplyAliases(aliases);
 
@@ -761,10 +756,14 @@ TEST_CASE("a throwing plugin is rolled back out of EVERY registry it touched",
     plugins::ServiceRegistry services;
     agent::MentionResolverRegistry mention_resolvers(common::DefaultLogger());
     agent::ContextContributorRegistry contributors(common::DefaultLogger());
-    plugins::PluginLoader loader{tool_registry, provider_registry, nlohmann::json::object(),
-                                 nullptr, nullptr, nullptr, nullptr, &model_catalogs, &services,
-                                 nullptr, {}, nullptr, &mention_resolvers, nullptr, nullptr,
-                                 nullptr, &contributors};
+    plugins::PluginLoader loader{plugins::HostRegistries{
+        .tools = &tool_registry,
+        .providers = &provider_registry,
+        .model_catalogs = &model_catalogs,
+        .context_contributors = &contributors,
+        .mention_resolvers = &mention_resolvers,
+        .services = &services,
+    }};
     const auto records = loader.LoadAll({Enabled("fixture-throws")});
 
     REQUIRE(records.size() == 1);

@@ -13,15 +13,28 @@
 
 namespace minimal::agent {
 
-SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, tools::ToolRegistry& tools,
-                                 const llm::ProviderFactoryRegistry& providers,
-                                 SessionObserverRegistry& observers, session::SessionDatabase& db,
-                                 LoopConfig loop_config, common::Logger& logger,
+namespace {
+
+template <typename T>
+T& Required(T* registry, const char* name) {
+    if (registry == nullptr) {
+        throw std::invalid_argument(std::string("SessionRegistry needs the ") + name + " registry");
+    }
+    return *registry;
+}
+
+}  // namespace
+
+SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets,
+                                 const plugins::HostRegistries& registries,
+                                 session::SessionDatabase& db, LoopConfig loop_config,
+                                 common::Logger& logger,
                                  std::chrono::milliseconds initial_attach_guard)
     : presets_(presets),
-      tools_(tools),
-      resolver_(presets.providers(), providers, logger),
-      observers_(observers),
+      registries_(registries),
+      tools_(Required(registries.tools, "tool")),
+      resolver_(presets.providers(), Required(registries.providers, "provider factory"), logger),
+      observers_(Required(registries.observers, "session observer")),
       db_(db),
       history_reader_(std::make_shared<session::SessionReader>(db_)),
       loop_config_(loop_config),
@@ -215,7 +228,7 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // the process-wide one without knowing it exists. One field now, not two
     // (Phase 5 step 8): Session reads this LoopConfig, not a second copy on
     // SessionParams.
-    if (loop_config.hooks == nullptr) loop_config.hooks = hooks_;
+    if (loop_config.hooks == nullptr) loop_config.hooks = registries_.hooks;
 
     auto provider = resolver_.Acquire(preset);
 
@@ -353,7 +366,7 @@ void SessionRegistry::AppendContributedContext(SessionParams& params,
     // operator-authored framing (project context, signal channels), so a
     // plugin can never push the operator's own instructions further from the
     // front. Rendered once here and frozen with the rest of project_context.
-    if (context_contributors_ == nullptr) return;
+    if (registries_.context_contributors == nullptr) return;
     ContextRequest request;
     request.session_id = params.session_id;
     request.parent_session_id = params.parent_session_id;
@@ -361,7 +374,7 @@ void SessionRegistry::AppendContributedContext(SessionParams& params,
     request.preset_name = preset.name;
     request.is_subagent = !params.parent_session_id.empty();
     request.resume = params.resume;
-    const std::string contributed = context_contributors_->Render(request);
+    const std::string contributed = registries_.context_contributors->Render(request);
     if (contributed.empty()) return;
     if (params.project_context.empty()) {
         params.project_context = contributed;
@@ -433,7 +446,7 @@ ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id,
 
 void SessionRegistry::ApplyConstructorWiring(SessionParams& params) {
     params.presets = &presets_;
-    params.compaction_strategies = compaction_strategies_;
+    params.compaction_strategies = registries_.compaction_strategies;
     // A SUBAGENT GETS A READ-ONLY COMMAND SURFACE. Commands are a user control
     // channel, and a child has no user: its client attaches to observe, and the
     // spawn was driven by the parent's model rather than by a person with a
@@ -452,7 +465,7 @@ void SessionRegistry::ApplyConstructorWiring(SessionParams& params) {
     // class. The guard is derived from the command object's own ReadOnly()
     // answer, so a future read-only command works on a child for free and a
     // future mutating one is refused without this file learning about it.
-    params.commands = commands_;
+    params.commands = registries_.commands;
     params.project_commands = project_commands_;
     params.provider_resolver = &resolver_;
 }

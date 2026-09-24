@@ -50,6 +50,7 @@
 #include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
+#include "minimal/plugins/host_registries.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/plugins/plugin_rpc.hpp"
 #include "minimal/plugins/plugin_storage.hpp"
@@ -400,12 +401,26 @@ int main(int argc, char** argv) {
     const nlohmann::json tools_settings =
         settings_preload ? settings_preload->tools.raw : nlohmann::json::object();
 
-    minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
-                                          &auth_providers, &permission_advisors, &model_catalogs,
-                                          &services, plugin_storage.get(), plugin_data_root,
-                                          &hook_dispatcher, &mention_resolvers,
-                                          &compaction_strategies, &metadata_catalogs,
-                                          &variant_params, &context_contributors);
+    // Every registry above, handed as one bundle to each consumer: the loader
+    // here, and the session registry and RPC service at serve stage.
+    const minimal::plugins::HostRegistries registries{
+        .tools = &tools,
+        .providers = &providers,
+        .commands = &commands,
+        .observers = &observers,
+        .auth_providers = &auth_providers,
+        .permission_advisors = &permission_advisors,
+        .model_catalogs = &model_catalogs,
+        .metadata_catalogs = &metadata_catalogs,
+        .variant_params = &variant_params,
+        .compaction_strategies = &compaction_strategies,
+        .context_contributors = &context_contributors,
+        .mention_resolvers = &mention_resolvers,
+        .services = &services,
+        .hooks = &hook_dispatcher,
+    };
+    minimal::plugins::PluginLoader loader(registries, tools_settings, plugin_storage.get(),
+                                          plugin_data_root);
     const auto records = loader.LoadAll(candidates);
     // The load thread is the only writer; from here the map is read-only, which
     // is what makes unguarded Find from session workers and the command pool
@@ -694,26 +709,20 @@ int main(int argc, char** argv) {
         }
     }
 
-    minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, *session_db,
-                                             loop_config, minimal::common::DefaultLogger());
-    // The strategy registry presets resolve their `compaction_strategy:`
-    // frontmatter against at compaction time. The map is read-only after
-    // plugin load (see the loader comment), which is what makes the loop's
-    // per-attempt Find safe from session workers.
-    sessions.set_compaction_strategies(&compaction_strategies);
-    sessions.set_commands(&commands);
+    // Contributors are configured before the registry exists, so no session
+    // can render against unconfigured settings.
+    context_contributors.Configure(settings.context_contributors);
+    minimal::agent::SessionRegistry sessions(*presets, registries, *session_db, loop_config,
+                                             minimal::common::DefaultLogger());
     sessions.set_project_commands(&project_commands);
     sessions.set_signal_router(&signal_router);
     // Project context (AGENTS.md/CLAUDE.md): each session loads its own, from
     // its own project_root, at creation/resume/spawn -- never at startup, since
     // the server serves many project roots and no file belongs to all of them.
     sessions.set_project_context(settings.project_context);
-    context_contributors.Configure(settings.context_contributors);
-    sessions.set_context_contributors(&context_contributors);
     if (!settings.small_model.empty()) sessions.set_small_model(settings.small_model);
     sessions.set_prompt_timeout(
         std::chrono::seconds(settings.sessions.unattended_prompt_timeout_seconds));
-    sessions.set_hook_dispatcher(&hook_dispatcher);
 
     // Stage-4 wiring for the core support service Provided above (see the
     // comment there): the dependencies only exist now. Serving has not
@@ -805,16 +814,8 @@ int main(int argc, char** argv) {
         }));
 
     minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings, permissions,
-                                             minimal::common::DefaultLogger(),
-                                             &permission_advisors);
-    service.set_commands(&commands);
+                                             minimal::common::DefaultLogger(), registries);
     service.set_project_commands(&project_commands);
-    service.set_auth_providers(&auth_providers);
-    service.set_mention_resolvers(&mention_resolvers);
-    // The PluginCall dispatch target: the same sealed registry plugins
-    // registered their services into. Borrowed; `services` outlives the
-    // service (declared at stage 2).
-    service.set_services(&services);
     service.set_mcp_manager(&mcp);
     service.set_presets(presets.get());
     service.set_signal_router(&signal_router);

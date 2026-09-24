@@ -104,8 +104,8 @@ struct ServiceFixture {
         candidate.file = std::filesystem::path(MINIMAL_FIXTURE_DIR) / "fixture-advisor.so";
         candidate.provenance = plugins::Provenance::User;
         candidate.enabled = true;
-        plugins::PluginLoader loader(tools, providers, nlohmann::json::object(), nullptr, nullptr,
-                                     nullptr, &permission_advisors);
+        plugins::PluginLoader loader(plugins::HostRegistries{
+            .tools = &tools, .providers = &providers, .permission_advisors = &permission_advisors});
         const auto records = loader.LoadAll({candidate});
         REQUIRE(records.size() == 1);
         REQUIRE(records.front().ok());
@@ -121,8 +121,8 @@ struct ServiceFixture {
         candidate.provenance = plugins::Provenance::User;
         candidate.enabled = true;
         candidate.config = config;
-        plugins::PluginLoader loader(tools, providers, nlohmann::json::object(), nullptr, nullptr,
-                                     nullptr, &permission_advisors);
+        plugins::PluginLoader loader(plugins::HostRegistries{
+            .tools = &tools, .providers = &providers, .permission_advisors = &permission_advisors});
         const auto records = loader.LoadAll({candidate});
         REQUIRE(records.size() == 1);
         REQUIRE(records.front().ok());
@@ -136,10 +136,10 @@ struct ServiceFixture {
         candidate.file = std::filesystem::path(MINIMAL_FIXTURE_DIR) / "fixture-endpoint.so";
         candidate.provenance = plugins::Provenance::User;
         candidate.enabled = true;
-        // services is the 9th ctor param; the endpoint lands under the
-        // plugin's own name, which is what the RPC dispatches by.
-        plugins::PluginLoader loader(tools, providers, nlohmann::json::object(), nullptr, nullptr,
-                                     nullptr, nullptr, nullptr, &services);
+        // The endpoint lands under the plugin's own name, which is what the
+        // RPC dispatches by.
+        plugins::PluginLoader loader(
+            plugins::HostRegistries{.tools = &tools, .providers = &providers, .services = &services});
         const auto records = loader.LoadAll({candidate});
         REQUIRE(records.size() == 1);
         REQUIRE(records.front().ok());
@@ -157,17 +157,19 @@ struct ServiceFixture {
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
         sessions_commands = &commands;
+        const plugins::HostRegistries registries{.tools = &tools,
+                                                 .providers = &providers,
+                                                 .commands = &commands,
+                                                 .observers = observers.get(),
+                                                 .permission_advisors = &permission_advisors,
+                                                 .mention_resolvers = &mention_resolvers,
+                                                 .services = &services};
         sessions = std::make_unique<agent::SessionRegistry>(
-            *presets, tools, providers, *observers, *db, agent::LoopConfig{},
-            common::DefaultLogger(), attach_guard);
+            *presets, registries, *db, agent::LoopConfig{}, common::DefaultLogger(), attach_guard);
         service = std::make_unique<rpc::SessionServiceImpl>(
             *sessions, *db, config::SettingsConfig{}, service_permissions,
-            common::DefaultLogger(), &permission_advisors);
-        service->set_services(&services);
+            common::DefaultLogger(), registries);
         service->set_presets(presets.get());
-        sessions->set_commands(&commands);
-        service->set_commands(&commands);
-        service->set_mention_resolvers(&mention_resolvers);
         service->set_signal_router(&signal_router);
         service->set_on_last_client_detached([this] { last_detach.store(true); });
 

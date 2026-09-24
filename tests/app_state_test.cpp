@@ -132,14 +132,15 @@ struct ClientFixture {
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
         for (auto& command : commands_core::MakeCoreCommands()) commands.Register(std::move(command));
         commands.Register(commands_core::MakeHelpCommand(commands));
+        const plugins::HostRegistries registries{.tools = &tools,
+                                                 .providers = &providers,
+                                                 .commands = &commands,
+                                                 .observers = observers.get()};
         sessions = std::make_unique<agent::SessionRegistry>(
-            *presets, tools, providers, *observers, *db, agent::LoopConfig{},
-            common::DefaultLogger(), attach_guard);
-        sessions->set_commands(&commands);
+            *presets, registries, *db, agent::LoopConfig{}, common::DefaultLogger(), attach_guard);
         service = std::make_unique<rpc::SessionServiceImpl>(
             *sessions, *db, config::SettingsConfig{}, config::PermissionsConfig{},
-            common::DefaultLogger());
-        service->set_commands(&commands);
+            common::DefaultLogger(), registries);
         service->set_presets(presets.get());   // RunSessionlessCommand dispatches against these
 
         socket = dir / "test.sock";

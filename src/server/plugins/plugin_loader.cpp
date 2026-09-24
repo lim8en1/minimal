@@ -206,43 +206,17 @@ std::string_view ToString(LoadStatus status) {
     return "unknown";
 }
 
-PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
-                            nlohmann::json tools_settings,
-                            agent::SessionObserverRegistry* observers,
-                           commands::CommandRegistry* commands,
-                           rpc::AuthProviderRegistry* auth_providers,
-                           tools::PermissionAdvisorRegistry* permission_advisors,
-                           llm::ModelCatalogRegistry* model_catalogs,
-                           ServiceRegistry* services, PluginStorage* storage,
-                           std::filesystem::path plugin_data_root,
-                           hooks::HookDispatcher* hook_points,
-                           agent::MentionResolverRegistry* mention_resolvers,
-                           agent::CompactionStrategyRegistry* compaction_strategies,
-                           llm::MetadataCatalogRegistry* metadata_catalogs,
-                           llm::VariantParamsRegistry* variant_params,
-                           agent::ContextContributorRegistry* context_contributors)
-    : tools_(tools),
-      providers_(providers),
+PluginLoader::PluginLoader(HostRegistries registries, nlohmann::json tools_settings,
+                           PluginStorage* storage, std::filesystem::path plugin_data_root)
+    : registries_(registries),
       tools_settings_(std::move(tools_settings)),
-      observers_(observers),
-      model_catalogs_(model_catalogs),
-      commands_(commands),
-      auth_providers_(auth_providers),
-      mention_resolvers_(mention_resolvers),
-      context_contributors_(context_contributors),
-      permission_advisors_(permission_advisors),
-      services_(services),
       storage_(storage),
-      plugin_data_root_(std::move(plugin_data_root)),
-      hook_points_(hook_points),
-      compaction_strategies_(compaction_strategies),
-      metadata_catalogs_(metadata_catalogs),
-      variant_params_(variant_params) {
+      plugin_data_root_(std::move(plugin_data_root)) {
     BuildTargets();
 }
 
 void PluginLoader::BuildTargets() {
-    AddTarget(targets_, "minimal_plugin_register_hook_points", "hook", hook_points_,
+    AddTarget(targets_, "minimal_plugin_register_hook_points", "hook", registries_.hooks,
               [](const hooks::HookDispatcher& registry, const std::string& plugin) {
                   std::vector<std::string> out;
                   for (const auto& entry : registry.attributions()) {
@@ -250,7 +224,7 @@ void PluginLoader::BuildTargets() {
                   }
                   return out;
               });
-    AddTarget(targets_, "minimal_plugin_register_tools", "tool", &tools_,
+    AddTarget(targets_, "minimal_plugin_register_tools", "tool", registries_.tools,
               [](const tools::ToolRegistry& registry, const std::string& plugin) {
                   std::vector<std::string> out;
                   for (const auto& entry : registry.attributions()) {
@@ -258,9 +232,9 @@ void PluginLoader::BuildTargets() {
                   }
                   return out;
               });
-    AddTarget(targets_, "minimal_plugin_register_provider_factories", "provider", &providers_,
+    AddTarget(targets_, "minimal_plugin_register_provider_factories", "provider", registries_.providers,
               KindsOwned<llm::ProviderFactoryRegistry>);
-    AddTarget(targets_, "minimal_plugin_register_commands", "command", commands_,
+    AddTarget(targets_, "minimal_plugin_register_commands", "command", registries_.commands,
               [](const commands::CommandRegistry& registry, const std::string& plugin) {
                   std::vector<std::string> out;
                   for (const auto& entry : registry.attributions()) {
@@ -268,42 +242,42 @@ void PluginLoader::BuildTargets() {
                   }
                   return out;
               });
-    AddTarget(targets_, "minimal_plugin_register_session_observer", "observer", observers_,
+    AddTarget(targets_, "minimal_plugin_register_session_observer", "observer", registries_.observers,
               [](const agent::SessionObserverRegistry& registry, const std::string& plugin) {
                   return Repeat(registry.CountOwnedBy(plugin), "session lifecycle");
               });
-    AddTarget(targets_, "minimal_plugin_register_auth_provider", "auth", auth_providers_,
+    AddTarget(targets_, "minimal_plugin_register_auth_provider", "auth", registries_.auth_providers,
               [](const rpc::AuthProviderRegistry& registry, const std::string& plugin) {
                   return Repeat(registry.OwnedBy(plugin) ? 1 : 0, "connection policy");
               });
     AddTarget(targets_, "minimal_plugin_register_context_contributors", "context",
-              context_contributors_,
+              registries_.context_contributors,
               [](const agent::ContextContributorRegistry& registry, const std::string& plugin) {
                   return Repeat(registry.CountOwnedBy(plugin), "session prefill");
               });
-    AddTarget(targets_, "minimal_plugin_register_mention_resolver", "mention", mention_resolvers_,
+    AddTarget(targets_, "minimal_plugin_register_mention_resolver", "mention", registries_.mention_resolvers,
               [](const agent::MentionResolverRegistry& registry, const std::string& plugin) {
                   return Repeat(registry.OwnedBy(plugin) ? 1 : 0, "@-mention resolver");
               });
     AddTarget(targets_, "minimal_plugin_register_permission_advisor", "advisor",
-              permission_advisors_,
+              registries_.permission_advisors,
               [](const tools::PermissionAdvisorRegistry& registry, const std::string& plugin) {
                   return Repeat(registry.Has(plugin) ? 1 : 0, "permission prompts");
               });
-    AddTarget(targets_, "minimal_plugin_register_model_catalogs", "catalog", model_catalogs_,
+    AddTarget(targets_, "minimal_plugin_register_model_catalogs", "catalog", registries_.model_catalogs,
               KindsOwned<llm::ModelCatalogRegistry>);
     AddTarget(targets_, "minimal_plugin_register_metadata_catalogs", "metadata",
-              metadata_catalogs_,
+              registries_.metadata_catalogs,
               [](const llm::MetadataCatalogRegistry& registry, const std::string& plugin) {
                   std::vector<std::string> out = registry.KeysOwnedBy(plugin);
                   if (registry.HasFallbackFrom(plugin)) out.push_back(kMetadataFallbackLabel);
                   return out;
               });
-    AddTarget(targets_, "minimal_plugin_register_variant_params", "variant", variant_params_,
+    AddTarget(targets_, "minimal_plugin_register_variant_params", "variant", registries_.variant_params,
               KindsOwned<llm::VariantParamsRegistry>);
     AddTarget(targets_, "minimal_plugin_register_compaction_strategies", "compaction",
-              compaction_strategies_, KindsOwned<agent::CompactionStrategyRegistry>);
-    AddTarget(targets_, "minimal_plugin_register_services", "service", services_,
+              registries_.compaction_strategies, KindsOwned<agent::CompactionStrategyRegistry>);
+    AddTarget(targets_, "minimal_plugin_register_services", "service", registries_.services,
               [](const ServiceRegistry& registry, const std::string& plugin) {
                   std::vector<std::string> out;
                   for (const auto& entry : registry.attributions()) {
@@ -377,7 +351,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // The consumer side of the service channel: the same registry that
     // register_services below dispatches into, so a plugin capturing this
     // pointer at registration resolves services from this process's registry.
-    context.services = services_;
+    context.services = registries_.services;
     // Per-plugin storage and its own data dir. The dir is provisioned HERE,
     // keyed by the plugin's declared name, because only the host can guarantee
     // it exists before the hooks that will use it run.
@@ -430,7 +404,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // The OPTIONAL per-root commands hook is never CALLED here (there is no
     // project root at startup) -- only remembered, with a copy of this
     // plugin's `context`, for RegisterProjectCommands to call later, per root.
-    if (commands_ != nullptr &&
+    if (registries_.commands != nullptr &&
         Lookup<RegisterProjectCommandsFn>(handle, "minimal_plugin_register_project_commands") !=
             nullptr) {
         project_command_plugins_.push_back(

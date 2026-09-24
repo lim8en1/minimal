@@ -159,10 +159,13 @@ struct HeadlessFixture {
         observers->Register(
             std::make_shared<cost_tracker::CostSessionObserver>(*cost_store, *cost_in_flight));
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
-        sessions = std::make_unique<agent::SessionRegistry>(*presets, tools, providers, *observers,
-                                                            *db, agent::LoopConfig{},
-                                                            common::DefaultLogger());
-        sessions->set_hook_dispatcher(hook_dispatcher.get());
+        sessions = std::make_unique<agent::SessionRegistry>(
+            *presets,
+            plugins::HostRegistries{.tools = &tools,
+                                    .providers = &providers,
+                                    .observers = observers.get(),
+                                    .hooks = hook_dispatcher.get()},
+            *db, agent::LoopConfig{}, common::DefaultLogger());
         if (title) {
             support.Wire(*sessions, *db, *presets);
             session_titler::TitlerConfig titler_config;

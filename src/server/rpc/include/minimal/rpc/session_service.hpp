@@ -62,10 +62,19 @@ namespace minimal::rpc {
 
 class SessionServiceImpl final : public v1::SessionService::Service {
 public:
+    // Registries read from `registries`, all optional:
+    //   commands            -- null: every command invocation answers "not
+    //                          available" rather than being dropped.
+    //   auth_providers      -- null: the pass-through default (no
+    //                          authentication), matching the local-only topology.
+    //   mention_resolvers   -- null: SuggestPaths uses the core-default
+    //                          PrefixMentionResolver.
+    //   services            -- the sealed PluginCall/PluginSubscribe dispatch
+    //                          target; null: both RPCs answer UNAVAILABLE.
+    //   permission_advisors -- null: permissions.json's advisor never applies.
     SessionServiceImpl(agent::SessionRegistry& sessions, session::SessionDatabase& db,
                        config::SettingsConfig settings, config::PermissionsConfig permissions,
-                       common::Logger& logger,
-                       const tools::PermissionAdvisorRegistry* permission_advisors = nullptr);
+                       common::Logger& logger, const plugins::HostRegistries& registries = {});
 
     grpc::Status CreateSession(grpc::ServerContext* context,
                                const v1::CreateSessionRequest* request,
@@ -115,9 +124,6 @@ public:
     // later auto-spawning client will rely on.
     void set_on_last_client_detached(std::function<void()> callback);
 
-    // Optional: a service without one answers every invocation with "not
-    // available" rather than dropping it. Set before serving.
-    void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
     // Optional: the project-scoped half of the catalog (ProjectCommandSource),
     // consulted BEFORE commands_ by both DispatchCommand's reader-thread
     // pre-check and ListCommands -- see FindEffective's own doc for why both
@@ -138,26 +144,6 @@ public:
     // subscribing to nothing. Set before serving (main.cpp, after the router
     // exists). The router is also how signal channels reach their sessions.
     void set_signal_router(agent::SignalRouter* router) { signal_router_ = router; }
-
-    // Optional; absent means the pass-through default (no authentication), which
-    // matches the local-only topology. Set before serving.
-    void set_auth_providers(const AuthProviderRegistry* registry) {
-        auth_providers_ = registry;
-    }
-
-    // Optional: unset, SuggestPaths uses the core-default PrefixMentionResolver;
-    // set (main.cpp after plugin load), a plugin's override takes precedence.
-    void set_mention_resolvers(const agent::MentionResolverRegistry* resolvers) {
-        mention_resolvers_ = resolvers;
-    }
-
-    // The PluginCall/PluginSubscribe dispatch target: the sealed ServiceRegistry
-    // plugins provided their "<plugin_name>.rpc" handlers (or a PluginEndpoint,
-    // see docs/EXTENSIBILITY.md 2.5) into at load, sealed before serving (which
-    // is what makes unguarded Find from these handler threads safe). Borrowed
-    // and optional; null means both RPCs answer UNAVAILABLE rather than
-    // silently empty.
-    void set_services(const plugins::ServiceRegistry* services) { services_ = services; }
 
     std::size_t attached_clients() const;
 

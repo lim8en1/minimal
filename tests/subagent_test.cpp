@@ -127,9 +127,12 @@ struct SubagentFixture {
         // A long guard: unattached children are normal here (no client in this
         // tier), and a test parked on a permission prompt must not be reaped
         // mid-assertion. Attach-guard behaviour has its own tests.
-        sessions = std::make_unique<agent::SessionRegistry>(*presets, tools, providers,
-                                                            *observers, *db, agent::LoopConfig{},
-                                                            common::DefaultLogger(), 60s);
+        sessions = std::make_unique<agent::SessionRegistry>(*presets,
+            plugins::HostRegistries{.tools = &tools,
+                                    .providers = &providers,
+                                    .commands = commands,
+                                    .observers = observers.get()},
+            *db, agent::LoopConfig{}, common::DefaultLogger(), 60s);
         manager = std::make_unique<agent::SubagentManager>(*sessions, *db, *presets,
                                                            /*max_concurrent_subagents=*/4,
                                                            std::move(default_subagent_model),
@@ -143,14 +146,19 @@ struct SubagentFixture {
             }));
     }
 
+    // Optional; set before Build().
+    commands::CommandRegistry* commands = nullptr;
+
     void BuildWithLimit(std::int64_t max_concurrent) {
         presets = std::make_unique<agent::AgentPresetRegistry>(
             dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir.path() / "sessions.db");
-        sessions = std::make_unique<agent::SessionRegistry>(*presets, tools, providers,
-                                                            *observers, *db, agent::LoopConfig{},
-                                                            common::DefaultLogger(), 60s);
+        sessions = std::make_unique<agent::SessionRegistry>(*presets,
+            plugins::HostRegistries{.tools = &tools,
+                                    .providers = &providers,
+                                    .observers = observers.get()},
+            *db, agent::LoopConfig{}, common::DefaultLogger(), 60s);
         manager = std::make_unique<agent::SubagentManager>(*sessions, *db, *presets,
                                                            max_concurrent,
                                                            /*default_subagent_model=*/"",
@@ -1682,8 +1690,8 @@ TEST_CASE("a subagent's /-command surface is read-only", "[subagent][commands][i
     commands::CommandRegistry registry;
     for (auto& command : commands_core::MakeCoreCommands()) registry.Register(std::move(command));
     registry.Register(commands_core::MakeHelpCommand(registry));
+    fixture.commands = &registry;
     fixture.Build();
-    fixture.sessions->set_commands(&registry);
 
     auto parent = fixture.CreateParent();
     auto* parent_script = fixture.scripts["parent-script"].get();
