@@ -571,41 +571,23 @@ void Session::ApplyPreset(AgentPreset preset) {
         }
     }
 
-    // THREE copies of the preset exist -- this one, the loop's, and the
-    // executor's run mode derived from it. A command updating only some is a bug
-    // that surfaces a turn later, so there is one entry point and it updates all
-    // of them. The run mode is the deliberate exception: the executor's mode is
-    // the USER'S durable choice (SetRunMode writes it directly; the session-
-    // creation override rode params_ at construction), and desired_run_mode_
-    // already tracks it -- recomputing it here from preset_.run_mode is what
-    // let a /model switch silently reset a shift+tab'd bypass back to Normal:
-    // no preset can declare a run mode (AgentPresetFrontmatter has no field;
-    // the registry stamps permissions_.default_run_mode on every resolve), so
-    // a recompute can only clobber the runtime choice with the global default.
-    // If preset-declared run modes ever land, apply the DECLARED value here --
-    // clamped through params_.run_mode_override -- and leave undeclared
-    // presets preserving desired_run_mode_.
-    //
-    // The swap takes mutex_ because preset_snapshot() reads preset_ from the
-    // RPC layer's command pool, off the worker. The rest of this method touches
-    // only worker-visible state and stays lock-free.
+    // Worker thread, between turns: the loop is provably not inside a provider
+    // call, so the swap is safe. It takes mutex_ because preset_snapshot() and
+    // ProviderSnapshot() read these off the worker (command pool, titler).
     {
         std::lock_guard<std::mutex> lock(mutex_);
         preset_ = std::move(preset);
-        // The preset NAME is external-callers' data (SessionInfo): EmitSessionMetadata
-        // and the tab label read it from info_, and a stale one here is why {agent}
-        // kept showing the session's original preset after /agent until re-attach.
+        if (rebuilt) provider_ = std::move(rebuilt);
+        // The preset NAME is external-callers' data (SessionInfo): the
+        // metadata event and the tab label read it from info_.
         if (!preset_.name.empty()) info_.agent_preset = preset_.name;
     }
-    // The sticky record and the executor keep whatever mode they held: a
-    // preset re-resolution (/model, /agent) is a model/policy swap, not a
-    // posture change. EmitMetadataChanged below still announces the
-    // (unchanged) mode, so attached clients never go stale.
-    loop_->SetPreset(preset_);
-    // The permission policy is part of the preset: the executor was built from
-    // the creation-time preset and must follow the switch, or /agent changes
-    // the prompt and tool list while the old preset's gates stay in force.
-    executor_.SetPolicies(preset_.permission_mode, preset_.mcp_permissions);
+    // The run mode is left alone: it is the user's durable choice, not the
+    // preset's (no preset declares one; the registry stamps the global default
+    // on every resolve), and SetRunMode may be writing it from the reader right
+    // now. The policies DO follow the preset, or /agent would change the
+    // prompt and tools while the old preset's gates stayed in force.
+    ApplyEffective(preset_, *provider_, std::nullopt);
     // The new preset may allow different MCP servers. Runs on the worker at a
     // turn boundary (the same blocking contract as a preset swap): a dead
     // server in the new list is surfaced here, never discovered mid-turn.
@@ -615,22 +597,14 @@ void Session::ApplyPreset(AgentPreset preset) {
     // ({model} {agent} {permission_mode} {tokens}-max) refreshes NOW instead
     // of only at its next attach.
     EmitMetadataChanged();
+}
 
-    if (!provider_changed) return;
-
-    // Worker thread, between turns: the loop is provably not inside a provider
-    // call, so rebinding and then releasing the old reference is safe. Rebind
-    // FIRST -- the loop must never hold a reference to the object being freed.
-    // The rebind takes mutex_ because ProviderSnapshot() hands the shared_ptr to
-    // the titler thread, and a concurrent reassign would be a data race; the
-    // titler tolerates the momentary null a snapshot between the two moves can
-    // see (it degrades to no title).
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto previous = std::move(provider_);
-        provider_ = std::move(rebuilt);
-    }
-    loop_->SetProvider(*provider_);
+void Session::ApplyEffective(const AgentPreset& preset, llm::LlmProvider& provider,
+                             std::optional<tools::PermissionRunMode> run_mode) {
+    loop_->SetPreset(preset);
+    loop_->SetProvider(provider);
+    executor_.SetPolicies(preset.permission_mode, preset.mcp_permissions);
+    if (run_mode) executor_.SetRunMode(*run_mode);
 }
 
 void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
@@ -1510,14 +1484,10 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
         // The user's latest word outranks the borrow.
         ~PresetRestore() {
             if (!active || session == nullptr) return;
-            session->loop_->SetPreset(session->preset_);
-            session->executor_.SetPolicies(session->preset_.permission_mode,
-                                           session->preset_.mcp_permissions);
-            session->executor_.SetRunMode(session->desired_run_mode());
-            // provider_ is what the loop held before the borrow by
-            // construction; rebind unconditionally so a borrowed provider can
-            // never leak into the next turn.
-            session->loop_->SetProvider(*session->provider_);
+            // Unconditional, provider included, so a borrow can never leak
+            // into the next turn.
+            session->ApplyEffective(session->preset_, *session->provider_,
+                                    session->desired_run_mode());
         }
     } preset_restore;
     preset_restore.session = this;
@@ -1564,27 +1534,21 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
                 }
                 transient = provider_resolver_->ResolveModel(std::move(transient), model);
             }
-            // The borrowed turn's run mode can only narrow the session's
-            // CURRENT posture -- desired_run_mode_, the sticky record every
-            // writer (reader-side SetRunMode included) keeps in sync with the
-            // executor, not the session's default from params_/preset_.
-            executor_.SetRunMode(tools::clamp_run_mode(desired_run_mode(), transient.run_mode));
-            // The borrowed preset's gates govern the borrowed turn (restored
-            // by preset_restore alongside the preset itself).
-            executor_.SetPolicies(transient.permission_mode, transient.mcp_permissions);
-            loop_->SetPreset(transient);
-            // Rebind whenever the borrowed preset is served by a different
-            // instance. The cache shares instances process-wide, so a borrow of
-            // a known entry is a hit and the restore a no-op rebind.
+            // A different instance only when the borrowed preset is served by
+            // a different connection; the cache makes a known entry a hit.
             if (!ProviderResolver::SameConnection(transient, preset_)) {
                 if (provider_resolver_ == nullptr) {
                     throw std::runtime_error("no provider resolver wired; cannot switch provider "
                                              "for the per-turn override");
                 }
                 borrowed_provider = provider_resolver_->Acquire(transient);
-                loop_->SetProvider(*borrowed_provider);
             }
-            preset_restore.active = true;
+            // The borrowed preset's gates govern the borrowed turn. Its run
+            // mode can only narrow the session's CURRENT posture
+            // (desired_run_mode_, which every writer keeps in sync), never the
+            // default from params_/preset_.
+            ApplyEffective(transient, borrowed_provider ? *borrowed_provider : *provider_,
+                           tools::clamp_run_mode(desired_run_mode(), transient.run_mode));
         } catch (const std::exception& error) {
             // A resolution failure fails the TURN with a named error -- nothing
             // persisted, the session keeps its sticky choices -- the same

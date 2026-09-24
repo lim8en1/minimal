@@ -730,6 +730,12 @@ private:
     // thread and the command pool are both safe: EmitEvent's sink never
     // blocks.
     void EmitMetadataChanged();
+    // The one place the loop and executor learn which preset and provider
+    // govern the next turn: preset commits, per-turn borrows and the borrow's
+    // restore all go through here so the copies can never diverge. Unset
+    // run_mode leaves the executor's mode as it is.
+    void ApplyEffective(const AgentPreset& preset, llm::LlmProvider& provider,
+                        std::optional<tools::PermissionRunMode> run_mode);
     void RunRewind(std::int64_t target_seq);
     void RunRedo();
     // Answers a rewind with an ErrorEvent. Publish never blocks on any path;
