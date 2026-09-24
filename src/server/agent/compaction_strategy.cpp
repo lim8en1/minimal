@@ -7,23 +7,7 @@ namespace minimal::agent {
 
 bool CompactionStrategyRegistry::Register(std::string kind, CompactionStrategy strategy) {
     if (!strategy.cut_selector || !strategy.summarize) return false;
-    return strategies_.emplace(std::move(kind), std::move(strategy)).second;
-}
-
-const CompactionStrategy* CompactionStrategyRegistry::Find(std::string_view kind) const {
-    const auto it = strategies_.find(kind);
-    return it == strategies_.end() ? nullptr : &it->second;
-}
-
-bool CompactionStrategyRegistry::Has(std::string_view kind) const {
-    return strategies_.find(kind) != strategies_.end();
-}
-
-std::vector<std::string> CompactionStrategyRegistry::kinds() const {
-    std::vector<std::string> out;
-    out.reserve(strategies_.size());
-    for (const auto& [kind, _] : strategies_) out.push_back(kind);
-    return out;  // map iteration is already sorted
+    return AttributedRegistry::Register(std::move(kind), std::move(strategy));
 }
 
 std::size_t ProposeSummarizeCut(const std::vector<llm::Message>& history,

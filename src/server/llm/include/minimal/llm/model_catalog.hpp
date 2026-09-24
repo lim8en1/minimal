@@ -31,6 +31,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/llm/provider.hpp"
+#include "minimal/plugins/attributed_registry.hpp"
 
 namespace minimal::llm {
 
@@ -83,45 +84,16 @@ public:
 // Kind-string -> catalog. Mirrors ProviderFactoryRegistry: no closed enum, the
 // first registration for a kind wins, and Register returns false on a
 // collision so the loader can report which two plugins claimed it.
-class ModelCatalogRegistry {
+class ModelCatalogRegistry : public plugins::AttributedRegistry<std::shared_ptr<ModelCatalog>> {
 public:
-    // Returns false if `kind` was already registered or `catalog` is null --
-    // the caller decides whether that is fatal, since the loader wants to name
-    // both claimants rather than throw from inside a plugin's callback.
+    // False for a null catalog or a kind already taken (recorded in
+    // collisions()); the loader, not this, decides whether that is fatal.
     bool Register(std::string kind, std::shared_ptr<ModelCatalog> catalog);
-
-    // --- Attribution, for collision reporting -------------------------------
-    //
-    // The same scoped window ProviderFactoryRegistry (and ToolRegistry/
-    // CommandRegistry) use, for the same reason: Register() has no idea who
-    // is calling, and a collision has to be able to name BOTH plugins. Not
-    // thread-safe and does not need to be -- plugin loading is
-    // single-threaded and finishes before any session exists.
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-
-    struct Collision {
-        std::string kind;
-        std::string first_plugin;   // the registration that holds the slot
-        std::string second_plugin;  // the one that was dropped
-    };
-    const std::vector<Collision>& collisions() const { return collisions_; }
 
     // nullptr when no plugin registered a catalog for this kind. A providers.json
     // entry with "discover": true whose backend has no catalog is a startup
     // sanity-check warning, not a crash: the entry may still have static models.
     ModelCatalog* Find(std::string_view kind) const;
-
-    bool Has(std::string_view kind) const;
-
-    // Sorted, for deterministic diagnostics and startup output.
-    std::vector<std::string> kinds() const;
-
-private:
-    std::map<std::string, std::shared_ptr<ModelCatalog>, std::less<>> catalogs_;
-    std::map<std::string, std::string, std::less<>> registrant_;  // kind -> plugin that holds it
-    std::string attribution_;
-    std::vector<Collision> collisions_;
 };
 
 }  // namespace minimal::llm

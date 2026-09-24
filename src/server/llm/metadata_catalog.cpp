@@ -4,36 +4,39 @@ namespace minimal::llm {
 
 bool MetadataCatalogRegistry::Register(std::string kind, std::shared_ptr<MetadataCatalog> catalog) {
     if (!catalog) return false;
-    const std::string key = kind;  // read before the move below
-    const bool inserted = catalogs_.emplace(std::move(kind), std::move(catalog)).second;
-    if (inserted) {
-        registrant_[key] = attribution_;
-        return true;
-    }
-    // Recorded, not just refused -- the same rule as ModelCatalogRegistry:
-    // a silent drop makes the winner depend on load order with nothing to
-    // point an operator at.
-    const auto first = registrant_.find(key);
-    collisions_.push_back(Collision{key, first != registrant_.end() ? first->second : std::string{},
-                                    attribution_});
-    return false;
+    return AttributedRegistry::Register(std::move(kind), std::move(catalog));
 }
 
 bool MetadataCatalogRegistry::RegisterFallback(std::shared_ptr<MetadataCatalog> catalog) {
     if (!catalog) return false;
-    // One fallback per instance: a plugin registering the same catalog twice
-    // would make the first-answering-fallback rule moot and double-log every
-    // miss. Comparison by owner-less pointer identity is exactly the check.
     for (const auto& existing : fallbacks_) {
         if (existing.get() == catalog.get()) return false;
     }
     fallbacks_.push_back(std::move(catalog));
+    fallback_plugins_.push_back(attribution());
     return true;
 }
 
 MetadataCatalog* MetadataCatalogRegistry::Find(std::string_view kind) const {
-    const auto it = catalogs_.find(kind);
-    return it == catalogs_.end() ? nullptr : it->second.get();
+    const auto* entry = FindEntry(kind);
+    return entry == nullptr ? nullptr : entry->get();
+}
+
+bool MetadataCatalogRegistry::HasFallbackFrom(const std::string& plugin_name) const {
+    for (const auto& plugin : fallback_plugins_) {
+        if (plugin == plugin_name) return true;
+    }
+    return false;
+}
+
+void MetadataCatalogRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    AttributedRegistry::RemoveByAttribution(plugin_name);
+    for (std::size_t i = fallbacks_.size(); i-- > 0;) {
+        if (fallback_plugins_[i] == plugin_name) {
+            fallbacks_.erase(fallbacks_.begin() + static_cast<std::ptrdiff_t>(i));
+            fallback_plugins_.erase(fallback_plugins_.begin() + static_cast<std::ptrdiff_t>(i));
+        }
+    }
 }
 
 MetadataCatalog* MetadataCatalogRegistry::FindForQuery(const MetadataQuery& query) const {
@@ -50,17 +53,6 @@ MetadataCatalog* MetadataCatalogRegistry::FindForQuery(const MetadataQuery& quer
         }
     }
     return nullptr;
-}
-
-bool MetadataCatalogRegistry::Has(std::string_view kind) const {
-    return catalogs_.find(kind) != catalogs_.end();
-}
-
-std::vector<std::string> MetadataCatalogRegistry::kinds() const {
-    std::vector<std::string> out;
-    out.reserve(catalogs_.size());
-    for (const auto& [kind, _] : catalogs_) out.push_back(kind);
-    return out;  // map iteration is already sorted
 }
 
 }  // namespace minimal::llm

@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "minimal/llm/model_catalog.hpp"  // DiscoveredModel
+#include "minimal/plugins/attributed_registry.hpp"
 
 namespace minimal::llm {
 
@@ -94,27 +95,18 @@ public:
 // registers under the known kinds AND falls back for wire-shape plugins that
 // load after it). Fallbacks are consulted in registration order after the
 // kind's own slot.
-class MetadataCatalogRegistry {
+class MetadataCatalogRegistry
+    : public plugins::AttributedRegistry<std::shared_ptr<MetadataCatalog>> {
 public:
+    // False for a null catalog or a kind already taken (recorded in
+    // collisions()).
     bool Register(std::string kind, std::shared_ptr<MetadataCatalog> catalog);
 
-    // Appends to the fallback list. A null catalog or a repeat registration
-    // of the same instance is refused (false): one fallback per plugin is the
-    // shape, and double-firing one catalog would double-log every miss.
+    // Appends to the fallback list, attributed like a kind slot. A null
+    // catalog or a repeat registration of the same instance is refused
+    // (false): one fallback per plugin is the shape, and double-firing one
+    // catalog would double-log every miss.
     bool RegisterFallback(std::shared_ptr<MetadataCatalog> catalog);
-
-    // --- Attribution, for collision reporting (same seam as
-    // ModelCatalogRegistry's; not thread-safe, registration is
-    // single-threaded) -----------------------------------------------
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-
-    struct Collision {
-        std::string kind;
-        std::string first_plugin;
-        std::string second_plugin;
-    };
-    const std::vector<Collision>& collisions() const { return collisions_; }
 
     // The kind slot, else nullptr. Does NOT consult fallbacks -- callers that
     // want the fallback chain use FindForQuery.
@@ -131,19 +123,14 @@ public:
     const std::vector<std::shared_ptr<MetadataCatalog>>& fallbacks() const {
         return fallbacks_;
     }
+    bool HasFallbackFrom(const std::string& plugin_name) const;
 
-    bool Has(std::string_view kind) const;
-
-    // Every kind with an own slot (sorted, like kinds()) -- NOT the fallback
-    // coverage, which is "everything else" by definition.
-    std::vector<std::string> kinds() const;
+    // Kind slots AND fallbacks.
+    void RemoveByAttribution(const std::string& plugin_name);
 
 private:
-    std::map<std::string, std::shared_ptr<MetadataCatalog>, std::less<>> catalogs_;
-    std::map<std::string, std::string, std::less<>> registrant_;  // kind -> plugin that holds it
     std::vector<std::shared_ptr<MetadataCatalog>> fallbacks_;
-    std::string attribution_;
-    std::vector<Collision> collisions_;
+    std::vector<std::string> fallback_plugins_;  // parallel to fallbacks_
 };
 
 }  // namespace minimal::llm

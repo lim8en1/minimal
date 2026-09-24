@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "minimal/agent/context_compactor.hpp"
+#include "minimal/plugins/attributed_registry.hpp"
 
 namespace minimal::agent {
 
@@ -33,27 +34,17 @@ struct CompactionStrategy {
     Compactor summarize;
 };
 
-class CompactionStrategyRegistry {
+class CompactionStrategyRegistry : public plugins::AttributedRegistry<CompactionStrategy> {
 public:
-    // Returns false if `kind` was already registered or either half of
-    // `strategy` is unset -- the caller (the loader) decides whether that is
-    // fatal, since it wants to name both claimants rather than throw from
-    // inside a plugin's callback.
+    // False if either half of `strategy` is unset or `kind` is already taken
+    // (recorded in collisions()).
     bool Register(std::string kind, CompactionStrategy strategy);
 
     // nullptr when no plugin (or core) registered a strategy for this kind.
     // settings.json's memory.compaction_strategy naming an unregistered kind
     // is a startup sanity-check warning, not a crash -- the session falls
     // back to the built-in behavior (see agent_loop.hpp's LoopConfig comment).
-    const CompactionStrategy* Find(std::string_view kind) const;
-
-    bool Has(std::string_view kind) const;
-
-    // Sorted, for deterministic diagnostics and startup output.
-    std::vector<std::string> kinds() const;
-
-private:
-    std::map<std::string, CompactionStrategy, std::less<>> strategies_;
+    const CompactionStrategy* Find(std::string_view kind) const { return FindEntry(kind); }
 };
 
 // The built-in "summarize" strategy: today's production behavior.

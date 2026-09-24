@@ -6,37 +6,12 @@ namespace minimal::llm {
 
 bool ModelCatalogRegistry::Register(std::string kind, std::shared_ptr<ModelCatalog> catalog) {
     if (!catalog) return false;
-    const std::string key = kind;  // read before the move below
-    const bool inserted = catalogs_.emplace(std::move(kind), std::move(catalog)).second;
-    if (inserted) {
-        registrant_[key] = attribution_;
-        return true;
-    }
-    // Recorded, not just refused. The loser is dropped either way -- the
-    // collision is fatal upstream, so which object holds the slot is moot --
-    // but a silent drop made the winner depend on load order with nothing to
-    // point an operator at (see ProviderFactoryRegistry::Register, the same
-    // pattern for the sibling registry).
-    const auto first = registrant_.find(key);
-    collisions_.push_back(Collision{key, first != registrant_.end() ? first->second : std::string{},
-                                    attribution_});
-    return false;
+    return AttributedRegistry::Register(std::move(kind), std::move(catalog));
 }
 
 ModelCatalog* ModelCatalogRegistry::Find(std::string_view kind) const {
-    const auto it = catalogs_.find(kind);
-    return it == catalogs_.end() ? nullptr : it->second.get();
-}
-
-bool ModelCatalogRegistry::Has(std::string_view kind) const {
-    return catalogs_.find(kind) != catalogs_.end();
-}
-
-std::vector<std::string> ModelCatalogRegistry::kinds() const {
-    std::vector<std::string> out;
-    out.reserve(catalogs_.size());
-    for (const auto& [kind, _] : catalogs_) out.push_back(kind);
-    return out;  // map iteration is already sorted
+    const auto* entry = FindEntry(kind);
+    return entry == nullptr ? nullptr : entry->get();
 }
 
 std::vector<std::string> AdvertisedEfforts(const nlohmann::json& metadata) {

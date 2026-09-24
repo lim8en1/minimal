@@ -28,6 +28,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/plugins/attributed_registry.hpp"
+
 namespace minimal::llm {
 
 class VariantParamsProvider {
@@ -54,38 +56,16 @@ public:
 // Kind-string -> provider. Mirrors ModelCatalogRegistry: no closed enum, the
 // first registration for a kind wins, and Register returns false on a
 // collision so the loader can report which two plugins claimed it.
-class VariantParamsRegistry {
+class VariantParamsRegistry
+    : public plugins::AttributedRegistry<std::shared_ptr<VariantParamsProvider>> {
 public:
-    // Returns false if `kind` was already registered or `provider` is null.
+    // False for a null provider or a kind already taken (recorded in
+    // collisions()).
     bool Register(std::string kind, std::shared_ptr<VariantParamsProvider> provider);
-
-    // --- Attribution, for collision reporting -- same seam as
-    // ModelCatalogRegistry's; not thread-safe, registration is
-    // single-threaded and finishes before any session exists. ------------
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-
-    struct Collision {
-        std::string kind;
-        std::string first_plugin;
-        std::string second_plugin;
-    };
-    const std::vector<Collision>& collisions() const { return collisions_; }
 
     // nullptr when no plugin registered a mapping for this kind -- the
     // generic reasoning_effort fallback applies.
     VariantParamsProvider* Find(std::string_view kind) const;
-
-    bool Has(std::string_view kind) const;
-
-    // Sorted, for deterministic diagnostics and startup output.
-    std::vector<std::string> kinds() const;
-
-private:
-    std::map<std::string, std::shared_ptr<VariantParamsProvider>, std::less<>> providers_;
-    std::map<std::string, std::string, std::less<>> registrant_;  // kind -> plugin that holds it
-    std::string attribution_;
-    std::vector<Collision> collisions_;
 };
 
 }  // namespace minimal::llm
