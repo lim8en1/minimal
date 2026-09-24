@@ -1,10 +1,6 @@
 #include "minimal/rpc/session_service.hpp"
 
 #include <algorithm>
-
-#include <fcntl.h>
-#include <unistd.h>
-
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -18,7 +14,6 @@
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/config/permission_codec.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
-#include "minimal/mcp/signal_protocol.hpp"
 #include "minimal/plugins/plugin_abi.h"
 #include "minimal/rpc/event_translator.hpp"
 #include "minimal/rpc/proto_convert.hpp"
@@ -93,23 +88,6 @@ SessionServiceImpl::SessionServiceImpl(agent::SessionRegistry& sessions,
     services_ = registries.services;
 }
 
-namespace {
-
-// Looks up permissions.json's configured advisor (if any) and records the
-// SELECTION on params -- composition happens later, in
-// rpc::FinishSessionWiring, called from the one funnel every session (this
-// path and SubagentManager's advisor-inheritance path alike) passes through.
-// No advisor configured, or the named plugin not loaded (a runtime condition
-// the sanity check warns about): params carry no selection and
-// FinishSessionWiring builds the wire default -- the human, as always.
-void ApplyAdvisor(const config::PermissionsConfig& permissions,
-                  const tools::PermissionAdvisorRegistry* advisors, agent::SessionParams& params) {
-    if (!permissions.advisor || advisors == nullptr) return;
-    params.selected_advisor = advisors->Find(*permissions.advisor);
-    params.advisor_timeout = std::chrono::milliseconds(permissions.advisor_timeout_ms);
-}
-
-}  // namespace
 
 void SessionServiceImpl::set_on_last_client_detached(std::function<void()> callback) {
     on_last_client_detached_ = std::move(callback);
@@ -151,140 +129,52 @@ int SessionServiceImpl::ScrollbackPageSize() const {
     return configured > 0 ? configured : kFallbackPageSize;
 }
 
+namespace {
+
+grpc::Status ToStatus(const agent::LaunchError& error) {
+    using Code = agent::LaunchError::Code;
+    switch (error.code()) {
+        case Code::kInvalidArgument:
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, error.what());
+        case Code::kFailedPrecondition:
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, error.what());
+        case Code::kNotFound: return grpc::Status(grpc::StatusCode::NOT_FOUND, error.what());
+        case Code::kAlreadyExists:
+            return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, error.what());
+        case Code::kInternal: return grpc::Status(grpc::StatusCode::INTERNAL, error.what());
+    }
+    return grpc::Status(grpc::StatusCode::INTERNAL, error.what());
+}
+
+}  // namespace
+
+agent::LaunchContext SessionServiceImpl::MakeLaunchContext() {
+    return agent::LaunchContext{sessions_,       db_,          settings_,    permissions_,
+                                logger_,         permission_advisors_,       mcp_manager_,
+                                signal_router_};
+}
+
+// An exception leaving an RPC handler is UB, so every throw below the launch
+// functions is mapped here; LaunchError already carries the status it means.
 grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
                                                const v1::CreateSessionRequest* request,
                                                v1::CreateSessionResponse* response) {
     if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
-
-    // session_id set means RESUME: reopen the stored session, loading its
-    // transcript as the loop's working history. Distinct enough from creation
-    // -- different validation, no row minting, no rollback-on-failure -- to be
-    // its own path rather than a flag inside this one.
-    if (!request->session_id().empty()) {
-        return ResumeSession(request, response);
-    }
-
-    agent::SessionParams params;
-    // Passed through EMPTY when the client sent nothing, never defaulted to a
-    // placeholder. SessionDatabase names an unnamed session from its first user
-    // message, and that rule is guarded by `name = ''` so it can never clobber a
-    // name someone chose -- so a placeholder here would satisfy the guard and
-    // permanently suppress the default naming. Every row in the picker would
-    // read "session", and no test below the RPC layer would notice.
-    params.name = request->name();
-    params.agent_preset =
-        request->agent_preset().empty() ? settings_.default_agent_preset : request->agent_preset();
-    params.project_root = request->project_root();
-
-    // UNSPECIFIED means "the client did not ask", which is why FromProto reports
-    // nullopt rather than a default: this service deliberately holds no
-    // permissions.json -- the run-mode default is applied where the rest of it
-    // is, in AgentPresetRegistry (agent_preset_registry.cpp,
-    // LoadPermissionsConfig). An earlier revision stored a PermissionsConfig
-    // here and never read it, which made this comment read as if the default
-    // were resolved on this path. Collapsing the wire value into a default
-    // anywhere before the registry would silently override a deliberate client
-    // choice with the file's.
-    params.run_mode_override = FromProto(request->run_mode());
-    params.mcp_manager = mcp_manager_;
-    // A startup-config decision, resolved once: the session never changes its
-    // answer mid-life, so a hot edit would not take effect anyway (config is
-    // read once at startup).
-    params.wake_on_injection = settings_.background_wake;
-    params.pause_auto_resume_on_submit = settings_.pause_auto_resume_on_submit;
-
-    if (const auto status = ApplyModelOverride(*request, params); !status.ok()) return status;
-
-    if (params.agent_preset.empty()) {
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                            "no agent_preset given and settings.json sets no "
-                            "default_agent_preset");
-    }
-    if (params.project_root.empty()) {
-        // project_root is per-session and client-supplied: it is the boundary for
-        // path confinement and bash's initial cwd, so defaulting it server-side
-        // would silently point the agent at the server's own cwd.
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "project_root is required");
-    }
-    // project_root must exist and be writable: it is the confinement boundary
-    // and bash's initial cwd, so a bad value should fail fast with a clear
-    // reason rather than surface later as confusing tool errors.
-    {
-        std::error_code ec;
-        if (!std::filesystem::is_directory(params.project_root, ec) || ec) {
-            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                                "project_root is not an existing directory: " +
-                                    params.project_root.string());
-        }
-        // faccessat with AT_EACCESS, not access(2): the check must answer for
-        // the server's EFFECTIVE uid -- access(2) tests the real one, which
-        // diverges under setuid/gid deployments and then lies in either
-        // direction.
-        if (::faccessat(AT_FDCWD, params.project_root.c_str(), W_OK, AT_EACCESS) != 0) {
-            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                                "project_root is not writable: " +
-                                    params.project_root.string());
-        }
-    }
-
-    // The DATABASE mints the id, so the row exists before the Session does. It
-    // is the only party that can guarantee uniqueness across restarts, and the
-    // transcript has to be attributable to a row from its very first append.
-    session::SessionSummary row;
+    agent::LaunchRequest launch;
+    launch.session_id = request->session_id();
+    launch.name = request->name();
+    launch.agent_preset = request->agent_preset();
+    launch.project_root = request->project_root();
+    launch.run_mode = FromProto(request->run_mode());
+    launch.model = request->model();
+    launch.signals.assign(request->signals().begin(), request->signals().end());
     try {
-        row = db_.CreateSession(params.name, std::nullopt, params.project_root.string(),
-                                params.agent_preset,
-                                params.model_override
-                                    ? std::optional<std::string>(params.model_override->str())
-                                    : std::nullopt);
-    } catch (const std::exception& e) {
-        logger_.warn("CreateSession: could not record session: {}", e.what());
-        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+        *response->mutable_session() = ToProto(agent::Launch(MakeLaunchContext(), launch));
+    } catch (const agent::LaunchError& error) {
+        return ToStatus(error);
+    } catch (const std::exception& error) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, error.what());
     }
-    params.session_id = row.session_id;
-
-    // After the id is minted: the wire checker inside the composition captures
-    // the session_id, so the advisor cannot be applied earlier.
-    ApplyAdvisor(permissions_, permission_advisors_, params);
-
-    // Signals next: every selector is validated and every named channel
-    // warmed BEFORE the session exists, so a bad or unreachable one refuses
-    // the start (and rolls the just-minted row back below) instead of
-    // delivering a session that silently never hears its channel.
-    if (const auto status = ApplySignals(*request, params); !status.ok()) {
-        try {
-            db_.DeleteSession(row.session_id);
-        } catch (const std::exception& e) {
-            logger_.warn("CreateSession: rollback after signal refusal failed: {}", e.what());
-        }
-        return status;
-    }
-
-    std::shared_ptr<agent::Session> session;
-    try {
-        session = sessions_.Create(std::move(params));
-    } catch (const std::exception& e) {
-        // Preset and provider problems are configuration errors the operator has
-        // to see and fix, so they come back with their reason attached rather
-        // than as a generic INTERNAL.
-        //
-        // Roll the row back. Inserting first is what makes the id authoritative,
-        // but it also means a failure here would otherwise leave a message-less
-        // session sitting in the picker forever with no way to remove it.
-        // Guarded: an exception leaving an RPC handler is UB (see
-        // ResumeSession's comment), and a store failure here must not
-        // shadow the FAILED_PRECONDITION the original error deserves.
-        try {
-            db_.DeleteSession(row.session_id);
-        } catch (const std::exception& rollback_error) {
-            logger_.warn("CreateSession: rollback after construction failure failed: {}",
-                        rollback_error.what());
-        }
-        logger_.warn("CreateSession failed: {}", e.what());
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
-    }
-
-    *response->mutable_session() = ToProto(row);
     return grpc::Status::OK;
 }
 
@@ -292,262 +182,20 @@ grpc::Status SessionServiceImpl::ForkSession(grpc::ServerContext* context,
                                              const v1::ForkSessionRequest* request,
                                              v1::ForkSessionResponse* response) {
     if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
-
-    if (request->source_session_id().empty()) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "source_session_id is required");
-    }
-
-    // The model ref is shape-checked HERE, not at pop: this path can answer
-    // INVALID_ARGUMENT directly, unlike a wire turn, so a malformed ref should
-    // not survive to the queue.
-    std::optional<config::ModelRef> model;
-    if (!request->model().empty()) {
-        model = config::SplitModelRef(request->model());
-        if (!model) {
-            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                                "model must be \"<provider>/<model>\" (got \"" +
-                                    request->model() + "\")");
-        }
-    }
-
-    std::optional<std::string> agent_preset;
-    if (!request->agent_preset().empty()) agent_preset = request->agent_preset();
-
+    agent::ForkRequest fork;
+    fork.source_session_id = request->source_session_id();
+    fork.target_seq = request->target_seq();
+    fork.name = request->name();
+    fork.model = request->model();
+    fork.agent_preset = request->agent_preset();
+    fork.run_mode = FromProto(request->run_mode());
     try {
-        std::shared_ptr<agent::Session> session = sessions_.ForkSession(
-            request->source_session_id(), request->target_seq(), request->name(), model,
-            agent_preset, FromProto(request->run_mode()));
-        // The registry returned the live session; read the persisted row back
-        // for the summary (it carries message_count and fork provenance the
-        // in-memory info does not).
-        const auto row = db_.GetSession(session->info().session_id);
-        if (!row) {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "forked session row vanished");
-        }
-        *response->mutable_session() = ToProto(*row);
-        return grpc::Status::OK;
-    } catch (const std::exception& e) {
-        // Store refusals (no such top-level session, invalid target) are caller
-        // errors; preset/model resolution failures are configuration errors.
-        // Both come back with their reason; the registry rolled the minted row
-        // back on the latter already.
-        logger_.warn("ForkSession failed: {}", e.what());
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
+        *response->mutable_session() = ToProto(agent::Fork(MakeLaunchContext(), fork));
+    } catch (const agent::LaunchError& error) {
+        return ToStatus(error);
+    } catch (const std::exception& error) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, error.what());
     }
-}
-
-grpc::Status SessionServiceImpl::ApplyModelOverride(const v1::CreateSessionRequest& request,
-                                                    agent::SessionParams& params) const {    // Shape-checked here so a malformed reference is INVALID_ARGUMENT rather
-    // than FAILED_PRECONDITION from deep inside session construction -- the
-    // client sent something wrong, which is a different thing from the server
-    // not being able to honour something well-formed.
-    if (request.model().empty()) return grpc::Status::OK;
-    // SplitModelRef, not ParseModelRef: a client may name a discovered model
-    // whose id itself carries slashes ("openrouter/anthropic/claude-opus-5"),
-    // and strict parsing would make those unaddressable from --model/resume.
-    params.model_override = config::SplitModelRef(request.model());
-    if (!params.model_override) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                            "model '" + request.model() +
-                                "' must be <provider>/<model>, e.g. local/qwen4");
-    }
-    return grpc::Status::OK;
-}
-
-grpc::Status SessionServiceImpl::ApplySignals(const v1::CreateSessionRequest& request,
-                                              agent::SessionParams& params) const {
-    if (request.signals().empty()) return grpc::Status::OK;
-    if (signal_router_ == nullptr) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                            "signals requested but this server does not offer them");
-    }
-
-    // Validate every selector BEFORE anything exists to roll back: a typo in
-    // one of five selectors must refuse the session start, not quietly deliver
-    // four of five signals. The channel halves are collected for the
-    // connection warm-up below.
-    std::vector<std::string> channels;
-    for (const auto& selector : request.signals()) {
-        std::string error;
-        std::string channel;
-        if (!signal_router_->CheckSelector(selector, error, &channel)) {
-            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, error);
-        }
-        // The internal source has no connection to warm; every real channel
-        // does. This is the lazy first start of a channel server -- the same
-        // trigger an MCP tool server gets from a session whose preset names
-        // it -- and a channel that fails to come up fails the session start:
-        // subscribing to a channel that cannot connect would otherwise look
-        // exactly like "connected but no signals ever arrive". A null manager
-        // is a deliberately supported degraded mode (a host that wires the
-        // router without a live MCP manager, e.g. a test harness): liveness
-        // simply cannot be checked, so validation stays structural-only,
-        // exactly like an internal-source selector.
-        if (channel != mcp::kInternalSignalSource && mcp_manager_ != nullptr) {
-            std::string connect_error;
-            if (!mcp_manager_->EnsureAlive(channel, connect_error)) {
-                return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                                    "signal channel '" + channel + "' is not available: " +
-                                        connect_error);
-            }
-        }
-        if (std::find(channels.begin(), channels.end(), channel) == channels.end()) {
-            channels.push_back(channel);
-        }
-    }
-
-    // A subscribed session exists to react to signals: it wakes on injection.
-    // The background_wake setting governs subagent completions and task
-    // results; a subscription is the user's explicit, per-session request for
-    // the same behavior from signals.
-    params.wake_on_injection = true;
-    params.signal_context = signal_router_->SignalContextFor(
-        std::vector<std::string>(request.signals().begin(), request.signals().end()));
-    // Staged for CreateResolved, not acted on here: subscription registration
-    // happens INSIDE the registry's create funnel, atomically with the
-    // session becoming findable, so no internal signal can ever observe this
-    // session_id before its declared subscriptions exist. See
-    // SessionRegistry::CreateResolved.
-    params.signal_router = signal_router_;
-    params.signal_selectors.assign(request.signals().begin(), request.signals().end());
-    return grpc::Status::OK;
-}
-
-grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* request,
-                                               v1::CreateSessionResponse* response) {
-    // The stored row already carries name, agent_preset and project_root, and
-    // it governs: a resumed session keeps the identity and confinement
-    // boundary it was created with. Rejecting a conflicting field beats
-    // silently ignoring it -- the client has all three from ListSessions, so
-    // sending one is a bug worth naming. run_mode is the exception: it is a
-    // property of the CLIENT, not of the session.
-    if (!request->name().empty() || !request->agent_preset().empty() ||
-        !request->project_root().empty()) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                            "resume carries session_id (and run_mode) only; the stored session "
-                            "keeps its name, agent_preset, and project_root");
-    }
-
-    // GetSession throws on a store failure (locked database, I/O error,
-    // corruption) rather than answering "no such session" -- and an exception
-    // leaving an RPC handler is UB, so the store's throws are mapped here.
-    std::optional<session::SessionSummary> stored;
-    try {
-        stored = db_.GetSession(request->session_id());
-    } catch (const std::exception& e) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
-    }
-    if (!stored) {
-        return grpc::Status(grpc::StatusCode::NOT_FOUND,
-                            "no such session: " + request->session_id());
-    }
-    // A subagent belongs to its parent's group and its lifecycle ended with
-    // the parent's turn; resuming one standalone has no meaning in v1.
-    if (stored->parent_session_id) {
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                            "subagent sessions cannot be resumed: " + request->session_id());
-    }
-    // Two live Sessions on one transcript would interleave appends, so an
-    // already-open session is refused here rather than inside the registry.
-    if (sessions_.Find(stored->session_id) != nullptr) {
-        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
-                            "session '" + stored->session_id + "' is already open");
-    }
-
-    agent::SessionParams params;
-    params.session_id = stored->session_id;
-    params.name = stored->name;
-    params.agent_preset = stored->agent_preset;
-    params.project_root = stored->project_root;
-    params.run_mode_override = FromProto(request->run_mode());
-    params.mcp_manager = mcp_manager_;
-    params.resume = true;
-    // Same startup-config decision as fresh creation: the setting is a
-    // property of the deployment, not of the stored row.
-    params.wake_on_injection = settings_.background_wake;
-    params.pause_auto_resume_on_submit = settings_.pause_auto_resume_on_submit;
-    ApplyAdvisor(permissions_, permission_advisors_, params);
-    // APPLIES ON RESUME TOO, like run_mode and for the same reason: a model
-    // named on THIS request outranks anything stored. Silently dropping it
-    // would be exactly the failure the field checks above refuse to make for
-    // name/preset/project_root.
-    if (const auto status = ApplyModelOverride(*request, params); !status.ok()) return status;
-    // No model on the request: restore the one the session was created (or
-    // last /model-ed) with, persisted in the row (v8). Without this a resume
-    // re-resolves the bare preset and its default model wins -- silently
-    // undoing the user's earlier choice across a server restart. A request
-    // model ("continue this conversation, but on the big model") takes
-    // precedence by arriving through ApplyModelOverride above.
-    if (!params.model_override && stored->model) {
-        params.model_override = config::SplitModelRef(*stored->model);
-    }
-    // Same restore for the subagent-model choice (/subagent-model, v10):
-    // without it a restart silently reverts spawned children to inheriting
-    // the parent's model, undoing the user's earlier choice.
-    if (stored->subagent_model) {
-        params.subagent_model_override = config::SplitModelRef(*stored->subagent_model);
-    }
-    // Signals on resume, same rules as fresh creation: validated and warmed
-    // before the session starts, never persisted from the previous stream.
-    if (const auto status = ApplySignals(*request, params); !status.ok()) return status;
-
-    // Read before params is moved from: a model the REQUEST named must outlive
-    // the move, to be written into the row once the session exists.
-    const auto request_model = params.model_override;
-
-    std::shared_ptr<agent::Session> resumed;
-    try {
-        // Loads the stored transcript, repairs a torn tool-call tail if there
-        // is one, and starts the session.
-        resumed = sessions_.Create(std::move(params));
-    } catch (const agent::SessionAlreadyOpen& e) {
-        // The pre-check above refused with ALREADY_EXISTS for the session
-        // being open, but the loser of a RACE (two resumes in flight) landed
-        // here as FAILED_PRECONDITION -- the same condition, two statuses,
-        // depending on timing. Match the pre-check.
-        logger_.warn("resume of session {} lost the open race", stored->session_id);
-        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, e.what());
-    } catch (const std::exception& e) {
-        // NO ROLLBACK here, unlike fresh creation: the row is the user's
-        // existing session, not one this call just minted. A failure (the
-        // stored preset no longer resolves, its provider kind no longer
-        // registered) is reported with its reason and the transcript survives.
-        logger_.warn("resume of session {} failed: {}", stored->session_id, e.what());
-        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
-    }
-
-    // The request's model outranked the stored one; make the row describe
-    // what the session now runs, so the NEXT model-less resume keeps THIS
-    // choice instead of silently restoring the superseded one. Written only
-    // after construction succeeded (a failed resume must not rewrite the
-    // row), best-effort like the runtime hook.
-    if (request_model) {
-        try {
-            db_.UpdateSessionModel(stored->session_id, request_model->str());
-        } catch (const std::exception& e) {
-            logger_.warn("resume of session {}: persisting model override failed: {}",
-                         stored->session_id, e.what());
-        }
-    }
-
-    // Re-read rather than reuse `stored`: resume may have appended a repair
-    // message, and the response should carry the current message_count.
-    // Guarded and failure-mapped: a nullopt here would previously have been
-    // dereferenced unchecked -- UB in the handler.
-    std::optional<session::SessionSummary> fresh;
-    try {
-        fresh = db_.GetSession(stored->session_id);
-    } catch (const std::exception& e) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
-    }
-    if (!fresh) {
-        // Unreachable while this process is the sole writer and just finished
-        // constructing the session -- which is exactly why it must be a named
-        // INTERNAL rather than a dereference of an empty optional.
-        return grpc::Status(grpc::StatusCode::INTERNAL,
-                            "session row vanished during resume: " + stored->session_id);
-    }
-    *response->mutable_session() = ToProto(*fresh);
     return grpc::Status::OK;
 }
 

@@ -93,6 +93,7 @@ add_library(minimal_server_core SHARED
     agent/session_observer_registry.cpp
     agent/context_contributor.cpp
     agent/session.cpp
+    agent/session_launch.cpp
     agent/session_registry.cpp
     agent/session_support.cpp
     agent/session_naming.cpp

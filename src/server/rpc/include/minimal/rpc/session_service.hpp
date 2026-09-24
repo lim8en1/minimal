@@ -33,6 +33,7 @@
 
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/mention_resolver.hpp"
+#include "minimal/agent/session_launch.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/commands/project_command_source.hpp"
@@ -158,13 +159,6 @@ private:
     // bound, and one default is easier to document than two.
     int ScrollbackPageSize() const;
 
-    // CreateSession with session_id set: reopen a stored session rather than
-    // creating a new one. The stored row's name/agent_preset/project_root
-    // govern -- the request may not carry its own -- and a failure NEVER
-    // deletes the row, unlike fresh creation's rollback of its just-minted one.
-    grpc::Status ResumeSession(const v1::CreateSessionRequest* request,
-                               v1::CreateSessionResponse* response);
-
     // Reader thread. Every branch is non-blocking -- that is the property the
     // three-thread topology depends on, not an implementation detail.
     void Dispatch(const v1::ClientEvent& event, agent::Session& session);
@@ -178,10 +172,8 @@ private:
     // Dispatch, reader thread, so this must not block (Publish never does).
     void PublishPromptResolved(agent::Session& session, const std::string& request_id);
 
-    // Parses CreateSessionRequest.model onto params. Shared by fresh creation
-    // and resume, so the two cannot disagree about whether --model applies.
-    grpc::Status ApplyModelOverride(const v1::CreateSessionRequest& request,
-                                    agent::SessionParams& params) const;
+    // What agent::Launch/Fork borrow from this service.
+    agent::LaunchContext MakeLaunchContext();
 
     // Validates CreateSessionRequest.signals against the router and stages the
     // session-side consequences onto params: the wake flag (a subscribed
