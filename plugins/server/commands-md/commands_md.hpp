@@ -17,7 +17,6 @@
 // lint-warned.
 
 #include <filesystem>
-#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -26,7 +25,6 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/commands/command.hpp"
-#include "minimal/commands/command_registry.hpp"
 
 namespace minimal::commands_md {
 
@@ -95,26 +93,22 @@ struct CommandDir {
     bool trusted = true;
 };
 
-// Optional per-spec veto, called after a file parses and before its command
-// object is built: returning false skips the file (the caller warns). The
-// plugin's registration hook uses AcceptNonColliding here.
-using SpecFilter = std::function<bool(const MdCommandSpec&)>;
-
 // Loads every *.md under the given directories, nearest dir winning a stem
 // collision (project shadows global -- `dirs` must therefore list project
 // directories BEFORE the global one). Malformed files are warned and skipped:
-// one broken command must not hide the rest from the picker. `accept`, when
-// set, vetoes individual specs the same way.
-std::vector<std::unique_ptr<commands::Command>> LoadCommands(
-    const std::vector<CommandDir>& dirs, const SpecFilter& accept = nullptr);
+// one broken command must not hide the rest from the picker.
+//
+// No registry-collision veto is needed: the global hook loads only trusted
+// files (a collision there is the operator's own, and stays fatal), and the
+// project hook loads into a fresh per-root registry that nothing else shares.
+// Whether a project command may shadow a GLOBAL name is decided at lookup
+// time instead (commands::ProjectMayShadow).
+std::vector<std::unique_ptr<commands::Command>> LoadCommands(const std::vector<CommandDir>& dirs);
 
-// Registration-time veto for the plugin's hook: false only when the spec is
-// UNTRUSTED (project-local -- content a cloned working tree supplied) AND its
-// command name is already registered. A duplicate surface name is otherwise a
-// FATAL startup collision, so repo-shipped commands/*.md could refuse to let
-// the server start at all; skipping lets the earlier registration win. A
-// TRUSTED (global config) file always passes -- the operator wrote it, and a
-// collision there stays the loud fatal it always was.
-bool AcceptNonColliding(commands::CommandRegistry& registry, const MdCommandSpec& spec);
+// What LoadCommands(dirs) would read, summarized at stat level: each existing
+// dir's mtime (catches a file added, removed or renamed) and each *.md file's
+// mtime and size (catches an edit). Never parses; never throws. Backs the
+// plugin's minimal_plugin_project_commands_fingerprint hook.
+std::string FingerprintCommandDirs(const std::vector<CommandDir>& dirs);
 
 }  // namespace minimal::commands_md

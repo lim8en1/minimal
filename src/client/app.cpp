@@ -42,6 +42,7 @@
 
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/cli_args.hpp"
+#include "minimal/client/command_catalog.hpp"
 #include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/session_client.hpp"
@@ -820,64 +821,50 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         startup_resume = found.summary;
     }
 
-    // The /-command catalog, fetched ONCE at connect (plugins load at startup
-    // and config is read once, so the GLOBAL list cannot change mid-connection
-    // -- no invalidation machinery) and merged server-side with the STARTUP
-    // project root's own commands-md discoveries, if any (ProjectCommandSource
-    // -- a project command may shadow a global one of the same name). Feeds
-    // the prompt editor's /-autocomplete and the /help overlay.
-    //
-    // SIMPLIFICATION, stated precisely: this is the startup root only. A tab
-    // opened later against a DIFFERENT project root (a fresh `/new` elsewhere
-    // on disk) still DISPATCHES that root's own project commands correctly --
-    // Session::ExecuteCommand resolves against the session's own project_root,
-    // never this catalog -- it just will not autocomplete-discover them here.
-    // A full fix needs a per-tab, per-focus-change catalog refresh; this
-    // covers the overwhelmingly common case (one project per invocation) at a
-    // fraction of the machinery.
-    std::vector<minimal::client::CommandCatalogEntry> command_catalog;
-    bool commands_listed = false;
+    // The /-command catalog: SEEDED here with one synchronous fetch at
+    // connect (the startup project root), so the very first `/` has
+    // something to show; from then on PULLED per tab scope by
+    // CommandCatalogCache (built below, once `app` exists) -- every read
+    // answers from the last known list and, at most every 2 s, refetches in
+    // the background. So a command file added to the project mid-run
+    // appears the next time autocomplete or /help opens, and a tab in a
+    // different project lists that project's commands.
+    const auto to_catalog_entries = [](const minimal::v1::ListCommandsResponse& response) {
+        std::vector<minimal::client::CommandCatalogEntry> entries;
+        for (const auto& info : response.commands()) {
+            entries.push_back({info.name(), info.summary(), info.read_only(),
+                               info.kind() == minimal::v1::COMMAND_KIND_PROMPT_SHORTHAND,
+                               info.requires_session()});
+        }
+        return entries;
+    };
+    std::optional<std::vector<minimal::client::CommandCatalogEntry>> seed_catalog;
     {
         const auto listed = client->ListCommands(minimal::client::CurrentProjectRootOrEmpty());
-        if (listed.status.ok()) {
-            commands_listed = true;
-            for (const auto& info : listed.response.commands()) {
-                command_catalog.push_back(
-                    {info.name(), info.summary(), info.read_only(),
-                     info.kind() == minimal::v1::COMMAND_KIND_PROMPT_SHORTHAND,
-                     info.requires_session()});
-            }
-        }
+        if (listed.status.ok()) seed_catalog = to_catalog_entries(listed.response);
     }
-    // /new, /detach-session, /rewind, /redo are intercepted client-side
-    // (submit_command, below) rather than routed through the server's
-    // ListCommands/Command dispatch, so they have no CommandInfo of their own
-    // to appear here -- added by hand so /-autocomplete still offers them.
-    // requires_session: /new opens a sessionless TAB (no session to
-    // require); /rewind and /redo act on a session's transcript, and
-    // /detach-session detaches the focused tab's session group, so all three
-    // are hidden until one exists. /keymap joins them (client-side data,
-    // nothing to require).
-    command_catalog.push_back({"new", "start a new session", /*read_only=*/false,
+    // Entries the client intercepts itself, appended to every server list.
+    std::vector<minimal::client::CommandCatalogEntry> client_side_commands;
+    client_side_commands.push_back({"new", "start a new session", /*read_only=*/false,
                                /*submits_prompt=*/false, /*requires_session=*/false});
-    command_catalog.push_back({"keymap", "show all configured key bindings",
+    client_side_commands.push_back({"keymap", "show all configured key bindings",
                                /*read_only=*/true,
                                /*submits_prompt=*/false, /*requires_session=*/false});
-    command_catalog.push_back({"rewind", "undo the most recent user turn (or N of them)",
+    client_side_commands.push_back({"rewind", "undo the most recent user turn (or N of them)",
                                /*read_only=*/false, /*submits_prompt=*/false,
                                /*requires_session=*/true});
-    command_catalog.push_back({"redo", "restore the most recently rewound turn",
+    client_side_commands.push_back({"redo", "restore the most recently rewound turn",
                                /*read_only=*/false, /*submits_prompt=*/false,
                                /*requires_session=*/true});
-    command_catalog.push_back({"detach-session",
+    client_side_commands.push_back({"detach-session",
                                "detach this tab group; work keeps running, /sessions reattaches",
                                /*read_only=*/false, /*submits_prompt=*/false,
                                /*requires_session=*/true});
-    command_catalog.push_back({"pause",
+    client_side_commands.push_back({"pause",
                                "pause the agent (stops after its current tool call)",
                                /*read_only=*/false, /*submits_prompt=*/false,
                                /*requires_session=*/true});
-    command_catalog.push_back({"resume",
+    client_side_commands.push_back({"resume",
                                "resume a paused session (continues from its last tool result)",
                                /*read_only=*/false, /*submits_prompt=*/false,
                                /*requires_session=*/true});
@@ -885,7 +872,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // Theme and re-pushes it to plugins; the server has no part in it), so it
     // has no CommandInfo -- added by hand for /-autocomplete. Works on a
     // sessionless tab: decoration, not session state.
-    command_catalog.push_back({"theme", "switch the UI theme",
+    client_side_commands.push_back({"theme", "switch the UI theme",
                                /*read_only=*/true, /*submits_prompt=*/false,
                                /*requires_session=*/false});
 
@@ -921,6 +908,42 @@ int RunTui(const minimal::client::ParsedArgs& args) {
 
     auto app = std::make_shared<AppState>(client);
     app->SetPluginAttention(&env.attention_state);
+
+    // The pull-model catalog (see the seed fetch above). Declared after
+    // `app`, so destroyed before it; a fetch landing after that is dropped
+    // (the cache's completion holds only a weak reference).
+    minimal::client::CommandCatalogCache command_catalog_cache(
+        std::move(client_side_commands),
+        [app, to_catalog_entries](
+            const std::string& session_id, const std::string& project_root,
+            std::function<void(std::optional<minimal::client::CommandCatalogCache::Entries>)>
+                done) {
+            app->RequestListCommands(
+                session_id, project_root,
+                [done = std::move(done), to_catalog_entries](
+                    std::optional<minimal::v1::ListCommandsResponse> response) {
+                    if (!response) return done(std::nullopt);
+                    done(to_catalog_entries(*response));
+                });
+        });
+    if (seed_catalog) {
+        command_catalog_cache.Seed({}, minimal::client::CurrentProjectRootOrEmpty(),
+                                   std::move(*seed_catalog));
+    }
+    // The focused tab's scope: its session, else its pending project root
+    // (a tab-less app scopes like a fresh tab would, to the TUI's cwd).
+    const auto command_scope = [app]() {
+        auto scope = app->FocusedCommandScope();
+        if (scope.session_id.empty() && scope.project_root.empty()) {
+            scope.project_root = minimal::client::CurrentProjectRootOrEmpty();
+        }
+        return scope;
+    };
+    const minimal::client::CommandCatalogSource current_catalog =
+        [&command_catalog_cache, command_scope]() {
+            const auto scope = command_scope();
+            return command_catalog_cache.Get(scope.session_id, scope.project_root);
+        };
     app->SetChatSurface(chat_surface);
     // THE STARTUP RESUME, on the probed session (probe above, before the UI
     // was built). LIVE opens the whole tab group -- the session plus every
@@ -1158,7 +1181,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // view_hint pointing at the same picker -- the round trip minted the
     // junk session and bought nothing). /agent //model never reach this
     // guard: they are the desired-state commands above, usable on any tab.
-    auto submit_command = [app, &command_catalog, commands_listed, focused_or_new_tab,
+    auto submit_command = [app, &current_catalog, &command_catalog_cache, command_scope,
+                           focused_or_new_tab,
                            &show_commands_help, &open_keymap_help_fn, &close_tab,
                            &open_picker_fn, &open_agent_picker_fn,
                            &open_model_picker_fn, &open_subagent_model_picker_fn,
@@ -1400,7 +1424,10 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             // after a failed ListCommands it is empty and knows nothing.
             bool known = false;
             bool sessionless = false;
-            for (const auto& entry : command_catalog) {
+            const auto scope = command_scope();
+            const bool commands_listed =
+                command_catalog_cache.Listed(scope.session_id, scope.project_root);
+            for (const auto& entry : *current_catalog()) {
                 if (entry.name == parsed.name) {
                     known = true;
                     sessionless = !entry.requires_session;
@@ -1438,15 +1465,10 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             submit_chat,
             submit_command,
         suggest,
-        // Explicit trailing return type: a bare `{ return command_catalog; }`
-        // deduces BY VALUE (auto return-type deduction never deduces a
-        // reference), silently copying the whole catalog on every call --
-        // exactly the per-keystroke cost CommandCatalogSource's contract
-        // exists to avoid. command_catalog is a RunTui local that outlives
-        // `editor`'s use, same lifetime argument as `state`/`theme` above.
-        [&command_catalog]() -> const std::vector<minimal::client::CommandCatalogEntry>& {
-            return command_catalog;
-        },
+        // The pull-model snapshot source (CommandCatalogCache): per frame
+        // while a command name is typed, which is also what triggers the
+        // background refresh.
+        current_catalog,
         // The requires_session filter's probe (cheap: one locked read in
         // AppState). An empty FocusedSessionId means no tab, or a tab whose
         // session does not exist yet -- both hide the session-bound entries.
@@ -1647,13 +1669,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         env.keybindings.all(), theme, [&] { show_keymap_help = false; },
         &keymap_help_reset);
 
-    // Built once, like keymap_help_view: the catalog was fetched once at
-    // connect and never changes (see its comment), and `theme` is a RunTui
-    // local that outlives the frame. Opened by the bare `/help` interception
+    // Built once, like keymap_help_view; the rows are rebuilt from
+    // current_catalog on every open, so it lists the current snapshot. `theme`
+    // is a RunTui local that outlives the frame. Opened by the bare `/help` interception
     // in submit_command -- the notice line's handful of rows could not hold
     // the full command listing.
     auto commands_help_view = minimal::client::MakeCommandsHelpView(
-        command_catalog, theme, [&] { show_commands_help = false; },
+        current_catalog, theme, [&] { show_commands_help = false; },
         // Same requires_session exclusion the autocomplete applies: while the
         // focused tab has no session, the overlay lists only sessionless
         // commands (the overlay rebuilds its rows on every open, so the probe

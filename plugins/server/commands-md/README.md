@@ -25,26 +25,33 @@ different registries:
    `<project_root>/.opencode/commands/`, opencode's own layout, walking
    ancestors up to the git root) — registered lazily, the first time a
    session rooted at that project asks for its command catalog
-   (`ProjectCommandSource`), into a registry scoped to that root alone.
+   (`ProjectCommandSource`), into a registry scoped to that root alone, and
+   rebuilt when the dirs' or files' mtimes change
+   (`minimal_plugin_project_commands_fingerprint`) — no restart.
    Untrusted: working-tree-supplied content, treated accordingly by the
    command surface (disclose-and-confirm before every run — see
    COMMANDS_HOWTO.md §2).
 
-A project command may freely shadow a global one of the same name for
-sessions rooted there — the same rule a project's own `agents/<name>.md`
+A project command may shadow a global markdown command of the same name for
+sessions rooted there, but never a built-in or plugin command (`/connect`,
+`/clear`, ...): the dispatcher and the catalog both keep the built-in
+(`commands::ProjectMayShadow`). Otherwise a repo-shipped `commands/connect.md`
+could receive the API key a user types — the same rule a project's own `agents/<name>.md`
 already follows for presets. Nearest directory wins a stem collision within
 the project walk.
 
 ## Trust and collisions
 
 - Global config-dir commands are trusted; project-local commands are
-  untrusted.
-- An untrusted file whose command name is already taken (by a nearer project
-  dir) is SKIPPED, not registered — the earlier registration wins.
+  untrusted: sources and `agent:`/`model:` overrides are disclosed and
+  confirmed on every invocation.
 - A trusted (global) name collision is a fatal startup error, same as any
-  other command-registry collision; a project-registry collision cannot be
-  fatal (there is no startup moment to fail at), so it is simply skipped with
-  a log line.
+  other command-registry collision. Project commands load into their own
+  per-root registry, so they never collide at startup; shadowing is decided
+  at lookup (above).
+- Sources run in the session's project root, over the shared sidecar
+  launcher (`src/server/sidecar`), with an allowlisted environment and stdin
+  at `/dev/null`.
 
 ## Configuration
 

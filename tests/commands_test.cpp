@@ -764,6 +764,32 @@ TEST_CASE("/connect writes auth.json 0600, never group/other-readable",
     CHECK((st.st_mode & 07777) == 0600);
 }
 
+TEST_CASE("/connect reports a failed save as a save failure, not a lock failure",
+          "[commands][connect]") {
+    // Regression: one catch around lock AND save labelled every exception
+    // "could not lock ... for update". A key that is not valid UTF-8 cannot
+    // be serialized as JSON -- that is a save failure.
+    CommandFixture fixture;
+    testing::TempDir data;
+    ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
+    std::filesystem::create_directories(data.path() / "minimal");
+
+    const auto result = fixture.Run("connect", {"local", "sk-\xff"});
+    CAPTURE(result.message);
+    CHECK(result.status == Status::kError);
+    CHECK(result.message.find("could not store") != std::string::npos);
+    CHECK(result.message.find("could not lock") == std::string::npos);
+}
+
+TEST_CASE("/agent, /model, /subagent-model and /think refuse extra arguments",
+          "[commands]") {
+    CommandFixture fixture;
+    CHECK(fixture.Run("agent", {"a", "b"}).status == Status::kError);
+    CHECK(fixture.Run("model", {"local/m", "extra"}).status == Status::kError);
+    CHECK(fixture.Run("subagent-model", {"inherit", "extra"}).status == Status::kError);
+    CHECK(fixture.Run("think", {"high", "extra"}).status == Status::kError);
+}
+
 TEST_CASE("/connect merges into an existing provider entry rather than replacing it -- an "
           "opencode-shaped OAuth entry survives",
           "[commands][connect]") {
@@ -862,11 +888,11 @@ TEST_CASE("/think lists the active model's declared variants and marks the curre
     CHECK(listing.message.find("(current)") == std::string::npos);
 }
 
-TEST_CASE("/think switches to a declared variant and persists like /model",
+TEST_CASE("/think switches to a declared variant; with no /model pin it records nothing",
           "[commands][think][invariant]") {
-    // THE PERSISTENCE RULE: a /think choice is a session-owned model override,
-    // so it must survive /agent re-resolving the preset -- the same invariant
-    // /model is tested against above.
+    // Pin only what was pinned: without a /model choice the variant changes
+    // the running preset's model and nothing more, so /agent afterwards runs
+    // the new preset's own model instead of this session's old one.
     CommandFixture fixture;
     fixture.WriteProviders(
         R"({"providers":{"main":{"backend":"openai","url":"http://x/v1",
@@ -883,14 +909,29 @@ TEST_CASE("/think switches to a declared variant and persists like /model",
     CHECK(fixture.preset().provider.model_name == "fast");
     // The derived parameter rides.
     CHECK(fixture.preset().parameters.at("reasoning_effort") == "high");
+    CHECK_FALSE(fixture.model_override().has_value());
 
-    // Survives an agent switch.
     REQUIRE(fixture.Run("agent", {"other"}).status == Status::kOk);
-    CHECK(fixture.preset().model_ref.str() == "main/fast@high");
+    CHECK(fixture.preset().model_ref.str() != "main/fast@high");
+}
 
-    // And the override was recorded on the session.
+TEST_CASE("/think after /model replaces the pinned choice, which survives /agent",
+          "[commands][think][invariant]") {
+    CommandFixture fixture;
+    fixture.WriteProviders(
+        R"({"providers":{"main":{"backend":"openai","url":"http://x/v1",
+             "models":{"fast":{"context_window_tokens":1000,
+                               "variants":["high"]},
+                       "slow":{"context_window_tokens":2000}}}}})");
+    fixture.ReloadPresets();
+    REQUIRE(fixture.Run("model", {"main/fast"}).status == Status::kOk);
+
+    REQUIRE(fixture.Run("think", {"high"}).status == Status::kOk);
     REQUIRE(fixture.model_override().has_value());
     CHECK(fixture.model_override()->str() == "main/fast@high");
+
+    REQUIRE(fixture.Run("agent", {"other"}).status == Status::kOk);
+    CHECK(fixture.preset().model_ref.str() == "main/fast@high");
 }
 
 TEST_CASE("/think off returns to the base model", "[commands][think]") {
@@ -978,4 +1019,29 @@ TEST_CASE("/permissions shows the policy, dry-runs a call and revokes grants",
     const auto all = fixture.Run("permissions", {"revoke", "all"});
     REQUIRE(all.status == Status::kOk);
     CHECK(all.message == "revoked 0 grant(s)");
+}
+
+TEST_CASE("picker commands answer their bare form beside a live turn; the argument form "
+          "keeps the command's own ReadOnly",
+          "[commands]") {
+    CommandFixture fixture;
+    const commands::CommandArgs bare;
+    commands::CommandArgs with_arg;
+    with_arg.positional = {"x"};
+    for (const char* name : {"agent", "model", "subagent-model"}) {
+        CAPTURE(name);
+        const auto* command = fixture.registry.Find(name);
+        REQUIRE(command != nullptr);
+        CHECK_FALSE(command->ReadOnly());          // catalog + subagent guard: unchanged
+        CHECK(command->ReadOnlyFor(bare));         // opens a picker: touches nothing
+        CHECK_FALSE(command->ReadOnlyFor(with_arg));  // mutates: turn boundary
+    }
+    const auto* mcp = fixture.registry.Find("mcp");
+    REQUIRE(mcp != nullptr);
+    CHECK(mcp->ReadOnlyFor(bare));
+    CHECK(mcp->ReadOnlyFor(with_arg));
+    // Non-picker commands: the static answer, whatever the args.
+    const auto* clear = fixture.registry.Find("clear");
+    REQUIRE(clear != nullptr);
+    CHECK_FALSE(clear->ReadOnlyFor(bare));
 }

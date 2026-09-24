@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <fstream>
 
+#include "temp_dir.hpp"
+
 #include "fakes.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/commands/project_command_source.hpp"
@@ -969,7 +971,8 @@ TEST_CASE("RegisterProjectCommands calls the optional per-root hook, into a "
     CHECK(h.commands.Find("project-only") == nullptr);
 }
 
-TEST_CASE("a project registry entry shadows a global one of the same name",
+TEST_CASE("a project registry entry shadows a global prompt shorthand, never a harness "
+          "command",
           "[plugin_loader][project_commands]") {
     Harness h;
     REQUIRE(h.loader.LoadAll({Enabled("fixture-project-commands")}).front().status ==
@@ -987,6 +990,12 @@ TEST_CASE("a project registry entry shadows a global one of the same name",
     // end to end, not merely "both exist".
     CHECK(commands::FindEffective(h.commands, &project, "shared")->Summary() ==
           "from the project registry");
+
+    // A global harness command keeps its name: project commands are working-
+    // tree content and must not take over /connect, /clear, ...
+    REQUIRE(project.Find("shared-harness") != nullptr);
+    CHECK(commands::FindEffective(h.commands, &project, "shared-harness")->Summary() ==
+          "from the global registry");
 }
 
 TEST_CASE("a plugin with no project-commands hook is silently skipped by "
@@ -1009,18 +1018,18 @@ TEST_CASE("ProjectCommandSource::For resolves and caches one registry per root",
             LoadStatus::Loaded);
     commands::ProjectCommandSource source(h.loader);
 
-    const commands::CommandRegistry& a = source.For("/repo/a");
-    REQUIRE(a.Find("project-only") != nullptr);
-    CHECK(a.Find("project-only")->Summary().find("/repo/a") != std::string_view::npos);
+    const auto a = source.For("/repo/a");
+    REQUIRE(a->Find("project-only") != nullptr);
+    CHECK(a->Find("project-only")->Summary().find("/repo/a") != std::string_view::npos);
 
-    const commands::CommandRegistry& b = source.For("/repo/b");
-    REQUIRE(b.Find("project-only") != nullptr);
-    CHECK(b.Find("project-only")->Summary().find("/repo/b") != std::string_view::npos);
+    const auto b = source.For("/repo/b");
+    REQUIRE(b->Find("project-only") != nullptr);
+    CHECK(b->Find("project-only")->Summary().find("/repo/b") != std::string_view::npos);
 
-    // Same object back for a root already resolved -- the whole point of the
-    // cache (config is static once loaded; no need to ask the plugin twice).
-    CHECK(&source.For("/repo/a") == &a);
-    CHECK(&source.For("/repo/b") == &b);
+    // Same object back for a root already resolved while its fingerprint is
+    // unchanged -- the whole point of the cache.
+    CHECK(source.For("/repo/a") == a);
+    CHECK(source.For("/repo/b") == b);
 }
 
 TEST_CASE("ProjectCommandSource::For on an empty root is a stable, permanently "
@@ -1031,7 +1040,31 @@ TEST_CASE("ProjectCommandSource::For on an empty root is a stable, permanently "
             LoadStatus::Loaded);
     commands::ProjectCommandSource source(h.loader);
 
-    const commands::CommandRegistry& empty = source.For("");
-    CHECK(empty.All().empty());
-    CHECK(&source.For("") == &empty);   // still cached, not rebuilt every call
+    const auto empty = source.For("");
+    CHECK(empty->All().empty());
+    CHECK(source.For("") == empty);   // still cached, not rebuilt every call
+}
+
+TEST_CASE("ProjectCommandSource::For rebuilds a root when its fingerprint changes, and the "
+          "old registry outlives the swap",
+          "[plugin_loader][project_commands][project_command_source]") {
+    // The fixture's fingerprint hook reports <root>/fingerprint's contents.
+    Harness h;
+    REQUIRE(h.loader.LoadAll({Enabled("fixture-project-commands")}).front().status ==
+            LoadStatus::Loaded);
+    commands::ProjectCommandSource source(h.loader);
+    testing::TempDir root;
+
+    const auto first = source.For(root.path());
+    REQUIRE(first->Find("project-only") != nullptr);
+    CHECK(source.For(root.path()) == first);   // unchanged: cached
+
+    std::ofstream(root.path() / "fingerprint") << "v2";
+    const auto second = source.For(root.path());
+    CHECK(second != first);                      // changed: rebuilt
+    CHECK(second->Find("project-only") != nullptr);
+    CHECK(source.For(root.path()) == second);   // and cached again
+
+    // A holder of the old registry (a command still executing) keeps it.
+    CHECK(first->Find("project-only") != nullptr);
 }

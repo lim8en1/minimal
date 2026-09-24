@@ -537,8 +537,16 @@ public:
     void OnUsage(const v1::UsageEvent& evt);
 
     // /-command outcome. Stored as a transient notice for the notice line;
-    // never enters the chat rows.
+    // never enters the chat rows. Also retires the invocation's request_id
+    // from the in-flight set (OnCommandSent).
     void OnCommandResult(const v1::CommandResult& evt);
+
+    // A /-command was sent on this session's stream and has not answered
+    // yet. While any is outstanding the tab counts as interruptible
+    // (Snapshot::turn_in_flight): a markdown command's generators run on the
+    // session worker BEFORE its turn exists, and ESC must reach the server's
+    // Cancel -- which stops them -- instead of reading the tab as idle.
+    void OnCommandSent(const std::string& request_id);
 
     // Drops the notice line immediately, if one is showing -- a no-op
     // otherwise (still bumps nothing when there is nothing to clear, so a
@@ -922,6 +930,10 @@ private:
     // events. Never disarmed mid-turn -- unlike turn_ended_, which flips at
     // every block boundary.
     bool turn_in_flight_ = false;
+    // Request ids of /-commands sent and not yet answered (OnCommandSent /
+    // OnCommandResult); cleared with turn_in_flight_ by the stream-terminal
+    // events. Folded into Snapshot::turn_in_flight.
+    std::set<std::string> commands_in_flight_;
     // This turn's live content in arrival order (track C4) -- see
     // Snapshot::live_segments. Same clear sites as streaming_accumulated_.
     std::vector<LiveTurnSegment> live_segments_;
@@ -1253,6 +1265,14 @@ public:
                                     int32_t limit,
                                     std::function<void(std::vector<std::string>)> on_result);
 
+    // Asynchronously fetches the /-command catalog (ListCommands) scoped to
+    // `session_id` (its own project root, server-resolved) or, when that is
+    // empty, `project_root`. `on_result` runs on the RPC worker with the
+    // response, or nullopt on any failure, and must not block; BumpUiVersion
+    // follows so the next frame reads what it published.
+    void RequestListCommands(const std::string& session_id, const std::string& project_root,
+                             std::function<void(std::optional<v1::ListCommandsResponse>)> on_result);
+
     // --- User answers to pending prompts (UI calls these; routes ClientEvents back) ---
 
     // deny_message / stop_turn refine a DENY (the server ignores both on ALLOW).
@@ -1337,6 +1357,15 @@ public:
     // The focused tab's session id ("" when no tabs, or when the focused tab
     // has no session yet). The session-keyed senders target it.
     std::string FocusedSessionId() const;
+
+    // What scopes the focused tab's /-command catalog: its session id once
+    // one exists, else the project root its first message would create the
+    // session with (pending_create). Both empty with no focused tab.
+    struct CommandScope {
+        std::string session_id;
+        std::string project_root;
+    };
+    CommandScope FocusedCommandScope() const;
 
     // The focused tab's TAB id ("" when no tabs) -- the UI's handle for it,
     // valid whether or not a session exists yet.

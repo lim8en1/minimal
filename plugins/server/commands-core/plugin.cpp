@@ -1,4 +1,4 @@
-// commands-core -- the built-in /-commands, as one plugin rather than nine.
+// commands-core -- the built-in /-commands, as one plugin.
 //
 // Deliberately does NOT include /restart-shell: it resets tools-bash's
 // per-session state, so it belongs to tools-bash. (The state is reachable from

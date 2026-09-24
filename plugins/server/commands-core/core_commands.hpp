@@ -1,6 +1,6 @@
 #pragma once
 
-// The built-in /-commands, as one plugin rather than nine.
+// The built-in /-commands, as one plugin.
 //
 // Deliberately does NOT include /restart-shell: it resets tools-bash's
 // per-session shell state, and a command belongs to the plugin that owns the

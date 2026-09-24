@@ -4,22 +4,34 @@
 
 namespace minimal::commands {
 
-const CommandRegistry& ProjectCommandSource::For(const std::filesystem::path& project_root) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (auto it = cache_.find(project_root); it != cache_.end()) return *it->second;
+std::shared_ptr<const CommandRegistry> ProjectCommandSource::For(
+    const std::filesystem::path& project_root) const {
+    // Outside the lock: stat-level work per plugin, and a lookup for one
+    // root must not wait on another root's fingerprint. An empty root has
+    // nothing to discover and so nothing to fingerprint.
+    const std::string fingerprint =
+        project_root.empty() ? std::string{} : loader_.ProjectCommandsFingerprint(project_root);
 
-    // Built OUTSIDE any lock a plugin's own hook might reasonably want to
-    // take is not possible here (mutex_ is already held) -- but unlike the
-    // global registry's startup load, this runs at most once per DISTINCT
-    // root over the process's life, not per session, so serializing it is
-    // the same cost AgentPresetRegistry's cache pays for a concurrent miss.
-    auto registry = std::make_unique<CommandRegistry>();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (auto it = cache_.find(project_root);
+        it != cache_.end() && it->second.fingerprint == fingerprint) {
+        return it->second.registry;
+    }
+
+    // A miss or a stale entry. Built under mutex_ (a plugin hook cannot take
+    // any lock it might want here without deadlocking, same as before): this
+    // runs once per distinct root plus once per edit, not per lookup, so
+    // serializing it is the cost AgentPresetRegistry's cache pays for a
+    // concurrent miss. The replaced registry stays alive for whoever still
+    // holds it.
+    auto registry = std::make_shared<CommandRegistry>();
     if (!project_root.empty()) {
         loader_.RegisterProjectCommands(*registry, project_root);
     }
-    auto [inserted, ok] = cache_.emplace(project_root, std::move(registry));
-    (void)ok;   // emplace on a fresh key (just missed the find above) always succeeds
-    return *inserted->second;
+    Entry& entry = cache_[project_root];
+    entry.registry = std::move(registry);
+    entry.fingerprint = fingerprint;
+    return entry.registry;
 }
 
 }  // namespace minimal::commands

@@ -787,9 +787,10 @@ Discovery merges `<config>/commands/` (global, registered once at server
 startup) with the SESSION's own project root's `commands/` and
 `.opencode/commands/` (opencode's layout, so existing command files work
 zero-copy; registered lazily, the first time a session rooted there needs its
-catalog, then cached for that root — `ProjectCommandSource`); the nearest
+catalog, then cached for that root and rebuilt when a file there changes —
+`ProjectCommandSource`); the nearest
 directory wins a stem collision, and a project command may shadow a global
-one of the same name. The composed prompt is submitted as the turn itself via
+markdown command of the same name (never a built-in or plugin command). The composed prompt is submitted as the turn itself via
 the sanctioned shorthand path — results of the RUN (errors, the submit
 notice) never enter the chat.
 

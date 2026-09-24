@@ -391,7 +391,10 @@ public:
         v1::ListCommandsResponse response;
         grpc::Status status;
     };
-    ListCommandsResult ListCommands(const std::string& project_root = {});
+    // `session_id`, when set, scopes the project half to that session's own
+    // root (server-resolved) instead of `project_root`.
+    ListCommandsResult ListCommands(const std::string& project_root = {},
+                                    const std::string& session_id = {});
 
     // Executes a SESSIONLESS /-command (a Sessionless<> command on the
     // server: /help, /sessions and their future siblings). Dispatched with

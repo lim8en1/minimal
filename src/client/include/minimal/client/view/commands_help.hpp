@@ -24,7 +24,9 @@
 
 namespace minimal::client {
 
-ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& catalog,
+// `catalog` is read on every open/filter change, so the overlay lists the
+// current snapshot (a background refresh can add project commands).
+ftxui::Component MakeCommandsHelpView(CommandCatalogSource catalog,
                                       const Theme& theme, std::function<void()> on_close,
                                       std::function<bool()> session_available = nullptr,
                                       // While true (the focused tab is a subagent), only

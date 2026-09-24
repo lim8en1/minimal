@@ -40,17 +40,25 @@ no project root) until one exists:
 - **Global** (`<config>/commands/`) registers once, at **server startup** —
   restart the server after adding or editing a file there.
 - **Project-local** registers lazily, the **first time a session rooted at
-  that project** asks for its command catalog, and is then cached for that
-  root's remaining lifetime — restart the server (or, if the server has never
-  seen that root before, nothing at all) after adding or editing a file
-  there.
+  that project** asks for its command catalog, and is cached for that root —
+  **rebuilt automatically** when a file there is added, edited or removed
+  (the next invocation runs the new version; no restart). The TUI re-pulls
+  its autocomplete list for the focused tab's project in the background
+  whenever autocomplete or `/help` is open (at most every 2 s), so a new
+  command shows up within a moment of typing `/`.
 
-A project command may shadow a global one of the same name for sessions
-rooted there.
+A project command may shadow a global **markdown** command of the same name
+for sessions rooted there. It never shadows a built-in or plugin command
+(`/connect`, `/clear`, `/model`, ...): the built-in keeps the name, and the
+project file with that name is neither listed nor run.
 
-Untrusted means: the first and every invocation discloses each source's
-literal program/script and asks run/cancel before anything executes. Trusted
-commands run without that prompt, like every other command in the harness.
+Untrusted means: every invocation discloses each source's literal
+program/script, plus any `agent:`/`model:` override, and asks run/cancel
+before anything executes. Trusted commands run without that prompt, like
+every other command in the harness.
+
+Sources run in the **session's project root**, with a filtered environment
+and stdin at `/dev/null`.
 
 ## 3. A minimal command: template + arguments
 
@@ -101,8 +109,10 @@ Review the uncommitted work with a focus on {focus}:
   shell ever parses it. Substituted values cannot be reinterpreted
   regardless of their content.
 - **`sh:` is a shell string** — run as `/bin/sh -c`. Values substituted into
-  it are POSIX single-quoted, and it may reference **only user-supplied
-  arguments** — never another source's output. Generator output (network
+  it are escaped for the quoting they land in (single-quoted when bare,
+  escaped inside `"..."` or `'...'`, so opencode's `"$1"` gets exactly the
+  value), and it may reference **only user-supplied arguments** — never
+  another source's output. Generator output (network
   data, git log text) must not be spliced into a shell string.
 - A source declaring **both** `run:` and `sh:` fails to load. A file mixing
   declared sources with the `!`cmd`` shortcut (§7) loads but is lint-warned.

@@ -2153,3 +2153,31 @@ TEST_CASE("compactions merge from pages and live events, once each",
     REQUIRE(snap.compactions->size() == 1);
     CHECK((*snap.compactions)[0].at_seq() == 18);
 }
+
+TEST_CASE("an unanswered /-command makes the tab interruptible until its result arrives",
+          "[session_state][regression]") {
+    // A markdown command's generators run on the session worker before its
+    // turn exists; without this, ESC read the tab as idle and never sent the
+    // Cancel that stops them.
+    SessionState state("s-1");
+    REQUIRE_FALSE(state.TakeSnapshot().turn_in_flight);
+
+    state.OnCommandSent("cmd-1");
+    state.OnCommandSent("cmd-2");
+    CHECK(state.TakeSnapshot().turn_in_flight);
+
+    v1::CommandResult first;
+    first.set_request_id("cmd-1");
+    state.OnCommandResult(first);
+    CHECK(state.TakeSnapshot().turn_in_flight);   // cmd-2 still outstanding
+
+    v1::CommandResult second;
+    second.set_request_id("cmd-2");
+    state.OnCommandResult(second);
+    CHECK_FALSE(state.TakeSnapshot().turn_in_flight);
+
+    // A dead stream answers nothing: outstanding commands are dropped with it.
+    state.OnCommandSent("cmd-3");
+    state.OnError("stream closed");
+    CHECK_FALSE(state.TakeSnapshot().turn_in_flight);
+}

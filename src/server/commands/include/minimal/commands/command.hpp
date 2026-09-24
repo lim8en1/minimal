@@ -99,6 +99,23 @@ public:
     // Defaults to false: the conservative answer is the one you get for free.
     virtual bool ReadOnly() const { return false; }
 
+    // The per-invocation answer to the same question -- ReadOnly()'s
+    // DisplayFor. The reader thread uses THIS to decide "answer now beside the
+    // turn" vs "queue for the turn boundary", so a command whose argument-less
+    // form touches nothing (bare /agent and /model only open a client picker)
+    // need not make the user wait out a whole turn for it. Everything else --
+    // the catalog's read_only, the subagent guard, sessionless dispatch --
+    // keeps the static, command-as-a-whole ReadOnly(): a command that CAN
+    // mutate is still refused on a subagent tab, picker and all.
+    //
+    // May only answer true for an invocation that touches no session state,
+    // and never for a command that RequiresConfirmation() (the registry's
+    // pool-deadlock refusal checks the static pair only).
+    virtual bool ReadOnlyFor(const CommandArgs& args) const {
+        (void)args;
+        return ReadOnly();
+    }
+
     // Whether Execute needs a live session (a non-null CommandContext session
     // ref). Defaults to true -- the safe answer: a command author who thinks
     // about neither this nor ReadOnly() gets "session-bound" and can never
@@ -182,8 +199,8 @@ class PromptShorthandCommand : public Command {};
 //
 // Re-parent onto this to declare "Execute must tolerate a NULL session ref in
 // CommandContext". The final keeps the taxonomy honest: a command cannot
-// accidentally override itself back to session-bound. Only /help and /sessions
-// qualify today -- and ReadOnly() must hold too, which the sessionless
+// accidentally override itself back to session-bound. /help, /sessions,
+// /connect and /mcp qualify today -- and ReadOnly() must hold too, which the sessionless
 // dispatch path (DispatchSessionless) enforces rather than trusts.
 template <typename Base>
 class Sessionless : public Base {

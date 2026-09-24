@@ -1,6 +1,6 @@
 # commands-core
 
-The built-in `/-commands`, as one plugin rather than nine.
+The built-in `/-commands`, as one plugin.
 
 ## What it adds
 
@@ -12,6 +12,12 @@ The built-in `/-commands`, as one plugin rather than nine.
 | `/agent` | `/agent [name]` | Bare form opens the agent-preset picker; with a name, switches the session's preset. |
 | `/model` | `/model [provider/model]` | Bare form opens the model picker; with a `<provider>/<model>` reference, switches the session's model. The choice is recorded on the session, so a later `/agent` re-applies it rather than resolving it away. |
 | `/sessions` | `/sessions` | Opens the session picker. Read-only; needs no session. |
+| `/subagent-model` | `/subagent-model [provider/model\|inherit]` | Bare form opens the picker; with a reference, pins the model this session's spawned subagents run on; `inherit` clears it. |
+| `/think` | `/think [variant\|off]` | Bare form lists the current model's reasoning-effort variants; with a name, switches to `<model>@<name>`; `off` returns to the base model. If a `/model` choice is in force the variant replaces it (and survives `/agent`); otherwise only the current preset's model changes, and a later `/agent` uses the new preset's own model. |
+| `/subagents` | `/subagents` | Opens the subagent picker for this session's children. Read-only. |
+| `/rename` | `/rename <name>` | Renames this session (the raw tail, spaces allowed); an explicit name is never overwritten by the titler. |
+| `/mcp` | `/mcp [name enable\|disable]` | Bare form opens the MCP picker; with a name, enables/disables that server live, without a restart. Needs no session. |
+| `/permissions` | `/permissions [revoke <key>\|all] [check <tool> <json-input>]` | Shows this session's effective permission rules and grants; revokes grants; dry-runs a call through the gate. |
 | `/connect` | `/connect <provider> <api-key>` | Stores a credential in the data dir's `auth.json` (mode 0600), used when the provider's providers.json entry names no key. Takes effect after a server restart. |
 
 ## Configuration

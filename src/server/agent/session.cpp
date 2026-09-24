@@ -674,8 +674,11 @@ void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
     // own cache makes a second call for the same root free, and a session's
     // project_root never changes after creation anyway -- there is nothing
     // to invalidate.
-    const commands::CommandRegistry* project_registry =
-        project_commands_ != nullptr ? &project_commands_->For(info_.project_root) : nullptr;
+    // Held for the whole dispatch: a rebuild (an edited command file) may
+    // replace the root's registry while this command still executes.
+    const std::shared_ptr<const commands::CommandRegistry> project_holder =
+        project_commands_ != nullptr ? project_commands_->For(info_.project_root) : nullptr;
+    const commands::CommandRegistry* project_registry = project_holder.get();
     // SUBAGENT GUARD, defense in depth: the reader (SessionServiceImpl::
     // DispatchCommand) already refuses non-read-only commands for a child, but
     // this is the one place every dispatch path converges, so the invariant
@@ -692,7 +695,8 @@ void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
             return;
         }
     }
-    commands::CommandContext context(this, *presets_, *confirmations_, logger_, mcp_manager_);
+    commands::CommandContext context(this, *presets_, *confirmations_, logger_, mcp_manager_,
+                                     project_registry);
     auto outcome =
         commands::Dispatch(*commands_, command.name, command.args, context, busy, project_registry);
     EmitCommandResult(std::move(outcome), command);

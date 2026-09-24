@@ -2,26 +2,24 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cerrno>
+#include <cstdint>
 #include <cstring>
+#include <functional>
+#include <map>
 #include <set>
-#include <csignal>
-#include <ctime>
-#include <fstream>
-#include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
-#include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-#include <poll.h>
 
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/confirmation_broker.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/frontmatter.hpp"
+#include "minimal/sidecar/drain.hpp"
+#include "minimal/sidecar/process.hpp"
 
 // POSIX declares it in <unistd.h> only under feature-test macros that C++ mode
 // does not guarantee; declare it ourselves. Same precedent as
@@ -48,317 +46,148 @@ constexpr const char* kEnvAllowlist[] = {
 };
 constexpr const char* kEnvAllowlistPrefixes[] = {"LC_"};
 
-// "KEY=VALUE" strings, verbatim from `environ`, filtered to the allowlist.
-// Built in the PARENT: the child only ever dereferences this, never allocates.
-std::vector<std::string> BuildAllowlistedEnv() {
-    std::vector<std::string> env_strings;
-    if (environ == nullptr) return env_strings;
+// The allowlisted slice of the server's environment -- the child's FULL
+// environment (sidecar::LaunchSpec::env is not a delta).
+std::map<std::string, std::string> BuildAllowlistedEnv() {
+    std::map<std::string, std::string> env;
+    if (environ == nullptr) return env;
     for (char** entry = environ; *entry != nullptr; ++entry) {
         const char* equals = std::strchr(*entry, '=');
         if (equals == nullptr || equals == *entry) continue;  // malformed / empty key
-        const std::string key(*entry, equals - *entry);
+        std::string key(*entry, equals - *entry);
         const bool allowed =
             std::any_of(std::begin(kEnvAllowlist), std::end(kEnvAllowlist),
                         [&](const char* name) { return key == name; }) ||
             std::any_of(std::begin(kEnvAllowlistPrefixes), std::end(kEnvAllowlistPrefixes),
                         [&](const char* prefix) { return key.rfind(prefix, 0) == 0; });
-        if (allowed) env_strings.emplace_back(*entry);
+        if (allowed) env.emplace(std::move(key), equals + 1);
     }
-    return env_strings;
-}
-
-std::string AllowlistedPath(const std::vector<std::string>& env_strings) {
-    for (const auto& entry : env_strings) {
-        if (entry.rfind("PATH=", 0) == 0) return entry.substr(5);
-    }
-    return {};
-}
-
-// Every "<dir>/<name>" a PATH search of `argv0` would try, precomputed in the
-// PARENT before fork -- execve() in the child must not allocate (async-signal
-// safety; see the child_argv comment below). Mirrors execvp()'s own rule: a
-// name containing '/' is used as-is, never PATH-searched.
-std::vector<std::string> ExecCandidates(const std::string& argv0, const std::string& path) {
-    if (argv0.empty() || argv0.find('/') != std::string::npos) return {argv0};
-    std::vector<std::string> candidates;
-    std::size_t start = 0;
-    while (start <= path.size()) {
-        const auto colon = path.find(':', start);
-        const std::string dir =
-            path.substr(start, colon == std::string::npos ? std::string::npos : colon - start);
-        if (!dir.empty()) candidates.push_back(dir + "/" + argv0);
-        if (colon == std::string::npos) break;
-        start = colon + 1;
-    }
-    return candidates;
+    return env;
 }
 
 // --- process runner -----------------------------------------------------------
 //
-// One child, two pipes, one deadline. stdout is the value; stderr is the error
-// narrative (read concurrently with stdout through poll, so a chatty stderr can
-// never deadlock the run). On timeout the child is SIGKILLed and reaped. Output
-// is capped at read time: once the cap is crossed the child is killed and the
-// overrun reported -- the caller decides whether that is a question for the
-// operator or a hard failure.
+// Over the shared sidecar launcher (src/server/sidecar), not a private
+// fork/exec: it owns the async-signal-safety rules, setsid + group kill, the
+// rlimit backstops, the process-exit pgid sweep, stdin=/dev/null, and the
+// bounded reap. What stays here is this plugin's own policy: stdout is the
+// value, stderr the error narrative, and the output cap KILLS the generator
+// and keeps the capped bytes (the confirm flow submits exactly those -- a
+// second, uncapped run would repeat the generator's side effects).
 
 struct RunOutcome {
     bool ok = false;
-    std::string output;       // stdout (partial, cap-bounded when exceeded_cap)
-    std::string error;        // reason when !ok, stderr tail included
+    std::string output;       // stdout (exactly cap-bounded when exceeded_cap)
+    std::string error;        // reason when !ok, stderr included
     bool exceeded_cap = false;
+    bool cancelled = false;   // `cancelled` fired: the user cancelled, or the session ended
 };
 
-std::string Tail(std::string text, std::size_t max) {
-    if (text.size() <= max) return text;
-    return "..." + text.substr(text.size() - max);
-}
+// stderr is only ever an error narrative: head+tail is plenty, and a chatty
+// generator's final lines (where the actual failure usually is) survive.
+constexpr std::int64_t kStderrCapBytes = 4000;
 
-// Both signals, always: killpg-equivalent (-pid) reaches the whole process
-// group once the child's own setpgid(0,0) has run, but a kill landing in the
-// fork-to-setpgid window targets a group that is still OUR group and misses
-// the child entirely (ESRCH on the -pid form). kill(pid, ...) by plain pid
-// always reaches the child regardless of that race. Same pairing as
-// tools-bash's KillProcessGroup.
-void KillGenerator(pid_t pid) {
-    kill(-pid, SIGKILL);
-    kill(pid, SIGKILL);
-}
+// DrainOptions has no "no deadline"; `timeout: 0` (documented as infinite)
+// maps to a deadline no generator run will meet.
+constexpr std::int64_t kNoTimeoutMs = 30LL * 24 * 3600 * 1000;
 
-RunOutcome RunProcess(const std::vector<std::string>& argv, const std::string& shell_script,
-                      int timeout_seconds, std::size_t cap_bytes) {
+RunOutcome RunProcess(const std::vector<std::string>& argv, const std::filesystem::path& cwd,
+                      int timeout_seconds, std::size_t cap_bytes,
+                      const std::function<bool()>& cancelled) {
     RunOutcome outcome;
 
-    int out_pipe[2];
-    if (pipe(out_pipe) != 0) {
-        outcome.error = "pipe() failed";
+    sidecar::LaunchSpec spec;
+    spec.argv = argv;
+    spec.cwd = cwd;
+    spec.env = BuildAllowlistedEnv();
+    spec.pipes = {
+        sidecar::PipePlan{sidecar::PipePlan::ChildEnd::kWrite, {{STDOUT_FILENO, false}}},
+        sidecar::PipePlan{sidecar::PipePlan::ChildEnd::kWrite, {{STDERR_FILENO, false}}},
+    };
+    // RLIMIT_CPU backstop; the wall-clock deadline normally fires first, and
+    // the grace keeps the two from racing on a generator that uses its budget.
+    if (timeout_seconds > 0) spec.cpu_seconds = timeout_seconds + 30;
+
+    auto launched = sidecar::Launch(spec);
+    if (!launched.ok) {
+        outcome.error = "could not execute: " + launched.spawn_error;
         return outcome;
     }
-    int err_pipe[2];
-    if (pipe(err_pipe) != 0) {
-        outcome.error = "pipe() failed";
-        close(out_pipe[0]);
-        close(out_pipe[1]);
-        return outcome;
-    }
-    // O_CLOEXEC so these never leak into a THIRD process: without it, a
-    // concurrent fork on another thread (another command, another bash-tool
-    // invocation) can inherit a write end past its own exec and hold it open,
-    // so this run's read() never sees EOF and blocks until its timeout even
-    // though its own generator already exited.
-    for (int fd : {out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]}) {
-        fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
-    }
+    if (!launched.warnings.empty()) common::DefaultLogger().warn("{}", launched.warnings);
 
-    // Everything the child touches, built HERE in the parent, before fork: a
-    // forked child of a multithreaded process may call only async-signal-safe
-    // functions until exec, and allocating (reserve/push_back/string
-    // concatenation) is not one of them -- if another thread held the malloc
-    // lock at fork time, the child would deadlock holding the pipe write end
-    // open, which then wedges every OTHER concurrent RunProcess in this same
-    // process via the read()-never-sees-EOF failure mode above. Mirrors
-    // tools-bash/bash_process.cpp's "Built in the parent BEFORE fork" rule.
-    const std::vector<std::string> env_strings = BuildAllowlistedEnv();
-    std::vector<char*> envp;
-    envp.reserve(env_strings.size() + 1);
-    for (const auto& s : env_strings) envp.push_back(const_cast<char*>(s.c_str()));
-    envp.push_back(nullptr);
+    // stdout accumulates HERE, through the kCapped sink's live tap, so the cap
+    // can stop the run: the tap latches the overrun and StopCheck -- polled at
+    // the top of every drain slice -- ends the drain, which kills the group.
+    // The sink's own buffer is unused, hence the token cap of 1.
+    std::string out_buf;
+    bool exceeded_cap = false;
+    std::vector<sidecar::PipeSink> sinks(2);
+    sinks[0].mode = sidecar::PipeSink::Mode::kCapped;
+    sinks[0].cap = 1;
+    sinks[0].emit = [&](std::string_view chunk) {
+        if (exceeded_cap) return;
+        const std::size_t room = cap_bytes - out_buf.size();
+        out_buf.append(chunk.substr(0, room));
+        // Zero is a real cap (`output_cap: {max: 0}` = no output tolerated),
+        // never "unset": cap_bytes is always concrete.
+        if (chunk.size() > room) exceeded_cap = true;
+    };
+    sinks[1].mode = sidecar::PipeSink::Mode::kCapped;
+    sinks[1].cap = kStderrCapBytes;
 
-    std::vector<char*> child_argv;
-    std::vector<std::string> exec_candidates;
-    std::vector<char*> exec_candidate_ptrs;
-    std::string shell_name = "sh";
-    std::string shell_flag = "-c";
-    if (!shell_script.empty()) {
-        exec_candidates = {"/bin/sh"};
-        child_argv = {shell_name.data(), shell_flag.data(),
-                     const_cast<char*>(shell_script.c_str()), nullptr};
-    } else {
-        exec_candidates = ExecCandidates(argv.empty() ? std::string{} : argv.front(),
-                                         AllowlistedPath(env_strings));
-        child_argv.reserve(argv.size() + 1);
-        for (const auto& arg : argv) child_argv.push_back(const_cast<char*>(arg.c_str()));
-        child_argv.push_back(nullptr);
-    }
-    exec_candidate_ptrs.reserve(exec_candidates.size());
-    for (const auto& c : exec_candidates) exec_candidate_ptrs.push_back(const_cast<char*>(c.c_str()));
+    sidecar::DrainOptions options;
+    options.timeout_ms =
+        timeout_seconds > 0 ? static_cast<std::int64_t>(timeout_seconds) * 1000 : kNoTimeoutMs;
 
-    const pid_t pid = fork();
-    if (pid < 0) {
-        outcome.error = "fork() failed";
-        close(out_pipe[0]);
-        close(out_pipe[1]);
-        close(err_pipe[0]);
-        close(err_pipe[1]);
-        return outcome;
-    }
-    if (pid == 0) {
-        // Child. Only dereferences from here -- no allocation, see above. New
-        // process group, so a timeout kill takes the whole tree (KillGenerator
-        // covers the race before this call lands).
-        setpgid(0, 0);
-        close(out_pipe[0]);
-        close(err_pipe[0]);
-        dup2(out_pipe[1], STDOUT_FILENO);
-        dup2(err_pipe[1], STDERR_FILENO);
-        close(out_pipe[1]);
-        close(err_pipe[1]);
-        // Try every PATH candidate in order, same semantics as execvp -- but
-        // over the ALLOWLISTED PATH baked into envp, and via execve so the
-        // child's environment is the filtered one, never the server's own
-        // (execl/execvp would inherit environ wholesale).
-        for (char* candidate : exec_candidate_ptrs) {
-            execve(candidate, child_argv.data(), envp.data());
-        }
-        _exit(127);  // exec failed; the parent reports through the exit status
-    }
-
-    close(out_pipe[1]);
-    close(err_pipe[1]);
-
-    // Deadline: poll timeout in ms; 0 s timeout means wait forever.
-    const auto start = std::chrono::steady_clock::now();
-    auto remaining_ms = [start, timeout_seconds]() -> int {
-        if (timeout_seconds <= 0) return -1;
-        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start);
-        const auto budget = std::chrono::milliseconds(timeout_seconds) * 1000;
-        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(budget) - elapsed;
-        return left.count() > 0 ? static_cast<int>(left.count()) : 0;
+    // Polled every drain slice (50 ms): a cancel kills the generator's group
+    // within one slice instead of leaving the session worker parked until the
+    // source's timeout (600 s by default).
+    const auto drained = sidecar::DrainAndReap(
+        std::move(launched), std::move(sinks), options,
+        [&exceeded_cap, &cancelled] { return exceeded_cap || (cancelled && cancelled()); });
+    const std::string& err_text = drained.sinks[1].text;
+    const auto with_stderr = [&err_text](std::string message) {
+        if (!err_text.empty()) message += "; stderr: " + err_text;
+        return message;
     };
 
-    std::string out_buf;
-    std::string err_buf;
-    bool out_open = true;
-    bool err_open = true;
-    bool timed_out = false;
-    bool killed_for_cap = false;
-    bool poll_failed = false;
-
-    while (out_open || err_open) {
-        pollfd fds[2];
-        int count = 0;
-        int out_index = -1;
-        int err_index = -1;
-        if (out_open) {
-            out_index = count;
-            fds[count++] = {out_pipe[0], POLLIN, 0};
-        }
-        if (err_open) {
-            err_index = count;
-            fds[count++] = {err_pipe[0], POLLIN, 0};
-        }
-        const int ready = poll(fds, static_cast<nfds_t>(count), remaining_ms());
-        if (ready < 0) {
-            if (errno == EINTR) continue;
-            outcome.error = "poll() failed: " + std::string(std::strerror(errno));
-            poll_failed = true;
-            break;
-        }
-        if (ready == 0) {
-            timed_out = true;
-            break;
-        }
-        char chunk[4096];
-        if (out_index >= 0 && (fds[out_index].revents & (POLLIN | POLLHUP)) != 0) {
-            const ssize_t got = read(out_pipe[0], chunk, sizeof(chunk));
-            if (got <= 0) {
-                out_open = false;
-            } else {
-                out_buf.append(chunk, static_cast<std::size_t>(got));
-                // No "0 means unset" case to protect: cap_bytes is always a
-                // concrete size (defaulting to source.cap_tokens's own
-                // non-zero default), so 0 only ever means an author wrote
-                // `output_cap: {max: 0}` -- zero tolerance for any output,
-                // not "no cap". The old `cap_bytes > 0` guard read the two
-                // the same way, silently uncapping the former.
-                if (out_buf.size() > cap_bytes) {
-                    killed_for_cap = true;
-                    break;
-                }
-            }
-        }
-        if (err_index >= 0 && (fds[err_index].revents & (POLLIN | POLLHUP)) != 0) {
-            const ssize_t got = read(err_pipe[0], chunk, sizeof(chunk));
-            if (got <= 0) {
-                err_open = false;
-            } else {
-                err_buf.append(chunk, static_cast<std::size_t>(got));
-                if (err_buf.size() > (1u << 20)) err_buf.resize(1u << 20);  // bounded narrative
-            }
-        }
-    }
-
-    // A poll() failure means the read loop can no longer be trusted to notice
-    // the child exiting on its own -- kill it rather than let the bounded
-    // reap below fall back to babysitting it for the full remaining budget.
-    if (timed_out || killed_for_cap || poll_failed) {
-        KillGenerator(pid);
-    }
-    close(out_pipe[0]);
-    close(err_pipe[0]);
-
-    // Bounded reap: the read loop exiting (both pipes at EOF, or a cap/timeout
-    // break) says nothing about whether the PROCESS has exited -- a generator
-    // that closes its own stdout/stderr and keeps running would otherwise wedge
-    // this thread in an unbounded waitpid, silently ignoring the timeout the
-    // command file declared. Poll WNOHANG under the SAME overall deadline the
-    // read loop used (still unbounded when timeout_seconds<=0, by design: "0 =
-    // infinite" is the documented contract, not a bug); a straggler past the
-    // deadline is force-killed and reaped with one final blocking wait, which
-    // returns promptly once SIGKILL (unblockable) lands.
-    int status = 0;
-    pid_t reaped = waitpid(pid, &status, WNOHANG);
-    while (reaped == 0) {
-        const int left_ms = remaining_ms();
-        if (left_ms == 0) {
-            KillGenerator(pid);
-            waitpid(pid, &status, 0);
-            break;
-        }
-        struct timespec poll_interval {
-            0, 5 * 1000 * 1000  // 5ms
-        };
-        nanosleep(&poll_interval, nullptr);
-        reaped = waitpid(pid, &status, WNOHANG);
-    }
-
-    if (timed_out) {
-        outcome.error = "timed out after " + std::to_string(timeout_seconds) + "s";
-        outcome.error += !err_buf.empty() ? "; stderr: " + Tail(err_buf, 2000) : "";
-        return outcome;
-    }
-    if (killed_for_cap) {
-        // Keep the capped stdout: it is the cached artifact the confirm flow
-        // submits when the operator opts in -- re-running the generator
-        // uncapped would execute its side effects a second time and produce
-        // output no cap ever bounded.
+    if (exceeded_cap) {
         outcome.exceeded_cap = true;
         outcome.output = std::move(out_buf);
         return outcome;
     }
-    // poll_failed: outcome.error is already set above. Falling through to the
-    // exit-status checks below would let a generator that happened to exit 0
-    // ship its PARTIAL, still-buffered output as a real, successful turn --
-    // exactly the one path where truncated/undefined output could reach the
-    // model. Return now instead.
-    if (poll_failed) return outcome;
-
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
-        outcome.error = "could not execute: " + (argv.empty() ? shell_script : argv.front());
+    if (drained.cancelled) {
+        outcome.cancelled = true;
+        outcome.error = "cancelled";
         return outcome;
     }
+    if (drained.timed_out) {
+        outcome.error = with_stderr("timed out after " + std::to_string(timeout_seconds) + "s");
+        return outcome;
+    }
+    // An I/O failure mid-drain or a lost reap: the buffered stdout may be
+    // partial and the exit status is unknown -- never ship it as a success.
+    if (drained.io_error) {
+        outcome.error = "reading generator output failed: " + drained.io_error_message;
+        return outcome;
+    }
+    if (drained.reap_error) {
+        outcome.error = "generator exit status could not be determined";
+        return outcome;
+    }
+    const int status = drained.wait_status;
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        outcome.error = "exit status " +
-                        (WIFEXITED(status) ? std::to_string(WEXITSTATUS(status))
-                                           : std::string("signal ") + std::to_string(WTERMSIG(status)));
-        outcome.error += !err_buf.empty() ? "; stderr: " + Tail(err_buf, 2000) : "";
+        // 127 included: from the launcher it means chdir/exec failed, from
+        // `sh -c` an inner command was not found -- either way stderr says
+        // which, so it is reported rather than guessed at.
+        outcome.error = with_stderr(
+            "exit status " + (WIFEXITED(status) ? std::to_string(WEXITSTATUS(status))
+                                                : "signal " + std::to_string(WTERMSIG(status))));
         return outcome;
     }
 
     outcome.ok = true;
     outcome.output = std::move(out_buf);
-    (void)err_buf;
     return outcome;
 }
 
@@ -374,6 +203,12 @@ RunOutcome RunProcess(const std::vector<std::string>& argv, const std::string& s
 // what typos actually look like: an identifier-shaped unknown token warns
 // once per render ({agr} names no argument -- almost certainly a mistyped
 // {arg}), while prose shapes ({"type": ...}, {print $1}) stay quiet.
+//
+// An unknown token emits only its '{' and scanning resumes at the NEXT
+// character, not past the '}': in `{"q": "{args}"}` the first '{' opens no
+// known name, and skipping to the first '}' would swallow the real {args}
+// placeholder inside it. Still single-pass over the template; substituted
+// values are appended and never re-scanned.
 bool LooksLikePlaceholder(const std::string& token) {
     if (token.empty()) return false;
     if (!std::isalnum(static_cast<unsigned char>(token.front())) &&
@@ -415,8 +250,7 @@ std::string RenderTemplate(const std::string& body,
                     "literal text",
                     token);
             }
-            out += body.substr(i, close - i + 1);
-            i = close + 1;
+            out += body[i++];
             continue;
         }
         out += it->second;
@@ -425,48 +259,79 @@ std::string RenderTemplate(const std::string& body,
     return out;
 }
 
-// POSIX single-quote wrapping: every embedded `'` becomes `'\''` (close the
-// quote, an escaped literal quote, reopen). The result is safe to splice into
-// a /bin/sh -c string at any position a bare word or quoted string could
-// legally appear -- unlike a value substituted unquoted, whose own content
-// can supply the shell metacharacters that end the enclosing command.
-std::string ShellQuote(const std::string& value) {
-    std::string out = "'";
+// Where a placeholder sits in a `sh:` script, as far as quoting goes.
+enum class ShellQuoting { kNone, kSingle, kDouble };
+
+// Renders `value` as literal text for the quoting context it lands in, so the
+// author's own quotes keep working and the value can never end them:
+//   - bare: POSIX single-quote wrapping, every `'` as `'\''`;
+//   - inside '...': the same, minus the outer quotes the author already wrote;
+//   - inside "...": backslash-escape the four characters special there
+//     (\ " $ `).
+// Context-blind wrapping turned opencode's idiomatic `echo "$1"` into
+// `echo "'foo'"`, which prints the quotes.
+std::string ShellEscape(const std::string& value, ShellQuoting context) {
+    std::string out;
+    if (context == ShellQuoting::kNone) out += '\'';
     for (const char c : value) {
-        if (c == '\'') {
+        if (context == ShellQuoting::kDouble) {
+            if (c == '\\' || c == '"' || c == '$' || c == '`') out += '\\';
+            out += c;
+        } else if (c == '\'') {
             out += "'\\''";
         } else {
             out += c;
         }
     }
-    out += "'";
+    if (context == ShellQuoting::kNone) out += '\'';
     return out;
 }
 
 // Substitutes {name} into one string (an argv entry or a shell script).
 // LENIENT by design: only KNOWN names substitute; anything else in braces
 // (JSON payloads, awk programs, shell parameter expansion) passes through
-// verbatim. Returns false when the string names an unfilled optional -- the
-// caller omits the whole entry, which is what "optional" means on a command
-// line.
+// verbatim, with the same resume-at-the-next-character rule as
+// RenderTemplate. Returns false when the string names an unfilled optional --
+// the caller omits the whole entry, which is what "optional" means on a
+// command line.
 //
-// `shell_quote`: true for a `sh:` script, false for a `run:` argv entry. A
-// `run:` entry reaches execve() directly -- no shell ever parses it, so the
+// `shell`: true for a `sh:` script, false for a `run:` argv entry. A `run:`
+// entry reaches execve() directly -- no shell ever parses it, so the
 // substituted text cannot be reinterpreted regardless of its content. A `sh:`
-// script IS parsed by /bin/sh, so an unquoted substitution lets the VALUE
+// script IS parsed by /bin/sh, so an unescaped substitution lets the VALUE
 // supply shell syntax (quotes, `;`, `|`, command substitution) that escapes
 // wherever the author placed the placeholder -- true of a source's own STDOUT
 // as much as a user-typed argument, which is why the caller additionally
 // restricts which values a `sh:` script may see at all (only user-supplied
 // arguments, never another source's output -- see the `use_shell` branch in
-// Execute()).
+// Execute()). Values are escaped for the quoting context the scan is in (see
+// ShellEscape); the scan tracks '...', "..." and backslash escapes, which is
+// all of POSIX quoting a placeholder can sit inside.
 bool SubstituteEntry(const std::string& entry, const std::map<std::string, std::string>& values,
                      const std::set<std::string>& omittable, std::string& out,
-                     bool shell_quote = false) {
+                     bool shell = false) {
+    ShellQuoting quoting = ShellQuoting::kNone;
     std::size_t i = 0;
     while (i < entry.size()) {
-        if (entry[i] != '{') {
-            out += entry[i++];
+        const char c = entry[i];
+        if (c != '{') {
+            if (shell) {
+                if (c == '\\' && quoting != ShellQuoting::kSingle && i + 1 < entry.size()) {
+                    out += c;
+                    out += entry[i + 1];
+                    i += 2;
+                    continue;
+                }
+                if (c == '\'' && quoting != ShellQuoting::kDouble) {
+                    quoting = quoting == ShellQuoting::kSingle ? ShellQuoting::kNone
+                                                               : ShellQuoting::kSingle;
+                } else if (c == '"' && quoting != ShellQuoting::kSingle) {
+                    quoting = quoting == ShellQuoting::kDouble ? ShellQuoting::kNone
+                                                               : ShellQuoting::kDouble;
+                }
+            }
+            out += c;
+            ++i;
             continue;
         }
         const auto close = entry.find('}', i);
@@ -485,14 +350,13 @@ bool SubstituteEntry(const std::string& entry, const std::map<std::string, std::
             // here, so they fall through to this same literal-passthrough path
             // rather than substituting attacker-reachable generator output into
             // a shell string.
-            out += entry.substr(i, close - i + 1);
-            i = close + 1;
+            out += entry[i++];
             continue;
         }
         if (omittable.count(token) != 0 && it->second.empty()) {
             return false;  // unfilled optional: the whole entry is omitted
         }
-        out += shell_quote ? ShellQuote(it->second) : it->second;
+        out += shell ? ShellEscape(it->second, quoting) : it->second;
         i = close + 1;
     }
     return true;
@@ -589,10 +453,17 @@ public:
             // permissions) -- repeated friction is the conservative default
             // for content the working directory supplied rather than the
             // operator configured.
-            if (!spec_.trusted && !spec_.sources.empty()) {
+            // The per-turn model/agent overrides are disclosed on the same
+            // prompt, and trigger it on their own: a sourceless untrusted
+            // file can still route the turn to a preset with looser tool
+            // permissions, and that must not happen silently either.
+            const bool overrides = !spec_.model.empty() || !spec_.agent.empty();
+            if (!spec_.trusted && (!spec_.sources.empty() || overrides)) {
                 std::string detail =
-                    "This command comes from a project-local file, not your own config, and "
-                    "will run:\n";
+                    "This command comes from a project-local file, not your own config.\n";
+                if (!spec_.agent.empty()) detail += "Its turn runs as agent: " + spec_.agent + "\n";
+                if (!spec_.model.empty()) detail += "Its turn runs on model: " + spec_.model + "\n";
+                if (!spec_.sources.empty()) detail += "It will run:\n";
                 for (const auto& source : spec_.sources) {
                     detail += "  " + source.name + ": ";
                     if (source.use_shell) {
@@ -617,24 +488,40 @@ public:
                 }
             }
 
+            // Generators run in the session's project root -- what `git ...`
+            // in a command file means -- never the server's own cwd (which
+            // is "/" under the client's auto-spawn). A test fake with no
+            // root falls back to the process cwd.
+            std::filesystem::path cwd = context.session().project_root();
+            if (cwd.empty()) cwd = std::filesystem::current_path();
+            // Made now, before any source runs: a cancel from here on stops
+            // the running generator and every source after it.
+            const std::function<bool()> cancelled = context.session().CancelProbe();
+
             for (const auto& source : spec_.sources) {
+                if (cancelled()) {
+                    return CommandResult::Error("/" + spec_.name +
+                                                " was cancelled; nothing was submitted");
+                }
                 std::vector<std::string> argv;
-                std::string script;
                 if (source.use_shell) {
+                    std::string script;
                     // A shell string cannot omit pieces; an unfilled optional in
                     // a script is an error rather than a silent gap. arg_values
                     // (not values): see the comment above the source loop --
                     // only user-supplied arguments may reach a `sh:` script, and
-                    // shell_quote=true so even those cannot supply shell syntax
-                    // that escapes the position the author placed them in.
+                    // shell=true escapes even those for their quoting context,
+                    // so they cannot supply shell syntax that escapes the
+                    // position the author placed them in.
                     const bool substituted =
                         SubstituteEntry(source.script, arg_values, unfilled, script,
-                                        /*shell_quote=*/true);
+                                        /*shell=*/true);
                     if (!substituted) {
                         return CommandResult::Error(
                             "source '" + source.name +
                             "': an optional argument it references was not provided");
                     }
+                    argv = {"/bin/sh", "-c", std::move(script)};
                 } else {
                     for (const auto& entry : source.argv) {
                         std::string piece;
@@ -653,7 +540,11 @@ public:
 
                 const std::size_t cap_bytes = source.cap_tokens * 4;
                 RunOutcome run =
-                    RunProcess(argv, script, source.timeout_seconds, cap_bytes);
+                    RunProcess(argv, cwd, source.timeout_seconds, cap_bytes, cancelled);
+                if (run.cancelled) {
+                    return CommandResult::Error("/" + spec_.name + " was cancelled while source '" +
+                                                source.name + "' ran; nothing was submitted");
+                }
                 if (run.exceeded_cap) {
                     const std::size_t estimated = cap_bytes / 4;
                     if (source.on_exceed == CapAction::Fail) {
@@ -743,6 +634,10 @@ public:
 
             if (prompt.find_first_not_of(" \t\r\n") == std::string::npos) {
                 return CommandResult::Error("the composed prompt is empty; nothing was submitted");
+            }
+            if (!spec_.sources.empty() && cancelled()) {
+                return CommandResult::Error("/" + spec_.name +
+                                            " was cancelled; nothing was submitted");
             }
 
             // The ONE sanctioned path: the composed text becomes the turn itself,

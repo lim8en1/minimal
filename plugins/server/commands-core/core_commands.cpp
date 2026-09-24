@@ -1,16 +1,17 @@
 #include "core_commands.hpp"
 
 #include <algorithm>
-#include <sstream>
-#include <unordered_map>
-#include <vector>
-#include <string>
-#include <system_error>
-
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <system_error>
+#include <unordered_map>
+#include <vector>
 
 #include "minimal/commands/command_context.hpp"
+#include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/file_lock.hpp"
 #include "minimal/common/model_ref.hpp"
@@ -49,10 +50,16 @@ public:
     std::string_view Usage() const override { return "/help [command]"; }
     bool ReadOnly() const override { return true; }
 
-    CommandResult Execute(CommandContext&, const CommandArgs& args) override {
+    // Over the EFFECTIVE catalog: this session's project commands included,
+    // with the same shadowing rule dispatch applies -- so /help never lists a
+    // command that would not run, nor misses one that would. Sessionless (no
+    // project scope yet), project_commands() is null and this is the global
+    // registry alone.
+    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
+        const minimal::commands::CommandRegistry* project = context.project_commands();
         if (!args.positional.empty()) {
             const std::string& wanted = args.positional.front();
-            const Command* command = registry_.Find(wanted);
+            const Command* command = minimal::commands::FindEffective(registry_, project, wanted);
             if (command == nullptr) {
                 return CommandResult::Error("unknown command: /" + wanted);
             }
@@ -63,7 +70,7 @@ public:
         }
 
         std::ostringstream out;
-        for (const auto& entry : registry_.All()) {
+        for (const auto& entry : minimal::commands::EffectiveCatalog(registry_, project)) {
             out << "/" << entry.surface << "  -  " << entry.command->Summary() << "\n";
         }
         return CommandResult::Ok(out.str());
@@ -139,43 +146,75 @@ public:
     }
 };
 
+// The "bare form opens a picker, argument form acts" shape shared by /agent,
+// /model, /subagent-model and /mcp. The catalog sees the command AS A WHOLE
+// as view-capable (Display()/ViewHint()); each INVOCATION opens the picker
+// only when it has no arguments -- the argument form is a direct action with
+// nothing to show, and before DisplayFor existed a successful switch
+// re-opened the picker it was just answered from. `PickerView()` is the one
+// place the client view id is written.
+template <typename Base>
+class PickerCommand : public Base {
+public:
+    virtual std::string_view PickerView() const = 0;
+
+    minimal::commands::CommandDisplay Display() const final {
+        return minimal::commands::CommandDisplay::kView;
+    }
+    std::string_view ViewHint() const final { return PickerView(); }
+    minimal::commands::CommandDisplay DisplayFor(const CommandArgs& args) const final {
+        return args.positional.empty() ? minimal::commands::CommandDisplay::kView
+                                       : minimal::commands::CommandDisplay::kStatus;
+    }
+    std::string_view ViewHintFor(const CommandArgs& args) const final {
+        return args.positional.empty() ? PickerView() : std::string_view{};
+    }
+    // The bare form only asks the client to open its picker -- it touches no
+    // session state, so it answers beside a live turn instead of queueing
+    // behind it. The argument form keeps the command's own ReadOnly().
+    bool ReadOnlyFor(const CommandArgs& args) const final {
+        return args.positional.empty() || this->ReadOnly();
+    }
+};
+
+// Switches THIS session to `ref`: the one sequence /model and /think share.
+// The ref is recorded on the SESSION (set_model_override), not folded into
+// the preset, so a later /agent re-applies it rather than resolving it away;
+// ApplyPreset rebuilds the provider when the switch crossed a connection.
+// `shown` is how the user named the model, for the miss message.
+CommandResult SwitchModel(CommandContext& context, const minimal::common::ModelRef& ref,
+                          const std::string& shown, std::string ok_message) {
+    const auto model = context.providers().Resolve(ref);
+    if (model == nullptr) {
+        return CommandResult::Error("unknown model '" + shown +
+                                    "' (run /model with no arguments for the list)");
+    }
+    context.session().set_model_override(ref);
+    auto preset = context.session().preset();
+    minimal::agent::ApplyModel(preset, *model);
+    context.session().ApplyPreset(std::move(preset));
+    return CommandResult::Ok(std::move(ok_message));
+}
+
 // Bare `/agent` opens the picker (display=View, view_hint="agents"), same
 // shape as SessionsCommand below: the command itself carries no data, the
 // client fetches the preset list itself over ListAgentPresets. With a name it
-// switches, exactly as before. ReadOnly() stays false (the default) even
-// though the no-arg branch touches nothing: ReadOnly() describes the command
-// as a whole, and the by-name branch still mutates session state via
-// ApplyPreset -- a command that can mutate must queue at a turn boundary
-// every time, not just on the branches that happen to need it, or a listing
-// call could run concurrently with a same-named switch mid-turn.
-class AgentCommand : public HarnessCommand {
+// switches, exactly as before. ReadOnly() stays false (the default): it
+// describes the command as a whole, and the by-name branch mutates session
+// state via ApplyPreset. The bare form answers beside a live turn anyway, via
+// PickerCommand's ReadOnlyFor -- it touches nothing.
+class AgentCommand : public PickerCommand<HarnessCommand> {
 public:
     std::string_view Name() const override { return "agent"; }
     std::string_view Summary() const override { return "Switch agent preset, or open the picker"; }
     std::string_view Usage() const override { return "/agent [name]"; }
-    minimal::commands::CommandDisplay Display() const override {
-        return minimal::commands::CommandDisplay::kView;
-    }
-    std::string_view ViewHint() const override { return "agents"; }
-
-    // Only the bare "/agent" (list) opens the picker; "/agent <name>" is a
-    // direct switch and has nothing to show -- without this override the
-    // dispatcher's static Display()/ViewHint() above (correct for the
-    // catalog, where /agent AS A WHOLE is view-capable) applied to EVERY
-    // invocation, so a successful switch re-opened the picker it was just
-    // answered from.
-    minimal::commands::CommandDisplay DisplayFor(const CommandArgs& args) const override {
-        return args.positional.empty() ? minimal::commands::CommandDisplay::kView
-                                        : minimal::commands::CommandDisplay::kStatus;
-    }
-    std::string_view ViewHintFor(const CommandArgs& args) const override {
-        return args.positional.empty() ? std::string_view("agents") : std::string_view{};
-    }
+    std::string_view PickerView() const override { return "agents"; }
 
     CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
         if (args.positional.empty()) {
             return CommandResult::Ok("agent list requested");
         }
+        if (args.positional.size() > 1) return CommandResult::Error("usage: /agent [name]");
         const std::string& wanted = args.positional.front();
 
         minimal::agent::AgentPreset resolved;
@@ -215,38 +254,23 @@ public:
 // "models"), the same shape as AgentCommand's bare form: the command itself
 // carries no data, the client fetches the model list itself over ListModels.
 // "/model <provider>/<model>" is a direct switch, unchanged. ReadOnly() stays
-// false (the default) even though the no-arg branch touches nothing, for the
-// same reason AgentCommand's does: the by-ref branch mutates session state and
-// a command that can mutate must queue at a turn boundary every time.
-class ModelCommand : public HarnessCommand {
+// false for the same reason AgentCommand's does; the bare form still answers
+// beside a live turn (PickerCommand::ReadOnlyFor).
+class ModelCommand : public PickerCommand<HarnessCommand> {
 public:
     std::string_view Name() const override { return "model"; }
     std::string_view Summary() const override {
         return "Switch model, or open the model picker";
     }
     std::string_view Usage() const override { return "/model [provider/model]"; }
-
-    minimal::commands::CommandDisplay Display() const override {
-        return minimal::commands::CommandDisplay::kView;
-    }
-    std::string_view ViewHint() const override { return "models"; }
-
-    // Only the bare "/model" opens the picker; "/model <ref>" is a direct
-    // switch with nothing to show -- without this the dispatcher's static
-    // Display() applied to EVERY invocation and a successful switch re-opened
-    // the picker it was just answered from (the exact bug AgentCommand's
-    // DisplayFor override exists for).
-    minimal::commands::CommandDisplay DisplayFor(const CommandArgs& args) const override {
-        return args.positional.empty() ? minimal::commands::CommandDisplay::kView
-                                       : minimal::commands::CommandDisplay::kStatus;
-    }
-    std::string_view ViewHintFor(const CommandArgs& args) const override {
-        return args.positional.empty() ? std::string_view("models") : std::string_view{};
-    }
+    std::string_view PickerView() const override { return "models"; }
 
     CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
         if (args.positional.empty()) {
             return CommandResult::Ok("model list requested");
+        }
+        if (args.positional.size() > 1) {
+            return CommandResult::Error("usage: /model [provider/model]");
         }
         const std::string& text = args.positional.front();
         // SplitModelRef, not ParseModelRef: a discovered model's id may
@@ -257,21 +281,7 @@ public:
                                         "' must be <provider>/<model>, e.g. local/qwen4 "
                                         "(or run /model with no arguments)");
         }
-        const auto model = context.providers().Resolve(*ref);
-        if (model == nullptr) {
-            return CommandResult::Error("unknown model '" + text +
-                                        "' (run /model with no arguments for the list)");
-        }
-
-        // Recorded on the SESSION, not folded into the preset, so a later /agent
-        // re-applies it rather than resolving it away.
-        context.session().set_model_override(*ref);
-
-        auto preset = context.session().preset();
-        minimal::agent::ApplyModel(preset, *model);
-        // ApplyPreset rebuilds the provider if this crossed a connection.
-        context.session().ApplyPreset(std::move(preset));
-        return CommandResult::Ok("model: " + text);
+        return SwitchModel(context, *ref, text, "model: " + text);
     }
 };
 
@@ -285,31 +295,21 @@ public:
 // "/subagent-model <provider>/<model>" pins the choice for this session's
 // children; "/subagent-model inherit" clears it. The same two-form display
 // rule as ModelCommand: only the bare form opens the picker.
-class SubagentModelCommand : public HarnessCommand {
+class SubagentModelCommand : public PickerCommand<HarnessCommand> {
 public:
     std::string_view Name() const override { return "subagent-model"; }
     std::string_view Summary() const override {
         return "Set the model for spawned subagents, or open its picker";
     }
     std::string_view Usage() const override { return "/subagent-model [provider/model|inherit]"; }
-
-    minimal::commands::CommandDisplay Display() const override {
-        return minimal::commands::CommandDisplay::kView;
-    }
-    std::string_view ViewHint() const override { return "subagent-models"; }
-
-    minimal::commands::CommandDisplay DisplayFor(const CommandArgs& args) const override {
-        return args.positional.empty() ? minimal::commands::CommandDisplay::kView
-                                       : minimal::commands::CommandDisplay::kStatus;
-    }
-    std::string_view ViewHintFor(const CommandArgs& args) const override {
-        return args.positional.empty() ? std::string_view("subagent-models")
-                                       : std::string_view{};
-    }
+    std::string_view PickerView() const override { return "subagent-models"; }
 
     CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
         if (args.positional.empty()) {
             return CommandResult::Ok("subagent model list requested");
+        }
+        if (args.positional.size() > 1) {
+            return CommandResult::Error("usage: /subagent-model [provider/model|inherit]");
         }
         const std::string& text = args.positional.front();
         if (text == "inherit") {
@@ -348,9 +348,11 @@ public:
 // <provider>/<base>@<name>, which is a MISS for an undeclared name -- reported
 // with the declared list, the DescribeModels habit, never a guess.
 //
-// Persistence follows ModelCommand exactly: set_model_override (survives /agent
-// re-resolve, visible to spawn inheritance) + ApplyModel + ApplyPreset. There
-// is deliberately no picker form: the bare /think answer is the list, and a
+// Persistence: when a /model choice is in force the variant replaces it, the
+// ModelCommand path (set_model_override + ApplyModel + ApplyPreset), and
+// survives /agent; otherwise only the running preset's model changes, and a
+// later /agent resolves its own model as usual (see SwitchTo). There is
+// deliberately no picker form: the bare /think answer is the list, and a
 // session's variants are a short hand-written set -- a client picker would be
 // surface ahead of need.
 class ThinkCommand : public HarnessCommand {
@@ -362,6 +364,7 @@ public:
     std::string_view Usage() const override { return "/think [variant|off]"; }
 
     CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
+        if (args.positional.size() > 1) return CommandResult::Error("usage: /think [variant|off]");
         const config::ModelRef current = context.session().preset_snapshot().model_ref;
         if (current.provider.empty() || current.model.empty()) {
             return CommandResult::Error("no model is active for this session yet");
@@ -422,21 +425,26 @@ public:
     }
 
 private:
-    // The ModelCommand switch path, verbatim in effect: session-owned override
-    // first, then ApplyModel + ApplyPreset (which rebuilds the provider when
-    // the connection changed). Resolve errors surface as command errors.
+    // Pins only what was already pinned. With a /model choice in force the
+    // variant replaces it (it IS that choice, at another effort) -- recorded,
+    // so /agent keeps it. Without one the preset's model is swapped in place
+    // and nothing is recorded, so a later /agent X runs X's own model rather
+    // than this session's old one at the chosen effort. Subagents inherit
+    // either way: spawn falls back to the parent's preset().model_ref.
     static CommandResult SwitchTo(CommandContext& context, const config::ModelRef& ref,
-                                  const std::string& ok_message) {
+                                  std::string ok_message) {
+        if (context.session().model_override()) {
+            return SwitchModel(context, ref, ref.str(), std::move(ok_message));
+        }
         const auto model = context.providers().Resolve(ref);
         if (model == nullptr) {
             return CommandResult::Error("unknown model '" + ref.str() +
                                         "' (run /model with no arguments for the list)");
         }
-        context.session().set_model_override(ref);
         auto preset = context.session().preset();
         minimal::agent::ApplyModel(preset, *model);
         context.session().ApplyPreset(std::move(preset));
-        return CommandResult::Ok(ok_message);
+        return CommandResult::Ok(std::move(ok_message));
     }
 };
 
@@ -477,7 +485,7 @@ public:
 // process-global (McpClientManager), not session state, so it never touches
 // the conversation path -- the exact meaning ReadOnly() carries here, not
 // "mutates nothing".
-class McpCommand : public Sessionless<HarnessCommand> {
+class McpCommand : public PickerCommand<Sessionless<HarnessCommand>> {
 public:
     std::string_view Name() const override { return "mcp"; }
     std::string_view Summary() const override {
@@ -485,18 +493,7 @@ public:
     }
     std::string_view Usage() const override { return "/mcp [name enable|disable]"; }
     bool ReadOnly() const override { return true; }
-    minimal::commands::CommandDisplay Display() const override {
-        return minimal::commands::CommandDisplay::kView;
-    }
-    std::string_view ViewHint() const override { return "mcp"; }
-
-    minimal::commands::CommandDisplay DisplayFor(const CommandArgs& args) const override {
-        return args.positional.empty() ? minimal::commands::CommandDisplay::kView
-                                        : minimal::commands::CommandDisplay::kStatus;
-    }
-    std::string_view ViewHintFor(const CommandArgs& args) const override {
-        return args.positional.empty() ? std::string_view("mcp") : std::string_view{};
-    }
+    std::string_view PickerView() const override { return "mcp"; }
 
     CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
         if (args.positional.empty()) {
@@ -720,8 +717,6 @@ private:
     }
 };
 
-}  // namespace
-
 // /connect <provider> <api-key> -- stores a credential in the data dir's
 // auth.json ({"<provider>": {"key": "..."}}), the same shape (and, for the
 // opencode-compat path, the same file) ResolveApiKey's credentials-file link
@@ -747,8 +742,7 @@ public:
     std::string_view Usage() const override { return "/connect <provider> <api-key>"; }
     bool ReadOnly() const override { return true; }
 
-    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
-        (void)context;
+    CommandResult Execute(CommandContext&, const CommandArgs& args) override {
         if (args.positional.size() != 2) {
             return CommandResult::Error("usage: /connect <provider> <api-key>");
         }
@@ -769,13 +763,22 @@ public:
         // race (both read, both merge, last writer wins) and one provider's
         // entry would silently vanish. ExclusiveFileLock throws when the lock
         // is held -- the command surface has no exception handler, so the
-        // refusal is converted to a command error below.
+        // refusal is converted to a command error below. The lock and the
+        // save are caught separately: a failure writing the file (a key that
+        // is not valid UTF-8 cannot be dumped as JSON; the data dir cannot be
+        // created) is not a lock problem and must not be reported as one.
+        std::optional<common::ExclusiveFileLock> lock;
         try {
-            const common::ExclusiveFileLock lock(path);
-            return SaveCredential(path, provider, key);
+            lock.emplace(path);
         } catch (const std::exception& e) {
             return CommandResult::Error("could not lock " + path.string() +
                                         " for update: " + e.what());
+        }
+        try {
+            return SaveCredential(path, provider, key);
+        } catch (const std::exception& e) {
+            return CommandResult::Error("could not store the credential in " + path.string() +
+                                        ": " + e.what());
         }
     }
 
@@ -830,6 +833,8 @@ private:
                                  " -- restart the server for it to take effect");
     }
 };
+
+}  // namespace
 
 std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     // /help needs the registry to list it, but it is being built to go INTO that

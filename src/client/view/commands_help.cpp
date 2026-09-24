@@ -5,7 +5,7 @@
 
 namespace minimal::client {
 
-ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& catalog,
+ftxui::Component MakeCommandsHelpView(CommandCatalogSource catalog,
                                       const Theme& theme, std::function<void()> on_close,
                                       std::function<bool()> session_available,
                                       std::function<bool()> subagent_read_only,
@@ -14,7 +14,8 @@ ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& ca
     // BY VALUE, not by reference: `catalog` is this factory's OWN parameter,
     // and the returned Component (and its closures) outlive this call -- the
     // exact "closures outlive the factory" trap keymap_help.cpp documents for
-    // `bindings`.
+    // `bindings`. It is a source, called per build, so each open lists the
+    // current snapshot.
     auto build_rows = [catalog, session_available, subagent_read_only](const std::string& filter) {
         std::vector<MenuRow> rows;
         // The sessionless gate shared with the /-autocomplete
@@ -30,7 +31,9 @@ ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& ca
         // server-side, so the overlay never advertises a mutating command
         // the child would only refuse.
         const bool subagent_only = subagent_read_only && subagent_read_only();
-        for (const auto& entry : catalog) {
+        const auto snapshot = catalog ? catalog() : nullptr;
+        if (!snapshot) return rows;
+        for (const auto& entry : *snapshot) {
             if (!UsableWithoutSession(entry) && !session_ok) continue;
             if (subagent_only && !UsableOnSubagent(entry)) continue;
             std::string label = "/" + entry.name + "  " + entry.summary;

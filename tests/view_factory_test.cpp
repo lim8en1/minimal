@@ -47,6 +47,13 @@ namespace v1 = minimal::v1;
 int ScreenLineOf(std::string_view frame, std::string_view needle);
 
 namespace {
+// A CommandCatalogSource over a fixed catalog: one snapshot, same identity
+// on every call (a real CommandCatalogCache swaps it only on a refresh).
+minimal::client::CommandCatalogSource SnapshotOf(
+    const std::vector<minimal::client::CommandCatalogEntry>& catalog) {
+    auto snapshot = std::make_shared<const std::vector<minimal::client::CommandCatalogEntry>>(catalog);
+    return [snapshot] { return snapshot; };
+}
 
 Theme TestTheme() {
     return Theme::Parse(R"({"name":"test","colors":{}})", ColorDepth::Truecolor);
@@ -2467,7 +2474,7 @@ TEST_CASE("prompt editor: suggestions repopulate after accepting then returning 
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; },
-        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
+        SnapshotOf(catalog));
 
     for (const char c : std::string_view("/compact")) {
         REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
@@ -2489,6 +2496,34 @@ TEST_CASE("prompt editor: suggestions repopulate after accepting then returning 
     CHECK_FALSE(state.suggestions.empty());
 }
 
+TEST_CASE("prompt editor: a refreshed catalog snapshot updates the list without retyping",
+         "[prompt_editor][regression]") {
+    // The catalog is pulled in the background (CommandCatalogCache): a
+    // command file added mid-run lands as a NEW snapshot. The per-frame
+    // cache keyed on (prefix, session) alone would keep serving the old
+    // list until the prefix changed; the snapshot's identity is in the key.
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    auto current = std::make_shared<const std::vector<CommandCatalogEntry>>(
+        std::vector<CommandCatalogEntry>{{"deploy", "old", false, true}});
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {}, [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; },
+        [&current]() { return current; });
+
+    for (const char c : std::string_view("/de")) {
+        REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
+    }
+    RenderFrame(editor);
+    REQUIRE(state.suggestions.size() == 1);
+
+    current = std::make_shared<const std::vector<CommandCatalogEntry>>(
+        std::vector<CommandCatalogEntry>{{"deploy", "old", false, true},
+                                         {"describe", "new", false, true}});
+    RenderFrame(editor);   // same prefix, new snapshot
+    CHECK(state.suggestions.size() == 2);
+}
+
 TEST_CASE("prompt editor: Enter accepts the highlighted suggestion instead of submitting",
          "[prompt_editor][regression]") {
     // Before this fix, Enter always submitted state.content verbatim even
@@ -2500,20 +2535,13 @@ TEST_CASE("prompt editor: Enter accepts the highlighted suggestion instead of su
     PromptEditorState state;
     std::vector<std::string> texts;
     std::vector<std::string> commands;
-    // CommandCatalogSource returns a REFERENCE (see its header comment): a
-    // lambda returning a vector BY VALUE still compiles against that
-    // signature (a prvalue converts to a const-ref parameter), but the
-    // reference std::function's invoker hands back then dangles -- the
-    // temporary is destroyed at the end of the wrapped call, before
-    // command_catalog()'s caller ever reads it. The catalog needs its own
-    // named storage, outliving `editor`'s use the same way `state` does.
     const std::vector<CommandCatalogEntry> catalog = {
         {"compact", "compact the history", false, false}};
     auto editor = MakePromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; },
-        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
+        SnapshotOf(catalog));
 
     for (const char c : std::string_view("/comp")) {
         REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
@@ -2555,7 +2583,7 @@ TEST_CASE("prompt editor: Enter submits in ONE press when the user typed the "
     auto editor = MakePromptEditor(
         theme, state, [](const std::string&) {}, [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; },
-        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
+        SnapshotOf(catalog));
 
     for (const char c : std::string_view("/help")) {
         REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
@@ -2585,7 +2613,7 @@ TEST_CASE("prompt editor: a bare '/' lists every command", "[prompt_editor][regr
     auto editor = MakePromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; },
-        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
+        SnapshotOf(catalog));
 
     REQUIRE(SendEvent(editor, ftx::Event::Character("/")));
     RenderFrame(editor);   // the catalog match runs at render time
@@ -2759,7 +2787,7 @@ TEST_CASE("prompt editor: history recall walks THROUGH a recalled command line "
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; },
-        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; },
+        SnapshotOf(catalog),
         nullptr, nullptr, nullptr, &hist);
 
     Type(editor, "plain message");
@@ -2808,7 +2836,7 @@ TEST_CASE("prompt editor: an open suggestion list still owns the arrows while "
         theme, state, [](const std::string&) {},
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; },
-        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; },
+        SnapshotOf(catalog),
         nullptr, nullptr, nullptr, &hist);
 
     Type(editor, "seed");
@@ -2917,7 +2945,7 @@ TEST_CASE("prompt editor: deleting the whole command line closes the stale sugge
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; },
-        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
+        SnapshotOf(catalog));
 
     Type(editor, "/se");
     RenderFrame(editor);
@@ -2966,7 +2994,7 @@ TEST_CASE("prompt editor: arrowing past the suggestion viewport scrolls the "
     auto editor = MakePromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; },
-        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
+        SnapshotOf(catalog));
 
     REQUIRE(SendEvent(editor, ftx::Event::Character("/")));
     RenderFrame(editor);
@@ -3003,7 +3031,7 @@ TEST_CASE("commands help overlay lists the whole catalog and closes on Escape",
         return entries;
     }();
     bool closed = false;
-    auto view = MakeCommandsHelpView(catalog, theme, [&] { closed = true; });
+    auto view = MakeCommandsHelpView(SnapshotOf(catalog), theme, [&] { closed = true; });
 
     const std::string frame = RenderFrame(view);
     CHECK(frame.find("cmd0") != std::string::npos);   // the head
@@ -3020,7 +3048,7 @@ TEST_CASE("commands help overlay: Enter hands the command to on_pick, then close
                                                       {"clear", "start over", false, false}};
     bool closed = false;
     std::string picked;
-    auto view = MakeCommandsHelpView(catalog, theme, [&] { closed = true; }, nullptr, nullptr,
+    auto view = MakeCommandsHelpView(SnapshotOf(catalog), theme, [&] { closed = true; }, nullptr, nullptr,
                                      nullptr, [&](const std::string& name) { picked = name; });
     CHECK(RenderFrame(view).find("enter: insert") != std::string::npos);
     REQUIRE(SendEvent(view, ftx::Event::Return));

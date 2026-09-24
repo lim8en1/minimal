@@ -382,6 +382,10 @@ message ListCommandsRequest {
   // of the same name, matching how a project's own agents/<name>.md already
   // shadows a global preset.
   string project_root = 1;
+  // Optional, and preferred over project_root when set: the project root is
+  // THIS session's own (a client need not track it per tab). An unknown id
+  // falls back to project_root.
+  string session_id = 2;
 }
 
 message ListCommandsResponse {

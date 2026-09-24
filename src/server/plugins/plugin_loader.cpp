@@ -38,6 +38,7 @@ using RegisterCommandsFn =
 using RegisterProjectCommandsFn = void (*)(commands::CommandRegistry&,
                                            const std::filesystem::path&,
                                            const PluginRegistrationContext&);
+using ProjectCommandsFingerprintFn = void (*)(const std::filesystem::path&, std::string&);
 using RegisterAuthProviderFn =
     void (*)(rpc::AuthProviderRegistry&, const PluginRegistrationContext&);
 using RegisterMentionResolverFn =
@@ -599,6 +600,31 @@ void PluginLoader::RegisterProjectCommands(commands::CommandRegistry& registry,
         }
         registry.ClearAttribution();
     }
+}
+
+std::string PluginLoader::ProjectCommandsFingerprint(
+    const std::filesystem::path& project_root) const {
+    std::string out;
+    for (const auto& plugin_ptr : project_command_plugins_) {
+        const ProjectCommandsPlugin& plugin = *plugin_ptr;
+        auto fn = Lookup<ProjectCommandsFingerprintFn>(
+            plugin.handle, "minimal_plugin_project_commands_fingerprint");
+        if (fn == nullptr) continue;
+        // The ABI says "must not throw"; a plugin that does anyway costs a
+        // rebuild on every lookup (its value reads as changed), never a
+        // failed lookup.
+        std::string value;
+        try {
+            fn(project_root, value);
+        } catch (...) {
+            value = "<threw>";
+        }
+        out += plugin.name;
+        out += '\0';
+        out += value;
+        out += '\0';
+    }
+    return out;
 }
 
 }  // namespace minimal::plugins

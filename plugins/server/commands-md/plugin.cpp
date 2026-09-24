@@ -17,15 +17,19 @@
 //     path (server_spawn.cpp chdir()s to "/" before exec).
 //   * minimal_plugin_register_project_commands -- the PROJECT's own dirs,
 //     called lazily per project root (ProjectCommandSource), into a FRESH
-//     registry scoped to that root alone. Never shares a registry with the
-//     global hook: a project command may shadow a global one of the same
-//     name for sessions rooted there (see the ABI doc on plugin_abi.h).
+//     registry scoped to that root alone -- and called AGAIN when
+//     minimal_plugin_project_commands_fingerprint (the dirs' and files'
+//     mtimes) changes, so editing a project command needs no restart. Never shares a registry with the
+//     global hook: a project command may shadow a global PROMPT SHORTHAND of
+//     the same name for sessions rooted there, never a harness/LLM command
+//     (commands::ProjectMayShadow, applied at lookup).
 //
 // Template logic is deliberately ALL here, plugin-local (consumer-first rule):
 // the argument split, file desugaring, and shell handling promote to a shared
 // header only when a second real consumer appears.
 
 #include <filesystem>
+#include <string>
 
 #include "commands_md.hpp"
 #include "minimal/commands/command_registry.hpp"
@@ -62,19 +66,7 @@ std::vector<minimal::commands_md::CommandDir> ProjectCommandDirs(
 
 void LoadInto(minimal::commands::CommandRegistry& registry,
              const std::vector<minimal::commands_md::CommandDir>& dirs) {
-    for (auto& command : minimal::commands_md::LoadCommands(
-             dirs, [&registry](const minimal::commands_md::MdCommandSpec& spec) {
-                 // An untrusted (project-local) file whose command name is
-                 // already taken is SKIPPED, not registered: a duplicate
-                 // surface name is a fatal startup collision on the global
-                 // registry (a cloned repo's commands/help.md must not refuse
-                 // to let the server start), and merely redundant on a
-                 // project registry (nothing else could have claimed the name
-                 // there first except a nearer project dir, which LoadCommands
-                 // already resolved by walk order). The earlier registration
-                 // wins either way.
-                 return minimal::commands_md::AcceptNonColliding(registry, spec);
-             })) {
+    for (auto& command : minimal::commands_md::LoadCommands(dirs)) {
         registry.Register(std::move(command));
     }
 }
@@ -95,6 +87,15 @@ void minimal_plugin_register_project_commands(
     minimal::commands::CommandRegistry& registry, const std::filesystem::path& project_root,
     const minimal::plugins::PluginRegistrationContext&) {
     LoadInto(registry, ProjectCommandDirs(project_root));
+}
+
+void minimal_plugin_project_commands_fingerprint(const std::filesystem::path& project_root,
+                                                 std::string& out) {
+    try {
+        out = minimal::commands_md::FingerprintCommandDirs(ProjectCommandDirs(project_root));
+    } catch (...) {
+        out.clear();   // the ABI forbids throwing; an unreadable dir reads as "no commands"
+    }
 }
 
 }  // extern "C"

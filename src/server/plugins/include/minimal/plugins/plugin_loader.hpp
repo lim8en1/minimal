@@ -167,6 +167,12 @@ public:
     void RegisterProjectCommands(commands::CommandRegistry& registry,
                                  const std::filesystem::path& project_root) const;
 
+    // Every project-commands plugin's OPTIONAL
+    // minimal_plugin_project_commands_fingerprint for `project_root`, joined
+    // with the plugin names. ProjectCommandSource rebuilds a root's registry
+    // when this changes. Empty when no plugin exports the hook.
+    std::string ProjectCommandsFingerprint(const std::filesystem::path& project_root) const;
+
 private:
     PluginRecord LoadOne(const PluginCandidate& candidate);
 

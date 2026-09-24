@@ -624,6 +624,8 @@ ftxui::Component MakePromptEditor(
                      cached_command_session_ok = false,
                      cached_command_subagent = false,
                      cached_command_suggestions = std::vector<std::string>(),
+                     cached_command_catalog =
+                         std::shared_ptr<const std::vector<CommandCatalogEntry>>(),
                      has_cached_command = false, cached_mention_prefix = std::string(),
                      has_cached_mention = false]() mutable {
         using namespace ftxui;
@@ -660,14 +662,20 @@ ftxui::Component MakePromptEditor(
             // but re-walking it and re-concatenating every entry's display
             // string on every frame was still pure waste whenever nothing
             // had actually changed.
-            const bool cache_hit = has_cached_command && command_prefix == cached_command_prefix &&
+            // The catalog snapshot too: a background refresh (a command file
+            // added to the project) replaces it, and the pointer's identity
+            // is exactly "did it change". Held here, so it cannot be freed
+            // and its address reused while this closure still compares it.
+            const auto catalog = command_catalog();
+            const bool cache_hit = has_cached_command && catalog == cached_command_catalog &&
+                                   command_prefix == cached_command_prefix &&
                                    session_ok == cached_command_session_ok &&
                                    subagent_only == cached_command_subagent &&
                                    state.suggestions == cached_command_suggestions;
             if (!cache_hit) {
                 std::vector<std::string> suggestions;
                 std::vector<std::string> completions;
-                for (const auto& entry : command_catalog()) {
+                for (const auto& entry : *catalog) {
                     // The sessionless gate (see UsableWithoutSession): a
                     // session-bound command is offered only while a session
                     // exists; /agent and /model always are (their forms
@@ -695,6 +703,7 @@ ftxui::Component MakePromptEditor(
                     state.suggestion_selected = 0;
                 }
                 has_cached_command = true;
+                cached_command_catalog = catalog;
                 cached_command_prefix = command_prefix;
                 cached_command_session_ok = session_ok;
                 cached_command_subagent = subagent_only;

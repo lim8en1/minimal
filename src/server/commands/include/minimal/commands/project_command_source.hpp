@@ -14,14 +14,15 @@
 // lazily the first time a session rooted there asks for it (For()), by
 // asking every loaded plugin's OPTIONAL minimal_plugin_register_project_commands
 // hook to contribute (PluginLoader::RegisterProjectCommands). The result is
-// cached for the process's life -- config is static once loaded, the same
-// rule AgentPresetRegistry's identical per-(name,root) cache already follows
-// for agent presets.
+// cached per root and REBUILT when the plugins' fingerprint for that root
+// changes (PluginLoader::ProjectCommandsFingerprint -- commands-md reports its
+// files' mtimes), so editing a project command file needs no restart.
 
 #include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include "minimal/commands/command_registry.hpp"
 
@@ -42,16 +43,25 @@ public:
     // two spellings of the same root onto one cache entry, if ever needed, is
     // the caller's job (SessionRegistry already canonicalizes what it hands
     // AgentPresetRegistry).
-    const CommandRegistry& For(const std::filesystem::path& project_root) const;
+    //
+    // Shared ownership, because a rebuild can replace a root's registry while
+    // a command from the old one is still executing (a markdown command's
+    // generators run for seconds): hold the pointer for as long as you use
+    // anything found in it, and the old registry lives exactly that long.
+    std::shared_ptr<const CommandRegistry> For(const std::filesystem::path& project_root) const;
 
 private:
+    struct Entry {
+        std::shared_ptr<const CommandRegistry> registry;
+        std::string fingerprint;
+    };
     const plugins::PluginLoader& loader_;
     mutable std::mutex mutex_;
     // GUARDED by mutex_: built lazily, on whichever thread asks first (a
     // gRPC handler resolving ListCommands, a session worker dispatching a
     // command) -- there is no single startup thread to build it on, unlike
     // the global registry.
-    mutable std::map<std::filesystem::path, std::unique_ptr<CommandRegistry>> cache_;
+    mutable std::map<std::filesystem::path, Entry> cache_;
 };
 
 }  // namespace minimal::commands

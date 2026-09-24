@@ -27,6 +27,7 @@ add_executable(minimal_tests
     client_args_test.cpp
     client_plugins_test.cpp
     commands_test.cpp
+    command_catalog_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/commands-core/core_commands.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/commands-md/commands_md.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/commands-md/commands_md_parse.cpp"

@@ -36,7 +36,8 @@
 // /-COMMANDS: a prompt starting with '/' goes out as a CommandInvocation.
 // /-AUTOCOMPLETE (E5): while the first token still reads like a command name
 // ('/' plus non-space), the local ListCommands catalog filters inline -- no
-// debounce, the catalog is in memory, fetched once at connect. Prompt
+// debounce, the catalog is an in-memory snapshot (CommandCatalogCache
+// refreshes it in the background, per tab scope). Prompt
 // shorthands are annotated as the one kind that will submit a turn
 // (docs/EXTENSIBILITY.md 4.4), so a macro never surprises anyone.
 
@@ -130,8 +131,8 @@ private:
     std::vector<std::optional<std::size_t>*> cursors_;
 };
 
-// One /-command the editor may offer. From ListCommands, fetched once at
-// connect by the host.
+// One /-command the editor may offer. From ListCommands, pulled per tab
+// scope by the host (CommandCatalogCache), plus client-intercepted entries.
 struct CommandCatalogEntry {
     std::string name;
     std::string summary;
@@ -183,12 +184,14 @@ inline bool UsableOnSubagent(const CommandCatalogEntry& entry) {
 using MentionSuggestor =
     std::function<std::optional<std::vector<std::string>>(const std::string& prefix)>;
 
-// Returns a REFERENCE, not a copy: the catalog is fetched once at connect and
-// held for the app's lifetime (see RunTui), and this is invoked on every
-// character typed while a line still reads like a `/`-command name -- copying
-// the whole catalog vector per keystroke was pure waste for data that never
-// changes after startup.
-using CommandCatalogSource = std::function<const std::vector<CommandCatalogEntry>&()>;
+// Returns a SHARED SNAPSHOT, never null: the catalog is refreshed in the
+// background (CommandCatalogCache) and replaced wholesale, so a caller keeps
+// the one it got valid for as long as it holds it, and the pointer's identity
+// tells a caller whether the catalog changed since it last looked. Invoked on
+// every frame while a line still reads like a `/`-command name; a
+// shared_ptr copy, not a vector copy.
+using CommandCatalogSource =
+    std::function<std::shared_ptr<const std::vector<CommandCatalogEntry>>()>;
 
 ftxui::Component MakePromptEditor(
     const Theme& theme, PromptEditorState& state,

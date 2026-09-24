@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <thread>
 
 #include "../../plugins/server/commands-md/commands_md.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
@@ -595,7 +596,30 @@ TEST_CASE("commands-md: over-cap output asks the operator; cancel submits nothin
     result = DispatchOne(registry, fixture, "big", {}, /*answer=*/"submit");
     CHECK(result.status == commands::CommandResult::Status::kOk);
     REQUIRE_FALSE(fixture.submitted_turns().empty());
-    CHECK(fixture.submitted_turns().front().find("0123456789") != std::string::npos);
+    // Exactly the cap (1 token = 4 bytes): the chunk that crossed it is cut at
+    // the cap, not kept whole.
+    CHECK(fixture.submitted_turns().front() == "0123\n");
+}
+
+TEST_CASE("commands-md: generators run in the session's project root, with stdin closed",
+          "[commands_md]") {
+    // Regression: generators inherited the SERVER's cwd -- "/" under the
+    // client's auto-spawn -- so `git ...` in a command file never saw the
+    // project. And a generator reading stdin must see EOF, not the server's.
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    auto commands = WriteAndLoad(files.path(), "where.md",
+                                 "---\nsources:\n  dir:\n    sh: \"pwd -P; cat\"\n"
+                                 "    timeout: 5\n---\n{dir}\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "where", {});
+    CAPTURE(result.message);
+    REQUIRE(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE(fixture.submitted_turns().size() == 1);
+    CHECK(fixture.submitted_turns().front() ==
+          std::filesystem::canonical(fixture.project_root()).string() + "\n");
 }
 
 TEST_CASE("commands-md: output_cap max:0 means zero tolerance, not uncapped",
@@ -676,10 +700,10 @@ TEST_CASE("LoadCommands: the nearest directory wins a stem collision and malform
     CHECK(Find(commands, "broken") == nullptr);        // malformed in the farther dir: skipped
 }
 
-// The plugin's registration hook filters through AcceptNonColliding; exercised
-// here directly against a real registry.
+// Project-vs-global lookup (commands::FindEffective / ProjectMayShadow),
+// exercised against real registries.
 namespace {
-class FixedCommand : public commands::Command {
+class FixedCommand : public commands::HarnessCommand {
 public:
     explicit FixedCommand(std::string name) : name_(std::move(name)), usage_("/" + name_) {}
     std::string_view Name() const override { return name_; }
@@ -695,32 +719,236 @@ private:
 };
 }  // namespace
 
-TEST_CASE("AcceptNonColliding: an untrusted file colliding with a registered command is "
-          "vetoed; trusted files are not",
+TEST_CASE("FindEffective: a project command shadows a global prompt shorthand, never a "
+          "harness command",
           "[commands_md][invariant]") {
-    // A duplicate surface name is a FATAL startup collision, so a cloned
-    // repo's commands/help.md would otherwise refuse to let the server start.
-    // The veto drops the project-local file; the earlier registration wins.
+    // A repo-shipped commands/connect.md must not take over /connect: the
+    // user's typed API key would be submitted to the model as a turn.
     testing::TempDir project;
     testing::TempDir global;
-    std::ofstream(project.path() / "help.md") << "---\ndescription: PROJECT\n---\nProject.\n";
+    std::ofstream(project.path() / "connect.md") << "---\ndescription: PROJECT\n---\n$ARGUMENTS\n";
     std::ofstream(project.path() / "deploy.md") << "---\ndescription: P deploy\n---\n.\n";
-    // A TRUSTED file colliding with the same name: the operator wrote it, so
-    // the collision stays the loud fatal it always was -- it is not vetoed.
-    std::ofstream(global.path() / "cost.md") << "---\ndescription: GLOBAL cost\n---\n.\n";
+    std::ofstream(project.path() / "review.md") << "---\ndescription: P review\n---\n.\n";
+    std::ofstream(global.path() / "review.md") << "---\ndescription: G review\n---\n.\n";
 
+    commands::CommandRegistry global_registry;
+    global_registry.Register(std::make_unique<FixedCommand>("connect"));
+    for (auto& command : LoadCommands({{global.path(), true}})) {
+        global_registry.Register(std::move(command));
+    }
+    commands::CommandRegistry project_registry;
+    for (auto& command : LoadCommands({{project.path(), false}})) {
+        project_registry.Register(std::move(command));
+    }
+
+    const auto* connect = commands::FindEffective(global_registry, &project_registry, "connect");
+    REQUIRE(connect != nullptr);
+    CHECK(connect->Summary() == "already registered");  // harness command holds its name
+    const auto* review = commands::FindEffective(global_registry, &project_registry, "review");
+    REQUIRE(review != nullptr);
+    CHECK(review->Summary() == "P review");  // md-over-md: the project wins
+    const auto* deploy = commands::FindEffective(global_registry, &project_registry, "deploy");
+    REQUIRE(deploy != nullptr);
+    CHECK(deploy->Summary() == "P deploy");  // project-only
+}
+
+TEST_CASE("commands-md: an untrusted command with an agent/model override but no sources "
+          "still asks first",
+          "[commands_md][invariant]") {
+    testing::CommandFixture fixture;
+    testing::TempDir files;
     commands::CommandRegistry registry;
-    registry.Register(std::make_unique<FixedCommand>("help"));
-    const auto commands = LoadCommands({{project.path(), false}, {global.path(), true}},
-                                       [&registry](const MdCommandSpec& spec) {
-                                           return AcceptNonColliding(registry, spec);
-                                       });
+    auto commands = WriteAndLoad(files.path(), "route.md",
+                                 "---\nagent: build\n---\nDo it\n", /*trusted=*/false);
+    for (auto& command : commands) registry.Register(std::move(command));
 
-    CHECK(Find(commands, "help") == nullptr);    // untrusted collision: skipped
-    CHECK(Find(commands, "deploy") != nullptr);  // untrusted, no collision: kept
-    CHECK(Find(commands, "cost") != nullptr);    // trusted collision: kept (fatal path)
+    const auto declined = DispatchOne(registry, fixture, "route", {}, /*answer=*/"cancel");
+    CHECK(declined.status == commands::CommandResult::Status::kError);
+    CHECK(fixture.submitted_turns().empty());
 
-    // The registered command still holds its slot: no collision, startup lives.
-    REQUIRE(registry.Find("help") != nullptr);
-    CHECK(registry.Find("help")->Summary() == "already registered");
+    const auto confirmed = DispatchOne(registry, fixture, "route", {}, /*answer=*/"run");
+    CHECK(confirmed.status == commands::CommandResult::Status::kOk);
+    CHECK(fixture.submitted_turns().size() == 1);
+}
+
+TEST_CASE("commands-md: a placeholder after an unmatched '{' still substitutes",
+          "[commands_md]") {
+    // Regression: an unknown token copied everything up to the first '}' and
+    // resumed past it, so in `{"q": "{args}"}` the real {args} was swallowed.
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    auto commands = WriteAndLoad(
+        files.path(), "json.md",
+        R"(---
+sources:
+  x:
+    sh: "echo '{\"n\": {1}}'"
+---
+Query {"q": "{args}"} got {x}
+)");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "json", {"hello"});
+    CAPTURE(result.message);
+    REQUIRE(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE(fixture.submitted_turns().size() == 1);
+    CHECK(fixture.submitted_turns().front() == "Query {\"q\": \"hello\"} got {\"n\": hello}\n");
+}
+
+TEST_CASE("commands-md: a sh: substitution is escaped for its quoting context",
+          "[commands_md][compat]") {
+    // opencode's idiomatic `"$1"`: context-blind wrapping produced "'v'" and
+    // the generator saw the quotes. Each context must yield the value exactly,
+    // and a hostile value must break out of none of them.
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    auto commands = WriteAndLoad(
+        files.path(), "quotes.md",
+        "---\n---\nbare=!`printf '%s' $1` dq=!`printf '%s' \"$1\"` "
+        "sq=!`printf '%s' '$1'` mid=!`printf '%s' \"<$1>\"`\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const std::string value = "a'b\"c$HOME`x`\\d";
+    const auto result = DispatchOne(registry, fixture, "quotes", {value});
+    CAPTURE(result.message);
+    REQUIRE(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE(fixture.submitted_turns().size() == 1);
+    CHECK(fixture.submitted_turns().front() == "bare=" + value + " dq=" + value + " sq=" + value +
+                                                   " mid=<" + value + ">\n");
+}
+
+TEST_CASE("ParseCommandFile: names are checked after desugaring; anonymous sources avoid "
+          "taken names",
+          "[commands_md]") {
+    testing::TempDir dir;
+    const auto write = [&dir](const std::string& file, const std::string& contents) {
+        std::ofstream(dir.path() / file) << contents;
+        return ParseCommandFile(dir.path() / file, true);
+    };
+
+    // A declared `cmd1` and an injection: the injection takes the next free name.
+    const auto spec = write("mixed.md",
+                            "---\nsources:\n  cmd1:\n    run: [\"/bin/echo\", \"a\"]\n---\n"
+                            "{cmd1} !`echo b`\n");
+    REQUIRE(spec.sources.size() == 2);
+    CHECK(spec.sources[1].name == "cmd2");
+    CHECK(spec.body == "{cmd1} {cmd2}\n");
+
+    // Reserved names and cross-kind duplicates are load errors.
+    CHECK_THROWS(write("reserved.md", "---\nargs: [args]\n---\n{args}\n"));
+    CHECK_THROWS(write("digit.md", "---\noptional: [\"2\"]\n---\n{2}\n"));
+    CHECK_THROWS(write("dup.md", "---\nargs: [x]\noptional: [x]\n---\n{x}\n"));
+}
+
+TEST_CASE("ParseCommandFile: json output cannot confirm an overrun, and fails by default",
+          "[commands_md]") {
+    testing::TempDir dir;
+    const auto write = [&dir](const std::string& file, const std::string& contents) {
+        std::ofstream(dir.path() / file) << contents;
+        return ParseCommandFile(dir.path() / file, true);
+    };
+    const std::string json_source =
+        "---\nsources:\n  j:\n    run: [\"/bin/echo\", \"{}\"]\n"
+        "    output: {type: json, fields: [a]}\n";
+    CHECK_THROWS(write("confirm.md", json_source + "    output_cap: {on_exceed: confirm}\n---\n.\n"));
+    const auto spec = write("default.md", json_source + "---\n.\n");
+    REQUIRE(spec.sources.size() == 1);
+    CHECK(spec.sources[0].on_exceed == CapAction::Fail);
+}
+
+TEST_CASE("ParseCommandFile: a whitespace-only body is no body; untypeable names are rejected",
+          "[commands_md]") {
+    testing::TempDir dir;
+    std::ofstream(dir.path() / "blank.md")
+        << "---\nsources:\n  x:\n    run: [\"/bin/echo\", \"hi\"]\n---\n  \n\n";
+    CHECK(ParseCommandFile(dir.path() / "blank.md", true).body.empty());
+
+    std::ofstream(dir.path() / "my cmd.md") << "body\n";
+    CHECK_THROWS(ParseCommandFile(dir.path() / "my cmd.md", true));
+    std::ofstream(dir.path() / "-dash.md") << "body\n";
+    CHECK_THROWS(ParseCommandFile(dir.path() / "-dash.md", true));
+    std::ofstream(dir.path() / "ok_name-1.2.md") << "body\n";
+    CHECK(ParseCommandFile(dir.path() / "ok_name-1.2.md", true).name == "ok_name-1.2");
+}
+
+TEST_CASE("/help lists the effective catalog: project commands in, non-shadowable ones out",
+          "[commands_md][commands]") {
+    // fixture.registry holds the real core commands (and /help over them).
+    testing::CommandFixture fixture;
+    testing::TempDir project;
+    std::ofstream(project.path() / "deploy.md") << "---\ndescription: P deploy\n---\n.\n";
+    // Named like a core command: dispatch keeps the core one, so /help must too.
+    std::ofstream(project.path() / "clear.md") << "---\ndescription: P clear\n---\n.\n";
+    commands::CommandRegistry project_registry;
+    for (auto& command : LoadCommands({{project.path(), false}})) {
+        project_registry.Register(std::move(command));
+    }
+
+    commands::CommandContext context(&fixture, fixture.registry_presets_for_test(),
+                                     fixture.confirmations, common::DefaultLogger(), nullptr,
+                                     &project_registry);
+    const auto listing = commands::Dispatch(fixture.registry, "help", {}, context,
+                                            /*busy=*/false, &project_registry);
+    REQUIRE(listing.status == commands::CommandResult::Status::kOk);
+    CHECK(listing.message.find("/deploy  -  P deploy") != std::string::npos);
+    CHECK(listing.message.find("P clear") == std::string::npos);
+    CHECK(listing.message.find("/clear  -  ") != std::string::npos);
+
+    commands::CommandArgs one;
+    one.positional = {"deploy"};
+    const auto explained = commands::Dispatch(fixture.registry, "help", one, context,
+                                              /*busy=*/false, &project_registry);
+    CHECK(explained.status == commands::CommandResult::Status::kOk);
+    CHECK(explained.message.find("P deploy") != std::string::npos);
+}
+
+TEST_CASE("commands-md: cancelling kills a running generator and submits nothing",
+          "[commands_md]") {
+    // Regression: generators ran on the session worker with only their own
+    // timeout (600 s by default) to end them; a cancel did nothing.
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    auto commands = WriteAndLoad(files.path(), "slow.md",
+                                 "---\nsources:\n  x:\n    sh: \"sleep 30\"\n"
+                                 "    timeout: 60\n---\n{x}\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    std::thread canceller([&fixture] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        fixture.cancel_requested = true;
+    });
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = DispatchOne(registry, fixture, "slow", {});
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    canceller.join();
+
+    CAPTURE(result.message);
+    CHECK(result.status == commands::CommandResult::Status::kError);
+    CHECK(result.message.find("cancelled") != std::string::npos);
+    CHECK(fixture.submitted_turns().empty());
+    CHECK(elapsed < std::chrono::seconds(10));
+}
+
+TEST_CASE("FingerprintCommandDirs changes when a command file is added, edited or removed",
+          "[commands_md]") {
+    testing::TempDir dir;
+    const std::vector<CommandDir> dirs{{dir.path() / "commands", false},
+                                       {dir.path() / "missing", false}};
+    const std::string none = FingerprintCommandDirs(dirs);   // no dir yet
+    std::filesystem::create_directories(dir.path() / "commands");
+    std::ofstream(dir.path() / "commands" / "a.md") << "one\n";
+    const std::string added = FingerprintCommandDirs(dirs);
+    CHECK(added != none);
+    CHECK(FingerprintCommandDirs(dirs) == added);   // stable while nothing changes
+
+    // An edit that changes the size (mtime alone can share a coarse tick).
+    std::ofstream(dir.path() / "commands" / "a.md") << "one, edited\n";
+    const std::string edited = FingerprintCommandDirs(dirs);
+    CHECK(edited != added);
+
+    std::filesystem::remove(dir.path() / "commands" / "a.md");
+    CHECK(FingerprintCommandDirs(dirs) != edited);
 }

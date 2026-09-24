@@ -8,6 +8,8 @@
 // here is REAL, though -- /clear and /compact act on it, and a fake loop would
 // only assert that the fake was called.
 
+#include <atomic>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <fstream>
@@ -196,6 +198,13 @@ public:
     // Flipped by a test to exercise the failure path (empty name / write
     // error surfaced as a command error).
     bool rename_ok = true;
+
+    // Set (from any thread) to cancel a running command, the way the
+    // session's CancelTurn would.
+    std::atomic<bool> cancel_requested{false};
+    std::function<bool()> CancelProbe() const override {
+        return [this] { return cancel_requested.load(); };
+    }
 
     // Replaces providers.json wholesale -- for tests that exercise discover
     // entries beside the static fixture. Call ReloadPresets() afterwards.

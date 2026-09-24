@@ -747,9 +747,10 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
     // then run fine through Session::ExecuteCommand's own Dispatch call --
     // both must agree, or the unknown-command refusal below fires before the
     // command ever gets a chance to run.
-    const commands::CommandRegistry* project_registry =
-        project_commands_ != nullptr ? &project_commands_->For(session.info().project_root)
+    const std::shared_ptr<const commands::CommandRegistry> project_holder =
+        project_commands_ != nullptr ? project_commands_->For(session.info().project_root)
                                      : nullptr;
+    const commands::CommandRegistry* project_registry = project_holder.get();
     const commands::Command* command =
         commands_ != nullptr ? commands::FindEffective(*commands_, project_registry, queued.name)
                              : nullptr;
@@ -769,7 +770,10 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
         session.RejectCommand(queued, commands::SubagentRefusalMessage(queued.name));
         return;
     }
-    if (command != nullptr && command->ReadOnly()) {
+    // ReadOnlyFor, not ReadOnly: the invocation decides where it runs (a
+    // bare /model opens a picker now, not after the turn); the subagent
+    // guard above stays on the static answer.
+    if (command != nullptr && command->ReadOnlyFor(queued.args)) {
         // On the bounded command pool, not a detached thread: a detached task
         // per command made a flood of read-only commands an unbounded pile of
         // never-joined threads and left a shutdown window where a still-running
@@ -1441,9 +1445,7 @@ grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
     // invocation with "the /-command subsystem is not available".
     if (commands_ == nullptr) return grpc::Status::OK;
 
-    std::set<std::string> seen;   // surface names already emitted (project shadows global)
-    const auto append = [response, &seen](const commands::CommandRegistry::Entry& entry) {
-        if (!seen.insert(entry.surface).second) return;   // already emitted by the project pass
+    const auto append = [response](const commands::CommandRegistry::Entry& entry) {
         const commands::Command* command = entry.command;
         // The SURFACE name -- the alias applied, the key Find() resolves --
         // not the command's own Name(): an aliased command advertised under
@@ -1479,24 +1481,28 @@ grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
         }
     };
 
-    // The project-scoped half FIRST -- a project command shadows a global one
-    // of the same name (append's `seen` guard is what makes that stick),
-    // matching how a project's own agents/<name>.md already shadows a global
-    // preset. request->project_root() empty (no project_root given, or the
-    // requester has none yet) means this pass is simply empty: For("") is a
-    // permanently-empty registry, not an error.
-    if (project_commands_ != nullptr && !request->project_root().empty()) {
-        for (const auto& entry : project_commands_->For(request->project_root()).All()) {
-            append(entry);
+    // The effective catalog -- the same shadowing rule dispatch applies
+    // (commands::EffectiveCatalog). request->project_root() empty (no
+    // project_root given, or the requester has none yet) means global only:
+    // For("") would be a permanently-empty registry anyway. The project slice
+    // is resolved fresh per call, since a client may ask about a different
+    // project_root on a later call within the same connection.
+    // A session id names its own root (the client need not track roots per
+    // tab); an unknown id falls back to the explicit project_root.
+    std::filesystem::path project_root = request->project_root();
+    if (!request->session_id().empty()) {
+        if (const auto session = sessions_.Find(request->session_id())) {
+            project_root = session->info().project_root;
         }
     }
-
-    // The global half: fetched once at connect and never again for THIS
-    // slice (plugins load at startup and config is read once, so it cannot
-    // change mid-connection); the project slice above, by contrast, is
-    // resolved fresh per call, since a client may ask about a different
-    // project_root on a later call within the same connection.
-    for (const auto& entry : commands_->All()) append(entry);
+    const std::shared_ptr<const commands::CommandRegistry> project_registry =
+        project_commands_ != nullptr && !project_root.empty()
+            ? project_commands_->For(project_root)
+            : nullptr;
+    for (const auto& entry :
+         commands::EffectiveCatalog(*commands_, project_registry.get())) {
+        append(entry);
+    }
     return grpc::Status::OK;
 }
 

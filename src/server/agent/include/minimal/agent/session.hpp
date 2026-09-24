@@ -613,6 +613,17 @@ public:
         SetName(name);
         return true;
     }
+    // The cancel generation as of NOW, not the last popped turn's base: a
+    // Cancel that ended an earlier turn must not read as cancelling this
+    // command. `this` outlives the probe -- it is used only inside the
+    // command's own Execute.
+    std::function<bool()> CancelProbe() const override {
+        const std::uint64_t base = cancel_gen_.load(std::memory_order_acquire);
+        return [this, base] {
+            return cancel_gen_.load(std::memory_order_acquire) != base ||
+                   terminated_.load(std::memory_order_acquire);
+        };
+    }
 
 
 

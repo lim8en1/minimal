@@ -29,6 +29,7 @@
 //      directory resolution the server uses.
 
 #include <filesystem>
+#include <string>
 
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
@@ -251,8 +252,8 @@ void minimal_plugin_register_commands(minimal::commands::CommandRegistry&,
 // first time a session rooted at `project_root` needs its command catalog
 // (PluginLoader::RegisterProjectCommands, driven by
 // minimal::commands::ProjectCommandSource's per-root cache), and the result is
-// cached for that root's remaining lifetime -- config is static once loaded,
-// the same rule every other registry in this tree follows.
+// cached for that root -- rebuilt only when the plugin's OPTIONAL
+// minimal_plugin_project_commands_fingerprint (below) reports a change.
 //
 // `registry` is a FRESH, project-scoped CommandRegistry -- never the global
 // one register_commands populates, and never shared between roots. A name
@@ -265,6 +266,20 @@ void minimal_plugin_register_commands(minimal::commands::CommandRegistry&,
 void minimal_plugin_register_project_commands(
     minimal::commands::CommandRegistry& registry, const std::filesystem::path& project_root,
     const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL, meaningful only beside register_project_commands: a cheap
+// summary of whatever this plugin's project commands for `project_root` are
+// built FROM (commands-md: its directories' and files' mtimes). The
+// ProjectCommandSource cache calls it on every lookup for that root and
+// rebuilds the root's registry -- asking every plugin's
+// register_project_commands again -- when any plugin's value changed, so an
+// edited command file takes effect without a server restart. Must be cheap
+// (stat-level, no parsing) and must not throw; it writes its value into
+// `out` (empty on entry; leaving it empty is a valid value -- an out-param
+// rather than a return, since a C-linkage function cannot return
+// std::string). A plugin without it never triggers a rebuild.
+void minimal_plugin_project_commands_fingerprint(const std::filesystem::path& project_root,
+                                                 std::string& out);
 
 // OPTIONAL, additive: contributes services other plugins may reach. Each
 // registration is an (name, abstract-interface pointer) pair; the interface

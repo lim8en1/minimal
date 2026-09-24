@@ -95,7 +95,7 @@ SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output)
     s.cache_read_tokens = cache_read_tokens_;
     s.cache_write_tokens = cache_write_tokens_;
     s.cancel_requested = cancel_requested_;
-    s.turn_in_flight = turn_in_flight_;
+    s.turn_in_flight = turn_in_flight_ || !commands_in_flight_.empty();
     s.live_view_truncated = live_view_truncated_;
     s.model = model_;
     s.agent_preset = agent_preset_;
@@ -200,7 +200,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.cache_read_tokens = cache_read_tokens_;
     s.cache_write_tokens = cache_write_tokens_;
     s.cancel_requested = cancel_requested_;
-    s.turn_in_flight = turn_in_flight_;
+    s.turn_in_flight = turn_in_flight_ || !commands_in_flight_.empty();
     s.live_view_truncated = live_view_truncated_;
     s.transcript_version = transcript_version_;
     s.turn_ended = turn_ended_;
@@ -673,6 +673,12 @@ void SessionState::OnCommandResult(const v1::CommandResult& evt) {
     // status line, dead on arrival.
     latest_notice_ = NoticeFromCommandResult(evt);
     ++notice_seq_;
+    commands_in_flight_.erase(evt.request_id());
+}
+
+void SessionState::OnCommandSent(const std::string& request_id) {
+    std::lock_guard lk(mtx_);
+    commands_in_flight_.insert(request_id);
 }
 
 bool SessionState::ClearNotice() {
@@ -906,6 +912,7 @@ void SessionState::OnError(const std::string& error_message) {
     is_streaming_ = false;
     turn_ended_ = true;   // the errored turn is over; the next stream is a new one
     turn_in_flight_ = false;   // dead streams end turns too -- the probe must not latch
+    commands_in_flight_.clear();   // nothing will answer them on this stream
     cancel_requested_ = false;   // a cancel can BE the error path (dead stream)
     pending_permission_.reset();
     pending_confirmation_.reset();
@@ -953,6 +960,7 @@ void SessionState::OnSessionEnded() {
     is_streaming_ = false;
     turn_ended_ = true;   // terminal: a final newest-fetch may still swap the partial stream
     turn_in_flight_ = false;   // terminal -- the probe must not survive the session
+    commands_in_flight_.clear();
     cancel_requested_ = false;
     pending_permission_.reset();
     pending_confirmation_.reset();
@@ -2930,6 +2938,20 @@ void AppState::RequestSuggestPathsForRoot(const std::string& project_root,
     });
 }
 
+void AppState::RequestListCommands(
+    const std::string& session_id, const std::string& project_root,
+    std::function<void(std::optional<v1::ListCommandsResponse>)> on_result) {
+    rpc_queue_.Submit([this, session_id, project_root, on_result = std::move(on_result)] {
+        auto result = client_->ListCommands(project_root, session_id);
+        if (on_result) {
+            on_result(result.status.ok()
+                          ? std::optional<v1::ListCommandsResponse>(std::move(result.response))
+                          : std::nullopt);
+        }
+        BumpUiVersion();   // wake the pump so the next frame reads the new catalog
+    });
+}
+
 void AppState::AnswerPermission(const std::string& session_id, const std::string& request_id,
                                 v1::PermissionDecision decision,
                                 std::vector<std::string> granted_keys, std::string deny_message,
@@ -3075,6 +3097,7 @@ void AppState::SendCommand(const std::string& session_id, const std::string& lin
         command->mutable_args()->add_positional(value);
     }
     command->mutable_args()->set_raw(invocation.raw);
+    if (auto state = GetState(session_id)) state->OnCommandSent(command->request_id());
     // A refused send is surfaced, not swallowed -- same rule as SendChatTurn/
     // AnswerPermission/AnswerConfirmation: a `/`-command silently vanishing
     // reads as "the harness ignored me", indistinguishable from it having
@@ -3494,6 +3517,16 @@ std::string AppState::FocusedSessionId() const {
         if (tab.info.tab_id == focused_id_) return tab.info.session_id;
     }
     return std::string{};
+}
+
+AppState::CommandScope AppState::FocusedCommandScope() const {
+    std::lock_guard lk(mtx_);
+    for (const auto& tab : tabs_) {
+        if (tab.info.tab_id != focused_id_) continue;
+        if (!tab.info.session_id.empty()) return {tab.info.session_id, {}};
+        return {{}, tab.pending_create.project_root};
+    }
+    return {};
 }
 
 std::string AppState::FocusedTabId() const {
