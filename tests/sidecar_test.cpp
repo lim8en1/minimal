@@ -77,6 +77,62 @@ TEST_CASE("Launch runs a child and the drain captures merged output", "[sidecar]
     CHECK(outcome.sinks[0].text == "hello\noops\n");
 }
 
+namespace {
+
+// stdin from a kSource pipe, stdout+stderr merged into one capped sink.
+DrainOutcome RunWithStdin(const std::string& script, std::string payload,
+                          std::int64_t timeout_ms = 10000) {
+    LaunchSpec spec = SimpleSpec(script);
+    spec.pipes.push_back(PipePlan{PipePlan::ChildEnd::kRead, {{STDIN_FILENO, false}}});
+    auto launched = Launch(spec);
+    REQUIRE(launched.ok);
+    std::vector<PipeSink> sinks(2);
+    sinks[0].mode = PipeSink::Mode::kCapped;
+    sinks[0].cap = 4 * 1024 * 1024;
+    sinks[1].mode = PipeSink::Mode::kSource;
+    sinks[1].payload = std::move(payload);
+    DrainOptions options;
+    options.timeout_ms = timeout_ms;
+    return DrainAndReap(std::move(launched), std::move(sinks), options, {});
+}
+
+}  // namespace
+
+TEST_CASE("A source pipe delivers its payload to the child's stdin, then EOF",
+          "[sidecar][process]") {
+    // Larger than any pipe buffer, so the write is interleaved with draining
+    // the child's echo of it -- a blocking write-then-read would deadlock.
+    const std::string payload(1024 * 1024, 'x');
+    const auto outcome = RunWithStdin("cat", payload);
+    CHECK_FALSE(outcome.timed_out);
+    CHECK(WIFEXITED(outcome.wait_status));
+    CHECK(outcome.sinks[0].text.size() == payload.size());
+}
+
+TEST_CASE("An empty source payload is EOF at once, not a wait for the deadline",
+          "[sidecar][process]") {
+    const auto started = std::chrono::steady_clock::now();
+    const auto outcome = RunWithStdin("cat; echo done", "", 5000);
+    CHECK_FALSE(outcome.timed_out);
+    CHECK(outcome.sinks[0].text == "done\n");
+    CHECK(std::chrono::steady_clock::now() - started < 3s);
+}
+
+TEST_CASE("A child that never reads its stdin does not stall or crash the drain",
+          "[sidecar][process]") {
+    const std::string payload(1024 * 1024, 'y');
+    const auto outcome = RunWithStdin("echo ignored", payload, 5000);
+    CHECK_FALSE(outcome.timed_out);
+    CHECK(WIFEXITED(outcome.wait_status));
+    CHECK(outcome.sinks[0].text == "ignored\n");
+}
+
+TEST_CASE("timeout_ms 0 means no deadline", "[sidecar][process]") {
+    const auto outcome = RunToCompletion("sleep 0.2; echo late", /*timeout_ms=*/0);
+    CHECK_FALSE(outcome.timed_out);
+    CHECK(outcome.sinks[0].text == "late\n");
+}
+
 TEST_CASE("A passthrough child fd (CLOEXEC cleared) survives exec", "[sidecar][process]") {
     // fd 3 is the pattern the python interpreter rides on: a pipe end that
     // must survive exec, kept distinct from the real stdout/stderr. Without

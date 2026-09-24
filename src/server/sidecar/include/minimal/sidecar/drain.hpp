@@ -39,10 +39,16 @@ struct PipeSink {
                    // clear the payload, and keep draining (discard)
         kDiscard,  // read and throw away (a channel that must drain or the
                    // child blocks writing it, but whose content is unwanted)
+        kSource,   // the child READS this pipe: the parent writes `payload`,
+                   // interleaved with the draining, then closes it -- EOF
+                   // tells the child the payload is complete. Empty payload:
+                   // closed before the first poll. Writing stops quietly if
+                   // the child exits or closes its end first.
     };
     Mode mode = Mode::kDiscard;
     std::int64_t cap = 0;
     std::function<void(std::string_view)> emit;  // kCapped only; may be empty
+    std::string payload;                         // kSource only
 
     // Whether this pipe counts toward DrainOptions::idle_after_reap_ms's
     // "detached grandchild" check. True for a sink a caller's OWN child is
@@ -66,7 +72,7 @@ struct PipeSink {
 };
 
 struct DrainOptions {
-    std::int64_t timeout_ms = 0;
+    std::int64_t timeout_ms = 0;   // 0 = no deadline (cancellation still applies)
     int slice_ms = 50;             // drain-poll slice: the cancel-latency bound
     int reap_slice_ms = 10;        // WNOHANG poll slice after EOF
     int post_kill_reap_ms = 5000;  // ceiling on the post-kill reap (D-state bound)

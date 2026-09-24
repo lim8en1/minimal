@@ -15,6 +15,8 @@
 #include <mutex>
 #include <set>
 
+extern char** environ;
+
 namespace minimal::sidecar {
 
 namespace {
@@ -165,6 +167,18 @@ std::string ResolveOnPath(const std::string& name) {
 
 // --- Launch ------------------------------------------------------------------------------
 
+std::map<std::string, std::string> CurrentEnvironment() {
+    std::map<std::string, std::string> env;
+    if (environ == nullptr) return env;
+    for (char** entry = environ; *entry != nullptr; ++entry) {
+        const char* equals = std::strchr(*entry, '=');
+        if (equals == nullptr || equals == *entry) continue;  // malformed / empty key
+        env.emplace(std::string(*entry, static_cast<std::size_t>(equals - *entry)),
+                    std::string(equals + 1));
+    }
+    return env;
+}
+
 Launched Launch(const LaunchSpec& spec) {
     Launched proc;
 
@@ -245,7 +259,8 @@ Launched Launch(const LaunchSpec& spec) {
     // child before exec. Clamping keeps the spawn alive -- the child runs
     // under the host's own ceiling, the tightest enforceable backstop.
     rlim_t cpu = spec.cpu_seconds > 0 ? static_cast<rlim_t>(spec.cpu_seconds) : RLIM_INFINITY;
-    rlim_t fsize = static_cast<rlim_t>(spec.file_size_bytes);
+    rlim_t fsize =
+        spec.file_size_bytes > 0 ? static_cast<rlim_t>(spec.file_size_bytes) : RLIM_INFINITY;
     {
         rlimit inherited{};
         if (getrlimit(RLIMIT_CPU, &inherited) == 0) {
