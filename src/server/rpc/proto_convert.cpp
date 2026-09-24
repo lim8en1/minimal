@@ -654,6 +654,7 @@ v1::PermissionRequest ToProto(const tools::PermissionRequest& request) {
         grant->set_label(offer.label);
     }
     out.set_complete(request.disclosure.complete);
+    out.set_reason(request.reason);
     return out;
 }
 

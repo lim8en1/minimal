@@ -172,7 +172,12 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
         Elements rows;
         rows.push_back(text("permission required") | bold | color(theme.ColorFor("attention")));
         rows.push_back(text("tool: " + request.tool_name) | Muted(theme));
-        rows.push_back(paragraph(request.summary));
+        rows.push_back(paragraph(request.summary));  // rows[2]: the scroll anchor below
+        if (!request.reason.empty()) {
+            // Which rule is asking -- the answer to "why am I being asked
+            // this?", and the line to edit to stop being asked.
+            rows.push_back(paragraph("asking because " + request.reason) | Muted(theme));
+        }
         if (!request.complete) {
             // THE LOWER-BOUND OBLIGATION: say what the disclosure does not
             // cover, so "allow" is never read as "exactly this command".
@@ -193,7 +198,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
                     static_cast<std::size_t>(i) < toggles.selected.size() && toggles.selected[i];
                 auto row = hbox({text(checked ? "[x] " : "[ ] "),
                                  text("allow " + request.grants[i].label() +
-                                      " · any arguments, this session") |
+                                      " · this session") |
                                      color(theme.ColorFor("attention"))});
                 row |= reflect(state->grant_boxes[i]);
                 if (i == state->cursor) {

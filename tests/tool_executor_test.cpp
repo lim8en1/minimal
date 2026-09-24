@@ -1325,3 +1325,181 @@ TEST_CASE("a tool without stages keeps whole-line pattern semantics",
     CHECK_FALSE(executor.Run("t1", "bash", {{"command", "rm -rf /"}}, ctx).is_error);
     REQUIRE(checker.called);
 }
+
+// --- ask patterns vs session grants ------------------------------------------------
+
+TEST_CASE("an ask pattern is never satisfied by a held grant",
+          "[tool_executor][patterns][grants][invariant]") {
+    // A grant is blanket per binary; an operator's `ask` pattern names ONE
+    // invocation shape. The grant minted from `git status` must not carry
+    // `git push --force` past `"git push *": ask`.
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    bash.set_disclosure(Disclosing({"bash:/usr/bin/git"}));
+    GrantingPermissionChecker checker;
+
+    tools::PermissionPolicy policy = AskExecutePolicy();
+    policy.pattern_overrides["bash"].push_back({"git push *", PermissionMode::Ask});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    CHECK_FALSE(executor.Run("t1", "bash", {{"command", "git status"}}, ctx).is_error);
+    REQUIRE(checker.seen.size() == 1);  // category ask: prompted, grant minted
+    CHECK_FALSE(executor.Run("t2", "bash", {{"command", "git log"}}, ctx).is_error);
+    CHECK(checker.seen.size() == 1);    // the grant satisfies a category ask
+    CHECK_FALSE(executor.Run("t3", "bash", {{"command", "git push --force"}}, ctx).is_error);
+    CHECK(checker.seen.size() == 2);    // ...but never a pattern ask
+}
+
+TEST_CASE("a ceiling's ask pattern is not satisfied by seeded grants",
+          "[tool_executor][patterns][grants][invariant]") {
+    // A child inherits the parent's grants AND the parent's policy as its
+    // ceiling; the inherited grant must not answer the parent's ask pattern.
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    bash.set_disclosure(Disclosing({"bash:/usr/bin/git"}));
+    GrantingPermissionChecker checker;
+
+    tools::PermissionPolicy ceiling = AskExecutePolicy();
+    ceiling.pattern_overrides["bash"].push_back({"git push *", PermissionMode::Ask});
+    tools::ToolExecutor executor(f.registry, checker, AskExecutePolicy(), {},
+                                 PermissionRunMode::Normal, ceiling, std::nullopt,
+                                 {"bash:/usr/bin/git"});
+    auto ctx = f.Context();
+
+    CHECK_FALSE(executor.Run("t1", "bash", {{"command", "git status"}}, ctx).is_error);
+    CHECK(checker.seen.empty());
+    CHECK_FALSE(executor.Run("t2", "bash", {{"command", "git push origin"}}, ctx).is_error);
+    CHECK(checker.seen.size() == 1);
+}
+
+// --- policy swap ---------------------------------------------------------------------
+
+TEST_CASE("SetPolicies replaces the gate a preset switch installs",
+          "[tool_executor][policy]") {
+    Fixture f;
+    f.AddTool("write", ToolCategory::FileWrite);
+    AlwaysAllowPermissionChecker checker;
+
+    tools::PermissionPolicy build;  // file_write: ask
+    tools::ToolExecutor executor(f.registry, checker, build, {}, PermissionRunMode::Normal,
+                                 std::nullopt, std::nullopt, {"bash:/usr/bin/git"});
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("t1", "write", nlohmann::json::object(), ctx).is_error);
+    CHECK(checker.seen.size() == 1);
+
+    tools::PermissionPolicy plan;
+    plan.file_write = PermissionMode::AlwaysDeny;
+    executor.SetPolicies(plan, {});
+    CHECK(executor.Run("t2", "write", nlohmann::json::object(), ctx).is_error);
+    CHECK(checker.seen.size() == 1);  // denied by policy, never prompted
+    // Grants are the session's, not the preset's: they survive the swap.
+    CHECK(executor.granted_keys() == std::vector<std::string>{"bash:/usr/bin/git"});
+}
+
+// --- MCP per-tool rules ------------------------------------------------------------
+
+TEST_CASE("an MCP tool's per-tool rule refines its server's mode",
+          "[tool_executor][mcp]") {
+    Fixture f;
+    f.AddTool("mcp__gh__get_issue", ToolCategory::ReadOnly);
+    f.AddTool("mcp__gh__delete_repo", ToolCategory::ReadOnly);
+    AlwaysAllowPermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.per_tool_overrides["mcp__gh__get_issue"] = PermissionMode::AlwaysAllow;
+    tools::McpPermissionPolicy mcp;  // default_mode: ask
+    tools::ToolExecutor executor(f.registry, checker, policy, mcp, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    CHECK_FALSE(executor.Run("t1", "mcp__gh__get_issue", nlohmann::json::object(), ctx).is_error);
+    CHECK(checker.seen.empty());  // the tool rule allows it
+    CHECK_FALSE(
+        executor.Run("t2", "mcp__gh__delete_repo", nlohmann::json::object(), ctx).is_error);
+    CHECK(checker.seen.size() == 1);  // the server's ask stands
+}
+
+TEST_CASE("a global MCP tool allow cannot widen a preset's per-server deny",
+          "[tool_executor][mcp]") {
+    tools::PermissionOverrideLayer global;
+    global.per_tool_overrides["mcp__gh__get_issue"] = PermissionMode::AlwaysAllow;
+    tools::PermissionPolicy policy;
+    policy.layers = std::make_shared<const tools::ToolModeLayers>(
+        tools::ToolModeLayers{tools::PermissionOverrideLayer{}, global, true});
+
+    tools::McpPermissionPolicy preset_denies;
+    preset_denies.per_server["gh"] = PermissionMode::AlwaysDeny;
+    CHECK(tools::resolve_mcp_tool_mode(policy, preset_denies, "gh", "mcp__gh__get_issue") ==
+          PermissionMode::AlwaysDeny);
+
+    tools::McpPermissionPolicy global_default;  // preset silent on gh: ask default
+    CHECK(tools::resolve_mcp_tool_mode(policy, global_default, "gh", "mcp__gh__get_issue") ==
+          PermissionMode::AlwaysAllow);
+}
+
+// --- explanations ------------------------------------------------------------------
+
+TEST_CASE("a denial names the rule that denied it", "[tool_executor][explain]") {
+    Fixture f;
+    f.AddTool("write", ToolCategory::FileWrite);
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionOverrideLayer plan;
+    plan.file_write = PermissionMode::AlwaysDeny;
+    tools::PermissionPolicy policy;
+    policy.layers = std::make_shared<const tools::ToolModeLayers>(
+        tools::ToolModeLayers{plan, tools::PermissionOverrideLayer{}, true});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    const auto block = executor.Run("t1", "write", nlohmann::json::object(), ctx);
+    REQUIRE(block.is_error);
+    CHECK(TextOf(block).find("preset: file_write=deny") != std::string::npos);
+}
+
+TEST_CASE("a prompt carries the rule that made it ask", "[tool_executor][explain]") {
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    AlwaysAllowPermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.execute = PermissionMode::AlwaysAllow;
+    policy.pattern_overrides["bash"].push_back({"git push *", PermissionMode::Ask});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    CHECK_FALSE(executor.Run("t1", "bash", {{"command", "git push origin"}}, ctx).is_error);
+    REQUIRE(checker.seen.size() == 1);
+    CHECK(checker.seen[0].reason == "pattern `git push *`=ask");
+}
+
+TEST_CASE("Explain names folds, ceilings and run modes", "[tool_executor][explain]") {
+    Fixture f;
+    auto& fetch = f.AddTool("web_fetch", ToolCategory::ReadOnly);
+    fetch.set_network_access_required(true);
+    UnreachablePermissionChecker checker;
+    auto ctx = f.Context();
+
+    tools::PermissionPolicy policy;  // read_only allow, network ask
+    tools::ToolExecutor normal(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    const auto asked = normal.Explain(fetch, nlohmann::json::object(), ctx);
+    CHECK(asked.mode == PermissionMode::Ask);
+    CHECK(asked.reason == "network access: network=ask");
+
+    tools::ToolExecutor headless(f.registry, checker, policy, {}, PermissionRunMode::AllowOnly);
+    const auto denied = headless.Explain(fetch, nlohmann::json::object(), ctx);
+    CHECK(denied.mode == PermissionMode::AlwaysDeny);
+    CHECK(denied.reason.rfind("run mode allow-only", 0) == 0);
+
+    tools::PermissionPolicy parent;
+    parent.network = PermissionMode::AlwaysDeny;
+    tools::PermissionPolicy child = policy;
+    child.network = PermissionMode::AlwaysAllow;
+    tools::ToolExecutor sub(f.registry, checker, child, {}, PermissionRunMode::Normal, parent);
+    const auto capped = sub.Explain(fetch, nlohmann::json::object(), ctx);
+    CHECK(capped.mode == PermissionMode::AlwaysDeny);
+    CHECK(capped.reason == "parent session, network access: network=deny");
+}

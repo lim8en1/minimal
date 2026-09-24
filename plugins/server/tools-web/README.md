@@ -7,9 +7,9 @@ client, settings parsing, URL policy, and truncation path.
 
 - **Tools**: `web_fetch` (URL → text, with redirects and truncation) and
   `web_search` (one configurable JSON search API).
-- Both declare `network_access_required()`, a permission dimension independent
-  of Execute — allowing Execute for a sandboxed bash does not thereby allow
-  fetching arbitrary URLs.
+- Both are `read_only` and declare `network_access_required()`: the `network`
+  permission (default `ask`) is their gate. Allowing Execute for a sandboxed
+  bash does not allow fetching URLs, and `network: allow` does not allow bash.
 - `web_search` is inert and self-describing when unconfigured: the tool still
   registers and reports that it needs `search_api_url`, rather than failing as
   misconfigured.

@@ -1,6 +1,9 @@
 #include "minimal/config/permissions_config.hpp"
 
+#include <algorithm>
+#include <initializer_list>
 #include <stdexcept>
+#include <string_view>
 
 #include "minimal/config/json_config_loader.hpp"
 #include "minimal/config/permission_codec.hpp"
@@ -75,6 +78,18 @@ void ParseExternalDirectoryPatterns(const nlohmann::json& doc,
     }
 }
 
+void CollectUnknownKeys(const nlohmann::json& object, std::string_view prefix,
+                        std::initializer_list<std::string_view> known,
+                        std::vector<std::string>& out) {
+    if (!object.is_object()) return;
+    for (const auto& [key, value] : object.items()) {
+        if (!key.empty() && (key[0] == '_' || key[0] == '$')) continue;  // comment convention
+        if (std::find(known.begin(), known.end(), key) == known.end()) {
+            out.push_back(std::string(prefix) + key);
+        }
+    }
+}
+
 }  // namespace
 
 PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
@@ -87,6 +102,10 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
         ParsePerToolOverrides(doc, config.global_layer);
         ParsePatternOverrides(doc, config.global_layer);
         ParseExternalDirectoryPatterns(doc, config.global_layer);
+        if (doc.contains("pattern_precedence")) {
+            config.global_layer.pattern_precedence =
+                ParsePatternPrecedence(doc.at("pattern_precedence").get<std::string>());
+        }
         if (doc.contains("mcp_default_mode")) {
             config.mcp_default_mode = ParsePermissionMode(doc.at("mcp_default_mode").get<std::string>());
         }
@@ -103,6 +122,17 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
                     "permissions.json: advisor_timeout_ms must be >= 0 (0 disables the budget)");
             }
             config.advisor_timeout_ms = value;
+        }
+        CollectUnknownKeys(doc, "",
+                           {"default_run_mode", "fallback", "per_tool_overrides",
+                            "pattern_overrides", "external_directory_patterns",
+                            "pattern_precedence", "mcp_default_mode", "advisor",
+                            "advisor_inherit", "advisor_timeout_ms"},
+                           config.unknown_keys);
+        if (doc.contains("fallback")) {
+            CollectUnknownKeys(doc.at("fallback"), "fallback.",
+                               {"read_only", "file_write", "execute", "out_of_workdir", "network"},
+                               config.unknown_keys);
         }
     } catch (const nlohmann::json::exception& error) {
         throw std::runtime_error(std::string("permissions.json: ") + error.what());

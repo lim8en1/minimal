@@ -28,13 +28,10 @@ TEST_CASE("BuildPermissionPolicy: preset per-tool override wins over everything"
     CHECK(policy.mode_for("bash", ToolCategory::Execute) == PermissionMode::AlwaysAllow);
 }
 
-TEST_CASE("BuildPermissionPolicy: a global-only per-tool override is carried into the flat policy",
+TEST_CASE("BuildPermissionPolicy: a preset category cannot widen a global per-tool rule",
           "[permission_resolution]") {
-    // Documented simplification: this tool has no preset-level opinion at all
-    // (neither a per-tool override nor -- in the true chain -- would a preset
-    // category even apply, since the global per-tool rule is more specific).
-    // BuildPermissionPolicy treats any explicit per-tool rule, from either
-    // layer, as outranking a preset's blanket category default.
+    // A blanket preset category and a specific global rule that both speak
+    // fold most-restrictively: `bash: deny` stays deny under `execute: allow`.
     PermissionOverrideLayer preset;
     preset.execute = PermissionMode::AlwaysAllow;  // preset's blanket category default
     PermissionOverrideLayer global;
@@ -44,6 +41,69 @@ TEST_CASE("BuildPermissionPolicy: a global-only per-tool override is carried int
     CHECK(policy.mode_for("bash", ToolCategory::Execute) == PermissionMode::AlwaysDeny);
     // An unrelated tool in the same category still gets the preset's category default.
     CHECK(policy.mode_for("other", ToolCategory::Execute) == PermissionMode::AlwaysAllow);
+}
+
+TEST_CASE("BuildPermissionPolicy: a global per-tool allow cannot widen a preset's category",
+          "[permission_resolution][regression]") {
+    // THE REGRESSION: the flat merge put every per-tool rule above every
+    // category, so the headless recipe `bash: allow` turned plan's
+    // `execute: deny` into allow.
+    PermissionOverrideLayer plan;
+    plan.execute = PermissionMode::AlwaysDeny;
+    PermissionOverrideLayer global;
+    global.per_tool_overrides["bash"] = PermissionMode::AlwaysAllow;
+
+    auto policy = BuildPermissionPolicy(plan, global);
+    CHECK(policy.mode_for("bash", ToolCategory::Execute) == PermissionMode::AlwaysDeny);
+    // Without a preset opinion on the category, the global rule stands.
+    auto build = BuildPermissionPolicy({}, global);
+    CHECK(build.mode_for("bash", ToolCategory::Execute) == PermissionMode::AlwaysAllow);
+    // And a preset per-tool rule is the most specific statement: it wins.
+    plan.per_tool_overrides["bash"] = PermissionMode::Ask;
+    auto pinned = BuildPermissionPolicy(plan, global);
+    CHECK(pinned.mode_for("bash", ToolCategory::Execute) == PermissionMode::Ask);
+}
+
+TEST_CASE("BuildPermissionPolicy: a preset's pattern carve-out still works under its category",
+          "[permission_resolution][patterns]") {
+    // plan.md's shape: execute deny + allow patterns. A matching pattern
+    // replaces the category; the global bash allow still does not reach
+    // commands no pattern covers.
+    PermissionOverrideLayer plan;
+    plan.execute = PermissionMode::AlwaysDeny;
+    plan.pattern_overrides["bash"].push_back({"git status", PermissionMode::AlwaysAllow});
+    PermissionOverrideLayer global;
+    global.per_tool_overrides["bash"] = PermissionMode::AlwaysAllow;
+    auto policy = BuildPermissionPolicy(plan, global);
+
+    minimal::tools::PatternSubjects git;
+    git.whole = "git status";
+    git.stages = {"git status"};
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, git, false) ==
+          PermissionMode::AlwaysAllow);
+    minimal::tools::PatternSubjects rm;
+    rm.whole = "rm -rf x";
+    rm.stages = {"rm -rf x"};
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, rm, false) ==
+          PermissionMode::AlwaysDeny);
+}
+
+TEST_CASE("BuildPermissionPolicy: an untrusted preset's narrowing holds against global patterns",
+          "[permission_resolution][patterns]") {
+    PermissionOverrideLayer project;
+    project.execute = PermissionMode::AlwaysDeny;
+    project.per_tool_overrides["grep"] = PermissionMode::AlwaysAllow;  // ignored as a widening
+    PermissionOverrideLayer global;
+    global.read_only = PermissionMode::Ask;
+    global.pattern_overrides["bash"].push_back({"git *", PermissionMode::AlwaysAllow});
+    auto policy = BuildPermissionPolicy(project, global, /*preset_is_trusted=*/false);
+
+    minimal::tools::PatternSubjects git;
+    git.whole = "git log";
+    git.stages = {"git log"};
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, git, false) ==
+          PermissionMode::AlwaysDeny);
+    CHECK(policy.mode_for("grep", ToolCategory::ReadOnly) == PermissionMode::Ask);
 }
 
 TEST_CASE("BuildPermissionPolicy: falls to hard-coded default when both layers are empty",
@@ -102,7 +162,7 @@ TEST_CASE("BuildMcpPermissionPolicy: an untrusted preset may still narrow", "[pe
 
 // --- pattern rules -----------------------------------------------------------------
 
-TEST_CASE("BuildPermissionPolicy: the built-in dotenv defaults fill in only where config is silent",
+TEST_CASE("BuildPermissionPolicy: the built-in dotenv defaults merge per glob",
           "[permission_resolution][patterns]") {
     // Production passes ToolRegistry::DotenvProtectedPermissionKeys() (see
     // main.cpp) -- {"read", "write", "edit"} pins today's tools-fs set at the
@@ -114,16 +174,28 @@ TEST_CASE("BuildPermissionPolicy: the built-in dotenv defaults fill in only wher
     REQUIRE(policy.pattern_overrides.count("edit") == 1);
     CHECK(policy.pattern_overrides.count("bash") == 0);
 
-    // Operator patterns for a tool replace its defaults wholesale: config
-    // intent, not a floor to fight.
+    // An UNRELATED operator rule for a tool keeps its defaults: it used to
+    // replace them wholesale, silently re-opening .env for that tool.
     PermissionOverrideLayer global;
     global.pattern_overrides["read"].push_back({"**/scratch", PermissionMode::AlwaysAllow});
     auto customized = BuildPermissionPolicy({}, global, /*preset_is_trusted=*/true, dotenv_protected);
-    REQUIRE(customized.pattern_overrides.count("read") == 1);
-    CHECK(customized.pattern_overrides["read"].size() == 1);
-    CHECK(customized.pattern_overrides["read"][0].glob == "**/scratch");
-    // The other file tools keep their defaults.
-    CHECK(customized.pattern_overrides.count("write") == 1);
+    const auto& read_rules = customized.pattern_overrides.at("read");
+    REQUIRE(read_rules.size() == 3);
+    CHECK(read_rules[0].glob == "**/scratch");
+    CHECK(customized.mode_for("read", ToolCategory::ReadOnly,
+                              std::optional<std::string>("/p/.env"), true) ==
+          PermissionMode::AlwaysDeny);
+
+    // A rule on the SAME glob replaces that default -- the documented way to
+    // lift it -- while the sibling default stays.
+    PermissionOverrideLayer lifting;
+    lifting.pattern_overrides["read"].push_back({"**/.env", PermissionMode::AlwaysAllow});
+    auto lifted = BuildPermissionPolicy({}, lifting, /*preset_is_trusted=*/true, dotenv_protected);
+    CHECK(lifted.mode_for("read", ToolCategory::ReadOnly, std::optional<std::string>("/p/.env"),
+                          true) == PermissionMode::AlwaysAllow);
+    CHECK(lifted.mode_for("read", ToolCategory::ReadOnly,
+                          std::optional<std::string>("/p/.env.local"), true) ==
+          PermissionMode::AlwaysDeny);
 }
 
 TEST_CASE("BuildPermissionPolicy: dotenv defaults apply to any tool that opts in, not just "
@@ -188,4 +260,23 @@ TEST_CASE("BuildPermissionPolicy: external_directory patterns merge per glob",
 
     auto policy = BuildPermissionPolicy(preset, global, /*preset_is_trusted=*/true);
     REQUIRE(policy.out_of_workdir_patterns.size() == 2);
+}
+
+TEST_CASE("BuildPermissionPolicy: pattern_precedence resolves preset over global, never untrusted",
+          "[permission_resolution][patterns]") {
+    using minimal::tools::PatternPrecedence;
+    PermissionOverrideLayer global;
+    CHECK(BuildPermissionPolicy({}, global).pattern_precedence == PatternPrecedence::Restrictive);
+    global.pattern_precedence = PatternPrecedence::Specific;
+    CHECK(BuildPermissionPolicy({}, global).pattern_precedence == PatternPrecedence::Specific);
+
+    PermissionOverrideLayer preset;
+    preset.pattern_precedence = PatternPrecedence::Restrictive;
+    CHECK(BuildPermissionPolicy(preset, global).pattern_precedence ==
+          PatternPrecedence::Restrictive);
+
+    PermissionOverrideLayer project;  // untrusted: may not choose Specific
+    project.pattern_precedence = PatternPrecedence::Specific;
+    CHECK(BuildPermissionPolicy(project, {}, /*preset_is_trusted=*/false).pattern_precedence ==
+          PatternPrecedence::Restrictive);
 }

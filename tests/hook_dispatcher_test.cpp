@@ -17,6 +17,7 @@
 #include <thread>
 
 #include "minimal/hooks/hook_dispatcher.hpp"
+#include "minimal/hooks/hook_observer_bridge.hpp"
 #include "minimal/hooks/hook_shell.hpp"
 
 using minimal::hooks::HookDispatcher;
@@ -371,6 +372,30 @@ TEST_CASE("observe-only points drop a block verdict and report it async", "[hook
     d.dispatcher->EmitAsync("core.post_tool_use", nlohmann::json{{"tool_name", "bash"}});
     d.dispatcher->WaitForIdleForTesting();
     // No crash, no wedged thread; the verdict is discarded by design.
+}
+
+TEST_CASE("post_tool_use carries the fields its filters declare", "[hooks][regression]") {
+    // THE REGRESSION: core.post_tool_use registered permission_key and
+    // category as filterable, but the bridge's payload never carried them --
+    // a filter on either could never match.
+    TempDir dir;
+    Dispatcher d;
+    (void)d.dispatcher->Configure(OneAction(
+        "core.post_tool_use", "cat > '" + dir.path.string() + "/payload.json'\n",
+        {{"category", "execute"}, {"permission_key", "bash"}}, 1000));
+    minimal::hooks::HookObserverBridge bridge(*d.dispatcher);
+
+    minimal::agent::ToolInvocation invocation;
+    invocation.tool_use_id = "tu1";
+    invocation.tool_name = "shell";  // an alias: the filter keys on the permission key
+    invocation.permission_key = "bash";
+    invocation.category = "execute";
+    bridge.OnToolExecuted(minimal::agent::SessionInfo{}, invocation);
+    d.dispatcher->WaitForIdleForTesting();
+
+    const auto payload = nlohmann::json::parse(dir.Slurp("payload.json"));
+    CHECK(payload["permission_key"] == "bash");
+    CHECK(payload["category"] == "execute");
 }
 
 TEST_CASE("a disabled handle passes and drops", "[hooks]") {

@@ -160,3 +160,78 @@ TEST_CASE("allow_eligible=false keeps allow rules inert but ask/deny rules live"
     asked.allow_eligible = false;
     CHECK(policy.mode_for("bash", ToolCategory::Execute, asked, false) == PermissionMode::Ask);
 }
+
+TEST_CASE("a per-tool deny holds on the staged path too",
+          "[permission][patterns][regression]") {
+    // THE REGRESSION: the staged overload (real bash) returned the pattern
+    // verdict without folding the exact rule, so `bash: deny` + `"git *":
+    // allow` ran `git status`, and an ask pattern downgraded the deny to ask.
+    PermissionPolicy policy;
+    policy.per_tool_overrides["bash"] = PermissionMode::AlwaysDeny;
+    policy.pattern_overrides["bash"].push_back({"git *", PermissionMode::AlwaysAllow});
+    policy.pattern_overrides["bash"].push_back({"make *", PermissionMode::Ask});
+
+    PatternSubjects git;
+    git.whole = "git status";
+    git.stages = {"git status"};
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, git, false) ==
+          PermissionMode::AlwaysDeny);
+    PatternSubjects make;
+    make.whole = "make install";
+    make.stages = {"make install"};
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, make, false) ==
+          PermissionMode::AlwaysDeny);
+}
+
+// --- pattern precedence: specific ----------------------------------------------------
+
+namespace {
+PatternSubjects Stages(std::string whole, std::vector<std::string> stages) {
+    PatternSubjects s;
+    s.whole = std::move(whole);
+    s.stages = std::move(stages);
+    return s;
+}
+}  // namespace
+
+TEST_CASE("specific precedence: a narrower allow carves out of a broad ask",
+          "[permission][patterns][specific]") {
+    PermissionPolicy policy;
+    policy.execute = PermissionMode::AlwaysAllow;
+    policy.pattern_overrides["bash"] = {{"git *", PermissionMode::Ask},
+                                        {"git status", PermissionMode::AlwaysAllow},
+                                        {"git status --porcelain*", PermissionMode::AlwaysDeny}};
+
+    // Restrictive (default): the broad ask wins -- the documented limitation.
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, Stages("git status", {"git status"}),
+                          false) == PermissionMode::Ask);
+
+    policy.pattern_precedence = PatternPrecedence::Specific;
+    std::string why;
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, Stages("git status", {"git status"}),
+                          false, &why) == PermissionMode::AlwaysAllow);
+    CHECK(why == "pattern `git status`=allow");
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, Stages("git push", {"git push"}),
+                          false) == PermissionMode::Ask);
+    // A deny wins whatever its specificity.
+    CHECK(policy.mode_for("bash", ToolCategory::Execute,
+                          Stages("git status --porcelain", {"git status --porcelain"}),
+                          false) == PermissionMode::AlwaysDeny);
+    // Compound: every stage must be allowed; one asking stage asks.
+    CHECK(policy.mode_for("bash", ToolCategory::Execute,
+                          Stages("git status; git push", {"git status", "git push"}),
+                          false) == PermissionMode::Ask);
+}
+
+TEST_CASE("specific precedence: respellings still only tighten",
+          "[permission][patterns][specific]") {
+    PermissionPolicy policy;
+    policy.execute = PermissionMode::AlwaysAllow;
+    policy.pattern_precedence = PatternPrecedence::Specific;
+    policy.pattern_overrides["bash"] = {{"rm *", PermissionMode::AlwaysDeny},
+                                        {"/bin/rm -i *", PermissionMode::AlwaysAllow}};
+    auto subjects = Stages("/bin/rm -i x", {"/bin/rm -i x"});
+    subjects.restrict_only = {"rm -i x"};
+    CHECK(policy.mode_for("bash", ToolCategory::Execute, subjects, false) ==
+          PermissionMode::AlwaysDeny);
+}

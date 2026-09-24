@@ -20,6 +20,10 @@ struct PermissionRequest {
     // What this invocation reaches, and which session grants may be offered.
     // Empty grants means allow-once/deny are the only choices.
     PermissionDisclosure disclosure;
+    // WHY this call asks: the rule that resolved it to Ask ("preset:
+    // execute=ask", "pattern `git push *`=ask", "outside the project:
+    // out_of_workdir=ask"). Shown in the prompt; an advisor may read it too.
+    std::string reason{};
 };
 
 // A decision, plus any grants the operator chose to remember for this session.

@@ -26,6 +26,12 @@ using tools::ToolSpec;
 
 ToolResult Error(std::string message) { return ToolResult{true, std::move(message)}; }
 
+// The same file set tools::default_pattern_rules denies by path:
+// `**/.env` and `**/.env.*`.
+bool IsDotenvName(std::string_view name) {
+    return name == ".env" || name.rfind(".env.", 0) == 0;
+}
+
 enum class OutputMode { kFilesWithMatches, kContent, kCount };
 
 // NUL within the first 8 KiB: the same binary heuristic file_access's
@@ -231,6 +237,11 @@ public:
 
     const ToolSpec& spec() const override { return spec_; }
     bool path_confinement_supported() const override { return true; }
+    // grep reads file CONTENT: `grep(path=".env", pattern=".")` dumped a
+    // dotenv file with no prompt while read/write/edit denied it. A search
+    // ROOTED at a dotenv file now hits the default deny like read does; a
+    // directory walk skips dotenv files in ScanFile below.
+    bool default_dotenv_protected() const override { return true; }
     std::optional<std::string> ExtractPath(const nlohmann::json& input) const override {
         if (!input.contains("path") || !input.at("path").is_string()) return std::nullopt;
         return input.at("path").get<std::string>();
@@ -385,6 +396,14 @@ public:
         const auto stats = WalkTree(
             resolved.absolute_path, options, [&](const WalkEntry& entry) {
                 if (entry.is_dir) return true;  // reported for traversal only
+                // Dotenv files are never searched by a directory walk (an
+                // un-ignored .env would otherwise land in any broad search):
+                // the permission gate protects them by PATH, and a walk's path
+                // is its root. Searching one means rooting grep at it, which
+                // goes through that gate.
+                if (root_is_dir && IsDotenvName(entry.absolute_path.filename().string())) {
+                    return true;
+                }
                 if (file_filter && !re2::RE2::FullMatch(re2::StringPiece(entry.rel_path.data(), entry.rel_path.size()), *file_filter)) {
                     return true;
                 }

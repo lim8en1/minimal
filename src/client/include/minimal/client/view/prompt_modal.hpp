@@ -4,9 +4,11 @@
 // (docs/EXTENSIBILITY.md §4.1) -- the consent-scoping wording obligations are
 // core-owned, and they are load-bearing, not decoration:
 //
-//   * A grant is BLANKET permission for a binary, any arguments, this session.
-//     The modal must say so in those words -- a human judging "allow git
-//     push --force" is judging the wrong thing; the offer is "allow git *".
+//   * A grant is BLANKET: for a binary, any arguments ("/usr/bin/git *
+//     (any arguments)"); for file edits, every file in the project. The
+//     label the server sends carries that wording and the modal prints it
+//     verbatim with "this session" -- a human judging "allow git push
+//     --force" is judging the wrong thing; the offer is "allow git *".
 //   * Disclosure is a LOWER BOUND. When complete == false the modal must say
 //     what the offer does NOT cover (syntactic blindness only), so "allow"
 //     is never read as "this exact command and nothing else".

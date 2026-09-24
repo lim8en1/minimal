@@ -105,9 +105,38 @@ public:
     llm::ToolResultBlock Run(const std::string& tool_use_id, const std::string& tool_name,
                               const nlohmann::json& input, ToolContext& ctx);
 
+    // The gate's whole verdict for one invocation: the final mode and the rule
+    // that decided it, in the words a denial and a prompt show the operator
+    // ("preset: file_write=deny", "pattern `git push *`=ask", "outside the
+    // project: out_of_workdir=ask", "parent session: ...", "run mode
+    // allow-only turns ask into deny"). Pure: no prompt, no hook, no grant --
+    // which is also what makes it the /permissions dry run.
+    struct Verdict {
+        PermissionMode mode = PermissionMode::Ask;
+        std::string reason;
+        // False when an operator-written `ask` pattern (this policy's or the
+        // ceiling's) matched: that Ask always reaches the checker, grants or not.
+        bool ask_grantable = true;
+        // The confinement classification the out-of-workdir fold used, for
+        // Execute's re-check. checked=false when the fold never ran.
+        bool confinement_checked = false;
+        bool inside_project_root = false;
+    };
+    Verdict Explain(const Tool& tool, const nlohmann::json& input, const ToolContext& ctx) const;
+
+    // Explain by tool name, for the /permissions dry run: nullopt when no such
+    // tool is registered. `grants_satisfy` (optional) reports whether the
+    // grants held right now would answer a resulting Ask without a prompt --
+    // the same test Prepare runs (disclosure conjunction + ask_grantable).
+    // SESSION WORKER ONLY: it reads the grant set Prepare mutates.
+    std::optional<Verdict> Explain(const std::string& tool_name, const nlohmann::json& input,
+                                   const ToolContext& ctx, bool* grants_satisfy = nullptr) const;
+
     // Exposed for testing and for surfacing "what would happen" without running.
     PermissionMode ResolveMode(const Tool& tool, const nlohmann::json& input,
-                                const ToolContext& ctx) const;
+                                const ToolContext& ctx) const {
+        return Explain(tool, input, ctx).mode;
+    }
 
     // True when every key this invocation discloses has already been granted, so
     // the prompt can be skipped. Exposed for testing the invariants directly.
@@ -128,10 +157,46 @@ public:
         run_mode_.store(mode, std::memory_order_relaxed);
     }
 
+    // A preset switch (/agent, /model re-resolution, a per-turn borrow and its
+    // restore) is a POLICY swap: without this the executor kept enforcing the
+    // policy of whichever preset the session was CREATED with, so `/agent plan`
+    // from build still asked for writes plan denies. SESSION WORKER ONLY, at a
+    // turn boundary or turn pop -- the same thread and ordering Prepare runs on,
+    // so no lock is needed. Ceilings, grants and the run mode are untouched: a
+    // subagent's ceiling is its parent's and a preset switch never lifts it.
+    void SetPolicies(PermissionPolicy policy, McpPermissionPolicy mcp_policy) {
+        policy_ = std::move(policy);
+        mcp_policy_ = std::move(mcp_policy);
+    }
+
+    // The labels every tool hook payload carries (core.pre_tool_use,
+    // core.permission_prompted, core.post_tool_use) -- one source, so a
+    // `permission_key`/`category` hook filter means the same thing at every
+    // point. category is the input-sensitive one (edit's `view` is
+    // read_only) and "mcp" for MCP tools. Thread-safe: reads the registry
+    // under its own lock and the tool's const surface only. A tool no longer
+    // registered (a replaced MCP server) keeps its permission key and gets
+    // the category "unknown" unless it is MCP-namespaced.
+    struct HookLabels {
+        std::string permission_key;
+        std::string category;
+    };
+    HookLabels hook_labels(const std::string& tool_name, const nlohmann::json& input) const;
+
     // Session grants are copied into a subagent at spawn -- re-prompting for
     // every binary the parent already approved would make subagents unusable --
     // so the spawning side needs to read them. Sorted for deterministic tests.
     std::vector<std::string> granted_keys() const;
+
+    // /permissions revoke: drops one held grant (true if it was held), or all
+    // of them. SESSION WORKER ONLY, like every other grant-set mutation.
+    // Children already spawned keep the copy they were seeded with.
+    bool RevokeGrant(const std::string& key) { return session_grants_.erase(key) != 0; }
+    std::size_t RevokeAllGrants() {
+        const std::size_t count = session_grants_.size();
+        session_grants_.clear();
+        return count;
+    }
 
     // The parent's run mode is the ceiling a child's is clamped against
     // (clamp_run_mode), which a spawner cannot do without reading it. Also
@@ -152,13 +217,6 @@ private:
                                       const std::string& tool_name, const nlohmann::json& input,
                                       ToolContext& ctx);
 
-    // ResolveMode with the confinement verdict surfaced: Prepare needs the same
-    // classification the out-of-workdir fold used, both for the execute-time
-    // re-check and to fold the ceiling's out_of_workdir dimension. Either
-    // pointer may be null (the public overload passes null).
-    PermissionMode ResolveMode(const Tool& tool, const nlohmann::json& input,
-                                const ToolContext& ctx, bool* confinement_checked,
-                                bool* was_inside_project_root) const;
 
     ToolRegistry& registry_;
     PermissionChecker& checker_;

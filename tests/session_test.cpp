@@ -1761,6 +1761,24 @@ TEST_CASE("a preset re-resolution does not reset the runtime run mode",
     CHECK(mode_announced);
 }
 
+TEST_CASE("a preset switch installs the new preset's permission policy",
+          "[session][permissions][regression]") {
+    // THE REGRESSION: the executor was built from the creation-time preset
+    // and ApplyPreset never touched it, so `/agent plan` from build kept
+    // build's `file_write: ask` -- plan's deny was never enforced.
+    SessionFixture fixture;
+    fixture.Start();
+
+    auto plan = fixture.preset;
+    plan.name = "plan";
+    plan.permission_mode.file_write = tools::PermissionMode::AlwaysDeny;
+    plan.mcp_permissions.default_mode = tools::PermissionMode::AlwaysDeny;
+    fixture.session->ApplyPreset(plan);
+
+    CHECK(fixture.session->policy().file_write == tools::PermissionMode::AlwaysDeny);
+    CHECK(fixture.session->mcp_policy().default_mode == tools::PermissionMode::AlwaysDeny);
+}
+
 TEST_CASE(
     "ApplyPreset rejects the whole switch when the new provider fails to construct",
     "[session][regression]") {

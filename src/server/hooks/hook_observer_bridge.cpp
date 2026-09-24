@@ -38,6 +38,11 @@ void HookObserverBridge::OnToolExecuted(const agent::SessionInfo& info,
                                             {"session_id", info.session_id},
                                             {"tool_use_id", invocation.tool_use_id},
                                             {"tool_name", invocation.tool_name},
+                                            // The registered filter fields: without
+                                            // them a `category`/`permission_key`
+                                            // filter on this point never matched.
+                                            {"permission_key", invocation.permission_key},
+                                            {"category", invocation.category},
                                             {"summary", invocation.summary},
                                             {"is_error", invocation.is_error},
                                             {"duration_ms", invocation.duration.count()},

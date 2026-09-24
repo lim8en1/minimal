@@ -8,22 +8,15 @@
 
 namespace minimal::agent {
 
-// Flattens a preset's + permissions.json's PermissionOverrideLayer into the
-// flat tools::PermissionPolicy that ToolExecutor::mode_for() consumes at call
-// time. Pure, no I/O -- the actual glue gap between the pure precedence-chain
-// math in permission.hpp and a real config file.
-//
-// Deliberate simplification: the true precedence is preset-per-tool >
-// preset-category > global-per-tool > global-category, but replicating that
-// exactly for a tool named ONLY in `global.per_tool_overrides` would require
-// knowing that tool's ToolCategory -- unavailable here, since tools are
-// plugin-registered and presets must resolve without consulting ToolRegistry.
-// This instead treats any explicit per-tool rule (either layer) as outranking
-// a preset's blanket category default. The two diverge only when a preset sets
-// a category default, deliberately omits a specific tool from its own
-// overrides, AND permissions.json separately pins that same tool -- an unusual
-// combination -- and the deviation errs toward keeping the explicit global
-// rule in force rather than silently losing it to a blanket default.
+// Builds the tools::PermissionPolicy that ToolExecutor consults at call time
+// from a preset's and permissions.json's PermissionOverrideLayer. Pure, no
+// I/O. Tool/category modes are NOT flattened: the policy keeps both layers
+// (PermissionPolicy::layers) and resolves them per call, when the tool's
+// category is known -- presets must resolve without consulting ToolRegistry,
+// and a flat merge without the category had to guess a precedence (and let a
+// global `bash: allow` beat plan's `execute: deny`). The precedence is
+// documented on PermissionPolicy::layers. Patterns, out_of_workdir and
+// network are merged here.
 //
 // `preset_is_trusted`: false for a preset resolved from PROJECT-LOCAL
 // discovery (a repo-shipped agents/*.md) -- see ProjectDirs. A project file is
@@ -31,14 +24,12 @@ namespace minimal::agent {
 // configured, so it must never WIDEN what permissions.json already allows: a
 // clone-and-run of a hostile repo shipping `permission: {bash: allow}` would
 // otherwise silently replace the operator's Ask/Deny floor with no prompt, no
-// diff, no trust decision. Untrusted mode folds each dimension against what
-// global alone would have resolved to (most_restrictive of "with preset" and
-// "without preset"), so a project preset may only narrow. Untrusted per-tool
-// overrides may only set AlwaysDeny for exactly the same reason -- Ask/Allow
-// entries are dropped rather than applied, since evaluating whether they would
-// still be a narrowing for an arbitrary tool name would require the tool's
-// ToolCategory, unavailable here. A GLOBAL-config preset (the operator's own
-// agents/*.md) stays fully trusted, as before.
+// diff, no trust decision. Untrusted mode resolves every call as if the preset
+// were absent and folds the preset's own opinion (per-tool rule, else
+// category) over it with most_restrictive, so a project preset may only
+// narrow; it contributes no pattern rules (their effect cannot be bounded
+// here). A GLOBAL-config preset (the operator's own agents/*.md) stays fully
+// trusted.
 // `dotenv_protected_permission_keys`: the live ToolRegistry's
 // DotenvProtectedPermissionKeys() -- what tools::default_pattern_rules()
 // applies its dotenv-deny defaults to. Defaulted to {} (no dotenv defaults)

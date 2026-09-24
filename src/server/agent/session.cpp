@@ -224,6 +224,9 @@ Session::Session(SessionParams params, AgentPreset preset,
         invocation.tool_name = lifecycle.tool_name;
         invocation.is_error = lifecycle.is_error;
         invocation.duration = lifecycle.duration;
+        auto labels = executor_.hook_labels(lifecycle.tool_name, lifecycle.input);
+        invocation.permission_key = std::move(labels.permission_key);
+        invocation.category = std::move(labels.category);
         // `summary` stays empty deliberately: the only honest summary is the
         // tool's own disclosure, which is built for a permission prompt and is
         // not reached when the call is pre-approved. An observer that wants
@@ -626,6 +629,10 @@ void Session::ApplyPreset(AgentPreset preset) {
     // posture change. EmitMetadataChanged below still announces the
     // (unchanged) mode, so attached clients never go stale.
     loop_->SetPreset(preset_);
+    // The permission policy is part of the preset: the executor was built from
+    // the creation-time preset and must follow the switch, or /agent changes
+    // the prompt and tool list while the old preset's gates stay in force.
+    executor_.SetPolicies(preset_.permission_mode, preset_.mcp_permissions);
     // The new preset may allow different MCP servers. Runs on the worker at a
     // turn boundary (the same blocking contract as a preset swap): a dead
     // server in the new list is surfaced here, never discovered mid-turn.
@@ -1532,6 +1539,8 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
         ~PresetRestore() {
             if (!active || session == nullptr) return;
             session->loop_->SetPreset(session->preset_);
+            session->executor_.SetPolicies(session->preset_.permission_mode,
+                                           session->preset_.mcp_permissions);
             session->executor_.SetRunMode(session->desired_run_mode());
             // provider_ is what the loop held before the borrow by
             // construction; rebind unconditionally so a borrowed provider can
@@ -1598,6 +1607,9 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
             // ignoring the user's switch for the turn's duration, and the old
             // restore then re-computed it away afterwards.
             executor_.SetRunMode(tools::clamp_run_mode(desired_run_mode(), transient.run_mode));
+            // The borrowed preset's gates govern the borrowed turn (restored
+            // by preset_restore alongside the preset itself).
+            executor_.SetPolicies(transient.permission_mode, transient.mcp_permissions);
             loop_->SetPreset(transient);
             // Rebind whenever the borrowed preset resolves through a different
             // provider ENTRY or connection identity. The instance cache shares

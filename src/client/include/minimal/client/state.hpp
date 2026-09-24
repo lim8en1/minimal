@@ -183,6 +183,7 @@ struct PendingPermission {
     v1::ToolCategory category;   // READ_ONLY / FILE_WRITE / EXECUTE (UI tint)
     std::string summary;         // one-line description shown in the prompt
     bool complete = false;       // server offered full disclosure (false = lower bound)
+    std::string reason;          // the rule that made this call ask (display only)
 
     // Grant offers to present as session-grant buttons ("/usr/bin/make *"). Blanket
     // permission for the whole binary, any args. Worded exactly that way.

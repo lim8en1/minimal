@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -37,6 +38,12 @@ struct PermissionsConfig {
     // bounded only by its cancellation contract). Negative values are refused
     // at parse -- silently disabling a safety timeout is never intended.
     int advisor_timeout_ms = 30000;
+    // Keys the parser did not recognise ("fallback.file_writes", a top-level
+    // "pattern"): collected, not thrown, and reported by the startup sanity
+    // check as warnings -- a typo'd rule used to be silently ignored, which
+    // for a permission file means silently LESS protection than written.
+    // Keys starting with '_' or '$' are treated as comments and skipped.
+    std::vector<std::string> unknown_keys;
 };
 
 // Pure. Throws on an empty-string key inside per_tool_overrides -- reserved as

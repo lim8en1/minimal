@@ -238,16 +238,19 @@ TEST_CASE("ParseAgentPresetFrontmatter: the permission alias maps onto categorie
         "---\n"
         "Only analyze code.\n");
 
+    // edit governs every file-modifying tool in opencode: the category.
     REQUIRE(preset.permission_mode.file_write.has_value());
     CHECK(*preset.permission_mode.file_write == PermissionMode::AlwaysDeny);
-    REQUIRE(preset.permission_mode.execute.has_value());
-    CHECK(*preset.permission_mode.execute == PermissionMode::Ask);
-    REQUIRE(preset.permission_mode.network.has_value());
-    CHECK(*preset.permission_mode.network == PermissionMode::AlwaysDeny);
     REQUIRE(preset.permission_mode.out_of_workdir.has_value());
     CHECK(*preset.permission_mode.out_of_workdir == PermissionMode::AlwaysAllow);
-    REQUIRE(preset.permission_mode.read_only.has_value());
-    CHECK(*preset.permission_mode.read_only == PermissionMode::AlwaysAllow);
+    // Single-tool keys govern that tool only -- never its whole category.
+    const auto& tools = preset.permission_mode.per_tool_overrides;
+    CHECK(tools.at("bash") == PermissionMode::Ask);
+    CHECK(tools.at("web_fetch") == PermissionMode::AlwaysDeny);
+    CHECK(tools.at("read") == PermissionMode::AlwaysAllow);
+    CHECK_FALSE(preset.permission_mode.execute.has_value());
+    CHECK_FALSE(preset.permission_mode.network.has_value());
+    CHECK_FALSE(preset.permission_mode.read_only.has_value());
 }
 
 TEST_CASE("ParseAgentPresetFrontmatter: a pattern-map permission value becomes rules, not a "
@@ -346,21 +349,38 @@ TEST_CASE("ParseAgentPresetFrontmatter: a native permission_mode override wins o
 TEST_CASE("ParseAgentPresetFrontmatter: alias keys collapsing onto one category keep the "
           "most restrictive",
           "[agent_preset_frontmatter][compat]") {
-    // read/glob/grep/list all feed read_only, applied in YAML document order;
-    // a later permissive key must not overwrite an earlier deny and WIDEN what
-    // the author asked for.
+    // edit/write both feed file_write, applied in YAML document order; a later
+    // permissive key must not overwrite an earlier deny and WIDEN what the
+    // author asked for.
+    auto preset = Parse(
+        "---\n"
+        "name: review\n"
+        "permission:\n"
+        "  edit: deny\n"
+        "  write: allow\n"
+        "---\n"
+        "body\n");
+    REQUIRE(preset.permission_mode.file_write.has_value());
+    CHECK(*preset.permission_mode.file_write == PermissionMode::AlwaysDeny);
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: read-side alias keys stay per tool",
+          "[agent_preset_frontmatter][compat]") {
+    // `read: deny` once denied the whole read_only category -- grep, glob,
+    // ask_user, skills. `list` names no minimal tool and is ignored (warned).
     auto preset = Parse(
         "---\n"
         "name: review\n"
         "permission:\n"
         "  read: deny\n"
         "  glob: allow\n"
-        "  grep: deny\n"
-        "  list: ask\n"
+        "  list: deny\n"
         "---\n"
         "body\n");
-    REQUIRE(preset.permission_mode.read_only.has_value());
-    CHECK(*preset.permission_mode.read_only == PermissionMode::AlwaysDeny);
+    CHECK_FALSE(preset.permission_mode.read_only.has_value());
+    CHECK(preset.permission_mode.per_tool_overrides.at("read") == PermissionMode::AlwaysDeny);
+    CHECK(preset.permission_mode.per_tool_overrides.at("glob") == PermissionMode::AlwaysAllow);
+    CHECK(preset.permission_mode.per_tool_overrides.count("list") == 0);
 }
 
 TEST_CASE("ParseAgentPresetFrontmatter: mode decodes and validates",
@@ -568,17 +588,18 @@ TEST_CASE("ParseAgentPresetFrontmatter: the same key is dropped, not decoded, wh
     CHECK(preset.permission_mode.pattern_overrides.empty());
 }
 
-TEST_CASE("ParseAgentPresetFrontmatter: scalar alias values still map to categories",
+TEST_CASE("ParseAgentPresetFrontmatter: a scalar bash alias governs bash only",
           "[agent_preset_frontmatter][patterns][compat]") {
     auto preset = Parse(
         "---\n"
         "name: build\n"
         "permission:\n"
-        "  bash: ask\n"
+        "  bash: allow\n"
         "---\n"
         "body\n");
-    REQUIRE(preset.permission_mode.execute.has_value());
-    CHECK(*preset.permission_mode.execute == PermissionMode::Ask);
+    // Not the Execute category: python_exec and spawn_subagent keep theirs.
+    CHECK_FALSE(preset.permission_mode.execute.has_value());
+    CHECK(preset.permission_mode.per_tool_overrides.at("bash") == PermissionMode::AlwaysAllow);
     CHECK(preset.permission_mode.pattern_overrides.empty());
 }
 
@@ -644,4 +665,21 @@ TEST_CASE("LoadAgentPresetFrontmatter: a normally-sized file is unaffected by th
     }
     const auto preset = LoadAgentPresetFrontmatter(path, kBundledToolPermissionKeys);
     CHECK(preset.name == "build");
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: unknown permission_mode keys are reported",
+          "[agent_preset_frontmatter]") {
+    auto preset = Parse(
+        "---\n"
+        "name: plan\n"
+        "permission_mode:\n"
+        "  file_writes: deny\n"
+        "  pattern_precedence: specific\n"
+        "---\n"
+        "body\n");
+    CHECK(preset.unknown_permission_keys == std::vector<std::string>{"file_writes"});
+    CHECK(preset.permission_mode.pattern_precedence ==
+          minimal::tools::PatternPrecedence::Specific);
+    // A wrong-SHAPED known block is an error, not a silent no-op.
+    CHECK_THROWS(Parse("---\nname: p\npermission_mode:\n  patterns: nope\n---\nb\n"));
 }

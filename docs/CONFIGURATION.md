@@ -39,7 +39,10 @@ runtime. Copyable example agents, prompts, skills, and commands live in
 Startup errors are gathered by a sanity check: **fatal** problems abort the
 server; **warnings** are logged and startup continues. Unless noted otherwise
 below, unknown fields are silently ignored and wrong-typed or out-of-range
-values are fatal (the file is refused, not patched).
+values are fatal (the file is refused, not patched). Exception: unknown keys in `permissions.json` (top level and `fallback`)
+and in a preset's `permission_mode:` block are **warnings** — a typo'd
+permission rule otherwise means silently less protection than written. Keys
+starting with `_` or `$` are treated as comments.
 
 ---
 
@@ -378,13 +381,22 @@ Mode vocabulary:
 |---|---|---|---|
 | `default_run_mode` | string | `"normal"` | one of the run modes |
 | `fallback` | object | harness defaults | five categories, each a permission mode: `read_only`, `file_write`, `execute`, `out_of_workdir`, `network`. Unset categories keep the harness default (bundled: `read_only=allow`, rest `ask`) |
-| `per_tool_overrides` | object | `{}` | tool permission key (bare tool name or `plugin.tool`) → permission mode. Keys that resolve to no registered tool → warning. Aliased tools keep their **original** name here (see docs/PLUGINS.md) |
-| `pattern_overrides` | object | `{}` | tool permission key → **glob → mode** rules matched against the tool's subject (bash: the command line **and its stages** — see below; `read`/`write`/`edit`/`grep`/`glob`: the canonical path). Semantics: an exact `per_tool_overrides` entry still wins; otherwise the **most restrictive matching rule replaces the category default** when any rule matches, and zero matches leave the category default. Downstream folds (out-of-workdir, network, subagent ceilings, run modes) apply as always — a pattern can never bypass the substrate. What most-restrictive folding cannot express: a strict default rule plus a more-specific allow (`"git *": ask` + `"git status": allow` stays ask) — use an exact override instead |
+| `per_tool_overrides` | object | `{}` | tool permission key (bare tool name or `plugin.tool`) → permission mode. Keys that resolve to no registered tool → warning. Aliased tools keep their **original** name here (see docs/PLUGINS.md). MCP tools are keyed by their full name (`mcp__<server>__<tool>`) and refine the server's mode. Precedence: a preset's per-tool rule wins; a preset's category (or per-server MCP mode) and a global per-tool rule that both apply resolve to the **more restrictive** of the two; then the global category |
+| `pattern_overrides` | object | `{}` | tool permission key → **glob → mode** rules matched against the tool's subject (bash: the command line **and its stages** — see below; `read`/`write`/`edit`/`grep`/`glob`: the canonical path). Semantics: when any rule matches, the **most restrictive matching rule** replaces the category default, folded most-restrictively with an exact `per_tool_overrides` entry if there is one (so `"bash": "allow"` cannot defeat a matching deny); zero matches leave the exact entry or category default. Downstream folds (out-of-workdir, network, subagent ceilings, run modes) apply as always — a pattern can never bypass the substrate. An `ask` rule is never satisfied by a session grant: a held grant on `/usr/bin/git` does not carry `git push --force` past `"git push *": ask`. What most-restrictive folding cannot express: a strict broad rule plus a more-specific allow (`"git *": ask` + `"git status": allow` stays ask) — set `pattern_precedence: "specific"` for that |
+| `pattern_precedence` | string | `"restrictive"` | how matching pattern rules for one tool combine. `"restrictive"`: the most restrictive match wins. `"specific"`: a matching **deny** still wins outright; otherwise the most specific match wins (most literal characters; ties go to the stricter rule), so `"git *": ask` + `"git status": allow` allows `git status` and asks for everything else. For bash, every stage needs an allow winner and any ask or deny winner decides; normalized respellings still only tighten. Also settable per preset (`permission_mode.pattern_precedence`); a project-local preset cannot choose `"specific"` |
 | `external_directory_patterns` | object | `{}` | glob → mode rules on the `out_of_workdir` dimension, matched against the canonical **absolute** path of an invocation that resolved outside the project root; the most restrictive matching rule replaces the scalar `out_of_workdir` for that invocation |
 | `mcp_default_mode` | string | `"ask"` | default permission mode for MCP tools |
 | `advisor` | string | — | plugin name of a permission advisor; unknown name → warning |
-| `advisor_inherit` | bool | `false` | |
+| `advisor_inherit` | bool | `false` | also let the advisor answer inside subagent sessions. An advisor decides one invocation at a time and never mints session grants |
 | `advisor_timeout_ms` | int | `30000` | ≥ 0; `0` disables the advisor budget |
+
+**Seeing what applies.** Every denial and every permission prompt names the
+rule that decided it (`preset: file_write=deny`, ``pattern `git push *`=ask``,
+`outside the project: out_of_workdir=ask`, `parent session: …`, `run mode
+allow-only …`). `/permissions` shows the session's effective rules and held
+grants; `/permissions check <tool> <json-input>` dry-runs a call through the
+real gate (e.g. `/permissions check bash {"command":"git push"}`);
+`/permissions revoke <key>|all` drops grants.
 
 Glob rules (`pattern_overrides` / `external_directory_patterns`): `*` and `?`
 stay within one path component, `**` crosses them, `\` escapes, and a pattern
@@ -405,15 +417,27 @@ assignments. Rules apply per mode:
 - **ask / deny**: match the whole line **or any stage** — `"rm *": deny`
   denies `ls | rm -rf /` even though `ls` matches nothing.
 
-Inert output (`2>/dev/null`, `2>&1`, `2>&-`) does not affect stages; a real
-output redirect (`>`, `>>`, `&>`, `2>` to a path) does not block matching, but
-an **incomplete** parse (`$X args`, `eval "$CMD"`) yields no stages, so allow
-rules cannot fire and only ask/deny whole-line rules apply. `time`/`coproc` in
-the command slot are demoted (their real program is the stage); a quoted
-spelling (`'time' make`) is not a keyword and stays in the stage. **Built-in defaults**: `read`, `write` and `edit` deny `**/.env` and
-`**/.env.*` — living in the default layer, any operator `pattern_overrides`
-entry for that tool replaces them wholesale (write your own deny back in if
-you also allow something).
+Inert output (`2>/dev/null`, `2>&1`, `2>&-`) does not affect matching. A real
+output redirect (`>`, `>>`, `&>`, `2>` to a path) or an **incomplete** parse
+(`$X args`, `eval "$CMD"`) makes allow rules inert for the whole command —
+`"git log *": allow` does not cover `git log > f` — while ask/deny rules still
+match the line and every stage. `time`/`coproc` in the command slot are demoted
+(their real program is the stage); a quoted spelling (`'time' make`) is not a
+keyword and stays in the stage. **ask/deny rules also see normalized
+spellings** of every stage — words unquoted, the program by its basename, and
+wrapper programs (`sudo`, `env`, `command`, `builtin`, `exec`, `nice`, `nohup`,
+`time`, `timeout`, `stdbuf`, `ionice`, `xargs`) peeled off with their flags —
+so `"rm *": deny` also catches `/bin/rm x`, `'rm' x`, `\rm x`, `sudo rm x` and
+`ls | xargs rm -f`. Allow rules never see these spellings (they could only
+widen through them). Still a guardrail against mistakes, not a boundary:
+`sh -c 'rm x'`, `$(echo rm) x` and `find -exec rm` stay out of reach of any
+string rule.
+
+**Built-in defaults**: `read`, `write`, `edit` and `grep` deny `**/.env` and
+`**/.env.*`. They merge per glob with operator rules: a rule on the same glob
+replaces the default (`"**/.env": "allow"` lifts it), and rules on other globs
+leave it in force. A directory-wide `grep` never searches dotenv files; root
+the search at one to search it (which goes through the rule above).
 
 ---
 
@@ -454,7 +478,7 @@ Core hook points (plugins may register more, e.g. `tools-bash.before_command`):
 
 | Point | Filterable fields |
 |---|---|
-| `core.pre_tool_use` (veto-capable) | `tool_name`, `permission_key`, `category` |
+| `core.pre_tool_use` (veto-capable) | `tool_name`, `permission_key`, `category` (`read_only` \| `file_write` \| `execute` \| `mcp`) |
 | `core.post_tool_use` | `tool_name`, `permission_key`, `category` |
 | `core.user_prompt_submit` | — |
 | `core.stop` | `stop_reason` |

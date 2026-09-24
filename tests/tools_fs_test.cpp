@@ -482,6 +482,32 @@ TEST_CASE("edit create's disclosure says it creates the file", "[tools_fs][edit]
     CHECK(disclosure.summary.find("creates this file") != std::string::npos);
 }
 
+TEST_CASE("write and edit offer one project-wide edit grant, never outside or into .git",
+          "[tools_fs][disclosure][grants]") {
+    Fixture f;
+    auto write = tools_fs::MakeWriteTool(f.settings);
+    auto edit = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto inside = write->Disclose({{"path", "src/a.txt"}, {"content", "x"}}, ctx);
+    REQUIRE(inside.grants.size() == 1);
+    CHECK(inside.grants[0].key.rfind("file_write:", 0) == 0);
+    CHECK(inside.grants[0].label.find("any file in") != std::string::npos);
+    // Same key from edit: one grant covers both tools.
+    const auto edited = edit->Disclose(
+        {{"command", "str_replace"}, {"path", "b.txt"}, {"old_str", "x"}, {"new_str", "y"}}, ctx);
+    REQUIRE(edited.grants.size() == 1);
+    CHECK(edited.grants[0].key == inside.grants[0].key);
+
+    // Outside the project, and .git/ (hooks run code): nothing to grant, so
+    // those calls always prompt.
+    CHECK(write->Disclose({{"path", "/tmp/elsewhere.txt"}, {"content", "x"}}, ctx).grants.empty());
+    CHECK(write->Disclose({{"path", ".git/hooks/pre-commit"}, {"content", "x"}}, ctx)
+              .grants.empty());
+    // view is read-only: it never asks, so it offers nothing.
+    CHECK(edit->Disclose({{"command", "view"}, {"path", "b.txt"}}, ctx).grants.empty());
+}
+
 TEST_CASE("disclosure names the destination a symlink hides", "[tools_fs][disclosure]") {
     // The Ask prompt shows the path as the model typed it; a symlink planted
     // in an earlier round must not let the operator consent to "notes" while

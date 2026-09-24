@@ -6,6 +6,7 @@ minimal_add_plugin(tools-bash
     bash_settings.cpp
     bash_session_state.cpp
     command_scanner.cpp
+    stage_normalize.cpp
     restart_shell.cpp
     tasks_command.cpp)
 

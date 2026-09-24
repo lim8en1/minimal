@@ -104,13 +104,10 @@ std::optional<tools::PermissionResponse> TypesafeAdvisor::Advise(
         outcome.answered_model.empty() ? "unknown" : outcome.answered_model, answer->choice,
         chosen, best_other, outcome.attempts, outcome.total.count());
     tools::PermissionResponse response;
+    // This invocation only: no granted_keys. The advised checker discards an
+    // advisor's grants anyway -- a blanket grant would let one confident
+    // allow skip every later judgement of that binary.
     response.decision = tools::PermissionDecision::Allow;
-    // Every key the disclosure offered, granted only through the double filter
-    // downstream: the offer is what the operator WOULD have been shown, and
-    // ToolExecutor re-checks each key against it before remembering any.
-    for (const auto& offer : request.disclosure.grants) {
-        response.granted_keys.push_back(offer.key);
-    }
     return response;
 }
 

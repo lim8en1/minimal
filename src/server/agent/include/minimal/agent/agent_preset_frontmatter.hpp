@@ -75,6 +75,10 @@ struct AgentPresetFrontmatter {
     // definition builder filters its listing with exactly this list).
     std::optional<std::vector<std::string>> allowed_subagents;
     tools::PermissionOverrideLayer permission_mode;  // read_only/file_write/execute/out_of_workdir/network + overrides -> per_tool_overrides
+    // Keys inside `permission_mode:` the decoder did not recognise (a typo'd
+    // `pattern:` or `file_writes:` used to vanish silently). Reported as
+    // startup warnings by the sanity check.
+    std::vector<std::string> unknown_permission_keys;
     std::unordered_map<std::string, tools::PermissionMode> mcp_permissions;  // server -> mode
     std::string compression_prompt;                 // filename under prompts/, "" = use default
     // Optional override of memory.compaction_strategy for THIS agent: the name

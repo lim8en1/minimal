@@ -51,21 +51,23 @@ const char* CategoryName(ToolCategory category) {
     return "read_only";
 }
 
-}  // namespace
-
-PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json& input,
-                                          const ToolContext& ctx) const {
-    return ResolveMode(tool, input, ctx, /*confinement_checked=*/nullptr,
-                       /*was_inside_project_root=*/nullptr);
+// The hook-payload label. MCP tools carry a placeholder ReadOnly category (the
+// server-scoped McpPermissionPolicy governs them, never a category), so a
+// category of "read_only" on an arbitrary remote call would mislead a
+// `category` hook filter -- they are labelled "mcp".
+const char* HookCategoryName(const std::string& tool_name, ToolCategory category) {
+    return mcp_server_of(tool_name).empty() ? CategoryName(category) : "mcp";
 }
 
-PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json& input,
-                                          const ToolContext& ctx, bool* confinement_checked,
-                                          bool* was_inside_project_root) const {
+}  // namespace
+
+ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::json& input,
+                                           const ToolContext& ctx) const {
     const std::string& name = tool.spec().name;  // surface name: what the model calls it
     const ToolCategory category = tool.category_for(input).value_or(tool.spec().category);
 
-    // 1. Is this tool allowed at all? MCP tools are server-scoped, not per-tool.
+    // 1. Is this tool allowed at all? MCP tools resolve from their server's
+    //    mode, refined by a per-tool rule on the full mcp__ name.
     //    The policy lookup uses the PERMISSION key (the non-alias name), never
     //    the surface: per_tool_overrides must keep governing a tool when an
     //    alias changes what the model sees. For unaliased tools the two agree.
@@ -121,12 +123,25 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
         // the subject above); a pattern-free pair never sees this work.
         subjects.stages = tool.PatternStages(input).value_or(std::vector<std::string>{});
         subjects.allow_eligible = tool.PatternAllowEligible(input);
+        subjects.restrict_only = tool.PatternRestrictSubjects(input);
     }
 
+    // `why` names the rule behind `mode`; every fold below that TIGHTENS the
+    // mode replaces it, so it always explains the final answer.
+    std::string why;
     PermissionMode mode =
         mcp_server.empty()
-            ? policy_.mode_for(permission_key, category, subjects, subject_is_path)
-            : mcp_policy_.mode_for(mcp_server);
+            ? policy_.mode_for(permission_key, category, subjects, subject_is_path, &why)
+            : resolve_mcp_tool_mode(policy_, mcp_policy_, mcp_server, permission_key, &why);
+    auto tighten = [&](PermissionMode candidate, auto&& describe) {
+        if (candidate < mode) {
+            mode = candidate;
+            why = describe();
+        }
+    };
+    auto dimension = [](std::string_view name, PermissionMode m) {
+        return std::string(name) + "=" + std::string(mode_name(m));
+    };
 
     // The confinement verdict of THIS invocation, consumed by the ceiling fold
     // below and surfaced to Prepare for the execute-time re-check.
@@ -150,17 +165,21 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
                 // than silently applying the in-workdir rule to something we
                 // could not place.
                 PermissionMode ood = policy_.out_of_workdir;
+                std::string ood_why = "outside the project: " + dimension("out_of_workdir", ood);
                 if (!policy_.out_of_workdir_patterns.empty() && resolved.ok) {
                     std::optional<PermissionMode> folded;
                     for (const auto& rule : policy_.out_of_workdir_patterns) {
                         if (GlobMatch(rule.glob, resolved.absolute_path.string(),
-                                      /*slash_terminates=*/true)) {
-                            folded = folded ? most_restrictive(*folded, rule.mode) : rule.mode;
+                                      /*slash_terminates=*/true) &&
+                            (!folded || rule.mode < *folded)) {
+                            folded = rule.mode;
+                            ood_why = "outside the project: pattern `" + rule.glob + "`=" +
+                                      std::string(mode_name(rule.mode));
                         }
                     }
                     if (folded) ood = *folded;
                 }
-                mode = most_restrictive(mode, ood);
+                tighten(ood, [&] { return ood_why; });
             }
         }
     }
@@ -168,7 +187,8 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     // 2a. Same fold, same reason, for the network dimension: only if still
     //     permitted, and only for tools that declare network_access_required().
     if (mode != PermissionMode::AlwaysDeny && tool.network_access_required()) {
-        mode = most_restrictive(mode, policy_.network);
+        tighten(policy_.network,
+                [&] { return "network access: " + dimension("network", policy_.network); });
     }
 
     // 2b. Subagent ceiling, when one was handed down: a child is never more
@@ -189,37 +209,56 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
                 // when the child preset asked for allow. Folding
                 // most_restrictive keeps the ceiling one-directional -- its
                 // pattern-allows can never widen the child.
-                mode = most_restrictive(
-                    mode, policy_ceiling_->mode_for(permission_key, category, subjects,
-                                                    subject_is_path));
+                std::string ceiling_why;
+                const PermissionMode ceiling_mode = policy_ceiling_->mode_for(
+                    permission_key, category, subjects, subject_is_path, &ceiling_why);
+                tighten(ceiling_mode, [&] { return "parent session: " + ceiling_why; });
                 // out_of_workdir and network are dimension FIELDS, not
                 // categories, so mode_for() never consults them: without this
                 // fold a child could exceed its parent on exactly those axes.
                 // Same conditions as this executor's own folds in 2/2a.
                 if (checked && !inside) {
                     PermissionMode ceiling_ood = policy_ceiling_->out_of_workdir;
+                    std::string ceiling_ood_why = dimension("out_of_workdir", ceiling_ood);
                     if (!policy_ceiling_->out_of_workdir_patterns.empty() && subjects.whole &&
                         subject_is_path) {
                         std::optional<PermissionMode> folded;
                         for (const auto& rule : policy_ceiling_->out_of_workdir_patterns) {
                             if (GlobMatch(rule.glob, *subjects.whole,
-                                          /*slash_terminates=*/true)) {
-                                folded =
-                                    folded ? most_restrictive(*folded, rule.mode) : rule.mode;
+                                          /*slash_terminates=*/true) &&
+                                (!folded || rule.mode < *folded)) {
+                                folded = rule.mode;
+                                ceiling_ood_why = "pattern `" + rule.glob + "`=" +
+                                                  std::string(mode_name(rule.mode));
                             }
                         }
                         if (folded) ceiling_ood = *folded;
                     }
-                    mode = most_restrictive(mode, ceiling_ood);
+                    tighten(ceiling_ood, [&] {
+                        return "parent session, outside the project: " + ceiling_ood_why;
+                    });
                 }
                 if (tool.network_access_required()) {
-                    mode = most_restrictive(mode, policy_ceiling_->network);
+                    tighten(policy_ceiling_->network, [&] {
+                        return "parent session, network access: " +
+                               dimension("network", policy_ceiling_->network);
+                    });
                 }
             }
         } else if (mcp_ceiling_) {
             // McpPermissionPolicy carries no out_of_workdir/network dimensions
-            // to fold -- per-server modes are all it has.
-            mode = most_restrictive(mode, mcp_ceiling_->mode_for(mcp_server));
+            // to fold -- per-server modes (refined by the parent's per-tool
+            // rules) are all it has.
+            std::string ceiling_why;
+            const PermissionMode ceiling_mode =
+                policy_ceiling_ ? resolve_mcp_tool_mode(*policy_ceiling_, *mcp_ceiling_,
+                                                        mcp_server, permission_key, &ceiling_why)
+                                : mcp_ceiling_->mode_for(mcp_server);
+            tighten(ceiling_mode, [&] {
+                return "parent session: " +
+                       (ceiling_why.empty() ? dimension("mcp " + mcp_server, ceiling_mode)
+                                            : ceiling_why);
+            });
         }
     }
 
@@ -230,14 +269,35 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     //     Ask. A tool can tighten its own call, never widen one.
     if (mode != PermissionMode::AlwaysDeny) {
         if (auto narrowed = tool.mode_override_for(input, ctx)) {
-            mode = most_restrictive(mode, *narrowed);
+            tighten(*narrowed, [&] {
+                return "the tool requires " + std::string(mode_name(*narrowed)) +
+                       " for this input";
+            });
         }
     }
 
+    // An Ask an operator's `ask` PATTERN produced is a demand to be asked
+    // about this invocation: session grants must not satisfy it (grants are
+    // blanket per binary; the pattern is not). Only a pattern-carrying policy
+    // computed subjects, so a pattern-free pair pays nothing here.
+    Verdict verdict;
+    verdict.ask_grantable =
+        !policy_.ask_pattern_matches(permission_key, subjects, subject_is_path) &&
+        !(policy_ceiling_ &&
+          policy_ceiling_->ask_pattern_matches(permission_key, subjects, subject_is_path));
+    verdict.confinement_checked = checked;
+    verdict.inside_project_root = checked && inside;
+
     // 3. Run mode wraps whatever the policy decided.
-    if (confinement_checked != nullptr) *confinement_checked = checked;
-    if (was_inside_project_root != nullptr) *was_inside_project_root = checked && inside;
-    return apply_run_mode(mode, run_mode_.load(std::memory_order_relaxed));
+    const PermissionRunMode run_mode = run_mode_.load(std::memory_order_relaxed);
+    verdict.mode = apply_run_mode(mode, run_mode);
+    if (verdict.mode != mode) {
+        why = run_mode == PermissionRunMode::AllowOnly
+                  ? "run mode allow-only turns ask into deny (would ask: " + why + ")"
+                  : "run mode bypass approves prompts (would ask: " + why + ")";
+    }
+    verdict.reason = std::move(why);
+    return verdict;
 }
 
 llm::ToolResultBlock ToolExecutor::Run(const std::string& tool_use_id,
@@ -314,12 +374,19 @@ PreparedInvocation ToolExecutor::PrepareGuarded(const std::string& tool_use_id,
     // The confinement verdict rides out on the prepared invocation so Execute
     // can re-check it: the two phases are separated by the rest of the round's
     // gating, including Ask prompts that can sit for minutes.
-    const PermissionMode mode = ResolveMode(*tool, input, ctx,
-                                            &prepared.path_confinement_checked,
-                                            &prepared.was_inside_project_root);
+    const Verdict verdict = Explain(*tool, input, ctx);
+    const PermissionMode mode = verdict.mode;
+    const bool ask_grantable = verdict.ask_grantable;
+    prepared.path_confinement_checked = verdict.confinement_checked;
+    prepared.was_inside_project_root = verdict.inside_project_root;
 
     if (mode == PermissionMode::AlwaysDeny) {
-        prepared.denial = ErrorResult(tool_use_id, "permission denied for tool: " + tool_name);
+        // The rule rides along: the model reads WHY (a plan preset's
+        // file_write=deny is not worth retrying; a missing grant under
+        // allow-only is the operator's to change), and so does anyone
+        // reading the transcript.
+        prepared.denial = ErrorResult(
+            tool_use_id, "permission denied for tool: " + tool_name + " (" + verdict.reason + ")");
         return prepared;
     }
 
@@ -335,14 +402,12 @@ PreparedInvocation ToolExecutor::PrepareGuarded(const std::string& tool_use_id,
     // hook can deny what policy allowed; it can never allow what policy
     // denied, because no path from here can raise `mode`.
     if (hooks_ != nullptr) {
-        const std::string permission_key(registry_.PermissionKeyFor(tool_name));
-        const ToolCategory category =
-            tool->category_for(input).value_or(tool->spec().category);
+        auto labels = hook_labels(tool_name, input);
         nlohmann::json payload{{"session_id", ctx.session_id},
                                {"tool_use_id", tool_use_id},
                                {"tool_name", tool_name},
-                               {"permission_key", permission_key},
-                               {"category", CategoryName(category)},
+                               {"permission_key", std::move(labels.permission_key)},
+                               {"category", std::move(labels.category)},
                                {"tool_input", input}};
         if (auto blocked = hooks_->Emit(hooks::kPreToolUse, std::move(payload),
                                         ctx.is_cancelled)) {
@@ -355,19 +420,17 @@ PreparedInvocation ToolExecutor::PrepareGuarded(const std::string& tool_use_id,
 
     if (mode == PermissionMode::Ask) {
         const PermissionDisclosure disclosure = tool->Disclose(input, ctx);
-        if (!SatisfiedByGrants(disclosure)) {
+        if (!ask_grantable || !SatisfiedByGrants(disclosure)) {
             // core.permission_prompted: observe-only, fired the moment a human
             // is about to be asked. The natural feed for a desktop
             // notification -- "the agent is waiting on you" -- which is the
             // consumer story for it.
             if (hooks_ != nullptr) {
-                const std::string permission_key(registry_.PermissionKeyFor(tool_name));
+                auto labels = hook_labels(tool_name, input);
                 nlohmann::json payload{{"session_id", ctx.session_id},
                                        {"tool_name", tool_name},
-                                       {"permission_key", permission_key},
-                                       {"category",
-                                        CategoryName(tool->category_for(input)
-                                                         .value_or(tool->spec().category))},
+                                       {"permission_key", std::move(labels.permission_key)},
+                                       {"category", std::move(labels.category)},
                                        {"summary", disclosure.summary}};
                 hooks_->EmitAsync(hooks::kPermissionPrompted, std::move(payload));
             }
@@ -377,6 +440,7 @@ PreparedInvocation ToolExecutor::PrepareGuarded(const std::string& tool_use_id,
             request.category = tool->category_for(input).value_or(tool->spec().category);
             request.tool_input = input;
             request.summary = disclosure.summary;
+            request.reason = verdict.reason;
             // The prompt offers only what the operator does NOT already hold:
             // a compound command sharing binaries with an earlier one
             // (`cd x; ls a | wc -l`, then `cd x; ls a | grep something`)
@@ -493,6 +557,40 @@ llm::ToolResultBlock ToolExecutor::Execute(const PreparedInvocation& prepared,
                            "tool '" + prepared.tool_name +
                                "' failed with an unrecognized exception");
     }
+}
+
+std::optional<ToolExecutor::Verdict> ToolExecutor::Explain(const std::string& tool_name,
+                                                          const nlohmann::json& input,
+                                                          const ToolContext& ctx,
+                                                          bool* grants_satisfy) const {
+    const std::shared_ptr<Tool> tool = registry_.Find(tool_name);
+    if (tool == nullptr) return std::nullopt;
+    Verdict verdict = Explain(*tool, input, ctx);
+    if (grants_satisfy != nullptr) {
+        *grants_satisfy = verdict.mode == PermissionMode::Ask && verdict.ask_grantable &&
+                          SatisfiedByGrants(tool->Disclose(input, ctx));
+    }
+    return verdict;
+}
+
+ToolExecutor::HookLabels ToolExecutor::hook_labels(const std::string& tool_name,
+                                                   const nlohmann::json& input) const {
+    HookLabels labels;
+    labels.permission_key = std::string(registry_.PermissionKeyFor(tool_name));
+    const std::shared_ptr<Tool> tool = registry_.Find(tool_name);
+    if (tool == nullptr) {
+        labels.category = mcp_server_of(tool_name).empty() ? "unknown" : "mcp";
+        return labels;
+    }
+    try {
+        labels.category =
+            HookCategoryName(tool_name, tool->category_for(input).value_or(tool->spec().category));
+    } catch (...) {
+        // category_for is plugin code reading model-written input; a label
+        // is never worth a throw out of a hook emission.
+        labels.category = HookCategoryName(tool_name, tool->spec().category);
+    }
+    return labels;
 }
 
 bool ToolExecutor::SatisfiedByGrants(const PermissionDisclosure& disclosure) const {

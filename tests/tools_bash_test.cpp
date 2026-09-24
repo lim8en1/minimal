@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 
 #include "background_registry.hpp"
 #include "bash_session_state.hpp"
+#include "stage_normalize.hpp"
 #include "bash_settings.hpp"
 #include "bash_tool.hpp"
 #include "command_scanner.hpp"
@@ -586,6 +588,56 @@ TEST_CASE("staged pattern allow runs a pipeline unprompted through the real gate
     const auto denied = executor.Run("t3", "bash", {{"command", "ls | rm -rf /"}}, ctx);
     CHECK(denied.is_error);
     CHECK(checker.seen.size() == 1);
+}
+
+TEST_CASE("stage variants unquote, strip paths and peel wrappers",
+          "[tools_bash][stages][normalize]") {
+    using tools_bash::NormalizedStageVariants;
+    auto has = [](const std::vector<std::string>& variants, const std::string& want) {
+        return std::find(variants.begin(), variants.end(), want) != variants.end();
+    };
+    CHECK(has(NormalizedStageVariants("/bin/rm -rf x"), "rm -rf x"));
+    CHECK(has(NormalizedStageVariants("'rm' -rf x"), "rm -rf x"));
+    CHECK(has(NormalizedStageVariants("\\rm -rf x"), "rm -rf x"));
+    CHECK(has(NormalizedStageVariants("command rm -rf x"), "rm -rf x"));
+    CHECK(has(NormalizedStageVariants("sudo -u root rm -rf x"), "rm -rf x"));
+    CHECK(has(NormalizedStageVariants("env FOO=1 /usr/bin/rm x"), "rm x"));
+    CHECK(has(NormalizedStageVariants("timeout -s KILL 5 rm x"), "rm x"));
+    CHECK(has(NormalizedStageVariants("xargs -I {} rm {}"), "rm {}"));
+    CHECK(has(NormalizedStageVariants("sudo nice -n 5 rm x"), "rm x"));
+    // Only spellings that differ; a plain stage has none.
+    CHECK(NormalizedStageVariants("rm -rf x").empty());
+}
+
+TEST_CASE("a deny rule catches the respellings of its program through the real gate",
+          "[tools_bash][stages][normalize][integration]") {
+    Fixture f;
+    tools::ToolRegistry registry;
+    registry.Register(tools_bash::MakeBashTool(f.settings, f.store, f.background));
+
+    testing::AlwaysAllowPermissionChecker checker;
+    tools::PermissionPolicy policy;
+    policy.execute = tools::PermissionMode::AlwaysAllow;
+    policy.pattern_overrides["bash"].push_back({"rm *", tools::PermissionMode::AlwaysDeny});
+    policy.pattern_overrides["bash"].push_back({"ls *", tools::PermissionMode::AlwaysAllow});
+    tools::ToolExecutor executor(registry, checker, policy, {}, tools::PermissionRunMode::Normal);
+
+    tools::ToolContext ctx{common::DefaultLogger()};
+    ctx.session_id = "s1";
+    ctx.project_root = f.dir.path();
+    auto verdict = [&](const std::string& command) {
+        return executor.Explain(std::string("bash"), {{"command", command}}, ctx)->mode;
+    };
+    for (const std::string command :
+         {"/bin/rm -rf x", "'rm' -rf x", "command rm -rf x", "sudo rm -rf x",
+          "ls | xargs rm -f", "env A=1 rm x"}) {
+        INFO(command);
+        CHECK(verdict(command) == tools::PermissionMode::AlwaysDeny);
+    }
+    // Variants never feed the allow conjunction: an allow rule on `ls *`
+    // does not start allowing `/bin/ls -la` (it stays the category default).
+    CHECK(verdict("ls -la") == tools::PermissionMode::AlwaysAllow);
+    CHECK(verdict("rmdir x") == tools::PermissionMode::AlwaysAllow);  // not `rm *`
 }
 
 TEST_CASE("bash settings take defaults when absent or nonsensical", "[tools_bash][settings]") {

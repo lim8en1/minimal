@@ -259,7 +259,7 @@ Composition in `Session`, after the checker-injection change below:
 Ask resolved by the substrate (modes, ceilings, run mode, grants)  -- unchanged
   → advisor registered AND enabled for this session?
       → Advise(request)
-          Allow/Deny → done (grants filtered exactly as today)
+          Allow/Deny → done (this invocation only; no grants minted)
           nullopt    → wire checker → the human
       → (advisor throws) → wire checker -- one plugin's failure is not a lost turn
 ```
@@ -274,7 +274,7 @@ An advisor sits **below** `ResolveMode` and **above** the wire checker. Everythi
 | Policy + out-of-workdir fold | `tool_executor.cpp:47-100` | Cannot overturn `file_write: deny` |
 | Subagent ceilings | `tool_executor.cpp:86-96` | A child's advisor cannot exceed its parent |
 | Run mode (`AllowOnly`/`Bypass`) | `tool_executor.cpp:239` (`apply_run_mode`) | Under `AllowOnly`, `Ask` → `AlwaysDeny` short-circuits *before* the advisor — an auto-approver cannot smuggle approvals into headless runs. `Bypass` turns `Ask` → `AlwaysAllow` the same way; `AlwaysDeny` is preserved |
-| Grant minting | Double filter: `tool_executor.cpp:199-205` + `proto_convert.cpp:493-498` | May grant only keys the disclosure offered — already guaranteed, no new code |
+| Grant minting | `AdvisedPermissionChecker` discards an advisor's `granted_keys`; the human's pass the disclosure filter in `ToolExecutor` | An advisor mints nothing |
 | Cancel semantics | Template exists: `wire_permission_checker.cpp` maps cancel/no-answer → Deny | Must map cancellation → abstain or Deny; never block through a cancel |
 
 Zero changes to `clamp_run_mode`, `most_restrictive`, the precedence chains, or subagent spawn. The advisor inherits all of it by position.
@@ -290,7 +290,7 @@ Zero changes to `clamp_run_mode`, `most_restrictive`, the precedence chains, or 
 
 - **Blocking-safe by construction, cancel-aware by contract, budgeted by the host.** `Advise` runs off the session worker (a bounded check spins it up on its own thread) with `permissions.json` `advisor_timeout_ms` as its budget — default 30 s, `0` disables the budget and restores fully synchronous `Advise`. A well-behaved advisor answers inside the budget; one that hangs — an external decider that ignores both its cancellation predicate and the clock — costs one abandoned, self-contained thread, and the wire checker (the human) is prompted at the budget's edge. The wait polls the cancel source, so a cancel or `Terminate` abandons the wait before the budget is spent: a wedged advisor can never wedge the worker join, the reaper, or process shutdown. Without the budget, an advisor violating its contract would deadlock all three.
 - **Owned values.** `PermissionRequest` arrives by value into the advise thread; an advisor must not stash references (the same rule as `SessionObserver` payloads — the worker's stack unwinds after the call).
-- **Grants are advisory.** Returning granted keys is permitted — an auto-approver *should* silence future prompts, that is the point of auto mode — and the double filter makes it safe: only disclosed keys land.
+- **No grants.** An advisor's answer decides one invocation; any `granted_keys` it returns are discarded. This reverses an earlier "grants are advisory" rule: a grant is blanket per binary and is copied into every subagent, so one confident allow of `git status` silenced the advisor *and* the human for `git push --force` for the rest of the session — including children deliberately left without the advisor. The cost is one `Advise` per gated call.
 - **Source compatibility.** The advisor interface is frozen surface the moment it ships; the same rebuild-guard model applies.
 
 ### 3.6 Difficulty

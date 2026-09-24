@@ -208,6 +208,16 @@ public:
         return std::nullopt;
     }
 
+    // Extra subjects for ask/deny pattern rules ONLY -- alternate spellings of
+    // the stages a rule author means by the same program (bash: `/bin/rm x`,
+    // `'rm' x`, `sudo rm x` all also present as `rm x`). Never consulted by
+    // allow rules, so a tool can only make itself stricter here. Default:
+    // none. A wrapper must forward this like PatternStages.
+    virtual std::vector<std::string> PatternRestrictSubjects(const nlohmann::json& input) const {
+        (void)input;
+        return {};
+    }
+
     // Whether allow-mode pattern rules may act on this invocation's stages. A
     // tool whose decomposition can be shaky or can hide a side effect the
     // stages do not name (bash: an unparseable program, an output redirect)

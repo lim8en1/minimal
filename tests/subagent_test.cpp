@@ -1321,6 +1321,43 @@ TEST_CASE("an unknown preset refuses the spawn without creating anything",
     CHECK(TextOf(block).find("nonexistent") != std::string::npos);
 }
 
+TEST_CASE("a subagent that calls spawn_subagent anyway is refused",
+          "[subagent][permissions]") {
+    // The spawn tool is hidden from a child's tool list, but the registry
+    // still holds it: a model that emits the call anyway reaches Spawn. The
+    // refusal is load-bearing -- a child's ceiling is its parent's policy
+    // only, so a grandchild would escape the grandparent's limits.
+    SubagentFixture fixture;
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+    auto* script = fixture.scripts["parent-script"].get();
+
+    // One shared queue: parent spawn, child's forbidden spawn, child's
+    // final text, parent's final text.
+    script->Push(testing::ToolUseResponse("call-spawn", "spawn_subagent", {{"task", "outer"}}));
+    script->Push(testing::ToolUseResponse("call-nested", "spawn_subagent", {{"task", "inner"}}));
+    script->Push(testing::TextResponse("child result"));
+    script->Push(testing::TextResponse("parent done"));
+
+    parent->SubmitTurn("go");
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    const auto child_id = fixture.WaitForSubagentStarted(parent, nullptr);
+    REQUIRE(child_id.has_value());
+    CHECK(fixture.sessions->ChildCount(*child_id) == 0);
+    const auto page = fixture.db->GetMessagesPage(*child_id, std::nullopt, 50);
+    bool refused = false;
+    for (const auto& row : page.messages) {
+        for (const auto& part : row.message.content) {
+            if (const auto* block = std::get_if<llm::ToolResultBlock>(&part)) {
+                refused = refused || (block->is_error && TextOf(*block).find(
+                                          "cannot spawn subagents") != std::string::npos);
+            }
+        }
+    }
+    CHECK(refused);
+}
+
 TEST_CASE("the parent's allowed_subagents gate spawns", "[subagent][preset]") {
     // The same allowlist the spawn tool's per-preset description and enum
     // advertise, enforced where the request lands: an unlisted preset is

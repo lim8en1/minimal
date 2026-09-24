@@ -1,7 +1,9 @@
 #include "fs_tools.hpp"
 
 #include <cstdint>
+#include <filesystem>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <utility>
 
@@ -97,6 +99,25 @@ std::string DisclosedPath(const ToolContext& ctx, const std::string& typed) {
     const std::filesystem::path canonical = std::filesystem::weakly_canonical(direct, ec);
     if (ec || canonical == direct) return typed;
     return typed + " (resolves to " + canonical.string() + ")";
+}
+
+// The one session grant file edits offer: every write/edit of a file INSIDE
+// the project, for this session. Blanket like a bash grant, and worded so.
+// Never offered -- so that call always prompts -- for a path outside the
+// project (an empty offer list can never satisfy the grant conjunction) or
+// inside .git/: a hook or config written there runs code on the next git
+// call, which is not "editing the project". The key embeds the canonical
+// root, so a grant copied to a subagent of the same project still applies.
+std::optional<tools::GrantOffer> ProjectEditGrant(const ToolContext& ctx, const std::string& typed) {
+    const ConfineResult resolved = tools::confine(ctx.project_root, typed, /*must_exist=*/false);
+    if (!resolved.ok || resolved.outside_project_root) return std::nullopt;
+    std::error_code ec;
+    const std::filesystem::path root = std::filesystem::weakly_canonical(ctx.project_root, ec);
+    if (ec) return std::nullopt;
+    const std::filesystem::path relative = resolved.absolute_path.lexically_relative(root);
+    if (relative.empty() || *relative.begin() == ".git") return std::nullopt;
+    return tools::GrantOffer{"file_write:" + root.string(),
+                             "edits to any file in " + root.string() + " (write, edit)"};
 }
 
 // THE MODEL-INPUT ALLOCATION CEILING for read windows, shared by read and
@@ -264,6 +285,7 @@ public:
         }
         disclosure.summary =
             "write: " + DisclosedPath(ctx, *path) + size_note + " -- creates or overwrites this file";
+        if (auto grant = ProjectEditGrant(ctx, *path)) disclosure.grants.push_back(std::move(*grant));
         return disclosure;
     }
 
@@ -385,6 +407,11 @@ public:
         else if (command == "str_replace") note = " -- replaces text in this file";
         else if (command == "insert") note = " -- inserts text into this file";
         disclosure.summary = "edit (" + command + "): " + DisclosedPath(ctx, *path) + note;
+        if (command != "view") {
+            if (auto grant = ProjectEditGrant(ctx, *path)) {
+                disclosure.grants.push_back(std::move(*grant));
+            }
+        }
         return disclosure;
     }
 

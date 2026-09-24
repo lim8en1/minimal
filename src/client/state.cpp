@@ -2321,6 +2321,7 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         pp->category = pr.category();
         pp->summary = pr.summary();
         pp->complete = pr.complete();
+        pp->reason = pr.reason();
         pp->grants.assign(pr.grants().begin(), pr.grants().end());
         target->SetPermissionRequest(std::move(pp));
     } else if (event.has_confirmation_request()) {

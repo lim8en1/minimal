@@ -82,6 +82,12 @@ struct ToolInvocation {
     std::string summary;
     bool is_error = false;
     std::chrono::milliseconds duration{0};
+    // The same labels core.pre_tool_use carries (ToolExecutor::hook_labels):
+    // the permission key (never an alias) and the input-sensitive category
+    // ("read_only" | "file_write" | "execute" | "mcp"). Appended last so the
+    // layout prefix a plugin was built against is unchanged.
+    std::string permission_key;
+    std::string category;
 };
 
 // EVERY PAYLOAD IS AN OWNED VALUE, never a reference. Observers run on a

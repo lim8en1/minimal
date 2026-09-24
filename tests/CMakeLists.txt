@@ -217,6 +217,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_settings.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_session_state.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/command_scanner.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/stage_normalize.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/restart_shell.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/tasks_command.cpp"
     # Same pattern for the titler: plugin logic over core headers, linked

@@ -15,14 +15,27 @@ TEST_CASE("permission chain: preset per-tool override wins over everything", "[p
     CHECK(resolve_permission_chain("bash", ToolCategory::Execute, preset, global) == PermissionMode::AlwaysAllow);
 }
 
-TEST_CASE("permission chain: preset category beats global layers", "[permission][chain]") {
+TEST_CASE("permission chain: preset category beats the global category", "[permission][chain]") {
+    PermissionOverrideLayer preset;
+    preset.file_write = PermissionMode::AlwaysAllow;
+    PermissionOverrideLayer global;
+    global.file_write = PermissionMode::AlwaysDeny;
+
+    CHECK(resolve_permission_chain("write", ToolCategory::FileWrite, preset, global) == PermissionMode::AlwaysAllow);
+}
+
+TEST_CASE("permission chain: preset category and global per-tool rule fold", "[permission][chain]") {
+    // Neither may widen the other: a blanket category vs a specific rule
+    // from the other layer resolves most-restrictively, in both directions.
     PermissionOverrideLayer preset;
     preset.file_write = PermissionMode::AlwaysAllow;
     PermissionOverrideLayer global;
     global.per_tool_overrides["write"] = PermissionMode::AlwaysDeny;
-    global.file_write = PermissionMode::AlwaysDeny;
+    CHECK(resolve_permission_chain("write", ToolCategory::FileWrite, preset, global) == PermissionMode::AlwaysDeny);
 
-    CHECK(resolve_permission_chain("write", ToolCategory::FileWrite, preset, global) == PermissionMode::AlwaysAllow);
+    preset.file_write = PermissionMode::AlwaysDeny;
+    global.per_tool_overrides["write"] = PermissionMode::AlwaysAllow;
+    CHECK(resolve_permission_chain("write", ToolCategory::FileWrite, preset, global) == PermissionMode::AlwaysDeny);
 }
 
 TEST_CASE("permission chain: global per-tool override beats global category", "[permission][chain]") {

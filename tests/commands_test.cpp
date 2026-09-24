@@ -952,3 +952,30 @@ TEST_CASE("/think off switches to a declared variant literally named \"off\" ins
     REQUIRE(switched.status == Status::kOk);
     CHECK(fixture.preset().model_ref.str() == "main/fast@off");
 }
+
+TEST_CASE("/permissions shows the policy, dry-runs a call and revokes grants",
+          "[commands][permissions]") {
+    CommandFixture fixture;
+    fixture.tools_for_test().Register(
+        std::make_unique<testing::FakeTool>("write", tools::ToolCategory::FileWrite, "ok"));
+    tools::PermissionPolicy plan;
+    plan.file_write = tools::PermissionMode::AlwaysDeny;
+    fixture.SetPoliciesForTest(plan);
+
+    const auto shown = fixture.Run("permissions");
+    REQUIRE(shown.status == Status::kOk);
+    CHECK(shown.message.find("file_write=deny") != std::string::npos);
+    CHECK(shown.message.find("session grants (0)") != std::string::npos);
+
+    // The dry run goes through the real gate and names the deciding rule.
+    const auto checked = fixture.Run("permissions", {"check", "write", "{}"});
+    REQUIRE(checked.status == Status::kOk);
+    CHECK(checked.message == "write: deny -- category: file_write=deny");
+    CHECK(fixture.Run("permissions", {"check", "nope"}).status == Status::kError);
+    CHECK(fixture.Run("permissions", {"check", "write", "{not json"}).status == Status::kError);
+
+    CHECK(fixture.Run("permissions", {"revoke", "bash:/usr/bin/git"}).status == Status::kError);
+    const auto all = fixture.Run("permissions", {"revoke", "all"});
+    REQUIRE(all.status == Status::kOk);
+    CHECK(all.message == "revoked 0 grant(s)");
+}

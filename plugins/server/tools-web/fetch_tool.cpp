@@ -119,7 +119,10 @@ public:
     WebFetchTool(WebSettings settings, net::HttpClient http)
         : settings_(std::move(settings)), http_(std::move(http)) {
         spec_.name = "web_fetch";
-        spec_.category = ToolCategory::Execute;
+        // ReadOnly: it runs nothing locally. The network dimension
+        // (network_access_required) is its gate -- as Execute it also
+        // needed `execute: allow`, which allows bash, to run unprompted.
+        spec_.category = ToolCategory::ReadOnly;
         spec_.definition.name = spec_.name;
         spec_.definition.description =
             "Fetch a URL over HTTP(S) and return its content as text. HTML pages are converted "

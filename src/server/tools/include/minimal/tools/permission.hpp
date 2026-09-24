@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -36,6 +37,11 @@ struct PermissionDisclosure {
 // Ordered: Deny < Ask < Allow. The ordering is the point -- most_restrictive() is
 // the lattice meet, and several composition rules depend on it.
 enum class PermissionMode { AlwaysDeny = 0, Ask = 1, AlwaysAllow = 2 };
+
+// Config spellings: "allow" | "ask" | "deny"; "read_only" | "file_write" |
+// "execute". Used for explanations, never parsed back.
+std::string_view mode_name(PermissionMode mode);
+std::string_view category_name(ToolCategory category);
 
 // allow+ask = ask, ask+deny = deny, deny+allow = deny.
 constexpr PermissionMode most_restrictive(PermissionMode a, PermissionMode b) {
@@ -88,6 +94,48 @@ struct PatternSubjects {
     // false = allow-mode pattern rules must not act on this invocation (the
     // tool could not vouch for the decomposition). ask/deny rules still match.
     bool allow_eligible = true;
+    // Extra spellings matched by ask/deny rules only (Tool::
+    // PatternRestrictSubjects) -- never by the allow conjunction.
+    std::vector<std::string> restrict_only;
+};
+
+// --- Permission precedence chains (Config -- "Permission-mode precedence") ---
+//
+// Pure functions over already-parsed config layers -- no file/YAML reading here.
+// Unlike PermissionPolicy (whose fields are always concrete), a layer may leave
+// any field unset, meaning "fall through to the next layer".
+// How matching pattern rules for one tool combine.
+//   Restrictive (default) -- the most restrictive matching rule wins; a broad
+//     `"git *": ask` cannot be carved out by `"git status": allow`.
+//   Specific -- a matching deny still wins outright; otherwise the most
+//     SPECIFIC matching rule wins (most literal characters; ties go to the
+//     stricter rule), so the carve-out works. Normalized bash respellings
+//     (PatternSubjects::restrict_only) still only tighten.
+enum class PatternPrecedence { Restrictive, Specific };
+
+struct PermissionOverrideLayer {
+    std::optional<PermissionMode> read_only, file_write, execute, out_of_workdir, network;
+    // Unset = fall through to the next layer (preset -> permissions.json ->
+    // Restrictive). An UNTRUSTED preset's choice is ignored: Specific can let
+    // a specific allow beat a broad ask, i.e. widen.
+    std::optional<PatternPrecedence> pattern_precedence;
+    std::unordered_map<std::string, PermissionMode> per_tool_overrides;
+    // Pattern rules per permission key; a layer may carry none.
+    std::unordered_map<std::string, std::vector<PermissionPatternRule>> pattern_overrides;
+    // Pattern rules on the out_of_workdir dimension.
+    std::vector<PermissionPatternRule> out_of_workdir_patterns;
+};
+
+// The two config layers a tool's mode resolves from, kept (rather than
+// flattened) so resolution can run PER CALL with the tool's real category. A
+// flat merge had to pick one precedence for "global per-tool rule vs preset
+// category" without knowing the category, and picked the wrong one: a global
+// `bash: allow` beat plan's `execute: deny`.
+struct ToolModeLayers {
+    PermissionOverrideLayer preset;
+    PermissionOverrideLayer global;
+    // false for a project-local (repo-shipped) preset: it may only narrow.
+    bool preset_trusted = true;
 };
 
 struct PermissionPolicy {
@@ -110,6 +158,22 @@ struct PermissionPolicy {
     PermissionMode network = PermissionMode::Ask;
 
     std::unordered_map<std::string, PermissionMode> per_tool_overrides;
+
+    // Set by agent::BuildPermissionPolicy. When present, the tool/category
+    // half of resolution comes from here and the flat read_only/file_write/
+    // execute/per_tool_overrides fields above are only a category-level
+    // summary (display, direct-construction tests). Precedence, per call:
+    //   preset per-tool > {preset category, global per-tool} > global category
+    //   > hard-coded default
+    // where a preset category and a global per-tool rule that BOTH speak fold
+    // most-restrictively: a blanket preset category cannot widen a specific
+    // global rule (`bash: deny` stays deny under `execute: allow`), and a
+    // specific global rule cannot widen a preset's blanket narrowing (plan's
+    // `execute: deny` holds under a global `bash: allow`). A preset per-tool
+    // rule is the most specific statement and wins outright. An untrusted
+    // preset only narrows: its per-tool/category opinion clamps the
+    // global-only result via most_restrictive.
+    std::shared_ptr<const ToolModeLayers> layers;
 
     // Pattern rules, keyed by PERMISSION key (never an alias -- the same rule
     // per_tool_overrides obeys). Semantics: an exact per_tool_overrides entry
@@ -136,6 +200,9 @@ struct PermissionPolicy {
     // the one pattern set that is anchored at "/" by construction.
     std::vector<PermissionPatternRule> out_of_workdir_patterns;
 
+    // How matching pattern rules combine (see PatternPrecedence).
+    PatternPrecedence pattern_precedence = PatternPrecedence::Restrictive;
+
     PermissionMode mode_for(std::string_view tool_name, ToolCategory category) const;
     // Subject-ful overload: `subject` is the tool's PatternSubject -- a
     // canonical path for confinement tools, the raw command line for bash.
@@ -155,8 +222,33 @@ struct PermissionPolicy {
     //     line no longer allows -- "git diff *" once allowed `git diff; make
     //     install`, because the subject was the raw line. No stages (or no
     //     allow match) -> the fold below decides as usual.
+    // `reason` (optional) receives the rule that decided, in the words the
+    // permission prompt and a denial show: "preset: execute=deny",
+    // "pattern `git push *`=ask", "permissions.json: bash=allow".
     PermissionMode mode_for(std::string_view tool_name, ToolCategory category,
-                            const PatternSubjects& subjects, bool subject_is_path) const;
+                            const PatternSubjects& subjects, bool subject_is_path,
+                            std::string* reason = nullptr) const;
+
+    // True when an `ask`-mode pattern rule for this tool matches the whole
+    // subject or any stage. An operator-written ask is a demand to be asked
+    // about THAT invocation, so the executor never lets a session grant
+    // satisfy it: a blanket grant on /usr/bin/git (minted from a `git status`
+    // prompt) must not carry `git push --force` past `"git push *": ask`.
+    bool ask_pattern_matches(std::string_view tool_name, const PatternSubjects& subjects,
+                             bool subject_is_path) const;
+
+    // The tool/category half of resolution, before patterns:
+    //   base  -- the mode when no pattern matches;
+    //   exact -- the per-tool rule a matching pattern folds with (a per-tool
+    //            deny is a kill switch no pattern allow can lift);
+    //   clamp -- an untrusted preset's narrowing, folded over everything.
+    struct ToolResolution {
+        PermissionMode base;
+        std::optional<PermissionMode> exact;
+        std::optional<PermissionMode> clamp;
+        std::string source;  // which rule produced `base`, for explanations
+    };
+    ToolResolution resolve_tool(std::string_view tool_name, ToolCategory category) const;
 };
 
 struct McpPermissionPolicy {
@@ -166,22 +258,22 @@ struct McpPermissionPolicy {
     PermissionMode mode_for(std::string_view server_name) const;
 };
 
-// --- Permission precedence chains (Config -- "Permission-mode precedence") ---
-//
-// Pure functions over already-parsed config layers -- no file/YAML reading here.
-// Unlike PermissionPolicy (whose fields are always concrete), a layer may leave
-// any field unset, meaning "fall through to the next layer".
-struct PermissionOverrideLayer {
-    std::optional<PermissionMode> read_only, file_write, execute, out_of_workdir, network;
-    std::unordered_map<std::string, PermissionMode> per_tool_overrides;
-    // Pattern rules per permission key; a layer may carry none.
-    std::unordered_map<std::string, std::vector<PermissionPatternRule>> pattern_overrides;
-    // Pattern rules on the out_of_workdir dimension.
-    std::vector<PermissionPatternRule> out_of_workdir_patterns;
-};
+// One MCP tool's mode: the server's mode (McpPermissionPolicy) refined by a
+// per-tool rule keyed by the full tool name (`mcp__<server>__<tool>`) in
+// `policy`'s per_tool_overrides -- so `get_issue` can be allowed while
+// `delete_repo` asks. Same shape as a built-in's tool-vs-category precedence:
+// a preset per-tool rule wins; a global per-tool rule and a preset per-server
+// rule that both speak fold most-restrictively; a global per-tool rule beats
+// the global default; an untrusted preset only narrows.
+PermissionMode resolve_mcp_tool_mode(const PermissionPolicy& policy,
+                                     const McpPermissionPolicy& mcp_policy,
+                                     std::string_view server_name, std::string_view tool_name,
+                                     std::string* reason = nullptr);
 
-// preset per-tool override -> preset category -> global per_tool_overrides ->
-// global fallback.<category> -> hard-coded default (read_only=Allow, others=Ask).
+
+// preset per-tool override -> {preset category, global per_tool_overrides}
+// (most_restrictive when both speak) -> global fallback.<category> ->
+// hard-coded default (read_only=Allow, others=Ask). See PermissionPolicy::layers.
 PermissionMode resolve_permission_chain(const std::string& tool_name, ToolCategory category,
                                          const PermissionOverrideLayer& preset,
                                          const PermissionOverrideLayer& global);
@@ -217,8 +309,9 @@ void merge_pattern_layers(
 // ToolRegistry::DotenvProtectedPermissionKeys() -- structural, not a
 // hardcoded read/write/edit literal, so a renamed or third-party file tool
 // that opts in is covered too). Living in the DEFAULT layer (not a hard
-// floor) is what keeps it overridable -- config patterns replace it wholesale
-// per tool.
+// floor) is what keeps it overridable: it merges under config patterns per
+// (tool, glob), so a config rule on the same glob replaces it and unrelated
+// rules leave it in force.
 std::unordered_map<std::string, std::vector<PermissionPatternRule>> default_pattern_rules(
     const std::vector<std::string>& dotenv_protected_permission_keys);
 

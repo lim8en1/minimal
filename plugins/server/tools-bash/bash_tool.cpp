@@ -17,6 +17,7 @@
 #include "background_registry.hpp"
 #include "bash_process.hpp"
 #include "command_scanner.hpp"
+#include "stage_normalize.hpp"
 #include "minimal/sidecar/drain.hpp"
 
 namespace minimal::tools_bash {
@@ -291,6 +292,21 @@ public:
         return ScanCommand(command).stages;
     }
 
+    // Alternate spellings of every stage (stage_normalize.hpp), for ask/deny
+    // rules only: `"rm *": deny` also catches `/bin/rm`, `'rm'`, `sudo rm`,
+    // `command rm`, `xargs rm`.
+    std::vector<std::string> PatternRestrictSubjects(const nlohmann::json& input) const override {
+        if (!input.is_object() || !input.contains("command") ||
+            !input.at("command").is_string()) {
+            return {};
+        }
+        std::vector<std::string> out;
+        for (const auto& stage : ScanCommand(input.at("command").get<std::string>()).stages) {
+            for (auto& variant : NormalizedStageVariants(stage)) out.push_back(std::move(variant));
+        }
+        return out;
+    }
+
     // The scanner's verdict: an incomplete parse (`$X args`, `eval "$CMD"`) or
     // a stage with a real output redirect (`git log > f`) is not what an allow
     // rule on `git log` vouched for, so allow rules stay inert for it.
@@ -337,7 +353,10 @@ public:
             // stricter -- more keys to hold, never fewer.
             if (!resolved) continue;
             const auto path = resolved->string();
-            disclosure.grants.push_back(GrantOffer{"bash:" + path, path + " *"});
+            // The label carries the blanket wording itself (consent-scoping
+            // rule 5): the modal prints labels verbatim, and not every
+            // tool's grant is about arguments.
+            disclosure.grants.push_back(GrantOffer{"bash:" + path, path + " * (any arguments)"});
         }
         return disclosure;
     }

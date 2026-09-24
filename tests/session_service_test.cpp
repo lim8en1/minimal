@@ -3175,10 +3175,14 @@ TEST_CASE("observers see every tool call and the turn's tool list",
         std::mutex mu;
         std::vector<std::string> executed;
         std::vector<std::string> summarized;
+        std::string permission_key;
+        std::string category;
         void OnToolExecuted(const agent::SessionInfo&,
                             const agent::ToolInvocation& invocation) override {
             std::lock_guard<std::mutex> lock(mu);
             executed.push_back(invocation.tool_name);
+            permission_key = invocation.permission_key;
+            category = invocation.category;
         }
         void OnTurnCompleted(const agent::SessionInfo&,
                              const agent::TurnSummary& summary) override {
@@ -3209,6 +3213,10 @@ TEST_CASE("observers see every tool call and the turn's tool list",
     std::lock_guard<std::mutex> lock(recorder->mu);
     CHECK((recorder->executed == std::vector<std::string>{"read"}));
     CHECK((recorder->summarized == std::vector<std::string>{"read"}));
+    // The labels core.post_tool_use filters on (hook_observer_bridge): they
+    // were registered as filterable but never produced.
+    CHECK(recorder->permission_key == "read");
+    CHECK(recorder->category == "read_only");
 }
 
 TEST_CASE("an advisor answers Ask; abstention still reaches the human over the wire",

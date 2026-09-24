@@ -42,6 +42,22 @@ std::optional<std::vector<std::string>> AliasedTool::PatternStages(
     return inner_->PatternStages(input);
 }
 
+// Without this forward an aliased bash fell back to the default (true): an
+// allow rule on `git log *` rode `git log > f` and unparseable lines.
+bool AliasedTool::PatternAllowEligible(const nlohmann::json& input) const {
+    return inner_->PatternAllowEligible(input);
+}
+
+// Without this forward an aliased bash's deny rules saw only the spelling as
+// written: `"rm *": deny` would miss `/bin/rm` again.
+std::vector<std::string> AliasedTool::PatternRestrictSubjects(const nlohmann::json& input) const {
+    return inner_->PatternRestrictSubjects(input);
+}
+
+// Without this forward an aliased read/write/edit dropped out of
+// DotenvProtectedPermissionKeys() and lost the default .env denial.
+bool AliasedTool::default_dotenv_protected() const { return inner_->default_dotenv_protected(); }
+
 std::string_view AliasedTool::config_namespace() const { return inner_->config_namespace(); }
 
 bool AliasedTool::parallel_safe() const { return inner_->parallel_safe(); }

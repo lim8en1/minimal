@@ -621,10 +621,8 @@ TEST_CASE("typesafe-advisor Advise resolves allow/deny/abstain from the live-sha
         REQUIRE(response != std::nullopt);
         if (use.expected == Action::kAllow) {
             CHECK(response->decision == tools::PermissionDecision::Allow);
-            // Every disclosed key granted: auto mode's point, bounded by the
-            // downstream re-filter.
-            REQUIRE(response->granted_keys.size() == 1);
-            CHECK(response->granted_keys[0] == "bash:/usr/bin/make");
+            // This invocation only: an advisor mints no session grants.
+            CHECK(response->granted_keys.empty());
             CHECK(response->deny_message.empty());
         } else {
             CHECK(response->decision == tools::PermissionDecision::Deny);

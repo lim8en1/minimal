@@ -180,11 +180,11 @@ TEST_CASE("under AllowOnly the advisor is never consulted", "[permission_advisor
     CHECK_FALSE(inner_ptr->called);
 }
 
-TEST_CASE("grants returned by an advisor are filtered against the disclosure",
-          "[permission_advisor][grants]") {
-    // The double filter holds unchanged: an advisor may grant only keys the
-    // disclosure offered. Returning an undisclosed key mints nothing, and the
-    // next invocation prompts again.
+TEST_CASE("an advisor never mints session grants", "[permission_advisor][grants]") {
+    // An advisor decides ONE invocation. Its granted_keys -- disclosed or not
+    // -- are discarded, so every later call is judged again: a blanket grant
+    // from one confident allow of `git status` must not silence the judgement
+    // of `git push --force`.
     Fixture f;
     auto& tool = f.AddTool("bash", ToolCategory::Execute);
     tool.set_disclosure(Disclosing({"bash:/usr/bin/git"}));
@@ -197,24 +197,51 @@ TEST_CASE("grants returned by an advisor are filtered against the disclosure",
     tools::ToolExecutor executor = MakeExecutor(f.registry, checker);
     auto ctx = f.Context();
 
-    // First invocation: the advisor claims a grant on rm, which was never disclosed.
+    // An undisclosed key mints nothing (as before).
     advisor->next = PermissionResponse{PermissionDecision::Allow, {"bash:/bin/rm"}};
     CHECK_FALSE(executor.Run("tu1", "bash", {{"command", "git status"}}, ctx).is_error);
-    REQUIRE(executor.granted_count() == 0);  // the undisclosed key minted nothing
-    REQUIRE(inner_ptr->seen.empty());  // the advisor's Allow decided; only the key was filtered
+    REQUIRE(executor.granted_count() == 0);
+    REQUIRE(inner_ptr->seen.empty());  // the advisor's Allow decided
 
-    // Second invocation: the advisor grants exactly what was disclosed.
+    // A DISCLOSED key mints nothing either.
     advisor->next = PermissionResponse{PermissionDecision::Allow, {"bash:/usr/bin/git"}};
     CHECK_FALSE(executor.Run("tu2", "bash", {{"command", "git log"}}, ctx).is_error);
-    REQUIRE(executor.granted_count() == 1);
-    CHECK(executor.granted_keys() == std::vector<std::string>{"bash:/usr/bin/git"});
+    REQUIRE(executor.granted_count() == 0);
 
-    // The grant silences the third prompt: the advisor answers Allow with no
-    // grant needed and the conjunction is already satisfied.
+    // So the next call reaches the advisor again.
     const auto seen_before = advisor->seen.size();
-    CHECK_FALSE(executor.Run("tu3", "bash", {{"command", "git diff"}}, ctx).is_error);
-    CHECK(advisor->seen.size() == seen_before);  // short-circuit before the checker
-    CHECK(inner_ptr->seen.empty());  // the inner checker was never needed in this test
+    advisor->next = PermissionResponse{PermissionDecision::Allow, {}};
+    CHECK_FALSE(executor.Run("tu3", "bash", {{"command", "git push --force"}}, ctx).is_error);
+    CHECK(advisor->seen.size() == seen_before + 1);
+    CHECK(inner_ptr->seen.empty());
+}
+
+TEST_CASE("a human's grant still passes through the advised checker",
+          "[permission_advisor][grants]") {
+    // Abstain falls through to the inner checker; ITS granted_keys are the
+    // human's and are remembered as before.
+    Fixture f;
+    auto& tool = f.AddTool("bash", ToolCategory::Execute);
+    tool.set_disclosure(Disclosing({"bash:/usr/bin/git"}));
+
+    struct Abstaining : tools::PermissionAdvisor {
+        std::optional<PermissionResponse> Advise(const tools::PermissionRequest&,
+                                                 const tools::AdvisorContext&) override {
+            return std::nullopt;
+        }
+    };
+    struct Granting : tools::PermissionChecker {
+        PermissionResponse check(const tools::PermissionRequest&) override {
+            return PermissionResponse{PermissionDecision::Allow, {"bash:/usr/bin/git"}};
+        }
+    };
+    tools::AdvisedPermissionChecker checker(std::make_shared<Abstaining>(),
+                                            std::make_unique<Granting>(), [] { return false; });
+    tools::ToolExecutor executor = MakeExecutor(f.registry, checker);
+    auto ctx = f.Context();
+
+    CHECK_FALSE(executor.Run("tu1", "bash", {{"command", "git status"}}, ctx).is_error);
+    CHECK(executor.granted_keys() == std::vector<std::string>{"bash:/usr/bin/git"});
 }
 
 TEST_CASE("a wedged advisor does not outlive cancellation", "[permission_advisor][cancel]") {

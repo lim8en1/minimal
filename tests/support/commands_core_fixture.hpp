@@ -223,6 +223,11 @@ public:
     // Accessors for tests that build their OWN CommandContext (the sessionless
     // dispatch tests pass a null session ref into the same registries).
     const agent::AgentPresetRegistry& registry_presets_for_test() const { return *presets_; }
+    tools::ToolRegistry& tools_for_test() { return tools_; }
+    // Swaps the executor's policies the way a preset switch does.
+    void SetPoliciesForTest(tools::PermissionPolicy policy) {
+        executor_->SetPolicies(std::move(policy), tools::McpPermissionPolicy{});
+    }
     commands::ConfirmationBroker& registry_confirmations_for_test() { return confirmations; }
 
 private:

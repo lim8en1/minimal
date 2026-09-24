@@ -527,6 +527,26 @@ TEST_CASE("grep: files_with_matches default mode with gitignore respected",
     CHECK(result.content_text.find("skip/d.py") == std::string::npos);
 }
 
+TEST_CASE("grep: a directory walk never searches dotenv files", "[tools_search][grep_tool]") {
+    // An un-ignored .env must not land in a broad search: dotenv files are
+    // protected by PATH at the permission gate, and a walk's path is its root.
+    Fixture f;
+    f.Write(".env", "SECRET=alpha\n");
+    f.Write("sub/.env.local", "SECRET=alpha\n");
+    f.Write("a.py", "alpha\n");
+
+    auto tool = tools_search::MakeGrepTool(f.settings);
+    auto ctx = f.Context();
+    const auto result = tool->execute({{"pattern", "alpha"}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.find("a.py") != std::string::npos);
+    CHECK(result.content_text.find(".env") == std::string::npos);
+
+    // Rooted AT the file, the gate decides -- so the tool opts into the
+    // default dotenv deny exactly like read.
+    CHECK(tool->default_dotenv_protected());
+}
+
 TEST_CASE("grep: content mode with context and separators", "[tools_search][grep_tool]") {
     Fixture f;
     f.Write("code.py", "one\ntwo\nmatch\ntwo\none\nmatch2\nend\n");

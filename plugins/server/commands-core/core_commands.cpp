@@ -1,6 +1,9 @@
 #include "core_commands.hpp"
 
+#include <algorithm>
 #include <sstream>
+#include <unordered_map>
+#include <vector>
 #include <string>
 #include <system_error>
 
@@ -12,6 +15,7 @@
 #include "minimal/common/file_lock.hpp"
 #include "minimal/common/model_ref.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/config/permission_codec.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/tools/atomic_write.hpp"
 #include "minimal/tools/permission.hpp"
@@ -570,6 +574,152 @@ public:
     }
 };
 
+// /permissions -- what gates THIS session, and why. Bare: the effective
+// policy (run mode, category modes, per-tool rules, pattern counts, MCP) and
+// the session grants held. `revoke <key>|all` drops grants. `check <tool>
+// <json-input>` is a dry run through the real gate (ToolExecutor::Explain):
+// the mode, the rule that decided it, and whether held grants would answer
+// an Ask -- no prompt, no hook, nothing executed.
+//
+// Not ReadOnly: the grant set and the policy belong to the session worker
+// (Prepare mutates grants, ApplyPreset swaps the policy), so every branch
+// runs there, at a turn boundary.
+class PermissionsCommand : public HarnessCommand {
+public:
+    std::string_view Name() const override { return "permissions"; }
+    std::string_view Summary() const override {
+        return "Show this session's permission rules and grants; revoke grants; dry-run a call";
+    }
+    std::string_view Usage() const override {
+        return "/permissions [revoke <key>|all] [check <tool> <json-input>]";
+    }
+
+    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
+        auto& executor = context.session().executor();
+        if (args.positional.empty()) return CommandResult::Ok(Describe(executor));
+
+        const std::string& verb = args.positional.front();
+        if (verb == "revoke") {
+            if (args.positional.size() != 2) {
+                return CommandResult::Error("usage: /permissions revoke <key>|all");
+            }
+            if (args.positional[1] == "all") {
+                return CommandResult::Ok("revoked " + std::to_string(executor.RevokeAllGrants()) +
+                                         " grant(s)");
+            }
+            if (!executor.RevokeGrant(args.positional[1])) {
+                return CommandResult::Error("no such grant held: " + args.positional[1]);
+            }
+            return CommandResult::Ok("revoked " + args.positional[1]);
+        }
+        if (verb == "check") return Check(context, executor, args);
+        return CommandResult::Error("usage: " + std::string(Usage()));
+    }
+
+private:
+    static std::string Describe(const minimal::tools::ToolExecutor& executor) {
+        using minimal::tools::mode_name;
+        const auto& policy = executor.policy();
+        std::ostringstream out;
+        out << "run mode: " << minimal::config::ToString(executor.run_mode()) << "\n";
+        out << "categories: read_only=" << mode_name(policy.read_only)
+            << " file_write=" << mode_name(policy.file_write)
+            << " execute=" << mode_name(policy.execute)
+            << " · out_of_workdir=" << mode_name(policy.out_of_workdir)
+            << " network=" << mode_name(policy.network) << "\n";
+        auto rules = [&out](std::string_view where,
+                            const std::unordered_map<std::string, minimal::tools::PermissionMode>&
+                                map) {
+            if (map.empty()) return;
+            std::vector<std::string> entries;
+            for (const auto& [key, mode] : map) {
+                entries.push_back(key + "=" + std::string(mode_name(mode)));
+            }
+            std::sort(entries.begin(), entries.end());
+            out << where << ":";
+            for (const auto& entry : entries) out << " " << entry;
+            out << "\n";
+        };
+        if (policy.layers) {
+            rules("preset rules", policy.layers->preset.per_tool_overrides);
+            rules("permissions.json rules", policy.layers->global.per_tool_overrides);
+            if (!policy.layers->preset_trusted) {
+                out << "(project preset: may only narrow permissions.json)\n";
+            }
+        } else {
+            rules("per-tool rules", policy.per_tool_overrides);
+        }
+        if (!policy.pattern_overrides.empty()) {
+            std::vector<std::string> entries;
+            for (const auto& [key, list] : policy.pattern_overrides) {
+                entries.push_back(key + " (" + std::to_string(list.size()) + ")");
+            }
+            std::sort(entries.begin(), entries.end());
+            out << "patterns:";
+            for (const auto& entry : entries) out << " " << entry;
+            out << "\n";
+        }
+        const auto& mcp = executor.mcp_policy();
+        out << "mcp: default=" << mode_name(mcp.default_mode);
+        for (const auto& [server, mode] : mcp.per_server) {
+            out << " " << server << "=" << mode_name(mode);
+        }
+        out << "\n";
+        const auto grants = executor.granted_keys();
+        out << "session grants (" << grants.size() << ")";
+        for (const auto& key : grants) out << "\n  " << key;
+        return out.str();
+    }
+
+    static CommandResult Check(CommandContext& context, minimal::tools::ToolExecutor& executor,
+                               const CommandArgs& args) {
+        if (args.positional.size() < 2) {
+            return CommandResult::Error("usage: /permissions check <tool> <json-input>");
+        }
+        const std::string& tool = args.positional[1];
+        // The input is everything after the tool name. JSON carries spaces the
+        // tokenizer split on, so the raw tail is authoritative; rejoining the
+        // positional tokens is the fallback for callers that set no raw.
+        std::string tail;
+        if (!args.raw.empty()) {
+            auto at = args.raw.find("check");
+            at = at == std::string::npos ? std::string::npos : args.raw.find(tool, at + 5);
+            if (at != std::string::npos) tail = args.raw.substr(at + tool.size());
+        } else {
+            for (std::size_t i = 2; i < args.positional.size(); ++i) {
+                tail += " " + args.positional[i];
+            }
+        }
+        nlohmann::json input = nlohmann::json::object();
+        if (tail.find_first_not_of(" \t") != std::string::npos) {
+            try {
+                input = nlohmann::json::parse(tail);
+            } catch (const std::exception& error) {
+                return CommandResult::Error(std::string("input is not JSON: ") + error.what());
+            }
+        }
+        minimal::tools::ToolContext ctx(context.logger());
+        ctx.session_id = context.session().session_id();
+        ctx.project_root = context.session().project_root();
+        bool grants_satisfy = false;
+        std::optional<minimal::tools::ToolExecutor::Verdict> verdict;
+        try {
+            verdict = executor.Explain(tool, input, ctx, &grants_satisfy);
+        } catch (const std::exception& error) {
+            return CommandResult::Error(std::string("the tool rejected this input: ") +
+                                        error.what());
+        }
+        if (!verdict) return CommandResult::Error("no such tool: " + tool);
+        std::string answer = tool + ": " + std::string(minimal::tools::mode_name(verdict->mode)) +
+                             " -- " + verdict->reason;
+        if (grants_satisfy) answer += " (held grants answer it: runs without a prompt)";
+        if (verdict->mode == minimal::tools::PermissionMode::Ask && !verdict->ask_grantable) {
+            answer += " (an ask pattern: always prompts, grants or not)";
+        }
+        return CommandResult::Ok(answer);
+    }
+};
+
 }  // namespace
 
 // /connect <provider> <api-key> -- stores a credential in the data dir's
@@ -697,6 +847,7 @@ std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     out.push_back(std::make_unique<RenameCommand>());
     out.push_back(std::make_unique<ConnectCommand>());
     out.push_back(std::make_unique<McpCommand>());
+    out.push_back(std::make_unique<PermissionsCommand>());
     return out;
 }
 

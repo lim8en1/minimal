@@ -151,3 +151,15 @@ TEST_CASE("ParsePermissionsConfig: malformed pattern shapes throw", "[permission
                         {"pattern_overrides", {{"bash", {{"git *", "sometimes"}}}}}}),  // bad mode
                     std::runtime_error);
 }
+
+TEST_CASE("ParsePermissionsConfig: unknown keys are collected, not silently dropped",
+          "[permissions_config]") {
+    const auto config = ParsePermissionsConfig(nlohmann::json{
+        {"fallback", {{"file_writes", "deny"}, {"execute", "ask"}}},
+        {"pattern", {{"bash", {{"rm *", "deny"}}}}},
+        {"_comment", "ignored by convention"},
+        {"pattern_precedence", "specific"}});
+    CHECK(config.unknown_keys == std::vector<std::string>{"pattern", "fallback.file_writes"});
+    CHECK(config.global_layer.pattern_precedence == minimal::tools::PatternPrecedence::Specific);
+    CHECK_THROWS(ParsePermissionsConfig(nlohmann::json{{"pattern_precedence", "loose"}}));
+}

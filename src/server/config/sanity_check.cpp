@@ -125,6 +125,10 @@ std::vector<CheckResult> StartupSanityCheck::check_config_files() {
 
     try {
         permissions_ = LoadPermissionsConfig(dir / "permissions.json");
+        for (const auto& key : permissions_.unknown_keys) {
+            results.push_back(Warning("config_parse", "permissions.json: unknown key '" + key +
+                                                          "' is ignored (typo?)"));
+        }
     } catch (const std::exception& e) {
         results.push_back(Fatal("config_parse", std::string("permissions.json: ") + e.what()));
     }
@@ -384,6 +388,11 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
             try {
                 presets_[preset_name] = agent::LoadAgentPresetFrontmatter(
                     entry.path(), inputs_.tool_registry.PermissionKeys());
+                for (const auto& key : presets_[preset_name].unknown_permission_keys) {
+                    results.push_back(Warning("presets", "agents/" + preset_name +
+                                                             ".md: unknown permission_mode key '" +
+                                                             key + "' is ignored (typo?)"));
+                }
             } catch (const std::exception& e) {
                 results.push_back(Warning("presets", "agents/" + preset_name + ".md: " + e.what()));
             }
@@ -785,6 +794,9 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
     // per_tool_overrides keys (global and per-preset) must reference a permission key.
     const auto check_override_key = [&results, &valid_keys, &ambiguous](const std::string& where,
                                                                          const std::string& key) {
+        // MCP tools (mcp__<server>__<tool>) register when their server
+        // connects, after startup -- there is nothing to check them against.
+        if (key.rfind("mcp__", 0) == 0) return;
         if (ambiguous(key)) {
             results.push_back(Warning("naming_model", where + " per_tool_overrides key '" + key +
                                   "' is ambiguous -- two plugins provide that name; write it qualified as "

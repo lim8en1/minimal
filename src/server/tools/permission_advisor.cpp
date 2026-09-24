@@ -24,6 +24,18 @@ constexpr std::chrono::milliseconds kWaitSlice{25};
 // abandoned wait already takes.
 constexpr int kMaxAbandonedAdvisors = 8;
 
+// An advisor answers ONE invocation; it never mints session grants. A grant is
+// blanket ("this binary, any arguments") and is copied into every subagent,
+// so an advisor-minted one let a single confident allow of `git status`
+// silence the advisor AND the human for `git push --force` for the rest of
+// the session -- including in children that were deliberately left without
+// the advisor (advisor_inherit: false). Grants are human-minted only
+// (ARCHITECTURE.md "Consent scoping").
+PermissionResponse WithoutGrants(PermissionResponse answer) {
+    answer.granted_keys.clear();
+    return answer;
+}
+
 }  // namespace
 
 AdvisedPermissionChecker::AdvisedPermissionChecker(std::shared_ptr<PermissionAdvisor> advisor,
@@ -67,7 +79,7 @@ PermissionResponse AdvisedPermissionChecker::CheckDirect(const PermissionRequest
                 "permission advisor answered {} for tool '{}'",
                 answer->decision == PermissionDecision::Allow ? "allow" : "deny",
                 request.tool_name);
-            return *answer;
+            return WithoutGrants(std::move(*answer));
         }
     } catch (const std::exception& e) {
         common::DefaultLogger().warn(
@@ -169,7 +181,7 @@ PermissionResponse AdvisedPermissionChecker::CheckWithTimeout(const PermissionRe
                 "permission advisor answered {} for tool '{}'",
                 answer->decision == PermissionDecision::Allow ? "allow" : "deny",
                 request.tool_name);
-            return *answer;
+            return WithoutGrants(std::move(*answer));
         }
     } catch (const std::exception& e) {
         common::DefaultLogger().warn(

@@ -85,8 +85,15 @@ tools::PermissionOverrideLayer DecodePermissionModeBlock(const YAML::Node& node,
     if (block["out_of_workdir"])
         layer.out_of_workdir = config::ParsePermissionMode(block["out_of_workdir"].as<std::string>());
     if (block["network"]) layer.network = config::ParsePermissionMode(block["network"].as<std::string>());
+    if (block["pattern_precedence"]) {
+        layer.pattern_precedence =
+            config::ParsePatternPrecedence(block["pattern_precedence"].as<std::string>());
+    }
 
     const YAML::Node overrides = block["overrides"];
+    if (overrides && !overrides.IsMap()) {
+        throw std::runtime_error("agent preset: permission_mode.overrides must be a map of {tool: mode}");
+    }
     if (overrides && overrides.IsMap()) {
         for (const auto& entry : overrides) {
             const std::string tool_name = entry.first.as<std::string>();
@@ -101,6 +108,10 @@ tools::PermissionOverrideLayer DecodePermissionModeBlock(const YAML::Node& node,
     // pattern_overrides: {tool: {glob: mode}}. The alias block above is the
     // opencode spelling of the same layer.
     const YAML::Node patterns = block["patterns"];
+    if (patterns && !patterns.IsMap()) {
+        throw std::runtime_error(
+            "agent preset: permission_mode.patterns must be a map of {tool: {glob: mode}}");
+    }
     if (patterns && patterns.IsMap()) {
         for (const auto& entry : patterns) {
             const std::string tool_name = entry.first.as<std::string>();
@@ -129,16 +140,17 @@ tools::PermissionOverrideLayer DecodePermissionModeBlock(const YAML::Node& node,
 // DecodePermissionModeBlock, so a native `permission_mode` field always wins
 // over an alias encoding of the same intent.
 //
-// Keys map onto minimal's categories: edit/write -> file_write, bash ->
-// execute, webfetch/websearch -> network, external_directory -> out_of_workdir,
-// read/glob/grep/list -> read_only. A SCALAR value lands on the category as
-// before. A MAP value under a tool-keyed alias (bash, read, write, edit, glob,
-// grep) is now the real pattern layer: each entry becomes a PermissionPattern
-// Rule on that tool's permission key, matched against the tool's subject at
-// resolve time (glob-shaped or literal alike -- GlobMatch treats a literal as
-// an exact-match pattern). A map under a category-only key (webfetch,
-// websearch, list) still collapses to the most restrictive mode: those keys
-// name no subject to match against.
+// Keys that name ONE tool in opencode (bash, read, glob, grep, webfetch,
+// websearch) govern that tool only: a scalar becomes a per-tool override on
+// the matching minimal permission key (webfetch -> web_fetch, websearch ->
+// web_search). Mapping them onto categories made `bash: allow` allow every
+// Execute tool (python, subagents) and `read: deny` deny grep, glob, ask_user
+// and skills. `edit`/`write` keep feeding file_write: opencode's `edit` governs
+// every file-modifying tool. external_directory -> out_of_workdir. A MAP value
+// under a tool key is the pattern layer: each entry becomes a
+// PermissionPatternRule on that tool's permission key. A map under a key whose
+// tool has no pattern subject (webfetch, websearch) collapses to its most
+// restrictive mode.
 std::optional<tools::PermissionMode> CollapsePermissionValue(const YAML::Node& value,
                                                              const std::string& key) {
     if (value.IsScalar()) return config::ParsePermissionMode(value.as<std::string>());
@@ -193,19 +205,29 @@ tools::PermissionOverrideLayer DecodePermissionAlias(
     const YAML::Node block = node["permission"];
     if (!block || !block.IsMap()) return layer;
 
-    // Alias key -> the native field it feeds. The layer's members are
-    // optionals, so the map holds pointers to the optionals themselves.
+    // Alias key -> the native CATEGORY field it feeds (file-modification only).
     std::unordered_map<std::string, std::optional<tools::PermissionMode>*> by_key{
-        {"read", &layer.read_only},   {"glob", &layer.read_only},
-        {"grep", &layer.read_only},   {"list", &layer.read_only},
-        {"edit", &layer.file_write},  {"write", &layer.file_write},
-        {"bash", &layer.execute},
-        {"webfetch", &layer.network}, {"websearch", &layer.network},
+        {"edit", &layer.file_write},
+        {"write", &layer.file_write},
         {"external_directory", &layer.out_of_workdir},
+    };
+    // Alias key -> the ONE tool it governs, by minimal permission key.
+    static const std::unordered_map<std::string, std::string> kToolKeys{
+        {"bash", "bash"}, {"read", "read"}, {"glob", "glob"}, {"grep", "grep"},
+        {"webfetch", "web_fetch"}, {"websearch", "web_search"},
     };
 
     for (const auto& entry : block) {
         const std::string key = entry.first.as<std::string>();
+        if (const auto tool = kToolKeys.find(key); tool != kToolKeys.end()) {
+            const std::string& tool_key = tool->second;
+            if (entry.second.IsMap() && tool_key != "web_fetch" && tool_key != "web_search") {
+                DecodeToolPatternMap(entry.second, tool_key, layer);
+            } else if (const auto mode = CollapsePermissionValue(entry.second, key)) {
+                layer.per_tool_overrides[tool_key] = *mode;
+            }
+            continue;
+        }
         const auto it = by_key.find(key);
         if (it == by_key.end()) {
             // Not one of the fixed opencode-shape category words -- but a map
@@ -244,8 +266,8 @@ tools::PermissionOverrideLayer DecodePermissionAlias(
             DecodeToolPatternMap(entry.second, key, layer);
             continue;
         }
-        // Several alias keys collapse onto one category (read/glob/grep/list ->
-        // read_only), and YAML document order is otherwise arbitrary: applying
+        // Two alias keys collapse onto one category (edit/write ->
+        // file_write), and YAML document order is otherwise arbitrary: applying
         // the keys in sequence would let a later permissive key overwrite an
         // earlier deny and WIDEN what the author asked for. Most restrictive
         // wins (AlwaysDeny < Ask < AlwaysAllow), matching the collapse of a
@@ -487,6 +509,18 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
     result.permission_mode = DecodePermissionAlias(node, known_tool_permission_keys);
     ApplyToolsAlias(node, result.permission_mode);
     result.permission_mode = DecodePermissionModeBlock(node, std::move(result.permission_mode));
+    if (const YAML::Node block = node["permission_mode"]; block && block.IsMap()) {
+        static const std::vector<std::string> kKnownPermissionKeys{
+            "read_only", "file_write", "execute", "out_of_workdir", "network",
+            "overrides", "patterns", "pattern_precedence"};
+        for (const auto& entry : block) {
+            const std::string key = entry.first.as<std::string>();
+            if (std::find(kKnownPermissionKeys.begin(), kKnownPermissionKeys.end(), key) ==
+                kKnownPermissionKeys.end()) {
+                result.unknown_permission_keys.push_back(key);
+            }
+        }
+    }
     result.mcp_permissions = DecodeMcpPermissionsBlock(node);
     result.compression_prompt = OptionalString(node, "compression_prompt");
     result.compaction_strategy = OptionalString(node, "compaction_strategy");

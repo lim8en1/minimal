@@ -49,6 +49,14 @@ TEST_CASE("AliasedTool forwards the declarative virtuals", "[aliased_tool]") {
         }
         bool network_access_required() const override { return true; }
         bool parallel_safe() const override { return false; }
+        // Every default below is the PERMISSIVE direction, so a missing
+        // forward is a silent widening: an aliased bash would let allow rules
+        // ride `cmd > file`, an aliased read would lose its .env deny.
+        bool PatternAllowEligible(const nlohmann::json&) const override { return false; }
+        bool default_dotenv_protected() const override { return true; }
+        std::vector<std::string> PatternRestrictSubjects(const nlohmann::json&) const override {
+            return {"rm x"};
+        }
         std::optional<tools::PermissionMode> mode_override_for(
             const nlohmann::json&, const tools::ToolContext&) const override {
             return tools::PermissionMode::AlwaysDeny;
@@ -62,6 +70,10 @@ TEST_CASE("AliasedTool forwards the declarative virtuals", "[aliased_tool]") {
 
     CHECK(wrapped.network_access_required());
     CHECK_FALSE(wrapped.parallel_safe());
+    CHECK_FALSE(wrapped.PatternAllowEligible(nlohmann::json::object()));
+    CHECK(wrapped.default_dotenv_protected());
+    CHECK(wrapped.PatternRestrictSubjects(nlohmann::json::object()) ==
+          std::vector<std::string>{"rm x"});
     CHECK(wrapped.mode_override_for(nlohmann::json::object(), ctx) ==
           tools::PermissionMode::AlwaysDeny);
 }

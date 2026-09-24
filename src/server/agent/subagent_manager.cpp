@@ -76,6 +76,14 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     if (parent == nullptr) {
         return SubagentOutcome::Error("cannot spawn a subagent: the parent session is gone");
     }
+    // Load-bearing for the permission ceilings, not just policy: a child's
+    // ceiling is its parent's OWN policy (parent->policy() below), never the
+    // parent's ceiling, so a grandchild would escape its grandparent's
+    // limits. BuildChatRequest already hides the spawn tool from subagents;
+    // this refuses the call if anything ever routes one here anyway.
+    if (!parent->info().parent_session_id.empty()) {
+        return SubagentOutcome::Error("a subagent cannot spawn subagents");
+    }
 
     // Over-limit spawns are an error the model adapts to, not a queue it blocks
     // in -- a tool that hangs is a turn that never ends.

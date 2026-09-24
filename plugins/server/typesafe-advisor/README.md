@@ -115,8 +115,8 @@ is logged but not gated on):
 1. `review` chosen → abstain.
 2. Top option below its floor (`min_probability_*`) → abstain.
 3. Top option not ahead of the runner-up by `min_margin` → abstain.
-4. `allow` → allow, granting every key the disclosure offered (ToolExecutor
-   re-filters each against the disclosure, so undisclosed keys mint nothing).
+4. `allow` → allow this one call. No session grant is minted, so the next
+   gated call is judged again.
 5. `deny` → deny with the message above.
 
 Abstention is the common denominator: HTTP trouble, a spent budget, a cancel,

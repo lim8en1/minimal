@@ -7,11 +7,11 @@
 // error message names the config key), which is what a separate optional
 // plugin would have bought anyway.
 //
-// Both tools declare network_access_required(), a permission dimension
-// independent of ToolCategory::Execute -- see permission.hpp's `network`
-// field and ARCHITECTURE.md's Permission model. An operator who allows
-// Execute for a sandboxed bash does not thereby also allow fetching
-// arbitrary URLs.
+// Both tools are ReadOnly and declare network_access_required(): the
+// `network` dimension (permission.hpp, ARCHITECTURE.md's Permission model)
+// is their gate. An operator who allows Execute for a sandboxed bash does
+// not thereby allow fetching arbitrary URLs, and allowing the web tools
+// (`network: allow`) does not require allowing bash.
 //
 // Result size: nothing tool-local is needed beyond HttpClient's own 8 MiB
 // buffered-response cap -- the agent loop caps every tool's persisted

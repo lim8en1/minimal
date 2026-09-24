@@ -271,6 +271,10 @@ message PermissionRequest {
   // False when the invocation cannot be named at all (bash: `eval "$X"`). Such a
   // request can never be satisfied by held grants, so it always prompts.
   bool complete = 7;
+  // Why this call asks: the rule that resolved it to "ask" -- e.g.
+  // "preset: execute=ask", "pattern `git push *`=ask", "outside the project:
+  // out_of_workdir=ask". Display text, never parsed.
+  string reason = 8;
 }
 
 message ConfirmationRequest {

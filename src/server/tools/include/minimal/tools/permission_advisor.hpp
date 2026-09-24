@@ -89,11 +89,11 @@ public:
                              std::chrono::milliseconds timeout = kDefaultTimeout);
 
     // try advisor; abstain (nullopt) or throw both fall through to the inner
-    // checker -- one plugin's failure is not a lost turn. A response returned
-    // by the advisor flows through the SAME grant filter at the call site as a
-    // human's answer: ToolExecutor re-checks every granted key against the
-    // disclosure before remembering it, so an advisor returning an undisclosed
-    // key mints nothing.
+    // checker -- one plugin's failure is not a lost turn. An advisor's answer
+    // decides THIS invocation only: its granted_keys are discarded here, so no
+    // advisor can mint a session grant (grants are blanket, copied into
+    // subagents, and human-minted by definition). The inner checker's -- the
+    // human's -- grants pass through to ToolExecutor's disclosure filter.
     //
     // With a positive timeout, Advise runs on its own thread and the wait
     // polls the cancel source: a wedged advisor (one that ignores the

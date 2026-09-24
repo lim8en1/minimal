@@ -54,7 +54,10 @@ public:
     WebSearchTool(WebSettings settings, net::HttpClient http)
         : settings_(std::move(settings)), http_(std::move(http)) {
         spec_.name = "web_search";
-        spec_.category = ToolCategory::Execute;
+        // ReadOnly: it runs nothing locally. The network dimension
+        // (network_access_required) is its gate -- as Execute it also
+        // needed `execute: allow`, which allows bash, to run unprompted.
+        spec_.category = ToolCategory::ReadOnly;
         spec_.definition.name = spec_.name;
         spec_.definition.description =
             "Search the web and return a list of results (title, URL, snippet). Requires a "
