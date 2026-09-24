@@ -5,20 +5,20 @@
 // which exposes per-session task lists over the generic PluginCall channel as
 // "checklist.rpc" ("get"/"list", see checklist_model.hpp for the shapes).
 //
-// ChecklistPoller (checklist_poller.cpp) owns every fetch: one background
-// worker, one cadence, one cache, shared by both hooks below regardless of
+// ChecklistFeed (checklist_feed.hpp) owns every call: one background worker
+// holding the server's "changes" push stream (with polling as the fallback),
+// one per-session cache, shared by both hooks below regardless of
 // registration order. The segment renders the focused session's counts; the
 // panel view renders the same data as either surface -- FOCUSED (the current
 // tab's tasklist) or SUMMARY (one line per open tab, display names via the
-// FocusProvider seam). Neither surface ever calls PluginCall from a render
-// path; the poller's "cheap, never block" contract is the
-// StatusSegment::Render discipline this plugin has always run on.
+// FocusProvider seam). Neither surface ever calls out from a render path:
+// the StatusSegment::Render "cheap, never block" discipline.
 
 #include <memory>
 #include <string>
 
 #include "checklist_panel_view.hpp"
-#include "checklist_poller.hpp"
+#include "checklist_feed.hpp"
 #include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/common/abi_tag.hpp"
 
@@ -27,36 +27,34 @@ namespace {
 namespace plugins = minimal::client::plugins;
 using namespace minimal::checklist_view;
 
-// The {todo} status segment, now thin over the shared poller.
+// The {todo} status segment, thin over the shared feed.
 class ChecklistStatusSegment final : public plugins::StatusSegment {
 public:
-    explicit ChecklistStatusSegment(std::shared_ptr<ChecklistPoller> poller)
-        : poller_(std::move(poller)) {}
+    explicit ChecklistStatusSegment(std::shared_ptr<ChecklistFeed> feed)
+        : feed_(std::move(feed)) {}
 
     std::string_view id() const override { return "todo"; }
 
-    // Same tab-switch discipline as always, now one nudge deep: a focus
-    // change clears the poller's focused cache and wakes its worker, so the
-    // label never shows the previous tab's checklist.
+    // Keyed by the frame's own session id, so the label can never show the
+    // previous tab's checklist; the call doubles as the feed's focus hint.
     std::string Render(const std::string& focused_session_id) const override {
-        poller_->OnFocusHint(focused_session_id);
-        return poller_->FocusedText();
+        return feed_->SegmentText(focused_session_id);
     }
 
 private:
-    std::shared_ptr<ChecklistPoller> poller_;
+    std::shared_ptr<ChecklistFeed> feed_;
 };
 
 }  // namespace
 
 namespace {
-// One poller per process (this .so is never unloaded): whichever hook runs
+// One feed per process (this .so is never unloaded): whichever hook runs
 // first creates it, the second reuses it.
-std::shared_ptr<ChecklistPoller> shared_instance;
-std::shared_ptr<ChecklistPoller> SharedPoller(plugins::ClientApi* api,
-                                              plugins::FocusProvider* focus) {
+std::shared_ptr<ChecklistFeed> shared_instance;
+std::shared_ptr<ChecklistFeed> SharedFeed(plugins::ClientApi* api,
+                                          plugins::FocusProvider* focus) {
     if (shared_instance == nullptr) {
-        shared_instance = std::make_shared<ChecklistPoller>(api, focus);
+        shared_instance = std::make_shared<ChecklistFeed>(api, focus);
     }
     return shared_instance;
 }
@@ -75,7 +73,7 @@ void minimal_client_plugin_register_status_segments(
     // segment that can never do anything.
     if (context.client_api == nullptr) return;
     registry.Register(std::make_unique<ChecklistStatusSegment>(
-        SharedPoller(context.client_api, context.focus)));
+        SharedFeed(context.client_api, context.focus)));
 }
 
 void minimal_client_plugin_register_views(
@@ -87,7 +85,7 @@ void minimal_client_plugin_register_views(
     // follows for a missing api.
     if (context.client_api == nullptr || context.focus == nullptr) return;
     registry.Register(std::make_unique<ChecklistPanelView>(
-        SharedPoller(context.client_api, context.focus), context.focus));
+        SharedFeed(context.client_api, context.focus), context.focus));
 }
 
 }  // extern "C"

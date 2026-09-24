@@ -13,14 +13,17 @@
 // would only train the operator to click through.
 
 #include <memory>
-#include <mutex>
 
+#include "checklist_hub.hpp"
 #include "checklist_store.hpp"
 #include "minimal/plugins/plugin_abi.h"
 #include "minimal/tools/tool.hpp"
 
 namespace minimal::checklist {
 
-std::unique_ptr<tools::Tool> MakeChecklistTool(std::shared_ptr<ChecklistStore> store);
+// `hub` is borrowed and may be null (tests, or a host that never registers the
+// session-observer seam): every successful write then simply pushes nothing.
+std::unique_ptr<tools::Tool> MakeChecklistTool(std::shared_ptr<ChecklistStore> store,
+                                               ChecklistHub* hub = nullptr);
 
 }  // namespace minimal::checklist

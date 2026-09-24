@@ -133,11 +133,11 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_command.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/context_index.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/runtime_factory.cpp"
-    # The checklist-VIEW client plugin: model (header-only), poller and panel
+    # The checklist-VIEW client plugin: model (header-only), feed and panel
     # view are pure plugin logic over the ClientApi/FocusProvider seams,
     # compiled in with stub seams; checklist_view_plugin.cpp (the extern "C"
     # entry points) stays out, like every other bundled plugin.
-    "${CMAKE_SOURCE_DIR}/plugins/client/checklist-view/checklist_poller.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/checklist-view/checklist_feed.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/client/checklist-view/checklist_panel_view.cpp"
     checklist_view_test.cpp
     color_downsample_test.cpp
@@ -224,12 +224,14 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/session-titler/titler.cpp"
     titler_test.cpp
     bash_background_test.cpp
-    # Same pattern for checklist: store, tool and rpc service are pure plugin
-    # logic over core headers; plugin.cpp (the extern "C" entry points) stays
-    # out, like every other bundled plugin.
+    # Same pattern for checklist: store, tool, hub, rpc service and endpoint
+    # are pure plugin logic over core headers; plugin.cpp (the extern "C"
+    # entry points) stays out, like every other bundled plugin.
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist/checklist_store.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist/checklist_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/checklist/checklist_hub.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist/rpc_service.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/checklist/endpoint.cpp"
     # Same pattern for cost-tracker. rates_fetch.cpp is the shared fetch path;
     # its network test uses an unroutable port, never the live snapshot.
     # rates_refresh.cpp is the startup auto-refresh: the gate is tested pure,

@@ -22,8 +22,8 @@ TotalsFeed::TotalsFeed(plugins::ClientApi* api, plugins::FocusProvider* focus, T
 }
 
 TotalsFeed::~TotalsFeed() {
-    // Explicit, not left to ~BackgroundPoller(): see checklist_poller.cpp's
-    // ~ChecklistPoller for why the derived destructor must call Stop() itself.
+    // Explicit, not left to ~BackgroundPoller(): see background_poller.hpp's
+    // TEARDOWN note for why the derived destructor must call Stop() itself.
     Stop();
 }
 

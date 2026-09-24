@@ -8,9 +8,9 @@ namespace minimal::checklist_view {
 
 using minimal::client::Theme;
 
-ChecklistPanelView::ChecklistPanelView(std::shared_ptr<ChecklistPoller> poller,
+ChecklistPanelView::ChecklistPanelView(std::shared_ptr<ChecklistFeed> feed,
                                        plugins::FocusProvider* focus)
-    : poller_(std::move(poller)), focus_(focus),
+    : feed_(std::move(feed)), focus_(focus),
       spec_{"checklist.panel", "checklist", plugins::ViewPlacement::Panel, "ctrl+k"} {
     auto body = ftxui::Renderer([this] { return RenderBody(); });
     // Surface toggle: Tab flips FOCUSED <-> SUMMARY. The core's panel focus
@@ -39,40 +39,54 @@ ftxui::Color ChecklistPanelView::ColorFor(const char* role) const {
 
 ftxui::Element ChecklistPanelView::StatusGlyph(const Item& item) const {
     using namespace ftxui;
+    // Every glyph is 4 cells wide, so item text lines up whatever the status.
     switch (item.status) {
         case Status::Completed:
             return hbox({text("[x]") | color(ColorFor("muted")), text(" ")});
         case Status::InProgress:
             // The active marker gets the accent: it is what "what's running
             // right now" wants the eye to find.
-            return text("→  ") | color(ColorFor("assistant_message")) | bold;
+            return hbox({text(" → ") | color(ColorFor("assistant_message")) | bold, text(" ")});
         case Status::Pending:
             return hbox({text("[ ]"), text(" ")});
     }
-    return text(" ");
+    return text("    ");
+}
+
+ftxui::Element ChecklistPanelView::StaleMarker() const {
+    return ftxui::text(" (stale; reconnecting)") | ftxui::color(ColorFor("error"));
 }
 
 ftxui::Element ChecklistPanelView::FocusedSurface() const {
     using namespace ftxui;
-    const ChecklistPoller::FocusedSnapshot snapshot = poller_->Focused();
     Elements rows;
 
-    if (!snapshot.ever_fetched) {
+    const std::string session_id = focus_->FocusedSessionId();
+    if (session_id.empty()) {
+        rows.push_back(text(" (no session in this tab)") | color(ColorFor("system_message")));
+        return vbox(std::move(rows));
+    }
+    const ChecklistFeed::SessionSnapshot snapshot = feed_->Session(session_id);
+    if (!snapshot.known) {
         rows.push_back(text(" fetching…") | color(ColorFor("system_message")));
         return vbox(std::move(rows));
     }
-    if (!snapshot.valid) {
-        rows.push_back(text(" last update failed; retrying") | color(ColorFor("error")));
-    }
+    if (snapshot.stale) rows.push_back(StaleMarker());
     if (snapshot.items.empty()) {
-        if (snapshot.valid) {
-            rows.push_back(text(" (no tasks)") | color(ColorFor("system_message")));
-        }
+        rows.push_back(text(" (no tasks)") | color(ColorFor("system_message")));
         return vbox(std::move(rows));
     }
 
+    // The first in-progress item takes the frame's focus, so a list taller
+    // than the panel scrolls to what is running now.
+    bool focused_row = false;
     for (const auto& item : snapshot.items) {
-        rows.push_back(hbox({StatusGlyph(item), paragraph(item.text)}));
+        auto row = hbox({StatusGlyph(item), paragraph(item.text)});
+        if (!focused_row && item.status == Status::InProgress) {
+            row = row | focus;
+            focused_row = true;
+        }
+        rows.push_back(std::move(row));
     }
     const Counts counts = CountOf(snapshot.items);
     rows.push_back(text(" "));  // spacer
@@ -85,39 +99,26 @@ ftxui::Element ChecklistPanelView::SummarySurface() const {
     using namespace ftxui;
     Elements rows;
 
-    // One locked read, not three: RunLoop writes items/valid/ever_fetched
-    // together, so independently-locked calls could pair a stale items map
-    // with a fresh valid/ever_fetched flag (or vice versa) if a poll landed
-    // between them -- the same reasoning Focused() already follows.
-    const ChecklistPoller::AllSnapshot snapshot = poller_->AllSnapshotOf();
-    if (!snapshot.ever_fetched) {
-        rows.push_back(text(" fetching…") | color(ColorFor("system_message")));
-        return vbox(std::move(rows));
-    }
-    const auto& all_items = snapshot.items;
-    if (!snapshot.valid) {
-        rows.push_back(text(" last update failed; retrying") | color(ColorFor("error")));
-    }
-
     // Open tabs only, in the host's own order (focused first): the summary
     // is per-TAB, the thing the user can act on -- a session whose tab is
-    // closed has no surface to jump to. This view registers ONLY when the
-    // context carried a FocusProvider, so focus_ is live here.
+    // closed has no surface to jump to. Tabs with no tasks (or none known
+    // yet) are left out: "no tasks" is not "0/0". This view registers ONLY
+    // when the context carried a FocusProvider, so focus_ is live here.
     const std::string focused_session = focus_->FocusedSessionId();
-    std::size_t lines = 0;
+    bool stale = false;
     for (const auto& tab : focus_->Tabs()) {
         if (tab.session_id.empty()) continue;  // sessionless: no tasks possible
-        std::vector<Item> items;
-        if (const auto it = all_items.find(tab.session_id); it != all_items.end()) {
-            items = it->second;
-        }
-        const Counts counts = CountOf(items);
+        const auto snapshot = feed_->Session(tab.session_id);
+        stale = stale || snapshot.stale;
+        if (snapshot.items.empty()) continue;
+        const Counts counts = CountOf(snapshot.items);
         auto line = hbox({
             text(tab.session_id == focused_session ? "▸ " : "  ") |
                 color(ColorFor("border_focused")),
             text(tab.display_name.empty() ? tab.session_id : tab.display_name) |
                 color(ColorFor("assistant_message")),
-            text("  " + std::to_string(counts.done) + "/" + std::to_string(counts.total)) | color(ColorFor("system_message")),
+            text("  " + std::to_string(counts.done) + "/" + std::to_string(counts.total)) |
+                color(ColorFor("system_message")),
         });
         if (counts.active > 0) {
             line = hbox({std::move(line),
@@ -125,27 +126,26 @@ ftxui::Element ChecklistPanelView::SummarySurface() const {
                              color(ColorFor("assistant_message"))});
         }
         rows.push_back(std::move(line));
-        ++lines;
     }
-    if (lines == 0) {
-        rows.push_back(text(" (no open tabs with tasks)") |
-                       color(ColorFor("system_message")));
+    if (rows.empty()) {
+        rows.push_back(text(" (no open tabs with tasks)") | color(ColorFor("system_message")));
     }
+    if (stale) rows.insert(rows.begin(), StaleMarker());
     return vbox(std::move(rows));
 }
 
 ftxui::Element ChecklistPanelView::RenderBody() const {
     using namespace ftxui;
-    Elements rows;
-    // The mode hint rides the top: which surface is showing, and the key
-    // that flips it (the panel receives events only while focused).
-    rows.push_back(hbox({
+    // The mode hint rides the top, outside the scrolled frame: which surface
+    // is showing, and the key that flips it (the panel receives events only
+    // while focused).
+    auto header = hbox({
         text(mode_ == Mode::Focused ? " tasks · this tab" : " tasks · all tabs") |
             color(ColorFor("syntax_function")),
         text(" (tab to switch)") | color(ColorFor("system_message")),
-    }));
-    rows.push_back(mode_ == Mode::Focused ? FocusedSurface() : SummarySurface());
-    return vbox(std::move(rows));
+    });
+    auto surface = mode_ == Mode::Focused ? FocusedSurface() : SummarySurface();
+    return vbox({std::move(header), std::move(surface) | vscroll_indicator | yframe | flex});
 }
 
 }  // namespace minimal::checklist_view

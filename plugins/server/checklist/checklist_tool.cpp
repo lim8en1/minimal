@@ -1,6 +1,7 @@
 #include "checklist_tool.hpp"
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -11,8 +12,7 @@ namespace minimal::checklist {
 namespace {
 
 // Shared by OpSet (bulk replace) and OpUpdate (single-item edit) so the two
-// enforcement points can't silently diverge -- OpUpdate used to hardcode its
-// own literal `4000` instead of referencing this.
+// enforcement points can't silently diverge.
 constexpr std::size_t kMaxItemTextBytes = 4000;
 
 tools::ToolResult Error(const std::string& message) {
@@ -24,13 +24,51 @@ const nlohmann::json& RequireObject(const nlohmann::json& input) {
     return input.is_object() ? input : empty;
 }
 
+// "" when `text` is an acceptable item text, else the error to return. One
+// line per item: a newline would break both the model's markdown list and the
+// client panel's one-row-per-item layout.
+std::string TextError(const std::string& text) {
+    if (text.empty()) return "checklist: item text must not be empty";
+    if (text.size() > kMaxItemTextBytes) {
+        return "checklist: item text is capped at " + std::to_string(kMaxItemTextBytes) + " bytes";
+    }
+    if (text.find_first_of("\r\n") != std::string::npos) {
+        return "checklist: item text must be a single line";
+    }
+    return {};
+}
+
+// An optional "status" field of `object`: `status` stays nullopt when the
+// field is absent; `error` is non-empty when it is present but invalid.
+struct StatusField {
+    std::optional<ItemStatus> status;
+    std::string error;
+};
+
+StatusField ReadStatus(const nlohmann::json& object) {
+    StatusField field;
+    if (!object.contains("status")) return field;
+    if (!object.at("status").is_string()) {
+        field.error = "checklist: 'status' must be a string";
+        return field;
+    }
+    const auto name = object.at("status").get<std::string>();
+    field.status = ParseStatus(name);
+    if (!field.status) {
+        field.error = "checklist: unknown status \"" + name +
+                      "\" (expected pending, in_progress or completed)";
+    }
+    return field;
+}
+
 }  // namespace
 
 namespace {
 
 class ChecklistTool : public tools::Tool {
 public:
-    explicit ChecklistTool(std::shared_ptr<ChecklistStore> store) : store_(std::move(store)) {
+    ChecklistTool(std::shared_ptr<ChecklistStore> store, ChecklistHub* hub)
+        : store_(std::move(store)), hub_(hub) {
         spec_.name = kPluginName;
         spec_.category = tools::ToolCategory::ReadOnly;
         spec_.definition.name = spec_.name;
@@ -54,7 +92,7 @@ public:
                  {{"type", "object"},
                   {"properties",
                    {{"text",
-                     {{"type", "string"}, {"description", "What has to happen"}}},
+                     {{"type", "string"}, {"description", "What has to happen (one line)"}}},
                     {"status",
                      {{"type", "string"},
                       {"enum", {"pending", "in_progress", "completed"}},
@@ -62,8 +100,8 @@ public:
                   {"required", nlohmann::json::array({"text"})}}}}},
               {"id",
                {{"type", "integer"},
-                {"description", "op=update: the item's id (ids run 1..N in list order; "
-                                "op=set renumbers from 1)"}}},
+                {"description", "op=update: the item's number as shown in the list "
+                                "(1..N in list order; op=set renumbers from 1)"}}},
               {"status",
                {{"type", "string"},
                 {"enum", {"pending", "in_progress", "completed"}},
@@ -74,14 +112,14 @@ public:
 
     const tools::ToolSpec& spec() const override { return spec_; }
 
+    // op=update is a Load -> modify -> Save over the session's one row, and a
+    // round that carries set + update must apply them in the order the model
+    // wrote them. Sequential dispatch gives both (tool.hpp): same-session
+    // calls run one at a time in assistant-block order. Different sessions
+    // write different keys, and the RPC path only reads.
+    bool parallel_safe() const override { return false; }
+
     tools::ToolResult execute(const nlohmann::json& input, tools::ToolContext& ctx) override {
-        // The tool is parallel-dispatched (no parallel_safe override), and
-        // op=update is a Load -> modify -> Save sequence over shared
-        // per-session state: two concurrent updates would read the same list
-        // and one would overwrite the other's change. Serializing the whole
-        // execute (not just the store calls, which are individually atomic)
-        // is what makes the sequence atomic; the RPC path only reads.
-        std::lock_guard<std::mutex> lock(mutex_);
         const auto& body = RequireObject(input);
         if (!body.contains("op") || !body.at("op").is_string()) {
             return Error("checklist: 'op' must be one of \"set\", \"update\", \"view\"");
@@ -106,8 +144,20 @@ public:
     }
 
 private:
+    // A stored row that fails to decode names the way out: op=set never
+    // reads the old row, so it replaces a corrupt one.
     std::vector<Item> Current(const tools::ToolContext& ctx) const {
-        return store_->Load(ctx.session_id);
+        try {
+            return store_->Load(ctx.session_id);
+        } catch (const std::exception& error) {
+            throw std::runtime_error(std::string(error.what()) + " (op=set replaces the list)");
+        }
+    }
+
+    tools::ToolResult Save(const tools::ToolContext& ctx, const std::vector<Item>& items) {
+        store_->Save(ctx.session_id, items);
+        if (hub_ != nullptr) hub_->MarkDirty(ctx.session_id);
+        return Reply(items);
     }
 
     tools::ToolResult Reply(const std::vector<Item>& items) const {
@@ -140,31 +190,14 @@ private:
             Item item;
             item.id = next_id++;
             item.text = entry.at("text").get<std::string>();
-            if (item.text.empty()) {
-                return Error("checklist: item text must not be empty");
-            }
-            if (item.text.size() > kMaxItemTextBytes) {
-                return Error("checklist: item text is capped at " +
-                             std::to_string(kMaxItemTextBytes) + " bytes");
-            }
-            item.status = ItemStatus::Pending;
-            if (entry.contains("status")) {
-                if (!entry.at("status").is_string()) {
-                    return Error("checklist: item 'status' must be a string");
-                }
-                const auto status = ParseStatus(entry.at("status").get<std::string>());
-                if (!status) {
-                    return Error("checklist: unknown item status \"" +
-                                 entry.at("status").get<std::string>() +
-                                 "\" (expected pending, in_progress or completed)");
-                }
-                item.status = *status;
-            }
+            if (auto error = TextError(item.text); !error.empty()) return Error(error);
+            auto status = ReadStatus(entry);
+            if (!status.error.empty()) return Error(status.error);
+            item.status = status.status.value_or(ItemStatus::Pending);
             items.push_back(std::move(item));
         }
 
-        store_->Save(ctx.session_id, items);
-        return Reply(items);
+        return Save(ctx, items);
     }
 
     tools::ToolResult OpUpdate(const nlohmann::json& body, const tools::ToolContext& ctx) {
@@ -173,29 +206,18 @@ private:
         }
         const auto id = body.at("id").get<std::int64_t>();
 
-        ItemStatus status = ItemStatus::Pending;
-        bool has_status = false;
-        if (body.contains("status")) {
-            if (!body.at("status").is_string()) {
-                return Error("checklist: 'status' must be a string");
+        const auto status = ReadStatus(body);
+        if (!status.error.empty()) return Error(status.error);
+        std::optional<std::string> text;
+        if (body.contains("text")) {
+            if (!body.at("text").is_string()) {
+                return Error("checklist: 'text' must be a string");
             }
-            const auto parsed = ParseStatus(body.at("status").get<std::string>());
-            if (!parsed) {
-                return Error("checklist: unknown status \"" + body.at("status").get<std::string>() +
-                             "\" (expected pending, in_progress or completed)");
-            }
-            status = *parsed;
-            has_status = true;
+            text = body.at("text").get<std::string>();
+            if (auto error = TextError(*text); !error.empty()) return Error(error);
         }
-        bool has_text = body.contains("text");
-        if (has_text && !body.at("text").is_string()) {
-            return Error("checklist: 'text' must be a string");
-        }
-        if (!has_status && !has_text) {
+        if (!status.status && !text) {
             return Error("checklist: op=update needs a new 'status' or a new 'text'");
-        }
-        if (has_text && body.at("text").get<std::string>().empty()) {
-            return Error("checklist: item text must not be empty");
         }
 
         auto items = Current(ctx);
@@ -205,17 +227,10 @@ private:
             return Error("checklist: no item with id " + std::to_string(id) +
                          " -- use op=view to see the current ids");
         }
-        if (has_status) item->status = status;
-        if (has_text) {
-            item->text = body.at("text").get<std::string>();
-            if (item->text.size() > kMaxItemTextBytes) {
-                return Error("checklist: item text is capped at " +
-                             std::to_string(kMaxItemTextBytes) + " bytes");
-            }
-        }
+        if (status.status) item->status = *status.status;
+        if (text) item->text = std::move(*text);
 
-        store_->Save(ctx.session_id, items);
-        return Reply(items);
+        return Save(ctx, items);
     }
 
     tools::ToolResult OpView(const tools::ToolContext& ctx) {
@@ -227,14 +242,14 @@ private:
 
     tools::ToolSpec spec_;
     std::shared_ptr<ChecklistStore> store_;
-    // Serializes execute() -- see the comment at the top of it.
-    std::mutex mutex_;
+    ChecklistHub* hub_;
 };
 
 }  // namespace
 
-std::unique_ptr<tools::Tool> MakeChecklistTool(std::shared_ptr<ChecklistStore> store) {
-    return std::make_unique<ChecklistTool>(std::move(store));
+std::unique_ptr<tools::Tool> MakeChecklistTool(std::shared_ptr<ChecklistStore> store,
+                                               ChecklistHub* hub) {
+    return std::make_unique<ChecklistTool>(std::move(store), hub);
 }
 
 }  // namespace minimal::checklist

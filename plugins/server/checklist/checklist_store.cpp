@@ -3,8 +3,6 @@
 #include <stdexcept>
 #include <utility>
 
-#include <nlohmann/json.hpp>
-
 namespace minimal::checklist {
 namespace {
 
@@ -116,14 +114,18 @@ std::vector<Item> DecodeItems(std::string_view json) {
     return items;
 }
 
-std::string EncodeItems(const std::vector<Item>& items) {
+nlohmann::json ItemsJson(const std::vector<Item>& items) {
     auto entries = nlohmann::json::array();
     for (const auto& item : items) {
         entries.push_back({{kIdKey, item.id},
                            {kTextKey, item.text},
                            {kStatusKey, StatusName(item.status)}});
     }
-    return nlohmann::json({{kItemsKey, std::move(entries)}}).dump();
+    return entries;
+}
+
+std::string EncodeItems(const std::vector<Item>& items) {
+    return nlohmann::json({{kItemsKey, ItemsJson(items)}}).dump();
 }
 
 std::string RenderMarkdown(const std::vector<Item>& items) {
@@ -132,7 +134,9 @@ std::string RenderMarkdown(const std::vector<Item>& items) {
     int done = 0;
     for (const auto& item : items) {
         if (item.status == ItemStatus::Completed) ++done;
-        out += "- [";
+        // Numbered by id, not bulleted: op=update addresses items by id, and
+        // the model should read it off the list rather than count.
+        out += std::to_string(item.id) + ". [";
         out += (item.status == ItemStatus::Completed) ? "x" : " ";
         out += "] ";
         if (item.status == ItemStatus::InProgress) out += "*(in progress)* ";

@@ -1,20 +1,26 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "../plugins/server/checklist/checklist_hub.hpp"
+#include "../plugins/server/checklist/endpoint.hpp"
 #include "checklist_store.hpp"
 #include "checklist_tool.hpp"
 #include "fakes.hpp"
 #include "minimal/plugins/plugin_rpc.hpp"
 #include "minimal/plugins/plugin_storage.hpp"
 #include "minimal/tools/tool.hpp"
-#include "rpc_service.hpp"
+#include "../plugins/server/checklist/rpc_service.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
@@ -70,9 +76,10 @@ TEST_CASE("set assigns ids, stores, and renders the tasklist", "[checklist][tool
                         ctx);
 
     CHECK_FALSE(result.is_error);
-    CHECK(result.content_text.find("- [x] read the code") != std::string::npos);
-    CHECK(result.content_text.find("*(in progress)* write the plan") != std::string::npos);
-    CHECK(result.content_text.find("- [ ] get it reviewed") != std::string::npos);
+    // Numbered by id: the model reads update's ids straight off the list.
+    CHECK(result.content_text.find("1. [x] read the code") != std::string::npos);
+    CHECK(result.content_text.find("2. [ ] *(in progress)* write the plan") != std::string::npos);
+    CHECK(result.content_text.find("3. [ ] get it reviewed") != std::string::npos);
     CHECK(result.content_text.find("1/3 done") != std::string::npos);
 
     // Ids are 1-based and monotonic, so update can address them.
@@ -90,7 +97,7 @@ TEST_CASE("update mutates without resending the list", "[checklist][tool]") {
 
     const auto result = f.tool->execute(Fixture::Update(2, "completed"), ctx);
     CHECK_FALSE(result.is_error);
-    CHECK(result.content_text.find("- [x] two") != std::string::npos);
+    CHECK(result.content_text.find("2. [x] two") != std::string::npos);
 
     const auto stored = f.store->Load("s1");
     CHECK(stored[1].status == checklist::ItemStatus::Completed);
@@ -108,7 +115,7 @@ TEST_CASE("view reports the stored list, empty included", "[checklist][tool]") {
     (void)f.tool->execute(Fixture::SetInput({{{"text", "only"}}}), ctx);
     const auto viewed = f.tool->execute(nlohmann::json{{"op", "view"}}, ctx);
     CHECK_FALSE(viewed.is_error);
-    CHECK(viewed.content_text.find("- [ ] only") != std::string::npos);
+    CHECK(viewed.content_text.find("1. [ ] only") != std::string::npos);
 }
 
 TEST_CASE("set replaces the whole list, including back to empty", "[checklist][tool]") {
@@ -182,6 +189,8 @@ TEST_CASE("bad ops and missing fields are error results", "[checklist][tool]") {
     CHECK((f.tool->execute(nlohmann::json{{"op", "set"}, {"items", 5}}, ctx).is_error));
     CHECK((f.tool->execute(Fixture::SetInput({{{"status", "done"}}}), ctx).is_error));  // no text
     CHECK((f.tool->execute(Fixture::SetInput({{{"text", ""}}}), ctx).is_error));        // empty text
+    CHECK((f.tool->execute(Fixture::SetInput({{{"text", "two\nlines"}}}), ctx).is_error));
+    CHECK((f.tool->execute(Fixture::SetInput({{{"text", "x"}, {"status", 3}}}), ctx).is_error));
 }
 
 TEST_CASE("update validates id, fields, and existence", "[checklist][tool]") {
@@ -194,6 +203,8 @@ TEST_CASE("update validates id, fields, and existence", "[checklist][tool]") {
     CHECK((f.tool->execute(nlohmann::json{{"op", "update"}, {"id", 1}, {"status", "bad"}}, ctx)
                .is_error));
     CHECK((f.tool->execute(nlohmann::json{{"op", "update"}, {"id", 1}, {"text", ""}}, ctx)
+               .is_error));
+    CHECK((f.tool->execute(nlohmann::json{{"op", "update"}, {"id", 1}, {"text", "a\rb"}}, ctx)
                .is_error));
     CHECK((f.tool->execute(nlohmann::json{{"op", "update"}, {"id", 99}, {"status", "completed"}},
                            ctx)
@@ -262,6 +273,12 @@ TEST_CASE("a corrupted stored row is a loud error, never a silent empty list", "
     const auto viewed = f.tool->execute(nlohmann::json{{"op", "view"}}, ctx);
     CHECK(viewed.is_error);
     CHECK(viewed.content_text.find("not valid JSON") != std::string::npos);
+    // The error names the way out, and the way out works: set never reads
+    // the old row.
+    CHECK(viewed.content_text.find("op=set") != std::string::npos);
+    const auto reset = f.tool->execute(Fixture::SetInput({{{"text", "fresh"}}, {{"text", "start"}}}), ctx);
+    CHECK_FALSE(reset.is_error);
+    CHECK(f.store->Load("s1").size() == 2);
 }
 
 // --- the .rpc service -----------------------------------------------------------
@@ -271,7 +288,7 @@ TEST_CASE("get returns the structured list a UI fetches", "[checklist][rpc]") {
     auto ctx = f.Context();
     (void)f.tool->execute(Fixture::SetInput({{{"text", "visible"}, {"status", "completed"}}}), ctx);
 
-    checklist::ChecklistRpcService service(f.store);
+    checklist::ChecklistRpcService service(*f.store);
     const auto reply = Call(service, "get", Fixture::Get("s1"));
     CHECK(reply.ok);
     const auto body = nlohmann::json::parse(reply.payload);
@@ -290,7 +307,7 @@ TEST_CASE("list enumerates every stored session", "[checklist][rpc]") {
     (void)f.tool->execute(Fixture::SetInput({{{"text", "a"}}}), ctx1);
     (void)f.tool->execute(Fixture::SetInput({{{"text", "b"}}}), ctx2);
 
-    checklist::ChecklistRpcService service(f.store);
+    checklist::ChecklistRpcService service(*f.store);
     const auto reply = Call(service, "list", nlohmann::json::object());
     CHECK(reply.ok);
     const auto body = nlohmann::json::parse(reply.payload);
@@ -299,9 +316,9 @@ TEST_CASE("list enumerates every stored session", "[checklist][rpc]") {
 
 TEST_CASE("the service validates method and payload", "[checklist][rpc]") {
     Fixture f;
-    checklist::ChecklistRpcService service(f.store);
+    checklist::ChecklistRpcService service(*f.store);
 
-    CHECK_FALSE((Call(service, "subscribe", nlohmann::json::object()).ok));  // not yet a method
+    CHECK_FALSE((Call(service, "subscribe", nlohmann::json::object()).ok));  // streams go through the endpoint
     CHECK_FALSE((Call(service, "get", nlohmann::json::object()).ok));        // no session_id
     CHECK_FALSE((Call(service, "get", nlohmann::json{{"session_id", 5}}).ok));
     const auto bad_json = service.Handle("get", "{oops");
@@ -311,37 +328,10 @@ TEST_CASE("the service validates method and payload", "[checklist][rpc]") {
 
 TEST_CASE("a null-storage service degrades like the tool", "[checklist][rpc]") {
     auto null_store = std::make_shared<checklist::ChecklistStore>(nullptr);
-    checklist::ChecklistRpcService service(null_store);
+    checklist::ChecklistRpcService service(*null_store);
     const auto reply = Call(service, "get", Fixture::Get("s1"));
     CHECK_FALSE(reply.ok);
     CHECK(reply.error.find("storage is not available") != std::string::npos);
-}
-
-TEST_CASE("the service binds to the caller's shared_ptr SLOT, not a value captured at "
-         "construction -- a later assignment into the same variable is visible",
-         "[checklist][rpc]") {
-    // plugin.cpp's real risk: SharedRpcService() constructs once, from
-    // SharedStore()'s value AT THAT MOMENT. If that moment ever preceded the
-    // tool filling the slot in (registration order plugin.cpp's own comment
-    // says doesn't happen today, but isn't enforced either), a by-value
-    // capture would freeze a null store forever. Reproduced directly here:
-    // start with a null-storage store, construct the service, THEN replace
-    // the variable's value with a real, populated store -- the service must
-    // see the replacement.
-    Fixture f;
-    std::shared_ptr<checklist::ChecklistStore> slot =
-        std::make_shared<checklist::ChecklistStore>(nullptr);
-    checklist::ChecklistRpcService service(slot);
-    CHECK_FALSE(Call(service, "get", Fixture::Get("s1")).ok);  // still null at this point
-
-    auto ctx = f.Context();
-    (void)f.tool->execute(Fixture::SetInput({{{"text", "late-bound"}}}), ctx);
-    slot = f.store;  // the "tool registers after services" scenario, corrected later
-
-    const auto reply = Call(service, "get", Fixture::Get("s1"));
-    CHECK(reply.ok);
-    const auto body = nlohmann::json::parse(reply.payload);
-    CHECK(body.at("items")[0].at("text") == "late-bound");
 }
 
 TEST_CASE("the dispatch convention routes PluginCall to the service", "[checklist][rpc]") {
@@ -349,7 +339,7 @@ TEST_CASE("the dispatch convention routes PluginCall to the service", "[checklis
     auto ctx = f.Context();
     (void)f.tool->execute(Fixture::SetInput({{{"text", "routed"}}}), ctx);
 
-    checklist::ChecklistRpcService service(f.store);
+    checklist::ChecklistRpcService service(*f.store);
     plugins::ServiceRegistry services;
     services.Provide(plugins::PluginRpcServiceName(checklist::kPluginName), &service);
     services.Seal();
@@ -363,4 +353,156 @@ TEST_CASE("the dispatch convention routes PluginCall to the service", "[checklis
     // And an unknown plugin name stays NOT_FOUND through the same path.
     const auto ghost = plugins::DispatchPluginCall(&services, "ghost", "get", "{}");
     CHECK(ghost.outcome == plugins::RpcOutcome::kNotFound);
+}
+
+// --- ordering, list filter, push ------------------------------------------------
+
+TEST_CASE("the tool is sequential so a round's set and update apply in order",
+          "[checklist][tool]") {
+    Fixture f;
+    CHECK_FALSE(f.tool->parallel_safe());
+}
+
+TEST_CASE("update validates its input before touching the stored row", "[checklist][tool]") {
+    Fixture f;
+    f.storage.Set(checklist::kStorageNamespace, "s1", "{not json");
+    auto ctx = f.Context();
+    // A bad text is reported as such, not masked by the unreadable row.
+    const auto result = f.tool->execute(
+        nlohmann::json{{"op", "update"}, {"id", 1}, {"text", std::string(5000, 'x')}}, ctx);
+    CHECK(result.is_error);
+    CHECK(result.content_text.find("capped") != std::string::npos);
+}
+
+TEST_CASE("list with session_ids answers only the named sessions that have a list",
+          "[checklist][rpc]") {
+    Fixture f;
+    auto ctx1 = f.Context("s1");
+    auto ctx2 = f.Context("s2");
+    (void)f.tool->execute(Fixture::SetInput({{{"text", "a"}}}), ctx1);
+    (void)f.tool->execute(Fixture::SetInput({{{"text", "b"}}}), ctx2);
+
+    checklist::ChecklistRpcService service(*f.store);
+    const auto reply =
+        Call(service, "list", nlohmann::json{{"session_ids", {"s2", "ghost"}}});
+    REQUIRE(reply.ok);
+    const auto body = nlohmann::json::parse(reply.payload);
+    REQUIRE(body.at("checklists").size() == 1);
+    CHECK(body.at("checklists")[0].at("session_id") == "s2");
+
+    CHECK_FALSE((Call(service, "list", nlohmann::json{{"session_ids", "s1"}}).ok));
+    CHECK_FALSE((Call(service, "list", nlohmann::json{{"session_ids", {1}}}).ok));
+}
+
+namespace {
+
+class RecordingSink final : public plugins::PluginSubscriptionSink {
+public:
+    bool Push(std::string json_payload) override {
+        std::lock_guard<std::mutex> lock(mtx_);
+        ++pushes_;
+        if (!alive_) return false;
+        payloads_.push_back(nlohmann::json::parse(json_payload));
+        return true;
+    }
+    void Kill() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        alive_ = false;
+    }
+    int PushCount() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return pushes_;
+    }
+    // The latest "checklist" push for `session_id`, if any.
+    std::optional<nlohmann::json> Latest(const std::string& session_id) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        for (auto it = payloads_.rbegin(); it != payloads_.rend(); ++it) {
+            if (it->value("type", "") == "checklist" && it->value("session_id", "") == session_id) {
+                return *it;
+            }
+        }
+        return std::nullopt;
+    }
+    bool SawHeartbeat() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        for (const auto& payload : payloads_) {
+            if (payload.value("type", "") == "heartbeat") return true;
+        }
+        return false;
+    }
+
+private:
+    std::mutex mtx_;
+    bool alive_ = true;
+    int pushes_ = 0;
+    std::vector<nlohmann::json> payloads_;
+};
+
+template <typename Pred>
+bool WaitUntil(Pred&& pred, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
+    const auto start = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start < timeout) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return pred();
+}
+
+}  // namespace
+
+TEST_CASE("every successful write pushes the session's list; a clear pushes []",
+          "[checklist][push]") {
+    Fixture f;
+    checklist::ChecklistHub hub(*f.store, std::chrono::milliseconds(10),
+                                std::chrono::milliseconds(1));
+    auto tool = checklist::MakeChecklistTool(f.store, &hub);
+    auto sink = std::make_shared<RecordingSink>();
+    hub.AddSink(sink);
+    auto ctx = f.Context();
+
+    (void)tool->execute(Fixture::SetInput({{{"text", "one"}}, {{"text", "two"}}}), ctx);
+    REQUIRE(WaitUntil([&] { return sink->Latest("s1").has_value(); }));
+    CHECK(sink->Latest("s1")->at("items").size() == 2);
+
+    (void)tool->execute(Fixture::Update(2, "completed"), ctx);
+    REQUIRE(WaitUntil([&] {
+        const auto latest = sink->Latest("s1");
+        return latest && latest->at("items")[1].at("status") == "completed";
+    }));
+
+    (void)tool->execute(Fixture::SetInput({}), ctx);
+    REQUIRE(WaitUntil([&] {
+        const auto latest = sink->Latest("s1");
+        return latest && latest->at("items").empty();
+    }));
+
+    // Idle: heartbeats keep the stream stoppable.
+    CHECK(WaitUntil([&] { return sink->SawHeartbeat(); }));
+
+    // A subscriber that went away is dropped, not pushed to forever.
+    sink->Kill();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const int after_drop = sink->PushCount();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(sink->PushCount() == after_drop);
+    hub.Shutdown();
+}
+
+TEST_CASE("the endpoint answers calls like .rpc and serves only the changes stream",
+          "[checklist][rpc]") {
+    Fixture f;
+    auto ctx = f.Context();
+    (void)f.tool->execute(Fixture::SetInput({{{"text", "routed"}}}), ctx);
+    checklist::ChecklistRpcService service(*f.store);
+    checklist::ChecklistHub hub(*f.store);
+    checklist::ChecklistEndpoint endpoint(service, hub);
+
+    const std::string payload = R"({"session_id": "s1"})";
+    CHECK(nlohmann::json::parse(endpoint.Call("get", payload)) ==
+          nlohmann::json::parse(service.Handle("get", payload).payload));
+    CHECK_THROWS(endpoint.Call("get", "{}"));
+
+    CHECK(endpoint.Subscribe("changes", "{}", std::make_shared<RecordingSink>()));
+    CHECK_FALSE(endpoint.Subscribe("totals", "{}", std::make_shared<RecordingSink>()));
+    hub.Shutdown();
 }

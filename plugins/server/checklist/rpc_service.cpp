@@ -9,39 +9,31 @@
 #include "minimal/common/logger.hpp"
 
 namespace minimal::checklist {
-namespace {
-
-nlohmann::json ItemsJson(const std::vector<Item>& items) {
-    auto entries = nlohmann::json::array();
-    for (const auto& item : items) {
-        entries.push_back({{"id", item.id},
-                           {"text", item.text},
-                           {"status", StatusName(item.status)}});
-    }
-    return entries;
-}
-
-}  // namespace
-
-ChecklistRpcService::ChecklistRpcService(std::shared_ptr<ChecklistStore>& store)
-    : store_(store) {}
 
 plugins::PluginRpcHandler::Reply ChecklistRpcService::Handle(const std::string& method,
                                                              std::string_view json_payload) {
-    if (store_ == nullptr || !store_->available()) {
+    if (!store_.available()) {
         return Reply{false, "", "checklist: plugin storage is not available in this host"};
+    }
+    if (method != "get" && method != "list") {
+        return Reply{false, "", "checklist: unknown method \"" + method +
+                                    "\" (expected \"get\" or \"list\")"};
+    }
+
+    nlohmann::json body;
+    try {
+        body = json_payload.empty() ? nlohmann::json::object()
+                                    : nlohmann::json::parse(json_payload);
+    } catch (const std::exception& error) {
+        return Reply{false, "", std::string("checklist: payload is not valid JSON: ") +
+                                    error.what()};
+    }
+    if (!body.is_object()) {
+        return Reply{false, "", "checklist: payload must be a JSON object"};
     }
 
     if (method == "get") {
-        nlohmann::json body;
-        try {
-            body = json_payload.empty() ? nlohmann::json::object()
-                                        : nlohmann::json::parse(json_payload);
-        } catch (const std::exception& error) {
-            return Reply{false, "", std::string("checklist: payload is not valid JSON: ") +
-                                     error.what()};
-        }
-        if (!body.is_object() || !body.contains("session_id") || !body.at("session_id").is_string() ||
+        if (!body.contains("session_id") || !body.at("session_id").is_string() ||
             body.at("session_id").get<std::string>().empty()) {
             return Reply{false, "", "checklist: get requires a non-empty string 'session_id'"};
         }
@@ -49,7 +41,7 @@ plugins::PluginRpcHandler::Reply ChecklistRpcService::Handle(const std::string& 
         std::vector<Item> items;
         try {
             // Load decodes the stored blob strictly; a corrupt row throws.
-            items = store_->Load(session_id);
+            items = store_.Load(session_id);
         } catch (const std::exception& error) {
             return Reply{false, "", std::string("checklist: ") + error.what()};
         }
@@ -59,30 +51,40 @@ plugins::PluginRpcHandler::Reply ChecklistRpcService::Handle(const std::string& 
                      ""};
     }
 
-    if (method == "list") {
-        std::vector<std::pair<std::string, std::vector<Item>>> checklists;
-        for (const auto& session_id : store_->SessionIds()) {
-            // Per-session, not around the loop: one corrupt blob must not
-            // abort the whole enumeration, the same rule /cost all follows.
-            // The skip is logged; the response shape stays {"checklists":
-            // [...]} and carries no error channel for a partial listing.
-            try {
-                checklists.emplace_back(session_id, store_->Load(session_id));
-            } catch (const std::exception& error) {
-                minimal::common::DefaultLogger().warn(
-                    "checklist: skipping unreadable stored list for session {}: {}",
-                    session_id, error.what());
+    // list
+    std::vector<std::string> session_ids;
+    if (const auto filter = body.find("session_ids"); filter != body.end()) {
+        if (!filter->is_array()) {
+            return Reply{false, "", "checklist: 'session_ids' must be an array of strings"};
+        }
+        for (const auto& id : *filter) {
+            if (!id.is_string()) {
+                return Reply{false, "", "checklist: 'session_ids' must be an array of strings"};
             }
+            session_ids.push_back(id.get<std::string>());
         }
-        auto entries = nlohmann::json::array();
-        for (auto& [session_id, items] : checklists) {
-            entries.push_back({{"session_id", session_id}, {"items", ItemsJson(items)}});
-        }
-        return Reply{true, nlohmann::json({{"checklists", std::move(entries)}}).dump(), ""};
+    } else {
+        session_ids = store_.SessionIds();
     }
 
-    return Reply{false, "", "checklist: unknown method \"" + method +
-                                "\" (expected \"get\" or \"list\")"};
+    auto entries = nlohmann::json::array();
+    for (const auto& session_id : session_ids) {
+        // Per-session, not around the loop: one corrupt blob must not abort
+        // the whole enumeration, the same rule /cost all follows. The skip is
+        // logged; the response carries no error channel for a partial listing.
+        try {
+            auto items = store_.Load(session_id);
+            // A named session with no stored list is absent, as in the
+            // unfiltered enumeration.
+            if (items.empty()) continue;
+            entries.push_back({{"session_id", session_id}, {"items", ItemsJson(items)}});
+        } catch (const std::exception& error) {
+            minimal::common::DefaultLogger().warn(
+                "checklist: skipping unreadable stored list for session {}: {}", session_id,
+                error.what());
+        }
+    }
+    return Reply{true, nlohmann::json({{"checklists", std::move(entries)}}).dump(), ""};
 }
 
 }  // namespace minimal::checklist

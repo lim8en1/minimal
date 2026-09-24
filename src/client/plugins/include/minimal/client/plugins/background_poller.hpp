@@ -1,22 +1,22 @@
 #pragma once
 
 // The mutex/cv/thread plumbing every background-polling client plugin needs
-// (cost-view's TotalsPoller, checklist-view's ChecklistPoller): a worker
+// (cost-view's TotalsFeed, checklist-view's ChecklistFeed): a worker
 // thread that runs until told to stop, torn down with a bounded join rather
 // than detached (a detached worker would keep calling into ClientApi/
 // SessionClient while the poller's own destructor runs -- a shutdown UAF,
 // strictly worse than a bounded stall on one in-flight fetch).
 //
-// EXTRACTED after a real bug: ChecklistPoller's worker used to start from a
+// EXTRACTED after a real bug: the old ChecklistPoller's worker started from a
 // MEMBER INITIALIZER, so it was only safe because the mutex it locks
 // (mtx_) happened to be declared earlier in the class -- get the declaration
 // order wrong (or add a member the loop touches after the thread member) and
 // the worker can lock a mutex, or read a bool, that does not exist yet:
 // macOS reported "mutex lock failed: Invalid argument" in ~1 of 5 runs under
-// parallel load before this was caught. TotalsPoller avoided the same class
-// of bug only by accident -- it assigns its thread in the constructor BODY,
-// after every member exists, not in the initializer list -- with nothing
-// enforcing that either poller (or a future third one) keeps doing so.
+// parallel load before this was caught. The old TotalsPoller avoided the
+// same class of bug only by accident -- it assigned its thread in the
+// constructor BODY, after every member exists, not in the initializer list
+// -- with nothing enforcing that either poller (or a future one) kept doing so.
 //
 // THE FIX: Start() is a normal method, called explicitly from the DERIVED
 // class's constructor BODY (never from an initializer list, never from this
@@ -68,8 +68,8 @@ protected:
     }
 
     mutable std::mutex mtx_;
-    // mutable: at least one derived poller (cost-view's TotalsPoller) wakes
-    // the worker from a const Render() call on a tab switch.
+    // mutable: derived pollers (TotalsFeed, ChecklistFeed) wake the worker
+    // from a const render-path call on a tab switch.
     mutable std::condition_variable cv_;
     bool stop_ = false;
 

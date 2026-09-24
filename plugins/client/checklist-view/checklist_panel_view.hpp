@@ -1,10 +1,10 @@
 #pragma once
 
 // The checklist panel view: one toggleable Panel view with TWO surfaces over
-// the shared poller's caches -- FOCUSED (the current tab's tasklist, from
-// the get cache) and SUMMARY (one line per open tab, from the list cache +
-// the focus seam's display names). Tab flips surfaces; the view is strictly
-// read-only (the model owns checklist mutations via the tool).
+// the shared feed's cache -- FOCUSED (the current tab's tasklist) and SUMMARY
+// (one line per open tab with tasks, display names from the focus seam). Tab
+// flips surfaces; the view is strictly read-only (the model owns checklist
+// mutations via the tool).
 
 #include <memory>
 #include <string>
@@ -12,8 +12,8 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 
+#include "checklist_feed.hpp"
 #include "minimal/client/plugins/registries.hpp"
-#include "checklist_poller.hpp"
 
 namespace minimal::checklist_view {
 
@@ -21,7 +21,7 @@ using minimal::client::Theme;
 
 class ChecklistPanelView final : public plugins::View {
 public:
-    ChecklistPanelView(std::shared_ptr<ChecklistPoller> poller, plugins::FocusProvider* focus);
+    ChecklistPanelView(std::shared_ptr<ChecklistFeed> feed, plugins::FocusProvider* focus);
 
     const plugins::ViewSpec& spec() const override;
     ftxui::Component component() override;
@@ -32,11 +32,12 @@ private:
 
     ftxui::Color ColorFor(const char* role) const;
     ftxui::Element StatusGlyph(const Item& item) const;
+    ftxui::Element StaleMarker() const;
     ftxui::Element FocusedSurface() const;
     ftxui::Element SummarySurface() const;
     ftxui::Element RenderBody() const;
 
-    std::shared_ptr<ChecklistPoller> poller_;
+    std::shared_ptr<ChecklistFeed> feed_;
     plugins::FocusProvider* focus_;
     plugins::ViewSpec spec_;
     ftxui::Component component_;

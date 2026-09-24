@@ -21,6 +21,8 @@
 #include <string_view>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "minimal/plugins/plugin_storage.hpp"
 
 namespace minimal::checklist {
@@ -70,10 +72,14 @@ private:
 std::vector<Item> DecodeItems(std::string_view json);
 std::string EncodeItems(const std::vector<Item>& items);
 
-// GFM tasklist rendering -- `- [x]` / `- [ ]`, in stored order, with the
-// done/total count in the footer. This is the MODEL's copy of the list (the
-// tool result text); UI rendering is a client's business and fetches the same
-// items through the .rpc service.
+// The wire form of a list -- [{id,text,status}] -- shared by the .rpc replies
+// and the push stream, so the two can never disagree on shape.
+nlohmann::json ItemsJson(const std::vector<Item>& items);
+
+// GFM tasklist rendering -- `1. [x]` / `2. [ ]`, numbered by item id in stored
+// order, with the done/total count in the footer. This is the MODEL's copy of
+// the list (the tool result text); UI rendering is a client's business and
+// gets the same items through the endpoint.
 std::string RenderMarkdown(const std::vector<Item>& items);
 
 }  // namespace minimal::checklist

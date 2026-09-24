@@ -1,17 +1,22 @@
 // Tests for the checklist-view client plugin's testable halves: the pure
-// wire model (checklist_model.hpp), the shared ChecklistPoller's cache and
-// focus semantics (compiled in directly, the bundled-plugin pattern), and
-// the panel view's two surfaces. The extern "C" wiring in
-// checklist_view_plugin.cpp stays out, like every other bundled plugin.
+// wire model (checklist_model.hpp), the shared ChecklistFeed's stream-fed
+// cache (compiled in directly, the bundled-plugin pattern), and the panel
+// view's two surfaces. The extern "C" wiring in checklist_view_plugin.cpp
+// stays out, like every other bundled plugin.
 //
-// The poller runs a real worker thread against stub seams; every assertion
-// on its state spins on the accessor with a deadline rather than sleeping a
-// fixed amount -- the fetch itself is immediate, the poll cadence is not
-// part of what these tests pin down.
+// The feed runs a real worker thread against a scripted server; every
+// assertion on its state spins with a deadline rather than sleeping a fixed
+// amount.
 
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <map>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -21,14 +26,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include "checklist_feed.hpp"
 #include "checklist_model.hpp"
 #include "checklist_panel_view.hpp"
-#include "checklist_poller.hpp"
 #include "minimal/client/render/theme.hpp"
 
 using namespace std::chrono_literals;
+using minimal::checklist_view::ChecklistFeed;
 using minimal::checklist_view::ChecklistPanelView;
-using minimal::checklist_view::ChecklistPoller;
 using minimal::checklist_view::CountOf;
 using minimal::checklist_view::FormatSegmentText;
 using minimal::checklist_view::Item;
@@ -39,18 +44,45 @@ namespace plugins = minimal::client::plugins;
 
 namespace {
 
-std::string ToText(const ftxui::Element& element) {
-    // 40x24 is enough for every fixture here; the panel wraps, it never
-    // clips horizontally.
-    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(40),
+constexpr int kScreenWidth = 40;
+
+// The rendered panel as plain rows -- cell by cell, so column positions are
+// real (the screen's ToString interleaves escape codes).
+std::vector<std::string> ToRows(const ftxui::Element& element) {
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(kScreenWidth),
                                         ftxui::Dimension::Fixed(24));
     ftxui::Render(screen, element);
-    return screen.ToString();
+    std::vector<std::string> rows;
+    for (int y = 0; y < screen.dimy(); ++y) {
+        std::string row;
+        for (int x = 0; x < screen.dimx(); ++x) row += screen.at(x, y);
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
-// Spins on a poller state change with a deadline. The worker fetches on its
-// first loop iteration, so "it happened" is milliseconds; the deadline only
-// bounds a regression.
+std::string ToText(const ftxui::Element& element) {
+    std::string text;
+    for (const auto& row : ToRows(element)) text += row + "\n";
+    return text;
+}
+
+// The display column `needle` starts at in its row, or -1. Byte offsets are
+// not columns once a multi-byte glyph precedes the needle, so count code
+// points (every glyph here is one cell wide).
+int ColumnOf(const std::vector<std::string>& rows, const std::string& needle) {
+    for (const auto& row : rows) {
+        const auto at = row.find(needle);
+        if (at == std::string::npos) continue;
+        int column = 0;
+        for (std::size_t i = 0; i < at; ++i) {
+            if ((static_cast<unsigned char>(row[i]) & 0xC0) != 0x80) ++column;
+        }
+        return column;
+    }
+    return -1;
+}
+
 template <typename Pred>
 bool WaitFor(Pred&& pred, std::chrono::milliseconds timeout = 3000ms) {
     const auto start = std::chrono::steady_clock::now();
@@ -61,9 +93,25 @@ bool WaitFor(Pred&& pred, std::chrono::milliseconds timeout = 3000ms) {
     return pred();
 }
 
-// The get/list responses the poller should see, per method. Empty optional =
-// transport failure (PluginCall's no-offer/refused answer).
-class StubClientApi final : public plugins::ClientApi {
+nlohmann::json ItemJson(int id, const std::string& text, const std::string& status) {
+    return {{"id", id}, {"text", text}, {"status", status}};
+}
+
+std::string ChecklistPush(const std::string& session_id, nlohmann::json items) {
+    return nlohmann::json{{"type", "checklist"}, {"session_id", session_id}, {"items", items}}
+        .dump();
+}
+
+const nlohmann::json kThree = nlohmann::json::array({ItemJson(1, "first", "completed"),
+                                                     ItemJson(2, "second", "in_progress"),
+                                                     ItemJson(3, "third", "pending")});
+
+// A scripted checklist server: PluginSubscribe delivers queued pushes, and a
+// heartbeat every 10 ms while idle (the server hub's contract, which is what
+// lets the subscriber stop). PluginCall answers "list" from a per-session
+// table, honoring the session_ids filter unless told to act like an older
+// server that ignores it.
+class StreamApi final : public plugins::ClientApi {
 public:
     std::optional<MessagePage> GetMessages(const std::string&, std::optional<std::int64_t>,
                                            int) override {
@@ -72,98 +120,145 @@ public:
 
     std::optional<std::string> PluginCall(const std::string& plugin, const std::string& method,
                                           const std::string& payload) override {
-        std::chrono::milliseconds delay{};
+        std::lock_guard<std::mutex> lock(mtx_);
+        ++list_calls_;
+        last_plugin_ = plugin;
+        last_payload_ = payload;
+        if (fail_ || method != "list") return std::nullopt;
+        const auto body = nlohmann::json::parse(payload);
+        auto checklists = nlohmann::json::array();
+        for (const auto& [id, items] : lists_) {
+            bool asked = ignore_filter_ || !body.contains("session_ids");
+            if (!asked) {
+                for (const auto& wanted : body.at("session_ids")) asked = asked || wanted == id;
+            }
+            if (asked) checklists.push_back({{"session_id", id}, {"items", items}});
+        }
+        return nlohmann::json{{"checklists", checklists}}.dump();
+    }
+
+    minimal::client::SubscribeOutcome PluginSubscribe(
+        const std::string&, const std::string& method, const std::string&,
+        const std::function<bool(const std::string&)>& on_payload) override {
+        std::unique_lock<std::mutex> lock(mtx_);
+        ++subscribes_;
+        last_stream_method_ = method;
+        if (refuse_) return minimal::client::SubscribeOutcome::kError;
+        for (;;) {
+            cv_.wait_for(lock, 10ms, [this] { return end_ || !queue_.empty(); });
+            if (end_) {
+                end_ = false;
+                return minimal::client::SubscribeOutcome::kError;
+            }
+            std::string payload = R"({"type":"heartbeat"})";
+            if (!queue_.empty()) {
+                payload = std::move(queue_.front());
+                queue_.pop_front();
+            }
+            lock.unlock();
+            const bool keep = on_payload(payload);
+            lock.lock();
+            if (!keep) return minimal::client::SubscribeOutcome::kCancelled;
+        }
+    }
+
+    void Push(std::string payload) {
         {
             std::lock_guard<std::mutex> lock(mtx_);
-            ++calls;
-            last_plugin = plugin;
-            last_method = method;
-            last_payload = payload;
-            if (method == "get") delay = get_delay;
-            if (method == "list") delay = list_delay;
+            queue_.push_back(std::move(payload));
         }
-        // Outside the lock: a delayed call must not block the OTHER method's
-        // concurrent call (or the test's own SetResponses/SetFail) for its
-        // own delay's duration -- the exact concurrency this stub exists to
-        // let a test observe.
-        if (delay.count() > 0) std::this_thread::sleep_for(delay);
-        std::lock_guard<std::mutex> lock(mtx_);
-        if (fail) return std::nullopt;
-        if (method == "get") return get_response;
-        if (method == "list") return list_response;
-        return std::nullopt;
+        cv_.notify_all();
     }
-
-    minimal::client::SubscribeOutcome PluginSubscribe(const std::string&, const std::string&,
-                                              const std::string&,
-                                              const std::function<bool(const std::string&)>&)
-        override {
-        return minimal::client::SubscribeOutcome::kError;
+    void EndStream() {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            end_ = true;
+        }
+        cv_.notify_all();
     }
-
-    // The poller thread reads these inside PluginCall (under mtx_) while the
-    // test's main thread mutates them mid-flight. Every mutation goes through
-    // the same mutex the read path holds -- the plain `api.fail = true` this
-    // once was was a TSan-reported data race in the test itself.
-    void SetResponses(std::string get, std::string list) {
+    void SetRefuse(bool value) {
         std::lock_guard<std::mutex> lock(mtx_);
-        get_response = std::move(get);
-        list_response = std::move(list);
-    }
-    void SetGetResponse(std::string get) {
-        std::lock_guard<std::mutex> lock(mtx_);
-        get_response = std::move(get);
+        refuse_ = value;
     }
     void SetFail(bool value) {
         std::lock_guard<std::mutex> lock(mtx_);
-        fail = value;
+        fail_ = value;
     }
-    void SetDelays(std::chrono::milliseconds get, std::chrono::milliseconds list) {
+    void SetIgnoreFilter(bool value) {
         std::lock_guard<std::mutex> lock(mtx_);
-        get_delay = get;
-        list_delay = list;
+        ignore_filter_ = value;
     }
-    int Calls() const {
+    void SetList(const std::string& session_id, nlohmann::json items) {
         std::lock_guard<std::mutex> lock(mtx_);
-        return calls;
+        lists_[session_id] = std::move(items);
     }
-    std::string LastPlugin() const {
+    int ListCalls() {
         std::lock_guard<std::mutex> lock(mtx_);
-        return last_plugin;
+        return list_calls_;
     }
-
-    mutable std::mutex mtx_;
+    int Subscribes() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return subscribes_;
+    }
+    std::string LastPayload() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return last_payload_;
+    }
+    std::string LastPlugin() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return last_plugin_;
+    }
+    std::string LastStreamMethod() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return last_stream_method_;
+    }
 
 private:
-    std::string get_response;
-    std::string list_response;
-    bool fail = false;
-    int calls = 0;
-    std::string last_plugin;
-    std::string last_method;
-    std::string last_payload;
-    std::chrono::milliseconds get_delay{};
-    std::chrono::milliseconds list_delay{};
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    std::deque<std::string> queue_;
+    bool end_ = false;
+    bool refuse_ = false;
+    bool fail_ = false;
+    bool ignore_filter_ = false;
+    int subscribes_ = 0;
+    int list_calls_ = 0;
+    std::string last_plugin_;
+    std::string last_payload_;
+    std::string last_stream_method_;
+    std::map<std::string, nlohmann::json> lists_;
 };
 
-class StubFocusProvider final : public plugins::FocusProvider {
+// The feed reads Tabs() from its worker while a test changes them: guarded.
+class StubFocus final : public plugins::FocusProvider {
 public:
-    std::string FocusedSessionId() const override { return focused; }
-    std::vector<plugins::TabInfo> Tabs() const override { return tabs; }
+    std::string FocusedSessionId() const override {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return focused_;
+    }
+    std::vector<plugins::TabInfo> Tabs() const override {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return tabs_;
+    }
+    void Set(std::string focused, std::vector<plugins::TabInfo> tabs) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        focused_ = std::move(focused);
+        tabs_ = std::move(tabs);
+    }
 
-    std::string focused;
-    std::vector<plugins::TabInfo> tabs;
+private:
+    mutable std::mutex mtx_;
+    std::string focused_;
+    std::vector<plugins::TabInfo> tabs_;
 };
 
-// nlohmann re-serializes the items arrays; ids are optional on the wire.
+constexpr ChecklistFeed::Timing kFastTiming{20ms, 100ms, 400ms};
+
+// The get/list wire shape for the model tests.
 const char* kGetTwo = R"({"session_id":"s1","items":[
     {"id":1,"text":"first","status":"completed"},
     {"id":2,"text":"second","status":"in_progress"},
     {"id":3,"text":"third","status":"pending"}]})";
-
-const char* kListTwo = R"({"checklists":[
-    {"session_id":"s1","items":[{"id":1,"text":"first","status":"completed"}]},
-    {"session_id":"s2","items":[{"id":1,"text":"other","status":"in_progress"}]}]})";
 
 }  // namespace
 
@@ -199,169 +294,128 @@ TEST_CASE("counts and the segment text track the three statuses", "[checklist_vi
     CHECK(FormatSegmentText({}).empty());
 }
 
-// --- the shared poller -----------------------------------------------------------
+// --- the shared feed -------------------------------------------------------------
 
-TEST_CASE("the poller fetches the focused session and every stored list",
-          "[checklist_view][poller]") {
-    StubClientApi api;
-    StubFocusProvider focus;
-    focus.focused = "s1";
-    api.SetResponses(kGetTwo, kListTwo);
+TEST_CASE("pushes fill a per-session cache; a switch to a cached session renders at once",
+          "[checklist_view][feed]") {
+    StreamApi api;
+    ChecklistFeed feed(&api, nullptr, kFastTiming);
+    api.Push(ChecklistPush("s1", kThree));
+    api.Push(ChecklistPush("s2", nlohmann::json::array({ItemJson(1, "other", "pending")})));
 
-    ChecklistPoller poller(&api, &focus, 20ms);
-    REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched; }));
-    CHECK(poller.Focused().valid);
-    CHECK(poller.Focused().session_id == "s1");
-    CHECK(poller.Focused().items.size() == 3);
-    CHECK(poller.FocusedText() == "todo 1/3 (1 active)");
-    CHECK(poller.AllEverFetched());
-    CHECK(poller.AllItems().size() == 2);
+    REQUIRE(WaitFor([&] { return feed.SegmentText("s1") == "todo 1/3 (1 active)"; }));
+    REQUIRE(WaitFor([&] { return feed.Session("s2").known; }));
+    // The switch is served from the cache in the same call -- no fetch gap.
+    CHECK(feed.SegmentText("s2") == "todo 0/1");
+    CHECK(api.LastStreamMethod() == "changes");
+}
 
-    // LastPlugin() takes the stub's own mutex -- the outer lock_guard this
-    // once had self-deadlocked the moment the accessor was introduced.
+TEST_CASE("an empty push clears the session: a real state, not a failure",
+          "[checklist_view][feed]") {
+    StreamApi api;
+    ChecklistFeed feed(&api, nullptr, kFastTiming);
+    api.Push(ChecklistPush("s1", kThree));
+    REQUIRE(WaitFor([&] { return !feed.SegmentText("s1").empty(); }));
+
+    api.Push(ChecklistPush("s1", nlohmann::json::array()));
+    REQUIRE(WaitFor([&] { return feed.Session("s1").items.empty(); }));
+    CHECK(feed.Session("s1").known);
+    CHECK_FALSE(feed.Session("s1").stale);
+    CHECK(feed.SegmentText("s1").empty());   // the unfilled-segment rule
+}
+
+TEST_CASE("unseen open tabs are seeded with one filtered list call",
+          "[checklist_view][feed]") {
+    StreamApi api;
+    api.SetList("s1", kThree);
+    api.SetList("closed", kThree);   // stored, but no open tab: never asked for
+    StubFocus focus;
+    focus.Set("s1", {{"t1", "s1", "one"}, {"t2", "s2", "two"}, {"t3", "", "sessionless"}});
+    ChecklistFeed feed(&api, &focus, kFastTiming);
+
+    REQUIRE(WaitFor([&] { return feed.Session("s1").known && feed.Session("s2").known; }));
+    CHECK(feed.Session("s1").items.size() == 3);
+    CHECK(feed.Session("s2").items.empty());   // no stored list: known and empty
     CHECK(api.LastPlugin() == "checklist");
+    CHECK(nlohmann::json::parse(api.LastPayload()).at("session_ids") ==
+          nlohmann::json::array({"s1", "s2"}));
+    // Seeded once; heartbeats after that do not re-ask.
+    std::this_thread::sleep_for(100ms);
+    CHECK(api.ListCalls() == 1);
+    CHECK_FALSE(feed.Session("closed").known);
 }
 
-TEST_CASE("a focus switch clears the focused cache and refetches the new session",
-          "[checklist_view][poller]") {
-    StubClientApi api;
-    StubFocusProvider focus;
-    focus.focused = "s1";
-    api.SetResponses(kGetTwo, kListTwo);
+TEST_CASE("a dead stream marks lists stale, polls, and resubscribes", "[checklist_view][feed]") {
+    StreamApi api;
+    ChecklistFeed feed(&api, nullptr, kFastTiming);
+    api.Push(ChecklistPush("s1", kThree));
+    REQUIRE(WaitFor([&] { return feed.SegmentText("s1") == "todo 1/3 (1 active)"; }));
 
-    ChecklistPoller poller(&api, &focus, 20ms);
-    REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched; }));
-
-    // The segment's nudge: switch focus. The nudge and the provider report
-    // the same truth in production (both are the frame's focused session),
-    // so the stub changes both. The old session's text and items must drop
-    // out SYNCHRONOUSLY (before the worker refetches), so neither surface
-    // can show the previous tab's checklist.
-    focus.focused = "s2";
-    poller.OnFocusHint("s2");
-    CHECK(poller.FocusedText().empty());
-    CHECK(poller.Focused().session_id == "s2");
-    CHECK(poller.Focused().items.empty());
-
-    api.SetGetResponse(R"({"session_id":"s2","items":[{"id":1,"text":"s2 task","status":"pending"}]})");
-    REQUIRE(WaitFor([&] { return poller.Focused().items.size() == 1; }));
-    CHECK(poller.Focused().session_id == "s2");
-    CHECK(poller.FocusedText() == "todo 0/1");
-}
-
-TEST_CASE("the provider's own focus answer drives the worker too", "[checklist_view][poller]") {
-    StubClientApi api;
-    StubFocusProvider focus;
-    focus.focused = "s1";
-    api.SetResponses(kGetTwo, kListTwo);
-
-    ChecklistPoller poller(&api, &focus, 20ms);
-    REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched; }));
-
-    // No nudge this time: only the provider changes. The worker's per-cycle
-    // cross-check must converge without the segment.
-    focus.focused = "s2";
-    api.SetGetResponse(R"({"session_id":"s2","items":[]})");
-    REQUIRE(WaitFor([&] { return poller.Focused().session_id == "s2"; }));
-    // Clearing the list server-side is a real state change, not a failure.
-    REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched && poller.Focused().valid; }));
-    CHECK(poller.FocusedText().empty());
-}
-
-TEST_CASE("a fetch failure marks the snapshot stale without losing the cache",
-          "[checklist_view][poller]") {
-    StubClientApi api;
-    StubFocusProvider focus;
-    focus.focused = "s1";
-    api.SetResponses(kGetTwo, kListTwo);
-
-    ChecklistPoller poller(&api, &focus, 20ms);
-    REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched && poller.AllEverFetched(); }));
-
+    // The server goes away and its calls fail too: last-known, marked.
     api.SetFail(true);
-    CHECK(WaitFor([&] { return !poller.AllValid(); }));
-    CHECK(WaitFor([&] { return !poller.Focused().valid; }));
-    // What was fetched stays readable: the panel renders stale data with a
-    // marker, never blanks it.
-    CHECK(poller.AllItems().size() == 2);
-    CHECK(poller.Focused().items.size() == 3);
+    api.EndStream();
+    REQUIRE(WaitFor([&] { return feed.SegmentText("s1") == "todo 1/3 (1 active) (stale)"; }));
+    CHECK(feed.Session("s1").stale);
+
+    // The fallback poll recovers the list (and clears the mark)...
+    api.SetList("s1", nlohmann::json::array({ItemJson(1, "first", "completed")}));
+    api.SetFail(false);
+    CHECK(WaitFor([&] { return feed.SegmentText("s1") == "todo 1/1"; }));
+    // ...and the stream is retried once the fallback period is over.
+    CHECK(WaitFor([&] { return api.Subscribes() >= 2; }));
 }
 
-TEST_CASE("get and list are fetched concurrently each poll iteration, not one after the "
-         "other",
-         "[checklist_view][poller]") {
-    // A slow list call used to add its OWN latency on top of get's before
-    // the focused surface's result -- ready sooner -- could be applied.
-    // Both loopback-style delays here are well above the poll cadence so a
-    // single concurrent iteration is what's actually being timed; a
-    // sequential implementation would take >=(get_delay + list_delay).
-    StubClientApi api;
-    StubFocusProvider focus;
-    focus.focused = "s1";
-    api.SetResponses(kGetTwo, kListTwo);
-    constexpr auto kDelay = 150ms;
-    api.SetDelays(kDelay, kDelay);
-
-    const auto start = std::chrono::steady_clock::now();
-    ChecklistPoller poller(&api, &focus, 5s);  // long cadence: time the FIRST iteration only
-    REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched && poller.AllEverFetched(); },
-                    1s));
-    const auto elapsed = std::chrono::steady_clock::now() - start;
-
-    // Well under the sequential sum (2x kDelay); comfortably above a single
-    // kDelay to tolerate scheduling jitter without a hair-trigger threshold.
-    CHECK(elapsed < kDelay * 3 / 2);
+TEST_CASE("an older server without the stream still fills through polling",
+          "[checklist_view][feed]") {
+    StreamApi api;
+    api.SetRefuse(true);
+    api.SetIgnoreFilter(true);   // and answers every session it has
+    api.SetList("s1", kThree);
+    api.SetList("elsewhere", kThree);
+    ChecklistFeed feed(&api, nullptr, kFastTiming);
+    CHECK(WaitFor([&] { return feed.SegmentText("s1") == "todo 1/3 (1 active)"; }));
+    CHECK_FALSE(feed.Session("elsewhere").known);   // filtered client-side
 }
 
-TEST_CASE("AllSnapshotOf returns one consistent triple, matching the individually-locked "
-         "accessors at every point in the poller's lifecycle",
-         "[checklist_view][poller]") {
-    // Not a race reproduction (RunLoop's write is already one locked
-    // assignment of all three fields; a torn read needs a poll to land
-    // between two SEPARATE reader locks, which is timing-dependent and not
-    // reliably forced from a test). Instead this pins the contract the
-    // combined accessor exists to guarantee: at any point where the
-    // individually-locked trio agrees, AllSnapshotOf's single locked read
-    // must report the exact same triple.
-    StubClientApi api;
-    StubFocusProvider focus;
-    focus.focused = "s1";
-    api.SetResponses(kGetTwo, kListTwo);
-
-    ChecklistPoller poller(&api, &focus, 20ms);
-    REQUIRE(WaitFor([&] { return poller.AllEverFetched(); }));
-    {
-        const auto snapshot = poller.AllSnapshotOf();
-        CHECK(snapshot.ever_fetched == poller.AllEverFetched());
-        CHECK(snapshot.valid == poller.AllValid());
-        CHECK(snapshot.items.size() == poller.AllItems().size());
-        CHECK(snapshot.valid);
-        CHECK(snapshot.items.size() == 2);
-    }
-
-    api.SetFail(true);
-    REQUIRE(WaitFor([&] { return !poller.AllValid(); }));
-    {
-        const auto snapshot = poller.AllSnapshotOf();
-        CHECK_FALSE(snapshot.valid);
-        CHECK(snapshot.ever_fetched);          // still true: a failure doesn't unset it
-        CHECK(snapshot.items.size() == 2);     // stale data survives, same as AllItems()
-    }
+TEST_CASE("a server that keeps refusing the stream is retried with backoff",
+          "[checklist_view][feed]") {
+    StreamApi api;
+    api.SetRefuse(true);
+    ChecklistFeed feed(&api, nullptr, kFastTiming);
+    // Fallback periods 100, 200, 400, 400 ms: after ~0.75 s the fixed period
+    // would have subscribed 8 times, the backoff about 3.
+    std::this_thread::sleep_for(750ms);
+    CHECK(api.Subscribes() <= 4);
+    CHECK(api.Subscribes() >= 2);
 }
 
-TEST_CASE("a null api or focus degrades to a quiet poller", "[checklist_view][poller]") {
+TEST_CASE("closed tabs are evicted on a heartbeat", "[checklist_view][feed]") {
+    StreamApi api;
+    StubFocus focus;
+    focus.Set("s1", {{"t1", "s1", "one"}});
+    ChecklistFeed feed(&api, &focus, kFastTiming);
+    api.Push(ChecklistPush("s2", kThree));   // not an open tab
+    api.Push(ChecklistPush("s1", kThree));
+    REQUIRE(WaitFor([&] { return feed.Session("s1").known; }));
+    std::this_thread::sleep_for(100ms);      // several heartbeats
+    CHECK_FALSE(feed.Session("s2").known);
+}
+
+TEST_CASE("a null api degrades to a quiet feed; teardown stays bounded",
+          "[checklist_view][feed]") {
     SECTION("no api at all") {
-        StubFocusProvider focus;
-        focus.focused = "s1";
-        ChecklistPoller poller(nullptr, &focus, 20ms);
-        std::this_thread::sleep_for(20ms);  // a cycle would have fetched
-        CHECK_FALSE(poller.Focused().ever_fetched);
+        ChecklistFeed feed(nullptr, nullptr, kFastTiming);
+        CHECK(feed.SegmentText("s1").empty());
+        CHECK_FALSE(feed.Session("s1").known);
     }
-    SECTION("no focus: nothing to fetch for") {
-        StubClientApi api;
-        ChecklistPoller poller(&api, nullptr, 20ms);
-        std::this_thread::sleep_for(20ms);
-        CHECK(api.Calls() == 0);
+    SECTION("teardown is bounded by the stream's heartbeat") {
+        StreamApi api;
+        const auto start = std::chrono::steady_clock::now();
+        {
+            ChecklistFeed feed(&api, nullptr, kFastTiming);
+            REQUIRE(WaitFor([&] { return api.Subscribes() == 1; }));
+        }
+        CHECK(std::chrono::steady_clock::now() - start < 1s);
     }
 }
 
@@ -369,65 +423,77 @@ TEST_CASE("a null api or focus degrades to a quiet poller", "[checklist_view][po
 
 TEST_CASE("the panel renders the focused surface, and Tab flips to the summary",
           "[checklist_view][panel]") {
-    StubClientApi api;
-    StubFocusProvider focus;
-    focus.focused = "s1";
-    focus.tabs = {{"t1", "s1", "first tab"}, {"t2", "s2", "second tab"}};
-    api.SetResponses(kGetTwo, kListTwo);
+    StreamApi api;
+    StubFocus focus;
+    focus.Set("s1", {{"t1", "s1", "first tab"},
+                     {"t2", "s2", "second tab"},
+                     {"t3", "s3", "idle tab"}});
+    api.SetList("s1", kThree);
+    api.SetList("s2", nlohmann::json::array({ItemJson(1, "other", "in_progress")}));
 
     auto theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
-    auto poller = std::make_shared<ChecklistPoller>(&api, &focus, 20ms);
-    ChecklistPanelView view(poller, &focus);
+    auto feed = std::make_shared<ChecklistFeed>(&api, &focus, kFastTiming);
+    ChecklistPanelView view(feed, &focus);
     view.OnTheme(theme);
     ftxui::Component component = view.component();
 
-    // Focused surface: the current tab's items with a footer count.
-    REQUIRE(WaitFor([&] { return poller->Focused().ever_fetched; }));
+    // Focused surface: the current tab's items with a footer count, every
+    // item's text in the same column whatever its status glyph.
+    REQUIRE(WaitFor([&] { return feed->Session("s1").known && feed->Session("s3").known; }));
+    const auto focused_rows = ToRows(component->Render());
     const std::string focused_text = ToText(component->Render());
     CHECK(focused_text.find("this tab") != std::string::npos);
-    CHECK(focused_text.find("first") != std::string::npos);
     CHECK(focused_text.find("1/3 done") != std::string::npos);
+    CHECK(ColumnOf(focused_rows, "first") == 4);
+    CHECK(ColumnOf(focused_rows, "second") == 4);
+    CHECK(ColumnOf(focused_rows, "third") == 4);
 
-    // Tab flips to the summary: one line per OPEN tab, display names from
-    // the focus seam, the focused one marked.
+    // Tab flips to the summary: one line per open tab WITH tasks, display
+    // names from the focus seam, the focused one marked.
     REQUIRE(component->OnEvent(ftxui::Event::Tab));
     const std::string summary_text = ToText(component->Render());
     CHECK(summary_text.find("all tabs") != std::string::npos);
-    CHECK(summary_text.find("first tab") != std::string::npos);
-    CHECK(summary_text.find("second tab") != std::string::npos);
-    CHECK(summary_text.find("0/1") != std::string::npos);   // s2's counts
+    CHECK(summary_text.find("▸ first tab") != std::string::npos);
+    CHECK(summary_text.find("second tab  0/1  1 active") != std::string::npos);
+    CHECK(summary_text.find("idle tab") == std::string::npos);   // no tasks: not "0/0"
 
     // Tab flips back.
     REQUIRE(component->OnEvent(ftxui::Event::Tab));
     CHECK(ToText(component->Render()).find("this tab") != std::string::npos);
 }
 
-TEST_CASE("the panel degrades: unfetched, failed, and empty states",
+TEST_CASE("the panel degrades: unfetched, stale, empty and sessionless states",
           "[checklist_view][panel]") {
-    StubClientApi api;
-    StubFocusProvider focus;
-    focus.focused = "s1";
-    focus.tabs = {};
+    StreamApi api;
+    StubFocus focus;
+    focus.Set("s1", {});
+    api.SetFail(true);   // the seed cannot land yet
 
     auto theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
-    auto poller = std::make_shared<ChecklistPoller>(&api, &focus, 20ms);
-    ChecklistPanelView view(poller, &focus);
+    auto feed = std::make_shared<ChecklistFeed>(&api, &focus, kFastTiming);
+    ChecklistPanelView view(feed, &focus);
     view.OnTheme(theme);
     ftxui::Component component = view.component();
 
-    // Before any fetch: "fetching", never a blank or a crash.
+    // Before anything is known: "fetching", never a blank or a crash.
+    (void)feed->SegmentText("s1");   // the segment's focus hint
     CHECK(ToText(component->Render()).find("fetching") != std::string::npos);
 
-    // After a transport failure: the stale marker, on both surfaces.
-    api.SetFail(true);
-    REQUIRE(WaitFor([&] { return poller->Focused().ever_fetched; }));
-    CHECK(ToText(component->Render()).find("last update failed") != std::string::npos);
+    // A well-formed EMPTY list is "(no tasks)".
+    api.Push(ChecklistPush("s1", nlohmann::json::array()));
+    REQUIRE(WaitFor([&] { return feed->Session("s1").known; }));
+    CHECK(ToText(component->Render()).find("no tasks") != std::string::npos);
 
-    // A well-formed EMPTY list is "(no tasks)", distinct from a failure.
-    api.SetFail(false);
-    api.SetResponses(R"({"session_id":"s1","items":[]})", R"({"checklists":[]})");
-    REQUIRE(WaitFor([&] { return poller->Focused().valid && poller->Focused().items.empty(); }));
-    const std::string empty_text = ToText(component->Render());
-    CHECK(empty_text.find("no tasks") != std::string::npos);
-    CHECK(empty_text.find("last update failed") == std::string::npos);
+    // A lost stream keeps what was known and says so.
+    api.Push(ChecklistPush("s1", kThree));
+    REQUIRE(WaitFor([&] { return feed->Session("s1").items.size() == 3; }));
+    api.EndStream();
+    REQUIRE(WaitFor([&] { return feed->Session("s1").stale; }));
+    const std::string stale_text = ToText(component->Render());
+    CHECK(stale_text.find("stale") != std::string::npos);
+    CHECK(stale_text.find("first") != std::string::npos);
+
+    // A sessionless tab says so rather than "fetching" forever.
+    focus.Set("", {});
+    CHECK(ToText(component->Render()).find("no session") != std::string::npos);
 }
