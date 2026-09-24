@@ -1,5 +1,5 @@
-// ReadFileOrEmpty's failure contract: loud on cap and I/O error, silent only
-// on "cannot open".
+// ReadFile's statuses, and ReadFileOrEmpty's failure contract on top of them:
+// loud on cap and I/O error, silent only on "cannot open".
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -84,4 +84,32 @@ TEST_CASE("ReadFileOrEmpty rejects an over-cap file without reading it whole") {
     // second; slurping 4 GiB first would take far longer (or fail with
     // bad_alloc) on any machine this suite runs on.
     CHECK(elapsed < std::chrono::seconds(5));
+}
+
+TEST_CASE("ReadFile tells missing, unopenable, oversized and empty apart") {
+    using minimal::common::ReadFile;
+    using Status = minimal::common::ReadFileResult::Status;
+    minimal::testing::TempDir dir;
+
+    const auto missing = ReadFile(dir.path() / "missing.txt");
+    CHECK(missing.status == Status::kNotFound);
+    CHECK(missing.error.find("missing.txt") != std::string::npos);
+
+    std::filesystem::create_directories(dir.path() / "subdir");
+    CHECK(ReadFile(dir.path() / "subdir").status == Status::kCannotOpen);
+
+    { std::ofstream(dir.path() / "big.txt", std::ios::binary) << std::string(65, 'x'); }
+    const auto big = ReadFile(dir.path() / "big.txt", 64);
+    CHECK(big.status == Status::kTooLarge);
+    CHECK(big.contents.empty());
+
+    { std::ofstream out(dir.path() / "empty.txt"); }
+    const auto empty = ReadFile(dir.path() / "empty.txt");
+    CHECK(empty.ok());
+    CHECK(empty.contents.empty());
+
+    { std::ofstream(dir.path() / "exact.txt", std::ios::binary) << std::string(64, 'y'); }
+    const auto exact = ReadFile(dir.path() / "exact.txt", 64);
+    CHECK(exact.ok());
+    CHECK(exact.contents == std::string(64, 'y'));
 }

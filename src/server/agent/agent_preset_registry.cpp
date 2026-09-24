@@ -2,9 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <fstream>
 #include <set>
-#include <sstream>
 #include <stdexcept>
 #include <system_error>
 #include <utility>
@@ -22,11 +20,12 @@ namespace minimal::agent {
 namespace {
 
 std::string ReadFileRequired(const std::filesystem::path& path, const std::string& what) {
-    std::ifstream in(path);
-    if (!in) throw std::runtime_error(what + " not found: " + path.string());
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    return buffer.str();
+    common::ReadFileResult result = common::ReadFile(path);
+    if (result.status == common::ReadFileResult::Status::kNotFound) {
+        throw std::runtime_error(what + " not found: " + path.string());
+    }
+    if (!result.ok()) throw std::runtime_error(what + ": " + result.error);
+    return std::move(result.contents);
 }
 
 // Resolves the raw allowed_skills map against the session's merged skill view

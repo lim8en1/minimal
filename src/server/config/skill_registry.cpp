@@ -2,13 +2,12 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <fstream>
 #include <mutex>
-#include <sstream>
 #include <system_error>
 #include <utility>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/common/read_file.hpp"
 #include "minimal/config/frontmatter.hpp"
 #include "minimal/config/project_dirs.hpp"
 
@@ -30,15 +29,9 @@ constexpr std::uintmax_t kMaxSkillFileBytes = 1 << 20;  // 1 MiB
 // every call site already has a skip-and-log (or demote-to-on-demand) path for
 // it, so this needs no new error shape.
 std::optional<std::string> ReadFile(const std::filesystem::path& path) {
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(path, ec);
-    if (!ec && size > kMaxSkillFileBytes) return std::nullopt;
-    std::ifstream in(path);
-    if (!in) return std::nullopt;
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    if (in.bad()) return std::nullopt;
-    return buffer.str();
+    common::ReadFileResult result = common::ReadFile(path, kMaxSkillFileBytes);
+    if (!result.ok()) return std::nullopt;
+    return std::move(result.contents);
 }
 
 // A description goes into the system prompt as one bullet per skill. Embedded

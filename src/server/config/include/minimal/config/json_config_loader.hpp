@@ -1,14 +1,13 @@
 #pragma once
 
 #include <filesystem>
-#include <fstream>
 #include <functional>
-#include <sstream>
 #include <stdexcept>
 #include <string>
-#include <system_error>
 
 #include <nlohmann/json.hpp>
+
+#include "minimal/common/read_file.hpp"
 
 namespace minimal::config {
 
@@ -22,42 +21,32 @@ enum class AbsencePolicy { kThrow, kDefaultOnMissing };
 enum class EmptyFilePolicy { kTreatAsMalformed, kTreatAsAbsent };
 
 // The shape shared by every `Load*Config` function: check existence per
-// `absence`, read the file, treat an empty-but-present file per
-// `empty_policy`, parse top-level JSON (wrapping a stray
+// `absence`, read the file (common::ReadFile's cap), treat an empty-but-present
+// file per `empty_policy`, parse top-level JSON (wrapping a stray
 // nlohmann::json::exception into "<label>: invalid JSON: <what>"), then hand
 // the parsed doc to `parse`. `T` must be default-constructible for the
-// kDefaultOnMissing/kTreatAsAbsent paths.
-//
-// Deliberately does not read via minimal::common::ReadFileOrEmpty: that
-// helper collapses "could not open" and "opened but empty" into the same
-// empty-string result, which would erase exactly the distinction
-// AbsencePolicy and EmptyFilePolicy exist to preserve.
+// kDefaultOnMissing/kTreatAsAbsent paths. A file that exists but cannot be
+// opened is reported as such, not as "not found"; an oversized or unreadable
+// file always throws, whatever `absence` says.
 template <typename T>
 T LoadJsonConfig(const std::filesystem::path& path, const std::string& label,
                  AbsencePolicy absence, EmptyFilePolicy empty_policy,
                  const std::function<T(const nlohmann::json&)>& parse) {
-    std::ifstream in(path);
-    if (!in) {
+    using Status = common::ReadFileResult::Status;
+    common::ReadFileResult file = common::ReadFile(path);
+    if (file.status == Status::kNotFound || file.status == Status::kCannotOpen) {
         if (absence == AbsencePolicy::kThrow) {
-            // Distinguish the failure: errno says whether the file is truly
-            // absent or present-but-unopenable (permission denied, a
-            // directory, ...). Reporting every open failure as "not found"
-            // sent the operator chasing a missing file that existed.
-            const std::error_code ec(errno, std::generic_category());
-            throw std::runtime_error(label + ".json could not be opened (" + ec.message() +
-                                     "): " + path.string());
+            throw std::runtime_error(label + ".json: " + file.error);
         }
         return T{};
     }
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    const std::string contents = buffer.str();
-    if (contents.empty() && empty_policy == EmptyFilePolicy::kTreatAsAbsent) {
+    if (!file.ok()) throw std::runtime_error(label + ".json: " + file.error);
+    if (file.contents.empty() && empty_policy == EmptyFilePolicy::kTreatAsAbsent) {
         return T{};
     }
     nlohmann::json doc;
     try {
-        doc = nlohmann::json::parse(contents);
+        doc = nlohmann::json::parse(file.contents);
     } catch (const nlohmann::json::exception& error) {
         throw std::runtime_error(label + ".json: invalid JSON: " + std::string(error.what()));
     }

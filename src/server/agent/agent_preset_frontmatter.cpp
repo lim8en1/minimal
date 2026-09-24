@@ -4,12 +4,11 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <fstream>
-#include <sstream>
 #include <stdexcept>
 #include <system_error>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/common/read_file.hpp"
 #include "minimal/config/permission_codec.hpp"
 
 namespace minimal::agent {
@@ -21,22 +20,9 @@ namespace {
 // content (a project-local file the current repo shipped, walked before the
 // operator's own config_dir -- see AgentPresetRegistry::ResolveUncached),
 // and yaml-cpp's recursive-descent parser has no built-in depth or size
-// limit. An oversized file is refused before the read even runs, rather
-// than after paying for a multi-hundred-KB (or worse) load and parse of
-// attacker-adjacent content on every ListAvailable() scan and every
-// Resolve().
+// limit. An oversized file is refused after reading at most one byte past
+// the cap, before any parse, on every ListAvailable() scan and Resolve().
 constexpr std::uintmax_t kMaxPresetFileBytes = 1 << 20;  // 1 MiB
-
-void CheckPresetFileSize(const std::filesystem::path& path) {
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(path, ec);
-    if (ec) return;  // let the read below report the real error
-    if (size > kMaxPresetFileBytes) {
-        throw std::runtime_error("agent preset " + path.string() + " is " +
-                                 std::to_string(size) + " bytes, over the " +
-                                 std::to_string(kMaxPresetFileBytes) + "-byte limit");
-    }
-}
 
 std::string RequireString(const YAML::Node& node, const std::string& key) {
     const YAML::Node value = node[key];
@@ -547,12 +533,12 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
 
 AgentPresetFrontmatter LoadAgentPresetFrontmatter(
     const std::filesystem::path& path, const std::vector<std::string>& known_tool_permission_keys) {
-    CheckPresetFileSize(path);
-    std::ifstream in(path);
-    if (!in) throw std::runtime_error("agent preset not found: " + path.string());
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    return ParseAgentPresetFrontmatter(config::parse_frontmatter_markdown(buffer.str()),
+    common::ReadFileResult file = common::ReadFile(path, kMaxPresetFileBytes);
+    if (file.status == common::ReadFileResult::Status::kNotFound) {
+        throw std::runtime_error("agent preset not found: " + path.string());
+    }
+    if (!file.ok()) throw std::runtime_error("agent preset: " + file.error);
+    return ParseAgentPresetFrontmatter(config::parse_frontmatter_markdown(file.contents),
                                        known_tool_permission_keys);
 }
 

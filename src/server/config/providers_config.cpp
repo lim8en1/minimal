@@ -1,12 +1,12 @@
 #include "minimal/config/providers_config.hpp"
 
 #include <algorithm>
-#include <fstream>
 #include <stdexcept>
 #include <utility>
 
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/read_file.hpp"
 #include "minimal/config/json_config_loader.hpp"
 
 namespace minimal::config {
@@ -119,10 +119,15 @@ std::optional<std::string> LookupAuthFile(const std::filesystem::path& path,
                                           const std::string& provider_name) {
     std::error_code ec;
     if (!std::filesystem::is_regular_file(path, ec) || ec) return std::nullopt;
-    std::ifstream in(path);
-    if (!in) return std::nullopt;
+    common::ReadFileResult file = common::ReadFile(path);
+    if (!file.ok()) {
+        if (file.status != common::ReadFileResult::Status::kNotFound) {
+            common::DefaultLogger().warn("credentials file ignored: {}", file.error);
+        }
+        return std::nullopt;
+    }
     try {
-        return LookupKeyInAuthJson(nlohmann::json::parse(in), provider_name);
+        return LookupKeyInAuthJson(nlohmann::json::parse(file.contents), provider_name);
     } catch (const std::exception& error) {
         common::DefaultLogger().warn("credentials file {} is malformed and was ignored: {}",
                                      path.string(), error.what());
