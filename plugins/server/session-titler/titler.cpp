@@ -1,45 +1,29 @@
 #include "titler.hpp"
 
-#include <algorithm>
 #include <cctype>
+#include <exception>
 #include <optional>
-#include <thread>
 #include <utility>
 #include <vector>
 
-#include "minimal/agent/session_support_service.hpp"
+#include "minimal/common/utf8.hpp"
 
 namespace minimal::session_titler {
 namespace {
 
 // Mirrors the free default's cap (session_database.cpp kDefaultNameMaxChars):
 // whatever names the session, it ends up the same shape.
-constexpr int kTitleMaxCodePoints = 60;
+constexpr std::size_t kTitleMaxCodePoints = 60;
+
+// Pending titles, not sessions: one entry per NEW session awaiting its title.
+// A backlog this deep means the provider is wedged; dropping beyond it keeps
+// the default name, which is the plugin's whole failure mode anyway.
+constexpr std::size_t kJobQueueSize = 64;
 
 const char* kDefaultPrompt =
     "Write a short title for a coding-assistant conversation that begins with the user "
     "message below. Reply with the title ONLY: 3-6 words, no quotes, no trailing period, "
     "no explanation.";
-
-// Cap at code-point granularity -- a byte cut would split a UTF-8 sequence
-// and render as U+FFFD downstream (tab bar, titling request).
-std::string_view TruncateCodePoints(std::string_view text, std::size_t max_chars) {
-    std::size_t chars = 0;
-    std::size_t i = 0;
-    while (i < text.size() && chars < max_chars) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-        std::size_t len;
-        if (c < 0x80) len = 1;
-        else if ((c & 0xE0) == 0xC0) len = 2;
-        else if ((c & 0xF0) == 0xE0) len = 3;
-        else if ((c & 0xF8) == 0xF0) len = 4;
-        else len = 1;
-        if (i + len > text.size()) len = text.size() - i;
-        i += len;
-        ++chars;
-    }
-    return text.substr(0, i);
-}
 
 std::string FirstUserText(const std::string& session_id, const session::SessionReader& reader,
                           int char_budget) {
@@ -51,11 +35,10 @@ std::string FirstUserText(const std::string& session_id, const session::SessionR
         for (const auto& block : stored.message.content) {
             if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
                 if (text->text.empty()) continue;
-                // Code-point truncation, not substr: the budget counts
-                // characters, and a byte cut could split a UTF-8 sequence
-                // inside the titling REQUEST.
-                return std::string(TruncateCodePoints(text->text,
-                                                      static_cast<std::size_t>(char_budget)));
+                // Code points, not bytes: a byte cut could split a UTF-8
+                // sequence inside the titling REQUEST.
+                return common::TruncateCodePoints(text->text,
+                                                  static_cast<std::size_t>(char_budget));
             }
         }
         // A tool-result-only user message is not a name; keep looking, exactly
@@ -71,6 +54,50 @@ std::string ResponseText(const llm::ChatResponse& response) {
         }
     }
     return {};
+}
+
+bool IsAsciiSpace(char c) {
+    const auto u = static_cast<unsigned char>(c);
+    return u < 0x80 && std::isspace(u) != 0;
+}
+
+void Trim(std::string& s) {
+    std::size_t begin = 0;
+    std::size_t end = s.size();
+    while (begin < end && IsAsciiSpace(s[begin])) ++begin;
+    while (end > begin && IsAsciiSpace(s[end - 1])) --end;
+    s = s.substr(begin, end - begin);
+}
+
+// Removes one layer of the decoration models add despite being told not to.
+// Returns whether anything came off, so the caller can peel nested layers
+// ("**\"Title\"**").
+bool StripDecoration(std::string& s) {
+    // Markdown heading.
+    if (!s.empty() && s.front() == '#') {
+        s.erase(0, s.find_first_not_of('#'));
+        return true;
+    }
+    // A "Title:" label.
+    constexpr std::string_view kLabel = "title:";
+    if (s.size() >= kLabel.size()) {
+        bool match = true;
+        for (std::size_t i = 0; i < kLabel.size() && match; ++i) {
+            match = std::tolower(static_cast<unsigned char>(s[i])) == kLabel[i];
+        }
+        if (match) {
+            s.erase(0, kLabel.size());
+            return true;
+        }
+    }
+    // One wrapping pair: bold, emphasis, or quotes. Inner ones stay.
+    for (const std::string_view wrap : {"**", "*", "\"", "'", "`"}) {
+        if (s.size() >= 2 * wrap.size() && s.starts_with(wrap) && s.ends_with(wrap)) {
+            s = s.substr(wrap.size(), s.size() - 2 * wrap.size());
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -98,70 +125,67 @@ TitlerConfig ParseTitlerConfig(const nlohmann::json& config) {
 }
 
 std::string CleanTitle(std::string_view text) {
-    // Trim.
-    const auto is_space = [](unsigned char c) {
-        return c < 0x80 && std::isspace(c) != 0;
-    };
-    std::size_t begin = 0;
-    std::size_t end = text.size();
-    while (begin < end && is_space(static_cast<unsigned char>(text[begin]))) ++begin;
-    while (end > begin && is_space(static_cast<unsigned char>(text[end - 1]))) --end;
-    std::string out(text.substr(begin, end - begin));
-
-    // Unwrap one pair of matching quotes -- models wrap titles in quotes often
-    // enough to make this worth four lines, and anything fancier is a rabbit hole.
-    if (out.size() >= 2) {
-        const char first = out.front();
-        const char last = out.back();
-        const bool wrapped = (first == '"' && last == '"') || (first == '\'' && last == '\'') ||
-                             (first == '`' && last == '`');
-        if (wrapped) out = out.substr(1, out.size() - 2);
-    }
-
-    // Collapse any internal newline run to a space, and DROP other C0 control
-    // bytes: only \n/\r/\t were handled, so a model reply containing an ESC
-    // sequence (or any other control byte) carried it verbatim into the
-    // session name and from there into the tab bar -- ANSI escapes in the UI,
+    // Collapse every whitespace run to one space and DROP other C0 control
+    // bytes: a model reply carrying an ESC sequence would otherwise reach the
+    // session name and from there the tab bar -- ANSI escapes in the UI,
     // courtesy of the provider.
-    std::string collapsed;
-    collapsed.reserve(out.size());
+    std::string out;
+    out.reserve(text.size());
     bool pending_space = false;
-    for (const unsigned char c : out) {
-        if (c == '\n' || c == '\r' || c == '\t') {
-            pending_space = !collapsed.empty();
+    for (const char ch : text) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (IsAsciiSpace(ch)) {
+            pending_space = !out.empty();
         } else if (c < 0x20 || c == 0x7F) {
             continue;  // control byte: dropped, not rendered
         } else {
             if (pending_space) {
-                collapsed += ' ';
+                out += ' ';
                 pending_space = false;
             }
-            collapsed += static_cast<char>(c);
+            out += ch;
         }
     }
 
-    // Cap at code-point granularity -- a byte cut would split a UTF-8 sequence
-    // and render as U+FFFD in the tab bar.
-    return std::string(TruncateCodePoints(collapsed, static_cast<std::size_t>(kTitleMaxCodePoints)));
+    // Bounded: each pass removes at least one byte, and real replies carry
+    // two or three layers at most.
+    for (int pass = 0; pass < 4; ++pass) {
+        Trim(out);
+        if (!StripDecoration(out)) break;
+    }
+    Trim(out);
+    // One trailing period, not an ellipsis.
+    if (out.size() >= 2 && out.back() == '.' && out[out.size() - 2] != '.') {
+        out.pop_back();
+        Trim(out);
+    }
+
+    // Code-point cap: a byte cut would render as U+FFFD in the tab bar.
+    return common::TruncateCodePoints(out, kTitleMaxCodePoints);
 }
 
 TitlerObserver::TitlerObserver(TitlerConfig config, plugins::ServiceRegistry* services,
                                common::Logger& logger)
-    : state_(std::make_shared<State>()) {
-    // Field-by-field: State holds a mutex and a set, so it is neither copyable
-    // nor movable, and an aggregate temporary would be a copy.
-    state_->config = std::move(config);
-    state_->services = services;
-    state_->logger = &logger;
-}
+    : config_(std::move(config)),
+      services_(services),
+      logger_(logger),
+      jobs_(kJobQueueSize),
+      worker_([this] { RunWorker(); }) {}
 
 TitlerObserver::~TitlerObserver() {
-    // Join-and-stop for the detached workers (see the class comment): the
-    // registry destroying this observer is the host's only teardown point for
-    // the titler, and a worker still running here would dereference the
-    // borrowed support pointer into teardown.
-    std::unique_lock<std::mutex> lock(state_->workers_mu);
-    state_->workers_cv.wait(lock, [this] { return state_->workers == 0; });
+    // Queued titles are dropped, not drained: N provider calls must not stand
+    // between the host and exit. Only the in-flight call, if any, is waited on.
+    stopping_.store(true, std::memory_order_release);
+    jobs_.DiscardPending();
+    jobs_.Close();
+    if (worker_.joinable()) worker_.join();
+}
+
+void TitlerObserver::RunWorker() {
+    while (auto session_id = jobs_.Pop()) {
+        if (stopping_.load(std::memory_order_acquire)) return;
+        ProcessJob(*session_id);
+    }
 }
 
 void TitlerObserver::OnTurnCompleted(const agent::SessionInfo& info,
@@ -174,131 +198,54 @@ void TitlerObserver::OnTurnCompleted(const agent::SessionInfo& info,
     // never seeds -- either way, not a session this process created, and
     // retitling it would spend tokens to overwrite a title that already exists.
     if (summary.first_seq != 0) return;
+    if (!titled_.insert(info.session_id).second) return;
 
-    if (!state_->titled.insert(info.session_id).second) return;
-
-    // EVERYTHING below runs on the observer thread on purpose (see the class
-    // comment): the turn just completed means the client may close its stream
-    // at any instant, which terminates the session and erases it from the
-    // registry -- so the transcript read and the provider/model resolution
-    // happen HERE, while the session is still findable. Only the provider
-    // call itself, which nothing here can bound, goes to the detached thread.
-    std::string first_text;
-    std::optional<agent::SessionLlm> llm;
-    // Resolved HERE and handed to the worker as a captured pointer: the worker
-    // must never dereference the ServiceRegistry itself, whose lifetime the
-    // worker cannot see (the observer thread's resolution is the pattern every
-    // other observer-side service access follows).
-    agent::SessionSupportService* support = nullptr;
-    if (state_->services != nullptr) {
-        void* raw = state_->services->Find(agent::kSessionSupportServiceName);
-        if (raw != nullptr) {
-            support = static_cast<agent::SessionSupportService*>(raw);
-            if (auto reader = support->HistoryFor(info.session_id); reader != nullptr) {
-                first_text =
-                    FirstUserText(info.session_id, *reader, state_->config.input_char_budget);
-            }
-            if (!first_text.empty()) {
-                llm = state_->config.model.empty()
-                          ? support->LlmForSession(info.session_id)
-                          : support->ResolveModelRef(state_->config.model);
-            }
-        }
-    }
-    if (first_text.empty()) {
-        // Nothing to title from (the default rule found none either, so the
-        // session keeps its empty name). The one-shot entry stays: the first
-        // turn is the only chance.
-        state_->logger->debug("session {}: no first-turn text to title from",
-                              info.session_id);
-        return;
-    }
-    if (!llm) {
-        state_->logger->debug("session {}: no provider available for titling",
-                              info.session_id);
-        return;
-    }
-    if (support == nullptr) {
-        // The service vanished between the two finds above -- unreachable in
-        // a sealed registry, but the rename needs the service, so there is
-        // nothing to spawn.
-        return;
-    }
-
-    // The worker holds ONLY owned captures plus the two pointers resolved on
-    // the observer thread above: the State shared_ptr (never `this` -- the
-    // observer may be destroyed with the registry while a straggler call is
-    // still in flight), the resolved provider shared_ptr, and a Logger BY
-    // VALUE (stateless handle; resolving spdlog's current default per call
-    // makes the copy equivalent without holding a raw pointer). It is counted
-    // on State so ~TitlerObserver can drain it -- an untracked detached thread
-    // used to outlive teardown entirely.
-    auto state = state_;
-    auto provider = llm->provider;
-    std::string model = llm->model;
-    std::string session_id = info.session_id;
-    common::Logger logger_copy = *state_->logger;  // by value; see above
-    {
-        std::lock_guard<std::mutex> lock(state->workers_mu);
-        state->workers += 1;
-    }
-    // If std::thread's constructor throws (thread-creation resource
-    // exhaustion), the increment above is never undone by the lambda body
-    // below (it never runs) -- ~TitlerObserver's drain then waits on
-    // workers_cv for a worker that was never actually started, hanging
-    // plugin/server teardown indefinitely. Titling is best-effort by design
-    // (see GenerateTitle's own silent-degrade contract); losing one title to
-    // resource exhaustion is fine, a hung teardown is not.
-    try {
-        std::thread([state, provider = std::move(provider), model = std::move(model),
-                     session_id = std::move(session_id), text = std::move(first_text), support,
-                     logger = std::move(logger_copy)]() mutable {
-            TitlerObserver::GenerateTitle(state->config, logger, *provider, model, session_id,
-                                          text, *support);
-            {
-                std::lock_guard<std::mutex> lock(state->workers_mu);
-                state->workers -= 1;
-            }
-            state->workers_cv.notify_all();
-        }).detach();
-    } catch (const std::exception& e) {
-        {
-            std::lock_guard<std::mutex> lock(state->workers_mu);
-            state->workers -= 1;
-        }
-        state->workers_cv.notify_all();
-        state_->logger->warn("session-titler: could not start a title worker for {}: {}",
-                             info.session_id, e.what());
+    if (!jobs_.TryPush(info.session_id)) {
+        logger_.debug("session {}: titling queue full or closed; keeping the default name",
+                      info.session_id);
     }
 }
 
 void TitlerObserver::OnSessionEnded(const agent::SessionInfo& info) {
-    std::lock_guard<std::mutex> lock(state_->mu);
-    state_->titled.erase(info.session_id);
+    titled_.erase(info.session_id);
 }
 
-void TitlerObserver::RunJobNow(const std::string& session_id, std::string first_text) const {
-    // Test seam: the whole pipeline synchronously, including the service
-    // resolution the production path does on the observer thread.
-    if (state_->services == nullptr) return;
-    void* raw = state_->services->Find(agent::kSessionSupportServiceName);
-    if (raw == nullptr) return;
-    auto* support = static_cast<agent::SessionSupportService*>(raw);
+void TitlerObserver::ProcessJob(const std::string& session_id) const {
+    try {
+        if (services_ == nullptr) return;
+        auto* support = static_cast<agent::SessionSupportService*>(
+            services_->Find(agent::kSessionSupportServiceName));
+        if (support == nullptr) return;
 
-    // The session's own model unless the config overrode it. nullopt on an
-    // unknown session or unresolvable override: no title, log at debug, done.
-    std::optional<agent::SessionLlm> llm;
-    if (state_->config.model.empty()) {
-        llm = support->LlmForSession(session_id);
-    } else {
-        llm = support->ResolveModelRef(state_->config.model);
+        std::string first_text;
+        if (const auto reader = support->HistoryFor(session_id); reader != nullptr) {
+            first_text = FirstUserText(session_id, *reader, config_.input_char_budget);
+        }
+        if (first_text.empty()) {
+            // Nothing to title from (the default rule found none either, so the
+            // session keeps its empty name).
+            logger_.debug("session {}: no first-turn text to title from", session_id);
+            return;
+        }
+
+        // The session's own model unless the config overrode it. nullopt on an
+        // unknown session or an unresolvable override: no title.
+        const std::optional<agent::SessionLlm> llm =
+            config_.model.empty() ? support->LlmForSession(session_id)
+                                  : support->ResolveModelRef(config_.model);
+        if (!llm || llm->provider == nullptr) {
+            logger_.debug("session {}: no provider available for titling", session_id);
+            return;
+        }
+        GenerateTitle(config_, logger_, *llm->provider, llm->model, session_id, first_text,
+                      *support);
+    } catch (const std::exception& error) {
+        // A failed title degrades to the free default name -- never an error
+        // event, never a surfaced failure. This whole plugin is cosmetic.
+        logger_.warn("session {}: titling failed: {}", session_id, error.what());
+    } catch (...) {
+        logger_.warn("session {}: titling failed with an unrecognized exception", session_id);
     }
-    if (!llm) {
-        state_->logger->debug("session {}: no provider available for titling", session_id);
-        return;
-    }
-    GenerateTitle(state_->config, *state_->logger, *llm->provider, llm->model, session_id,
-                  std::move(first_text), *support);
 }
 
 void TitlerObserver::GenerateTitle(const TitlerConfig& config, common::Logger& logger,
@@ -313,21 +260,22 @@ void TitlerObserver::GenerateTitle(const TitlerConfig& config, common::Logger& l
     messages.push_back(llm::Message{llm::Role::User, {llm::TextBlock{first_text}}});
     request.messages = messages;  // span; `messages` outlives the Complete call
 
-    try {
-        const llm::ChatResponse response = provider.Complete(request);
-        const std::string title = CleanTitle(ResponseText(response));
-        if (title.empty()) {
+    const llm::ChatResponse response = provider.Complete(request);
+    const std::string title = CleanTitle(ResponseText(response));
+    if (title.empty()) {
+        if (response.stop_reason == llm::StopReason::MaxTokens) {
+            // The reasoning-model case: hidden reasoning spent the whole cap
+            // before any visible text. Silent at debug, this looked like the
+            // plugin doing nothing.
+            logger.warn("session {}: titling hit max_tokens ({}) with no visible text; "
+                        "raise session-titler's max_tokens or configure a non-reasoning model",
+                        session_id, config.max_tokens);
+        } else {
             logger.debug("session {}: titler produced no usable text", session_id);
-            return;
         }
-        support.RenameSession(session_id, title);
-    } catch (const std::exception& error) {
-        // A failed title degrades to the free default name -- never an error
-        // event, never a surfaced failure. This whole plugin is cosmetic.
-        logger.warn("session {}: titling failed: {}", session_id, error.what());
-    } catch (...) {
-        logger.warn("session {}: titling failed with an unrecognized exception", session_id);
+        return;
     }
+    support.RenameSession(session_id, title);
 }
 
 }  // namespace minimal::session_titler

@@ -23,12 +23,23 @@ SessionObserverRegistry::SessionObserverRegistry(common::Logger& logger,
     });
 }
 
-SessionObserverRegistry::~SessionObserverRegistry() {
+SessionObserverRegistry::~SessionObserverRegistry() { Shutdown(); }
+
+void SessionObserverRegistry::Shutdown() {
     // Closing drains the backlog first, so observer calls already queued still
     // run -- OnSessionEnded at shutdown is exactly the notification a plugin
     // needs in order to release per-session state.
     tasks_.Close();
     if (dispatcher_.joinable()) dispatcher_.join();
+    // Then release the observers, so their destructors (a plugin joining its
+    // own worker) run NOW, while whatever the caller keeps alive past this
+    // point is still standing. Swapped out under the lock and destroyed
+    // outside it: an observer destructor must not run holding mutex_.
+    std::vector<std::shared_ptr<SessionObserver>> released;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        released.swap(observers_);
+    }
 }
 
 void SessionObserverRegistry::Register(std::shared_ptr<SessionObserver> observer) {

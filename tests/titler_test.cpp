@@ -6,7 +6,9 @@
 // interface, which is exactly what a third-party titler would be tested
 // against.
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -38,11 +40,14 @@ class FakeSupportService final : public agent::SessionSupportService {
 public:
     std::shared_ptr<testing::FakeLlmProvider> provider =
         std::make_shared<testing::FakeLlmProvider>();
+    // When set, served instead of `provider` (a provider the test controls
+    // beyond scripted responses -- the gated one below).
+    std::shared_ptr<llm::LlmProvider> provider_override;
     std::string model = "test-model";
     std::shared_ptr<const session::SessionReader> reader;
     bool serve_llm = true;
     bool fail_rename = false;
-    // The titler's detached worker thread calls ResolveModelRef/RenameSession
+    // The titler's worker thread calls ResolveModelRef/RenameSession
     // while the test's main thread reads the records, so both vectors are
     // mutex-guarded and read only through the locked views below -- a data
     // race here is a test bug, not a plugin finding.
@@ -51,12 +56,16 @@ public:
 
     std::optional<agent::SessionLlm> LlmForSession(const std::string&) override {
         if (!serve_llm) return std::nullopt;
-        return agent::SessionLlm{provider, model};
+        return Served();
     }
     std::optional<agent::SessionLlm> ResolveModelRef(const std::string& ref) override {
         std::lock_guard<std::mutex> lock(records_mu);
         resolved_refs.push_back(ref);
         if (!serve_llm) return std::nullopt;
+        return Served();
+    }
+    agent::SessionLlm Served() const {
+        if (provider_override) return agent::SessionLlm{provider_override, model};
         return agent::SessionLlm{provider, model};
     }
     std::shared_ptr<const session::SessionReader> HistoryFor(const std::string&) override {
@@ -100,6 +109,66 @@ agent::TurnSummary Summary(std::int64_t first_seq) {
 }
 
 session_titler::TitlerConfig DefaultConfig() { return {}; }
+
+// A real database holding one fresh session whose first user message is
+// `first_text` -- what ProcessJob reads through HistoryFor.
+struct Transcript {
+    testing::TempDir dir;
+    session::SessionDatabase db{dir.path() / "sessions.db"};
+    std::shared_ptr<const session::SessionReader> reader =
+        std::make_shared<const session::SessionReader>(db);
+
+    std::string AddSession(const std::string& first_text) {
+        const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+        db.AppendMessage(id, testing::UserText(first_text));
+        return id;
+    }
+};
+
+// Blocks every Complete until Release(); counts calls. The destructor test's
+// "a provider call is in flight" state.
+class GatedProvider final : public llm::LlmProvider {
+public:
+    llm::ChatResponse Complete(const llm::ChatRequest& request) override {
+        return StreamComplete(request, {});
+    }
+    llm::ChatResponse StreamComplete(const llm::ChatRequest&,
+                                     const llm::StreamEventSink&) override {
+        std::unique_lock<std::mutex> lock(mu_);
+        ++calls_;
+        cv_.notify_all();
+        cv_.wait(lock, [this] { return released_; });
+        return testing::TextResponse("Gated title");
+    }
+    void WaitForCall() {
+        std::unique_lock<std::mutex> lock(mu_);
+        cv_.wait_for(lock, 5s, [this] { return calls_ > 0; });
+    }
+    void Release() {
+        std::lock_guard<std::mutex> lock(mu_);
+        released_ = true;
+        cv_.notify_all();
+    }
+    int calls() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return calls_;
+    }
+
+private:
+    mutable std::mutex mu_;
+    std::condition_variable cv_;
+    int calls_ = 0;
+    bool released_ = false;
+};
+
+// The worker is asynchronous; the failure mode is "never", so poll with a
+// deadline -- a hang here is the bug, not a wrong assertion.
+void WaitForRenames(const FakeSupportService& support, std::size_t n) {
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (support.Renames().size() < n && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
 
 }  // namespace
 
@@ -162,19 +231,38 @@ TEST_CASE("CleanTitle drops control bytes instead of rendering them", "[titler][
     CHECK(CleanTitle("fix\tthe\r\nbug") == "fix the bug");
 }
 
-TEST_CASE("RunJobNow titles from the session's own model by default", "[titler]") {
+TEST_CASE("CleanTitle strips the decoration models add anyway", "[titler]") {
+    using session_titler::CleanTitle;
+    CHECK(CleanTitle("Fix the login bug.") == "Fix the login bug");
+    CHECK(CleanTitle("Wait for it...") == "Wait for it...");  // an ellipsis stays
+    CHECK(CleanTitle("Title: Fix the login bug") == "Fix the login bug");
+    CHECK(CleanTitle("TITLE:Fix it") == "Fix it");
+    CHECK(CleanTitle("# Fix the login bug") == "Fix the login bug");
+    CHECK(CleanTitle("**Fix the login bug**") == "Fix the login bug");
+    // Nested layers peel together.
+    CHECK(CleanTitle("**\"Fix the login bug.\"**") == "Fix the login bug");
+    CHECK(CleanTitle("Title: \"Fix it\"") == "Fix it");
+    // Inner markup is content, not decoration.
+    CHECK(CleanTitle("Fix *the* bug") == "Fix *the* bug");
+    CHECK(CleanTitle("**").empty());
+}
+
+TEST_CASE("ProcessJob titles from the session's own model by default", "[titler]") {
+    Transcript transcript;
+    const auto id = transcript.AddSession("please fix the login bug");
     plugins::ServiceRegistry services;
     FakeSupportService support;
+    support.reader = transcript.reader;
     services.Provide(agent::kSessionSupportServiceName, &support);
     support.provider->PushResponse(testing::TextResponse("  \"Fix the login bug\"  "));
 
     session_titler::TitlerObserver observer(DefaultConfig(), &services,
                                             common::DefaultLogger());
-    observer.RunJobNow("s1", "please fix the login bug");
+    observer.ProcessJob(id);
 
     const auto renames = support.Renames();
     REQUIRE(renames.size() == 1);
-    CHECK(renames[0].first == "s1");
+    CHECK(renames[0].first == id);
     CHECK(renames[0].second == "Fix the login bug");
 
     // The request went to the session's model, with the default prompt and cap.
@@ -189,17 +277,42 @@ TEST_CASE("RunJobNow titles from the session's own model by default", "[titler]"
           "please fix the login bug");
 }
 
-TEST_CASE("RunJobNow routes a configured model override through ResolveModelRef",
-          "[titler]") {
+TEST_CASE("ProcessJob truncates the first user text to the input budget", "[titler]") {
+    Transcript transcript;
+    std::string long_text;
+    for (int i = 0; i < 20; ++i) long_text += "\xC3\xA9";  // é × 20
+    const auto id = transcript.AddSession(long_text);
     plugins::ServiceRegistry services;
     FakeSupportService support;
+    support.reader = transcript.reader;
+    services.Provide(agent::kSessionSupportServiceName, &support);
+    support.provider->PushResponse(testing::TextResponse("t"));
+
+    session_titler::TitlerConfig config;
+    config.input_char_budget = 5;
+    session_titler::TitlerObserver observer(config, &services, common::DefaultLogger());
+    observer.ProcessJob(id);
+
+    REQUIRE(support.provider->requests().size() == 1);
+    // 5 code points, 10 bytes -- never a split sequence.
+    CHECK(std::get<llm::TextBlock>(support.provider->requests()[0].messages[0].content[0])
+              .text == long_text.substr(0, 10));
+}
+
+TEST_CASE("ProcessJob routes a configured model override through ResolveModelRef",
+          "[titler]") {
+    Transcript transcript;
+    const auto id = transcript.AddSession("text");
+    plugins::ServiceRegistry services;
+    FakeSupportService support;
+    support.reader = transcript.reader;
     services.Provide(agent::kSessionSupportServiceName, &support);
     support.provider->PushResponse(testing::TextResponse("tiny title"));
 
     session_titler::TitlerConfig config;
     config.model = "cheap/main";
     session_titler::TitlerObserver observer(config, &services, common::DefaultLogger());
-    observer.RunJobNow("s1", "text");
+    observer.ProcessJob(id);
 
     const auto refs = support.ResolvedRefs();
     REQUIRE(refs.size() == 1);
@@ -210,49 +323,66 @@ TEST_CASE("RunJobNow routes a configured model override through ResolveModelRef"
     CHECK(renames[0].second == "tiny title");
 }
 
-TEST_CASE("RunJobNow degrades on every failure path", "[titler]") {
+TEST_CASE("ProcessJob degrades on every failure path", "[titler]") {
+    Transcript transcript;
+    const auto id = transcript.AddSession("text");
+    plugins::ServiceRegistry services;
+    FakeSupportService support;
+    support.reader = transcript.reader;
+
     SECTION("no service from the registry") {
-        plugins::ServiceRegistry services;  // sealed-empty: Find answers null
-        services.Seal();
+        services.Seal();  // sealed-empty: Find answers null
         session_titler::TitlerObserver observer(DefaultConfig(), &services,
                                                 common::DefaultLogger());
-        observer.RunJobNow("s1", "text");  // must not crash or rename
+        observer.ProcessJob(id);  // must not crash or rename
+    }
+    SECTION("no service pointer at all (host offers no seam)") {
+        session_titler::TitlerObserver observer(DefaultConfig(), nullptr,
+                                                common::DefaultLogger());
+        observer.ProcessJob(id);
+    }
+    SECTION("no transcript") {
+        support.reader = nullptr;
+        services.Provide(agent::kSessionSupportServiceName, &support);
+        session_titler::TitlerObserver observer(DefaultConfig(), &services,
+                                                common::DefaultLogger());
+        observer.ProcessJob(id);
+        CHECK(support.provider->call_count() == 0);  // nothing spent
+        CHECK(support.Renames().empty());
     }
     SECTION("no provider resolvable") {
-        plugins::ServiceRegistry services;
-        FakeSupportService support;
         support.serve_llm = false;
         services.Provide(agent::kSessionSupportServiceName, &support);
         session_titler::TitlerObserver observer(DefaultConfig(), &services,
                                                 common::DefaultLogger());
-        observer.RunJobNow("s1", "text");
+        observer.ProcessJob(id);
         CHECK(support.Renames().empty());
     }
     SECTION("provider error") {
-        plugins::ServiceRegistry services;
-        FakeSupportService support;
         support.provider->PushError(
             llm::LlmError(llm::LlmErrorCategory::Transport, "connection refused"));
         services.Provide(agent::kSessionSupportServiceName, &support);
         session_titler::TitlerObserver observer(DefaultConfig(), &services,
                                                 common::DefaultLogger());
-        observer.RunJobNow("s1", "text");
+        observer.ProcessJob(id);  // caught: never escapes the worker
         CHECK(support.Renames().empty());
     }
     SECTION("empty model output") {
-        plugins::ServiceRegistry services;
-        FakeSupportService support;
         support.provider->PushResponse(testing::TextResponse(""));
         services.Provide(agent::kSessionSupportServiceName, &support);
         session_titler::TitlerObserver observer(DefaultConfig(), &services,
                                                 common::DefaultLogger());
-        observer.RunJobNow("s1", "text");
+        observer.ProcessJob(id);
         CHECK(support.Renames().empty());
     }
-    SECTION("no service pointer at all (host offers no seam)") {
-        session_titler::TitlerObserver observer(DefaultConfig(), nullptr,
+    SECTION("max_tokens spent before any visible text (reasoning model)") {
+        support.provider->PushResponse(
+            testing::TextResponse("", llm::StopReason::MaxTokens));
+        services.Provide(agent::kSessionSupportServiceName, &support);
+        session_titler::TitlerObserver observer(DefaultConfig(), &services,
                                                 common::DefaultLogger());
-        observer.RunJobNow("s1", "text");  // degrade silently
+        observer.ProcessJob(id);  // warns; keeps the default name
+        CHECK(support.Renames().empty());
     }
 }
 
@@ -261,15 +391,15 @@ TEST_CASE("OnTurnCompleted skips everything that is not a fresh session's first 
     plugins::ServiceRegistry services;
     FakeSupportService support;
     services.Provide(agent::kSessionSupportServiceName, &support);
-    session_titler::TitlerObserver observer(DefaultConfig(), &services,
-                                            common::DefaultLogger());
-
-    // Subagents are named by their task.
-    observer.OnTurnCompleted(Info("child", "parent"), Summary(0));
-    CHECK(support.Renames().empty());
-
-    // A resumed session (or wake turn): the first new seq is above the seed.
-    observer.OnTurnCompleted(Info("s1"), Summary(7));
+    {
+        session_titler::TitlerObserver observer(DefaultConfig(), &services,
+                                                common::DefaultLogger());
+        // Subagents are named by their task.
+        observer.OnTurnCompleted(Info("child", "parent"), Summary(0));
+        // A resumed session (or wake turn): the first new seq is above the seed.
+        observer.OnTurnCompleted(Info("s1"), Summary(7));
+    }  // joined: anything enqueued would have run or been dropped by now
+    CHECK(support.provider->call_count() == 0);
     CHECK(support.Renames().empty());
 }
 
@@ -289,56 +419,58 @@ TEST_CASE("OnTurnCompleted reads the first user text and titles asynchronously",
 
     session_titler::TitlerObserver observer(DefaultConfig(), &services,
                                             common::DefaultLogger());
-    // The production path: the job runs on a detached thread, so the rename
-    // lands later. Poll with a deadline -- the failure mode is "never", and a
-    // hang here is the bug, not a wrong assertion.
     observer.OnTurnCompleted(Info(id), Summary(0));
-    const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (support.Renames().empty() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    WaitForRenames(support, 1);
     const auto renames = support.Renames();
     REQUIRE(renames.size() == 1);
     CHECK(renames[0].first == id);
     CHECK(renames[0].second == "Fix the login bug");
 
-    // A second first-turn-shaped notification is still one title, ever.
+    // A second first-turn-shaped notification is still one title.
     observer.OnTurnCompleted(Info(id), Summary(0));
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     CHECK(support.Renames().size() == 1);
+    CHECK(support.provider->call_count() == 1);
 
     observer.OnSessionEnded(Info(id));
 }
 
-TEST_CASE("OnTurnCompleted resolves the provider before going async", "[titler][async]") {
-    // THE TERMINATION RACE, as a regression test: the client closes its stream
-    // at turn_completed, the session terminates and leaves the registry, and a
-    // titler that resolved its provider on the DETACHED thread would lose. The
-    // provider must be captured on the observer thread -- so once
-    // OnTurnCompleted returns, the service may stop serving the live session
-    // entirely and the title must still land.
-    testing::TempDir dir;
-    session::SessionDatabase db(dir.path() / "sessions.db");
-    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
-    db.AppendMessage(id, testing::UserText("please fix the login bug"));
-
+TEST_CASE("The destructor waits for the in-flight title and drops queued ones",
+          "[titler][async]") {
+    // Shutdown contract: the host releases observers while the support service
+    // is still alive, so the one in-flight provider call is waited on (its
+    // rename must not outlive the observer), but queued titles are dropped --
+    // exit must not wait on N provider calls.
+    Transcript transcript;
+    const auto first = transcript.AddSession("first");
+    const auto second = transcript.AddSession("second");
     plugins::ServiceRegistry services;
     FakeSupportService support;
-    support.reader = std::make_shared<const session::SessionReader>(db);
-    support.provider->PushResponse(testing::TextResponse("Fix the login bug"));
+    support.reader = transcript.reader;
+    auto gated = std::make_shared<GatedProvider>();
+    support.provider_override = gated;
     services.Provide(agent::kSessionSupportServiceName, &support);
 
-    session_titler::TitlerObserver observer(DefaultConfig(), &services,
-                                            common::DefaultLogger());
-    observer.OnTurnCompleted(Info(id), Summary(0));
-    // The session is "gone" the moment the callback returned.
-    support.serve_llm = false;
+    auto observer = std::make_unique<session_titler::TitlerObserver>(
+        DefaultConfig(), &services, common::DefaultLogger());
+    observer->OnTurnCompleted(Info(first), Summary(0));
+    gated->WaitForCall();  // `first` is in flight
+    REQUIRE(gated->calls() == 1);
+    observer->OnTurnCompleted(Info(second), Summary(0));  // queued behind it
 
-    const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (support.Renames().empty() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    std::atomic<bool> destroyed{false};
+    std::thread destroyer([&] {
+        observer.reset();
+        destroyed = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK_FALSE(destroyed.load());  // still joined on the in-flight call
+    gated->Release();
+    destroyer.join();
+
+    CHECK(gated->calls() == 1);  // `second` never reached the provider
     const auto renames = support.Renames();
     REQUIRE(renames.size() == 1);
-    CHECK(renames[0].second == "Fix the login bug");
+    CHECK(renames[0].first == first);
+    CHECK(renames[0].second == "Gated title");
 }

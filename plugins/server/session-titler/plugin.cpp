@@ -18,7 +18,7 @@ void minimal_plugin_register_session_observer(
     const minimal::plugins::PluginRegistrationContext& context) {
     auto config = minimal::session_titler::ParseTitlerConfig(context.config);
     // The ServiceRegistry pointer is captured at registration and resolved
-    // lazily (Find at titling time) per the service contract -- this plugin
+    // lazily (Find on the titling worker) per the service contract -- this plugin
     // may load before or after any other, and the registry is sealed long
     // before the first session exists.
     registry.Register(std::make_shared<minimal::session_titler::TitlerObserver>(

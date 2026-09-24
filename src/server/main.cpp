@@ -1008,5 +1008,11 @@ int main(int argc, char** argv) {
     // formality. TerminateAll does not touch the reaper, so it is unaffected.
     sessions.StopReaper();
     sessions.TerminateAll();
+    // Drain and release the observers NOW, not in ~SessionObserverRegistry:
+    // `observers` is declared before `services`, `session_support`,
+    // `session_db` and `sessions`, so its destructor runs after all of them --
+    // and the backlog it drains (TerminateAll's OnSessionEnded among it) plus
+    // any observer-owned worker (session-titler's rename) reach exactly those.
+    observers.Shutdown();
     return 0;
 }

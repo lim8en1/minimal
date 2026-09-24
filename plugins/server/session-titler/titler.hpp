@@ -7,24 +7,24 @@
 // generated title once, asynchronously, after turn 1. Everything it needs from
 // core reaches it through ONE seam -- SessionSupportService, core's provided
 // service (session_support_service.hpp), resolved via ServiceRegistry::Find.
-// The plugin holds no session state beyond a one-shot set; the database is
-// authoritative.
+// The database is authoritative; the plugin holds only a one-shot set.
 //
 // SHIPPED DISABLED (bundled provenance, DefaultsDisabled in
 // plugin_discovery.cpp): this is the one bundled plugin whose whole job is to
 // spend the user's tokens on its own initiative. Enable it with one
 // plugins.json edit.
 
-#include <condition_variable>
-#include <memory>
-#include <mutex>
+#include <atomic>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
 #include "minimal/agent/session_observer.hpp"
 #include "minimal/agent/session_support_service.hpp"
+#include "minimal/common/event_queue.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/plugins/service_registry.hpp"
 
@@ -38,6 +38,8 @@ struct TitlerConfig {
     // the default: the operator already chose it, and no second connection is
     // constructed for a title. Set it to a small model to spend less.
     std::string model;
+    // A reasoning model spends hidden tokens before any visible text; too low a
+    // cap yields an empty reply (GenerateTitle warns when that happens).
     int max_tokens = 64;
     // The first user message is truncated to this before it is sent. A prompt
     // can carry inlined @-mention file content; only enough to title by is needed.
@@ -50,82 +52,65 @@ TitlerConfig ParseTitlerConfig(const nlohmann::json& config);
 // The default instruction when the config names no prompt override.
 std::string_view DefaultPrompt();
 
-// Turns raw model output into a tab-label-shaped title: trimmed, unwrapped
-// from quotes, whitespace-collapsed, capped at the 60 code points the free
-// default uses. Empty input yields an empty string (caller keeps the default).
+// Turns raw model output into a tab-label-shaped title: trimmed, control bytes
+// dropped, whitespace-collapsed, stripped of the decoration models add anyway
+// (wrapping quotes/markdown, a "Title:" label, a trailing period), capped at
+// the 60 code points the free default uses. Empty input yields an empty
+// string (caller keeps the default).
 std::string CleanTitle(std::string_view text);
 
-// One session, one title, ever -- per process. The guard set covers both
-// "already titled" and "in flight": OnTurnCompleted runs on the observer
-// registry's single serialized thread, so insertion alone decides, and no
-// second job for a session can start. The set lives on a shared_ptr State
-// block so the detached worker holds plugin state, never `this`.
+// One session, one title. OnTurnCompleted runs on the observer registry's
+// single dispatch thread: it filters and enqueues a session id, nothing more.
+// ONE owned worker thread does the rest -- resolve through the support
+// service, read the first user text, call the provider, rename -- so the
+// dispatcher (shared with every other observer) never waits on a provider.
 //
-// THE SPLIT BETWEEN SYNCHRONOUS AND DETACHED IS LOAD-BEARING. The stream that
-// closes at turn completion TERMINATES the session, and a terminated session
-// is erased from the registry -- so anything resolved through the live
-// session (its transcript reader, its provider, its model) must be resolved
-// on the observer thread, before the job goes async. Only the unbounded
-// provider call runs detached. A rename AFTER termination still works: the
-// database write does not need a live session, and the event push degrades to
-// a no-op.
+// Resolving on the worker is safe after the session is gone: SessionSupport
+// falls back to the database row for a session already erased from the
+// registry (a one-shot headless turn terminates the instant it completes).
 //
-// THE DETACHED WORKERS ARE NOT UNTRACKED. Each one is counted on the shared
-// State block, and ~TitlerObserver -- the observer registry is the last
-// holder of this object -- DRAINS them before the observer's own state dies:
-// the shutdown-time alternative was detached threads still dereferencing
-// borrowed host pointers (the support service, resolved on the observer
-// thread precisely so the worker never touches the ServiceRegistry again)
-// into teardown. Everything else the worker touches is owned by the capture:
-// the State shared_ptr, the resolved provider shared_ptr, a Logger BY VALUE
-// (the handle is stateless and resolves spdlog's current default per call,
-// so a copy is the same logger without the raw pointer).
+// Shutdown: the destructor drops queued jobs and joins the worker, so at most
+// one in-flight provider call delays it. The host releases observers
+// (SessionObserverRegistry::Shutdown) while the support service is still
+// alive, which is what makes that join safe.
 class TitlerObserver final : public agent::SessionObserver {
 public:
     TitlerObserver(TitlerConfig config, plugins::ServiceRegistry* services,
                    common::Logger& logger);
-    // Joins-and-stops: waits for every outstanding detached worker. Runs at
-    // observer-registry teardown; see the class comment.
     ~TitlerObserver() override;
+
+    TitlerObserver(const TitlerObserver&) = delete;
+    TitlerObserver& operator=(const TitlerObserver&) = delete;
 
     void OnTurnCompleted(const agent::SessionInfo& info,
                          const agent::TurnSummary& summary) override;
-    // Releases the one-shot entry. Per-process sessions are bounded, so this is
-    // hygiene rather than leak control -- the tools-bash cwd/env map is the
-    // pattern, and OnSessionEnded is not optional garnish for it.
+    // Releases the one-shot entry. Hygiene rather than leak control: a
+    // resumed session's turns never start at seq 0, so it is never retitled.
     void OnSessionEnded(const agent::SessionInfo& info) override;
 
-    // The job body, synchronous -- the testing seam. Resolves through the
-    // service, then runs GenerateTitle. The production path resolves on the
-    // observer thread and runs ONLY GenerateTitle detached (see the class
-    // comment); RunJobNow collapses the two so tests drive one entry point.
-    void RunJobNow(const std::string& session_id, std::string first_text) const;
+    // The worker's job body, synchronous -- also the testing seam, so tests
+    // drive exactly the production path. Never throws; every failure keeps the
+    // default name.
+    void ProcessJob(const std::string& session_id) const;
 
-    // Call the provider, clean the output, rename. No service access: the
-    // provider and model were resolved by the caller while the session was
-    // still findable.
+    // Call the provider, clean the output, rename. Provider errors propagate;
+    // ProcessJob is the catch-all.
     static void GenerateTitle(const TitlerConfig& config, common::Logger& logger,
                               llm::LlmProvider& provider, const std::string& model,
                               const std::string& session_id, const std::string& first_text,
                               agent::SessionSupportService& support);
 
 private:
-    struct State {
-        TitlerConfig config;
-        plugins::ServiceRegistry* services = nullptr;  // null = no seam; degrade
-        common::Logger* logger = nullptr;
-        std::mutex mu;
-        std::unordered_set<std::string> titled;
-        // Outstanding detached workers -- the drain target of the destructor.
-        // A separate mutex from `mu`: the worker decrements at EXIT, long
-        // after it last touched `titled`, and the two critical sections must
-        // not serialize each other.
-        std::mutex workers_mu;
-        std::condition_variable workers_cv;
-        std::size_t workers = 0;
-    };
+    void RunWorker();
 
-    std::shared_ptr<State> state_;
+    const TitlerConfig config_;
+    plugins::ServiceRegistry* const services_;  // null = no seam; degrade
+    common::Logger& logger_;
+    // Touched only on the observer registry's dispatch thread.
+    std::unordered_set<std::string> titled_;
+    std::atomic<bool> stopping_{false};
+    common::EventQueue<std::string> jobs_;
+    std::thread worker_;  // last: started once everything above exists
 };
 
 }  // namespace minimal::session_titler

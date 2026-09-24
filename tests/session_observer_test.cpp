@@ -171,6 +171,40 @@ TEST_CASE("queued notifications still run during shutdown", "[session_observer]"
     CHECK(observer->ended.size() == 50);
 }
 
+TEST_CASE("Shutdown drains, then releases the observers before the registry dies",
+          "[session_observer]") {
+    // The host calls Shutdown while the services observers reach are still
+    // alive; an observer's destructor (a plugin joining its own worker) must
+    // therefore run inside Shutdown, not later in ~SessionObserverRegistry.
+    agent::SessionObserverRegistry registry(common::DefaultLogger());
+    auto observer = std::make_shared<RecordingObserver>();
+    std::weak_ptr<RecordingObserver> weak = observer;
+    registry.Register(observer);
+    for (int i = 0; i < 10; ++i) {
+        registry.NotifySessionEnded(MakeInfo("s" + std::to_string(i)));
+    }
+    observer.reset();  // the registry is now the only owner
+
+    registry.Shutdown();
+    CHECK(weak.expired());
+    CHECK(registry.observer_count() == 0);
+
+    // Idempotent, and later notifications are no-ops rather than crashes.
+    registry.Shutdown();
+    registry.NotifySessionEnded(MakeInfo("late"));
+}
+
+TEST_CASE("Shutdown delivers the queued backlog first", "[session_observer]") {
+    agent::SessionObserverRegistry registry(common::DefaultLogger());
+    auto observer = std::make_shared<RecordingObserver>();
+    registry.Register(observer);
+    for (int i = 0; i < 50; ++i) {
+        registry.NotifySessionEnded(MakeInfo("s" + std::to_string(i)));
+    }
+    registry.Shutdown();
+    CHECK(observer->ended.size() == 50);
+}
+
 TEST_CASE("a wedged observer drops notifications instead of blocking its dispatcher",
           "[session_observer][invariant]") {
     // THE CONTAINMENT PROPERTY, which the class and ARCHITECTURE.md both state

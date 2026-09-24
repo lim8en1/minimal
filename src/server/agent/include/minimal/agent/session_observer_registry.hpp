@@ -71,6 +71,16 @@ public:
     }
     ~SessionObserverRegistry();
 
+    // Drains the queued notifications, joins the dispatcher, then RELEASES
+    // every observer (running their destructors). Idempotent; the destructor
+    // calls it too. The host calls it explicitly once every session has
+    // terminated: observers reach services, the session database, and
+    // SessionSupport, which main() declares AFTER this registry and so
+    // destroys first -- left to the destructor, the drained backlog and any
+    // observer-owned worker would run against already-destroyed objects.
+    // Notifications after Shutdown find no observers and are no-ops.
+    void Shutdown();
+
     SessionObserverRegistry(const SessionObserverRegistry&) = delete;
     SessionObserverRegistry& operator=(const SessionObserverRegistry&) = delete;
 
