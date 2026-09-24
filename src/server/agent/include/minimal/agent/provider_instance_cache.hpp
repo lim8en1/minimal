@@ -13,21 +13,19 @@
 // runtime (config is read once at startup; there is no hot-reload), so the
 // entry name uniquely determines the connection. The API key is deliberately
 // NOT part of the key -- hashing a secret into a map key invites leaking it
-// through logs and dumps. The generation counter exists for the day config
-// reload does; until then it is always zero and the field is documentation
-// rather than mechanism.
+// through logs and dumps.
 //
 // The cache holds instances for the process lifetime. Providers are tiny
 // (config plus nothing else), the plugin handles they live behind are never
 // unloaded anyway, and the alternative -- refcounted eviction -- is machinery
 // for a resource that does not strain.
 
-#include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <utility>
+#include <string_view>
 
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/provider.hpp"
@@ -53,19 +51,13 @@ public:
                                                   std::string_view kind,
                                                   const llm::ProviderConfig& config);
 
-    // Bumped when a future config reload invalidates every cached instance at
-    // once. Always zero today; see the class comment.
-    std::uint64_t generation() const { return generation_; }
-
 private:
     const llm::ProviderFactoryRegistry& factories_;
     common::Logger& logger_;
     std::mutex mu_;  // GetOrCreate mutates from multiple session-creating threads
     // map, not unordered_map: provider entries are few, and a stable iteration
     // order keeps any future diagnostic honest.
-    std::map<std::pair<std::uint64_t, std::string>, std::shared_ptr<llm::LlmProvider>>
-        instances_;
-    std::uint64_t generation_ = 0;
+    std::map<std::string, std::shared_ptr<llm::LlmProvider>, std::less<>> instances_;
 };
 
 }  // namespace minimal::agent
