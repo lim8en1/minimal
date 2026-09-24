@@ -1,27 +1,74 @@
 #include "minimal/tools/permission.hpp"
 
 #include <algorithm>
+#include <cstddef>
 
 #include "minimal/tools/pattern_match.hpp"
 
 namespace minimal::tools {
 
-std::string_view mode_name(PermissionMode mode) {
-    switch (mode) {
-        case PermissionMode::AlwaysAllow: return "allow";
-        case PermissionMode::Ask:         return "ask";
-        case PermissionMode::AlwaysDeny:  return "deny";
+namespace {
+
+template <typename Enum>
+struct Spelling {
+    Enum value;
+    std::string_view name;
+};
+
+constexpr Spelling<PermissionMode> kModeNames[] = {
+    {PermissionMode::AlwaysAllow, "allow"},
+    {PermissionMode::Ask, "ask"},
+    {PermissionMode::AlwaysDeny, "deny"},
+};
+constexpr Spelling<ToolCategory> kCategoryNames[] = {
+    {ToolCategory::ReadOnly, "read_only"},
+    {ToolCategory::FileWrite, "file_write"},
+    {ToolCategory::Execute, "execute"},
+};
+constexpr Spelling<PermissionRunMode> kRunModeNames[] = {
+    {PermissionRunMode::Normal, "normal"},
+    {PermissionRunMode::Bypass, "bypass"},
+    {PermissionRunMode::AllowOnly, "allow-only"},
+};
+constexpr Spelling<PatternPrecedence> kPrecedenceNames[] = {
+    {PatternPrecedence::Restrictive, "restrictive"},
+    {PatternPrecedence::Specific, "specific"},
+};
+
+// Every enumerator has a row, so the fallback is unreachable for a valid
+// value; it names the first row rather than returning an empty string.
+template <typename Enum, std::size_t N>
+std::string_view NameOf(const Spelling<Enum> (&table)[N], Enum value) {
+    for (const auto& row : table) {
+        if (row.value == value) return row.name;
     }
-    return "ask";
+    return table[0].name;
 }
 
-std::string_view category_name(ToolCategory category) {
-    switch (category) {
-        case ToolCategory::ReadOnly:  return "read_only";
-        case ToolCategory::FileWrite: return "file_write";
-        case ToolCategory::Execute:   return "execute";
+template <typename Enum, std::size_t N>
+std::optional<Enum> ValueOf(const Spelling<Enum> (&table)[N], std::string_view name) {
+    for (const auto& row : table) {
+        if (row.name == name) return row.value;
     }
-    return "read_only";
+    return std::nullopt;
+}
+
+}  // namespace
+
+std::string_view mode_name(PermissionMode mode) { return NameOf(kModeNames, mode); }
+std::string_view category_name(ToolCategory category) { return NameOf(kCategoryNames, category); }
+std::optional<PermissionMode> mode_from_name(std::string_view name) {
+    return ValueOf(kModeNames, name);
+}
+std::string_view run_mode_name(PermissionRunMode mode) { return NameOf(kRunModeNames, mode); }
+std::optional<PermissionRunMode> run_mode_from_name(std::string_view name) {
+    return ValueOf(kRunModeNames, name);
+}
+std::string_view precedence_name(PatternPrecedence precedence) {
+    return NameOf(kPrecedenceNames, precedence);
+}
+std::optional<PatternPrecedence> precedence_from_name(std::string_view name) {
+    return ValueOf(kPrecedenceNames, name);
 }
 
 namespace {

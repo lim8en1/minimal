@@ -42,21 +42,12 @@ ToolExecutor::ToolExecutor(ToolRegistry& registry, PermissionChecker& checker,
 
 namespace {
 
-const char* CategoryName(ToolCategory category) {
-    switch (category) {
-        case ToolCategory::ReadOnly: return "read_only";
-        case ToolCategory::FileWrite: return "file_write";
-        case ToolCategory::Execute: return "execute";
-    }
-    return "read_only";
-}
-
 // The hook-payload label. MCP tools carry a placeholder ReadOnly category (the
 // server-scoped McpPermissionPolicy governs them, never a category), so a
 // category of "read_only" on an arbitrary remote call would mislead a
 // `category` hook filter -- they are labelled "mcp".
-const char* HookCategoryName(const std::string& tool_name, ToolCategory category) {
-    return mcp_server_of(tool_name).empty() ? CategoryName(category) : "mcp";
+std::string_view HookCategoryName(const std::string& tool_name, ToolCategory category) {
+    return mcp_server_of(tool_name).empty() ? category_name(category) : "mcp";
 }
 
 }  // namespace
