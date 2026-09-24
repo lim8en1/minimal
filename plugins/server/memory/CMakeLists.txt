@@ -1,5 +1,6 @@
 minimal_add_plugin(memory
     plugin.cpp
+    runtime_factory.cpp
     memory_settings.cpp
     memory_store.cpp
     embedding_http.cpp

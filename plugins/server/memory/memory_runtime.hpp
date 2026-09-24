@@ -20,6 +20,9 @@
 namespace minimal::tools {
 class Tool;
 }
+namespace minimal::plugins {
+class ServiceRegistry;
+}
 
 namespace minimal::memory {
 
@@ -37,6 +40,16 @@ struct MemoryRuntime {
     // embedding sidecar.
     std::once_flag workers_started;
 };
+
+// Builds the whole runtime from the plugin's config. Never throws: on any
+// failure (the store cannot open -- corrupt, unreadable, written by a newer
+// binary; disk errors) it returns null and fills `error`. A bundled plugin
+// whose registration throws aborts server startup, and an optional feature
+// must never take the harness down with it -- the caller degrades instead.
+std::shared_ptr<MemoryRuntime> BuildMemoryRuntime(const nlohmann::json& config,
+                                                  const std::filesystem::path& data_dir,
+                                                  plugins::ServiceRegistry* services,
+                                                  std::string& error);
 
 // Idempotent; every entry point (tools, command, context index) calls it.
 inline void StartWorkers(MemoryRuntime& runtime) {
@@ -64,6 +77,8 @@ std::unique_ptr<tools::Tool> MakeMemoryDeleteTool(std::shared_ptr<MemoryRuntime>
 
 // /memory: status, tags maintenance, purge, reindex.
 std::unique_ptr<commands::Command> MakeMemoryCommand(std::shared_ptr<MemoryRuntime> runtime);
+// /memory when the runtime could not be built: says why, does nothing else.
+std::unique_ptr<commands::Command> MakeMemoryUnavailableCommand(std::string reason);
 
 // The "Memory" section pre-filled into each session's context.
 std::shared_ptr<agent::ContextContributor> MakeMemoryIndexContributor(

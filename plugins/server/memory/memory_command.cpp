@@ -165,7 +165,27 @@ private:
     std::shared_ptr<MemoryRuntime> runtime_;
 };
 
+class MemoryUnavailableCommand final : public commands::Command {
+public:
+    explicit MemoryUnavailableCommand(std::string reason) : reason_(std::move(reason)) {}
+    std::string_view Name() const override { return "memory"; }
+    std::string_view Summary() const override { return "memory is unavailable (see reason)"; }
+    std::string_view Usage() const override { return "/memory"; }
+    bool RequiresSession() const override { return false; }
+    bool ReadOnly() const override { return true; }
+    commands::CommandResult Execute(commands::CommandContext&, const commands::CommandArgs&) override {
+        return commands::CommandResult::Error("memory is unavailable: " + reason_);
+    }
+
+private:
+    std::string reason_;
+};
+
 }  // namespace
+
+std::unique_ptr<commands::Command> MakeMemoryUnavailableCommand(std::string reason) {
+    return std::make_unique<MemoryUnavailableCommand>(std::move(reason));
+}
 
 std::unique_ptr<commands::Command> MakeMemoryCommand(std::shared_ptr<MemoryRuntime> runtime) {
     return std::make_unique<MemoryCommand>(std::move(runtime));

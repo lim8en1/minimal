@@ -1101,3 +1101,38 @@ TEST_CASE("memory workers: background embedding and tagging, prompt shutdown", "
     t.service.reset();
     CHECK(std::chrono::steady_clock::now() - stop_start < std::chrono::seconds(2));
 }
+
+TEST_CASE("memory runtime: a store that cannot open degrades instead of throwing", "[memory]") {
+    // A bundled plugin whose registration throws aborts server startup, so a
+    // bad store must come back as null + reason, never as an exception.
+    const fs::path dir = fs::temp_directory_path() / ("memory-degrade-" + std::to_string(getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+
+    std::string error;
+    auto ok = BuildMemoryRuntime(nlohmann::json::object(), dir, nullptr, error);
+    REQUIRE(ok != nullptr);
+    CHECK(error.empty());
+    ok.reset();
+
+    SECTION("written by a newer binary") {
+        sqlite3* db = nullptr;
+        REQUIRE(sqlite3_open((dir / "memory.sqlite3").string().c_str(), &db) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(db, "PRAGMA user_version = 99;", nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(db);
+        CHECK(BuildMemoryRuntime(nlohmann::json::object(), dir, nullptr, error) == nullptr);
+        CHECK_THAT(error, ContainsSubstring("newer"));
+    }
+    SECTION("not a database at all") {
+        fs::remove(dir / "memory.sqlite3-wal");
+        fs::remove(dir / "memory.sqlite3-shm");
+        std::ofstream(dir / "memory.sqlite3", std::ios::trunc) << std::string(4096, 'z');
+        CHECK(BuildMemoryRuntime(nlohmann::json::object(), dir, nullptr, error) == nullptr);
+        CHECK_FALSE(error.empty());
+    }
+
+    const auto stub = MakeMemoryUnavailableCommand("some reason");
+    CHECK(stub->Name() == "memory");
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}

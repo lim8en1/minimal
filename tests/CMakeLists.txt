@@ -132,6 +132,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/tools_write.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/memory_command.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/memory/context_index.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/memory/runtime_factory.cpp"
     # The checklist-VIEW client plugin: model (header-only), poller and panel
     # view are pure plugin logic over the ClientApi/FocusProvider seams,
     # compiled in with stub seams; checklist_view_plugin.cpp (the extern "C"
