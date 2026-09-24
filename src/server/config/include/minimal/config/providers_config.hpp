@@ -342,9 +342,11 @@ public:
     // construction in tests.
     const std::map<std::string, ProviderEntry>& provider_entries() const { return catalog_.providers_; }
 
-    // Injection point for discovery (main.cpp, after plugin load). Once per
-    // process; the hook is called under the config mutex and must not
-    // re-enter this object.
+    // Injection point for discovery (main.cpp, after plugin load). The hook
+    // is called under the config mutex and must not re-enter this object.
+    // Setting it invalidates every discovery attempted so far (a lookup made
+    // before the hook existed was negative-cached), so each provider refetches
+    // at its next resolve.
     void SetDiscoveryHook(DiscoveryHook hook);
 
     // Injects the metadata-enrichment hook (docs/EXTENSIBILITY.md §2.13).

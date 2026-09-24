@@ -143,9 +143,32 @@ AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
                                          const config::PermissionsConfig& permissions,
                                          ToolPermissionKeys tool_permission_keys,
                                          const llm::VariantParamsRegistry* variant_params)
+    : AgentPresetRegistry(config_dir, skills, settings, permissions,
+                          std::make_unique<config::ProvidersConfig>(config::LoadProvidersConfig(
+                              config_dir / "providers.json",
+                              config::MakeVariantParamsHook(variant_params))),
+                          nullptr, std::move(tool_permission_keys)) {}
+
+AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
+                                         const config::SkillRegistry& skills,
+                                         const config::SettingsConfig& settings,
+                                         const config::PermissionsConfig& permissions,
+                                         const config::ProvidersConfig& providers,
+                                         ToolPermissionKeys tool_permission_keys)
+    : AgentPresetRegistry(config_dir, skills, settings, permissions, nullptr, &providers,
+                          std::move(tool_permission_keys)) {}
+
+AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
+                                         const config::SkillRegistry& skills,
+                                         const config::SettingsConfig& settings,
+                                         const config::PermissionsConfig& permissions,
+                                         std::unique_ptr<config::ProvidersConfig> owned,
+                                         const config::ProvidersConfig* borrowed,
+                                         ToolPermissionKeys tool_permission_keys)
     : config_dir_(std::move(config_dir)),
-      providers_(config::LoadProvidersConfig(config_dir_ / "providers.json",
-                                             config::MakeVariantParamsHook(variant_params))),
+      owned_providers_(std::move(owned)),
+      // owned_providers_ is declared (so initialized) first.
+      providers_(borrowed != nullptr ? *borrowed : *owned_providers_),
       settings_(settings),
       permissions_(permissions),
       skills_(skills),

@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <optional>
 #include <mutex>
 #include <string>
@@ -88,11 +89,8 @@ public:
     // exists. The listing rendered into each preset's system prompt comes from
     // it (allowed_skills ∩ loaded, see ResolveUncached).
     //
-    // `settings` is passed in rather than parsed here: settings.json used to be
-    // read three times at startup (main, the sanity check, and this class), and
-    // main ran the loop on the sanity check's parse while this one resolved
-    // default_model from its own -- the sanity check could validate content the
-    // server was not running. One parse, in the sanity check, handed to both.
+    // `settings` is passed in rather than parsed here, so the server validates
+    // and runs on the same parse (config::LoadConfigBundle in production).
     // `tool_permission_keys` defaults to {} so a caller with no ToolRegistry
     // handy (most tests) keeps compiling -- dotenv defaults and preset
     // pattern-map aliases simply see no known tools in that case.
@@ -100,25 +98,31 @@ public:
     // `variant_params` defaults to nullptr for the same reason: this
     // constructor's own LoadProvidersConfig call is where a static
     // "variants": [...] entry derives its wire parameters (see
-    // VariantParametersFor), and it runs DURING construction -- before
-    // main.cpp's SetDiscoveryHook/SetMetadataHook post-construction calls
-    // even happen -- so the registry must arrive as a constructor parameter,
-    // not a setter called afterward like those two.
+    // VariantParametersFor), and it runs DURING construction, so the registry
+    // must arrive as a constructor parameter.
     AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
                         const config::SettingsConfig& settings,
                         ToolPermissionKeys tool_permission_keys = {},
                         const llm::VariantParamsRegistry* variant_params = nullptr);
 
     // Same as above, but takes an already-parsed PermissionsConfig instead of
-    // loading permissions.json itself -- the production path (main.cpp),
-    // once the startup sanity check has already loaded and validated it.
-    // Delegated to by the 3-arg overload above, which still loads its own
-    // copy for every other caller (tests construct this directly).
+    // loading permissions.json itself. Still loads and owns its own
+    // providers.json -- the self-contained form tests construct directly.
     AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
                         const config::SettingsConfig& settings,
                         const config::PermissionsConfig& permissions,
                         ToolPermissionKeys tool_permission_keys = {},
                         const llm::VariantParamsRegistry* variant_params = nullptr);
+
+    // The production form (main.cpp): every config file already loaded once
+    // (config::ConfigBundle), and the model catalog BORROWED from its owner,
+    // which also injects the catalog's discovery/metadata/variant hooks. The
+    // catalog must outlive this registry.
+    AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
+                        const config::SettingsConfig& settings,
+                        const config::PermissionsConfig& permissions,
+                        const config::ProvidersConfig& providers,
+                        ToolPermissionKeys tool_permission_keys = {});
 
     // Throws if agents/<preset_name>.md doesn't exist, or its `provider`
     // doesn't resolve (a providers.json entry, or "default" with no
@@ -214,43 +218,20 @@ public:
 
     const std::string& SubagentPrefix() const { return subagent_prefix_; }
 
-    // The parsed providers.json this registry resolved presets against. Exposed
+    // The model catalog this registry resolves presets against. Exposed
     // rather than re-loaded by callers who need to resolve a model the USER
-    // named (--model, /model): two loads would be two sources of truth, and the
-    // second could disagree after an edit.
+    // named (--model, /model): two loads would be two sources of truth.
     const config::ProvidersConfig& providers() const { return providers_; }
 
-    // Discovery injection (track N): the hook built over the ModelCatalogRegistry
-    // after plugin load. Must be called before the first Resolve()/model lookup
-    // that could trigger a fetch -- main.cpp injects right after construction.
-    void SetDiscoveryHook(config::DiscoveryHook hook) { providers_.SetDiscoveryHook(std::move(hook)); }
-
-    // Injects the metadata-enrichment hook (docs/EXTENSIBILITY.md §2.13),
-    // main-injected like the discovery hook above -- the registry stays a
-    // config reader and never links the plugin-facing catalog registries
-    // itself. Arguments: backend kind, model id, entry base_url, entry name,
-    // match policy. nullopt = no answer (never an error).
-    void SetMetadataHook(config::MetadataHook hook) {
-        providers_.SetMetadataHook(std::move(hook));
-    }
-
-    // Injects the variant-params hook for the DISCOVERED-variant path
-    // (ProvidersConfig::ResolveVariant), main-injected like the two hooks
-    // above -- the STATIC "variants": [...] list form already resolved its
-    // parameters during this object's own construction (see the constructor
-    // comment); this hook only ever fires for a variant discovered lazily.
-    void SetVariantParamsHook(config::VariantParamsHook hook) {
-        providers_.SetVariantParamsHook(std::move(hook));
-    }
-
-    // Evicts and refetches every discover-entry's catalog (see
-    // ProvidersConfig::RefreshDiscovery). Const for the same reason: it touches
-    // only mutex-guarded cache state, never the parsed config.
-    std::vector<config::DiscoveryRefreshOutcome> RefreshDiscovery() const {
-        return providers_.RefreshDiscovery();
-    }
-
 private:
+    // Exactly one of `owned` / `borrowed` is set.
+    AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
+                        const config::SettingsConfig& settings,
+                        const config::PermissionsConfig& permissions,
+                        std::unique_ptr<config::ProvidersConfig> owned,
+                        const config::ProvidersConfig* borrowed,
+                        ToolPermissionKeys tool_permission_keys);
+
     AgentPreset ResolveUncached(
         const std::string& preset_name, const std::filesystem::path& project_root,
         const std::optional<std::map<std::string, SkillMode>>& parent_skills,
@@ -288,7 +269,10 @@ private:
     const PresetToolEnv& EnvFor(const std::filesystem::path& project_root) const;
 
     std::filesystem::path config_dir_;
-    config::ProvidersConfig providers_;
+    // Set only by the self-contained constructors; providers_ refers to it
+    // then, and to the borrowed catalog otherwise.
+    std::unique_ptr<config::ProvidersConfig> owned_providers_;
+    const config::ProvidersConfig& providers_;
     config::SettingsConfig settings_;
     config::PermissionsConfig permissions_;
     const config::SkillRegistry& skills_;

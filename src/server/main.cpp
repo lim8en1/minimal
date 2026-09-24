@@ -555,12 +555,12 @@ int main(int argc, char** argv) {
 
     // --- Stage 4: serve ------------------------------------------------------
     // Everything below takes its config from the bundle rather than re-reading
-    // the same files. providers.json is the exception, still: the live,
-    // discovery-hooked instance the preset registry builds is not
-    // interchangeable with the bundle's un-hooked one (see ProvidersConfig's
-    // discovery cache).
+    // the same files -- the model catalog included: the one parse of
+    // providers.json, owned here and borrowed by the preset registry, the
+    // provider resolver and the command context.
     minimal::config::SettingsConfig settings = bundle.settings;
     minimal::config::PermissionsConfig permissions = bundle.permissions;
+    minimal::config::ProvidersConfig model_catalog = std::move(bundle.providers);
     std::unique_ptr<minimal::agent::AgentPresetRegistry> presets;
     // Resolved once, after ApplyAliases/SetPermissionKeys above, so preset
     // parsing and permission-default resolution see the live tool vocabulary
@@ -570,7 +570,7 @@ int main(int argc, char** argv) {
         tools.PermissionKeys(), tools.DotenvProtectedPermissionKeys()};
     try {
         presets = std::make_unique<minimal::agent::AgentPresetRegistry>(
-            config_dir, skills, settings, permissions, tool_permission_keys, &variant_params);
+            config_dir, skills, settings, permissions, model_catalog, tool_permission_keys);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "\nconfiguration error (%s): %s\n", config_dir.c_str(), e.what());
         return 1;
@@ -583,7 +583,7 @@ int main(int argc, char** argv) {
     // throws: a failed List is cached as a failed discovery and reported
     // through the miss reporting and ListModels(refresh_discovery) -- the
     // client model picker's ctrl+r -- not here.
-    presets->SetDiscoveryHook(
+    model_catalog.SetDiscoveryHook(
         [&model_catalogs, &logger = minimal::common::DefaultLogger()](
             const std::string& kind,
             const minimal::llm::ProviderConfig& connection) -> minimal::config::DiscoveryOutcome {
@@ -610,7 +610,7 @@ int main(int argc, char** argv) {
     // the fallback chain. Every failure inside Lookup is the catalog's own
     // degraded nullopt or a caught throw: an enrichment miss must never fail
     // a resolve.
-    presets->SetMetadataHook(
+    model_catalog.SetMetadataHook(
         [&metadata_catalogs, &logger = minimal::common::DefaultLogger()](
             const minimal::llm::MetadataQuery& query, minimal::llm::MetadataMatch match)
             -> std::optional<minimal::llm::DiscoveredModel> {
@@ -631,13 +631,9 @@ int main(int argc, char** argv) {
 
     // Inject the DISCOVERED-variant params hook (ResolveVariant), the same
     // AFTER-plugin-load / BEFORE-first-Resolve point the two hooks above use.
-    // The STATIC "variants": [...] list-form path already resolved its
-    // parameters above, during the LoadProvidersConfig call inside
-    // AgentPresetRegistry's own constructor -- it needed the registry
-    // earlier than any post-construction setter could supply it, so it took
-    // the same &variant_params pointer directly as a constructor argument
-    // instead (see AgentPresetRegistry's constructor comment).
-    presets->SetVariantParamsHook(minimal::config::MakeVariantParamsHook(&variant_params));
+    // The STATIC "variants": [...] list form already resolved its parameters
+    // when the bundle parsed providers.json, with the same registry.
+    model_catalog.SetVariantParamsHook(minimal::config::MakeVariantParamsHook(&variant_params));
 
     // Preset-scoped tool definitions: the builders run once per resolved
     // preset (inside the registry's resolve cache) and their results ride the
@@ -891,9 +887,9 @@ int main(int argc, char** argv) {
         std::promise<std::vector<minimal::config::DiscoveryRefreshOutcome>> warmup_promise;
         auto warmup_result = warmup_promise.get_future();
         std::thread warmup_worker(
-            [&presets, promise = std::move(warmup_promise)]() mutable {
+            [&model_catalog, promise = std::move(warmup_promise)]() mutable {
                 try {
-                    promise.set_value(presets->RefreshDiscovery());
+                    promise.set_value(model_catalog.RefreshDiscovery());
                 } catch (...) {
                     promise.set_exception(std::current_exception());
                 }

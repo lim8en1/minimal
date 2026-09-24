@@ -74,9 +74,7 @@ public:
         Write("agents/other.md", "---\nname: other\nmodel: main/fast\n---\nother body\n");
 
         skills_ = std::make_unique<config::SkillRegistry>(config::SkillRegistry::Load(dir_.path()));
-        presets_ = std::make_unique<agent::AgentPresetRegistry>(
-            dir_.path(), *skills_,
-            config::LoadSettingsConfig(dir_.path() / "settings.json"));
+        BuildPresets();
         preset_ = presets_->Resolve("build");
 
         executor_ = std::make_unique<tools::ToolExecutor>(tools_, checker_, AllowAllPolicy(),
@@ -216,15 +214,13 @@ public:
     // session's preset -- for tests that edit providers.json after
     // construction (the refresh tests edit it to add a discover-entry).
     void ReloadPresets() {
-        presets_ = std::make_unique<agent::AgentPresetRegistry>(
-            dir_.path(), *skills_, config::LoadSettingsConfig(dir_.path() / "settings.json"));
+        BuildPresets();
         preset_ = presets_->Resolve("build");
     }
 
-    // Discovery injection, exactly as main.cpp does after plugin load.
-    void SetDiscoveryHook(config::DiscoveryHook hook) {
-        presets_->SetDiscoveryHook(std::move(hook));
-    }
+    // Discovery injection, exactly as main.cpp does after plugin load: on the
+    // catalog the registry borrows.
+    void SetDiscoveryHook(config::DiscoveryHook hook) { catalog_->SetDiscoveryHook(std::move(hook)); }
 
     commands::CommandRegistry registry;
     FakeConfirmationBroker confirmations;
@@ -259,7 +255,19 @@ private:
     AlwaysAllowPermissionChecker checker_;
     InMemoryHistoryStore store_;
     std::unique_ptr<config::SkillRegistry> skills_;
+    // The one providers.json parse, owned here and borrowed by presets_ --
+    // declared first so it outlives the registry.
+    std::unique_ptr<config::ProvidersConfig> catalog_;
     std::unique_ptr<agent::AgentPresetRegistry> presets_;
+
+    void BuildPresets() {
+        presets_.reset();  // it borrows the catalog being replaced
+        catalog_ = std::make_unique<config::ProvidersConfig>(
+            config::LoadProvidersConfig(dir_.path() / "providers.json"));
+        presets_ = std::make_unique<agent::AgentPresetRegistry>(
+            dir_.path(), *skills_, config::LoadSettingsConfig(dir_.path() / "settings.json"),
+            config::LoadPermissionsConfig(dir_.path() / "permissions.json"), *catalog_);
+    }
     agent::AgentPreset preset_;
     std::unique_ptr<agent::AgentLoop> loop_;
     std::optional<common::ModelRef> override_;

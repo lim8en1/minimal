@@ -354,11 +354,14 @@ TEST_CASE("AgentPresetRegistry: a preset naming a discover-only model resolves t
     config.Write("agents/build.md",
                  "---\nname: build\nmodel: disc/served-model\n---\nbody\n");
     config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    auto catalog = config::LoadProvidersConfig(config.dir / "providers.json");
     AgentPresetRegistry registry(config.dir, skills,
-                                 config::LoadSettingsConfig(config.dir / "settings.json"));
+                                 config::LoadSettingsConfig(config.dir / "settings.json"),
+                                 config::LoadPermissionsConfig(config.dir / "permissions.json"),
+                                 catalog);
 
     int calls = 0;
-    registry.SetDiscoveryHook(
+    catalog.SetDiscoveryHook(
         [&calls](const std::string& kind, const llm::ProviderConfig& c) {
             ++calls;
             CHECK(kind == "openai");

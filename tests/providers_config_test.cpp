@@ -547,6 +547,23 @@ TEST_CASE("a non-discover provider with no models is still refused", "[providers
     })")), std::runtime_error);
 }
 
+TEST_CASE("a resolve before the discovery hook existed is not cached past the hook",
+          "[providers][discover]") {
+    // The startup sanity check resolves against the catalog before plugins'
+    // catalogs are wired in; that miss must not stick once the hook arrives.
+    CountingHook hook;
+    hook.models = {{"big", 131072, nlohmann::json::object(), 32768}};
+    auto config = DiscoverConfig();
+    CHECK(config.Resolve(ModelRef{"local", "big"}) == nullptr);  // no hook yet
+
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+    const auto big = config.Resolve(ModelRef{"local", "big"});
+    REQUIRE(big != nullptr);
+    CHECK(hook.calls == 1);
+}
+
 TEST_CASE("a discover-only model resolves lazily, once", "[providers][discover]") {
     CountingHook hook;
     hook.models = {{"big", 131072, nlohmann::json::object(), 32768},

@@ -714,6 +714,11 @@ const ProviderEntry* ProvidersConfig::FindProviderLocked(const std::string& name
 void ProvidersConfig::SetDiscoveryHook(DiscoveryHook hook) {
     std::lock_guard<std::mutex> lock(cache_.mutex_);
     cache_.hook_ = std::move(hook);
+    // A discovery attempted under the previous hook -- typically none at all,
+    // when the startup sanity check resolved against this catalog before
+    // plugins' catalogs were wired in -- is stale: refetch it at next resolve
+    // rather than serving its negative-cached "no discovery hook set".
+    ++cache_.generation_;
 }
 
 void ProvidersConfig::SetMetadataHook(MetadataHook hook) {

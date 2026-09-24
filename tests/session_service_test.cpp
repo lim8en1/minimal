@@ -149,8 +149,11 @@ struct ServiceFixture {
 
     // Built after the script and any tools, so a session sees the finished setup.
     void Start() {
+        catalog = std::make_unique<config::ProvidersConfig>(
+            config::LoadProvidersConfig(dir / "providers.json"));
         presets = std::make_unique<agent::AgentPresetRegistry>(
-            dir, skills, config::LoadSettingsConfig(dir / "settings.json"));
+            dir, skills, config::LoadSettingsConfig(dir / "settings.json"),
+            config::LoadPermissionsConfig(dir / "permissions.json"), *catalog);
         auto script_copy = script;
         providers.Register("fake", [script_copy](const llm::ProviderConfig&) {
             return std::make_unique<testing::ScriptedProvider>(script_copy);
@@ -214,6 +217,8 @@ struct ServiceFixture {
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
     std::shared_ptr<testing::ScriptedProviderScript> script;
+    // The model catalog presets borrows; declared first so it outlives it.
+    std::unique_ptr<config::ProvidersConfig> catalog;
     std::unique_ptr<agent::AgentPresetRegistry> presets;
     std::unique_ptr<agent::SessionObserverRegistry> observers;
     std::unique_ptr<session::SessionDatabase> db;
@@ -2060,7 +2065,7 @@ TEST_CASE("ListModels lists static refs cold and discovered refs after refresh",
                       "models":{"test-model":{}}},
                      "disc":{"backend":"fake","url":"http://disc/v1","discover":true}}})");
     fixture.Start();
-    fixture.presets->SetDiscoveryHook([](const std::string&, const llm::ProviderConfig&) {
+    fixture.catalog->SetDiscoveryHook([](const std::string&, const llm::ProviderConfig&) {
         return config::DiscoveryOutcome{
             /*catalog_present=*/true, /*ok=*/true, {},
             {llm::DiscoveredModel{"discovered-model", 12345, nlohmann::json::object(),
