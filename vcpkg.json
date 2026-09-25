@@ -39,7 +39,12 @@
     "tests": {
       "description": "Build the test suite",
       "dependencies": [
-        "catch2"
+        "catch2",
+        {
+          "$comment": "In-process HTTP server for the streamable-http MCP test fixture. No compression or TLS needed.",
+          "name": "cpp-httplib",
+          "default-features": false
+        }
       ]
     }
   },

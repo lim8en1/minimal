@@ -1,5 +1,3 @@
-# 3.28 for FetchContent_Declare(EXCLUDE_FROM_ALL), used to keep cpp-mcp's bundled
-# examples out of our build.
 cmake_minimum_required(VERSION 3.28)
 
 # The vcpkg toolchain must be set before project(). Pass it on the command line
@@ -418,33 +416,14 @@ if(MINIMAL_BUILD_TESTS)
     include(Catch)
 endif()
 
-# The only dependency not in the vcpkg registry (verified, not assumed -- even
-# tree-sitter is packaged). Vendored directly.
-#
-# Pinned to a SHA, not a branch: cpp-mcp publishes no tags or releases, so `main`
-# is the only moving alternative and would silently change what every contributor
-# builds. EXCLUDE_FROM_ALL because its CMakeLists unconditionally adds an
-# `examples` subdirectory we have no interest in compiling.
-FetchContent_Declare(cpp_mcp
-    GIT_REPOSITORY https://github.com/hkr04/cpp-mcp.git
-    GIT_TAG        13a8bef5f1885b10b8d6038c4b319b7024744fa5  # 2026-08-16
-    EXCLUDE_FROM_ALL)
-FetchContent_MakeAvailable(cpp_mcp)
-# Exports a plain, un-namespaced static target: `mcp`.
-#
-# Patched in place, idempotently (existing build trees are already patched):
-# the stdio child-pid accessor lets the harness kill a wedged stdio child on
-# teardown. cmake/ApplyCppMcpPatches.cmake fails loudly on a half-applied or
-# diverged tree.
-include(cmake/ApplyCppMcpPatches.cmake)
-
-# The second vendored dependency, and the first tree-sitter GRAMMAR: the
+# The one vendored dependency outside the grammar set, and the first
+# tree-sitter GRAMMAR: the
 # registry packages the core runtime but not the per-language parsers (see
 # ARCHITECTURE.md -- Dependency management). Grammars ship a generated
 # parser.c, so vendoring means compiling two C files, not running the
 # tree-sitter CLI/Node toolchain.
 #
-# Pinned to a tag: unlike cpp-mcp, this repo publishes releases. SOURCE_SUBDIR
+# Pinned to a tag: this repo publishes releases. SOURCE_SUBDIR
 # points at a directory that does not exist, which stops MakeAvailable from
 # add_subdirectory-ing the grammar's own CMakeLists -- that file is written for
 # standalone distribution (BUILD_SHARED_LIBS ON, a tree-sitter-CLI regeneration
@@ -456,8 +435,8 @@ FetchContent_Declare(tree_sitter_bash
 FetchContent_MakeAvailable(tree_sitter_bash)
 
 # No MINIMAL_WARNING_FLAGS here, deliberately: this is third-party generated C
-# (a ~10 MB parser table), compiled with default flags for the same reason
-# cpp-mcp is excluded from our warning set. PIC because it links into plugin
+# (a ~10 MB parser table), compiled with default flags, outside our warning
+# set. PIC because it links into plugin
 # MODULEs.
 add_library(minimal_tree_sitter_bash STATIC
     "${tree_sitter_bash_SOURCE_DIR}/src/parser.c"

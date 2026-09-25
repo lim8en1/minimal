@@ -1,8 +1,5 @@
 // Scripted stdio SIGNAL-CHANNEL server for the signal tests: deterministic,
-// no threads, no network. Hand-rolled JSON-RPC -- NOT built on cpp-mcp, whose
-// server cannot push a server->client notification over stdio (start_stdio
-// never registers a session dispatcher, so broadcast_notification finds no
-// target; see the note in mcp_fake_server.cpp).
+// no threads, no network. Hand-rolled JSON-RPC, like mcp_fake_server.cpp.
 //
 // Single-threaded on purpose. Every frame the harness will ever receive is
 // written from the request loop itself, so nothing ever interleaves with a
@@ -41,8 +38,7 @@ void Emit(const std::string& line) {
 
 // The client's request id, verbatim as written (`"id":` followed by a number
 // or a quoted string). The harness matches responses to requests by id, so a
-// scripted server must echo the REAL one -- cpp-mcp's client does not count
-// from 1. Returns "null" when no id is present (a notification).
+// scripted server must echo the REAL one, whatever the client counts from. Returns "null" when no id is present (a notification).
 // Splice a request's id into a response template: the templates hardcode
 // "id":1 and this rewrites exactly that first occurrence.
 std::string ReplaceId(std::string response, const std::string& id) {

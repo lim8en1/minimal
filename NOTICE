@@ -5,9 +5,8 @@ Licensed under the Apache License, Version 2.0. See LICENSE.
 
 This project fetches, patches, or links the following third-party software at
 build time. Each is distributed under its own license; see the respective
-project for terms. Patches applied to them live under patches/ and cmake/ports/.
+project for terms. Patches applied to them live under cmake/ports/.
 
-  cpp-mcp           https://github.com/hkr04/cpp-mcp
   tree-sitter-bash  https://github.com/tree-sitter/tree-sitter-bash
   FTXUI             https://github.com/ArthurSonzogni/FTXUI
   curl              https://github.com/curl/curl

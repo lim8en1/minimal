@@ -1,6 +1,6 @@
 // One in-process streamable-http MCP server, scripted per test. Shared by the
 // connection and manager tests. Deterministic: binds an ephemeral localhost
-// port. httplib comes from cpp-mcp's bundled copy (SYSTEM include, wired for
+// port. httplib comes from vcpkg (cpp-httplib, the tests feature; wired for
 // the whole test target in tests/CMakeLists.txt).
 #pragma once
 

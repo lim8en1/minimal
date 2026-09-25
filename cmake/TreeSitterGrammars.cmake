@@ -2,8 +2,8 @@
 #
 # vcpkg packages the tree-sitter CORE library but not the per-language parsers
 # (ARCHITECTURE.md "Dependency management"), so the curated grammar set is
-# vendored the same way cpp-mcp is: FetchContent, pinned. Unlike cpp-mcp these
-# repos publish releases, so the pins are TAGS, with the commit each tag resolved
+# vendored with FetchContent, pinned. These repos publish releases, so the pins
+# are TAGS, with the commit each tag resolved
 # to recorded beside it -- a silent retag is then detectable in review.
 #
 # Each grammar is two files: src/parser.c (generated, self-contained) and

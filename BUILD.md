@@ -2,9 +2,8 @@
 
 minimal is a C++20 CMake project with all third-party dependencies resolved
 through **vcpkg manifest mode** (`vcpkg.json`) — a fresh checkout plus a vcpkg
-checkout is the whole setup. The only dependency not in the vcpkg registry
-(`hkr04/cpp-mcp`) is vendored via `FetchContent`, pinned to a commit SHA, and
-fetched automatically.
+checkout is the whole setup. The tree-sitter grammars, which vcpkg does not
+package, are vendored via `FetchContent`, pinned, and fetched automatically.
 
 ## Quick start
 

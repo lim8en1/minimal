@@ -22,8 +22,7 @@
 #include "support/deadline.hpp"
 #include "support/fake_http_mcp_server.hpp"
 
-// cpp-mcp ships httplib.h for its own transports; the test reuses it as an
-// in-process streamable-http SERVER fixture. SYSTEM include: third-party.
+// An in-process streamable-http SERVER fixture (vcpkg cpp-httplib).
 #include <httplib.h>
 
 using minimal::mcp::McpCallOutcome;
@@ -341,11 +340,10 @@ TEST_CASE("McpConnection stdio: server dying mid-life degrades to a bounded erro
 }
 
 TEST_CASE("McpConnection stdio: teardown kills a wedged call's child process", "[mcp_connection]") {
-    // The hang tool parks the worker inside cpp-mcp's blocking call well past
-    // every deadline; the child used to linger for cpp-mcp's internal 60 s
-    // (or forever, had the server process exited first). Teardown must kill
-    // it: the fake server writes its pid to a file, and the test -- being the
-    // child's parent -- observes the death via waitpid.
+    // The hang tool parks the worker inside a call well past every deadline.
+    // Teardown must kill the child anyway: the fake server writes its pid to
+    // a file, and the test -- being the child's parent -- observes the death
+    // via waitpid.
     char pid_file[] = "/tmp/minimal_fake_mcp_pid_XXXXXX";
     const int pid_fd = mkstemp(pid_file);
     REQUIRE(pid_fd != -1);
@@ -375,8 +373,7 @@ TEST_CASE("McpConnection stdio: teardown kills a wedged call's child process", "
     CHECK(run.WaitFor(std::chrono::seconds(5)));
 
     // Teardown (the destructor) while the worker is still wedged inside the
-    // hung call: the child must die promptly -- not at cpp-mcp's internal
-    // 60 s cap.
+    // hung call: the child must die promptly.
     connection.reset();
 
     bool child_dead = false;

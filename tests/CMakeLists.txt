@@ -400,19 +400,18 @@ target_compile_definitions(minimal_tests PRIVATE
 # startup sanity check. The aggregate target is the freshness coupling.
 add_dependencies(minimal_tests bundled_plugins)
 
-# Scripted stdio SIGNAL-CHANNEL server, hand-rolled (no cpp-mcp: its server
-# cannot push a notification over stdio -- see fake_signal_channel.cpp and the
-# note in mcp_fake_server.cpp). Deterministic single-threaded emission.
+# Scripted stdio SIGNAL-CHANNEL server, hand-rolled. Deterministic
+# single-threaded emission.
 add_executable(minimal_signal_channel_server support/fake_signal_channel.cpp)
 target_compile_options(minimal_signal_channel_server PRIVATE ${MINIMAL_WARNING_FLAGS})
 add_dependencies(minimal_tests minimal_signal_channel_server)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_SIGNAL_CHANNEL_SERVER="$<TARGET_FILE:minimal_signal_channel_server>")
 
-# The http-side tests use cpp-mcp's bundled (header-only) httplib as an
-# in-process streamable-http server fixture. SYSTEM: third-party header.
-target_include_directories(minimal_tests SYSTEM PRIVATE
-    "${cpp_mcp_SOURCE_DIR}/common")
+# The http-side tests use httplib as an in-process streamable-http server
+# fixture (support/fake_http_mcp_server.hpp).
+find_package(httplib CONFIG REQUIRED)
+target_link_libraries(minimal_tests PRIVATE httplib::httplib)
 
 # TSAN_OPTIONS suppresses the uninstrumented system-libsqlite3 races the
 # multi-process E2E tests trigger (see tests/tsan.supp); ignored by non-TSan
