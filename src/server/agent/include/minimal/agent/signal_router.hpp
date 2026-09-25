@@ -7,7 +7,6 @@
 #include <vector>
 
 #include "minimal/agent/signal_service.hpp"
-#include "minimal/config/channels_config.hpp"
 
 namespace minimal::agent {
 
@@ -20,10 +19,11 @@ class Session;
 //
 // Two producer families share this path:
 //
-//   - EXTERNAL: an MCP channel server (channels.json, stdio) pushes
-//     notifications/minimal/signal. OnMcpNotification() is invoked with the
-//     raw JSON-RPC line -- on the channel's read thread, so it must stay
-//     non-blocking (parse, map lookup, InjectionQueue::Push: all bounded).
+//   - EXTERNAL: a producer registers named channels and delivers their
+//     events (DeliverExternal) -- today the MCP signal channels
+//     (channels.json), whose transport parses the wire frame and calls in on
+//     the channel's read thread, so delivery must stay non-blocking (map
+//     lookup, InjectionQueue::Push: all bounded).
 //
 //   - INTERNAL: same-process sessions messaging each other (the bundled
 //     message_session tool today; future producers reach this through the
@@ -47,24 +47,25 @@ public:
     // What happened to one delivered signal. Delivered requires at least one
     // live subscriber to have accepted the message into its injection queue.
     using Delivery = SignalDelivery;
-    // The channel registry, from channels.json, loaded once at startup.
-    // Subscription validation is purely structural against it -- a selector
-    // never needs the channel to be connected, only declared. Calling twice
-    // for one name replaces the entry (idempotent startup).
-    void RegisterChannel(const config::ChannelEntry& entry);
+    // The external channel registry (SignalService). Subscription validation
+    // is purely structural against it -- a selector never needs the channel
+    // to be connected, only declared.
+    bool RegisterExternalChannel(const ExternalChannel& channel, ExternalChannelSource* source,
+                                 std::string& error) override;
 
-    // A channel server's own description of what its signals mean, captured
-    // from the initialize result when the manager connects it. Consumed by
-    // SignalContextFor(): an empty string contributes nothing. Unknown
-    // channels (never registered) store nothing.
-    void SetChannelInstructions(const std::string& channel, const std::string& instructions);
+    // Consumed by SignalContextFor(): an empty string contributes nothing.
+    void SetChannelInstructions(const std::string& channel,
+                                const std::string& instructions) override;
 
-    // EXTERNAL producer. `raw` is one complete JSON-RPC notification line as
-    // the channel server wrote it. Only kSignalNotificationMethod frames are
-    // signal candidates; anything else (tools/list_changed, ...) is ignored
-    // silently -- an MCP server may send other notifications for its own
-    // reasons. Never throws.
-    void OnMcpNotification(const std::string& channel, const std::string& raw);
+    SignalDelivery DeliverExternal(const std::string& channel, const std::string& signal,
+                                   const std::string& content,
+                                   const std::map<std::string, std::string>& meta) override;
+
+    // Brings up the producer behind the selector's channel, for session
+    // start (see CheckSelector). True for the internal source and for a
+    // channel registered without a source (structural-only); false with
+    // `error` for an unknown channel or a producer that cannot come up.
+    bool EnsureChannelAlive(const std::string& channel, std::string& error);
 
     // INTERNAL producer (the SignalService override): addressed delivery to
     // `target_session`'s "sessions" subscription. The content is wrapped with
@@ -134,8 +135,13 @@ private:
     Delivery Deliver(const std::string& channel, const std::string& filter_signal,
                      const std::string& wrapped_content);
 
+    struct Channel {
+        ExternalChannel declaration;
+        ExternalChannelSource* source = nullptr;  // borrowed; outlives serving
+    };
+
     mutable std::mutex mu_;
-    std::map<std::string, config::ChannelEntry> channels_;  // name -> entry
+    std::map<std::string, Channel> channels_;  // name -> registration
     std::map<std::string, std::string> instructions_;       // channel -> instructions
     // session_id -> that session's subscriptions. Replacing a session's
     // subscriptions (re-subscribe on resume) overwrites wholesale: a resume

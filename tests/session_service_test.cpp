@@ -3553,11 +3553,9 @@ TEST_CASE("an invalid rewind target is refused on the wire",
 TEST_CASE("signals: an unknown selector refuses the session start",
           "[session_service][signals]") {
     ServiceFixture fixture;
-    config::ChannelEntry ci;
-    ci.name = "ci";
-    ci.signals = {"build.completed"};
-    ci.command = "true";
-    fixture.signal_router.RegisterChannel(ci);
+    std::string register_error;
+    REQUIRE(fixture.signal_router.RegisterExternalChannel(
+        agent::ExternalChannel{"ci", false, {"build.completed"}}, nullptr, register_error));
     fixture.Start();
 
     auto create = [&](const std::string& selector) {
@@ -3625,11 +3623,9 @@ TEST_CASE("signals: a subscribed session wakes and receives the message",
 TEST_CASE("signals: no subscriber, no delivery -- and an extended channel passes every signal",
           "[session_service][signals]") {
     ServiceFixture fixture;
-    config::ChannelEntry reminder;
-    reminder.name = "reminder";
-    reminder.extended = true;
-    reminder.command = "true";
-    fixture.signal_router.RegisterChannel(reminder);
+    std::string register_error;
+    REQUIRE(fixture.signal_router.RegisterExternalChannel(
+        agent::ExternalChannel{"reminder", true, {}}, nullptr, register_error));
     fixture.Start();
 
     // A session with NO subscriptions: nothing is delivered to it, even though
@@ -3651,13 +3647,10 @@ TEST_CASE("signals: no subscriber, no delivery -- and an extended channel passes
     CHECK(fixture.signal_router.DeliverInternal("someone", unsubscriber,
                                                 "you did not subscribe") ==
           agent::SignalDelivery::kNoSubscriber);
-    // The EXTERNAL producer path, through the same raw-notification seam the
-    // MCP manager feeds: an extended channel delivers any signal name.
-    fixture.signal_router.OnMcpNotification(
-        "reminder",
-        nlohmann::json{{"method", "notifications/minimal/signal"},
-                       {"params", {{"signal", "any.thing"}, {"content", "extended passes"}}}}
-            .dump());
+    // The EXTERNAL producer path (core.signals' ingress, what the MCP
+    // channel transport feeds): an extended channel delivers any signal name.
+    CHECK(fixture.signal_router.DeliverExternal("reminder", "any.thing", "extended passes", {}) ==
+          agent::SignalDelivery::kDelivered);
     REQUIRE(WaitForTurnCompleted(*stream));
     (void)DrainAndFinish(stream);
 

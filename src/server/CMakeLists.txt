@@ -68,6 +68,7 @@ add_library(minimal_server_core SHARED
     tools/tool_pool.cpp
     tools/skill_tool.cpp
     mcp/naming.cpp
+    mcp/signal_protocol.cpp
     mcp/env_interpolation.cpp
     mcp/mcp_tool.cpp
     mcp/mcp_connection.cpp

@@ -13,6 +13,7 @@
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/mcp/signal_protocol.hpp"
 #include "minimal/rpc/session_wiring.hpp"
 
 using namespace minimal;
@@ -97,20 +98,26 @@ bool WaitForInTranscript(testing::InMemoryHistoryStore* store, const std::string
 }
 
 // Restricted "ci" with two declared signals; extended "reminder"; both enabled.
-config::ChannelEntry CiChannel() {
-    config::ChannelEntry entry;
-    entry.name = "ci";
-    entry.signals = {"build.completed", "build.failed"};
-    entry.command = "true";
-    return entry;
+agent::ExternalChannel CiChannel() {
+    return {"ci", /*extended=*/false, {"build.completed", "build.failed"}};
 }
 
-config::ChannelEntry ReminderChannel() {
-    config::ChannelEntry entry;
-    entry.name = "reminder";
-    entry.extended = true;
-    entry.command = "true";
-    return entry;
+agent::ExternalChannel ReminderChannel() { return {"reminder", /*extended=*/true, {}}; }
+
+void Register(agent::SignalRouter& router, const agent::ExternalChannel& channel,
+              agent::ExternalChannelSource* source = nullptr) {
+    std::string error;
+    REQUIRE(router.RegisterExternalChannel(channel, source, error));
+}
+
+// The MCP channel transport's glue (main.cpp's on_notification): decode the
+// wire frame, hand the router the signal. Kept here so the wire-contract tests
+// below keep exercising the whole external path.
+void Notify(agent::SignalRouter& router, const std::string& channel, const std::string& raw) {
+    mcp::SignalFrame frame;
+    std::string error;
+    if (!mcp::ParseSignalNotification(raw, frame, error)) return;
+    router.DeliverExternal(channel, frame.signal, frame.content, frame.meta);
 }
 
 }  // namespace
@@ -157,8 +164,8 @@ TEST_CASE(
 
 TEST_CASE("CheckSelector: syntax and mode rules", "[signals][router]") {
     agent::SignalRouter router;
-    router.RegisterChannel(CiChannel());
-    router.RegisterChannel(ReminderChannel());
+    Register(router, CiChannel());
+    Register(router, ReminderChannel());
 
     std::string error;
     std::string channel;
@@ -240,16 +247,16 @@ TEST_CASE("DeliverInternal wakes an idle subscribed session", "[signals][router]
     CHECK(WaitForInTranscript(carol.store, "deploy finished"));
 }
 
-TEST_CASE("OnMcpNotification: wire contract, allowlist, meta sanitization", "[signals][router]") {
+TEST_CASE("External path: wire contract, allowlist, meta sanitization", "[signals][router]") {
     agent::SignalRouter router;
-    router.RegisterChannel(CiChannel());
+    Register(router, CiChannel());
     RouterSessionFixture eve;
     eve.Script("ack");
     eve.Start("eve");
     std::string error;
     REQUIRE(router.Subscribe(eve.session, "ci/build.completed", error));
 
-    auto notify = [&](const std::string& raw) { router.OnMcpNotification("ci", raw); };
+    auto notify = [&](const std::string& raw) { Notify(router, "ci", raw); };
 
     // The happy frame: right method, declared signal, meta sanitized.
     notify(nlohmann::json{
@@ -299,19 +306,19 @@ TEST_CASE("OnMcpNotification: wire contract, allowlist, meta sanitization", "[si
     CHECK(signal_turns == 1);
 }
 
-TEST_CASE("OnMcpNotification: a full injection queue refuses delivery without crashing",
+TEST_CASE("External path: a full injection queue refuses delivery without crashing",
           "[signals][router]") {
     // THE kDropped PATH: a subscribed, LIVE session whose InjectionQueue is
     // already at kMaxPending is a different outcome from "no subscriber at
     // all" (kNoSubscriber) -- Deliver() -> Session::QueueInjectedMessage
-    // refuses every target, and SignalRouter::OnMcpNotification's switch
+    // refuses every target, and SignalRouter::DeliverExternal's switch
     // must handle Delivery::kDropped without throwing (it previously fell
     // through silently; this test exercises the branch added alongside the
     // fix). No log-capturing harness exists in this test tree, so this
     // confirms behavior (no crash, no phantom delivery) rather than the log
     // line's exact text.
     agent::SignalRouter router;
-    router.RegisterChannel(CiChannel());
+    Register(router, CiChannel());
     RouterSessionFixture gina;
     gina.wake_on_injection = false;  // tool-result injections stay staged (a user
                                      // text injection would wake the worker for a
@@ -340,7 +347,7 @@ TEST_CASE("OnMcpNotification: a full injection queue refuses delivery without cr
     // The notification itself must not throw, and must not silently make
     // room -- the queue is still exactly full afterward (a probe push still
     // refuses), confirming the signal's content never entered.
-    REQUIRE_NOTHROW(router.OnMcpNotification(
+    REQUIRE_NOTHROW(Notify(router, 
         "ci", nlohmann::json{{"jsonrpc", "2.0"},
                             {"method", "notifications/minimal/signal"},
                             {"params",
@@ -353,8 +360,8 @@ TEST_CASE("OnMcpNotification: a full injection queue refuses delivery without cr
 TEST_CASE("restricted channel: undeclared signals are loud drops, extended pass everything",
           "[signals][router]") {
     agent::SignalRouter router;
-    router.RegisterChannel(CiChannel());
-    router.RegisterChannel(ReminderChannel());
+    Register(router, CiChannel());
+    Register(router, ReminderChannel());
 
     RouterSessionFixture frank;
     frank.Script("ack");
@@ -369,13 +376,13 @@ TEST_CASE("restricted channel: undeclared signals are loud drops, extended pass 
     // landing while the wake turn is still running queues for the NEXT
     // boundary, which would never come and would make this test lie.
 
-    router.OnMcpNotification("reminder",
+    Notify(router, "reminder",
                              nlohmann::json{{"method", "notifications/minimal/signal"},
                                             {"params", {{"signal", "any.thing"},
                                                         {"content", "extended passes"}}}}
                                  .dump());
     CHECK(WaitForInTranscript(frank.store, "extended passes"));
-    router.OnMcpNotification("ci",
+    Notify(router, "ci",
                              nlohmann::json{{"method", "notifications/minimal/signal"},
                                             {"params", {{"signal", "build.failed"},
                                                         {"content", "restricted exact match"}}}}
@@ -383,7 +390,7 @@ TEST_CASE("restricted channel: undeclared signals are loud drops, extended pass 
     CHECK(WaitForInTranscript(frank.store, "restricted exact match"));
     // Frank's OTHER ci subscription does not exist: build.completed must not
     // reach him (he never subscribed to it). Dropped, so nothing to settle.
-    router.OnMcpNotification("ci",
+    Notify(router, "ci",
                              nlohmann::json{{"method", "notifications/minimal/signal"},
                                             {"params", {{"signal", "build.completed"},
                                                         {"content", "not for frank"}}}}
@@ -420,8 +427,8 @@ TEST_CASE("Unsubscribe stops delivery; resume semantics replace the whole set",
 
 TEST_CASE("SignalContextFor: joined instructions for subscribed channels", "[signals][router]") {
     agent::SignalRouter router;
-    router.RegisterChannel(CiChannel());
-    router.RegisterChannel(ReminderChannel());
+    Register(router, CiChannel());
+    Register(router, ReminderChannel());
     router.SetChannelInstructions("ci", "Build events: read logs before acting.");
     CHECK(router.SignalContextFor({"ci/build.completed"}) ==
           "Channel 'ci': Build events: read logs before acting.");
@@ -432,4 +439,91 @@ TEST_CASE("SignalContextFor: joined instructions for subscribed channels", "[sig
     const std::string both = router.SignalContextFor({"ci/build.failed", "reminder"});
     REQUIRE(both.find("Channel 'ci':") != std::string::npos);
     REQUIRE(both.find("Channel 'reminder':") != std::string::npos);
+}
+
+TEST_CASE("RegisterExternalChannel: shape rules and the reserved name", "[signals][router]") {
+    agent::SignalRouter router;
+    std::string error;
+    CHECK_FALSE(router.RegisterExternalChannel({"sessions", true, {}}, nullptr, error));
+    CHECK(error.find("reserved") != std::string::npos);
+    CHECK_FALSE(router.RegisterExternalChannel({"Bad Name", true, {}}, nullptr, error));
+    CHECK_FALSE(router.RegisterExternalChannel({"ci", false, {}}, nullptr, error));
+    CHECK(error.find("declares no signals") != std::string::npos);
+    CHECK_FALSE(router.RegisterExternalChannel({"ci", true, {"x"}}, nullptr, error));
+    CHECK_FALSE(router.RegisterExternalChannel({"ci", false, {"BAD!"}}, nullptr, error));
+
+    REQUIRE(router.RegisterExternalChannel(CiChannel(), nullptr, error));
+    CHECK_FALSE(router.RegisterExternalChannel(CiChannel(), nullptr, error));
+    CHECK(error == "channel 'ci' is already registered");
+}
+
+TEST_CASE("EnsureChannelAlive: asks the channel's producer", "[signals][router]") {
+    struct Source : agent::ExternalChannelSource {
+        bool up = true;
+        std::vector<std::string> asked;
+        bool EnsureAlive(const std::string& channel, std::string& error) override {
+            asked.push_back(channel);
+            if (!up) error = "connect refused";
+            return up;
+        }
+    } source;
+    agent::SignalRouter router;
+    Register(router, CiChannel(), &source);
+    Register(router, ReminderChannel());  // no producer: structural-only
+
+    std::string error;
+    CHECK(router.EnsureChannelAlive("sessions", error));
+    CHECK(router.EnsureChannelAlive("reminder", error));
+    CHECK(router.EnsureChannelAlive("ci", error));
+    source.up = false;
+    CHECK_FALSE(router.EnsureChannelAlive("ci", error));
+    CHECK(error == "connect refused");
+    CHECK(source.asked == std::vector<std::string>{"ci", "ci"});
+    CHECK_FALSE(router.EnsureChannelAlive("nowhere", error));
+}
+
+TEST_CASE("DeliverExternal: refusals are kInvalid, not silent", "[signals][router]") {
+    agent::SignalRouter router;
+    Register(router, CiChannel());
+    CHECK(router.DeliverExternal("nowhere", "x", "c", {}) == agent::SignalDelivery::kInvalid);
+    CHECK(router.DeliverExternal("ci", "BAD NAME", "c", {}) == agent::SignalDelivery::kInvalid);
+    CHECK(router.DeliverExternal("ci", "undeclared", "c", {}) == agent::SignalDelivery::kInvalid);
+    CHECK(router.DeliverExternal("ci", "build.completed", "c", {}) ==
+          agent::SignalDelivery::kNoSubscriber);
+}
+
+TEST_CASE("ParseSignalNotification: the MCP wire frame", "[signals][mcp]") {
+    mcp::SignalFrame frame;
+    std::string error;
+
+    REQUIRE(mcp::ParseSignalNotification(
+        nlohmann::json{{"jsonrpc", "2.0"},
+                       {"method", "notifications/minimal/signal"},
+                       {"params",
+                        {{"signal", "build.completed"},
+                         {"content", "ok"},
+                         {"meta", {{"run_id", "123"}, {"count", 7}}}}}}
+            .dump(),
+        frame, error));
+    CHECK(frame.signal == "build.completed");
+    CHECK(frame.content == "ok");
+    // Non-string values are dropped here; key filtering is the router's.
+    CHECK(frame.meta == std::map<std::string, std::string>{{"run_id", "123"}});
+
+    // Another notification: not a signal, and not an error either.
+    CHECK_FALSE(mcp::ParseSignalNotification(
+        nlohmann::json{{"method", "notifications/tools/list_changed"}}.dump(), frame, error));
+    CHECK(error.empty());
+
+    CHECK_FALSE(mcp::ParseSignalNotification("not json", frame, error));
+    CHECK(error == "dropped a non-JSON frame");
+    CHECK_FALSE(mcp::ParseSignalNotification(
+        nlohmann::json{{"method", "notifications/minimal/signal"}}.dump(), frame, error));
+    CHECK(error == "dropped a signal frame without params");
+    CHECK_FALSE(mcp::ParseSignalNotification(
+        nlohmann::json{{"method", "notifications/minimal/signal"},
+                       {"params", {{"signal", "x"}}}}
+            .dump(),
+        frame, error));
+    CHECK(error == "dropped a signal frame missing string 'signal'/'content'");
 }

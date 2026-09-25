@@ -39,6 +39,18 @@ public:
         last_content = content;
         return next;
     }
+
+    // The external ingress is not what message_session uses.
+    bool RegisterExternalChannel(const agent::ExternalChannel&, agent::ExternalChannelSource*,
+                                 std::string&) override {
+        return false;
+    }
+    void SetChannelInstructions(const std::string&, const std::string&) override {}
+    agent::SignalDelivery DeliverExternal(const std::string&, const std::string&,
+                                          const std::string&,
+                                          const std::map<std::string, std::string>&) override {
+        return agent::SignalDelivery::kInvalid;
+    }
 };
 
 struct Fixture {

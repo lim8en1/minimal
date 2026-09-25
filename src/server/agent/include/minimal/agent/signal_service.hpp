@@ -1,6 +1,8 @@
 #pragma once
 
+#include <map>
 #include <string>
+#include <vector>
 
 // The core-provided signal service plugins reach through ServiceRegistry::
 // Find(kSignalServiceName) -- the second CORE-provided service (after
@@ -9,11 +11,22 @@
 // in main.cpp before Seal() so a plugin claiming "core.signals" is a
 // diagnosed fatal duplicate.
 //
-// It exists so an INTERNAL producer can be plugin surface: the bundled
-// message_session tool is the first consumer, and a third-party producer
-// (timers, file watchers, a git-hook bridge) would ship the same way. The
-// router's receiver side -- subscriptions, wake, delivery -- stays core; only
-// the producing is offered here.
+// Two producer families reach the router through it, and both are plugin
+// surface:
+//
+//   - INTERNAL: cross-session messages on the builtin "sessions" source
+//     (DeliverInternal). The bundled message_session tool is the first
+//     consumer; a third-party producer (timers, file watchers, a git-hook
+//     bridge) would ship the same way.
+//   - EXTERNAL: named channels an operator declared, whose events arrive
+//     from outside the process (RegisterExternalChannel + DeliverExternal).
+//     The MCP signal channels (channels.json) are the first such producer:
+//     the transport and its wire protocol are the producer's business, the
+//     router sees only (channel, signal, content, meta).
+//
+// The receiver side -- subscriptions, the restricted/extended allowlist,
+// provenance framing, wake, delivery -- stays core: a producer can PRODUCE
+// signals, never change who RECEIVES them.
 //
 // Find returning null means the host does not offer the seam (an embedded or
 // test harness): degrade, do not error -- the same contract
@@ -22,6 +35,35 @@
 namespace minimal::agent {
 
 inline constexpr const char* kSignalServiceName = "core.signals";
+
+// The builtin INTERNAL source (cross-session messages). Never an external
+// channel: RegisterExternalChannel refuses the name.
+inline constexpr const char* kInternalSignalSource = "sessions";
+
+// One external channel as the router needs it: its name and its allowlist.
+// Everything about HOW its events arrive (a process to spawn, a wire
+// protocol) stays with the producer that registers it.
+struct ExternalChannel {
+    std::string name;
+    // restricted (false): only `signals` may be delivered, and sessions
+    // subscribe per signal ("ci/build.completed"). extended (true): any
+    // signal name passes, and sessions subscribe at channel level.
+    bool extended = false;
+    std::vector<std::string> signals;
+};
+
+// Implemented by the producer of external channels. The router calls it when
+// a session subscribes, so a subscription to a channel that cannot come up is
+// refused at session start instead of looking like "no signal ever arrives".
+// Called on the session-launch path; may block for the producer's own connect
+// budget.
+class ExternalChannelSource {
+public:
+    virtual ~ExternalChannelSource() = default;
+    // True when `channel`'s producer is up (starting it if needed); false
+    // with `error` set when it cannot be.
+    virtual bool EnsureAlive(const std::string& channel, std::string& error) = 0;
+};
 
 // What happened to one delivered signal. kDelivered requires the addressed
 // session to have accepted the message into its injection queue.
@@ -49,6 +91,33 @@ public:
     virtual SignalDelivery DeliverInternal(const std::string& from_session,
                                            const std::string& target_session,
                                            const std::string& content) = 0;
+
+    // --- External ingress ---------------------------------------------------
+
+    // Declares an external channel sessions may subscribe to. At startup,
+    // before serving. `source` (borrowed; may be null for a structural-only
+    // host) must outlive serving. Refused, with `error` set, for an invalid
+    // or reserved name ("sessions"), a restricted channel without signals,
+    // an extended channel WITH a list, or a name already registered.
+    virtual bool RegisterExternalChannel(const ExternalChannel& channel,
+                                         ExternalChannelSource* source, std::string& error) = 0;
+
+    // The channel's own description of what its signals mean (the MCP
+    // initialize instructions), rendered into subscribing sessions' context.
+    // Unregistered channels store nothing.
+    virtual void SetChannelInstructions(const std::string& channel,
+                                        const std::string& instructions) = 0;
+
+    // Delivers one signal from a registered external channel to every
+    // session subscribed to it. Non-blocking (safe on a producer's read
+    // thread) and never throws. The router validates the signal name,
+    // enforces a restricted channel's allowlist, sanitizes `meta` into
+    // attributes, and wraps the untrusted `content` in its provenance frame.
+    // kInvalid: unregistered channel, bad signal name, or a restricted
+    // channel's undeclared signal -- each logged, like every drop.
+    virtual SignalDelivery DeliverExternal(const std::string& channel, const std::string& signal,
+                                           const std::string& content,
+                                           const std::map<std::string, std::string>& meta) = 0;
 };
 
 }  // namespace minimal::agent

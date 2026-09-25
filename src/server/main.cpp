@@ -48,6 +48,7 @@
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
+#include "minimal/mcp/signal_protocol.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/host_registries.hpp"
@@ -105,6 +106,19 @@ void OnShutdownSignal(int) {
         (void)ignored;  // a full pipe means a shutdown is already queued
     }
 }
+
+// The MCP manager as the producer behind channels.json's signal channels:
+// bringing a channel up is bringing its MCP connection up.
+class McpChannelSource final : public minimal::agent::ExternalChannelSource {
+public:
+    explicit McpChannelSource(minimal::mcp::McpClientManager& manager) : manager_(manager) {}
+    bool EnsureAlive(const std::string& channel, std::string& error) override {
+        return manager_.EnsureAlive(channel, error);
+    }
+
+private:
+    minimal::mcp::McpClientManager& manager_;
+};
 
 }  // namespace
 
@@ -746,9 +760,18 @@ int main(int argc, char** argv) {
     channel_wiring.config = bundle.channels;
     channel_wiring.on_notification = [&signal_router](const std::string& channel,
                                                       const std::string& raw) {
-        // Runs on the channel's read thread: the router's contract is
-        // parse, look up, inject -- no blocking.
-        signal_router.OnMcpNotification(channel, raw);
+        // Runs on the channel's read thread. The wire frame is the MCP
+        // transport's business; the router gets only the decoded signal
+        // (core.signals' external ingress), and delivery never blocks.
+        minimal::mcp::SignalFrame frame;
+        std::string error;
+        if (!minimal::mcp::ParseSignalNotification(raw, frame, error)) {
+            if (!error.empty()) {
+                minimal::common::DefaultLogger().warn("signal channel '{}': {}", channel, error);
+            }
+            return;
+        }
+        signal_router.DeliverExternal(channel, frame.signal, frame.content, frame.meta);
     };
     channel_wiring.on_connected = [&signal_router](const std::string& channel,
                                                    const std::string& instructions) {
@@ -768,12 +791,24 @@ int main(int argc, char** argv) {
     // producing "subscribed but no signal ever arrives" with no error
     // anywhere. The sanity check already warns about both skip cases from
     // the config side; this is the enforcement.
+    //
+    // The manager is each channel's producer: a session subscribing to one
+    // asks it (through the router) to bring the channel up. It outlives
+    // serving -- sessions are terminated before it is destroyed.
+    McpChannelSource mcp_channel_source(mcp);
     {
         const auto enabled_channels = mcp.EnabledChannelNames();
         for (const auto& entry : bundle.channels.entries) {
-            if (std::find(enabled_channels.begin(), enabled_channels.end(), entry.name) !=
+            if (std::find(enabled_channels.begin(), enabled_channels.end(), entry.name) ==
                 enabled_channels.end()) {
-                signal_router.RegisterChannel(entry);
+                continue;
+            }
+            std::string error;
+            if (!signal_router.RegisterExternalChannel(
+                    minimal::agent::ExternalChannel{entry.name, entry.extended, entry.signals},
+                    &mcp_channel_source, error)) {
+                minimal::common::DefaultLogger().warn("signal channel '{}' skipped: {}",
+                                                      entry.name, error);
             }
         }
     }

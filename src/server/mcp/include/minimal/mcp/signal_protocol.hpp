@@ -20,6 +20,8 @@
 // `content` is untrusted text in every mode; the router wraps it in a
 // <signal> tag so the model can tell source and provenance.
 
+#include <map>
+#include <string>
 #include <string_view>
 
 #include "minimal/config/channels_config.hpp"
@@ -38,5 +40,22 @@ inline constexpr const char* kSignalNotificationMethod = "notifications/minimal/
 // keeps the protocol vocabulary in one place for mcp/ and agent/ readers.
 inline constexpr std::string_view kInternalSignalSource =
     minimal::config::kReservedInternalChannelName;
+
+// One decoded notifications/minimal/signal frame: what the router's
+// DeliverExternal takes. `meta` keeps only string values; key filtering (the
+// charset, the reserved provenance names) is the router's job.
+struct SignalFrame {
+    std::string signal;
+    std::string content;
+    std::map<std::string, std::string> meta;
+};
+
+// Decodes one JSON-RPC line a channel server wrote. True with `frame` filled
+// for a signal notification. False otherwise: `error` stays EMPTY for a frame
+// that is simply not a signal (another MCP notification -- the server's own
+// business, ignored silently) and says why for a malformed one (not JSON, no
+// params, missing string signal/content), which the caller logs and drops.
+// Never throws.
+bool ParseSignalNotification(const std::string& raw, SignalFrame& frame, std::string& error);
 
 }  // namespace minimal::mcp

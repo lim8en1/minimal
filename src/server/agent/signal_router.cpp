@@ -5,14 +5,16 @@
 #include <string_view>
 #include <utility>
 
-#include <nlohmann/json.hpp>
-
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/message.hpp"
-#include "minimal/mcp/signal_protocol.hpp"
+#include "minimal/config/channels_config.hpp"
 
 namespace minimal::agent {
+
+static_assert(std::string_view(kInternalSignalSource) ==
+                  config::kReservedInternalChannelName,
+              "the internal source and channels.json's reserved name must agree");
 
 namespace {
 
@@ -35,13 +37,12 @@ bool IsReservedAttributeKey(const std::string& key) {
 // whole notification. Mirrors the wire rule for params.meta. A key colliding
 // with a reserved provenance attribute is dropped the same way: decoration
 // must not be able to masquerade as the frame's own source/signal/from.
-std::map<std::string, std::string> SanitizeMeta(const nlohmann::json& meta) {
+std::map<std::string, std::string> SanitizeMeta(const std::map<std::string, std::string>& meta) {
     std::map<std::string, std::string> out;
-    if (!meta.is_object()) return out;
-    for (const auto& [key, value] : meta.items()) {
-        if (!config::IsValidSignalName(key) || !value.is_string()) continue;
+    for (const auto& [key, value] : meta) {
+        if (!config::IsValidSignalName(key)) continue;
         if (IsReservedAttributeKey(key)) continue;
-        out.emplace(key, value.get<std::string>());
+        out.emplace(key, value);
     }
     return out;
 }
@@ -108,9 +109,37 @@ std::string WrapSignal(const std::string& source, const std::string& signal,
     return tag + "\n" + EscapeContent(content) + "\n</signal>";
 }
 
-void SignalRouter::RegisterChannel(const config::ChannelEntry& entry) {
+bool SignalRouter::RegisterExternalChannel(const ExternalChannel& channel,
+                                           ExternalChannelSource* source, std::string& error) {
+    if (!config::IsValidSignalName(channel.name)) {
+        error = "invalid channel name '" + channel.name + "' (names in [a-z0-9._-])";
+        return false;
+    }
+    if (channel.name == kInternalSignalSource) {
+        error = "channel name '" + channel.name + "' is reserved for cross-session messages";
+        return false;
+    }
+    if (!channel.extended && channel.signals.empty()) {
+        error = "restricted channel '" + channel.name + "' declares no signals";
+        return false;
+    }
+    if (channel.extended && !channel.signals.empty()) {
+        error = "extended channel '" + channel.name +
+                "' declares a signals list (extended means every signal passes)";
+        return false;
+    }
+    for (const auto& signal : channel.signals) {
+        if (!config::IsValidSignalName(signal)) {
+            error = "channel '" + channel.name + "' declares invalid signal '" + signal + "'";
+            return false;
+        }
+    }
     std::lock_guard<std::mutex> lock(mu_);
-    channels_[entry.name] = entry;
+    if (!channels_.emplace(channel.name, Channel{channel, source}).second) {
+        error = "channel '" + channel.name + "' is already registered";
+        return false;
+    }
+    return true;
 }
 
 void SignalRouter::SetChannelInstructions(const std::string& channel,
@@ -120,43 +149,33 @@ void SignalRouter::SetChannelInstructions(const std::string& channel,
     instructions_[channel] = instructions;
 }
 
-void SignalRouter::OnMcpNotification(const std::string& channel, const std::string& raw) {
-    // Parse leniently: a malformed line from a channel server is a logged
-    // drop, never an exception into the read thread that carries it.
-    const nlohmann::json message = nlohmann::json::parse(raw, nullptr, /*allow_exceptions=*/false);
-    if (!message.is_object()) {
-        minimal::common::DefaultLogger().warn("signal channel '{}': dropped a non-JSON frame", channel);
-        return;
+bool SignalRouter::EnsureChannelAlive(const std::string& channel, std::string& error) {
+    if (channel == kInternalSignalSource) return true;  // nothing to bring up
+    ExternalChannelSource* source = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        const auto it = channels_.find(channel);
+        if (it == channels_.end()) {
+            error = "unknown signal channel '" + channel + "'";
+            return false;
+        }
+        source = it->second.source;
     }
-    if (message.value("method", std::string()) != mcp::kSignalNotificationMethod) {
-        return;  // some other MCP notification: the server's own business
-    }
-    const auto params = message.find("params");
-    if (params == message.end() || !params->is_object()) {
-        minimal::common::DefaultLogger().warn("signal channel '{}': dropped a signal frame without params",
-                             channel);
-        return;
-    }
+    // Outside the lock: a producer's connect may block for its whole budget,
+    // and every delivery on every channel takes mu_.
+    return source == nullptr || source->EnsureAlive(channel, error);
+}
 
-    const auto signal_it = params->find("signal");
-    const auto content_it = params->find("content");
-    if (signal_it == params->end() || !signal_it->is_string() || content_it == params->end() ||
-        !content_it->is_string()) {
-        minimal::common::DefaultLogger().warn("signal channel '{}': dropped a signal frame missing string "
-                             "'signal'/'content'",
-                             channel);
-        return;
-    }
-    const std::string signal = signal_it->get<std::string>();
+SignalDelivery SignalRouter::DeliverExternal(const std::string& channel, const std::string& signal,
+                                             const std::string& content,
+                                             const std::map<std::string, std::string>& meta) {
     if (!config::IsValidSignalName(signal)) {
         // A bad NAME is a contract violation worth one line per drop (config
-        // drift or a misbehaving server), unlike a bad meta key above.
+        // drift or a misbehaving producer), unlike a bad meta key.
         minimal::common::DefaultLogger().warn("signal channel '{}': dropped a signal with invalid name '{}'",
                              channel, signal);
-        return;
+        return Delivery::kInvalid;
     }
-    const std::string content = content_it->get<std::string>();
-    const auto meta_it = params->find("meta");
 
     // Restricted allowlist check: the declared signals are what the operator
     // reviewed. A name outside the list is exactly the config-drift case this
@@ -165,23 +184,22 @@ void SignalRouter::OnMcpNotification(const std::string& channel, const std::stri
         std::lock_guard<std::mutex> lock(mu_);
         const auto it = channels_.find(channel);
         if (it == channels_.end()) {
-            minimal::common::DefaultLogger().warn("signal channel '{}': not configured (channels.json); dropping",
+            minimal::common::DefaultLogger().warn("signal channel '{}': not registered; dropping",
                                  channel);
-            return;
+            return Delivery::kInvalid;
         }
-        if (!it->second.extended &&
-            std::find(it->second.signals.begin(), it->second.signals.end(), signal) ==
-                it->second.signals.end()) {
+        const auto& declared = it->second.declaration;
+        if (!declared.extended &&
+            std::find(declared.signals.begin(), declared.signals.end(), signal) ==
+                declared.signals.end()) {
             minimal::common::DefaultLogger().warn(
                 "signal channel '{}': signal '{}' is not in the declared signals list; dropping",
                 channel, signal);
-            return;
+            return Delivery::kInvalid;
         }
     }
 
-    const std::map<std::string, std::string> meta =
-        meta_it == params->end() ? std::map<std::string, std::string>{} : SanitizeMeta(*meta_it);
-    const std::string wrapped = WrapSignal(channel, signal, meta, content);
+    const std::string wrapped = WrapSignal(channel, signal, SanitizeMeta(meta), content);
     // Every other drop path above logs a line; a well-formed, allowlisted
     // signal that never reaches a session must too, or these specific (and
     // likely common) cases are invisible to an operator debugging "why
@@ -190,7 +208,8 @@ void SignalRouter::OnMcpNotification(const std::string& channel, const std::stri
     // session whose InjectionQueue refused every delivery attempt (it is
     // terminating, or already staged kMaxPending messages) -- so they get
     // distinct messages rather than one that fits neither.
-    switch (Deliver(channel, signal, wrapped)) {
+    const Delivery delivery = Deliver(channel, signal, wrapped);
+    switch (delivery) {
         case Delivery::kNoSubscriber:
             minimal::common::DefaultLogger().warn(
                 "signal channel '{}': signal '{}' has no subscriber; dropped", channel, signal);
@@ -205,6 +224,7 @@ void SignalRouter::OnMcpNotification(const std::string& channel, const std::stri
         case Delivery::kInvalid:
             break;
     }
+    return delivery;
 }
 
 SignalDelivery SignalRouter::DeliverInternal(const std::string& from_session,
@@ -228,7 +248,7 @@ SignalDelivery SignalRouter::DeliverInternal(const std::string& from_session,
         const auto it = subs_.find(target_session);
         if (it == subs_.end()) return Delivery::kNoSubscriber;
         for (auto& sub : it->second) {
-            if (sub.channel != mcp::kInternalSignalSource) continue;
+            if (sub.channel != kInternalSignalSource) continue;
             if (auto session = sub.session.lock()) {
                 target = std::move(session);
                 break;
@@ -242,7 +262,7 @@ SignalDelivery SignalRouter::DeliverInternal(const std::string& from_session,
     }
     if (target == nullptr) return Delivery::kNoSubscriber;
 
-    const std::string wrapped = WrapSignal(std::string(mcp::kInternalSignalSource),
+    const std::string wrapped = WrapSignal(std::string(kInternalSignalSource),
                                            /*signal=*/std::string(), {{"from", from_session}},
                                            content);
     // The message lands as a USER turn: injected signals are the same shape
@@ -305,7 +325,7 @@ bool SignalRouter::CheckSelector(const std::string& selector, std::string& error
     // Split on the FIRST '/': "ci/build.completed" is channel "ci", signal
     // "build.completed". The charset rule guarantees a signal never contains
     // '/', so the split is unambiguous -- and a channel part of "a/b" was
-    // already impossible (channels.json validated it).
+    // already impossible (RegisterExternalChannel validated it).
     const auto slash = selector.find('/');
     const std::string channel_part =
         slash == std::string::npos ? selector : selector.substr(0, slash);
@@ -319,7 +339,7 @@ bool SignalRouter::CheckSelector(const std::string& selector, std::string& error
     }
     if (channel != nullptr) *channel = channel_part;
 
-    const bool internal = channel_part == mcp::kInternalSignalSource;
+    const bool internal = channel_part == kInternalSignalSource;
     if (internal) {
         if (!signal_part.empty()) {
             error = "the internal source subscribes at source level ('sessions')";
@@ -331,10 +351,11 @@ bool SignalRouter::CheckSelector(const std::string& selector, std::string& error
     std::lock_guard<std::mutex> lock(mu_);
     const auto it = channels_.find(channel_part);
     if (it == channels_.end()) {
-        error = "unknown signal channel '" + channel_part + "' (channels.json declares none)";
+        error = "unknown signal channel '" + channel_part + "' (no such channel is registered)";
         return false;
     }
-    if (it->second.extended) {
+    const ExternalChannel& declared = it->second.declaration;
+    if (declared.extended) {
         if (!signal_part.empty()) {
             error = "channel '" + channel_part +
                     "' is extended: subscribe at channel level ('" + channel_part +
@@ -345,12 +366,12 @@ bool SignalRouter::CheckSelector(const std::string& selector, std::string& error
         if (signal_part.empty()) {
             error = "channel '" + channel_part +
                     "' is restricted: subscribe per signal (e.g. '" + channel_part + "/" +
-                    (it->second.signals.empty() ? std::string() : it->second.signals.front()) +
+                    (declared.signals.empty() ? std::string() : declared.signals.front()) +
                     "')";
             return false;
         }
-        if (std::find(it->second.signals.begin(), it->second.signals.end(), signal_part) ==
-            it->second.signals.end()) {
+        if (std::find(declared.signals.begin(), declared.signals.end(), signal_part) ==
+            declared.signals.end()) {
             error = "signal '" + signal_part + "' is not declared by channel '" + channel_part +
                     "'";
             return false;

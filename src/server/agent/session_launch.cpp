@@ -13,7 +13,6 @@
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/common/model_ref.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
-#include "minimal/mcp/signal_protocol.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 
 namespace minimal::agent {
@@ -71,16 +70,14 @@ void ApplySignals(const LaunchContext& context, const std::vector<std::string>& 
         if (!context.signal_router->CheckSelector(selector, error, &channel)) {
             throw LaunchError(Code::kInvalidArgument, error);
         }
-        // The internal source has no connection to warm. A null manager (a
-        // host that wires the router without live MCP, e.g. a test) keeps
-        // validation structural-only, like an internal-source selector.
-        if (channel != mcp::kInternalSignalSource && context.mcp_manager != nullptr) {
-            std::string connect_error;
-            if (!context.mcp_manager->EnsureAlive(channel, connect_error)) {
-                throw LaunchError(Code::kFailedPrecondition, "signal channel '" + channel +
-                                                                 "' is not available: " +
-                                                                 connect_error);
-            }
+        // The router asks the channel's producer to come up. The internal
+        // source has nothing to warm, and a channel registered without a
+        // producer (a test host) stays structural-only.
+        std::string connect_error;
+        if (!context.signal_router->EnsureChannelAlive(channel, connect_error)) {
+            throw LaunchError(Code::kFailedPrecondition, "signal channel '" + channel +
+                                                             "' is not available: " +
+                                                             connect_error);
         }
         if (std::find(channels.begin(), channels.end(), channel) == channels.end()) {
             channels.push_back(channel);
