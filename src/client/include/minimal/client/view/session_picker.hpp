@@ -13,6 +13,7 @@
 #include <ftxui/component/component.hpp>
 
 #include "minimal/client/render/theme.hpp"
+#include "minimal/client/view/filterable_menu.hpp"
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::client {
@@ -37,6 +38,7 @@ struct SessionPickerCallbacks {
 // refetch behind either is the host's job (see the callbacks above).
 ftxui::Component MakeSessionPicker(const std::vector<v1::SessionSummary>& sessions,
                                    bool include_all_dirs, bool has_more, const Theme& theme,
-                                   SessionPickerCallbacks callbacks);
+                                   SessionPickerCallbacks callbacks,
+    MenuStatus status = {});
 
 }  // namespace minimal::client

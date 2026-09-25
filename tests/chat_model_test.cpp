@@ -504,9 +504,9 @@ using client::ScrollbackRefreshAction;
 using client::ScrollbackRefreshState;
 using Snapshot = client::SessionState::Snapshot;
 
-Snapshot SnapAt(uint64_t version, uint64_t refresh_seq) {
+Snapshot SnapAt(uint64_t generation, uint64_t refresh_seq) {
     Snapshot snap;
-    snap.transcript_version = version;
+    snap.fetch_generation = generation;
     snap.refresh_seq = refresh_seq;
     snap.refresh_succeeded = true;
     return snap;
@@ -516,12 +516,12 @@ Snapshot SnapAt(uint64_t version, uint64_t refresh_seq) {
 
 TEST_CASE("a fresh tab fetches the newest slice on its first frame",
           "[chat_model][refresh]") {
-    ScrollbackRefreshState state;   // rendered_version: nullopt
+    ScrollbackRefreshState state;   // fetched_generation: nullopt
     const auto snap = SnapAt(0, 0);
     CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kSubmit);
     CHECK(state.refresh_pending);
     CHECK(state.refresh_seq_seen == 0);
-    CHECK(state.refresh_from_version == 0);
+    CHECK(state.refresh_from_generation == 0);
 }
 
 TEST_CASE("an in-flight refresh is not resubmitted", "[chat_model][refresh]") {
@@ -543,8 +543,8 @@ TEST_CASE("a resolved SUCCESSFUL empty page marks current instead of retrying fo
     // No new content, but the request resolved successfully.
     CHECK(AdvanceScrollbackRefresh(state, SnapAt(0, 1)) == ScrollbackRefreshAction::kNone);
     CHECK_FALSE(state.refresh_pending);
-    REQUIRE(state.rendered_version.has_value());
-    CHECK(*state.rendered_version == 0);
+    REQUIRE(state.fetched_generation.has_value());
+    CHECK(*state.fetched_generation == 0);
     // And a settled tab stays settled.
     CHECK(AdvanceScrollbackRefresh(state, SnapAt(0, 1)) == ScrollbackRefreshAction::kNone);
 }
@@ -557,7 +557,7 @@ TEST_CASE("a resolved FAILED fetch leaves the mismatch so the same frame retries
     failed.refresh_succeeded = false;
     CHECK(AdvanceScrollbackRefresh(state, failed) == ScrollbackRefreshAction::kSubmit);
     CHECK(state.refresh_pending);   // resubmitted immediately
-    CHECK(!state.rendered_version.has_value());
+    CHECK(!state.fetched_generation.has_value());
 }
 
 TEST_CASE("a turn-end version bump fetches even though streaming text is still held",
@@ -567,12 +567,12 @@ TEST_CASE("a turn-end version bump fetches even though streaming text is still h
     // consumed the version bump with a latch and no fetch ever fired. The
     // turn boundary -- Snapshot::turn_ended -- is what unlocks it.
     ScrollbackRefreshState state;
-    state.rendered_version = 4;
+    state.fetched_generation = 4;
     auto snap = SnapAt(5, 0);
     snap.has_streaming_text = true;
     snap.turn_ended = true;
     CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kSubmit);
-    CHECK(state.refresh_from_version == 5);
+    CHECK(state.refresh_from_generation == 5);
 }
 
 TEST_CASE("a version bump mid-turn with live streaming text fetches anyway",
@@ -585,13 +585,13 @@ TEST_CASE("a version bump mid-turn with live streaming text fetches anyway",
     // block IS the content until the turn ends" -- was what made live tool
     // rows structurally different from their persisted twins.)
     ScrollbackRefreshState state;
-    state.rendered_version = 4;
+    state.fetched_generation = 4;
     auto snap = SnapAt(5, 0);
     snap.has_streaming_text = true;
     snap.turn_ended = false;
     CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kSubmit);
     CHECK(state.refresh_pending);
-    CHECK(state.refresh_from_version == 5);
+    CHECK(state.refresh_from_generation == 5);
 }
 
 TEST_CASE("empty streaming text fetches regardless of the turn flag",
@@ -599,20 +599,72 @@ TEST_CASE("empty streaming text fetches regardless of the turn flag",
     // The idle path (resync also clears the accumulation mid-turn): nothing
     // live on screen, a version mismatch must reach a fetch.
     ScrollbackRefreshState state;
-    state.rendered_version = 4;
+    state.fetched_generation = 4;
     auto snap = SnapAt(5, 0);
     snap.turn_ended = false;
     CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kSubmit);
 }
 
-TEST_CASE("a page that applied during a successful refresh marks the applied version",
+TEST_CASE("a successful refresh marks the generation it was submitted at",
           "[chat_model][refresh]") {
     ScrollbackRefreshState state;
     (void)AdvanceScrollbackRefresh(state, SnapAt(4, 0));
-    // The worker applied a page (version moved 4 -> 5) and resolved.
-    CHECK(AdvanceScrollbackRefresh(state, SnapAt(5, 1)) == ScrollbackRefreshAction::kNone);
-    REQUIRE(state.rendered_version.has_value());
-    CHECK(*state.rendered_version == 5);
+    // The worker applied a page (a page apply moves transcript_version, not
+    // fetch_generation) and resolved: settled.
+    CHECK(AdvanceScrollbackRefresh(state, SnapAt(4, 1)) == ScrollbackRefreshAction::kNone);
+    REQUIRE(state.fetched_generation.has_value());
+    CHECK(*state.fetched_generation == 4);
+    CHECK(AdvanceScrollbackRefresh(state, SnapAt(4, 1)) == ScrollbackRefreshAction::kNone);
+}
+
+TEST_CASE("a trigger that lands while a fetch is in flight earns its own fetch",
+          "[chat_model][refresh]") {
+    // THE VANISHING TOOL ROWS: a tool round finishing starts a mid-turn fetch
+    // (generation 4); the turn completes while it is in flight (generation
+    // 5, the final round's rows now persisted). The in-flight fetch resolves
+    // having seen only what existed at 4 -- marking 5 handled skipped the
+    // turn-end fetch, and the final round's tool rows never arrived.
+    ScrollbackRefreshState state;
+    state.fetched_generation = 3;
+    REQUIRE(AdvanceScrollbackRefresh(state, SnapAt(4, 0)) == ScrollbackRefreshAction::kSubmit);
+    // Still in flight when the turn ends: nothing new is submitted yet.
+    CHECK(AdvanceScrollbackRefresh(state, SnapAt(5, 0)) == ScrollbackRefreshAction::kNone);
+    // The fetch resolves: generation 4 is covered, 5 is not -- refetch now.
+    CHECK(AdvanceScrollbackRefresh(state, SnapAt(5, 1)) == ScrollbackRefreshAction::kSubmit);
+    CHECK(*state.fetched_generation == 4);
+    CHECK(state.refresh_from_generation == 5);
+    // And that one settles the tab.
+    CHECK(AdvanceScrollbackRefresh(state, SnapAt(5, 2)) == ScrollbackRefreshAction::kNone);
+    CHECK(*state.fetched_generation == 5);
+}
+
+TEST_CASE("row slots name content, not position: a result arriving shifts no key",
+          "[chat_model][regression]") {
+    // The chat view keys its render cache and row geometry on (seq, slot).
+    // The old key -- occurrence within the seq -- shifted when the pending
+    // tool_use row dropped out once its result arrived, and the cache then
+    // served one row's render under another row's key.
+    const auto assistant =
+        MakeMessage(v1::ROLE_ASSISTANT, {ToolUse("t1", "bash"), TextBlock("after the call")}, 1);
+    const std::vector<v1::StoredMessage> before = {assistant,
+                                                   MakeMessage(v1::ROLE_USER, {TextBlock("go")}, 0)};
+    const auto pending = client::ChatRowsFromMessages(before);
+    REQUIRE(pending.size() == 3);
+    CHECK(pending[1].tool_pending);
+    CHECK(pending[1].slot == 0);
+    CHECK(pending[2].kind == ChatRowKind::AgentMarkdown);
+    CHECK(pending[2].slot == 1);
+
+    const std::vector<v1::StoredMessage> after = {
+        MakeMessage(v1::ROLE_USER, {ToolResult("t1", "ok", false)}, 2), assistant,
+        MakeMessage(v1::ROLE_USER, {TextBlock("go")}, 0)};
+    const auto settled = client::ChatRowsFromMessages(after);
+    REQUIRE(settled.size() == 3);
+    CHECK(settled[1].kind == ChatRowKind::AgentMarkdown);
+    CHECK(settled[1].seq == 1);
+    CHECK(settled[1].slot == 1);   // same key as before the result arrived
+    CHECK(settled[2].seq == 2);
+    CHECK(settled[2].slot == 0);
 }
 
 TEST_CASE("compactions interleave right after the message they ran at", "[chat_model][compaction]") {

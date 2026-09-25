@@ -53,11 +53,13 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"session.pause", "alt+p"},
         {"panel.toggle", "ctrl+t"},
         // Panel focus cycling among VISIBLE plugin panels: the focused one
-        // alone receives key events (keybinding_dispatch.cpp). ctrl+j was
-        // taken (it collides with enter), ctrl+e/ctrl+g are unclaimed
-        // ctrl-letters with distinct encodings.
-        {"panel.focus.next", "ctrl+g"},
-        {"panel.focus.prev", "ctrl+e"},
+        // alone receives key events (keybinding_dispatch.cpp). Not bare
+        // ctrl-letters: global actions dispatch BEFORE the prompt editor, and
+        // ctrl+e (the old prev default) is the editor's end-of-line -- it
+        // was dead in the prompt. ctrl+alt+letter pairs with the other
+        // ctrl+alt chords below and shadows no editing key.
+        {"panel.focus.next", "ctrl+alt+n"},
+        {"panel.focus.prev", "ctrl+alt+p"},
         {"tab.close", "ctrl+w"},
         {"chat.load_older", "pageup"},
         // Not ctrl+up/ctrl+down: macOS binds those systemwide by default

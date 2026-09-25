@@ -17,6 +17,8 @@
 // TabUi's type is known, not appear only once every dependency of the
 // maintenance logic is available.
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -36,19 +38,6 @@
 #include "minimal/client/view/prompt_modal.hpp"
 
 namespace minimal::client {
-
-// Whether a SHARED modal slot (see TabMaintenance::MaintainModals) must be
-// rebuilt: either this is genuinely a new request for the tab whose id is
-// tracked alongside the old one, or focus has moved to a different tab
-// since the slot was last filled. The rebuild-on-new-request-id bookkeeping
-// is per-tab (TabUi), but permission_child/confirmation_child/prompt_child are
-// each ONE slot shared by every tab -- so a tab switch alone (A -> B -> A,
-// A's own request id unchanged throughout) can leave the slot holding B's
-// (possibly already-answered) modal while A's guard reads "unchanged,
-// nothing to rebuild." Pure so the rebuild decision is directly testable
-// without TabMaintenance's AppState/FTXUI dependencies.
-bool ModalSlotStale(const std::string& tracked_request_id, const std::string& request_id,
-                    const std::string& slot_tab, const std::string& focused_tab);
 
 struct TabUi {
     // Track C4: one slot per live TEXT segment, keyed by the segment's
@@ -72,8 +61,16 @@ struct TabUi {
     // The wire confirmation modal's rebuild key, like grants_for_request:
     // the inner modal is rebuilt only when a NEW request_id arrives.
     std::string confirmation_for_request;
-    // The model's ask modal (tool-ask plugin), same rebuild keying.
+    // A plugin prompt modal's rebuild key, same rule.
     std::string prompt_for_request;
+    // THIS tab's built modals, kept per tab: the app's modal slots are
+    // shared, and focus A -> B -> A used to rebuild A's modal from scratch
+    // -- a half-typed deny message or partial prompt answers were lost on
+    // every tab switch. The shared slot is pointed at the focused tab's own
+    // component instead.
+    ftxui::Component permission_modal;
+    ftxui::Component confirmation_modal;
+    ftxui::Component prompt_modal;
     ftxui::Component surface_body;          // the chat surface's tab body (when slotted)
     plugins::ChatSurface* surface_for = nullptr;   // which surface instance built it
     // Per-tab ChatView: its row cache is keyed by transcript_version, a
@@ -196,8 +193,26 @@ public:
     // into this object's own members -- valid as long as this TabMaintenance
     // is (RunTui declares one plain local and never relocates it, same
     // requirement as PickerController/KeyContext's dependents).
+    // THE ChatView builder for a tab (no-op when `ui` already has one): the
+    // maintenance pass calls it for the focused tab, and FrameRenderer for
+    // the race where a frame renders a tab this pass has not processed yet.
+    // One builder, so both paths get the same hints, fold defaults and
+    // click-to-cancel handler.
+    void EnsureChatView(const std::string& tab_id, TabUi& ui);
+
+    // The fold toggles' new kind defaults, for ChatViews built from now on
+    // (the existing ones flip themselves). nullopt leaves a kind unchanged.
+    void SetFoldDefaults(std::optional<int> thinking, std::optional<int> tool);
+
     const std::string& Focused() const { return focused_; }
     const SessionState::Snapshot& FocusedDetails() const { return focused_details_; }
+
+    // True once a scrollback refresh held back by the failure backoff is due
+    // to retry. Nothing else wakes an idle frame for it (a failed fetch moves
+    // no UiVersion once it has resolved), so the render pump polls this --
+    // it is the one method safe to call from the pump thread.
+    bool RefreshRetryDue(std::chrono::steady_clock::time_point now =
+                             std::chrono::steady_clock::now()) const;
 
 private:
     SessionState::Snapshot Maintain(const std::string& tab_id, SessionState::Snapshot snap);
@@ -211,20 +226,13 @@ private:
     Dependencies deps_;
     std::string focused_;
     SessionState::Snapshot focused_details_;
-    // Which tab's request currently occupies each SHARED modal slot (see
-    // MaintainModals): the rebuild-on-new-request-id guard is keyed per tab
-    // in TabUi, but permission_child/confirmation_child/prompt_child are each
-    // ONE slot for the whole app. Without this, focus moving A -> B -> A
-    // left A's un-rebuilt guard reading "unchanged" while the shared slot
-    // still held B's (possibly already-answered) modal -- A's own request
-    // was never displayed, and the modal that WAS shown answered the wrong
-    // session.
-    std::string permission_slot_tab_;
-    std::string confirmation_slot_tab_;
-    std::string prompt_slot_tab_;
     // Sentinel, not 0: forces the first call (before the loop starts) to
     // run regardless of whatever OpenTab's own bumps left UiVersion at.
     uint64_t last_ui_version_ = static_cast<uint64_t>(-1);
+    // The focused tab's backoff-held refresh deadline (steady_clock ticks
+    // since epoch), 0 when none is waiting. Atomic: read by the pump thread
+    // through RefreshRetryDue.
+    std::atomic<int64_t> refresh_retry_at_{0};
 };
 
 }  // namespace minimal::client

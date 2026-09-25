@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -159,4 +160,25 @@ TEST_CASE("RpcQueue: destruction joins the worker without hanging") {
         // Stop() only guarantees the worker itself is joined.
     }
     SUCCEED("RpcQueue destructor returned");
+}
+
+TEST_CASE("a draining queue runs every queued job on Stop, then refuses more",
+          "[rpc_queue]") {
+    RpcQueue queue(16, /*drain_on_stop=*/true);
+    Gate gate;
+    std::atomic<int> ran{0};
+    REQUIRE(queue.Submit([&] {
+        gate.Wait();
+        ++ran;
+    }));
+    for (int i = 0; i < 5; ++i) REQUIRE(queue.Submit([&] { ++ran; }, /*must_run=*/true));
+    std::thread opener([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        gate.Open();
+    });
+    queue.Stop();   // joins only after the backlog ran
+    opener.join();
+    CHECK(ran.load() == 6);
+    CHECK_FALSE(queue.Submit([&] { ++ran; }));   // refused: stopped
+    CHECK(ran.load() == 6);
 }

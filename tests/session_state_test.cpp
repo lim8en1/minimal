@@ -94,6 +94,53 @@ TEST_CASE("message_stop with nothing pending holds Working while the turn is in 
     REQUIRE_FALSE(state.TakeSnapshot().turn_in_flight);
 }
 
+// Regression (tool rows vanishing on long chats): OnTurnCompleted sweeps
+// finished rows out of tools_, but the turn's live Tool markers stay until
+// the post-turn refresh retires them. A marker used to carry only its id, so
+// between the sweep and that refresh -- forever, when the refresh was lost --
+// the chat view had nothing to render for it.
+TEST_CASE("a live tool marker keeps its row's final state past the turn-end sweep",
+          "[session_state][regression]") {
+    SessionState state("s-1");
+    state.OnToolStarted(StartTool("t-1", "read"));
+    state.OnToolFinished("t-1", FinishTool(/*is_error=*/true, /*duration_ms=*/42));
+    state.OnTurnCompleted(v1::TurnCompletedEvent{});
+
+    const auto snap = state.TakeSnapshot();
+    CHECK(snap.tools.empty());   // swept, as before
+    REQUIRE(snap.live_segments.size() == 1);
+    const auto& marker = snap.live_segments.front();
+    REQUIRE(marker.kind == LiveTurnSegment::Kind::Tool);
+    REQUIRE(marker.final_tool != nullptr);
+    CHECK(marker.final_tool->tool_use_id == "t-1");
+    CHECK(marker.final_tool->tool_name == "read");
+    CHECK(marker.final_tool->is_error);
+    CHECK(marker.final_tool->duration == std::chrono::milliseconds(42));
+    CHECK_FALSE(marker.final_tool->started);
+}
+
+TEST_CASE("the turn-end sweep bumps the fetch generation; a page apply does not",
+          "[session_state][regression]") {
+    SessionState state("s-1");
+    const auto start = state.TakeSnapshot().fetch_generation;
+    state.OnToolStarted(StartTool("t-1"));
+    state.OnToolFinished("t-1", FinishTool());
+    CHECK(state.TakeSnapshot().fetch_generation == start + 1);   // round persisted
+    state.OnTurnCompleted(v1::TurnCompletedEvent{});
+    const auto after_turn = state.TakeSnapshot();
+    CHECK(after_turn.fetch_generation == start + 2);
+
+    v1::GetMessagesResponse page;
+    auto* row = page.add_messages();
+    row->set_seq(0);
+    row->mutable_message()->set_role(v1::ROLE_USER);
+    row->mutable_message()->add_content()->mutable_text()->set_text("hi");
+    state.ApplyScrollbackPage(page, /*delta=*/false);
+    const auto applied = state.TakeSnapshot();
+    CHECK(applied.transcript_version > after_turn.transcript_version);   // re-render
+    CHECK(applied.fetch_generation == after_turn.fetch_generation);      // no refetch
+}
+
 TEST_CASE("message_stop with an active tool stays Working, not Idle", "[session_state]") {
     SessionState state("s-1");
     state.OnToolStarted(StartTool("t-1"));
@@ -1355,17 +1402,34 @@ TEST_CASE("TickNotice expires the notice after kNoticeTicksDefault ticks, not "
     state.OnCommandResult(evt);
     REQUIRE(state.TakeSnapshot().latest_notice.has_value());
 
+    const auto later = std::chrono::steady_clock::now() + kNoticeMinVisible;
     for (int i = 0; i < kNoticeTicksDefault - 1; ++i) {
-        state.TickNotice();
+        state.TickNotice(later);
         REQUIRE(state.TakeSnapshot().latest_notice.has_value());
     }
     const uint64_t seq_before_last_tick = state.TakeSnapshot().notice_seq;
 
-    state.TickNotice();   // the kNoticeTicksDefault-th tick
+    state.TickNotice(later);   // the kNoticeTicksDefault-th tick
 
     const auto snap = state.TakeSnapshot();
     CHECK_FALSE(snap.latest_notice.has_value());
     CHECK(snap.notice_seq > seq_before_last_tick);
+}
+
+TEST_CASE("a notice survives a burst of ticks until it has been visible long enough",
+          "[session_state][notice][regression]") {
+    // A background tab streaming deltas ticks the focused tab's notice once
+    // per UI bump -- 20 ticks can land in well under a second.
+    SessionState state("s-1");
+    v1::CommandResult evt;
+    evt.set_message("theme: moss");
+    evt.set_status(v1::COMMAND_STATUS_OK);
+    state.OnCommandResult(evt);
+    const auto now = std::chrono::steady_clock::now();
+    for (int i = 0; i < kNoticeTicksDefault * 3; ++i) state.TickNotice(now);
+    REQUIRE(state.TakeSnapshot().latest_notice.has_value());
+    state.TickNotice(now + kNoticeMinVisible);   // ticks spent, floor passed
+    CHECK_FALSE(state.TakeSnapshot().latest_notice.has_value());
 }
 
 TEST_CASE("TickNotice on an empty notice is a no-op", "[session_state][notice]") {

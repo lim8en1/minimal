@@ -11,7 +11,7 @@ using minimal::client::Theme;
 ChecklistPanelView::ChecklistPanelView(std::shared_ptr<ChecklistFeed> feed,
                                        plugins::FocusProvider* focus)
     : feed_(std::move(feed)), focus_(focus),
-      spec_{"checklist.panel", "checklist", plugins::ViewPlacement::Panel, "ctrl+k"} {
+      spec_{"checklist.panel", "checklist", plugins::ViewPlacement::Panel, "alt+l"} {
     auto body = ftxui::Renderer([this] { return RenderBody(); });
     // Surface toggle: Tab flips FOCUSED <-> SUMMARY. The core's panel focus
     // routing means this handler runs only while the panel holds focus, so

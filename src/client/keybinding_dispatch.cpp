@@ -155,6 +155,35 @@ void FocusPanelOnClose(std::vector<plugins::PluginViewEntry>& views,
     }
 }
 
+void ShowPluginView(std::vector<plugins::PluginViewEntry>& views,
+                    plugins::PluginViewEntry& entry,
+                    ftxui::Component& modal_slot, bool& show_modal) {
+    if (entry.view->spec().placement == plugins::ViewPlacement::Modal) {
+        for (auto& shown : views) {
+            if (&shown != &entry &&
+                shown.view->spec().placement == plugins::ViewPlacement::Modal) {
+                shown.visible = false;
+            }
+        }
+        if (entry.component == nullptr) {
+            common::DefaultLogger().warn("plugin view '{}' has no component; modal not opened",
+                                         std::string(entry.view->spec().id));
+            entry.visible = false;
+            modal_slot = nullptr;
+            show_modal = false;
+            return;
+        }
+        entry.visible = true;
+        modal_slot = entry.component;
+        show_modal = true;
+    } else {
+        const bool was_visible = entry.visible;
+        entry.visible = true;
+        if (!was_visible) FocusPanelOnOpen(views, entry);
+    }
+    NotifyShown(*entry.view);
+}
+
 void CyclePanelFocus(std::vector<plugins::PluginViewEntry>& views, bool forward) {
     std::vector<plugins::PluginViewEntry*> visible;
     for (auto& entry : views) {
@@ -564,7 +593,8 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         // a local mutable copy is cheap and this handler never mutates it.
         Event mouse_event = event;
         const auto& mouse = mouse_event.mouse();
-        if (mouse.button == Mouse::WheelUp || mouse.button == Mouse::WheelDown) {
+        if ((mouse.button == Mouse::WheelUp || mouse.button == Mouse::WheelDown) &&
+            (!ctx.chat_contains_y || sid.empty() || ctx.chat_contains_y(sid, mouse.y))) {
             if (!sid.empty()) {
                 // WheelUp = scroll toward older (positive), matching
                 // conventional scroll-up-reveals-earlier-content. ONE wheel
@@ -667,12 +697,21 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     }
 
     // Panel focus cycling among VISIBLE plugin panels (see CyclePanelFocus
-    // and the header's focus-rule contract). Consumed even against an empty
-    // visible set: the action was pressed, it just had nothing to do.
+    // and the header's focus-rule contract). With no panel visible the key
+    // falls through: the action has nothing to act on, and a user who bound
+    // it to an editing key (the old ctrl+e default) keeps that key working
+    // in the prompt whenever no panel is up.
     if (ctx.keymap.Matches("panel.focus.next", event) ||
         ctx.keymap.Matches("panel.focus.prev", event)) {
-        CyclePanelFocus(ctx.plugin_views, ctx.keymap.Matches("panel.focus.next", event));
-        return true;
+        const bool any_panel_visible = std::any_of(
+            ctx.plugin_views.begin(), ctx.plugin_views.end(), [](const auto& entry) {
+                return entry.visible &&
+                       entry.view->spec().placement == plugins::ViewPlacement::Panel;
+            });
+        if (any_panel_visible) {
+            CyclePanelFocus(ctx.plugin_views, ctx.keymap.Matches("panel.focus.next", event));
+            return true;
+        }
     }
 
     // Plugin views, after every core action: the FOCUSED panel gets the event
@@ -719,33 +758,18 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     }
     for (auto& entry : ctx.plugin_views) {
         if (ctx.keymap.Matches(entry.view->spec().id, event)) {
-            // There is ONE modal slot: opening modal B while modal A is
-            // shown must retire A's `visible` flag along with replacing the
-            // slot's child. Left set, A counted as shown while it was not
-            // displayed, so A's own keypress first "toggled" it off -- one
-            // dead keypress before A could actually open.
-            if (entry.view->spec().placement == plugins::ViewPlacement::Modal) {
-                for (auto& shown : ctx.plugin_views) {
-                    if (&shown != &entry &&
-                        shown.view->spec().placement == plugins::ViewPlacement::Modal) {
-                        shown.visible = false;
-                    }
-                }
+            if (!entry.visible) {
+                ShowPluginView(ctx.plugin_views, entry, *ctx.plugin_modal_child_slot,
+                               ctx.show_plugin_modal);
+                return true;
             }
-            entry.visible = !entry.visible;
-            if (entry.visible) NotifyShown(*entry.view);
+            // Toggle off. Focus follows -- see the header's focus-rule
+            // contract.
+            entry.visible = false;
             if (entry.view->spec().placement == plugins::ViewPlacement::Panel) {
-                // Focus follows the toggle -- see the header's focus-rule
-                // contract.
-                if (entry.visible) {
-                    FocusPanelOnOpen(ctx.plugin_views, entry);
-                } else {
-                    FocusPanelOnClose(ctx.plugin_views, entry);
-                }
-            }
-            if (entry.view->spec().placement == plugins::ViewPlacement::Modal) {
-                *ctx.plugin_modal_child_slot = entry.component;
-                ctx.show_plugin_modal = entry.visible;
+                FocusPanelOnClose(ctx.plugin_views, entry);
+            } else {
+                ctx.show_plugin_modal = false;
             }
             return true;
         }

@@ -437,7 +437,7 @@ TEST_CASE("ResolvedKeymap: every core default binds to something", "[keybinding_
         "tab.filter_group": "alt+f", "tab.filter_agents": "alt+o",
         "jump.attention": "alt+a", "session.picker": "ctrl+o",
         "agent.picker": "alt+g", "panel.toggle": "ctrl+t",
-        "panel.focus.next": "ctrl+g", "panel.focus.prev": "ctrl+e",
+        "panel.focus.next": "ctrl+alt+n", "panel.focus.prev": "ctrl+alt+p",
         "tab.close": "ctrl+w", "chat.load_older": "pageup",
         "chat.scroll_up": "ctrl+alt+k", "chat.scroll_down": "ctrl+alt+j",
         "chat.scroll_bottom": "pagedown",

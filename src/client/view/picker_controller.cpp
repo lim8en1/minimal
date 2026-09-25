@@ -90,6 +90,7 @@ void PickerController::FetchPickerPage(bool reset) {
     if (reset) {
         picker_data_.sessions.clear();
         picker_data_.has_more = false;
+        session_fetch_.Begin(/*keep_input=*/true);
     } else if (picker_fetch_in_flight_) {
         // A second load-more for the SAME cursor (key-repeat queues it faster
         // than the round trip) must not be queued: both arrivals would append
@@ -102,6 +103,7 @@ void PickerController::FetchPickerPage(bool reset) {
         return;
     }
     picker_fetch_in_flight_ = true;
+    session_fetch_.loading = true;
     // Captured by value below: identifies THIS fetch so a reset that starts
     // a second, concurrent RunOnRpcQueue job (reset is exempt from the latch
     // above) can supersede it -- see picker_fetch_generation_'s doc comment.
@@ -124,13 +126,16 @@ void PickerController::FetchPickerPage(bool reset) {
             // an operator debugging a dead server gets one line per fetch.
             minimal::common::DefaultLogger().warn("session picker fetch failed: {}",
                                                   result.status.error_message());
-            QueueApply([this, generation] {
+            QueueApply([this, generation, error = result.status.error_message()] {
                 // A newer fetch (e.g. a reset that fired while this one was
                 // outstanding) already owns the latch/model -- releasing it
                 // here would be releasing state that isn't this fetch's to
                 // release.
                 if (generation != picker_fetch_generation_) return;
                 picker_fetch_in_flight_ = false;
+                session_fetch_.loading = false;
+                session_fetch_.error = error.empty() ? "the server did not answer" : error;
+                RebuildPickerComponent();
             });
             return;
         }
@@ -146,6 +151,8 @@ void PickerController::FetchPickerPage(bool reset) {
             // list a newer fetch has already reset and is repopulating.
             if (generation != picker_fetch_generation_) return;
             picker_fetch_in_flight_ = false;
+            session_fetch_.loading = false;
+            session_fetch_.error.clear();
             picker_data_.has_more = has_more;
             picker_data_.sessions.insert(picker_data_.sessions.end(),
                                          std::make_move_iterator(rows.begin()),
@@ -209,15 +216,12 @@ void PickerController::RebuildPickerComponent() {
              },
           .on_load_more =
               [this] {
-                  // No immediate RebuildPickerComponent here: unlike the
-                  // ctrl+a toggle above, nothing observable changed yet (the
-                  // component's row snapshot still matches picker_data_), so
-                  // a rebuild would only throw away the user's filter text
-                  // and cursor position -- then the fetch's arrival rebuild
-                  // would do it a second time. The data-driven rebuild in
-                  // the apply closure is the only one.
+                  // Rebuilt at once for the "loading more…" line; the menu's
+                  // filter and cursor ride session_fetch_.memory across it.
                   FetchPickerPage(/*reset=*/false);
-              }});
+                  RebuildPickerComponent();
+              }},
+        session_fetch_.Status());
 }
 
 void PickerController::OpenSessionPicker() {
@@ -227,6 +231,7 @@ void PickerController::OpenSessionPicker() {
     // sessions.
     deps_.show_picker = true;
     picker_data_.include_all_dirs = false;
+    session_fetch_.Begin();
     FetchPickerPage(/*reset=*/true);
     RebuildPickerComponent();
 }
@@ -256,7 +261,8 @@ void PickerController::RebuildAgentPickerComponent() {
                   }
                   deps_.show_agent_picker = false;
               },
-          .on_close = [this] { deps_.show_agent_picker = false; }});
+          .on_close = [this] { deps_.show_agent_picker = false; }},
+        agent_fetch_.Status());
 }
 
 void PickerController::OpenAgentPicker() {
@@ -267,6 +273,7 @@ void PickerController::OpenAgentPicker() {
     // (empty on a fresh open) and repopulates the moment the fetch resolves.
     deps_.show_agent_picker = true;
     agent_picker_presets_.clear();
+    agent_fetch_.Begin();
     RebuildAgentPickerComponent();
     deps_.app.RunOnRpcQueue([this] {
         // The client's cwd is the same project root session creation sends
@@ -279,12 +286,18 @@ void PickerController::OpenAgentPicker() {
         if (!result.status.ok()) {
             minimal::common::DefaultLogger().warn("agent picker fetch failed: {}",
                                                   result.status.error_message());
+            QueueApply([this, error = result.status.error_message()] {
+                agent_fetch_.loading = false;
+                agent_fetch_.error = error.empty() ? "the server did not answer" : error;
+                RebuildAgentPickerComponent();
+            });
             return;
         }
         std::vector<v1::AgentPresetSummary> presets(result.response.presets().begin(),
                                                      result.response.presets().end());
         QueueApply([this, presets = std::move(presets)]() mutable {
             agent_picker_presets_ = std::move(presets);
+            agent_fetch_.loading = false;
             RebuildAgentPickerComponent();
         });
     });
@@ -311,6 +324,7 @@ void PickerController::OpenSubagentModelPicker() {
 void PickerController::OpenModelPickerFetch(bool refresh) {
     deps_.show_model_picker = true;
     model_picker_models_.clear();
+    model_fetch_.Begin(/*keep_input=*/refresh);   // ctrl+r keeps what was typed
     RebuildModelPickerComponent();
     SessionClient::ListModelsOptions opts;
     opts.refresh_discovery = refresh;
@@ -319,12 +333,18 @@ void PickerController::OpenModelPickerFetch(bool refresh) {
         if (!result.status.ok()) {
             minimal::common::DefaultLogger().warn("model picker fetch failed: {}",
                                                   result.status.error_message());
+            QueueApply([this, error = result.status.error_message()] {
+                model_fetch_.loading = false;
+                model_fetch_.error = error.empty() ? "the server did not answer" : error;
+                RebuildModelPickerComponent();
+            });
             return;
         }
         std::vector<v1::ModelSummary> models(result.response.models().begin(),
                                              result.response.models().end());
         QueueApply([this, models = std::move(models)]() mutable {
             model_picker_models_ = std::move(models);
+            model_fetch_.loading = false;
             RebuildModelPickerComponent();
         });
     });
@@ -372,38 +392,47 @@ void PickerController::RebuildModelPickerComponent() {
     callbacks.on_refresh_discovery = [this] { OpenModelPicker(/*refresh=*/true); };
     callbacks.on_close = [this] { deps_.show_model_picker = false; };
     *deps_.model_picker_slot = MakeModelPicker(model_picker_models_, deps_.theme,
-                                               std::move(callbacks));
+                                               std::move(callbacks), model_fetch_.Status());
 }
 
-// The /subagents picker (see the header). One bounded fetch per open, like
-// the agent picker; the parent filter runs in the apply closure so a
-// session's rows are the only ones this picker ever holds.
+// The /subagents picker (see the header). One full listing per open, filtered
+// by parent as it pages, so a session's rows are the only ones this picker
+// ever holds.
 void PickerController::OpenSubagentsPicker(const std::string& parent_session_id) {
     deps_.show_subagent_picker = true;
     subagent_include_ended_ = false;
     subagent_parent_ = parent_session_id;
     subagent_children_.clear();
+    subagent_fetch_.Begin();
     RebuildSubagentPickerComponent();
     deps_.app.RunOnRpcQueue([this, parent_session_id] {
         // include_all_dirs: the GROUP's own project root governs where its
         // children live, not this client's cwd -- the same rule
         // AttachSessionGroup's child scan uses.
+        // Every page, filtered as it arrives: one 200-row page silently
+        // dropped the children of any session older than the 200 most
+        // recently updated.
         SessionClient::ListSessionsOptions opts;
         opts.include_all_dirs = true;
         opts.include_subagents = true;
-        opts.limit = 200;   // AttachSessionGroup's bound; one page, no load-more
-        const auto result = deps_.client.ListSessions(opts);
+        opts.limit = 200;
+        auto result = deps_.client.ListAllSessions(opts, [&](const v1::SessionSummary& row) {
+            return row.parent_session_id() == parent_session_id;
+        });
         if (!result.status.ok()) {
             minimal::common::DefaultLogger().warn("subagent picker fetch failed: {}",
                                                   result.status.error_message());
+            QueueApply([this, error = result.status.error_message()] {
+                subagent_fetch_.loading = false;
+                subagent_fetch_.error = error.empty() ? "the server did not answer" : error;
+                RebuildSubagentPickerComponent();
+            });
             return;
         }
-        std::vector<v1::SessionSummary> children;
-        for (const auto& row : result.response.sessions()) {
-            if (row.parent_session_id() == parent_session_id) children.push_back(row);
-        }
+        std::vector<v1::SessionSummary> children = std::move(result.sessions);
         QueueApply([this, children = std::move(children)]() mutable {
             subagent_children_ = std::move(children);
+            subagent_fetch_.loading = false;
             RebuildSubagentPickerComponent();
         });
     });
@@ -467,7 +496,8 @@ void PickerController::RebuildSubagentPickerComponent() {
                                     // local Tab sort (and unlike its ctrl+a, which
                                     // changes what the SERVER would send).
                                     RebuildSubagentPickerComponent();
-                                }});
+                                }},
+                           subagent_fetch_.Status());
 }
 
 }  // namespace minimal::client

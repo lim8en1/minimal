@@ -71,6 +71,9 @@ struct TuiEnvironment {
     ColorDepth depth = ColorDepth::Truecolor;
     UiConfig ui;
 
+    // Every client plugin that loaded, by name -- the theme's section check
+    // input, at startup and on every /theme switch.
+    std::vector<std::string> loaded_plugins;
     plugins::AttentionState attention_state;
     std::unique_ptr<plugins::AttentionSink> attention_sink;
     std::unique_ptr<plugins::ClientApi> host_client_api;

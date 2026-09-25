@@ -93,8 +93,10 @@ ftxui::Component MakeFilterableMenuModal(
         std::string filter;
     };
     auto state = std::make_shared<MenuState>();
+    const std::shared_ptr<MenuMemory> memory = spec.status.memory;
+    if (memory) state->filter = memory->filter;
 
-    auto rebuild = [state, build_rows] {
+    auto rebuild = [state, build_rows, memory] {
         // Re-anchor by the ROW'S IDENTITY, not its stale index: a filter or
         // sort change can shift what index the previously-highlighted row
         // now lives at (or drop it entirely). Anchoring only the index left
@@ -106,6 +108,8 @@ ftxui::Component MakeFilterableMenuModal(
             state->selected < static_cast<int>(state->rows.size()) &&
             !state->rows[state->selected].header) {
             selected_id = state->rows[state->selected].id;
+        } else if (state->rows.empty() && memory && !memory->selected_id.empty()) {
+            selected_id = memory->selected_id;   // first build of a rebuilt component
         }
         state->rows = build_rows(state->filter);
         state->labels.clear();
@@ -128,6 +132,7 @@ ftxui::Component MakeFilterableMenuModal(
         }
         state->selected =
             ResolveSelectableRow(state->rows, state->selected, state->direction);
+        if (memory) memory->filter = state->filter;
     };
     rebuild();
 
@@ -138,9 +143,15 @@ ftxui::Component MakeFilterableMenuModal(
     // the same shared block every closure here uses, so it can never outlive
     // or diverge from what Menu itself is displaying.
     MenuOption menu_options;
+    // The theme is read per render, never captured by value: /theme swaps
+    // it in place, and a captured copy kept a long-lived menu (the help
+    // overlays are built once) on the startup palette forever.
+    const Theme* theme_ptr = &theme;
     menu_options.entries_option.transform =
-        [state, depth = theme.depth(), selection = SelectionStyle(theme)](
-            const EntryState& entry) -> Element {
+        [state, theme_ptr](const EntryState& entry) -> Element {
+        const Theme& theme = *theme_ptr;
+        const ColorDepth depth = theme.depth();
+        const auto selection = SelectionStyle(theme);
         const bool is_header = entry.index >= 0 &&
                                entry.index < static_cast<int>(state->rows.size()) &&
                                state->rows[entry.index].header;
@@ -177,8 +188,23 @@ ftxui::Component MakeFilterableMenuModal(
             }
             return true;   // consumed either way: no double-submit on empty list
         }
+        // Esc clears a typed filter first, and closes on the next press --
+        // one stray Esc no longer throws away a half-typed search along with
+        // the menu. ctrl+u clears the filter outright (readline's kill-line).
         if (event == Event::Escape) {
-            if (callbacks.on_close) callbacks.on_close();
+            if (!state->filter.empty()) {
+                state->filter.clear();
+                rebuild();
+            } else if (callbacks.on_close) {
+                callbacks.on_close();
+            }
+            return true;
+        }
+        if (event == Event::Character(std::string(1, '\x15'))) {
+            if (!state->filter.empty()) {
+                state->filter.clear();
+                rebuild();
+            }
             return true;
         }
         if (event == Event::Backspace) {
@@ -199,7 +225,10 @@ ftxui::Component MakeFilterableMenuModal(
             if (callbacks.on_extra_key(event, ctx, rebuild)) return true;
         }
         if (event.is_character()) {
-            state->filter += event.character();
+            // Control bytes (an unbound ctrl+letter) are not filter text.
+            const std::string& typed = event.character();
+            if (typed.size() == 1 && static_cast<unsigned char>(typed[0]) < 0x20) return true;
+            state->filter += typed;
             rebuild();
             return true;
         }
@@ -237,8 +266,9 @@ ftxui::Component MakeFilterableMenuModal(
         };
     }
 
-    return Renderer(interactive, [interactive, state, spec, theme] {
+    return Renderer(interactive, [interactive, state, spec, theme_ptr, memory] {
         using namespace ftxui;
+        const Theme& theme = *theme_ptr;
         // The cursor never rests on a header. Menu's own navigation clamps
         // into bounds but knows nothing of headers (it walks labels), so a
         // move can END on one -- and the transform renders headers with no
@@ -289,8 +319,24 @@ ftxui::Component MakeFilterableMenuModal(
         }
         rows.push_back(hbox(std::move(top)));
         rows.push_back(separator() | color(theme.ColorFor("border_unfocused")));
+        // Remember the highlight for the next rebuild (MenuMemory): Menu
+        // moves `selected` itself on arrow keys, so this is where it lands.
+        if (memory && state->selected >= 0 &&
+            state->selected < static_cast<int>(state->rows.size()) &&
+            !state->rows[state->selected].header) {
+            memory->selected_id = state->rows[state->selected].id;
+        }
         if (state->rows.size() <= spec.empty_threshold) {
-            rows.push_back(text(spec.empty_message) | Muted(theme));
+            if (!spec.status.error.empty()) {
+                rows.push_back(paragraph(" could not load: " + spec.status.error) |
+                               color(theme.ColorFor("error")));
+            } else if (spec.status.loading) {
+                rows.push_back(text(" loading…") | Muted(theme));
+            } else {
+                rows.push_back(text(spec.empty_message) | Muted(theme));
+            }
+        } else if (spec.status.loading) {
+            rows.push_back(text(" loading more…") | Muted(theme));
         }
         // Never hand Menu's own Render() an empty label list -- same
         // reasoning as the event guard above; this file keeps the reserved

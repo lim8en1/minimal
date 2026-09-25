@@ -306,19 +306,18 @@ TEST_CASE("the client loader loads a real plugin through a real dlopen",
     CHECK_FALSE(fixtures->markdown_engine.record.registered);
 }
 
-TEST_CASE("the exclusive slots ignore a second registration and keep the first",
+TEST_CASE("a second plugin with a loaded plugin's name is refused before any hook runs",
           "[client_plugins][loader]") {
-    // The same .so loaded twice = two plugins claiming the same exclusive
-    // slot. The first wins; the second's record says it did NOT land.
+    // The same .so loaded twice = the same plugin NAME twice. Attribution and
+    // rollback are keyed by name, so the second copy is refused outright; the
+    // first keeps its exclusive slots. (Two DIFFERENT plugins claiming one
+    // exclusive slot is the registry-level test above.)
     const auto fixtures = LoadedFixtures::Load(
         {Candidate("fixture-client-exclusive.so"), Candidate("fixture-client-exclusive.so")});
 
     REQUIRE(fixtures->records.size() == 2);
     CHECK(fixtures->records[0].ok());
-    CHECK(fixtures->records[1].ok());
-    // The same .so twice is the same plugin NAME, so the per-plugin records
-    // cannot say who holds the slot; the registry's rule is the observable:
-    // one claimant, the first, the second warned and ignored.
+    CHECK(fixtures->records[1].status == LoadStatus::DuplicateName);
     CHECK(fixtures->chat_surface.record.registered);
     CHECK(fixtures->chat_surface.record.plugin_name == "fixture-client-exclusive");
     CHECK(fixtures->markdown_engine.record.registered);

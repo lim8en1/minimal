@@ -8,11 +8,6 @@
 
 namespace minimal::client {
 
-bool ModalSlotStale(const std::string& tracked_request_id, const std::string& request_id,
-                    const std::string& slot_tab, const std::string& focused_tab) {
-    return tracked_request_id != request_id || slot_tab != focused_tab;
-}
-
 TabMaintenance::TabMaintenance(Dependencies deps) : deps_(std::move(deps)) {}
 
 // Per-frame maintenance for the focused tab: feed streaming deltas to the
@@ -27,6 +22,28 @@ TabMaintenance::TabMaintenance(Dependencies deps) : deps_(std::move(deps)) {}
 // the result within the same call -- it returns the snapshot UNCHANGED, and
 // the worker's completion (BumpUiVersion) wakes the pump for a frame that
 // will see the applied page in a freshly-taken snapshot.
+void TabMaintenance::EnsureChatView(const std::string& tab_id, TabUi& ui) {
+    if (ui.chat) return;
+    // The keymap's hints, not the ChatView defaults: a remapped
+    // chat.toggle_collapse must reach the row hints.
+    ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
+                                         deps_.renderer_registry, deps_.display_registry,
+                                         deps_.toggle_collapse_hint, deps_.load_older_hint);
+    ui.chat->SetFoldDefaults(deps_.fold_thinking_default, deps_.fold_tool_default);
+    // Click-to-cancel for QUEUED message rows: the view is per-tab, so the
+    // handler binds this tab's own id.
+    if (deps_.cancel_pending_turn) {
+        ui.chat->SetCancelPendingHandler([this, tab_id](std::uint64_t turn_id) {
+            deps_.cancel_pending_turn(tab_id, turn_id);
+        });
+    }
+}
+
+void TabMaintenance::SetFoldDefaults(std::optional<int> thinking, std::optional<int> tool) {
+    if (thinking) deps_.fold_thinking_default = *thinking;
+    if (tool) deps_.fold_tool_default = *tool;
+}
+
 SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
                                                 SessionState::Snapshot snap) {
     // Gated SOLELY on EffectiveChatSurface(): it is what actually renders the
@@ -53,23 +70,7 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
     // every tab this method has processed at least once (Render() keeps its
     // own null-guarded fallback for the one documented race where it hasn't
     // -- see frame_renderer.cpp).
-    if (!ui.chat) {
-        // The keymap's hints, not the ChatView defaults: this is the builder
-        // that normally runs first, so a remapped chat.toggle_collapse never
-        // reached the row hints when it passed none.
-        ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
-                                             deps_.renderer_registry, deps_.display_registry,
-                                             deps_.toggle_collapse_hint, deps_.load_older_hint);
-        ui.chat->SetFoldDefaults(deps_.fold_thinking_default, deps_.fold_tool_default);
-        // Click-to-cancel for QUEUED message rows: the view is per-tab, so
-        // the handler binds this tab's own session id.
-        if (deps_.cancel_pending_turn) {
-            ui.chat->SetCancelPendingHandler(
-                [this, tab_id](std::uint64_t turn_id) {
-                    deps_.cancel_pending_turn(tab_id, turn_id);
-                });
-        }
-    }
+    EnsureChatView(tab_id, ui);
 
     const auto make_stream = [&] { return deps_.engine.MakeStream(); };
 
@@ -209,6 +210,14 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
     if (AdvanceScrollbackRefresh(ui.refresh, snap) == ScrollbackRefreshAction::kSubmit) {
         deps_.app.RequestScrollback(snap.session_id, /*newest=*/true);
     }
+    // A mismatch the backoff is holding: remember when it may retry, so the
+    // pump wakes a frame for it (RefreshRetryDue) and Run() lets that frame
+    // through its UiVersion gate.
+    const bool held = !ui.refresh.refresh_pending &&
+                      ui.refresh.fetched_generation != snap.fetch_generation;
+    refresh_retry_at_.store(
+        held ? ui.refresh.next_retry_earliest.time_since_epoch().count() : 0,
+        std::memory_order_release);
     return snap;
 }
 
@@ -244,37 +253,14 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
         // well from a nested subagent's tab, whose children these are).
         if (!snap.session_id.empty()) deps_.open_subagents_picker(snap.session_id);
     } else if (auto* view = deps_.view_registry.Find(notice.view_hint)) {
+        // The keybinding's own opener (keybinding_dispatch.hpp): the same
+        // staged component instance, the same focus rule -- and a modal
+        // retires any other modal's `visible`, not only a panel's focus.
         for (auto& entry : deps_.plugin_views) {
             if (entry.view != view) continue;
-            // Same focus-follows-open rule as the keybinding toggle (see
-            // keybinding_dispatch.hpp's focus-rule contract).
-            const bool was_visible = entry.visible;
-            entry.visible = true;
-            if (!was_visible) FocusPanelOnOpen(deps_.plugin_views, entry);
-            NotifyShown(*view);
-        }
-        if (view->spec().placement == plugins::ViewPlacement::Modal) {
-            // REUSE the staged component (bootstrap built one instance per
-            // view; the keybinding path stages that same instance). Calling
-            // component() again here built a SECOND instance with its own
-            // internal state, so the modal shown via a notice was a
-            // different object than the one the keybinding toggles. The
-            // call is still plugin code and still contained: if the entry
-            // has no component (bootstrap's build threw), keep the modal
-            // closed rather than crash.
-            for (auto& entry : deps_.plugin_views) {
-                if (entry.view != view) continue;
-                if (entry.component) {
-                    *deps_.plugin_modal_child = entry.component;
-                    deps_.show_plugin_modal = true;
-                } else {
-                    common::DefaultLogger().warn(
-                        "plugin view '{}' has no component; modal not opened",
-                        std::string(view->spec().id));
-                    *deps_.plugin_modal_child = nullptr;
-                }
-                break;
-            }
+            ShowPluginView(deps_.plugin_views, entry, *deps_.plugin_modal_child,
+                           deps_.show_plugin_modal);
+            break;
         }
     }
     // A hint naming no view falls through: the unknown-view-id rule, like
@@ -293,10 +279,8 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
 
     if (snap.pending_permission.has_value()) {
         const auto& request = *snap.pending_permission;
-        if (ModalSlotStale(ui.grants_for_request, request.request_id, permission_slot_tab_,
-                           focused_)) {
+        if (ui.permission_modal == nullptr || ui.grants_for_request != request.request_id) {
             ui.grants_for_request = request.request_id;
-            permission_slot_tab_ = focused_;
             // ONE shared_ptr shared by the modal component and the answer
             // closure. The old code captured a raw `&toggles` (pointee of
             // ui.grants) in the closure, which stayed valid only through the
@@ -312,7 +296,7 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
             // sessioned tab, so the snapshot's session id is the right key.
             const auto session_id = snap.session_id;
             AppState& app = deps_.app;
-            *deps_.permission_child = MakePermissionModal(
+            ui.permission_modal = MakePermissionModal(
                 request, *toggles, deps_.theme,
                 [&app, session_id, request, toggles](PermissionVerdict verdict) {
                     // granted_keys FILTERED to what this request offered
@@ -330,8 +314,10 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
                                          verdict.choice == PermissionChoice::DenyAndStop);
                 });
         }
+        *deps_.permission_child = ui.permission_modal;
         deps_.show_permission = true;
     } else {
+        ui.permission_modal = nullptr;
         deps_.show_permission = false;
     }
 
@@ -340,21 +326,22 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
     // once (each Set clears the others in SessionState).
     if (snap.pending_confirmation.has_value()) {
         const auto& request = *snap.pending_confirmation;
-        if (ModalSlotStale(ui.confirmation_for_request, request.request_id,
-                           confirmation_slot_tab_, focused_)) {
+        if (ui.confirmation_modal == nullptr ||
+            ui.confirmation_for_request != request.request_id) {
             ui.confirmation_for_request = request.request_id;
-            confirmation_slot_tab_ = focused_;
             const auto session_id = snap.session_id;   // SESSION-keyed (see above)
             const auto request_copy = request;
             AppState& app = deps_.app;
-            *deps_.confirmation_child = MakeConfirmationModal(
+            ui.confirmation_modal = MakeConfirmationModal(
                 request_copy, deps_.theme,
                 [&app, session_id, request_copy](const std::string& chosen) {
                     app.AnswerConfirmation(session_id, request_copy.request_id, chosen);
                 });
         }
+        *deps_.confirmation_child = ui.confirmation_modal;
         deps_.show_confirmation = true;
     } else {
+        ui.confirmation_modal = nullptr;
         deps_.show_confirmation = false;
     }
 
@@ -365,9 +352,10 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
     // worker is parked on this prompt and nothing else would ever answer it.
     if (snap.pending_prompt.has_value()) {
         const auto& request = *snap.pending_prompt;
-        if (ModalSlotStale(ui.prompt_for_request, request.request_id, prompt_slot_tab_, focused_)) {
+        // Keyed on the request id alone (not on the component): a kind no
+        // renderer draws is answered UNAVAILABLE once, not on every pass.
+        if (ui.prompt_for_request != request.request_id) {
             ui.prompt_for_request = request.request_id;
-            prompt_slot_tab_ = focused_;
             const auto session_id = snap.session_id;
             const auto request_id = request.request_id;
             AppState& app = deps_.app;
@@ -400,22 +388,28 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
                     "no prompt renderer for kind '{}': answering unavailable", request.kind);
             }
             if (modal == nullptr) {
-                *deps_.prompt_child = nullptr;
                 reply(plugins::PromptReply{v1::PROMPT_OUTCOME_UNAVAILABLE, nullptr});
-            } else {
-                *deps_.prompt_child = std::move(modal);
             }
+            ui.prompt_modal = std::move(modal);
         }
-        deps_.show_prompt = *deps_.prompt_child != nullptr;
+        *deps_.prompt_child = ui.prompt_modal;
+        deps_.show_prompt = ui.prompt_modal != nullptr;
     } else {
+        ui.prompt_modal = nullptr;
         deps_.show_prompt = false;
     }
 }
 
+bool TabMaintenance::RefreshRetryDue(std::chrono::steady_clock::time_point now) const {
+    const int64_t at = refresh_retry_at_.load(std::memory_order_acquire);
+    return at != 0 && now.time_since_epoch().count() >= at;
+}
+
 void TabMaintenance::Run() {
     const uint64_t version = deps_.app.UiVersion();
-    if (version == last_ui_version_) return;
+    if (version == last_ui_version_ && !RefreshRetryDue()) return;
     last_ui_version_ = version;
+    refresh_retry_at_.store(0, std::memory_order_release);   // Maintain() re-arms it
 
     // A picker's async fetch completion is exactly what bumped the version
     // that got this pass past the gate above (PickerController::QueueApply

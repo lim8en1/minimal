@@ -8,6 +8,7 @@
 // -- this only owns the FTXUI component wiring both used to duplicate.
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,26 @@ struct FilterableMenuCallbacks {
         on_extra_key;
 };
 
+// The menu input that must survive a component REBUILD. Pickers rebuild
+// their component whenever fetched data lands (a page, a load-more, a
+// refresh); a fresh component used to start with an empty filter and the
+// cursor on row 0, so type-ahead entered while the fetch was in flight --
+// and the cursor after "load more" -- were thrown away. The owner keeps one
+// per picker, resets it on open, and hands it to every rebuild.
+struct MenuMemory {
+    std::string filter;
+    std::string selected_id;   // the highlighted row's MenuRow::id ("" = none yet)
+};
+
+// What the list's data source is doing, rendered in place of the empty
+// message: without it an open-while-fetching picker read "(no models
+// match)", and a failed fetch said the same thing forever.
+struct MenuStatus {
+    bool loading = false;
+    std::string error;   // the last fetch's failure, "" when none
+    std::shared_ptr<MenuMemory> memory;
+};
+
 struct FilterableMenuSpec {
     std::string window_title;    // "resume a session" / "switch agent preset"
     std::string hint_line;       // caller-composed key hints, rendered as the footer
@@ -93,6 +114,7 @@ struct FilterableMenuSpec {
     // PICKERS deliberately do not reset (reopening with the filter intact
     // is the feature there).
     std::function<void()>* reset_state = nullptr;
+    MenuStatus status;
 };
 
 // `build_rows` is called on every filter keystroke and whenever an

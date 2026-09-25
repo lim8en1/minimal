@@ -6,7 +6,7 @@
 namespace minimal::client {
 
 ftxui::Component MakeAgentPresetPicker(const std::vector<v1::AgentPresetSummary>& presets,
-                                       const Theme& theme, AgentPickerCallbacks callbacks) {
+                                       const Theme& theme, AgentPickerCallbacks callbacks, MenuStatus status) {
     auto build_rows = [presets](const std::string& filter) {
         std::vector<MenuRow> rows;
         for (const auto& row : BuildAgentPickerRows(presets, filter)) {
@@ -32,7 +32,11 @@ ftxui::Component MakeAgentPresetPicker(const std::vector<v1::AgentPresetSummary>
         .on_extra_key = nullptr,
     };
 
-    return MakeFilterableMenuModal(build_rows, spec, callbacks_out, theme);
+    FilterableMenuSpec with_status = spec;
+
+    with_status.status = std::move(status);
+
+    return MakeFilterableMenuModal(build_rows, with_status, callbacks_out, theme);
 }
 
 }  // namespace minimal::client

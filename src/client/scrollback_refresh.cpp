@@ -19,38 +19,43 @@ ScrollbackRefreshAction AdvanceScrollbackRefresh(ScrollbackRefreshState& state,
                                                  std::chrono::steady_clock::time_point now) {
     // Resolve any outstanding refresh BEFORE deciding whether to submit a
     // new one: refresh_seq (bumped by SessionState on every RESOLVED attempt
-    // -- success or failure) is a different counter from transcript_version
+    // -- success or failure) is a different counter from fetch_generation
     // specifically so a failed fetch still tells this frame "stop waiting",
     // without looking identical to "still in flight".
     if (state.refresh_pending && snap.refresh_seq != state.refresh_seq_seen) {
         state.refresh_pending = false;
         if (snap.refresh_succeeded) {
-            // A page applied (or an empty page resolved successfully): this
-            // snapshot was taken after the worker's BumpUiVersion woke the
-            // pump, so it already reflects the attempt. Mark current even
-            // when the version did not move -- that is exactly the empty-page
-            // case, and NOT marking it is the every-frame refetch loop.
-            state.rendered_version = snap.transcript_version;
+            // A page applied (or an empty page resolved successfully): the
+            // window now covers everything persisted up to the generation
+            // this fetch was SUBMITTED at. Not the snapshot's generation --
+            // a trigger that landed while the fetch was in flight (turn end
+            // during a mid-turn fetch) may name rows this fetch never saw;
+            // marking it handled here was the "tool rows vanish until
+            // restart" bug. Such a trigger leaves a mismatch below and gets
+            // its own fetch; with none, this settles (no empty-page loop).
+            state.fetched_generation = state.refresh_from_generation;
             state.consecutive_failures = 0;   // backoff resets on success
-            return ScrollbackRefreshAction::kNone;
-        }
-        // Failed (or the applied page happened to leave transcript_version
-        // where it was): rendered_version stays behind on purpose -- the
-        // mismatch check below retries on this very frame.
-        ++state.consecutive_failures;
-        // From the second consecutive failure on, hold the NEXT submit: a
-        // dead server otherwise gets a connect attempt per frame (20 Hz),
-        // because the failure resolves the latch without moving
-        // transcript_version, and the unchanged mismatch resubmits
-        // immediately. The first failure stays un-delayed (retry contract).
-        if (state.consecutive_failures >= 2) {
-            const int shift = std::min(state.consecutive_failures - 2, 10);
-            state.next_retry_earliest =
-                now + std::min(kRetryBackoffBase * (1 << shift), kRetryBackoffMax);
+            // Falls through to the mismatch check on THIS frame: an idle tab
+            // may render no further frame to notice the pending trigger.
+        } else {
+            // Failed: fetched_generation stays behind on purpose -- the
+            // mismatch check below retries on this very frame.
+            ++state.consecutive_failures;
+            // From the second consecutive failure on, hold the NEXT submit:
+            // a dead server otherwise gets a connect attempt per frame
+            // (20 Hz), because the failure resolves the latch without moving
+            // fetch_generation, and the unchanged mismatch resubmits
+            // immediately. The first failure stays un-delayed (retry
+            // contract).
+            if (state.consecutive_failures >= 2) {
+                const int shift = std::min(state.consecutive_failures - 2, 10);
+                state.next_retry_earliest =
+                    now + std::min(kRetryBackoffBase * (1 << shift), kRetryBackoffMax);
+            }
         }
     }
 
-    if (!state.refresh_pending && state.rendered_version != snap.transcript_version) {
+    if (!state.refresh_pending && state.fetched_generation != snap.fetch_generation) {
         // No turn-boundary latch: a mismatch fetches whenever the backoff
         // window allows it, MID-TURN included. A tool round finishing bumps
         // the version while the turn keeps streaming, and the fetch that
@@ -65,7 +70,7 @@ ScrollbackRefreshAction AdvanceScrollbackRefresh(ScrollbackRefreshState& state,
         if (state.consecutive_failures < 2 || now >= state.next_retry_earliest) {
             state.refresh_pending = true;
             state.refresh_seq_seen = snap.refresh_seq;
-            state.refresh_from_version = snap.transcript_version;
+            state.refresh_from_generation = snap.fetch_generation;
             return ScrollbackRefreshAction::kSubmit;
         }
     }

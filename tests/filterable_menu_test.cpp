@@ -6,8 +6,14 @@
 // header) resolves through this one pure function.
 
 #include <catch2/catch_test_macros.hpp>
+#include <memory>
+#include <string>
 #include <vector>
 
+#include <ftxui/component/event.hpp>
+
+#include "ftxui_harness.hpp"
+#include "minimal/client/render/theme.hpp"
 #include "minimal/client/view/filterable_menu.hpp"
 
 namespace minimal::client {
@@ -89,6 +95,95 @@ TEST_CASE("ResolveSelectableRow: a list with no selectable row yields -1", "[fil
     CHECK(ResolveSelectableRow(headers_only, 1, -1) == -1);
     // Empty list entirely.
     CHECK(ResolveSelectableRow({}, 0, 1) == -1);
+}
+
+namespace {
+
+struct MenuFixture {
+    Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
+    std::vector<std::string> selected;
+    int closes = 0;
+
+    ftxui::Component Make(std::vector<MenuRow> rows, MenuStatus status = {}) {
+        FilterableMenuSpec spec{.window_title = "t", .empty_message = " (nothing)"};
+        spec.status = std::move(status);
+        return MakeFilterableMenuModal(
+            [rows](const std::string& filter) {
+                std::vector<MenuRow> out;
+                for (const auto& row : rows) {
+                    if (row.label.find(filter) != std::string::npos) out.push_back(row);
+                }
+                return out;
+            },
+            spec,
+            {.on_select = [this](const MenuRow& row) { selected.push_back(row.id); },
+             .on_close = [this] { ++closes; },
+             .on_extra_key = nullptr},
+            theme);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("filterable menu: Esc clears a typed filter before it closes",
+          "[filterable_menu]") {
+    MenuFixture fx;
+    auto menu = fx.Make({Item("alpha"), Item("beta")});
+    minimal_test::SendEvent(menu, ftxui::Event::Character("b"));
+    CHECK(minimal_test::RenderFrame(menu).find("alpha") == std::string::npos);
+    minimal_test::SendEvent(menu, ftxui::Event::Escape);
+    CHECK(fx.closes == 0);
+    CHECK(minimal_test::RenderFrame(menu).find("alpha") != std::string::npos);
+    minimal_test::SendEvent(menu, ftxui::Event::Escape);
+    CHECK(fx.closes == 1);
+}
+
+TEST_CASE("filterable menu: ctrl+u clears the filter; control bytes are not filter text",
+          "[filterable_menu]") {
+    MenuFixture fx;
+    auto menu = fx.Make({Item("alpha"), Item("beta")});
+    minimal_test::SendEvent(menu, ftxui::Event::Character("zz"));
+    CHECK(minimal_test::RenderFrame(menu).find("(nothing)") != std::string::npos);
+    minimal_test::SendEvent(menu, ftxui::Event::Character(std::string(1, '\x15')));
+    CHECK(minimal_test::RenderFrame(menu).find("alpha") != std::string::npos);
+    minimal_test::SendEvent(menu, ftxui::Event::Character(std::string(1, '\x02')));   // ctrl+b
+    CHECK(minimal_test::RenderFrame(menu).find("alpha") != std::string::npos);
+}
+
+TEST_CASE("filterable menu: MenuMemory carries filter and cursor into a rebuilt component",
+          "[filterable_menu][regression]") {
+    // A picker rebuilds its component when fetched data lands; type-ahead
+    // and the cursor used to reset on every such rebuild.
+    MenuFixture fx;
+    auto memory = std::make_shared<MenuMemory>();
+    auto first = fx.Make({Item("apple"), Item("apricot"), Item("banana")},
+                         MenuStatus{.loading = true, .error = {}, .memory = memory});
+    minimal_test::SendEvent(first, ftxui::Event::Character("ap"));
+    minimal_test::SendEvent(first, ftxui::Event::ArrowDown);
+    (void)minimal_test::RenderFrame(first);
+    CHECK(memory->filter == "ap");
+    CHECK(memory->selected_id == "apricot");
+
+    auto rebuilt = fx.Make({Item("apple"), Item("apricot"), Item("banana"), Item("apex")},
+                           MenuStatus{.loading = false, .error = {}, .memory = memory});
+    const auto frame = minimal_test::RenderFrame(rebuilt);
+    CHECK(frame.find("banana") == std::string::npos);   // the filter survived
+    minimal_test::SendEvent(rebuilt, ftxui::Event::Return);
+    REQUIRE(fx.selected.size() == 1);
+    CHECK(fx.selected.front() == "apricot");            // so did the cursor
+}
+
+TEST_CASE("filterable menu: an empty list says loading, or why the fetch failed",
+          "[filterable_menu]") {
+    MenuFixture fx;
+    auto loading = fx.Make({}, MenuStatus{.loading = true, .error = {}, .memory = nullptr});
+    const auto loading_frame = minimal_test::RenderFrame(loading);
+    CHECK(loading_frame.find("loading") != std::string::npos);
+    CHECK(loading_frame.find("(nothing)") == std::string::npos);
+
+    auto failed =
+        fx.Make({}, MenuStatus{.loading = false, .error = "deadline exceeded", .memory = nullptr});
+    CHECK(minimal_test::RenderFrame(failed).find("deadline exceeded") != std::string::npos);
 }
 
 }  // namespace minimal::client

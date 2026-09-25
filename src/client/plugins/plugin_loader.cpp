@@ -97,6 +97,7 @@ std::string_view ToString(LoadStatus status) {
         case LoadStatus::MissingRequiredSymbol: return "missing required symbol";
         case LoadStatus::AbiMismatch:           return "abi mismatch";
         case LoadStatus::RegistrationThrew:     return "registration threw";
+        case LoadStatus::DuplicateName:         return "duplicate plugin name";
     }
     return "unknown";
 }
@@ -192,6 +193,12 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (record.name.empty()) {
         record.status = LoadStatus::MissingRequiredSymbol;
         record.error = "minimal_client_plugin_name() returned null or an empty string";
+        return record;
+    }
+    if (loaded_names_.count(record.name) != 0) {
+        record.status = LoadStatus::DuplicateName;
+        record.error = "a plugin named '" + record.name +
+                       "' is already loaded -- disable one of the two copies";
         return record;
     }
 
@@ -366,6 +373,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     }
 
     record.status = LoadStatus::Loaded;
+    loaded_names_.insert(record.name);
     return record;
 }
 

@@ -125,6 +125,29 @@ grpc::Status SessionClient::GetMessages(grpc::ClientContext* context,
     return stub_->GetMessages(context, request, response);
 }
 
+SessionClient::ListAllSessionsResult SessionClient::ListAllSessions(
+    ListSessionsOptions options, const std::function<bool(const v1::SessionSummary&)>& keep) {
+    ListAllSessionsResult out;
+    options.before_updated_at.reset();
+    options.before_id.reset();
+    if (options.limit <= 0) options.limit = 200;
+    for (;;) {
+        const auto page = ListSessions(options);
+        if (!page.status.ok()) {
+            out.status = page.status;
+            return out;
+        }
+        const auto& rows = page.response.sessions();
+        for (const auto& row : rows) {
+            if (!keep || keep(row)) out.sessions.push_back(row);
+        }
+        if (rows.empty() || rows.size() < static_cast<std::size_t>(options.limit)) break;
+        options.before_updated_at = rows[rows.size() - 1].updated_at_unix_ms();
+        options.before_id = rows[rows.size() - 1].session_id();
+    }
+    return out;
+}
+
 SessionClient::ListSessionsResult SessionClient::ListSessions(const ListSessionsOptions& options) {
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));

@@ -615,29 +615,17 @@ int RunListSessions(const minimal::client::HeadlessOptions& options) {
         return kUnavailable;
     }
 
-    std::vector<minimal::v1::SessionSummary> sessions;
-    std::optional<int64_t> before_updated_at;
-    std::optional<std::string> before_id;
-    constexpr int32_t kPageSize = 200;
-    for (;;) {
-        minimal::client::SessionClient::ListSessionsOptions opts;
-        opts.include_all_dirs = options.all_dirs;
-        if (!options.all_dirs) opts.project_root = minimal::client::CurrentProjectRootOrEmpty();
-        opts.limit = kPageSize;
-        opts.before_updated_at = before_updated_at;
-        opts.before_id = before_id;
-        const auto page = client.ListSessions(opts);
-        if (!page.status.ok()) {
-            std::fprintf(stderr, "could not list sessions: %s\n",
-                         page.status.error_message().c_str());
-            return kUnavailable;
-        }
-        const auto& rows = page.response.sessions();
-        for (const auto& row : rows) sessions.push_back(row);
-        if (rows.empty() || static_cast<int>(rows.size()) < kPageSize) break;
-        before_updated_at = rows[rows.size() - 1].updated_at_unix_ms();
-        before_id = rows[rows.size() - 1].session_id();
+    minimal::client::SessionClient::ListSessionsOptions opts;
+    opts.include_all_dirs = options.all_dirs;
+    if (!options.all_dirs) opts.project_root = minimal::client::CurrentProjectRootOrEmpty();
+    opts.limit = 200;
+    auto listed = client.ListAllSessions(opts);
+    if (!listed.status.ok()) {
+        std::fprintf(stderr, "could not list sessions: %s\n",
+                     listed.status.error_message().c_str());
+        return kUnavailable;
     }
+    const std::vector<minimal::v1::SessionSummary> sessions = std::move(listed.sessions);
 
     if (options.list_json) {
         // ONE array, not NDJSON: a listing is consumed whole
@@ -1119,7 +1107,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto apply_theme = [app, &env, &theme](const std::string& name) {
         Theme loaded;
         try {
-            loaded = Theme::Load(env.config_dir / "themes", name, env.depth);
+            loaded = Theme::Load(env.config_dir / "themes", name, env.depth, &env.loaded_plugins);
         } catch (const std::exception& error) {
             if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
                 app->TabNotice(tab, "theme: " + std::string(error.what()));
@@ -1750,8 +1738,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         permission_child, show_permission,
         confirmation_child, show_confirmation, prompt_child, show_prompt,
         // The chat views this builds name these keys in their own text; the
-        // user's keymap decides them (FrameRenderer's fallback builder gets
-        // the same two).
+        // user's keymap decides them.
         env.keybindings.KeyFor("chat.toggle_collapse", "alt+c"),
         env.keybindings.KeyFor("chat.load_older", "pageup"),
         // ui.json's startup fold defaults (kFoldDefaultAuto when unset).
@@ -1885,9 +1872,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         env.keybindings.KeyFor("session.picker", "ctrl+o"),
         env.keybindings.KeyFor("chat.load_older", "pageup"),
         env.keybindings.KeyFor("chat.scroll_bottom", "pagedown"),
-        // ui.json's startup fold defaults (kFoldDefaultAuto when unset).
-        env.ui.fold_thinking,
-        env.ui.fold_tools});
+        [&tab_maintenance](const std::string& tab_id, minimal::client::TabUi& ui) {
+            tab_maintenance.EnsureChatView(tab_id, ui);
+        }});
     auto session_view = Renderer(editor, [&] { return frame_renderer.Render(); });
 
     // --- global keybindings -----------------------------------------------------
@@ -1957,11 +1944,10 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // The fold toggles are session-wide preferences, unlike the
         // per-tab actions above: EVERY open tab's ChatView flips, and the
         // new state persists to ui.json (SaveFoldDefaults) so the next
-        // launch starts there. Tabs opened AFTER a toggle are covered too:
-        // TabMaintenance builds fresh ChatViews from app's per-session
-        // seed, which SetFoldDefaults re-seeds from the persisted value on
-        // the next session (see AppState::StoreFoldDefaults' comment). The
-        // toggles return the same value from every view, so one write.
+        // launch starts there. Tabs opened AFTER a toggle start from it too:
+        // TabMaintenance::SetFoldDefaults re-seeds the builder every new
+        // ChatView comes from. The toggles return the same value from every
+        // view, so one write.
         [&](const std::string& session_id) {
             std::optional<int> next;
             for (auto& [tab, ui] : tab_ui) {
@@ -1973,6 +1959,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 // the notice names the state and whether it persisted.
                 const bool saved =
                     minimal::client::SaveFoldDefaults(env.config_dir, next, std::nullopt);
+                tab_maintenance.SetFoldDefaults(next, std::nullopt);   // tabs opened later
                 app->TabNotice(session_id,
                                std::string("thinking rows: ") +
                                    (*next == kFoldCollapsed ? "collapsed" : "expanded") +
@@ -1987,6 +1974,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             if (next.has_value()) {
                 const bool saved =
                     minimal::client::SaveFoldDefaults(env.config_dir, std::nullopt, next);
+                tab_maintenance.SetFoldDefaults(std::nullopt, next);   // tabs opened later
                 app->TabNotice(session_id,
                                std::string("tool rows: ") +
                                    (*next == kFoldCollapsed ? "collapsed" : "expanded") +
@@ -1994,7 +1982,10 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
         },
         *pasting,
-        [&prompt_editors, &app] { return prompt_editors.CurrentState(app->FocusedTabId()).list_open; }};
+        [&prompt_editors, &app] { return prompt_editors.CurrentState(app->FocusedTabId()).list_open; },
+        [&tab_ui](const std::string& tab_id, int y) {
+            return WithChat(tab_ui, tab_id, [y](auto& chat) { return chat.ViewportContainsY(y); });
+        }};
     auto with_keys = CatchEvent(session_view, [&](const Event& event) {
         return minimal::client::HandleGlobalKey(key_ctx, event);
     });
@@ -2152,7 +2143,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 prompt_editors.QueryPendingHint(app->FocusedTabId()) ||
                 minimal::client::StreamingMarkdownView::PendingReparseHint().load(
                     std::memory_order_acquire) ||
-                running_tool_redraw_due;
+                running_tool_redraw_due || tab_maintenance.RefreshRetryDue();
             if (version != last_version || debounce_pending) {
                 // Coalesce: skip the post while the previous Custom is still
                 // unconsumed. last_version moves ONLY on a successful post,

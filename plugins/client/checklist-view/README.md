@@ -9,7 +9,7 @@ data: two presentation surfaces over one fetch path.
   session; unfilled while the list is empty or not yet known; ` (stale)`
   appended while the server connection is down.
 - **`checklist.panel` view** — a toggleable panel (default binding
-  `ctrl+k`, rebindable under that id in `keybindings.json`) with two
+  `alt+l`, rebindable under that id in `keybindings.json`) with two
   surfaces, flipped with `Tab` while the panel has focus:
   - **This tab** — the focused session's tasklist (`[x]` done, `→` in
     progress, `[ ]` pending) with a `N/M done` footer; long lists scroll to

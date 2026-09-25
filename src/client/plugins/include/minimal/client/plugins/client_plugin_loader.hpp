@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,7 @@ enum class LoadStatus {
     MissingRequiredSymbol,  // not a minimal client plugin, or built against a different ABI header
     AbiMismatch,            // built against a different toolchain; rebuild it
     RegistrationThrew,      // a registration callback threw (see the server loader's history)
+    DuplicateName,          // an already-loaded plugin reported the same name
 };
 
 struct PluginCandidate {
@@ -100,6 +102,13 @@ public:
 
 private:
     PluginRecord LoadOne(const PluginCandidate& candidate);
+
+    // Names of the plugins this loader has LOADED. Attribution -- and so a
+    // failed hook's rollback, RemoveByAttribution(name) -- is keyed by name:
+    // a second library reporting a loaded plugin's name (both copies of a
+    // "replaced" bundled plugin enabled) could strip the healthy one's
+    // registrations when its own hook threw. Refused before any hook runs.
+    std::set<std::string> loaded_names_;
 
     ViewRegistry& views_;
     ToolResultRendererRegistry& renderers_;

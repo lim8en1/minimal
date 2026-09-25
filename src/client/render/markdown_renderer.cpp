@@ -563,7 +563,10 @@ private:
         Elements quoted;
         quoted.reserve(children.size());
         for (Element& child : children) {
-            quoted.push_back(ftxui::hbox({ftxui::text("> ") | Mute(), std::move(child)}));
+            // A bar that fills the child's full height: a one-row "> "
+            // text beside a wrapped paragraph marked only its first line.
+            quoted.push_back(ftxui::hbox(
+                {ftxui::separatorCharacter("│") | Mute(), ftxui::text(" "), std::move(child)}));
         }
         return ftxui::vbox(std::move(quoted));
     }

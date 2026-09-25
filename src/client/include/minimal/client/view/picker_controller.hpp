@@ -43,6 +43,7 @@
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/state.hpp"
+#include "minimal/client/view/filterable_menu.hpp"
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::client {
@@ -196,6 +197,26 @@ private:
     uint64_t picker_fetch_generation_ = 0;
     // The agent picker's list: fetched whole on each open (no pagination,
     // no sort -- agents/*.md is small and has no "recent" axis).
+    // Per picker: what its fetch is doing (rendered in the menu instead of
+    // its empty message) and the menu input carried across the component
+    // rebuilds each data arrival causes (filterable_menu.hpp's MenuMemory).
+    struct FetchState {
+        bool loading = false;
+        std::string error;
+        std::shared_ptr<MenuMemory> memory = std::make_shared<MenuMemory>();
+        MenuStatus Status() const { return MenuStatus{loading, error, memory}; }
+        // A fresh open forgets the last session's filter; a refresh keeps it.
+        void Begin(bool keep_input = false) {
+            loading = true;
+            error.clear();
+            if (!keep_input) memory = std::make_shared<MenuMemory>();
+        }
+    };
+    FetchState session_fetch_;
+    FetchState agent_fetch_;
+    FetchState model_fetch_;
+    FetchState subagent_fetch_;
+
     std::vector<v1::AgentPresetSummary> agent_picker_presets_;
     // The model picker's list: fetched whole on each open (refs are sorted
     // server-side; grouping is a pure display transform). No pagination --

@@ -15,6 +15,7 @@
 // never-a-chat-row half of the ruling holds now, enforced by the type split
 // below rather than by a check someone could forget.
 
+#include <chrono>
 #include <optional>
 #include <string>
 #include <vector>
@@ -45,10 +46,22 @@ enum class ChatRowKind {
 // name kinds by it.
 std::string_view ToString(ChatRowKind kind);
 
+inline constexpr int kSwitchSlot = -1;
+inline constexpr int kCompactionSlotBase = 1 << 20;
+
 struct ChatRow {
     // The transcript row this view row came from (first member: designated
     // initializers elsewhere stay declaration-ordered). -1 = synthetic.
     int64_t seq = -1;
+    // Which part of message `seq` this row renders -- a CONTENT identity,
+    // stable however the rest of the page changes: the source content
+    // block's index, kSwitchSlot for the divider ahead of the message, or
+    // kCompactionSlotBase + k for the k-th compaction after it. (seq, slot)
+    // is the chat view's per-row cache and geometry key. The old key --
+    // the row's occurrence index within its seq -- shifted whenever a
+    // pending tool_use row dropped out (its result arrived) or a divider
+    // came or went, and the cache then served one row's render for another.
+    int slot = 0;
     ChatRowKind kind;
     // UserText/AgentMarkdown/Thinking: the text itself. UserAttachment: the
     // framed block (the view extracts the path for the header). ToolActivity:
@@ -246,6 +259,11 @@ RowWindowSelection SelectRowWindow(const std::vector<RowSpan>& spans,
 // something -- which is when a stale "/theme x" or "/cost" line stops being
 // useful anyway. Picked by feel; tune if it reads as too eager or too sticky.
 inline constexpr int kNoticeTicksDefault = 20;
+// ...and never before it has been on screen this long. The ticks count
+// app-wide UI activity, and a background tab streaming deltas is activity
+// too: 20 ticks alone could clear a notice in well under a second, before
+// anyone read it.
+inline constexpr std::chrono::milliseconds kNoticeMinVisible{4000};
 
 // CommandResult -> transient notice line. The return type is deliberately not
 // a ChatRow and not convertible to one: a command result has no path into the
@@ -265,6 +283,8 @@ struct CommandNotice {
     // its default -- there is exactly one lifetime policy, not one per call
     // site.
     int ticks_remaining = kNoticeTicksDefault;
+    // When the notice was raised -- the kNoticeMinVisible floor.
+    std::chrono::steady_clock::time_point shown_at = std::chrono::steady_clock::now();
 };
 CommandNotice NoticeFromCommandResult(const v1::CommandResult& result);
 

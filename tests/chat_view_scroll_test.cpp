@@ -394,3 +394,37 @@ TEST_CASE("chat view: short content never scrolls and reports pinned") {
     (void)RenderElement(view.Render(snap), 80, 24);
     CHECK_FALSE(view.IsScrolledAway());
 }
+
+// Regression: the scroll position was an offset from the BOTTOM only, so a
+// reader parked mid-transcript slid along with every line landing below.
+TEST_CASE("chat view: scrolled away, content arriving below does not move the view") {
+    ChatViewFixture fx;
+    ChatView view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
+    const auto snap = SnapshotWithNumberedLines("s", 1, 60);
+
+    (void)RenderElement(view.Render(snap), 80, 24);
+    view.ScrollBy(1);
+    const auto parked = RenderElement(view.Render(snap), 80, 24);
+    const int parked_top = LowestVisibleLine(parked);
+    REQUIRE(view.IsScrolledAway());
+    // One frame with nothing new: the anchor is picked, nothing moves.
+    CHECK(LowestVisibleLine(RenderElement(view.Render(snap), 80, 24)) == parked_top);
+    CHECK_FALSE(view.HasUnseenBelow());
+
+    // A new 30-line message lands below.
+    auto grown = snap;
+    grown.transcript_version = 2;
+    std::string more;
+    for (int i = 0; i < 30; ++i) more += (i ? "\n" : "") + std::string("more ") + std::to_string(i);
+    auto page = *snap.scrollback_page;
+    page.insert(page.begin(), StoredUserText(2, more));
+    grown.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(page);
+    const auto after = RenderElement(view.Render(grown), 80, 24);
+    CHECK(LowestVisibleLine(after) == parked_top);
+    CHECK(view.IsScrolledAway());
+    CHECK(view.HasUnseenBelow());   // the frame's "new output below" hint
+
+    view.ScrollToBottom();
+    (void)RenderElement(view.Render(grown), 80, 24);
+    CHECK_FALSE(view.HasUnseenBelow());
+}

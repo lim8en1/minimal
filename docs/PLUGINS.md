@@ -41,7 +41,7 @@ Installed to `<libdir>/minimal/plugins/client/`.
 | `cost-view` | The `{cost}` status-bar segment (polls `cost-tracker.rpc`, renders cumulative $ / tokens) |
 | `ask-view` | The client half of `tool-ask`: the `ask` prompt renderer (the question modal) and the `ask` display renderer (the transcript row, expanded by default). Disabled, every ask is answered "unavailable" |
 | `mcp-view` | The `/mcp` picker: the `mcp` modal view (`view_hint` "mcp") over the `mcp` plugin's `mcp.endpoint` — lists servers with live status, Enter toggles one |
-| `checklist-view` | The `{todo}` status-bar segment + the `checklist.panel` view (both poll `checklist.rpc` through one shared worker; the panel toggles between a focused-tab tasklist and a per-tab summary; default binding `ctrl+k`) |
+| `checklist-view` | The `{todo}` status-bar segment + the `checklist.panel` view (both poll `checklist.rpc` through one shared worker; the panel toggles between a focused-tab tasklist and a per-tab summary; default binding `alt+l`) |
 
 ## User plugins (`user-plugins/`)
 

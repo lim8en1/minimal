@@ -333,7 +333,8 @@ Elements RenderToolActivityBlocks(const ChatRow& row, const Theme& theme,
     // a row of its own -- so a turn of many calls reads as a compact list.
     if (ctx.collapsed) {
         const std::string summary = SummarizeToolInput(row.tool_name, row.tool_input);
-        if (!summary.empty()) line.push_back(text("  " + summary) | Muted(theme));
+        // Shrinks first: the chat view right-aligns the row timestamp after it.
+        if (!summary.empty()) line.push_back(text("  " + summary) | Muted(theme) | flex_shrink);
         return {hbox(std::move(line))};
     }
 

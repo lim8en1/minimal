@@ -127,6 +127,9 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                                            out.host_focus_provider.get(),
                                            &out.prompt_registry);
         const auto records = loader.LoadAll(candidates);
+        for (const auto& record : records) {
+            if (record.ok()) out.loaded_plugins.push_back(record.name);
+        }
 
         // Provenance-keyed severity, mirrored from the server's sanity check:
         // a failed BUNDLED plugin is fatal (a silently missing renderer reads
@@ -210,21 +213,6 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         if (fatal) return false;
     }
 
-    // Loaded plugin names feed the theme's section check.
-    std::vector<std::string> loaded_plugins;
-    const auto collect_loaded = [&loaded_plugins](const std::vector<plugins::Attribution>& attributions) {
-        for (const auto& a : attributions) {
-            if (!a.plugin_name.empty()) loaded_plugins.push_back(a.plugin_name);
-        }
-    };
-    collect_loaded(out.view_registry.attributions());
-    collect_loaded(out.start_view_registry.attributions());
-    collect_loaded(out.renderer_registry.attributions());
-    collect_loaded(out.display_registry.attributions());
-    collect_loaded(out.prompt_registry.attributions());
-    collect_loaded(out.status_registry.attributions());
-    collect_loaded(out.grammar_registry.attributions());
-
     // ui.json's "theme" selects the file (themes/<name>.json); empty means
     // the built-in default. Previously hardcoded to "dark" regardless of
     // config, which made the bundled light.json -- and any user theme --
@@ -232,7 +220,8 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     const std::string theme_name = !out.ui.theme.empty() ? out.ui.theme : std::string("dark");
     out.theme.emplace([&] {
         try {
-            return Theme::Load(out.config_dir / "themes", theme_name, out.depth, &loaded_plugins);
+            return Theme::Load(out.config_dir / "themes", theme_name, out.depth,
+                               &out.loaded_plugins);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "minimal: %s; using terminal defaults\n", e.what());
             // An empty-but-valid document: "no colors set" is the fallback,
@@ -266,7 +255,16 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         // std::terminate). Contained like every other plugin call site:
         // logged, that view skipped, never fatal.
         try {
-            out.plugin_views.push_back(PluginViewEntry{view.get(), view->component(), false});
+            auto component = view->component();
+            // A null component is skipped like a throwing one: every event
+            // path downstream (keybinding dispatch, modal routing) calls
+            // into it unguarded.
+            if (component == nullptr) {
+                common::DefaultLogger().warn("plugin view '{}' returned no component; skipped",
+                                             view->spec().id);
+                continue;
+            }
+            out.plugin_views.push_back(PluginViewEntry{view.get(), std::move(component), false});
         } catch (const std::exception& error) {
             common::DefaultLogger().warn("plugin view '{}' threw on component(): {}",
                                          view->spec().id, error.what());

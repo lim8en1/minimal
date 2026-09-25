@@ -7,7 +7,7 @@ namespace minimal::client {
 
 ftxui::Component MakeSubagentPicker(const std::vector<v1::SessionSummary>& children,
                                     bool include_ended, const Theme& theme,
-                                    SubagentPickerCallbacks callbacks) {
+                                    SubagentPickerCallbacks callbacks, MenuStatus status) {
     auto build_rows = [children, include_ended](const std::string& filter) {
         std::vector<MenuRow> rows;
         for (const auto& row : BuildSubagentPickerRows(children, include_ended, filter)) {
@@ -57,7 +57,11 @@ ftxui::Component MakeSubagentPicker(const std::vector<v1::SessionSummary>& child
             },
     };
 
-    return MakeFilterableMenuModal(build_rows, spec, callbacks_out, theme);
+    FilterableMenuSpec with_status = spec;
+
+    with_status.status = std::move(status);
+
+    return MakeFilterableMenuModal(build_rows, with_status, callbacks_out, theme);
 }
 
 }  // namespace minimal::client

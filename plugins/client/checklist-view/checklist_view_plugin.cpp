@@ -20,7 +20,6 @@
 #include "checklist_panel_view.hpp"
 #include "checklist_feed.hpp"
 #include "minimal/client/plugins/client_plugin_abi.h"
-#include "minimal/common/abi_tag.hpp"
 
 namespace {
 
@@ -48,23 +47,27 @@ private:
 }  // namespace
 
 namespace {
-// One feed per process (this .so is never unloaded): whichever hook runs
-// first creates it, the second reuses it.
-std::shared_ptr<ChecklistFeed> shared_instance;
+// One feed for both hooks: whichever runs first creates it, the second
+// reuses it. WEAK: the registered segment and view own it, so it dies with
+// the host's registries -- while the ClientApi/FocusProvider seams its
+// worker calls are still alive. A strong static here kept the worker running
+// until static destruction at process exit, calling into seams RunTui had
+// already destroyed.
+std::weak_ptr<ChecklistFeed> shared_instance;
 std::shared_ptr<ChecklistFeed> SharedFeed(plugins::ClientApi* api,
                                           plugins::FocusProvider* focus) {
-    if (shared_instance == nullptr) {
-        shared_instance = std::make_shared<ChecklistFeed>(api, focus);
+    auto feed = shared_instance.lock();
+    if (feed == nullptr) {
+        feed = std::make_shared<ChecklistFeed>(api, focus);
+        shared_instance = feed;
     }
-    return shared_instance;
+    return feed;
 }
 }  // namespace
 
-extern "C" {
+MINIMAL_CLIENT_PLUGIN_ABI_SYMBOLS("checklist-view")
 
-const char* minimal_client_plugin_abi_tag() { return minimal::common::AbiTag(); }
-const char* minimal_client_plugin_name() { return "checklist-view"; }
-const char* minimal_client_plugin_version() { return minimal::common::Version(); }
+extern "C" {
 
 void minimal_client_plugin_register_status_segments(
     plugins::StatusSegmentRegistry& registry,

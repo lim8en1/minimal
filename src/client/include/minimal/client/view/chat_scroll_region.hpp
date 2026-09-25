@@ -54,6 +54,20 @@ struct ScrollState {
     // are screen coordinates; converting a row's box into content
     // coordinates (for row-cursor reveal) needs the viewport's own origin.
     int viewport_top_screen = 0;
+
+    // Top anchoring while scrolled away from the newest content. An offset
+    // from the BOTTOM alone slid a reader parked mid-transcript along with
+    // every line that streamed in below them. When set, `anchor` is the
+    // persistent Box of the row part that sat at the viewport's top in the
+    // previous layout, and `anchor_line` how many of its lines were above
+    // that top: the region keeps that line at the top, and the offset from
+    // the bottom grows instead. Ignored (offset-from-bottom rules) when null,
+    // or when the anchored part is not in this frame's tree.
+    std::shared_ptr<ftxui::Box> anchor;
+    int anchor_line = 0;
+    // Whether the last layout actually positioned by the anchor -- the
+    // owner adopts applied_offset_from_bottom as its offset when it did.
+    bool anchor_applied = false;
 };
 
 // Wraps `child` in the scroll region driven by `state`. Ownership is shared:

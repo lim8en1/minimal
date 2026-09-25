@@ -12,6 +12,7 @@
 #include <ftxui/component/component.hpp>
 
 #include "minimal/client/render/theme.hpp"
+#include "minimal/client/view/filterable_menu.hpp"
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::client {
@@ -22,6 +23,7 @@ struct AgentPickerCallbacks {
 };
 
 ftxui::Component MakeAgentPresetPicker(const std::vector<v1::AgentPresetSummary>& presets,
-                                       const Theme& theme, AgentPickerCallbacks callbacks);
+                                       const Theme& theme, AgentPickerCallbacks callbacks,
+    MenuStatus status = {});
 
 }  // namespace minimal::client

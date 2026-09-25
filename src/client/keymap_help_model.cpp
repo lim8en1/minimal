@@ -18,10 +18,11 @@ struct Group {
     const char* name;
     std::array<const char*, 4> prefixes;
 };
-constexpr std::array<Group, 6> kGroups = {{
+constexpr std::array<Group, 7> kGroups = {{
     {"tabs", {"tab.", "group.", "jump.", nullptr}},
     {"chat", {"chat.", nullptr, nullptr, nullptr}},
-    {"turn", {"turn.", "permission.", nullptr, nullptr}},
+    {"prompt", {"prompt.", nullptr, nullptr, nullptr}},
+    {"turn", {"turn.", "permission.", "session.pause", nullptr}},
     {"open", {"session.picker", "agent.picker", "model.picker", "help.overlay"}},
     {"panels", {"panel.", nullptr, nullptr, nullptr}},
     {"app", {"app.", nullptr, nullptr, nullptr}},
@@ -66,6 +67,7 @@ constexpr KnownAction kKnown[] = {
     {"chat.toggle_thinking_fold", "auto-fold / unfold thinking rows"},
     {"chat.toggle_tool_fold", "auto-fold / unfold tool rows"},
     {"chat.toggle_timestamps", "show / hide timestamps"},
+    {"prompt.newline", "insert a newline"},
     {"turn.cancel", "interrupt the turn"},
     {"permission.cycle", "cycle the permission mode"},
     {"session.pause", "pause / resume the agent (stops at the next tool boundary)"},

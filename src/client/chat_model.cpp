@@ -361,7 +361,7 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
             (!it->agent_preset().empty() || !it->model().empty())) {
             std::pair<std::string, std::string> speaker{it->agent_preset(), it->model()};
             if (last_speaker.has_value() && *last_speaker != speaker) {
-                ChatRow divider{.kind = ChatRowKind::Switch};
+                ChatRow divider{.slot = kSwitchSlot, .kind = ChatRowKind::Switch};
                 divider.switch_from_agent = last_speaker->first;
                 divider.switch_from_model = last_speaker->second;
                 rows.push_back(std::move(divider));
@@ -383,12 +383,15 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
         // runs regardless of which branch produced the rows.
         [&] {
             if (message.role() == v1::ROLE_ASSISTANT) {
-                for (const auto& block : message.content()) {
+                for (int b = 0; b < message.content_size(); ++b) {
+                    const auto& block = message.content(b);
                     if (block.has_text()) {
-                        rows.push_back(ChatRow{.kind = ChatRowKind::AgentMarkdown,
+                        rows.push_back(ChatRow{.slot = b,
+                                               .kind = ChatRowKind::AgentMarkdown,
                                                .text = block.text().text()});
                     } else if (block.has_thinking()) {
-                        rows.push_back(ChatRow{.kind = ChatRowKind::Thinking,
+                        rows.push_back(ChatRow{.slot = b,
+                                               .kind = ChatRowKind::Thinking,
                                                .text = block.thinking().text()});
                     } else if (block.has_tool_use()) {
                         // Computed ONCE, not once for the map entry and again
@@ -411,7 +414,8 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                         if (result_ids.count(block.tool_use().id()) != 0) {
                             continue;
                         }
-                        rows.push_back(ChatRow{.kind = ChatRowKind::ToolActivity,
+                        rows.push_back(ChatRow{.slot = b,
+                                               .kind = ChatRowKind::ToolActivity,
                                                .tool_name = block.tool_use().name(),
                                                .tool_input = std::move(input),
                                                .tool_pending = true});
@@ -443,9 +447,11 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                     rows.push_back(ChatRow{.kind = ChatRowKind::System, .text = std::move(joined)});
                     return;
                 }
-                for (const auto& block : message.content()) {
+                for (int b = 0; b < message.content_size(); ++b) {
+                    const auto& block = message.content(b);
                     const ToolCall* call = tool_call_of(block.tool_result().tool_use_id());
-                    ChatRow row{.kind = ChatRowKind::ToolActivity,
+                    ChatRow row{.slot = b,
+                                .kind = ChatRowKind::ToolActivity,
                                 .text = JoinResultText(block.tool_result()),
                                 .tool_name = call != nullptr ? call->name : std::string{},
                                 .tool_input = call != nullptr ? call->input : nlohmann::json::object(),
@@ -462,10 +468,13 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                 const auto& block = message.content(i);
                 if (!block.has_text()) continue;
                 if (i == 0) {
-                    rows.push_back(
-                        ChatRow{.kind = ChatRowKind::UserText, .text = block.text().text()});
+                    rows.push_back(ChatRow{.slot = i,
+                                           .kind = ChatRowKind::UserText,
+                                           .text = block.text().text()});
                 } else {
-                    ChatRow row{.kind = ChatRowKind::UserAttachment, .text = block.text().text()};
+                    ChatRow row{.slot = i,
+                                .kind = ChatRowKind::UserAttachment,
+                                .text = block.text().text()};
                     // The E3 frame: <file path="..."> / <file-tree path="...">.
                     const std::string& framed = block.text().text();
                     const auto open = framed.find("<file");
@@ -504,9 +513,12 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
         // live compaction arriving later never shifts the render-cache keys
         // of rows already drawn.
         if (compactions != nullptr) {
+            int k = 0;   // compactions are ascending by at_seq, arrival-stable
             for (const auto& evt : *compactions) {
                 if (evt.at_seq() != message_seq) continue;
-                ChatRow row{.seq = message_seq, .kind = ChatRowKind::Compaction,
+                ChatRow row{.seq = message_seq,
+                            .slot = kCompactionSlotBase + k++,
+                            .kind = ChatRowKind::Compaction,
                             .text = evt.summary()};
                 row.created_at_unix_ms = evt.created_at_unix_ms();
                 row.compaction_folded_messages = evt.folded_messages();

@@ -60,19 +60,38 @@ std::string ActivityLabel(SessionStateKind state,
 
 FrameRenderer::FrameRenderer(Dependencies deps) : deps_(std::move(deps)) {}
 
+bool FrameRenderer::GuardPluginCall(const std::string& key, const std::string& what,
+                                    const std::function<void()>& call) {
+    int& throws = plugin_throws_[key];
+    if (throws < 0) return false;   // disabled after repeated throws
+    std::string error;
+    try {
+        call();
+        throws = 0;
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+    } catch (...) {
+        error = "a non-standard exception";
+    }
+    if (++throws >= kPluginThrowLimit) {
+        common::DefaultLogger().error("{} threw {} times in a row ({}); disabled for this session",
+                                      what, kPluginThrowLimit, error);
+        throws = -1;
+    } else if (throws == 1) {
+        common::DefaultLogger().error("{} threw: {}", what, error);
+    }
+    return false;
+}
+
 ftxui::Elements FrameRenderer::RenderStartViews(const std::string& session_id) {
     using namespace ftxui;
     Elements out;
     for (const auto& view : deps_.start_view_registry.views()) {
-        try {
+        const std::string id(view->spec().id);
+        GuardPluginCall("start:" + id, "start view '" + id + "'", [&] {
             out.push_back(view->Render(session_id, deps_.theme) | center);
-        } catch (const std::exception& error) {
-            common::DefaultLogger().error("start view '{}' threw: {}",
-                                          std::string(view->spec().id), error.what());
-        } catch (...) {
-            common::DefaultLogger().error("start view '{}' threw a non-standard exception",
-                                          std::string(view->spec().id));
-        }
+        });
     }
     return out;
 }
@@ -216,24 +235,18 @@ ftxui::Element FrameRenderer::Render() {
                 // whose stable id has no slot for, so an empty (or short)
                 // vector here just means "nothing live rendered yet" --
                 // exactly right for this same race, not a null-deref risk.
-                if (!ui.chat) {
-                    ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
-                                                         deps_.renderer_registry,
-                                                         deps_.display_registry,
-                                                         deps_.toggle_collapse_hint,
-                                                         deps_.load_older_hint);
-                    ui.chat->SetFoldDefaults(deps_.fold_thinking_default,
-                                             deps_.fold_tool_default);
-                }
+                if (!ui.chat && deps_.ensure_chat_view) deps_.ensure_chat_view(focused, ui);
                 // ChatView::Render wraps its own ScrollRegion + vscroll_
                 // indicator (explicit line-offset scrolling -- see
                 // chat_scroll_region.hpp); yframe's focus-driven scroll
                 // would fight it. flex is the only outer decoration left.
                 rows.push_back(ui.chat->Render(snap, ui.live_text_streams) | flex);
                 // Scrolled up (or parked on a row) while the turn is still
-                // producing: the newest output lands below the viewport, and
-                // nothing said so. Outside the yframe, so it stays on screen.
-                const bool new_output_below = ui.chat->IsScrolledAway() && turn_busy;
+                // producing, or after output already landed below the
+                // viewport: nothing else says so. Outside the yframe, so it
+                // stays on screen.
+                const bool new_output_below =
+                    ui.chat->IsScrolledAway() && (turn_busy || ui.chat->HasUnseenBelow());
                 if (new_output_below) {
                     rows.push_back(text(" ↓ new output below · " + deps_.scroll_bottom_hint +
                                         " to follow") |
@@ -268,7 +281,12 @@ ftxui::Element FrameRenderer::Render() {
                     const std::size_t newline = remaining.find('\n', pos);
                     const std::size_t end =
                         newline == std::string_view::npos ? remaining.size() : newline;
-                    notice_lines.push_back(text(" " + std::string(remaining.substr(pos, end - pos))));
+                    // paragraph(), not text(): a line wider than the
+                    // terminal wraps inside the capped viewport instead of
+                    // losing its tail at the edge -- notices carry error
+                    // messages whose END is often the useful part.
+                    notice_lines.push_back(
+                        paragraph(" " + std::string(remaining.substr(pos, end - pos))));
                     if (newline == std::string_view::npos) break;
                     pos = newline + 1;
                 }
@@ -352,16 +370,9 @@ ftxui::Element FrameRenderer::Render() {
             // cannot protect against it.
             if (entry.component == nullptr) continue;
             Element body;
-            try {
-                body = entry.component->Render();
-            } catch (const std::exception& error) {
-                common::DefaultLogger().error("plugin view '{}' threw: {}",
-                                              std::string(entry.view->spec().id), error.what());
-                continue;
-            } catch (...) {
-                common::DefaultLogger().error(
-                    "plugin view '{}' threw a non-standard exception",
-                    std::string(entry.view->spec().id));
+            const std::string id(entry.view->spec().id);
+            if (!GuardPluginCall("panel:" + id, "plugin view '" + id + "'",
+                                 [&] { body = entry.component->Render(); })) {
                 continue;
             }
 
@@ -547,18 +558,13 @@ ftxui::Element FrameRenderer::Render() {
     // blocking) is stated on the interface; a THROW is contained (that
     // segment renders nothing for this frame), never fatal.
     for (const auto& segment : deps_.status_registry.segments()) {
-        try {
-            // Segments are SESSION-keyed (cost-view caches per focused
-            // session); the frame's focused handle is a TAB id, so the
-            // snapshot's session id goes out (empty = no tab / sessionless).
-            values[std::string(segment->id())] = segment->Render(focused_details.session_id);
-        } catch (const std::exception& error) {
-            common::DefaultLogger().error("status segment '{}' threw: {}",
-                                          std::string(segment->id()), error.what());
-        } catch (...) {
-            common::DefaultLogger().error("status segment '{}' threw a non-standard "
-                                          "exception", std::string(segment->id()));
-        }
+        // Segments are SESSION-keyed (cost-view caches per focused session);
+        // the frame's focused handle is a TAB id, so the snapshot's session
+        // id goes out (empty = no tab / sessionless).
+        const std::string id(segment->id());
+        GuardPluginCall("segment:" + id, "status segment '" + id + "'", [&] {
+            values[id] = segment->Render(focused_details.session_id);
+        });
     }
     rows.push_back(RenderStatusBar(deps_.status_format, values, deps_.theme,
                                    ftxui::Terminal::Size().dimx, emphasis));

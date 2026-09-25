@@ -714,10 +714,11 @@ TEST_CASE("confirmation modal: default focus is the cancel option, not the "
     CHECK(answers[0] == "cancel");
 }
 
-TEST_CASE("confirmation modal: with no cancel option, focus stays on the "
-          "first option") {
-    // The server's Yes/No confirms have no cancel option to default to;
-    // behavior there is unchanged from before this fix.
+TEST_CASE("confirmation modal: with no cancel option, the first Enter only arms it") {
+    // The server's Yes/No confirms have no cancel option to default to, so
+    // focus starts on "Yes" -- and a reflexive Enter (the user was mid-way
+    // through submitting a message) answered it. The first Enter now arms
+    // the modal, like the permission modal's rule; the second answers.
     const auto theme = TestTheme();
     PendingConfirmation request;
     request.kind = "wire_confirm";
@@ -729,6 +730,8 @@ TEST_CASE("confirmation modal: with no cancel option, focus stays on the "
     auto modal = MakeConfirmationModal(
         request, theme, [&](const std::string& chosen) { answers.push_back(chosen); });
 
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // arms
+    CHECK(answers.empty());
     REQUIRE(SendEvent(modal, ftx::Event::Return));
     REQUIRE(answers.size() == 1);
     CHECK(answers[0] == "Yes");

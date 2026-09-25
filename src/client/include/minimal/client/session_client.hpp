@@ -354,6 +354,18 @@ public:
         grpc::Status status;
     };
     ListSessionsResult ListSessions(const ListSessionsOptions& options);
+    // Every page of a listing, following the (updated_at, id) keyset cursor
+    // until a short page ends it. `options`' cursor fields are ignored (the
+    // walk starts at the first page); `options.limit` is the page size.
+    // `keep` filters rows as they arrive (null keeps all). On a failed page
+    // the rows gathered so far come back with that page's status.
+    struct ListAllSessionsResult {
+        std::vector<v1::SessionSummary> sessions;
+        grpc::Status status;
+    };
+    ListAllSessionsResult ListAllSessions(
+        ListSessionsOptions options,
+        const std::function<bool(const v1::SessionSummary&)>& keep = nullptr);
 
     // One stored row by id (the startup --resume probe). NOT_FOUND for an
     // unknown id; a subagent row answers normally with parent_session_id set.

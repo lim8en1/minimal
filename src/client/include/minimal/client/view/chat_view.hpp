@@ -113,7 +113,10 @@ public:
     // content instead of leaving it scrolled away from what just arrived.
     void ScrollToBottom() {
         scroll_from_bottom_lines_ = 0;
+        unseen_below_ = false;
         focused_row_.reset();
+        scroll_state_->anchor_applied = false;
+        anchor_suspended_ = true;
     }
 
     // True while the viewport is NOT pinned to the newest content -- scrolled
@@ -122,6 +125,20 @@ public:
     bool IsScrolledAway() const {
         return scroll_from_bottom_lines_ > 0 || focused_row_.has_value();
     }
+
+    // Content arrived below the viewport since the reader last was at the
+    // bottom -- the "new output below" hint's signal once the turn that
+    // produced it has ended (a post-turn refresh landing rows, say).
+    // Cleared by returning to the bottom.
+    // Whether screen row `y` is inside the viewport as last laid out. Click
+    // hit-tests and wheel routing gate on it: rows scrolled out of view keep
+    // their last boxes, which can overlap the panels and editor below.
+    bool ViewportContainsY(int y) const {
+        return scroll_state_->viewport_height > 0 && y >= scroll_state_->viewport_top_screen &&
+               y < scroll_state_->viewport_top_screen + scroll_state_->viewport_height;
+    }
+
+    bool HasUnseenBelow() const { return unseen_below_ && IsScrolledAway(); }
 
     // chat.toggle_timestamps: per-row clock display, layout-level (drawn by
     // this view directly, not a MessageRenderer concern -- see
@@ -237,7 +254,7 @@ private:
     // no-op when there is no cursor or nothing to measure it against.
     void RetireRowCursorToOffset();
 
-    using RowKey = std::pair<int64_t, int>;   // (transcript seq, occurrence within seq)
+    using RowKey = std::pair<int64_t, int>;   // (transcript seq, ChatRow::slot)
 
     // Four-tier collapse resolution for one row, most specific first: an
     // explicit per-row toggle > the global collapse-all choice > the
@@ -260,6 +277,11 @@ private:
     std::string load_older_hint_ = "pageup";
     uint64_t rendered_version_ = 0;   // transcript_version these rows came from
     std::string rendered_session_id_; // which tab they came from (see Render)
+    uint64_t rendered_rewind_epoch_ = 0;   // Snapshot::rewind_epoch the caches were keyed under
+    // Theme::epoch() the cached Elements were colored under: /theme swaps the
+    // theme in place, and every cached row kept the old palette until it
+    // happened to re-render.
+    uint64_t rendered_theme_epoch_ = 0;
     // ChatRowsFromMessages' own output, cached on scrollback_page's pointer
     // identity (see RebuildRows): a collapse-epoch-only rebuild reuses this
     // instead of re-walking the page.
@@ -307,6 +329,27 @@ private:
     // content. Ignored while focused_row_ has a value -- the row cursor
     // drives the offset instead (see Render()).
     int scroll_from_bottom_lines_ = 0;
+    // Top anchoring while scrolled away (ScrollState::anchor): the row part
+    // at the viewport's top in the last layout, and how many of its lines
+    // were above that top (negative: the top sat on the gap before it).
+    // Picked each frame from the last layout's boxes; suspended for the one
+    // frame after an explicit scroll, whose offset must apply as asked.
+    std::optional<std::pair<RowKey, std::size_t>> anchor_part_;
+    int anchor_line_ = 0;
+    bool anchor_suspended_ = true;
+    // The last layout positioned by the anchor: its offset from the bottom
+    // is the truth now (content grew below), so adopt it before anything
+    // reads or moves scroll_from_bottom_lines_.
+    bool unseen_below_ = false;
+    // What sits at the bottom of the column: the newest row's key, then the
+    // live block's shape. A change while scrolled away sets unseen_below_.
+    std::tuple<RowKey, std::size_t, std::size_t, std::size_t> bottom_signature_{};
+    void AdoptAnchoredOffset() {
+        if (!scroll_state_->anchor_applied) return;
+        scroll_from_bottom_lines_ = scroll_state_->applied_offset_from_bottom;
+        scroll_state_->anchor_applied = false;
+    }
+    void PickScrollAnchor();
     // Shared with the ScrollRegion node ChatView::Render wraps the column
     // in: desired offset in, applied offset + measured content/viewport
     // heights out (one frame stale, converging each layout pass).

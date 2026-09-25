@@ -16,6 +16,8 @@
 #include <string>
 #include <string_view>
 
+#include <ftxui/screen/string.hpp>
+
 namespace minimal::client {
 
 // ASCII-only lowercasing for case-insensitive filter matching (the pickers'
@@ -48,29 +50,32 @@ inline std::size_t Utf8CeilToBoundary(std::string_view text, std::size_t pos) {
     return pos;
 }
 
-// Terminal display columns for one code point, per the ranges East Asian
-// Width marks Wide/Fullwidth and the common emoji planes. Not a full wcwidth
-// (no ambient-charset awareness, no unassigned-code-point subtleties) but it
-// covers what actually overflows a tab budget: CJK text and emoji count 2,
-// not 1, which is the bug this replaced (codepoint counting under-measured
-// those labels 2x, so "budgeted" tab bars still clipped or wrapped).
+// Terminal display columns for one code point -- FTXUI's own table, the one
+// its renderer lays glyphs out by. The hand-kept range list this replaced
+// agreed with it for CJK but not for most emoji (U+1F680 transport, U+1FA70,
+// regional indicators) or zero-width joiners/variation selectors, so every
+// measurement built on it -- the prompt's wrap and caret column, tab-bar
+// budgets -- drifted from what was actually drawn on such text. Negative
+// (control characters) reads as 0: they draw nothing.
 inline std::size_t Utf8CharColumnWidth(char32_t cp) {
-    // Combining marks occupy no column of their own (they modify the
-    // preceding one).
-    if (cp >= 0x0300 && cp <= 0x036F) return 0;
-    if ((cp >= 0x1100 && cp <= 0x115F) ||    // Hangul Jamo leading consonants
-        (cp >= 0x2E80 && cp <= 0xA4CF) ||    // CJK radicals through Yijing hexagrams
-        (cp >= 0xAC00 && cp <= 0xD7A3) ||    // Hangul syllables
-        (cp >= 0xF900 && cp <= 0xFAFF) ||    // CJK compatibility ideographs
-        (cp >= 0xFE30 && cp <= 0xFE4F) ||    // CJK compatibility forms
-        (cp >= 0xFF00 && cp <= 0xFF60) ||    // fullwidth ASCII/forms
-        (cp >= 0xFFE0 && cp <= 0xFFE6) ||    // fullwidth symbols
-        (cp >= 0x1F300 && cp <= 0x1F64F) ||  // emoji (misc symbols and pictographs)
-        (cp >= 0x1F900 && cp <= 0x1F9FF) ||  // emoji (supplemental symbols)
-        (cp >= 0x20000 && cp <= 0x3FFFD)) {  // CJK extension planes B+
-        return 2;
+    if (cp < 0x80) return cp < 0x20 || cp == 0x7F ? (cp == U'\t' ? 1 : 0) : 1;
+    char buf[4];
+    std::size_t n = 0;
+    if (cp < 0x800) {
+        buf[n++] = static_cast<char>(0xC0 | (cp >> 6));
+        buf[n++] = static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        buf[n++] = static_cast<char>(0xE0 | (cp >> 12));
+        buf[n++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        buf[n++] = static_cast<char>(0x80 | (cp & 0x3F));
+    } else {
+        buf[n++] = static_cast<char>(0xF0 | (cp >> 18));
+        buf[n++] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        buf[n++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        buf[n++] = static_cast<char>(0x80 | (cp & 0x3F));
     }
-    return 1;
+    const int width = ftxui::string_width(std::string_view(buf, n));
+    return width > 0 ? static_cast<std::size_t>(width) : 0;
 }
 
 // Decodes the UTF-8 code point at text[*i] and advances *i past it. Malformed

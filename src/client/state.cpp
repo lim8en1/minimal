@@ -128,6 +128,7 @@ std::vector<LiveTurnSegment> SessionState::CopyLiveSegmentsLocked() const {
         s.segment_id = segment.segment_id;
         s.text_truncated = segment.text_truncated;
         s.tool_use_id = segment.tool_use_id;
+        s.final_tool = segment.final_tool;
         if ((segment.kind == LiveTurnSegment::Kind::Text ||
              segment.kind == LiveTurnSegment::Kind::Thinking) &&
             !segment.text.empty()) {
@@ -203,6 +204,8 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.turn_in_flight = turn_in_flight_ || !commands_in_flight_.empty();
     s.live_view_truncated = live_view_truncated_;
     s.transcript_version = transcript_version_;
+    s.fetch_generation = fetch_generation_;
+    s.rewind_epoch = rewind_epoch_;
     s.turn_ended = turn_ended_;
     s.scrollback_trimmed = scrollback_trimmed_;
     s.scrollback_gap = scrollback_gap_;
@@ -226,6 +229,14 @@ void SessionState::OnSessionCreated(std::string name) {
     std::lock_guard lk(mtx_);
     if (!name.empty()) display_name_ = std::move(name);
     state_ = SessionStateKind::Idle;
+}
+
+void SessionState::SeedDisplayNameIfUnset(std::string name) {
+    std::lock_guard lk(mtx_);
+    if (name.empty() || !display_name_.empty()) return;
+    display_name_ = std::move(name);
+    // The tools panel shows each row's session name (see OnSessionMetadata).
+    tools_version_.fetch_add(1, std::memory_order_release);
 }
 
 void SessionState::OnSessionMetadata(const v1::SessionMetadataEvent& metadata) {
@@ -479,12 +490,17 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
     thinking_turn_seq_ = turn_seq_;
     // Flat cap, same shape as streaming_accumulated_: truncate once, append
     // the marker, drop further deltas -- the transcript is authoritative.
-    if (thinking_truncated_) return;
-    thinking_accumulated_.append(text);
-    if (thinking_accumulated_.size() > kStreamingTextCapBytes) {
-        thinking_accumulated_ = TruncateUtf8(thinking_accumulated_, kStreamingTextCapBytes);
-        thinking_accumulated_.append(kStreamingTruncationMarker);
-        thinking_truncated_ = true;
+    // Only the BYTES are dropped: this used to return here, skipping the
+    // segment tracking and state update below, so a turn past 2 MiB of
+    // reasoning opened no further Thinking segments and never moved the tab
+    // to Thinking again (AppendStreamingText keeps its bookkeeping too).
+    if (!thinking_truncated_) {
+        thinking_accumulated_.append(text);
+        if (thinking_accumulated_.size() > kStreamingTextCapBytes) {
+            thinking_accumulated_ = TruncateUtf8(thinking_accumulated_, kStreamingTextCapBytes);
+            thinking_accumulated_.append(kStreamingTruncationMarker);
+            thinking_truncated_ = true;
+        }
     }
     // Segment tracking mirrors AppendStreamingText: a NEW Thinking segment
     // opens on a fresh turn (live_segments_ empty), a block boundary
@@ -620,6 +636,31 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     // (its own terminal event already closed it) is swept here exactly like
     // any other finished row -- only a LIVE one survives.
     {
+        // The turn's live Tool markers outlive this sweep -- they stay until
+        // the post-turn refresh retires them against the persisted rows --
+        // and the chat view used to render a marker whose row was swept as
+        // NOTHING. Whenever that refresh was late or never came, the turn's
+        // tool calls simply vanished. Each marker keeps a copy of its row's
+        // final state instead (output buffers dropped: the live row never
+        // renders them), so it renders the same until it retires.
+        for (auto& segment : live_segments_) {
+            if (segment.kind != LiveTurnSegment::Kind::Tool || segment.final_tool) continue;
+            for (const auto& t : tools_) {
+                if (t.tool_use_id != segment.tool_use_id || (t.is_background && t.started)) continue;
+                auto copy = std::make_shared<ToolExecutionState>();
+                copy->tool_use_id = t.tool_use_id;
+                copy->tool_name = t.tool_name;
+                copy->summary = t.summary;
+                copy->input = t.input;
+                copy->started_at_unix_ms = t.started_at_unix_ms;
+                copy->duration = t.duration;
+                copy->started = t.started;
+                copy->is_error = t.is_error;
+                copy->is_background = t.is_background;
+                segment.final_tool = std::move(copy);
+                break;
+            }
+        }
         const std::size_t before = tools_.size();
         tools_.erase(std::remove_if(tools_.begin(), tools_.end(),
                                     [](const ToolExecutionState& t) {
@@ -651,6 +692,7 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     // scrollback window; bumping the version is what makes the chat view
     // re-fetch and swap its streaming block for the real rows.
     ++transcript_version_;
+    ++fetch_generation_;
 }
 
 void SessionState::OnUsage(const v1::UsageEvent& evt) {
@@ -689,10 +731,12 @@ bool SessionState::ClearNotice() {
     return true;
 }
 
-void SessionState::TickNotice() {
+void SessionState::TickNotice(std::chrono::steady_clock::time_point now) {
     std::lock_guard lk(mtx_);
     if (!latest_notice_.has_value()) return;
-    if (--latest_notice_->ticks_remaining > 0) return;
+    if (latest_notice_->ticks_remaining > 0) --latest_notice_->ticks_remaining;
+    if (latest_notice_->ticks_remaining > 0) return;
+    if (now - latest_notice_->shown_at < kNoticeMinVisible) return;
     latest_notice_.reset();
     ++notice_seq_;
 }
@@ -1007,6 +1051,7 @@ void SessionState::OnResyncRequired(const std::string& reason) {
     // happened to fire MaybeGoIdleLocked next.
     MaybeGoIdleLocked();
     ++transcript_version_;
+    ++fetch_generation_;
     common::DefaultLogger().info("session {}: resync required ({})", session_id_, reason);
 }
 
@@ -1065,6 +1110,7 @@ void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_las
     // AppState::CurrentRewindEpoch(); DiscardStaleScrollbackPage above).
     refresh_succeeded_ = true;
     ++transcript_version_;
+    ++fetch_generation_;
     ++refresh_seq_;
     ++rewind_epoch_;
 }
@@ -1305,6 +1351,7 @@ void SessionState::OnToolFinished(const std::string& tool_use_id, const v1::Tool
                 // turn ends. Background rows stay out of it: their result
                 // row retires nothing (the live row outlives the ack).
                 ++transcript_version_;
+                ++fetch_generation_;
             }
             // Row status/duration the panel shows changed (see ToolsVersion).
             tools_version_.fetch_add(1, std::memory_order_release);
@@ -1399,6 +1446,7 @@ void SessionState::OnCompaction(const v1::CompactionEvent& evt) {
     cache_read_tokens_ = 0;
     cache_write_tokens_ = 0;
     ++transcript_version_;
+    ++fetch_generation_;
 }
 
 void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp, bool delta) {
@@ -2061,33 +2109,20 @@ std::string AppState::AttachSessionGroup(const std::string& session_id) {
     // here. Paged with the same (updated_at, id) cursor rule ListSessions
     // documents, until a short page says there is no more.
     std::vector<std::string> live_children;
-    std::optional<int64_t> before_updated_at;
-    std::optional<std::string> before_id;
-    for (;;) {
-        SessionClient::ListSessionsOptions opts;
-        opts.include_all_dirs = true;
-        opts.include_subagents = true;
-        opts.limit = 200;
-        opts.before_updated_at = before_updated_at;
-        opts.before_id = before_id;
-        const auto page = client_->ListSessions(opts);
-        if (!page.status.ok()) {
-            // The root tab is already open and usable; a failed listing must
-            // not undo it. The group just opens without its children.
-            common::DefaultLogger().warn("AttachSessionGroup({}): child listing failed: {}",
-                                         session_id, page.status.error_message());
-            break;
-        }
-        const auto& rows = page.response.sessions();
-        for (const auto& row : rows) {
-            if (row.parent_session_id() == session_id && row.is_live()) {
-                live_children.push_back(row.session_id());
-            }
-        }
-        if (rows.empty() || static_cast<int>(rows.size()) < opts.limit) break;
-        before_updated_at = rows[rows.size() - 1].updated_at_unix_ms();
-        before_id = rows[rows.size() - 1].session_id();
+    SessionClient::ListSessionsOptions opts;
+    opts.include_all_dirs = true;
+    opts.include_subagents = true;
+    opts.limit = 200;
+    const auto listed = client_->ListAllSessions(opts, [&](const v1::SessionSummary& row) {
+        return row.parent_session_id() == session_id && row.is_live();
+    });
+    if (!listed.status.ok()) {
+        // The root tab is already open and usable; a failed listing must not
+        // undo it. The group opens with whatever children were listed.
+        common::DefaultLogger().warn("AttachSessionGroup({}): child listing failed: {}",
+                                     session_id, listed.status.error_message());
     }
+    for (const auto& row : listed.sessions) live_children.push_back(row.session_id());
 
     // Children inherit the ROOT's ordinal, and only the root's: AttachTab's
     // grouping matches the group leader by "this ordinal, no parent" -- the
@@ -2206,7 +2241,9 @@ bool AppState::HasQueuedWork() const {
 // Reader-thread callback: route a ServerEvent to its owned tab. Defers subagent creation
 // until the app lock is released, so opening a child stream never happens while held.
 void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEvent& event) {
-    BumpUiVersion();   // every wire event can change what the frame renders
+    // Every wire event can change what the frame renders; bumped on the way
+    // out, once the event has been applied.
+    const UiVersionBumpOnExit bump{*this};
     // The exclusive chat surface sees EVERY event for the session, before
     // core's handling (docs/EXTENSIBILITY.md 4.2: the host pushes, the surface
     // owns its presentation; core's data plane runs regardless). Reader
@@ -2427,15 +2464,12 @@ void AppState::OnSubagentSpawned(std::string_view parent_id, const v1::SubagentS
     // mints the row with name=""), so the child tab's label used to fall back
     // to the raw session id until -- if ever -- a naming observer ran. The
     // event's `task` (the parent model's own formulation of the job) is the
-    // natural title; seed it ONLY while the tab is still unnamed and idle, so
-    // a real SessionMetadataEvent name always wins and a racing live turn is
-    // never disturbed.
+    // natural title; seed it ONLY while the tab is still unnamed, so a real
+    // SessionMetadataEvent name always wins. The seed never touches the
+    // child's derived state, so a racing live turn is not disturbed.
     if (!evt.task().empty()) {
         if (auto child_state = GetState(evt.child_session_id())) {
-            const auto snap = child_state->TakeLightSnapshot();
-            if (snap.display_name.empty() && snap.state == SessionStateKind::Idle) {
-                child_state->OnSessionCreated(evt.task());
-            }
+            child_state->SeedDisplayNameIfUnset(evt.task());
         }
     }
 
@@ -2444,7 +2478,7 @@ void AppState::OnSubagentSpawned(std::string_view parent_id, const v1::SubagentS
 }
 
 void AppState::CloseTab(const std::string& tab_id) {
-    BumpUiVersion();
+    const UiVersionBumpOnExit bump{*this};
     std::shared_ptr<SessionClient::Stream> to_close;
     bool was_focused = false;
     {
@@ -2478,13 +2512,18 @@ void AppState::CloseTab(const std::string& tab_id) {
             }
         }
     }
-    if (to_close) to_close->Close();   // bare drop: the server reads it as a DETACH
+    // Bare drop (the server reads it as a DETACH), off the loop thread --
+    // see closer_.
+    // Inline once the closer has stopped (shutdown): nothing may leak.
+    if (to_close && !closer_.Submit([to_close] { to_close->Close(); }, /*must_run=*/true)) {
+        to_close->Close();
+    }
 }
 
 void AppState::EndTabSessions(const std::vector<std::string>& tab_ids, EndSessionMode mode) {
     // Same shape as CloseTab/DetachAllTabs: copy the streams out from under
-    // the lock, act on the copies outside it -- Detach() drains and joins
-    // the writer (bounded), which must never happen under mtx_.
+    // the lock -- Detach() drains and joins the writer (bounded), which must
+    // never happen under mtx_ (nor, now, on the loop thread).
     std::vector<std::shared_ptr<SessionClient::Stream>> to_end;
     {
         std::lock_guard lk(mtx_);
@@ -2497,11 +2536,17 @@ void AppState::EndTabSessions(const std::vector<std::string>& tab_ids, EndSessio
             }
         }
     }
-    for (auto& stream : to_end) stream->Detach(mode);
+    // Off the loop thread (see closer_), ahead of the Close a following
+    // CloseTab queues for the same stream.
+    for (auto& stream : to_end) {
+        if (!closer_.Submit([stream, mode] { stream->Detach(mode); }, /*must_run=*/true)) {
+            stream->Detach(mode);   // shutdown: the closer has stopped
+        }
+    }
 }
 
 void AppState::SetFocusedTab(const std::string& tab_id) {
-    BumpUiVersion();
+    const UiVersionBumpOnExit bump{*this};
     std::lock_guard lk(mtx_);
     // FindTab, not HasTab: HasTab locks mtx_ itself, and this mutex is not
     // recursive -- calling it here would deadlock every caller, including
@@ -2960,7 +3005,7 @@ void AppState::AnswerPermission(const std::string& session_id, const std::string
                                 v1::PermissionDecision decision,
                                 std::vector<std::string> granted_keys, std::string deny_message,
                                 bool stop_turn) {
-    BumpUiVersion();
+    const UiVersionBumpOnExit bump{*this};
     // Mirror the wire guarantee (see ARCHITECTURE.md consent scoping): only keys actually
     // offered by the PermissionRequest may be answered. The server filters extras too, but
     // answering is a local no-op here so the round-trip stays cheap.
@@ -3008,7 +3053,7 @@ void AppState::AnswerPermission(const std::string& session_id, const std::string
 
 void AppState::AnswerConfirmation(const std::string& session_id, const std::string& request_id,
                                   const std::string& chosen_option) {
-    BumpUiVersion();
+    const UiVersionBumpOnExit bump{*this};
     auto stream = GetStream(session_id);
     if (!stream) {
         if (auto state = GetState(session_id)) {
@@ -3045,6 +3090,10 @@ void AppState::AnswerConfirmation(const std::string& session_id, const std::stri
 
 void AppState::AnswerPluginPrompt(const std::string& session_id, const std::string& request_id,
                                   v1::PromptOutcome outcome, const std::string& answer_json) {
+    // Every outcome changes what the frame shows: the modal closes on
+    // success, the notice appears on failure. The success path used to bump
+    // nothing, so the answered modal stayed up until some other event.
+    const UiVersionBumpOnExit bump{*this};
     auto stream = GetStream(session_id);
     if (!stream) {
         if (auto state = GetState(session_id)) {
@@ -3119,7 +3168,8 @@ void AppState::SendCommand(const std::string& session_id, const std::string& lin
 }
 
 void AppState::SendCancel(const std::string& session_id) {
-    BumpUiVersion();   // the "cancelling…" hint renders this frame, not the next event's
+    // The "cancelling…" hint renders this frame, not the next event's.
+    const UiVersionBumpOnExit bump{*this};
     auto stream = GetStream(session_id);
     if (!stream) {
         if (auto state = GetState(session_id)) {
@@ -3153,7 +3203,7 @@ void AppState::SendCancel(const std::string& session_id) {
 }
 
 void AppState::SendCancelQueuedTurn(const std::string& session_id, std::uint64_t turn_id) {
-    BumpUiVersion();
+    const UiVersionBumpOnExit bump{*this};
     auto stream = GetStream(session_id);
     if (!stream) {
         if (auto state = GetState(session_id)) {
@@ -3399,6 +3449,11 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
         // unbounded worker occupation.
         const bool delta = newest && delta_cursor >= 0;
         int64_t after = delta_cursor;
+        // Whether every page this job asked for actually applied. The turn-end
+        // coarse clear below is only sound when the persisted rows replacing
+        // the live ones are in the window -- clearing after a failed fetch
+        // blanked the turn's live rows until a retry happened to succeed.
+        bool applied_all = true;
         for (int page = 0; page < 50; ++page) {
             v1::GetMessagesResponse resp;
             grpc::ClientContext context;
@@ -3418,14 +3473,15 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
                 !status.ok()) {
                 // Resolve the attempt without applying anything: the fetch that
                 // opened the mismatch is still open, so the next frame's
-                // maintain() sees transcript_version != rendered_version again
+                // maintain() sees fetch_generation != fetched_generation again
                 // and retries -- this used to be a dead comment ("the next
                 // trigger retries") because the loop-thread caller had already
-                // latched rendered_version to the pre-refresh version before
+                // latched the rendered state to the pre-refresh version before
                 // this failure was known. The status message rides along: the
                 // failure streak's user-visible notice (NoteRefreshFailed) names
                 // WHY the transcript stopped moving.
                 state->NoteRefreshFailed(status.error_message());
+                applied_all = false;
                 break;
             }
             if (state->CurrentRewindEpoch() != rewind_epoch_at_submit) {
@@ -3435,6 +3491,7 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
                 // rows the rewind just cut, or hide the redo's restored ones
                 // behind a page keyed to seqs that no longer mean what they did).
                 state->DiscardStaleScrollbackPage();
+                applied_all = false;
                 break;
             }
             state->ApplyScrollbackPage(resp, /*delta=*/delta);   // bumps transcript_version + refresh_seq
@@ -3444,7 +3501,7 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
             if (resp.messages().empty() || !resp.has_more()) break;
             after = resp.messages().rbegin()->seq();   // ascending: last row is the newest
         }
-        if (newest && turn_ended_at_submit) {
+        if (newest && turn_ended_at_submit && applied_all) {
             // Turn-end refresh only: coarsely retire the covered turns' live
             // material. A mid-turn fetch (turn_ended_at_submit == false)
             // relies on the apply's content-matched retirement alone -- see
@@ -3457,12 +3514,22 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
 }
 
 uint64_t AppState::ToolsVersion() const {
+    // A hash over (tab, version) pairs, not a plain sum: after a tab closes,
+    // the survivors' bumps could walk a sum back to a value the panel cache
+    // already holds (same tab count too), and the cache served a stale panel.
     std::lock_guard lk(mtx_);
-    uint64_t sum = 0;
+    uint64_t h = 14695981039346656037ull;   // FNV-1a
+    const auto mix = [&h](uint64_t v) {
+        for (int i = 0; i < 8; ++i) {
+            h ^= (v >> (i * 8)) & 0xff;
+            h *= 1099511628211ull;
+        }
+    };
     for (const auto& tab : tabs_) {
-        sum += tab.info.state->ToolsVersion();
+        mix(std::hash<std::string>{}(tab.info.tab_id));
+        mix(tab.info.state->ToolsVersion());
     }
-    return sum;
+    return h;
 }
 
 std::vector<AppState::TabSnapshot> AppState::GetAllTabs(bool include_tool_output) const {

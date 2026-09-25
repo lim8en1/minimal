@@ -7,7 +7,7 @@ namespace minimal::client {
 
 ftxui::Component MakeSessionPicker(const std::vector<v1::SessionSummary>& sessions,
                                    bool include_all_dirs, bool has_more, const Theme& theme,
-                                   SessionPickerCallbacks callbacks) {
+                                   SessionPickerCallbacks callbacks, MenuStatus status) {
     // Sort is this picker's own display-only state (picker_model.hpp: a
     // pure transform, no host round trip) -- lives outside MenuState, which
     // filterable_menu.cpp owns and knows nothing about sort.
@@ -91,7 +91,11 @@ ftxui::Component MakeSessionPicker(const std::vector<v1::SessionSummary>& sessio
             },
     };
 
-    return MakeFilterableMenuModal(build_rows, spec, callbacks_out, theme);
+    FilterableMenuSpec with_status = spec;
+
+    with_status.status = std::move(status);
+
+    return MakeFilterableMenuModal(build_rows, with_status, callbacks_out, theme);
 }
 
 }  // namespace minimal::client

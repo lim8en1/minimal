@@ -27,6 +27,8 @@
 #include <string>
 #include <vector>
 
+#include <functional>
+
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 
@@ -81,11 +83,11 @@ public:
         std::string session_picker_hint = "ctrl+o";
         std::string load_older_hint = "pageup";
         std::string scroll_bottom_hint = "pagedown";   // the "new output below" line
-        // ui.json's fold_thinking/fold_tools (kFoldDefaultAuto when unset),
-        // seeded into the fallback ChatView built here -- the startup fold
-        // tier IsCollapsed consults below the global collapse choice.
-        int fold_thinking_default = kFoldDefaultAuto;
-        int fold_tool_default = kFoldDefaultAuto;
+        // Builds a tab's ChatView when a frame reaches a tab the maintenance
+        // pass has not processed yet (TabMaintenance::EnsureChatView -- the
+        // one builder, so this path gets the same hints, fold defaults and
+        // click-to-cancel handler).
+        std::function<void(const std::string& tab_id, TabUi& ui)> ensure_chat_view;
     };
 
     explicit FrameRenderer(Dependencies deps);
@@ -101,6 +103,18 @@ private:
     ftxui::Elements RenderStartViews(const std::string& session_id);
 
     Dependencies deps_;
+
+    // Per-frame plugin calls (start views, panels, status segments) run in
+    // GuardPluginCall: a throw is contained, logged ONCE (not at frame rate
+    // -- a broken segment used to write an error line per repaint), and
+    // after kPluginThrowLimit consecutive throws the call is skipped for the
+    // rest of the session, the way a throwing chat surface is disabled.
+    // Returns whether `call` ran and returned normally. `key` names the
+    // plugin surface ("segment:todo"); `what` is the log's noun.
+    static constexpr int kPluginThrowLimit = 3;
+    bool GuardPluginCall(const std::string& key, const std::string& what,
+                         const std::function<void()>& call);
+    std::map<std::string, int> plugin_throws_;   // consecutive, per key; -1 = disabled
 
     // Tools-panel render cache: RenderToolsPanel's input fetches every tab's
     // tool rows (state.hpp's copy-on-publish `buffered_output` -- cheap since

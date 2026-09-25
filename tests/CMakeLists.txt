@@ -155,7 +155,6 @@ add_executable(minimal_tests
     app_state_test.cpp
     view_factory_test.cpp
     chat_view_scroll_test.cpp
-    tab_ui_test.cpp
     tab_bar_test.cpp
     status_bar_test.cpp
     utf8_test.cpp

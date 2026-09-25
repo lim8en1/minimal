@@ -114,3 +114,14 @@ TEST_CASE("SanitizeUtf8 repairs malformed sequences, leaves valid input untouche
     const std::string valid = "\xE6\x97\xA5\xE6\x9C\xAC";
     CHECK(SanitizeUtf8(valid) == valid);
 }
+
+TEST_CASE("Utf8CharColumnWidth follows the renderer's table, emoji planes included",
+          "[utf8][regression]") {
+    using minimal::client::Utf8CharColumnWidth;
+    // The old hand-kept ranges missed the transport block: a rocket measured
+    // 1 column while FTXUI drew 2, so the prompt caret drifted after one.
+    CHECK(Utf8CharColumnWidth(U'\U0001F680') == 2);
+    CHECK(Utf8CharColumnWidth(U'中') == 2);   // CJK, unchanged
+    CHECK(Utf8CharColumnWidth(U'a') == 1);
+    CHECK(Utf8CharColumnWidth(U'́') == 0);   // combining acute
+}

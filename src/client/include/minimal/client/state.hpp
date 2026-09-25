@@ -148,9 +148,16 @@ struct LiveTurnSegment {
     // truncation is presentation-only.
     bool text_truncated = false;
     // Kind::Tool: which tool -- cross-referenced against Snapshot::tools by
-    // id at render time; this struct carries no tool state of its own so
-    // ToolExecutionState stays the single source of truth for it.
+    // id at render time, so ToolExecutionState stays the single source of
+    // truth while the row lives in SessionState::tools_.
     std::string tool_use_id;
+    // Kind::Tool: the row's final state, captured when OnTurnCompleted sweeps
+    // it out of tools_ (output buffers not carried). The marker outlives that
+    // sweep until the post-turn refresh retires it; without this copy it had
+    // nothing to render and the turn's tool calls vanished whenever that
+    // refresh was late. Null while the row is still in tools_. Shared and
+    // immutable, so snapshots copy a pointer.
+    std::shared_ptr<const ToolExecutionState> final_tool;
 
     // Snapshot-facing read of this segment's text: the published view when
     // one is carried, empty when not (Tool markers, empty segments). Callers
@@ -333,6 +340,22 @@ public:
         // The view compares its cached value to decide a refresh; no timer.
         uint64_t transcript_version = 0;
 
+        // Bumped only by events that mean "the server has persisted rows the
+        // window does not hold yet" (a tool round finished, the turn
+        // completed, a resync, a rewind, a compaction) -- NOT by a page
+        // apply. The refresh state machine (scrollback_refresh.hpp) keys on
+        // THIS rather than on transcript_version: an apply bumps
+        // transcript_version to re-render, and when "fetch needed" and
+        // "re-render" shared one counter, a fetch that resolved after a newer
+        // trigger marked that trigger handled too -- the turn-end fetch never
+        // ran and the final round's tool rows vanished until restart.
+        uint64_t fetch_generation = 0;
+
+        // SessionState's rewind epoch (CurrentRewindEpoch): a rewind/redo
+        // moved the transcript under the window, and later appends REUSE the
+        // cut seqs -- anything a view cached by seq is stale when this moves.
+        uint64_t rewind_epoch = 0;
+
         // True when older-page loads evicted pages from the window's NEWEST
         // end to hold the cap: the top of the window is no longer the live
         // newest message, so the view renders a boundary marker instead of a
@@ -479,6 +502,12 @@ public:
 
     // --- Session lifecycle ---
     void OnSessionCreated(std::string name);
+    // Names the tab only while it has no name yet, atomically (one lock) and
+    // without touching the derived state -- the subagent-spawn seed. The old
+    // check-snapshot-then-OnSessionCreated pair raced the child's own reader
+    // thread, and OnSessionCreated's state_ = Idle could knock a child that
+    // had just started working back to Idle.
+    void SeedDisplayNameIfUnset(std::string name);
     void OnSessionMetadata(const v1::SessionMetadataEvent& metadata);
 
     // Sessionless-tab support. A tab's SessionState is constructed before its
@@ -564,7 +593,7 @@ public:
     // from TabMaintenance::Run for whichever tab is focused. A no-op when
     // there is no notice showing, so ticking an idle tab with nothing to
     // expire costs nothing beyond the check.
-    void TickNotice();
+    void TickNotice(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
 
     // True while any tool is mid-call (started, not yet finished). A plain
     // scan, not a copy -- unlike CopyToolsLocked, this never touches
@@ -862,6 +891,7 @@ private:
     int64_t last_loaded_seq_ = -1;      // oldest seq loaded so far (descending)
     bool has_earlier_ = false;
     uint64_t transcript_version_ = 0;
+    uint64_t fetch_generation_ = 0;   // see Snapshot::fetch_generation
     uint64_t refresh_seq_ = 0;   // see Snapshot::refresh_seq
     uint64_t rewind_epoch_ = 0;   // see CurrentRewindEpoch
     bool refresh_succeeded_ = false;   // outcome of the attempt that bumped refresh_seq_
@@ -1464,7 +1494,7 @@ public:
         return ui_version_.load(std::memory_order_acquire);
     }
 
-    // Sum of every tab's SessionState::ToolsVersion -- "did anything the
+    // A hash of every tab's (id, SessionState::ToolsVersion) -- "did anything the
     // running-tools panel renders change on ANY tab". The panel's render
     // cache keys on this (plus the tab count and the theme epoch, see
     // frame_renderer.hpp) instead of UiVersion, so text/thinking deltas --
@@ -1480,7 +1510,12 @@ public:
     // SessionState/AppState the same way a reader thread's dispatch does,
     // and CloseAllTabs() tears down the very tabs a straggling job would
     // publish into.
-    void StopRpcQueue() { rpc_queue_.Stop(); }
+    // Also drains the stream closer (see closer_): every queued Detach/Close
+    // runs before this returns, so no stream thread outlives AppState.
+    void StopRpcQueue() {
+        rpc_queue_.Stop();
+        closer_.Stop();
+    }
 
     // True if the RPC worker has a job queued or running -- callable before
     // StopRpcQueue() to decide whether its join (unbounded against whatever
@@ -1574,6 +1609,14 @@ private:
 
     std::atomic<uint64_t> ui_version_{0};
     void BumpUiVersion() { ui_version_.fetch_add(1, std::memory_order_acq_rel); }
+    // Bumps on scope exit, i.e. AFTER the mutation the bump announces. A
+    // bump at a method's entry let the pump post, and TabMaintenance latch
+    // the new version, before the change landed -- that frame rendered the
+    // old state and nothing re-rendered it until an unrelated event.
+    struct UiVersionBumpOnExit {
+        AppState& app;
+        ~UiVersionBumpOnExit() { app.BumpUiVersion(); }
+    };
 
     // T2: the async unary RPC worker backing RequestScrollback (and, over
     // time, the other calls app.cpp used to make on the loop thread). One
@@ -1581,6 +1624,13 @@ private:
     // ordering for free, so e.g. a queued delete can never race ahead of a
     // list queued after it.
     RpcQueue rpc_queue_;
+    // Stream teardown off the loop thread: Stream::Close/Detach join the
+    // reader and writer (Detach waits up to ~2 s each on a wedged server),
+    // and CloseTab/EndTabSessions used to pay that on the UI thread -- the
+    // whole TUI froze for seconds per stream in a group. The tab leaves the
+    // model at once; its stream closes here, in FIFO order (a group's
+    // Detach runs before its Close). Drained, not discarded, on stop.
+    RpcQueue closer_{1024, /*drain_on_stop=*/true};
     std::vector<std::pair<std::string, v1::SubagentStartedEvent>> pending_subagents_;   // deferred
     // Fast-path skip for DispatchToTab's drain step (see .cpp): true only
     // while pending_subagents_ actually holds something. Every call to

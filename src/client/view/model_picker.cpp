@@ -6,7 +6,7 @@
 namespace minimal::client {
 
 ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
-                                 const Theme& theme, ModelPickerCallbacks callbacks) {
+                                 const Theme& theme, ModelPickerCallbacks callbacks, MenuStatus status) {
     auto build_rows = [models, callbacks](const std::string& filter) {
         std::vector<MenuRow> rows;
         // The leading row first, so it tops the list and survives every
@@ -58,7 +58,11 @@ ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
             },
     };
 
-    return MakeFilterableMenuModal(build_rows, spec, callbacks_out, theme);
+    FilterableMenuSpec with_status = spec;
+
+    with_status.status = std::move(status);
+
+    return MakeFilterableMenuModal(build_rows, with_status, callbacks_out, theme);
 }
 
 }  // namespace minimal::client

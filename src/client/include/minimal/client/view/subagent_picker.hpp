@@ -13,6 +13,7 @@
 #include <ftxui/component/component.hpp>
 
 #include "minimal/client/render/theme.hpp"
+#include "minimal/client/view/filterable_menu.hpp"
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::client {
@@ -30,6 +31,7 @@ struct SubagentPickerCallbacks {
 
 ftxui::Component MakeSubagentPicker(const std::vector<v1::SessionSummary>& children,
                                     bool include_ended, const Theme& theme,
-                                    SubagentPickerCallbacks callbacks);
+                                    SubagentPickerCallbacks callbacks,
+    MenuStatus status = {});
 
 }  // namespace minimal::client

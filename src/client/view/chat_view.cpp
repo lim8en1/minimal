@@ -199,7 +199,12 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
     // version check in Render() only decides WHETHER to rebuild).
     // global_collapse_ is NOT keyed by row, so it survives a tab switch --
     // "show me everything expanded" is a reasonable preference to carry over.
-    if (rendered_session_id_ != snapshot.session_id) {
+    // A rewind/redo cuts rows whose seqs the next appends REUSE for
+    // different content: everything keyed by seq is as stale as another
+    // session's would be.
+    if (rendered_session_id_ != snapshot.session_id ||
+        rendered_rewind_epoch_ != snapshot.rewind_epoch) {
+        rendered_rewind_epoch_ = snapshot.rewind_epoch;
         row_cache_.clear();
         collapse_overrides_.clear();
         focused_row_.reset();
@@ -248,20 +253,19 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
     row_collapsed_.reserve(rows.size());
     const std::vector<bool> continuations = LabelContinuations(rows);
 
-    // Per-row cache keyed by (seq, occurrence within seq, resolved collapsed
-    // state): a version bump re-renders only rows the page did not already
-    // have; a collapse-epoch bump (no version change) re-renders only the
-    // rows whose RESOLVED state actually changed -- everything else still
-    // hits cache under its unchanged key. Same-key rows from one message are
-    // stable (a message's row decomposition is deterministic), so a cached
-    // hit is always the same visual content.
+    // Per-row cache keyed by (seq, content slot, resolved collapsed state):
+    // a version bump re-renders only rows the page did not already have; a
+    // collapse-epoch bump (no version change) re-renders only the rows whose
+    // RESOLVED state actually changed -- everything else still hits cache
+    // under its unchanged key. The slot names the source content block
+    // (ChatRow::slot), so a key means the same content however the rest of
+    // the page changes; a rewind, which reuses seqs, drops the whole cache
+    // (rewind_epoch, above).
     std::map<std::tuple<int64_t, int, bool, bool>, ftxui::Elements> fresh_cache;
     std::map<RowKey, bool> fresh_resolved;
-    std::map<int64_t, int> occurrences;
 
     for (const auto& row : rows) {
-        const int occurrence = occurrences[row.seq]++;
-        const RowKey row_key = std::make_pair(row.seq, occurrence);
+        const RowKey row_key = std::make_pair(row.seq, row.slot);
         row_keys_.push_back(row_key);
         row_timestamps_.push_back(row.created_at_unix_ms);
         const bool collapsed = IsCollapsed(row_key, row);
@@ -282,7 +286,7 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
             .collapse_marker = ClickCollapsible(row.kind) ? (collapsed ? "▸" : "▾")
                                                           : std::string_view(""),
             .continuation = continuation};
-        const auto key = std::make_tuple(row.seq, occurrence, collapsed, continuation);
+        const auto key = std::make_tuple(row.seq, row.slot, collapsed, continuation);
 
         ftxui::Elements parts;
         const auto cached = row_cache_.find(key);
@@ -425,7 +429,9 @@ ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const
             ? OneLineSummary(*tool.summary)
             : SummarizeToolInput(tool.tool_name, tool.input);
     if (!summary.empty()) {
-        line.push_back(text("  " + summary) | Muted(theme_));
+        // The one part allowed to shrink: a long summary used to push the
+        // elapsed/clock fields after it off the edge of the row.
+        line.push_back(text("  " + summary) | Muted(theme_) | flex_shrink);
     }
     // THE BUG this closes: a live "bash, bash, bash" list had no clock or
     // elapsed anywhere, so a stuck step and a running one looked identical
@@ -565,6 +571,18 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // this check is the same invariant enforced at the unit-testable seam.
     // collapse_epoch_ catches a collapse toggle: it changes no
     // transcript_version, so nothing else here would notice it happened.
+    // Before RebuildRows: the anchor is picked by key from the geometry of
+    // the rows the LAST layout contained, which the rebuild re-indexes.
+    AdoptAnchoredOffset();
+    PickScrollAnchor();
+    if (rendered_theme_epoch_ != theme_.epoch()) {
+        rendered_theme_epoch_ = theme_.epoch();
+        row_cache_.clear();
+        thinking_render_cache_.clear();
+        assembly_valid_ = false;
+        ++collapse_epoch_;   // forces RebuildRows below (spans stay: heights are unchanged)
+        spans_epoch_ = collapse_epoch_;
+    }
     if (rendered_version_ != snapshot.transcript_version ||
         rendered_session_id_ != snapshot.session_id ||
         rendered_collapse_epoch_ != collapse_epoch_) {
@@ -1075,11 +1093,11 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                     break;
                 }
             }
-            // Not found: swept from snapshot.tools between OnTurnCompleted
-            // and the post-turn refresh applying (a brief window; the
-            // persisted rows are about to replace this whole section
-            // anyway) -- render nothing for this marker rather than stale
-            // or crashing.
+            // Not found: OnTurnCompleted swept the row, and the marker is
+            // waiting for the post-turn refresh to retire it. It carries the
+            // row's final state for exactly this window -- rendering nothing
+            // here is how a late refresh made the turn's tool calls vanish.
+            if (tool == nullptr) tool = segment.final_tool.get();
             if (tool != nullptr) {
                 column.push_back(WithGutter(RenderLiveToolRow(*tool), assistant_gutter));
                 // Consecutive calls stack as a list, like the settled rows.
@@ -1095,9 +1113,11 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // explicit offset-from-bottom in lines -- no focus() marker anywhere in
     // the column anymore. 0 (the default) pins to the newest content,
     // including the live streaming block and live tool rows below the
-    // persisted rows ("pinned" tracks whatever is newest, streaming or not);
-    // an offset-from-bottom also survives content growing underneath, so a
-    // reader parked mid-transcript does not slide while a turn streams.
+    // persisted rows ("pinned" tracks whatever is newest, streaming or not).
+    // Scrolled away, the region additionally ANCHORS the row at the
+    // viewport's top (PickScrollAnchor / ScrollState::anchor): an offset
+    // from the bottom alone moved a reader parked mid-transcript by every
+    // line that streamed in below.
     //
     // The row cursor (focused_row_, chat.row_up/chat.row_down) overrides the
     // stored offset: the focused row is revealed minimally (see
@@ -1122,10 +1142,68 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             std::clamp(scroll_from_bottom_lines_, 0, max_from_bottom);
     }
     scroll_state_->desired_offset_from_bottom = scroll_from_bottom_lines_;
+    {
+        const std::size_t live_tail =
+            snapshot.live_segments.empty() ? 0 : snapshot.live_segments.back().Text().size();
+        const auto signature = std::make_tuple(
+            row_keys_.empty() ? RowKey{} : row_keys_.back(), snapshot.live_segments.size(),
+            live_tail, snapshot.pending_user_messages.size());
+        if (signature != bottom_signature_ && IsScrolledAway()) unseen_below_ = true;
+        bottom_signature_ = signature;
+    }
+    // Hand the anchor's persistent part box to the region (null: pinned,
+    // cursor-driven, just scrolled, or the part left the transcript).
+    scroll_state_->anchor.reset();
+    if (anchor_part_.has_value()) {
+        const auto slots = row_box_slots_.find(anchor_part_->first);
+        if (slots != row_box_slots_.end() && anchor_part_->second < slots->second.size() &&
+            slots->second[anchor_part_->second] != nullptr) {
+            scroll_state_->anchor = slots->second[anchor_part_->second];
+            scroll_state_->anchor_line = anchor_line_;
+        }
+    }
     return ScrollRegion(vscroll_indicator(vbox(std::move(column))), scroll_state_);
 }
 
+void ChatView::PickScrollAnchor() {
+    anchor_part_.reset();
+    if (scroll_from_bottom_lines_ <= 0 && !focused_row_.has_value()) unseen_below_ = false;
+    const bool suspended = anchor_suspended_;
+    anchor_suspended_ = false;
+    if (suspended || focused_row_.has_value() || scroll_from_bottom_lines_ <= 0 ||
+        scroll_state_->viewport_height <= 0) {
+        return;
+    }
+    // Only rows the last tree contained carry that layout's geometry.
+    std::size_t first = 0;
+    std::size_t last = row_keys_.empty() ? 0 : row_keys_.size() - 1;
+    if (!last_assembly_full_) {
+        first = last_window_first_;
+        last = last_window_last_;
+    }
+    const int top = scroll_state_->viewport_top_screen;
+    std::optional<int> best_below;   // nearest part starting below the top line
+    for (std::size_t i = first; i <= last && i < row_keys_.size() && i < row_boxes_.size(); ++i) {
+        for (std::size_t p = 0; p < row_boxes_[i].size(); ++p) {
+            const auto& box = row_boxes_[i][p];
+            if (box == nullptr || box->y_max < box->y_min) continue;
+            if (box->y_min <= top && top <= box->y_max) {
+                anchor_part_ = std::make_pair(row_keys_[i], p);
+                anchor_line_ = top - box->y_min;
+                return;
+            }
+            if (box->y_min > top && (!best_below || box->y_min < *best_below)) {
+                best_below = box->y_min;
+                anchor_part_ = std::make_pair(row_keys_[i], p);
+                anchor_line_ = top - box->y_min;   // negative: the top sits on a gap
+            }
+        }
+    }
+}
+
 void ChatView::ScrollBy(int delta_steps) {
+    AdoptAnchoredOffset();
+    anchor_suspended_ = true;
     RetireRowCursorToOffset();
     const int viewport = scroll_state_->viewport_height > 0
                              ? scroll_state_->viewport_height
@@ -1137,6 +1215,8 @@ void ChatView::ScrollWheelBy(int delta_ticks) {
     const auto now = std::chrono::steady_clock::now();
     if (now - last_wheel_step_ < kWheelGateMs) return;   // momentum burst: dropped
     last_wheel_step_ = now;
+    AdoptAnchoredOffset();
+    anchor_suspended_ = true;
     RetireRowCursorToOffset();
     scroll_from_bottom_lines_ += delta_ticks * kWheelLinesPerTick;
 }
@@ -1282,6 +1362,10 @@ int ChatView::ToggleToolFold() {
 }
 
 bool ChatView::ToggleCollapseAt(int screen_y) {
+    // Off-viewport rows keep their last boxes (see ViewportContainsY): a
+    // click on the editor or a panel must not toggle a row scrolled out of
+    // view behind it.
+    if (!ViewportContainsY(screen_y)) return false;
     // row_boxes_ is parallel to row_keys_ AND materialized_rows_ (RebuildRows
     // fills all three together; Render() only fills row_boxes_ when it walks
     // the same rows), so the kind gate can index materialized_rows_ directly.
@@ -1291,6 +1375,9 @@ bool ChatView::ToggleCollapseAt(int screen_y) {
     for (std::size_t i = 0; i < row_boxes_.size() && i < row_keys_.size() &&
                             i < materialized_rows_.size();
          ++i) {
+        // Windowed frames lay out only the window: other rows' boxes are
+        // an older layout's and may still claim this y.
+        if (!last_assembly_full_ && (i < last_window_first_ || i > last_window_last_)) continue;
         const auto& boxes = row_boxes_[i];
         if (boxes.empty()) continue;   // a row that rendered nothing: nothing to hit
         // The row's full vertical extent: its first part's top to its last
@@ -1318,6 +1405,7 @@ bool ChatView::ToggleCollapseAt(int screen_y) {
 }
 
 bool ChatView::CancelPendingAt(int screen_y) {
+    if (!ViewportContainsY(screen_y)) return false;   // see ToggleCollapseAt
     // One box per pending row (the wrapper wraps row + queued tag), parallel
     // to the turn ids. A click consumes only when the row's turn id has
     // arrived -- before TurnQueuedEvent the cancel is not addressable, and

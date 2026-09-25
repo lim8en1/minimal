@@ -86,7 +86,8 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
                     ? OneLineSummary(*tool.summary)
                     : SummarizeToolInput(tool.tool_name, tool.input);
             if (!summary.empty()) {
-                line.push_back(text("  " + summary) | Muted(theme));
+                // Shrinks first, so the elapsed field after it stays visible.
+                line.push_back(text("  " + summary) | Muted(theme) | flex_shrink);
             }
             // "started-at" (ARCHITECTURE.md's promised column) plus elapsed:
             // without a ticking number, a long-running cross-session command

@@ -21,12 +21,12 @@ namespace minimal::client {
 // Per-tab bookkeeping for AdvanceScrollbackRefresh (TabUi's refresh fields).
 // Plain value state; app.cpp holds one per open tab.
 struct ScrollbackRefreshState {
-    // The transcript version the rendered rows correspond to. nullopt =
+    // The Snapshot::fetch_generation the window is known to cover. nullopt =
     // nothing fetched yet (a fresh tab fetches on its first frame).
-    std::optional<uint64_t> rendered_version;
-    bool refresh_pending = false;       // an async newest-fetch is outstanding
-    uint64_t refresh_seq_seen = 0;      // pre-submit Snapshot::refresh_seq
-    uint64_t refresh_from_version = 0;  // pre-submit Snapshot::transcript_version
+    std::optional<uint64_t> fetched_generation;
+    bool refresh_pending = false;          // an async newest-fetch is outstanding
+    uint64_t refresh_seq_seen = 0;         // pre-submit Snapshot::refresh_seq
+    uint64_t refresh_from_generation = 0;  // pre-submit Snapshot::fetch_generation
 
     // Failure backoff (see AdvanceScrollbackRefresh): consecutive RESOLVED
     // FAILURES, and the earliest steady-clock time the NEXT submit may fire.
@@ -47,10 +47,12 @@ enum class ScrollbackRefreshAction {
 // One maintain() pass over one tab's refresh bookkeeping. Resolves an
 // outstanding request (Snapshot::refresh_seq moved) before considering a new
 // one, then acts on a version mismatch:
-//   - a resolved SUCCESSFUL request marks the rendered version current, even
-//     when the page applied no rows (an empty page moves no version -- without
-//     this, a fresh tab retried GetMessages every frame until the first
-//     message persisted);
+//   - a resolved SUCCESSFUL request marks the generation it was SUBMITTED at
+//     as fetched -- never the snapshot's current one: a trigger that bumped
+//     the generation while the fetch was in flight (the turn completing while
+//     a mid-turn fetch runs) describes rows that fetch may not have seen, so
+//     it must earn a fetch of its own. An empty page still resolves (no
+//     retry loop: nothing moved the generation);
 //   - a resolved FAILED request leaves the mismatch so the SAME frame
 //     resubmits (the retry contract);
 //   - a mismatch fetches unconditionally (subject to the backoff window

@@ -336,6 +336,15 @@ ftxui::Component MakePromptEditor(
             *pasting = false;
             return true;   // swallowed
         }
+        // A pasted tab is content, not completion: Tab-accept below must not
+        // replace the pasted text with whatever suggestion happened to show.
+        if (*pasting && event == Event::Tab) {
+            const auto at = static_cast<std::size_t>(
+                std::clamp(state.cursor_position, 0, static_cast<int>(state.content.size())));
+            state.content.insert(at, "\t");
+            state.cursor_position = static_cast<int>(at) + 1;
+            return true;
+        }
         if (*pasting && event == Event::Return) {
             InsertNewlineAtCursor(state);
             return true;   // consumed
@@ -348,9 +357,10 @@ ftxui::Component MakePromptEditor(
         // another name, so a multi-line prompt behaves the same either way.
         // ctrl+w (delete word backward, also standard readline) is
         // deliberately NOT here: it is already the global tab.close binding
-        // (keybindings.cpp), and the editor's CatchEvent runs before that
-        // dispatch -- claiming it here would silently break closing a tab
-        // while the prompt has focus, which is effectively always.
+        // (keybindings.cpp). Global dispatch runs BEFORE this CatchEvent
+        // (HandleGlobalKey wraps the editor), so a key a global action
+        // claims never arrives here at all -- which is why no default
+        // global binding may use ctrl+a/e/k/u.
         // Byte encoding matches key_event_parser.cpp's CtrlLetter exactly
         // (ctrl+<letter> is ASCII letter - 'a' + 1); duplicated rather than
         // shared because that helper is file-local to key_event_parser.cpp.
@@ -465,6 +475,11 @@ ftxui::Component MakePromptEditor(
                 on_text(line);
             }
             state.content.clear();
+            // The caret and any stashed history draft belong to the line
+            // just sent: left set, the next line's editing started from a
+            // stale position and ArrowDown restored the old draft.
+            state.cursor_position = 0;
+            state.history_draft.clear();
             state.list_open = false;
             state.suggestions.clear();
             state.completions.clear();
@@ -821,6 +836,13 @@ ftxui::Component MakePromptEditor(
             input->Focused() ? ftxui::Decorator(ftxui::focusCursorBarBlinking)
                              : ftxui::Decorator(ftxui::focus);
 
+        // text() draws a tab as nothing, while the wrap math counts it as
+        // one column (Utf8CharColumnWidth): shown as one space, the caret
+        // and click mapping line up. Display only -- the buffer keeps the tab.
+        const auto shown = [](std::string row_text) {
+            std::replace(row_text.begin(), row_text.end(), '\t', ' ');
+            return ftxui::text(std::move(row_text));
+        };
         Elements body;
         if (state.content.empty()) {
             // Placeholder, decorated the way FTXUI's own Input renders one:
@@ -832,7 +854,7 @@ ftxui::Component MakePromptEditor(
             for (std::size_t k = first_row; k < last_row; ++k) {
                 const PromptVisualLine& row = wrap.lines[k];
                 if (k != wrap.cursor_row) {
-                    body.push_back(text(row.text));
+                    body.push_back(shown(row.text));
                     continue;
                 }
                 // The caret row: split at the cursor byte so the glyph under
@@ -847,9 +869,9 @@ ftxui::Component MakePromptEditor(
                 const std::string glyph =
                     offset < row.text.size() ? row.text.substr(offset, glyph_end - offset)
                                              : std::string(" ");   // caret past the last glyph
-                body.push_back(hbox({text(row.text.substr(0, offset)),
-                                     text(glyph) | caret_deco,
-                                     text(row.text.substr(glyph_end))}));
+                body.push_back(hbox({shown(row.text.substr(0, offset)),
+                                     shown(glyph) | caret_deco,
+                                     shown(row.text.substr(glyph_end))}));
             }
         }
         // The gutter: "❯ " marks where input goes (on the first logical row

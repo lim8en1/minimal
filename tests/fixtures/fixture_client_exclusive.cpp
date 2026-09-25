@@ -56,7 +56,8 @@ private:
 }  // namespace
 
 extern "C" {
-const char* minimal_client_plugin_abi_tag() { return minimal::common::AbiTag(); }
+// The compile-time tag, not AbiTag(): see client_plugin_abi.h.
+const char* minimal_client_plugin_abi_tag() { return MINIMAL_ABI_TAG; }
 const char* minimal_client_plugin_name() { return "fixture-client-exclusive"; }
 const char* minimal_client_plugin_version() { return "1.0.0"; }
 

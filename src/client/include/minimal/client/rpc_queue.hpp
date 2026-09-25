@@ -43,7 +43,11 @@ public:
     // is worthless once a newer one is queued behind it, and dropping the
     // front keeps Submit() from ever blocking the loop thread -- the one
     // thing this class exists to prevent.
-    explicit RpcQueue(std::size_t capacity = 64);
+    // `drain_on_stop`: Stop() runs every job still queued before joining,
+    // instead of discarding them -- for queues whose jobs are obligations
+    // (the stream closer: a queued Detach IS the server's goodbye), not
+    // requests whose answer nobody will read after shutdown.
+    explicit RpcQueue(std::size_t capacity = 64, bool drain_on_stop = false);
     ~RpcQueue();
 
     RpcQueue(const RpcQueue&) = delete;
@@ -64,7 +68,8 @@ public:
     // jobs cannot be evicted into; it is allowed to overrun capacity
     // rather than strand one -- bounded in practice by the handful of
     // per-tab latches that exist.
-    void Submit(Job job, bool must_run = false);
+    // Returns false when the job was refused (the queue is stopping).
+    bool Submit(Job job, bool must_run = false);
 
     // Wakes the worker with no more work coming and joins it. Idempotent.
     // Jobs still queued when Stop() runs are DISCARDED, not drained -- the
@@ -100,6 +105,7 @@ private:
     };
 
     std::size_t capacity_;
+    bool drain_on_stop_ = false;
     mutable std::mutex mtx_;
     std::condition_variable cv_;
     std::deque<Item> queue_;

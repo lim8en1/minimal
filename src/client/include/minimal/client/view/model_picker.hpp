@@ -11,6 +11,7 @@
 #include <ftxui/component/component.hpp>
 
 #include "minimal/client/render/theme.hpp"
+#include "minimal/client/view/filterable_menu.hpp"
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::client {
@@ -36,6 +37,7 @@ struct ModelPickerCallbacks {
 };
 
 ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
-                                 const Theme& theme, ModelPickerCallbacks callbacks);
+                                 const Theme& theme, ModelPickerCallbacks callbacks,
+    MenuStatus status = {});
 
 }  // namespace minimal::client

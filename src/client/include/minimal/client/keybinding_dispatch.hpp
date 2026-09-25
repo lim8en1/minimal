@@ -273,6 +273,13 @@ struct KeyContext {
     // instead of reading as turn.cancel first. Null-checked at the call
     // site (every real caller sets it; test fixtures may not need to).
     std::function<bool()> suggestions_open;
+
+    // Whether screen row `y` lies inside tab `tab_id`'s chat viewport, as
+    // last laid out. The wheel scrolls the chat only when the pointer is
+    // over it -- over the tools panel, a plugin panel or the suggestion list
+    // the event falls through to those components. Null: every wheel event
+    // scrolls the chat (the pre-routing behavior; test fixtures).
+    std::function<bool(const std::string& tab_id, int y)> chat_contains_y;
 };
 
 // The global-keybinding CatchEvent body (app.cpp's with_keys), as a function
@@ -308,6 +315,16 @@ void FocusPanelOnOpen(std::vector<plugins::PluginViewEntry>& views,
 void FocusPanelOnClose(std::vector<plugins::PluginViewEntry>& views,
                        plugins::PluginViewEntry& entry);
 void CyclePanelFocus(std::vector<plugins::PluginViewEntry>& views, bool forward);
+
+// Shows one plugin view, for every opener (its keybinding, a command's
+// view_hint): a PANEL becomes visible and takes focus if it was hidden; a
+// MODAL takes the one modal slot -- every other modal's `visible` retires
+// with it (left set, that modal read as shown while it was not, and its own
+// key's first press was a dead "toggle off") -- and stays closed if the
+// entry has no component. NotifyShown fires either way.
+void ShowPluginView(std::vector<plugins::PluginViewEntry>& views,
+                    plugins::PluginViewEntry& entry,
+                    ftxui::Component& modal_slot, bool& show_modal);
 
 // Host-level close for the ONE plugin modal slot, callable from OUTSIDE
 // HandleGlobalKey's own dispatch. FTXUI's Modal() gives the shown modal

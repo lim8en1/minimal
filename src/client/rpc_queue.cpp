@@ -7,17 +7,18 @@
 
 namespace minimal::client {
 
-RpcQueue::RpcQueue(std::size_t capacity) : capacity_(capacity) {
+RpcQueue::RpcQueue(std::size_t capacity, const bool drain_on_stop)
+    : capacity_(capacity), drain_on_stop_(drain_on_stop) {
     worker_ = std::thread([this] { WorkerMain(); });
 }
 
 RpcQueue::~RpcQueue() { Stop(); }
 
-void RpcQueue::Submit(Job job, const bool must_run) {
-    if (!job) return;
+bool RpcQueue::Submit(Job job, const bool must_run) {
+    if (!job) return false;
     {
         std::lock_guard lk(mtx_);
-        if (stopping_) return;   // dropped: no worker left to run it
+        if (stopping_) return false;   // dropped: no worker left to run it
         if (queue_.size() >= capacity_) {
             // Drop-oldest, but never a must-run job: it resolves a latch whose
             // setter has already fired and whose only clearer is the job itself
@@ -35,6 +36,7 @@ void RpcQueue::Submit(Job job, const bool must_run) {
         queue_.push_back(Item{std::move(job), must_run});
     }
     cv_.notify_one();
+    return true;
 }
 
 void RpcQueue::Stop() {
@@ -42,7 +44,7 @@ void RpcQueue::Stop() {
         std::lock_guard lk(mtx_);
         if (stopping_) return;   // idempotent
         stopping_ = true;
-        queue_.clear();   // discard, not drain -- see header
+        if (!drain_on_stop_) queue_.clear();   // discard, not drain -- see header
     }
     cv_.notify_one();
     if (worker_.joinable()) worker_.join();
@@ -59,7 +61,9 @@ void RpcQueue::WorkerMain() {
         {
             std::unique_lock lk(mtx_);
             cv_.wait(lk, [this] { return stopping_ || !queue_.empty(); });
-            if (stopping_) return;   // Stop() already cleared queue_; nothing left to run
+            // Stop() already cleared queue_ unless draining; a draining
+            // queue exits once it has run everything left.
+            if (stopping_ && queue_.empty()) return;
             job = std::move(queue_.front().job);
             queue_.pop_front();
             running_job_ = true;

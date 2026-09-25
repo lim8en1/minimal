@@ -497,8 +497,16 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
     // Escape -- the inconsistency made the most destructive dialogs the only
     // ones without a keyboard out.
     const std::string cancel_option = "cancel";
+    //
+    // Without a cancel option (the server's Yes/No), focus starts on the
+    // first answer, so a reflexive Enter as the modal opens -- the user was
+    // mid-way through submitting a message -- answered "Yes". The permission
+    // modal's arming rule applies: until some other key has touched the
+    // modal, Enter only arms it (and the focus frame appears).
     return CatchEvent(body, [on_answer, has_cancel, cancel_option, interacted](const Event& event) {
+        const bool armed = *interacted;
         *interacted = true;
+        if (!has_cancel && !armed && event == Event::Return) return true;
         if (event == Event::Escape) {
             if (has_cancel) {
                 on_answer(cancel_option);
