@@ -144,12 +144,16 @@ bool ReapAfterKill(pid_t pid) {
 }
 
 std::string ResolveOnPath(const std::string& name) {
+    const char* path_env = ::getenv("PATH");
+    return ResolveOnPath(name, path_env != nullptr ? std::string_view(path_env)
+                                                   : std::string_view());
+}
+
+std::string ResolveOnPath(const std::string& name, std::string_view path) {
     if (name.empty()) return {};
     if (name.find('/') != std::string::npos) return name;  // caller-resolved
-    const char* path_env = ::getenv("PATH");
-    if (path_env == nullptr || *path_env == '\0') return {};
+    if (path.empty()) return {};
     std::error_code ec;
-    std::string_view path(path_env);
     for (std::size_t start = 0; start <= path.size();) {
         const auto end = path.find(':', start);
         const auto dir =

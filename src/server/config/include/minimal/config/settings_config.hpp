@@ -61,13 +61,11 @@ struct MemorySettings {
 // (tools-fs parses its own tool config, tools-bash parses `bash`), so core
 // never has to match or break their shapes.
 struct McpSettings {
-    // Spawn/handshake deadline and per-call deadline. The MCP client wrapper
-    // enforces these itself: cpp-mcp's client blocks internally (up to a fixed
-    // 60 s) with no deadline parameter, and a dead or hanging MCP server must
-    // degrade to a tool error, never a hung session worker.
+    // Spawn/handshake deadline and per-call deadline: a dead or hanging MCP
+    // server must degrade to a tool error, never a hung session worker.
     std::int64_t connect_timeout_ms = 10000;
     std::int64_t request_timeout_ms = 60000;
-    // tools/list pagination cap for the http transport. A server that never
+    // tools/list pagination cap (both transports). A server that never
     // stops returning nextCursor pages would otherwise wedge the connection's
     // worker thread (each page is individually within request_timeout). The
     // stdio transport answers from a single request and needs no cap.

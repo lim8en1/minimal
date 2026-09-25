@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -145,5 +146,8 @@ std::map<std::string, std::string> CurrentEnvironment();
 // Resolves a program name against the PROCESS's PATH (absolute paths and
 // anything containing '/' pass through). Empty on failure.
 std::string ResolveOnPath(const std::string& name);
+// The same search over an explicit colon-separated PATH -- for a child whose
+// own environment names a different PATH than this process's.
+std::string ResolveOnPath(const std::string& name, std::string_view path);
 
 }  // namespace minimal::sidecar

@@ -64,8 +64,8 @@ mcp::McpEndpoint StdioEndpoint(const std::string& command) {
     static int reg_port_counter = 0;
     mcp::McpEndpoint endpoint;
     endpoint.transport = mcp::McpTransport::Stdio;
-    endpoint.command_line = command + " --transport stdio --reg-port " +
-                            std::to_string(33500 + (reg_port_counter++ % 64));
+    endpoint.argv = {command, "--transport", "stdio", "--reg-port",
+                     std::to_string(33500 + (reg_port_counter++ % 64))};
     return endpoint;
 }
 

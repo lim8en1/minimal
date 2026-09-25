@@ -1,15 +1,30 @@
 #include "minimal/mcp/mcp_connection.hpp"
 
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <exception>
+#include <filesystem>
+#include <map>
+#include <mutex>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 
-#include "minimal/mcp/mcp_stdio_shim.hpp"
+#include "minimal/common/logger.hpp"
+#include "minimal/sidecar/process.hpp"
 #include "minimal/net/http_client.hpp"
 #include "minimal/net/sse_parser.hpp"
 
@@ -138,116 +153,466 @@ struct McpConnection::Transport {
     virtual void CallTool(const std::string& tool_name, const nlohmann::json& arguments,
                           Slot<nlohmann::json>& slot) = 0;
     // The initialize result's capabilities/instructions, for channel
-    // detection. Defaults fit a transport with no initialize-result capture
-    // (http): no capabilities, no instructions. Not worker-thread work -- the
-    // base contract holds that these are plain reads of state initialize
-    // already wrote, and Open's slot-wait orders them.
+    // detection. Not worker-thread work: plain reads of state initialize
+    // already wrote, ordered by Open's slot-wait.
     virtual std::string ServerCapabilitiesJson() const { return "{}"; }
     virtual std::string Instructions() const { return {}; }
     // Teardown support, called from the DESTROYING thread while the worker may
-    // be wedged inside a blocking call above: unblock the underlying I/O the
-    // only way it can be unblocked (kill the stdio child; the blocking read
-    // then ends, cpp-mcp's 60 s request cap fires, and the detached worker
-    // unwinds). A no-op for transports without a process to kill. Returns the
-    // pid the caller must reap (ReapChild/WatchChildDetached), 0 for none.
+    // be inside a blocking call: ask the stdio child to exit, which ends that
+    // call. A no-op for transports without a process. Returns the pid the
+    // caller must reap (ReapChild/WatchChildDetached), 0 for none.
     virtual int Abort() { return 0; }
 };
 
 namespace {
 
-// --- stdio transport: cpp-mcp's client over a spawned subprocess ----------
-
-class StdioTransport final : public McpConnection::Transport {
-public:
-    StdioTransport(const McpEndpoint& endpoint, const std::string& client_name,
-                   const std::string& client_version, const NotificationSink& sink)
-        : client_name_(client_name), client_version_(client_version) {
-        // Env arrives pre-interpolated (secrets included) and is never logged.
-        for (const auto& [key, value] : endpoint.env) env_[key] = value;
-        shim_ = std::make_unique<McpStdioShim>(endpoint.command_line, env_);
-        // Pre-initialize: the read thread that would invoke the sink starts
-        // inside Initialize(), and the shim's sink capture is parked until
-        // then. No sink = the pre-channels behavior, unchanged.
-        if (sink) shim_->SetNotificationSink(sink);
-    }
-
-    void Initialize(Slot<bool>& slot) override {
-        std::string error;
-        if (shim_->Initialize(client_name_, client_version_, &error)) {
-            slot.Complete(true, {});
-        } else {
-            slot.Complete(std::nullopt,
-                          "MCP initialize failed: server rejected the handshake or died "
-                          "during startup" +
-                              (error.empty() ? std::string() : ": " + error));
+// Turns one JSON-RPC response object into a result or an error. A JSON-RPC
+// error is reported as an error string, never as a result. Its text is
+// server-authored and flows verbatim into logs and the model-visible tool
+// result, so it is capped here, at the source.
+bool ReadResponse(const nlohmann::json& message, nlohmann::json* result, std::string* error) {
+    if (message.contains("error")) {
+        const auto& error_obj = message.at("error");
+        // Checked, not value(): a non-string "message" degrades to "unknown"
+        // rather than throwing on the worker thread.
+        std::string server_message =
+            error_obj.is_object() && error_obj.contains("message") &&
+                    error_obj.at("message").is_string()
+                ? error_obj.at("message").get<std::string>()
+                : "unknown";
+        constexpr std::size_t kMaxErrorMessage = 2000;
+        if (server_message.size() > kMaxErrorMessage) {
+            server_message.resize(kMaxErrorMessage);
+            server_message += " …[truncated]";
         }
+        *error = "MCP server error: " + server_message;
+        return false;
     }
+    *result = message.contains("result") ? message.at("result") : nlohmann::json::object();
+    return true;
+}
 
-    // Kill the child NOW, from the destroying thread: a wedged blocking call
-    // would otherwise hold the child (and the detached worker's shared_ptrs)
-    // for up to cpp-mcp's internal 60 s per request -- and an orphaned child
-    // forever if the server process exits first.
-    int Abort() override { return shim_->AbortChild(); }
+// The protocol shared by every transport: ping, paged tools/list and
+// tools/call are the same JSON-RPC exchanges whether a request travels over
+// HTTP or a child's stdio. A transport supplies only the round trip.
+class JsonRpcTransport : public McpConnection::Transport {
+public:
+    explicit JsonRpcTransport(std::int64_t max_list_pages) : max_list_pages_(max_list_pages) {}
 
-    // Plain reads of initialize-result state, ordered by Open's slot-wait.
-    std::string ServerCapabilitiesJson() const override {
-        return shim_->ServerCapabilitiesJson();
+    void Ping(Slot<bool>& slot) override {
+        nlohmann::json result;
+        std::string error;
+        slot.Complete(std::optional<bool>(Rpc("ping", nlohmann::json::object(), &result, &error)),
+                      error);
     }
-    std::string Instructions() const override { return shim_->Instructions(); }
-
-    void Ping(Slot<bool>& slot) override { slot.Complete(std::optional<bool>(shim_->Ping()), {}); }
 
     void ListTools(Slot<std::vector<McpConnection::ToolListing>>& slot) override {
         std::vector<McpConnection::ToolListing> listings;
-        for (const auto& tool : shim_->ListTools()) {
-            McpConnection::ToolListing listing;
-            listing.name = tool.name;
-            listing.description = tool.description;
-            listing.input_schema = nlohmann::json::parse(tool.schema_json, nullptr, false);
-            if (!listing.input_schema.is_object()) listing.input_schema = nlohmann::json::object();
-            listings.push_back(std::move(listing));
+        std::string cursor;
+        std::string error;
+        // tools/list pages with a cursor; most servers never paginate, but a
+        // truncated listing would silently hide tools from the model, so the
+        // loop is real. Capped: a server that never stops returning
+        // nextCursor would otherwise occupy this worker thread forever (each
+        // page is individually within the request timeout).
+        for (std::int64_t page = 0;; ++page) {
+            if (page >= max_list_pages_) {
+                slot.Complete(std::nullopt,
+                              "MCP tools/list exceeded " + std::to_string(max_list_pages_) +
+                                  " pages (tools.mcp.max_list_pages); refusing further "
+                                  "cursors from a possibly broken or malicious server");
+                return;
+            }
+            nlohmann::json params = nlohmann::json::object();
+            if (!cursor.empty()) params["cursor"] = cursor;
+            nlohmann::json result;
+            if (!Rpc("tools/list", params, &result, &error)) {
+                slot.Complete(std::nullopt, error);
+                return;
+            }
+            if (!result.contains("tools") || !result.at("tools").is_array()) {
+                slot.Complete(std::nullopt, "MCP tools/list response has no tools array");
+                return;
+            }
+            for (const auto& tool : result.at("tools")) {
+                // Checked, not value(): a hostile server answering
+                // {"name": 42} fails the LISTING with a visible error rather
+                // than throwing on the worker thread.
+                if (!tool.is_object() || !tool.contains("name") || !tool.at("name").is_string()) {
+                    slot.Complete(std::nullopt, "MCP tools/list entry has no string 'name'");
+                    return;
+                }
+                McpConnection::ToolListing listing;
+                listing.name = tool.at("name").get<std::string>();
+                listing.description =
+                    tool.contains("description") && tool.at("description").is_string()
+                        ? tool.at("description").get<std::string>()
+                        : std::string();
+                listing.input_schema = tool.contains("inputSchema") && tool.at("inputSchema").is_object()
+                                           ? tool.at("inputSchema")
+                                           : nlohmann::json::object();
+                listings.push_back(std::move(listing));
+            }
+            cursor = result.contains("nextCursor") && result.at("nextCursor").is_string()
+                         ? result.at("nextCursor").get<std::string>()
+                         : std::string();
+            if (cursor.empty()) break;
         }
         slot.Complete(std::move(listings), {});
     }
 
     void CallTool(const std::string& tool_name, const nlohmann::json& arguments,
                   Slot<nlohmann::json>& slot) override {
-        std::string result_json, error;
-        if (!shim_->CallTool(tool_name, arguments.dump(), result_json, error)) {
+        nlohmann::json result;
+        std::string error;
+        if (!Rpc("tools/call", {{"name", tool_name}, {"arguments", arguments}}, &result, &error)) {
             slot.Complete(std::nullopt, error);
             return;
         }
-        nlohmann::json parsed = nlohmann::json::parse(result_json, nullptr, false);
-        if (!parsed.is_object()) {
+        if (!result.is_object()) {
             slot.Complete(std::nullopt, "MCP server returned an unparseable tool result");
             return;
         }
-        slot.Complete(std::move(parsed), {});
+        slot.Complete(std::move(result), {});
+    }
+
+protected:
+    // One request/response round trip. False with `error` set on a transport
+    // failure or a JSON-RPC error response.
+    virtual bool Rpc(const std::string& method, const nlohmann::json& params,
+                     nlohmann::json* result, std::string* error) = 0;
+
+    nlohmann::json InitializeParams(const std::string& client_name,
+                                    const std::string& client_version) const {
+        return {{"protocolVersion", kProtocolVersion},
+                {"capabilities", nlohmann::json::object()},
+                {"clientInfo", {{"name", client_name}, {"version", client_version}}}};
     }
 
 private:
+    std::int64_t max_list_pages_;
+};
+
+// --- stdio transport: newline-delimited JSON-RPC over a child's stdio ------
+
+// An unterminated line can only be a misbehaving or hostile child: a
+// conforming message is newline-framed. Past this, the connection is dropped
+// rather than growing the buffer without bound.
+constexpr std::size_t kMaxLineBytes = 16 * 1024 * 1024;
+
+// The reader's poll slice: how long ~StdioTransport can wait for its join.
+constexpr int kReaderSliceMs = 100;
+
+// Waits for a signalled child to exit, escalating to SIGKILL of its process
+// group after `grace`. Never signals a pid that is no longer our child (the
+// waitpid(WNOHANG) recheck), so a recycled pid is never hit.
+void ReapChildWithGrace(int pid, std::chrono::milliseconds grace) {
+    if (pid <= 0) return;
+    const auto deadline = std::chrono::steady_clock::now() + grace;
+    while (std::chrono::steady_clock::now() < deadline) {
+        int status = 0;
+        const pid_t result = waitpid(pid, &status, WNOHANG);
+        if (result == pid || result == -1) {  // gone (reaped here or elsewhere)
+            sidecar::ForgetPgid(pid);
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    int status = 0;
+    if (waitpid(pid, &status, WNOHANG) != 0) {
+        sidecar::ForgetPgid(pid);
+        return;  // no longer ours
+    }
+    sidecar::ReapAfterKill(pid);  // SIGKILL the group, bounded reap
+    sidecar::ForgetPgid(pid);
+}
+
+class StdioTransport final : public JsonRpcTransport {
+public:
+    StdioTransport(const McpEndpoint& endpoint, std::string client_name,
+                   std::string client_version, NotificationSink sink,
+                   std::chrono::milliseconds request_timeout, std::int64_t max_list_pages)
+        : JsonRpcTransport(max_list_pages),
+          argv_(endpoint.argv),
+          env_(endpoint.env.begin(), endpoint.env.end()),
+          client_name_(std::move(client_name)),
+          client_version_(std::move(client_version)),
+          sink_(std::move(sink)),
+          request_timeout_(request_timeout) {}
+
+    ~StdioTransport() override {
+        stopping_.store(true, std::memory_order_release);
+        if (reader_.joinable()) reader_.join();
+        // A child still running here was never aborted -- the connection
+        // failed before teardown could see its pid. It must not outlive us.
+        const int pid = pid_.exchange(0);
+        if (pid > 0) {
+            int status = 0;
+            if (waitpid(pid, &status, WNOHANG) == 0) sidecar::ReapAfterKill(pid);
+            sidecar::ForgetPgid(pid);
+        }
+    }
+
+    void Initialize(Slot<bool>& slot) override {
+        std::string error;
+        if (!Start(error)) {
+            slot.Complete(std::nullopt, "MCP initialize failed: could not start the server: " + error);
+            return;
+        }
+        nlohmann::json result;
+        if (!Rpc("initialize", InitializeParams(client_name_, client_version_), &result, &error)) {
+            slot.Complete(std::nullopt,
+                          "MCP initialize failed: server rejected the handshake or died "
+                          "during startup: " +
+                              error);
+            return;
+        }
+        if (result.contains("capabilities") && result.at("capabilities").is_object()) {
+            capabilities_ = result.at("capabilities").dump();
+        }
+        // Missing and non-string both degrade to empty.
+        if (result.contains("instructions") && result.at("instructions").is_string()) {
+            instructions_ = result.at("instructions").get<std::string>();
+        }
+        if (!WriteMessage({{"jsonrpc", "2.0"},
+                           {"method", "notifications/initialized"},
+                           {"params", nlohmann::json::object()}},
+                          error)) {
+            slot.Complete(std::nullopt, "MCP initialize failed: " + error);
+            return;
+        }
+        slot.Complete(true, {});
+    }
+
+    std::string ServerCapabilitiesJson() const override { return capabilities_; }
+    std::string Instructions() const override { return instructions_; }
+
+    // Asks the child's whole process group to exit. The reader then sees EOF,
+    // every pending request fails at once, and the worker unwinds. Only a
+    // live process that is still OUR child is signalled.
+    int Abort() override {
+        const int pid = pid_.exchange(0);
+        if (pid <= 0) return 0;
+        int status = 0;
+        if (waitpid(pid, &status, WNOHANG) != 0) {
+            sidecar::ForgetPgid(pid);
+            return 0;
+        }
+        ::kill(-pid, SIGTERM);
+        ::kill(pid, SIGTERM);  // the fork-to-setsid window, where the group does not exist yet
+        return pid;
+    }
+
+protected:
+    bool Rpc(const std::string& method, const nlohmann::json& params, nlohmann::json* result,
+             std::string* error) override {
+        const std::int64_t id = next_id_++;
+        auto pending = std::make_shared<Pending>();
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (!closed_reason_.empty()) {
+                *error = closed_reason_;
+                return false;
+            }
+            pending_[id] = pending;
+        }
+        std::string write_error;
+        if (!WriteMessage({{"jsonrpc", "2.0"}, {"id", id}, {"method", method}, {"params", params}},
+                          write_error)) {
+            std::lock_guard<std::mutex> lock(mu_);
+            pending_.erase(id);
+            *error = write_error;
+            return false;
+        }
+
+        std::unique_lock<std::mutex> lock(mu_);
+        const bool answered = cv_.wait_for(lock, request_timeout_, [&] {
+            return pending->response.has_value() || !closed_reason_.empty();
+        });
+        pending_.erase(id);
+        if (pending->response) {
+            const nlohmann::json message = std::move(*pending->response);
+            lock.unlock();
+            return ReadResponse(message, result, error);
+        }
+        *error = answered ? closed_reason_ : "request timed out";
+        return false;
+    }
+
+private:
+    struct Pending {
+        std::optional<nlohmann::json> response;  // guarded by StdioTransport::mu_
+    };
+
+    bool Start(std::string& error) {
+        if (argv_.empty()) {
+            error = "no command";
+            return false;
+        }
+        // The child inherits the server's environment with the entry's env
+        // layered over it, and its PATH decides where the command is found.
+        sidecar::LaunchSpec spec;
+        spec.env = sidecar::CurrentEnvironment();
+        for (const auto& [key, value] : env_) spec.env[key] = value;
+        spec.argv = argv_;
+        const auto path = spec.env.find("PATH");
+        const std::string resolved = sidecar::ResolveOnPath(
+            argv_[0], path != spec.env.end() ? std::string_view(path->second) : std::string_view());
+        if (resolved.empty()) {
+            error = "'" + argv_[0] + "' not found on PATH";
+            return false;
+        }
+        spec.argv[0] = resolved;
+        std::error_code cwd_error;
+        spec.cwd = std::filesystem::current_path(cwd_error);
+        if (cwd_error) spec.cwd = "/";
+        // stdout carries the protocol; stdin receives it. stderr is the
+        // server's own, so a server's diagnostics land in the harness log.
+        spec.pipes = {
+            sidecar::PipePlan{sidecar::PipePlan::ChildEnd::kWrite, {{STDOUT_FILENO, false}}},
+            sidecar::PipePlan{sidecar::PipePlan::ChildEnd::kRead, {{STDIN_FILENO, false}}},
+        };
+        spec.cpu_seconds = 0;
+        spec.file_size_bytes = 0;
+
+        sidecar::Launched launched = sidecar::Launch(spec);
+        if (!launched.ok) {
+            error = launched.spawn_error;
+            return false;
+        }
+        stdout_ = std::move(launched.parent_fds[0]);
+        stdin_ = std::move(launched.parent_fds[1]);
+#ifdef F_SETNOSIGPIPE
+        fcntl(stdin_.get(), F_SETNOSIGPIPE, 1);
+#endif
+        pid_.store(launched.pid, std::memory_order_release);
+        reader_ = std::thread([this] { ReadLoop(); });
+        return true;
+    }
+
+    bool WriteMessage(const nlohmann::json& message, std::string& error) {
+        const std::string line = message.dump() + "\n";
+        std::lock_guard<std::mutex> lock(write_mu_);
+        std::size_t written = 0;
+        while (written < line.size()) {
+            const ssize_t n = ::write(stdin_.get(), line.data() + written, line.size() - written);
+            if (n > 0) {
+                written += static_cast<std::size_t>(n);
+            } else if (n < 0 && errno == EINTR) {
+                continue;
+            } else {
+                error = std::string("MCP transport error: writing to the server failed: ") +
+                        std::strerror(errno);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void Close(std::string reason) {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (closed_reason_.empty()) closed_reason_ = std::move(reason);
+        }
+        cv_.notify_all();
+    }
+
+    void Dispatch(const std::string& line) {
+        nlohmann::json message = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+        if (!message.is_object()) return;  // not JSON-RPC; servers print banners
+        const bool has_id = message.contains("id") && !message.at("id").is_null();
+        if (has_id && !message.contains("method")) {
+            std::lock_guard<std::mutex> lock(mu_);
+            for (auto& [id, pending] : pending_) {
+                if (FrameIdMatches(message, id)) {
+                    pending->response = std::move(message);
+                    break;
+                }
+            }
+            cv_.notify_all();
+            return;
+        }
+        // A notification goes to the sink, which runs on this reader thread
+        // and must not block: a slow sink stalls every in-flight request.
+        // Server-originated REQUESTS demand a response this client does not
+        // model and are ignored.
+        if (!has_id && message.contains("method") && sink_) {
+            try {
+                sink_(message.dump());
+            } catch (const std::exception& e) {
+                common::DefaultLogger().warn("MCP notification sink threw: {}", e.what());
+            }
+        }
+    }
+
+    void ReadLoop() {
+        std::string buffer;
+        char chunk[8192];
+        while (!stopping_.load(std::memory_order_acquire)) {
+            pollfd fd{stdout_.get(), POLLIN, 0};
+            const int rc = ::poll(&fd, 1, kReaderSliceMs);
+            if (rc < 0 && errno == EINTR) continue;
+            if (rc < 0) {
+                Close("MCP transport error: polling the server failed");
+                return;
+            }
+            if (rc == 0) continue;
+            const ssize_t n = ::read(stdout_.get(), chunk, sizeof(chunk));
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) {
+                Close("MCP server closed its output (the process exited?)");
+                return;
+            }
+            buffer.append(chunk, static_cast<std::size_t>(n));
+            std::size_t start = 0;
+            for (std::size_t end; (end = buffer.find('\n', start)) != std::string::npos;
+                 start = end + 1) {
+                if (end > start) Dispatch(buffer.substr(start, end - start));
+            }
+            buffer.erase(0, start);
+            if (buffer.size() > kMaxLineBytes) {
+                Close("MCP server sent an unterminated line over " +
+                      std::to_string(kMaxLineBytes) + " bytes; connection dropped");
+                return;
+            }
+        }
+    }
+
+    std::vector<std::string> argv_;
+    std::map<std::string, std::string> env_;  // pre-interpolated; never logged
     std::string client_name_;
     std::string client_version_;
-    std::map<std::string, std::string> env_;
-    std::unique_ptr<McpStdioShim> shim_;
+    NotificationSink sink_;
+    std::chrono::milliseconds request_timeout_;
+
+    sidecar::ScopedFd stdin_;
+    sidecar::ScopedFd stdout_;
+    std::atomic<int> pid_{0};
+    std::int64_t next_id_ = 1;  // worker thread only
+    std::string capabilities_ = "{}";
+    std::string instructions_;
+
+    std::mutex write_mu_;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::map<std::int64_t, std::shared_ptr<Pending>> pending_;  // guarded by mu_
+    std::string closed_reason_;                                 // guarded by mu_
+    std::atomic<bool> stopping_{false};
+    std::thread reader_;
 };
 
 // --- http transport: minimal Streamable HTTP over HttpClient ---------------
 
-class HttpTransport final : public McpConnection::Transport {
+class HttpTransport final : public JsonRpcTransport {
 public:
     HttpTransport(const McpEndpoint& endpoint, std::chrono::milliseconds request_timeout,
                   std::int64_t max_list_pages)
-        : endpoint_(endpoint), request_timeout_(request_timeout), max_list_pages_(max_list_pages) {}
+        : JsonRpcTransport(max_list_pages), endpoint_(endpoint), request_timeout_(request_timeout) {}
 
     void Initialize(Slot<bool>& slot) override {
-        nlohmann::json params = {
-            {"protocolVersion", kProtocolVersion},
-            {"capabilities", nlohmann::json::object()},
-            {"clientInfo", {{"name", kClientName}, {"version", kClientVersion}}}};
         nlohmann::json result;
         std::string error;
-        if (!Rpc("initialize", params, NextId(), &result, &error)) {
+        if (!Rpc("initialize", InitializeParams(kClientName, kClientVersion), &result, &error)) {
             slot.Complete(std::nullopt, error);
             return;
         }
@@ -261,82 +626,14 @@ public:
         slot.Complete(true, {});
     }
 
-    void Ping(Slot<bool>& slot) override {
-        nlohmann::json result;
-        std::string error;
-        slot.Complete(std::optional<bool>(Rpc("ping", nlohmann::json::object(), NextId(),
-                                              &result, &error)),
-                      error);
-    }
-
-    void ListTools(Slot<std::vector<McpConnection::ToolListing>>& slot) override {
-        std::vector<McpConnection::ToolListing> listings;
-        std::string cursor;
-        std::string error;
-        // tools/list pages with a cursor; most servers never paginate, but a
-        // truncated listing would silently hide tools from the model, so the
-        // loop is real. Capped: a server that never stops returning
-        // nextCursor would otherwise occupy this worker thread forever (each
-        // page is individually within request_timeout, so no deadline fires).
-        for (std::int64_t page = 0;; ++page) {
-            if (page >= max_list_pages_) {
-                slot.Complete(std::nullopt,
-                              "MCP tools/list exceeded " + std::to_string(max_list_pages_) +
-                                  " pages (tools.mcp.max_list_pages); refusing further "
-                                  "cursors from a possibly broken or malicious server");
-                return;
-            }
-            nlohmann::json params = nlohmann::json::object();
-            if (!cursor.empty()) params["cursor"] = cursor;
-            nlohmann::json result;
-            if (!Rpc("tools/list", params, NextId(), &result, &error)) {
-                slot.Complete(std::nullopt, error);
-                return;
-            }
-            if (!result.contains("tools") || !result.at("tools").is_array()) {
-                slot.Complete(std::nullopt, "MCP tools/list response has no tools array");
-                return;
-            }
-            for (const auto& tool : result.at("tools")) {
-                // Checked, not value(): a hostile server answering
-                // {"name": 42} must fail the LISTING with a visible error,
-                // not throw nlohmann's type_error on the MCP worker thread
-                // -- an uncontained throw there stalls every waiter for the
-                // full request deadline.
-                if (!tool.is_object() || !tool.contains("name") || !tool.at("name").is_string()) {
-                    slot.Complete(std::nullopt, "MCP tools/list entry has no string 'name'");
-                    return;
-                }
-                McpConnection::ToolListing listing;
-                listing.name = tool.at("name").get<std::string>();
-                listing.description =
-                    tool.contains("description") && tool.at("description").is_string()
-                        ? tool.at("description").get<std::string>()
-                        : std::string();
-                listing.input_schema =
-                    tool.contains("inputSchema") ? tool.at("inputSchema") : nlohmann::json::object();
-                listings.push_back(std::move(listing));
-            }
-            // Same checked-not-valued rule: nextCursor of the wrong type
-            // means "no cursor", never a throw.
-            cursor = result.contains("nextCursor") && result.at("nextCursor").is_string()
-                         ? result.at("nextCursor").get<std::string>()
-                         : std::string();
-            if (cursor.empty()) break;
-        }
-        slot.Complete(std::move(listings), {});
-    }
-
-    void CallTool(const std::string& tool_name, const nlohmann::json& arguments,
-                  Slot<nlohmann::json>& slot) override {
-        nlohmann::json result;
-        std::string error;
-        if (!Rpc("tools/call", {{"name", tool_name}, {"arguments", arguments}}, NextId(),
-                 &result, &error)) {
-            slot.Complete(std::nullopt, error);
-            return;
-        }
-        slot.Complete(std::move(result), {});
+protected:
+    // Sends one request and extracts the JSON-RPC response with the matching
+    // id -- from a JSON body, or from an SSE stream that is aborted the moment
+    // the response frame arrives (a server may otherwise keep the stream open
+    // long after the answer).
+    bool Rpc(const std::string& method, const nlohmann::json& params, nlohmann::json* result,
+             std::string* error) override {
+        return RpcWithId(method, params, NextId(), result, error);
     }
 
 private:
@@ -362,12 +659,8 @@ private:
         return request;
     }
 
-    // Sends one request and, for requests, extracts the JSON-RPC response
-    // with the matching id -- from a JSON body, or from an SSE stream that is
-    // aborted the moment the response frame arrives (a server may otherwise
-    // keep the stream open long after the answer).
-    bool Rpc(const std::string& method, const nlohmann::json& params, int64_t id,
-             nlohmann::json* result, std::string* error) {
+    bool RpcWithId(const std::string& method, const nlohmann::json& params, int64_t id,
+                   nlohmann::json* result, std::string* error) {
         const std::string body = nlohmann::json{{"jsonrpc", "2.0"},
                                                 {"id", id},
                                                 {"method", method},
@@ -495,31 +788,7 @@ private:
             }
         }
 
-        if (message.contains("error")) {
-            const auto& error_obj = message.at("error");
-            // Checked, not value(): the error OBJECT's shape is server-
-            // authored; a non-string "message" must degrade to "unknown",
-            // not throw on the worker thread. The text is capped at the
-            // source: it is server-authored and flows verbatim into logs
-            // (the per-invocation audit line, the manager's liveness log)
-            // and the model-visible tool result, so an unbounded message
-            // is an unbounded log/context line from a remote we do not
-            // control.
-            std::string server_message =
-                error_obj.is_object() && error_obj.contains("message") &&
-                        error_obj.at("message").is_string()
-                    ? error_obj.at("message").get<std::string>()
-                    : "unknown";
-            constexpr std::size_t kMaxErrorMessage = 2000;
-            if (server_message.size() > kMaxErrorMessage) {
-                server_message.resize(kMaxErrorMessage);
-                server_message += " …[truncated]";
-            }
-            *error = "MCP server error: " + server_message;
-            return false;
-        }
-        *result = message.contains("result") ? message.at("result") : nlohmann::json::object();
-        return true;
+        return ReadResponse(message, result, error);
     }
 
     bool Notify(const std::string& method, std::string& error) {
@@ -548,7 +817,6 @@ private:
     net::HttpSession session_;
     McpEndpoint endpoint_;
     std::chrono::milliseconds request_timeout_;
-    std::int64_t max_list_pages_;
     std::string session_id_;           // worker-thread only
     std::string response_session_id_;  // out-of-band: Rpc records what headers carried
     int64_t next_id_ = 1;
@@ -654,38 +922,31 @@ void McpConnection::Teardown() {
     worker_->cv.notify_all();
     {
         std::unique_lock<std::mutex> lock(worker_->mu);
-        // JOIN, never blind-detach, whenever the worker exits in time. A
-        // detached worker that unwinds late -- or never -- deletes the
-        // transport (last shared_ptr) on its own thread, and cpp-mcp's
-        // destructor path then logs through a function-local-static logger:
-        // after main() returns that static's mutex is destroyed, and the
-        // logging thread aborts the whole process on a destroyed-mutex lock
-        // (observed under TSan, whose 4x slowdown widened the window that
-        // the default build races through). The exit is bimodal, so the
-        // grace is short: a worker parked on cv between calls exits in
-        // microseconds, and one inside a call whose child was just killed
-        // stays wedged on cpp-mcp's internal 60 s future wait -- there is
-        // nothing in between worth waiting for, and Open's connect-deadline
-        // failure path (dead child, wedged initialize) must return promptly,
-        // not burn the grace on a wait that cannot succeed.
+        // JOIN, never blind-detach, whenever the worker exits in time: a
+        // detached worker that unwinds late deletes the transport on its own
+        // thread, possibly after main() has returned. Abort() ends a stdio
+        // call almost at once (the reader sees EOF and fails every pending
+        // request), and an http call is bounded by its request timeout, so
+        // the grace only has to cover a worker leaving a call in flight.
         joined = worker_->cv.wait_for(lock, std::chrono::milliseconds(250),
                                       [this] { return worker_->exited; });
     }
     if (loop_.joinable()) {
         if (joined) {
             loop_.join();
-            // The child is ours to reap NOW, on this thread: the worker is
-            // gone, cpp-mcp's own destructor waitpid will only ever see
-            // ECHILD (it skips its 2 s SIGTERM grace on that), and nothing
-            // outlives this call.
-            McpStdioShim::ReapChild(child_pid);
+            // The child is ours to reap NOW, on this thread: nothing else
+            // waits for it, and nothing outlives this call.
+            ReapChildWithGrace(child_pid, std::chrono::seconds(5));
         } else {
-            // Wedged past the grace: detach, never join. The thread may be
-            // parked inside cpp-mcp's blocking call with no deadline. It
-            // references only shared_ptr-held state, so it exits safely
-            // whenever that call returns. The child gets the detached
-            // escalation watcher, since this thread is done waiting.
-            McpStdioShim::WatchChildDetached(child_pid);
+            // Wedged past the grace: detach, never join. The thread references
+            // only shared_ptr-held state, so it exits safely whenever its
+            // call returns. The child gets a detached escalation watcher,
+            // since this thread is done waiting.
+            if (child_pid > 0) {
+                std::thread([child_pid] {
+                    ReapChildWithGrace(child_pid, std::chrono::seconds(5));
+                }).detach();
+            }
             loop_.detach();
         }
     }
@@ -700,11 +961,12 @@ std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
                                                    const NotificationSink& sink) {
     std::shared_ptr<Transport> transport;
     if (endpoint.transport == McpTransport::Stdio) {
-        if (endpoint.command_line.empty()) {
+        if (endpoint.argv.empty() || endpoint.argv[0].empty()) {
             error.message = "MCP stdio endpoint has no command";
             return nullptr;
         }
-        transport = std::make_shared<StdioTransport>(endpoint, client_name, client_version, sink);
+        transport = std::make_shared<StdioTransport>(endpoint, client_name, client_version, sink,
+                                                     limits.request, limits.max_list_pages);
     } else {
         if (endpoint.url.empty()) {
             error.message = "MCP http endpoint has no url";
@@ -721,9 +983,7 @@ std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
     connection->request_timeout_ = limits.request;
 
     // The initialize handshake runs on the worker under the connect deadline.
-    // Bounded even when the subprocess dies during startup, which wedges
-    // cpp-mcp's own initialize indefinitely (verified by probe). No token:
-    // the handshake has no cancellation path, only the deadline.
+    // No token: the handshake has no cancellation path, only the deadline.
     auto slot = std::make_shared<Slot<bool>>();
     auto token = std::make_shared<tools::CancelToken>();
     PushOrComplete(*connection->worker_,

@@ -67,7 +67,7 @@ TEST_CASE("McpConnection: a channel server's notifications reach the sink", "[mc
     McpConnection::Failure error;
     minimal::mcp::McpEndpoint endpoint;
     endpoint.transport = minimal::mcp::McpTransport::Stdio;
-    endpoint.command_line = kFakeChannel;
+    endpoint.argv = {kFakeChannel};
     auto connection = McpConnection::Open(
         endpoint, TestLimits(), "test", "0.0.1", error, Collect(received, mu, cv));
     REQUIRE(connection);
@@ -115,7 +115,7 @@ TEST_CASE("McpConnection: no sink is the pre-channels behavior", "[mcp][signals]
     McpConnection::Failure error;
     minimal::mcp::McpEndpoint endpoint;
     endpoint.transport = minimal::mcp::McpTransport::Stdio;
-    endpoint.command_line = kFakeChannel;
+    endpoint.argv = {kFakeChannel};
     auto connection = McpConnection::Open(endpoint, TestLimits(), "test", "0.0.1", error);
     REQUIRE(connection);
     if (!connection) return;

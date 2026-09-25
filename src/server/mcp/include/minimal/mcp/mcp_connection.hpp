@@ -21,14 +21,14 @@ namespace minimal::mcp {
 
 enum class McpTransport { Stdio, Http };
 
-// `command_line` is the stdio command JOINED WITH SPACES -- cpp-mcp splits it
-// on whitespace, so an argument containing a space cannot be passed (recorded
-// limitation, ARCHITECTURE.md known gaps). `env`/`headers` arrive
+// `argv` is the stdio command and its arguments, passed to the child as-is
+// (argv[0] resolved against the child's PATH). The child inherits the
+// server's environment with `env` layered over it. `env`/`headers` arrive
 // pre-interpolated: the manager resolves ${ENV_VAR} at connect time and never
 // logs the values.
 struct McpEndpoint {
     McpTransport transport = McpTransport::Stdio;
-    std::string command_line;
+    std::vector<std::string> argv;
     std::string url;
     std::unordered_map<std::string, std::string> env;
     std::unordered_map<std::string, std::string> headers;
@@ -55,25 +55,22 @@ struct McpLimits {
 // dropped).
 using NotificationSink = std::function<void(const std::string&)>;
 
-// One live MCP server connection -- either a spawned stdio subprocess (cpp-mcp)
-// or a Streamable-HTTP endpoint (hand-rolled over net::HttpClient + SseParser;
-// cpp-mcp's bundled sse_client speaks the legacy SSE protocol and cannot talk
-// to a modern streamable-http server).
+// One live MCP server connection -- a spawned stdio subprocess (newline-
+// delimited JSON-RPC over its stdin/stdout, launched through sidecar::Launch)
+// or a Streamable-HTTP endpoint (over net::HttpClient + SseParser). Both share
+// one JSON-RPC layer; only the round trip differs.
 //
-// ALL protocol I/O runs on one dedicated thread. Two reasons, both structural:
-// cpp-mcp's client blocks internally (up to a fixed 60 s) and offers no
-// deadline parameter, so a caller-visible timeout or a CancelTurn could not be
-// honoured without keeping the blocking call off the caller's thread; and one
-// thread serialises calls to the shared server, which sidesteps cpp-mcp's
-// unverified concurrency. Callers wait on their cancellation token's
-// condition variable (tools::CancelToken): completion and cancellation both
-// notify it, so a waiter wakes on exactly the events that can change its
-// outcome -- no polling. The underlying request may still complete in the
-// background (accepted asymmetry -- the same class as bash's killpg window). A
-// worker wedged in a blocking call is never joined: it holds its state by
-// shared_ptr and exits when the call finally returns (the stdio child is
-// killed on teardown, which unblocks it), so destruction cannot hang on a
-// dead server.
+// ALL protocol I/O runs on one dedicated thread: a caller-visible timeout or a
+// CancelTurn is honoured by keeping the blocking call off the caller's
+// thread, and one thread serialises calls to the shared server. Callers wait
+// on their cancellation token's condition variable (tools::CancelToken):
+// completion and cancellation both notify it, so a waiter wakes on exactly
+// the events that can change its outcome -- no polling. The underlying
+// request may still complete in the background (accepted asymmetry -- the
+// same class as bash's killpg window). Teardown asks the stdio child to exit,
+// which fails its in-flight request at once; a worker that still does not
+// leave in time is detached, holding its state by shared_ptr, so destruction
+// cannot hang on a dead server.
 class McpConnection : public McpInvoker {
 public:
     struct ToolListing {
@@ -92,12 +89,9 @@ public:
     struct Transport;
 
     // Spawns/connects and completes the MCP initialize handshake. nullptr with
-    // `error` set on failure -- always a bounded wait, never a hang, even if
-    // the subprocess dies during startup (cpp-mcp's initialize can block
-    // indefinitely there; the deadline lives here). `sink` (stdio only)
-    // receives server-originated notifications; it must be handed over HERE,
-    // before the handshake starts -- the read thread that invokes it is
-    // spawned during initialize and reads the callback without a lock.
+    // `error` set on failure -- always bounded by limits.connect. `sink`
+    // (stdio only) receives server-originated notifications on the reader
+    // thread, from the handshake on; it must not block.
     static std::unique_ptr<McpConnection> Open(const McpEndpoint& endpoint,
                                                const McpLimits& limits,
                                                const std::string& client_name,

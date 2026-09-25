@@ -40,7 +40,7 @@ constexpr const char* kFakeServer = MINIMAL_MCP_FAKE_SERVER;
 McpEndpoint StdioEndpoint(const std::string& mode) {
     McpEndpoint endpoint;
     endpoint.transport = McpTransport::Stdio;
-    endpoint.command_line = std::string(kFakeServer) + " " + mode;
+    endpoint.argv = {std::string(kFakeServer), std::string(mode)};
     return endpoint;
 }
 
@@ -247,9 +247,9 @@ TEST_CASE("McpConnection stdio: teardown of an idle connection is fast, not the 
 TEST_CASE("McpConnection stdio: a tool error surfaces as an isError result", "[mcp_connection]") {
     auto connection = OpenStdio("normal");
     const McpCallOutcome outcome = connection->CallTool("fail", nlohmann::json::object(), nullptr);
-    // cpp-mcp wraps a throwing tool handler in a JSON-RPC *result* carrying
-    // isError -- a protocol-valid response, not a transport failure. The
-    // adapter maps that to is_error one layer up.
+    // A failing tool answers with a JSON-RPC *result* carrying isError -- a
+    // protocol-valid response, not a transport failure. The adapter maps
+    // that to is_error one layer up.
     REQUIRE(outcome.ok);
     CHECK(outcome.result.value("isError", true));
 }

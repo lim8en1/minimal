@@ -111,7 +111,7 @@ TEST_CASE("McpClientManager: a restarted server respawns and re-discovers", "[mc
 TEST_CASE("McpClientManager: a restart does not stall behind the old connection's teardown",
           "[mcp_manager]") {
     // "stubborn" ignores SIGTERM: tearing its connection down inline would
-    // need the full ~5 s SIGTERM-grace-then-SIGKILL reap (mcp_stdio_shim.cpp).
+    // need the full ~5 s SIGTERM-grace-then-SIGKILL reap (mcp_connection.cpp's ReapChildWithGrace).
     // A short request timeout means the liveness ping queued behind the
     // in-flight "hang" call times out quickly, giving EnsureAlive a
     // deterministic reason to restart without waiting on the hang call itself.

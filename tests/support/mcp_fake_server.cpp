@@ -1,10 +1,11 @@
 // Scripted stdio MCP server for the connection and E2E tests: deterministic,
 // no network, argv-driven behaviour. Built as its own executable and spawned
-// by tests exactly as a real MCP server would be. Links ONLY cpp-mcp (which
-// brings its own bundled json) -- same island rule as mcp_stdio_shim.cpp.
+// by tests exactly as a real MCP server would be. Hand-rolled newline-
+// delimited JSON-RPC, like fake_signal_channel.cpp.
 //
 // Modes (argv[1]):
-//   normal          -- tools: echo{text}, slow{ms}, fail{} (tool error)
+//   normal          -- tools: echo{text}, slow{ms}, fail{} (tool error),
+//                      getenv{name}
 //   hang            -- same tools plus hang{} which sleeps 10 minutes
 //   stubborn        -- like hang, but ignores SIGTERM: teardown must escalate
 //                      all the way to SIGKILL to reap it
@@ -12,28 +13,26 @@
 //                      (dies right after a successful initialize)
 //   garbage         -- emits non-JSON junk on stdout forever (protocol corrupt)
 //
-// NOTE: there is deliberately no SIGNAL-CHANNEL mode here. cpp-mcp's server
-// cannot push a server->client notification over stdio (start_stdio never
-// registers a session dispatcher, so broadcast finds no target), and a
-// timing-based stdout write from a detached thread could interleave with
-// response writes. The dedicated fixture is tests/support/
-// fake_signal_channel.cpp: hand-rolled, single-threaded, emits at a
-// deterministic point in the request loop.
+// Requests are answered one at a time, in order, on the main thread: the
+// harness serialises its calls on one worker anyway, and a tool that sleeps
+// simply delays the next answer, as a real single-threaded server would.
 //
 // Everything it logs goes to stderr: stdout is the JSON-RPC pipe.
-#include <mcp_message.h>
-#include <mcp_server.h>
-#include <mcp_tool.h>
-
-#include <csignal>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
-#include <string>
-#include <thread>
 #include <unistd.h>
 
+#include <chrono>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include <thread>
+
+#include <nlohmann/json.hpp>
+
 namespace {
+
+using nlohmann::json;
 
 // When set, the fake server writes its own pid here at startup. Teardown
 // tests read it to verify the harness killed the child (the test binary is
@@ -61,58 +60,52 @@ void StartOrphanWatchdog() {
     }).detach();
 }
 
-::mcp::json TextContent(const std::string& text) {
-    return ::mcp::json::array({::mcp::json{{"type", "text"}, {"text", text}}});
+void Emit(const json& message) {
+    const std::string line = message.dump() + "\n";
+    std::fwrite(line.data(), 1, line.size(), stdout);
+    std::fflush(stdout);
 }
 
-void Sleep(std::chrono::milliseconds ms) { std::this_thread::sleep_for(ms); }
+json TextResult(const std::string& text, bool is_error = false) {
+    return {{"content", json::array({{{"type", "text"}, {"text", text}}})}, {"isError", is_error}};
+}
 
-void RegisterStandardTools(::mcp::server& server, bool with_hang) {
-    ::mcp::tool echo = ::mcp::tool_builder("echo")
-                           .with_description("Returns the text it was given")
-                           .with_string_param("text", "Text to echo")
-                           .build();
-    server.register_tool(echo, [](const ::mcp::json& args, const std::string&) -> ::mcp::json {
-        return TextContent(args.value("text", ""));
+json ToolListing(bool with_hang) {
+    const auto tool = [](const char* name, const char* description, json properties) {
+        return json{{"name", name},
+                    {"description", description},
+                    {"inputSchema", {{"type", "object"}, {"properties", std::move(properties)}}}};
+    };
+    json tools = json::array({
+        tool("echo", "Returns the text it was given",
+             {{"text", {{"type", "string"}, {"description", "Text to echo"}}}}),
+        tool("slow", "Sleeps ms milliseconds, then echoes done",
+             {{"ms", {{"type", "number"}, {"description", "How long to sleep"}}}}),
+        tool("fail", "Always fails", json::object()),
+        tool("getenv", "Returns the child process's value for name",
+             {{"name", {{"type", "string"}, {"description", "Environment variable name"}}}}),
     });
+    if (with_hang) tools.push_back(tool("hang", "Sleeps forever", json::object()));
+    return {{"tools", tools}};
+}
 
-    ::mcp::tool slow = ::mcp::tool_builder("slow")
-                           .with_description("Sleeps ms milliseconds, then echoes done")
-                           .with_number_param("ms", "How long to sleep")
-                           .build();
-    server.register_tool(slow, [](const ::mcp::json& args, const std::string&) -> ::mcp::json {
-        Sleep(std::chrono::milliseconds(static_cast<long long>(args.value("ms", 0.0))));
-        return TextContent("done");
-    });
-
-    ::mcp::tool fail = ::mcp::tool_builder("fail")
-                           .with_description("Always fails")
-                           .build();
-    server.register_tool(fail, [](const ::mcp::json&, const std::string&) -> ::mcp::json {
-        throw ::mcp::mcp_exception(::mcp::error_code::internal_error, "scripted failure");
-    });
-
-    ::mcp::tool getenv_tool = ::mcp::tool_builder("getenv")
-                                 .with_description("Returns the child process's value for name")
-                                 .with_string_param("name", "Environment variable name")
-                                 .build();
-    server.register_tool(getenv_tool,
-                         [](const ::mcp::json& args, const std::string&) -> ::mcp::json {
-                             const std::string value = std::getenv(args.value("name", "").c_str()) != nullptr
-                                                           ? std::getenv(args.value("name", "").c_str())
-                                                           : "";
-                             return TextContent(value);
-                         });
-
-    if (with_hang) {
-        ::mcp::tool hang = ::mcp::tool_builder("hang")
-                               .with_description("Sleeps forever")
-                               .build();
-        server.register_tool(hang, [](const ::mcp::json&, const std::string&) -> ::mcp::json {
-            Sleep(std::chrono::minutes(10));
-            return TextContent("unreachable");
-        });
+json CallTool(const std::string& name, const json& args) {
+    if (name == "echo") return TextResult(args.value("text", ""));
+    if (name == "slow") {
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(static_cast<long long>(args.value("ms", 0.0))));
+        return TextResult("done");
     }
+    if (name == "fail") return TextResult("scripted failure", /*is_error=*/true);
+    if (name == "getenv") {
+        const char* value = std::getenv(args.value("name", "").c_str());
+        return TextResult(value != nullptr ? value : "");
+    }
+    if (name == "hang") {
+        std::this_thread::sleep_for(std::chrono::minutes(10));
+        return TextResult("unreachable");
+    }
+    return TextResult("unknown tool: " + name, /*is_error=*/true);
 }
 
 }  // namespace
@@ -127,32 +120,43 @@ int main(int argc, char** argv) {
         for (;;) {
             std::printf("THIS IS NOT JSON\n");
             std::fflush(stdout);
-            Sleep(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::seconds(1));
         }
     }
-
-    ::mcp::server::configuration conf;
-    conf.name = "fake-mcp-server";
-    conf.version = "0.0.1";
-    ::mcp::server server(conf);
-
     if (mode.rfind("die_after_ms:", 0) == 0) {
-        RegisterStandardTools(server, false);
         const auto delay = std::chrono::milliseconds(std::stoi(mode.substr(13)));
         std::thread([delay] {
-            Sleep(delay);
+            std::this_thread::sleep_for(delay);
             std::fflush(stdout);
             std::_Exit(0);  // _exit: no atexit chatter on the JSON-RPC pipe
         }).detach();
-    } else if (mode == "hang") {
-        RegisterStandardTools(server, true);
-    } else if (mode == "stubborn") {
-        std::signal(SIGTERM, SIG_IGN);
-        RegisterStandardTools(server, true);
-    } else {
-        RegisterStandardTools(server, false);
     }
+    if (mode == "stubborn") std::signal(SIGTERM, SIG_IGN);
+    const bool with_hang = mode == "hang" || mode == "stubborn";
 
-    server.start_stdio();
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        const json request = json::parse(line, nullptr, /*allow_exceptions=*/false);
+        if (!request.is_object() || !request.contains("method")) continue;
+        if (!request.contains("id") || request.at("id").is_null()) continue;  // a notification
+        const std::string method = request.at("method").get<std::string>();
+        const json params = request.value("params", json::object());
+        json response = {{"jsonrpc", "2.0"}, {"id", request.at("id")}};
+        if (method == "initialize") {
+            response["result"] = {{"protocolVersion", "2025-03-26"},
+                                  {"capabilities", {{"tools", json::object()}}},
+                                  {"serverInfo", {{"name", "fake-mcp-server"}, {"version", "0.0.1"}}}};
+        } else if (method == "ping") {
+            response["result"] = json::object();
+        } else if (method == "tools/list") {
+            response["result"] = ToolListing(with_hang);
+        } else if (method == "tools/call") {
+            response["result"] = CallTool(params.value("name", ""),
+                                          params.value("arguments", json::object()));
+        } else {
+            response["error"] = {{"code", -32601}, {"message", "method not found: " + method}};
+        }
+        Emit(response);
+    }
     return 0;
 }

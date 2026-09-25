@@ -122,19 +122,6 @@ target_include_directories(minimal_server_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/mcp/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/startup/include")
 
-# cpp-mcp vendors its own older nlohmann/json whose ABI namespace differs from
-# vcpkg's, so the two cannot share a translation unit. The shim is compiled as
-# an ISLAND: a static library whose one TU sees cpp-mcp's headers and no vcpkg
-# json, exposing a string/bool facade (mcp_stdio_shim.hpp). SYSTEM on the
-# include paths keeps third-party header warnings out of the zero-warnings gate.
-add_library(minimal_mcp_shim STATIC mcp/mcp_stdio_shim.cpp)
-target_include_directories(minimal_mcp_shim SYSTEM PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/mcp/include"
-    "${cpp_mcp_SOURCE_DIR}/include"
-    "${cpp_mcp_SOURCE_DIR}/common")
-target_link_libraries(minimal_mcp_shim PUBLIC mcp)
-target_compile_options(minimal_mcp_shim PRIVATE ${MINIMAL_WARNING_FLAGS})
-
 target_link_libraries(minimal_server_core
     PUBLIC
         minimal::common
@@ -144,8 +131,7 @@ target_link_libraries(minimal_server_core
     PRIVATE
         spdlog::spdlog
         CURL::libcurl
-        SQLite3::SQLite3
-        minimal_mcp_shim)
+        SQLite3::SQLite3)
 
 set_target_properties(minimal_server_core PROPERTIES
     VERSION "${PROJECT_VERSION}"

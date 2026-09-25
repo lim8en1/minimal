@@ -376,13 +376,10 @@ target_link_libraries(minimal_tests PRIVATE
     # backend there is no extra native dependency to keep plugin-only.
     minimal_tree_sitter_bash)
 
-# Scripted stdio MCP server spawned by the MCP tests as a real child process.
-# Island build like mcp_stdio_shim.cpp: cpp-mcp's bundled json only.
+# Scripted stdio MCP server spawned by the MCP tests as a real child process
+# (hand-rolled JSON-RPC, like the signal-channel fixture below).
 add_executable(minimal_mcp_fake_server support/mcp_fake_server.cpp)
-target_include_directories(minimal_mcp_fake_server SYSTEM PRIVATE
-    "${cpp_mcp_SOURCE_DIR}/include"
-    "${cpp_mcp_SOURCE_DIR}/common")
-target_link_libraries(minimal_mcp_fake_server PRIVATE mcp)
+target_link_libraries(minimal_mcp_fake_server PRIVATE nlohmann_json::nlohmann_json)
 target_compile_options(minimal_mcp_fake_server PRIVATE ${MINIMAL_WARNING_FLAGS})
 add_dependencies(minimal_tests minimal_mcp_fake_server)
 target_compile_definitions(minimal_tests PRIVATE

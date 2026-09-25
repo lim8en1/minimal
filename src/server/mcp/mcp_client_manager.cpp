@@ -262,13 +262,8 @@ McpEndpoint ToEndpoint(const config::McpServerEntry& entry) {
     McpEndpoint endpoint;
     endpoint.transport = entry.transport == config::McpTransport::Stdio ? McpTransport::Stdio
                                                                         : McpTransport::Http;
-    // cpp-mcp splits the command line on whitespace: command plus args joined.
-    // Args containing spaces cannot cross this boundary (recorded limitation).
-    std::string command_line = entry.command;
-    for (const auto& arg : entry.args) {
-        command_line += " " + arg;
-    }
-    endpoint.command_line = std::move(command_line);
+    endpoint.argv.push_back(entry.command);
+    endpoint.argv.insert(endpoint.argv.end(), entry.args.begin(), entry.args.end());
     endpoint.url = entry.url;
     endpoint.env = entry.env;
     endpoint.headers = entry.headers;
