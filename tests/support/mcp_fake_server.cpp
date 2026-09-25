@@ -127,8 +127,11 @@ int main(int argc, char** argv) {
         const auto delay = std::chrono::milliseconds(std::stoi(mode.substr(13)));
         std::thread([delay] {
             std::this_thread::sleep_for(delay);
-            std::fflush(stdout);
-            std::_Exit(0);  // _exit: no atexit chatter on the JSON-RPC pipe
+            // SIGKILL, not an exit call: no stdio flush (it can block behind
+            // the main thread's stdin read) and no sanitizer exit handling
+            // (TSan sleeps a second at exit) -- the death lands on schedule
+            // in every build. Every response was already flushed.
+            ::kill(::getpid(), SIGKILL);
         }).detach();
     }
     if (mode == "stubborn") std::signal(SIGTERM, SIG_IGN);
