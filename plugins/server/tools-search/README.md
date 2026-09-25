@@ -22,10 +22,12 @@ point of the harness.
   names a subdirectory: an ancestor's rules keep their anchoring (a root
   `/build` does not ignore `src/build`). A `path` that is itself inside an
   ignored directory is searched as asked; its own `.gitignore` still applies.
-- A directory-walking `grep` never searches dotenv files (`.env`, `.env.*`) and
-  says so in its footer; rooting `grep` at one goes through the permission
-  gate like `read`. Files too large for `grep.max_file_bytes` are skipped
-  whole, never searched as a truncated prefix.
+- Permission path rules apply to every file a walk reaches, not only to the
+  `path` argument (core supplies `ToolContext::path_permitted`). A file the
+  rules deny, or would ask about, is withheld and counted in the footer; the
+  default dotenv deny reaches walked `.env` files the same way. Files too large
+  for `grep.max_file_bytes` are skipped whole, never searched as a truncated
+  prefix.
 - `glob` walks the whole tree (within its timeout) and returns the newest
   matches with an exact total; `glob.max_results` caps the rows returned, not
   the walk.

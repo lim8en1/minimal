@@ -28,12 +28,6 @@ using tools::ToolSpec;
 
 ToolResult Error(std::string message) { return ToolResult{true, std::move(message)}; }
 
-// The same file set tools::default_pattern_rules denies by path:
-// `**/.env` and `**/.env.*`.
-bool IsDotenvName(std::string_view name) {
-    return name == ".env" || name.rfind(".env.", 0) == 0;
-}
-
 enum class OutputMode { kFilesWithMatches, kContent, kCount };
 
 // NUL within the first 8 KiB: the same binary heuristic file_access's
@@ -154,7 +148,7 @@ struct GrepRun {
     // Files the SCAN (not the walker) left unsearched -- disclosed alongside
     // the walker's own counts, never silently folded into "no matches".
     int skipped_oversize = 0;   // grew past max_file_bytes between stat and read
-    int skipped_protected = 0;  // dotenv files a directory walk never searches
+    int skipped_by_rules = 0;   // withheld by the operator's path rules
     int skipped_unreadable = 0; // a read error mid-file
     std::string out;
 
@@ -303,8 +297,9 @@ public:
     bool path_confinement_supported() const override { return true; }
     // grep reads file CONTENT: `grep(path=".env", pattern=".")` dumped a
     // dotenv file with no prompt while read/write/edit denied it. A search
-    // ROOTED at a dotenv file now hits the default deny like read does; a
-    // directory walk skips dotenv files in ScanFile below.
+    // ROOTED at a dotenv file hits the default deny like read does, and a
+    // directory walk withholds dotenv files through ctx.path_permitted -- the
+    // same default rules, applied per walked file.
     bool default_dotenv_protected() const override { return true; }
     std::optional<std::string> ExtractPath(const nlohmann::json& input) const override {
         if (!input.contains("path") || !input.at("path").is_string()) return std::nullopt;
@@ -470,16 +465,16 @@ public:
         const auto stats = WalkTree(
             resolved.absolute_path, options, [&](const WalkEntry& entry) {
                 if (entry.is_dir) return true;  // reported for traversal only
-                // Dotenv files are never searched by a directory walk (an
-                // un-ignored .env would otherwise land in any broad search):
-                // the permission gate protects them by PATH, and a walk's path
-                // is its root. Searching one means rooting grep at it, which
-                // goes through that gate. Counted, so the skip is disclosed.
                 if (file_filter && !re2::RE2::FullMatch(re2::StringPiece(entry.rel_path.data(), entry.rel_path.size()), *file_filter)) {
                     return true;
                 }
-                if (root_is_dir && IsDotenvName(entry.absolute_path.filename().string())) {
-                    run.skipped_protected += 1;
+                // The permission gate resolved the call's PATH -- the walk
+                // root -- so the operator's per-path rules (the default
+                // dotenv deny, a `"**/secrets/**": deny`, an ask pattern) are
+                // applied to each walked file here. Counted, so the skip is
+                // disclosed rather than read as "no matches".
+                if (ctx.path_permitted && !ctx.path_permitted(entry.absolute_path)) {
+                    run.skipped_by_rules += 1;
                     return true;
                 }
                 return ScanFile(entry, matcher, prefilter ? &*prefilter : nullptr, run);
@@ -503,7 +498,7 @@ public:
                     : "No matches found";
             const bool anything_to_disclose =
                 skipped_oversize > 0 || stats.skipped_entries > 0 || stats.skipped_deep > 0 ||
-                skipped_errors > 0 || run.skipped_protected > 0 || stats.timed_out ||
+                skipped_errors > 0 || run.skipped_by_rules > 0 || stats.timed_out ||
                 stats.cancelled;
             if (!anything_to_disclose) return ToolResult{false, std::move(headline)};
             // The skip footers below say why the negative is only partial; the
@@ -540,10 +535,10 @@ public:
                        " file(s) skipped: larger than " +
                        std::to_string(settings_.grep_max_file_bytes) + " bytes)\n");
         }
-        if (run.skipped_protected > 0) {
-            run.Append("(" + std::to_string(run.skipped_protected) +
-                       " protected file(s) (.env, .env.*) not searched; grep one directly by "
-                       "path to search it through the permission gate)\n");
+        if (run.skipped_by_rules > 0) {
+            run.Append("(" + std::to_string(run.skipped_by_rules) +
+                       " file(s) withheld by permission rules; grep one directly by path to be "
+                       "asked)\n");
         }
         if (clamped) {
             run.Append("(head_limit clipped to the configured grep_max_results=" +

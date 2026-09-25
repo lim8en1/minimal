@@ -19,6 +19,10 @@
 #include "temp_dir.hpp"
 #include "glob_tool.hpp"
 #include "tree_walker.hpp"
+#include "fakes.hpp"
+#include "minimal/tools/permission.hpp"
+#include "minimal/tools/tool_executor.hpp"
+#include "minimal/tools/tool_registry.hpp"
 
 using namespace minimal;
 using minimal::testing::TempDir;
@@ -545,33 +549,41 @@ TEST_CASE("grep: files_with_matches default mode with gitignore respected",
     CHECK(result.content_text.find("skip/d.py") == std::string::npos);
 }
 
-TEST_CASE("grep: a directory walk never searches dotenv files", "[tools_search][grep_tool]") {
-    // An un-ignored .env must not land in a broad search: dotenv files are
-    // protected by PATH at the permission gate, and a walk's path is its root.
+TEST_CASE("grep and glob withhold what ctx.path_permitted refuses, and say so",
+          "[tools_search][grep_tool][glob_tool][permissions]") {
+    // The executor supplies the predicate (see the integration cases below);
+    // here a fake one proves the tools consult it per walked file and never
+    // present a withheld file as "no matches".
     Fixture f;
     f.Write(".env", "SECRET=alpha\n");
     f.Write("sub/.env.local", "SECRET=alpha\n");
     f.Write("a.py", "alpha\n");
-
-    auto tool = tools_search::MakeGrepTool(f.settings);
+    auto grep = tools_search::MakeGrepTool(f.settings);
+    auto glob = tools_search::MakeGlobTool(f.settings);
     auto ctx = f.Context();
-    const auto result = tool->execute({{"pattern", "alpha"}}, ctx);
+    ctx.path_permitted = [](const std::filesystem::path& p) {
+        return p.filename().string().rfind(".env", 0) != 0;
+    };
+
+    const auto result = grep->execute({{"pattern", "alpha"}}, ctx);
     CHECK_FALSE(result.is_error);
     CHECK(result.content_text.find("a.py") != std::string::npos);
-    // Neither file is a result row -- and the skip is disclosed, so a match
-    // living only in a dotenv file never reads as "no matches".
-    CHECK(result.content_text.find("\n.env\n") == std::string::npos);
-    CHECK(result.content_text.rfind(".env\n", 0) == std::string::npos);
     CHECK(result.content_text.find("sub/.env.local") == std::string::npos);
-    CHECK(result.content_text.find("2 protected file(s)") != std::string::npos);
+    CHECK(result.content_text.find("2 file(s) withheld by permission rules") != std::string::npos);
 
-    const auto only_in_dotenv = tool->execute({{"pattern", "SECRET"}}, ctx);
-    CHECK(only_in_dotenv.content_text.rfind("No matches found\n", 0) == 0);
-    CHECK(only_in_dotenv.content_text.find("protected file(s)") != std::string::npos);
+    const auto only_withheld = grep->execute({{"pattern", "SECRET"}}, ctx);
+    CHECK(only_withheld.content_text.rfind("No matches found\n", 0) == 0);
+    CHECK(only_withheld.content_text.find("withheld by permission rules") != std::string::npos);
 
-    // Rooted AT the file, the gate decides -- so the tool opts into the
-    // default dotenv deny exactly like read.
-    CHECK(tool->default_dotenv_protected());
+    const auto listed = glob->execute({{"pattern", "**/*"}}, ctx);
+    CHECK(listed.content_text.find(".env") == std::string::npos);
+    CHECK(listed.content_text.find("2 path(s) withheld by permission rules") != std::string::npos);
+    CHECK(glob->execute({{"pattern", ".env"}}, ctx).content_text ==
+          "No files found (1 path(s) withheld by permission rules)");
+
+    // Without a predicate (no rules apply) nothing is withheld.
+    ctx.path_permitted = nullptr;
+    CHECK(glob->execute({{"pattern", ".env"}}, ctx).content_text == ".env\n");
 }
 
 TEST_CASE("grep: content mode with context and separators", "[tools_search][grep_tool]") {
@@ -1072,4 +1084,138 @@ TEST_CASE("grep: out-of-int numeric fields are clamped, not wrapped",
                                {"context_after", 4294967297LL}},
                               ctx)
                     .is_error);
+}
+
+// --- permission rules per walked file (executor integration) ------------------
+
+namespace {
+
+std::string TextOf(const llm::ToolResultBlock& block) {
+    return std::get<llm::TextBlock>(block.content.front()).text;
+}
+
+struct RulesFixture : Fixture {
+    tools::ToolRegistry registry;
+
+    RulesFixture() {
+        Write(".env", "needle\n");
+        Write("a.txt", "needle\n");
+        Write("secrets/key.txt", "needle\n");
+        Write("confidential/plan.txt", "needle\n");
+        registry.Register(tools_search::MakeGrepTool(settings));
+        registry.Register(tools_search::MakeGlobTool(settings));
+    }
+
+    // The production shape: the default dotenv rules for every dotenv-
+    // protected tool, plus operator rules for grep. (Not "**/private/**": a
+    // macOS temp dir canonicalizes under /private.)
+    tools::PermissionPolicy Policy() const {
+        tools::PermissionPolicy policy;
+        policy.read_only = tools::PermissionMode::AlwaysAllow;
+        policy.pattern_overrides =
+            tools::default_pattern_rules(registry.DotenvProtectedPermissionKeys());
+        policy.pattern_overrides["grep"].push_back(
+            {"**/secrets/**", tools::PermissionMode::AlwaysDeny});
+        policy.pattern_overrides["grep"].push_back(
+            {"**/confidential/**", tools::PermissionMode::Ask});
+        return policy;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("executor: a tree-wide grep withholds files the path rules deny or would ask about",
+          "[tools_search][permissions][integration]") {
+    RulesFixture f;
+    testing::UnreachablePermissionChecker checker;
+    tools::ToolExecutor executor(f.registry, checker, f.Policy(), tools::PermissionModels{},
+                                 tools::PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    const auto block = executor.Run("t1", "grep", {{"pattern", "needle"}}, ctx);
+    CHECK_FALSE(block.is_error);
+    CHECK_FALSE(checker.called);  // the call itself was allowed outright
+    const auto text = TextOf(block);
+    CHECK(text.find("a.txt") != std::string::npos);
+    CHECK(text.find(".env") == std::string::npos);                 // default deny
+    CHECK(text.find("secrets/key.txt") == std::string::npos);      // operator deny
+    CHECK(text.find("confidential/plan.txt") == std::string::npos);  // operator ask
+    CHECK(text.find("3 file(s) withheld by permission rules") != std::string::npos);
+    CHECK_FALSE(ctx.path_permitted);  // cleared once execute() returned
+}
+
+TEST_CASE("executor: naming an ask-pattern file directly still prompts, then searches it",
+          "[tools_search][permissions][integration]") {
+    RulesFixture f;
+    testing::AlwaysAllowPermissionChecker checker;
+    tools::ToolExecutor executor(f.registry, checker, f.Policy(), tools::PermissionModels{},
+                                 tools::PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    // The file itself, as the footer says: the ask pattern matches it, so the
+    // call prompts, and the approval covers exactly that file.
+    const auto block = executor.Run(
+        "t1", "grep", {{"pattern", "needle"}, {"path", "confidential/plan.txt"}}, ctx);
+    CHECK(checker.seen.size() == 1);
+    CHECK(TextOf(block).find("confidential/plan.txt") != std::string::npos);
+
+    // The directory does not match `**/confidential/**` (only paths below it
+    // do), so rooting there asks nothing -- and withholds every file in it.
+    const auto dir = executor.Run(
+        "t2", "grep", {{"pattern", "needle"}, {"path", "confidential"}}, ctx);
+    CHECK(checker.seen.size() == 1);
+    CHECK(TextOf(dir).find("1 file(s) withheld") != std::string::npos);
+}
+
+TEST_CASE("executor: no pattern rules for a tool means no per-file predicate at all",
+          "[tools_search][permissions][integration]") {
+    RulesFixture f;
+    testing::UnreachablePermissionChecker checker;
+    // glob is not dotenv-protected and has no operator rules.
+    tools::ToolExecutor executor(f.registry, checker, f.Policy(), tools::PermissionModels{},
+                                 tools::PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    CHECK_FALSE(executor.Prepare("t1", "glob", {{"pattern", "**/*"}}, ctx).path_permitted);
+    CHECK(executor.Prepare("t2", "grep", {{"pattern", "x"}}, ctx).path_permitted);
+}
+
+TEST_CASE("executor: a subagent ceiling's path rules withhold files too",
+          "[tools_search][permissions][integration]") {
+    RulesFixture f;
+    testing::UnreachablePermissionChecker checker;
+    tools::PermissionPolicy child;
+    child.read_only = tools::PermissionMode::AlwaysAllow;
+    tools::PermissionPolicy parent;
+    parent.read_only = tools::PermissionMode::AlwaysAllow;
+    parent.pattern_overrides["grep"].push_back({"**/secrets/**", tools::PermissionMode::AlwaysDeny});
+    tools::ToolExecutor executor(f.registry, checker, child, tools::PermissionModels{},
+                                 tools::PermissionRunMode::Normal, parent);
+    auto ctx = f.Context();
+
+    const auto text = TextOf(executor.Run("t1", "grep", {{"pattern", "needle"}}, ctx));
+    CHECK(text.find("a.txt") != std::string::npos);
+    CHECK(text.find("secrets/key.txt") == std::string::npos);
+    CHECK(text.find("1 file(s) withheld") != std::string::npos);
+}
+
+TEST_CASE("executor: an approved ask-mode call covers files the rules treat alike",
+          "[tools_search][permissions][integration]") {
+    // The call's own mode is ask (read_only: ask) and the user approved it:
+    // files whose mode is also plain ask are covered by that approval; only
+    // a rule STRICTER than the call (a deny) withholds.
+    RulesFixture f;
+    testing::AlwaysAllowPermissionChecker checker;
+    auto policy = f.Policy();
+    policy.read_only = tools::PermissionMode::Ask;
+    tools::ToolExecutor executor(f.registry, checker, policy, tools::PermissionModels{},
+                                 tools::PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    const auto text = TextOf(executor.Run("t1", "grep", {{"pattern", "needle"}}, ctx));
+    CHECK(checker.seen.size() == 1);
+    CHECK(text.find("a.txt") != std::string::npos);
+    CHECK(text.find("confidential/plan.txt") != std::string::npos);
+    CHECK(text.find("secrets/key.txt") == std::string::npos);
+    CHECK(text.find(".env") == std::string::npos);
 }

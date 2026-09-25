@@ -161,6 +161,19 @@ struct ToolContext {
     // handles above.
     std::function<AskAnswer(const AskRequest&)> ask_user;
 
+    // Per-FILE permission for a tool that reads files its call never named --
+    // grep/glob walking a tree. Permission gating resolves the call's own path
+    // (the walk ROOT), so without this an operator's `"**/secrets/**": deny`
+    // stopped grep(path="secrets") but not grep(path="."), which read the
+    // same files anyway. True = the operator's path rules allow this file
+    // under the call's approval: its mode is no stricter than the call's own.
+    // A file an `ask` pattern covers is NOT permitted -- a walk cannot prompt
+    // per file, so naming the file directly (and being asked) stays the only
+    // way in. `absolute` is canonical (the walker never follows symlinks
+    // below a canonical root). Set by ToolExecutor::Execute for the duration
+    // of execute(); null = no per-path rules apply, everything is permitted.
+    std::function<bool(const std::filesystem::path& absolute)> path_permitted;
+
     // Per-invocation audit logging (bash logs command, resolved argv or
     // rejection reason, exit code, duration). One process-wide instance for now.
     common::Logger& logger;

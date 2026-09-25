@@ -538,7 +538,68 @@ PreparedInvocation ToolExecutor::PrepareGuarded(const std::string& tool_use_id,
         }
     }
 
+    prepared.path_permitted = PathPermittedFor(*tool, input, ctx);
     return prepared;
+}
+
+std::function<bool(const std::filesystem::path&)> ToolExecutor::PathPermittedFor(
+    const Tool& tool, const nlohmann::json& input, const ToolContext& ctx) const {
+    if (!tool.path_confinement_supported()) return nullptr;
+    const std::string key(registry_.PermissionKeyFor(tool.spec().name));
+    // A plugin model owning the base stage owns the call's verdict; core
+    // patterns are not its vocabulary, so they do not second-guess it per file.
+    if (const BoundPermissionModel* claimant = ClaimantFor(models_, key);
+        claimant != nullptr && replaces(claimant->model->Replaces(), PermissionStage::kBase)) {
+        return nullptr;
+    }
+    // Only a pattern rule can tell one file from another: every other input
+    // to the mode (category, per-tool rules, presets, dimensions) is the
+    // same for each file of one call. No rules for this tool -> nothing to
+    // exclude, and the walk pays nothing.
+    const bool own_rules = policy_.pattern_overrides.count(key) != 0;
+    const bool ceiling_rules =
+        policy_ceiling_.has_value() && policy_ceiling_->pattern_overrides.count(key) != 0;
+    if (!own_rules && !ceiling_rules) return nullptr;
+
+    // The call's own subject, exactly as Explain computed it: the canonical
+    // path, the raw one when it does not resolve, none when absent.
+    std::optional<std::string> root_subject;
+    if (auto typed = tool.ExtractPath(input)) {
+        const ConfineResult confined = confine(ctx.project_root, *typed, /*must_exist=*/false);
+        root_subject = confined.ok ? confined.absolute_path.string() : *typed;
+    }
+
+    // A snapshot, not a reference: the predicate runs inside execute(),
+    // possibly on a pool thread, while the worker may swap policies
+    // (SetPolicies) for the next turn.
+    const auto own = std::make_shared<const PermissionPolicy>(policy_);
+    const auto ceiling = policy_ceiling_ ? std::make_shared<const PermissionPolicy>(*policy_ceiling_)
+                                         : std::shared_ptr<const PermissionPolicy>();
+    const ToolCategory category = tool.category_for(input).value_or(tool.spec().category);
+    // The run mode wraps both sides like it wraps the call: under bypass an
+    // `ask` file is approved exactly as a direct call to it would be, and
+    // under allow-only it is withheld.
+    const PermissionRunMode run_mode = run_mode_.load(std::memory_order_relaxed);
+    auto resolve = [own, ceiling, key, category,
+                    run_mode](const std::optional<std::string>& subject) {
+        PatternSubjects subjects;
+        subjects.whole = subject;
+        PermissionMode mode = own->mode_for(key, category, subjects, /*subject_is_path=*/true);
+        if (ceiling) {
+            mode = most_restrictive(
+                mode, ceiling->mode_for(key, category, subjects, /*subject_is_path=*/true));
+        }
+        return apply_run_mode(mode, run_mode);
+    };
+    // A file is permitted when its mode is no stricter than the call's own:
+    // the approval the call got (a prompt answered, a rule that allowed it)
+    // covers every file the rules treat alike, and nothing a rule treats
+    // more strictly -- a deny pattern, or an ask pattern that would have
+    // prompted for that file by name.
+    const PermissionMode reference = resolve(root_subject);
+    return [resolve, reference](const std::filesystem::path& absolute) {
+        return resolve(absolute.string()) >= reference;
+    };
 }
 
 llm::ToolResultBlock ToolExecutor::Execute(const PreparedInvocation& prepared,
@@ -582,6 +643,14 @@ llm::ToolResultBlock ToolExecutor::Execute(const PreparedInvocation& prepared,
     // plugin code reading model-written input, and the call is already
     // persisted. The catch moved here from the old Run() so a parallel caller
     // gets the guarantee without composing through Run().
+    // The per-file permission predicate lives on the context exactly as long
+    // as execute() runs -- cleared on every exit, a throw included.
+    struct PathPermittedScope {
+        ToolContext& ctx;
+        ~PathPermittedScope() { ctx.path_permitted = nullptr; }
+    } path_permitted_scope{ctx};
+    ctx.path_permitted = prepared.path_permitted;
+
     try {
         ToolResult result = prepared.tool->execute(prepared.input, ctx);
 

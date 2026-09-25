@@ -439,8 +439,17 @@ string rule.
 **Built-in defaults**: `read`, `write`, `edit` and `grep` deny `**/.env` and
 `**/.env.*`. They merge per glob with operator rules: a rule on the same glob
 replaces the default (`"**/.env": "allow"` lifts it), and rules on other globs
-leave it in force. A directory-wide `grep` never searches dotenv files; root
-the search at one to search it (which goes through the rule above).
+leave it in force.
+
+**Walks honor path rules per file.** A path rule is matched against the path a
+call names, and for `grep`/`glob` that is the directory the walk starts from.
+So the rules for those tools are also applied to **every file the walk reaches**.
+A file is withheld when its rules are stricter than the call's own: a `deny`
+match, or an `ask` match (a walk cannot prompt for each file). The output says
+how many were withheld. To reach one, name the file itself as the call's
+`path`; that call prompts, or is denied, like any other. The dotenv defaults
+work the same way, so `grep` over `.` never reads `.env`. A tool with no
+pattern rules pays nothing for this.
 
 ---
 

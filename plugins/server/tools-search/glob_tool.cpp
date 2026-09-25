@@ -183,6 +183,9 @@ public:
             if (!target.ok || target.outside_project_root) {
                 return ToolResult{false, "No files found"};
             }
+            if (ctx.path_permitted && !ctx.path_permitted(target.absolute_path)) {
+                return ToolResult{false, "No files found (1 path(s) withheld by permission rules)"};
+            }
             return ToolResult{false, path_prefix + rel + "\n"};
         }
 
@@ -223,9 +226,18 @@ public:
         std::vector<MatchedPath> kept;  // a heap under `newer`: front() is the OLDEST kept
         kept.reserve(static_cast<std::size_t>(head_limit));
         int total = 0;
+        int withheld = 0;
         const auto stats = WalkTree(
             resolved.absolute_path, options, [&](const WalkEntry& entry) {
                 if (!re2::RE2::FullMatch(re2::StringPiece(entry.rel_path.data(), entry.rel_path.size()), matcher)) return true;
+                // The operator's per-path rules for glob, applied to each
+                // listed path (the gate itself resolved only the walk root).
+                // A directory is withheld as a row; the walk still descends,
+                // and its files answer to the rules on their own.
+                if (ctx.path_permitted && !ctx.path_permitted(entry.absolute_path)) {
+                    withheld += 1;
+                    return true;
+                }
                 total += 1;
                 // Directories carry mtime 0 (the walker stats them for type
                 // only): they sort after files, as they always have.
@@ -252,6 +264,9 @@ public:
         if (stats.skipped_deep > 0) {
             notes.push_back(std::to_string(stats.skipped_deep) +
                             " director(ies) skipped: deeper than the walk depth cap");
+        }
+        if (withheld > 0) {
+            notes.push_back(std::to_string(withheld) + " path(s) withheld by permission rules");
         }
 
         if (kept.empty()) {

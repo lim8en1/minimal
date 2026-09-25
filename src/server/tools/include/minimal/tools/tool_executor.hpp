@@ -1,5 +1,7 @@
 #pragma once
 
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -43,6 +45,12 @@ struct PreparedInvocation {
     // extractable, or the call already denied.
     bool path_confinement_checked = false;
     bool was_inside_project_root = false;
+
+    // ToolContext::path_permitted for this call, built in Prepare on the
+    // session worker from a SNAPSHOT of the policies (Execute may run on a
+    // pool thread and must not read executor state). Null when no pattern
+    // rule could tell one file from another for this tool.
+    std::function<bool(const std::filesystem::path&)> path_permitted;
 };
 
 // The single call site the agent loop uses for tool invocation. Permission
@@ -227,6 +235,13 @@ private:
     PreparedInvocation PrepareGuarded(const std::string& tool_use_id,
                                       const std::string& tool_name, const nlohmann::json& input,
                                       ToolContext& ctx);
+
+    // The per-file permission predicate for an allowed call (see
+    // ToolContext::path_permitted), or null when it could not exclude
+    // anything: not a path tool, a plugin model owns the base stage, or
+    // neither this policy nor the ceiling carries pattern rules for the tool.
+    std::function<bool(const std::filesystem::path&)> PathPermittedFor(
+        const Tool& tool, const nlohmann::json& input, const ToolContext& ctx) const;
 
 
     ToolRegistry& registry_;
