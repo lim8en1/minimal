@@ -33,23 +33,21 @@
 #include "minimal/session/session_database.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool.hpp"
-
-namespace minimal::mcp {
-class McpClientManager;
-}  // namespace minimal::mcp
+#include "minimal/tools/tool_source.hpp"
 
 namespace minimal::agent {
 
 class SubagentManager {
 public:
-    // `mcp_manager` may be null (no mcps.json, MCP-free tests): the child then
-    // simply has no live MCP servers. When present it gates the spawn: a child
-    // preset naming a dead server FAILS THE SPAWN -- an error ToolResultBlock
-    // the parent model adapts to, never a child that starts crippled.
+    // `tool_sources` may be null (tests without dynamic tools): a child preset
+    // naming a source member then fails the spawn like any unavailable
+    // member. When present it gates the spawn: a child preset naming a member
+    // that cannot come up FAILS THE SPAWN -- an error ToolResultBlock the
+    // parent model adapts to, never a child that starts crippled.
     SubagentManager(SessionRegistry& sessions, session::SessionDatabase& db,
                     const AgentPresetRegistry& presets, std::int64_t max_concurrent_subagents,
                     std::string default_subagent_model, common::Logger& logger,
-                    mcp::McpClientManager* mcp_manager = nullptr,
+                    const tools::ToolSourceRegistry* tool_sources = nullptr,
                     std::shared_ptr<tools::PermissionAdvisor> advisor = nullptr,
                     bool advisor_inherit = false,
                     std::chrono::milliseconds advisor_timeout = tools::AdvisedPermissionChecker::kDefaultTimeout,
@@ -82,7 +80,7 @@ private:
     // explicit fallback before "inherit the parent's model"; empty = unset.
     std::string default_subagent_model_;
     common::Logger& logger_;
-    mcp::McpClientManager* mcp_manager_ = nullptr;
+    const tools::ToolSourceRegistry* tool_sources_ = nullptr;
     // The configured advisor, resolved once at startup; copied into a child's
     // params ONLY when advisor_inherit_ is set -- a child defaults to no
     // advisor (docs/EXTENSIBILITY.md §3.4). The parent's ceilings still bound

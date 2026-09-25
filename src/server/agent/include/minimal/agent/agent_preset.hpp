@@ -51,7 +51,10 @@ struct AgentPreset {
     // withheld entirely. (Preload entries are consumed at resolve time -- their
     // bodies ship in the system prompt -- and carry no tool-side access.)
     std::map<std::string, SkillMode> allowed_skills;
-    std::vector<std::string> allowed_mcp_servers;
+    // Dynamic tool-source members this preset allows, per source name
+    // (tools/tool_source.hpp); the session activates them and exposes the
+    // active groups' tools.
+    std::map<std::string, std::vector<std::string>> tool_sources;
     nlohmann::json parameters = nlohmann::json::object();  // from the resolved providers.json entry, not preset frontmatter
     // Also from the providers.json entry. Applies to every request the session
     // makes, summarization included -- a cap the conversation honours and the

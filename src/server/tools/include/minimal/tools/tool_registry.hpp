@@ -16,18 +16,19 @@
 namespace minimal::tools {
 
 // Tool-source-agnostic by construction: built-in, plugin-registered, and
-// MCP-discovered tools all end up here indistinguishably. Register() takes
-// built-ins and plugin tools; MCP tools are namespaced `mcp__<server>__<tool>`
-// and arrive ONLY through ReplaceMcpTools(), which is also how ToolExecutor
-// routes their server-scoped permission decision. Register() refuses
-// mcp__-prefixed names carrying a PLUGIN attribution for that reason (core
-// and the test harness register unattributed).
+// dynamically discovered tools all end up here indistinguishably. Register()
+// takes built-ins and plugin tools. DYNAMIC tools (a plugin's tool source --
+// the MCP plugin's servers) live in a namespace the plugin RESERVED
+// (ReserveNamespace, e.g. "mcp__"), grouped per member ("mcp__<server>__"),
+// and arrive ONLY through ReplaceGroupTools(). Register() refuses names in
+// another plugin's reserved namespace (core and the test harness register
+// unattributed).
 //
-// Concurrency: startup registration (Register/ApplyAliases/SetPermissionKeys)
-// is single-threaded and completes before any session exists. Once MCP tools
-// can be REPLACED at runtime (a shared MCP server process restarting and
-// re-discovering), reads from session workers overlap writes for the first
-// time -- so all map access goes through the mutex below. Startup mutators
+// Concurrency: startup registration (Register/ApplyAliases/SetPermissionKeys/
+// ReserveNamespace) is single-threaded and completes before any session
+// exists. Once group tools can be REPLACED at runtime (a server process
+// restarting and re-discovering), reads from session workers overlap writes
+// for the first time -- so all map access goes through the mutex below. Startup mutators
 // take the exclusive lock too, serially and before serving, which costs
 // nothing and keeps the rules uniform.
 class ToolRegistry {
@@ -70,13 +71,26 @@ public:
     // `allowed` containing a single "*" means every registered tool.
     std::vector<llm::ToolDefinition> DefinitionsFor(const std::vector<std::string>& allowed) const;
 
-    // Definitions for the mcp__<server>__* tools of exactly these servers,
-    // sorted like DefinitionsFor (one request prefix, one cache). The caller --
-    // the agent loop -- passes the allowed-AND-alive set it resolved with the
-    // McpClientManager; servers not in the list contribute nothing, which is
-    // how a dead or de-scoped server's tools vanish from the model's view.
-    std::vector<llm::ToolDefinition> DefinitionsForMcpServers(
-        const std::vector<std::string>& servers) const;
+    // Definitions for the tools of exactly these groups, sorted like
+    // DefinitionsFor (one request prefix, one cache). The caller -- the agent
+    // loop -- passes the allowed-AND-active groups its session resolved
+    // through the tool sources; groups not in the list contribute nothing,
+    // which is how a dead or de-scoped member's tools vanish from the
+    // model's view.
+    std::vector<llm::ToolDefinition> DefinitionsForGroups(
+        const std::vector<std::string>& groups) const;
+
+    // --- Reserved namespaces and tool groups --------------------------------
+    //
+    // Reserves a tool-name prefix for the attributed plugin (or core, when
+    // unattributed): only its own ReplaceGroupTools may publish names there,
+    // Register() refuses them from anyone else, and DefinitionsFor() never
+    // lists them. Startup only. False (logged) for an empty prefix or one
+    // overlapping an existing reservation in either direction.
+    bool ReserveNamespace(std::string prefix);
+
+    // True when `name` falls inside any reserved namespace.
+    bool IsReserved(std::string_view name) const;
 
     std::size_t size() const { return tools_.size(); }
 
@@ -152,22 +166,23 @@ public:
     // tool, the key IS the name -- so the fallback is correct, not accidental.
     std::string_view PermissionKeyFor(std::string_view surface_name) const;
 
-    // Registers or replaces the tool set of one MCP server, atomically from the
-    // readers' point of view: after this returns, Find/DefinitionsFor see
-    // exactly the new set. Called at discovery time and again on re-discovery
-    // (a server process restarted) -- the mcp__ namespacing cannot collide with
-    // other sources, so this bypasses attribution, aliasing and the shadowed
-    // list entirely.
+    // Registers or replaces the tool set of one GROUP -- a name prefix inside
+    // a reserved namespace ("mcp__<server>__") -- atomically from the
+    // readers' point of view: after this returns, Find/DefinitionsForGroups
+    // see exactly the new set. Called at discovery time and again on
+    // re-discovery (a server process restarted); reserved namespacing cannot
+    // collide with Register()ed tools, so this bypasses attribution, aliasing
+    // and the shadowed list entirely. A group outside every reserved
+    // namespace is refused (logged).
     //
     // Replaced tools are NOT freed here: they leave the map, but an executor
     // that already holds the shared_ptr from Find() keeps the object alive
-    // until its invocation finishes. A tool whose name is not in this
-    // server's namespace (mcp__<server>__ prefix) is refused -- destroyed
-    // outright, since it was never Find-able and no executor can hold it:
-    // this entry point owns exactly one server's namespace. Within the batch, the FIRST registration of a name wins,
-    // matching Register()'s rule; same for batch-internal duplicates.
-    void ReplaceMcpTools(const std::string& server_name,
-                         std::vector<std::unique_ptr<Tool>> tools);
+    // until its invocation finishes. A tool whose name is not under `group`
+    // is refused -- destroyed outright, since it was never Find-able and no
+    // executor can hold it: this entry point owns exactly one group. Within
+    // the batch, the FIRST registration of a name wins, matching Register()'s
+    // rule.
+    void ReplaceGroupTools(const std::string& group, std::vector<std::unique_ptr<Tool>> tools);
 
 private:
     // Locking discipline: every tools_/permission_keys_ access holds mutex_.
@@ -181,6 +196,12 @@ private:
         return surface_name;
     }
 
+    struct ReservedNamespace {
+        std::string prefix;
+        std::string owner;  // plugin name; empty for core
+    };
+    const ReservedNamespace* ReservedNamespaceOfUnlocked(std::string_view name) const;
+
     struct Pending {
         Attribution attr;  // the attribution entry this object belongs to
         std::shared_ptr<Tool> tool;
@@ -192,16 +213,17 @@ private:
     std::vector<Attribution> attributions_;
     // Parallel to attributions_: the object each entry refers to. Raw and
     // non-owning: ApplyAliases only matches against tools still in tools_ or
-    // shadowed_, which keep them alive. MCP tools never register through
-    // Register(), so these never dangle via ReplaceMcpTools (which erases
-    // only mcp__-namespaced names, none of which are attributed).
+    // shadowed_, which keep them alive. Group tools never register through
+    // Register(), so these never dangle via ReplaceGroupTools (which erases
+    // only group-owned names, none of which are attributed).
     std::vector<Tool*> owners_;
     std::unordered_map<std::string, std::string> permission_keys_;
-    // Tool name -> the MCP server that registered it. The authority for
-    // ReplaceMcpTools retirement: parsed names are ambiguous ("a_" vs "a" +
-    // "_x" tool), prefixes wipe superset namespaces, but the recording owner
-    // is exact. Guarded by mutex_.
-    std::unordered_map<std::string, std::string> mcp_owners_;
+    // Tool name -> the group that published it. The authority for
+    // ReplaceGroupTools retirement and DefinitionsForGroups: parsed names are
+    // ambiguous ("a_" vs "a" + "_x" tool), prefixes wipe superset groups, but
+    // the recording group is exact. Guarded by mutex_.
+    std::unordered_map<std::string, std::string> group_owners_;
+    std::vector<ReservedNamespace> namespaces_;  // guarded by mutex_
     bool aliases_applied_ = false;
 
     // mutable: readers are const and run on session workers; startup and MCP

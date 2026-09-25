@@ -48,6 +48,7 @@
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
+#include "minimal/mcp/mcp_tool_source.hpp"
 #include "minimal/mcp/signal_protocol.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
@@ -337,6 +338,9 @@ int main(int argc, char** argv) {
     // every resolved preset's slices; the sanity check refuses a model that
     // claims another plugin's tool.
     minimal::tools::PermissionModelRegistry permission_models;
+    // Dynamic tool sources a preset's tool_sources name, keyed by source name
+    // (tools/tool_source.hpp). Sessions activate their preset's members.
+    minimal::tools::ToolSourceRegistry tool_sources;
     // Additive across plugins, keyed by the provider kind string: a backend can
     // be asked to LIST its models ("discover": true in providers.json), fetched
     // lazily at first resolve and never written back to the file.
@@ -433,6 +437,7 @@ int main(int argc, char** argv) {
         .auth_providers = &auth_providers,
         .permission_advisors = &permission_advisors,
         .permission_models = &permission_models,
+        .tool_sources = &tool_sources,
         .model_catalogs = &model_catalogs,
         .metadata_catalogs = &metadata_catalogs,
         .variant_params = &variant_params,
@@ -781,6 +786,12 @@ int main(int argc, char** argv) {
         bundle.mcps, tools, mcp_limits, minimal::common::DefaultLogger(),
         std::move(channel_wiring));
     minimal::mcp::McpClientManager& mcp = *mcp_manager;
+    // The servers as a tool source: presets allow them under tool_sources.mcp
+    // (or the legacy allowed_mcp_servers). No session exists yet, so this is
+    // still ahead of the first activation.
+    tool_sources.Register(minimal::mcp::kMcpToolSourceName,
+                          std::make_shared<minimal::mcp::McpToolSource>(
+                              mcp, minimal::common::DefaultLogger()));
 
     // Register with the router only the channels the manager actually built
     // a handle for -- asking the manager directly, rather than re-deriving
@@ -833,7 +844,7 @@ int main(int argc, char** argv) {
         permissions.advisor ? permission_advisors.Find(*permissions.advisor) : nullptr;
     auto subagents = std::make_shared<minimal::agent::SubagentManager>(
         sessions, *session_db, *presets, settings.max_concurrent_subagents,
-        settings.default_subagent_model, minimal::common::DefaultLogger(), &mcp, advisor,
+        settings.default_subagent_model, minimal::common::DefaultLogger(), &tool_sources, advisor,
         permissions.advisor_inherit,
         std::chrono::milliseconds(permissions.advisor_timeout_ms), &hook_dispatcher);
     tools.Register(std::make_unique<minimal::agent::SpawnSubagentTool>(

@@ -64,7 +64,10 @@ struct AgentPresetFrontmatter {
     // able to demote individual names below it ({"*": allow, "internal-*"-style
     // exact names: ask}).
     std::map<std::string, SkillMode> allowed_skills;
-    std::vector<std::string> allowed_mcp_servers;   // default empty
+    // tool_sources: {<source>: [members]} -- the dynamic tool-source members
+    // (tools/tool_source.hpp) this preset allows. The legacy
+    // `allowed_mcp_servers: [...]` key lands here as tool_sources["mcp"].
+    std::map<std::string, std::vector<std::string>> tool_sources;
     // Allowlist of agent preset keys THIS preset may spawn via spawn_subagent
     // (agents/<name>.md file stems -- the names a spawn request's agent_preset
     // accepts, not the frontmatter display `name:`). Absent = every spawnable

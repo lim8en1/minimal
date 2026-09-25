@@ -65,6 +65,7 @@
 #include "minimal/tools/permission_model.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
+#include "minimal/tools/tool_source.hpp"
 #include "minimal/plugins/service_registry.hpp"
 
 // --- Half 1: extension points plugins implement -----------------------------
@@ -338,6 +339,16 @@ void minimal_plugin_register_permission_advisor(
 void minimal_plugin_register_permission_models(
     minimal::tools::PermissionModelRegistry&,
     const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL, additive: contributes DYNAMIC tool sources, keyed by source name
+// (tools/tool_source.hpp) -- tools that are not a fixed set at registration,
+// published per member into a ToolRegistry namespace the plugin reserved
+// (ReserveNamespace in register_tools, then ReplaceGroupTools). A preset
+// allows members under `tool_sources: {<source>: [members]}`; core activates
+// them per session and exposes exactly the active groups. Two plugins
+// registering one source name is FATAL at startup.
+void minimal_plugin_register_tool_sources(minimal::tools::ToolSourceRegistry&,
+                                          const minimal::plugins::PluginRegistrationContext&);
 
 // OPTIONAL, additive: contributes a model catalog, keyed by the SAME kind
 // string the provider factory registry uses -- a providers.json entry's

@@ -6,9 +6,9 @@
 namespace minimal::mcp {
 
 // MCP tools surface to the model as `mcp__<server>__<tool>` -- the namespacing
-// that keeps them collision-free with built-ins and across servers, and how
-// tools::mcp_server_of() recovers the owning server for the server-scoped
-// permission chain.
+// that keeps them collision-free with built-ins and across servers (the
+// manager reserves kMcpPrefix in the ToolRegistry), and how McpServerOf()
+// recovers the owning server for the MCP permission model.
 inline constexpr std::string_view kMcpPrefix = "mcp__";
 inline constexpr std::string_view kMcpSeparator = "__";
 
@@ -29,9 +29,13 @@ bool IsValidMcpToolName(std::string_view tool_name);
 // first and decides its own failure mode (config error vs. skipped tool).
 std::string McpToolName(std::string_view server_name, std::string_view tool_name);
 
+// The ToolRegistry group one server's tools are published under:
+// "mcp__<server>__" (ToolRegistry::ReplaceGroupTools). Precondition: valid.
+std::string McpGroup(std::string_view server_name);
+
 // Inverse of McpToolName: recovers the server segment from a wire name, or
 // empty if `tool_name` is not one of ours (missing prefix, or no separator
-// after it). Used by the server-scoped permission chain (tools::mcp_server_of()).
+// after it). Used by the MCP permission model.
 std::string McpServerOf(std::string_view tool_name);
 
 }  // namespace minimal::mcp

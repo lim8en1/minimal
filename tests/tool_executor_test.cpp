@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "fakes.hpp"
+#include "minimal/mcp/naming.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
 #include "temp_dir.hpp"
@@ -45,10 +46,10 @@ std::string TextOf(const llm::ToolResultBlock& block) {
 
 }  // namespace
 
-TEST_CASE("mcp_server_of extracts the server segment", "[tool_executor][mcp]") {
-    CHECK(tools::mcp_server_of("mcp__search__query") == "search");
-    CHECK(tools::mcp_server_of("bash").empty());
-    CHECK(tools::mcp_server_of("mcp__malformed").empty());
+TEST_CASE("McpServerOf extracts the server segment", "[tool_executor][mcp]") {
+    CHECK(mcp::McpServerOf("mcp__search__query") == "search");
+    CHECK(mcp::McpServerOf("bash").empty());
+    CHECK(mcp::McpServerOf("mcp__malformed").empty());
 }
 
 TEST_CASE("AlwaysAllow executes without consulting the checker", "[tool_executor]") {

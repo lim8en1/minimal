@@ -114,6 +114,8 @@ public:
     Status StatusOf(const std::string& server_name) const;
 
     std::vector<std::string> ServerNames() const;
+    // The mcps.json servers only -- ServerNames() minus channel handles.
+    std::vector<std::string> ToolServerNames() const;
     bool IsConfigured(const std::string& server_name) const;
 
     // Channel names that survived construction's reserved/collision rules AND

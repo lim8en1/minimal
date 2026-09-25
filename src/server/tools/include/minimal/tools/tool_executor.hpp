@@ -283,8 +283,4 @@ private:
     const hooks::HookDispatcher* hooks_ = nullptr;
 };
 
-// Extracts "<server>" from "mcp__<server>__<tool>". Returns empty for a name
-// that is not MCP-namespaced.
-std::string mcp_server_of(const std::string& tool_name);
-
 }  // namespace minimal::tools

@@ -43,7 +43,7 @@ TEST_CASE("ParseAgentPresetFrontmatter: minimal valid preset", "[agent_preset_fr
     CHECK(preset.model.empty());
     CHECK(preset.allowed_tools.empty());
     CHECK(preset.allowed_skills.empty());
-    CHECK(preset.allowed_mcp_servers.empty());
+    CHECK(preset.tool_sources.empty());
     CHECK(preset.compression_prompt.empty());
     CHECK(preset.body == "You are a build agent.\n");
 }
@@ -97,7 +97,7 @@ TEST_CASE("ParseAgentPresetFrontmatter: allowed_* lists decode", "[agent_preset_
     CHECK(preset.model == "openai-main/gpt-4.1");
     CHECK(preset.allowed_tools == std::vector<std::string>{"read", "write", "bash"});
     CHECK(preset.allowed_skills == std::map<std::string, SkillMode>{{"refactor", SkillMode::Allow}});
-    CHECK(preset.allowed_mcp_servers == std::vector<std::string>{"search"});
+    CHECK(preset.tool_sources.at("mcp") == std::vector<std::string>{"search"});
 }
 
 TEST_CASE("ParseAgentPresetFrontmatter: allowed_subagents is absent-vs-list, not just a list",

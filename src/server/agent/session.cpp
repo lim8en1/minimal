@@ -303,53 +303,56 @@ Session::Session(SessionParams params, AgentPreset preset,
     // SessionParams::hooks in sync with LoopConfig::hooks by convention.
     hooks_ = loop_config.hooks;
 
-    // MCP liveness at session start, BEFORE the worker exists: this thread is
-    // allowed to block (the RPC reader is a different one), and the loop must
-    // already carry its final server set when the first turn can run.
+    // Tool-source activation at session start, BEFORE the worker exists:
+    // this thread is allowed to block (the RPC reader is a different one),
+    // and the loop must already carry its final group set when the first
+    // turn can run.
     mcp_manager_ = params_.mcp_manager;
-    if (mcp_manager_ != nullptr) RefreshMcpServers();
+    RefreshToolSources();
 
     observers_.NotifySessionCreated(InfoSnapshot());
     worker_ = std::thread([this] { WorkerMain(); });
 }
 
-void Session::RefreshMcpServers() {
+void Session::RefreshToolSources() {
     // A fresh reappraisal every call, not a sticky per-session blocklist: a
-    // server that failed once used to stay disabled for the rest of the
-    // session's life, and an /agent switch was the only way back -- it never
-    // took the chance. EnsureAlive's own cooldown (tools.mcp.restart_cooldown_ms)
-    // is what now keeps a genuinely-still-down server from being re-attempted
-    // on every call here, without permanently hiding one that came back.
-    std::vector<std::string> live;
-    live.reserve(preset_.allowed_mcp_servers.size());
-    for (const auto& server : preset_.allowed_mcp_servers) {
-        // A preset naming a server that is configured but currently disabled
-        // (SetEnabled / mcps.json) is an intent to use it -- auto-enable
-        // rather than silently lose those tools. Failure here (only possible
-        // if the name vanished from handles_ between StatusOf and SetEnabled,
-        // which cannot happen since nothing removes a handle post-construction)
-        // falls through to the ordinary EnsureAlive failure path below.
-        const auto status = mcp_manager_->StatusOf(server);
-        if (status.configured && !status.enabled) {
-            std::string enable_error;
-            if (mcp_manager_->SetEnabled(server, true, enable_error)) {
-                logger_.info("session {}: auto-enabled MCP server '{}' required by preset '{}'",
-                             params_.session_id, server, preset_.name);
+    // member that failed once used to stay disabled for the rest of the
+    // session's life, and an /agent switch was the only way back. The
+    // source's own cooldown is what keeps a genuinely-still-down member from
+    // being re-attempted on every call here.
+    std::vector<std::string> groups;
+    const tools::ToolSourceRegistry* sources = params_.environment.tool_sources;
+    for (const auto& [source_name, members] : preset_.tool_sources) {
+        const std::shared_ptr<tools::ToolSource> source =
+            sources != nullptr ? sources->Find(source_name) : nullptr;
+        for (const auto& member : members) {
+            std::string error;
+            std::optional<std::string> group;
+            if (source == nullptr) {
+                error = "tool source '" + source_name +
+                        "' is not available (no loaded plugin provides it)";
+            } else {
+                try {
+                    group = source->Activate(member, error);
+                } catch (const std::exception& e) {
+                    error = e.what();
+                } catch (...) {
+                    error = "tool source '" + source_name + "' threw";
+                }
             }
+            if (group) {
+                groups.push_back(std::move(*group));
+                continue;
+            }
+            // Surfaced, not swallowed: an error on the outbound stream is the
+            // same channel a failed turn uses, so the client sees WHY the
+            // member's tools never appeared.
+            EmitEvent(SessionEvent{SessionError{error}});
+            logger_.warn("session {}: tool source '{}' member '{}' unavailable: {}",
+                         params_.session_id, source_name, member, error);
         }
-        std::string error;
-        if (mcp_manager_->EnsureAlive(server, error)) {
-            live.push_back(server);
-            continue;
-        }
-        // Surfaced, not swallowed: an error on the outbound stream is the
-        // same channel a failed turn uses, so the client sees WHY the
-        // server's tools never appeared.
-        EmitEvent(SessionEvent{SessionError{error}});
-        logger_.warn("session {}: MCP server '{}' disabled: {}", params_.session_id, server,
-                     error);
     }
-    loop_->SetMcpServers(std::move(live));
+    loop_->SetToolGroups(std::move(groups));
 }
 
 Session::~Session() { Terminate(); }
@@ -577,10 +580,11 @@ void Session::ApplyPreset(AgentPreset preset) {
     // now. The policies DO follow the preset, or /agent would change the
     // prompt and tools while the old preset's gates stayed in force.
     ApplyEffective(preset_, *provider_, std::nullopt);
-    // The new preset may allow different MCP servers. Runs on the worker at a
-    // turn boundary (the same blocking contract as a preset swap): a dead
-    // server in the new list is surfaced here, never discovered mid-turn.
-    if (mcp_manager_ != nullptr) RefreshMcpServers();
+    // The new preset may allow different tool-source members. Runs on the
+    // worker at a turn boundary (the same blocking contract as a preset
+    // swap): a dead member in the new list is surfaced here, never
+    // discovered mid-turn.
+    RefreshToolSources();
 
     // Announce the full metadata set so every attached client's status bar
     // ({model} {agent} {permission_mode} {tokens}-max) refreshes NOW instead

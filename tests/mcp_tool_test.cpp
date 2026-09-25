@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "minimal/mcp/naming.hpp"
 #include "minimal/mcp/mcp_tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -153,15 +154,16 @@ TEST_CASE("McpTool: disconnected invoker degrades to an error result", "[mcp_too
     CHECK(result.content_text.find("not connected") != std::string::npos);
 }
 
-TEST_CASE("ReplaceMcpTools swaps a server's set atomically; an in-flight tool survives", "[mcp_tool]") {
+TEST_CASE("ReplaceGroupTools swaps a server's set atomically; an in-flight tool survives", "[mcp_tool]") {
     ToolRegistry registry;
+    registry.ReserveNamespace("mcp__");
     auto first_invoker = std::make_shared<StubInvoker>(OkOutcome("v1"));
     auto second_invoker = std::make_shared<StubInvoker>(OkOutcome("v2"));
 
     std::vector<std::unique_ptr<Tool>> batch1;
     batch1.push_back(std::make_unique<McpTool>("ida", Listing("list_instances"), first_invoker));
     batch1.push_back(std::make_unique<McpTool>("ida", Listing("stop_instance"), first_invoker));
-    registry.ReplaceMcpTools("ida", std::move(batch1));
+    registry.ReplaceGroupTools(minimal::mcp::McpGroup("ida"), std::move(batch1));
 
     CHECK(registry.Find("mcp__ida__list_instances") != nullptr);
     REQUIRE(registry.Find("mcp__ida__stop_instance") != nullptr);
@@ -174,7 +176,7 @@ TEST_CASE("ReplaceMcpTools swaps a server's set atomically; an in-flight tool su
     // Re-discovery reports fewer tools: the stale one must leave the map.
     std::vector<std::unique_ptr<Tool>> batch2;
     batch2.push_back(std::make_unique<McpTool>("ida", Listing("list_instances"), second_invoker));
-    registry.ReplaceMcpTools("ida", std::move(batch2));
+    registry.ReplaceGroupTools(minimal::mcp::McpGroup("ida"), std::move(batch2));
 
     CHECK(registry.Find("mcp__ida__stop_instance") == nullptr);
     REQUIRE(registry.Find("mcp__ida__list_instances") != nullptr);
@@ -194,35 +196,37 @@ TEST_CASE("ReplaceMcpTools swaps a server's set atomically; an in-flight tool su
     CHECK(weak.expired());
 }
 
-TEST_CASE("ReplaceMcpTools removes only the named server's tools, not prefix-overlapping ones",
+TEST_CASE("ReplaceGroupTools removes only the named server's tools, not prefix-overlapping ones",
           "[mcp_tool]") {
     // Server "a_" is rejected by config validation now, but the registry must
     // not rely on that: McpServerOf("mcp__a___x") is "a", not "a_", so a
     // restart of "a" must leave "a_"'s tools (registered directly here,
     // bypassing validation) untouched -- the old prefix erase wiped them all.
     ToolRegistry registry;
+    registry.ReserveNamespace("mcp__");
     auto invoker = std::make_shared<StubInvoker>(OkOutcome("x"));
 
     std::vector<std::unique_ptr<Tool>> underscore_batch;
     underscore_batch.push_back(std::make_unique<McpTool>("a_", Listing("x"), invoker));
-    registry.ReplaceMcpTools("a_", std::move(underscore_batch));
+    registry.ReplaceGroupTools(minimal::mcp::McpGroup("a_"), std::move(underscore_batch));
     REQUIRE(registry.Find("mcp__a___x") != nullptr);
 
     std::vector<std::unique_ptr<Tool>> plain_batch;
     plain_batch.push_back(std::make_unique<McpTool>("a", Listing("t"), invoker));
-    registry.ReplaceMcpTools("a", std::move(plain_batch));
+    registry.ReplaceGroupTools(minimal::mcp::McpGroup("a"), std::move(plain_batch));
 
     REQUIRE(registry.Find("mcp__a__t") != nullptr);
     CHECK(registry.Find("mcp__a___x") != nullptr);  // not collateral damage
 
     // An empty re-discovery of "a" still only touches "a"'s namespace.
-    registry.ReplaceMcpTools("a", {});
+    registry.ReplaceGroupTools(minimal::mcp::McpGroup("a"), {});
     CHECK(registry.Find("mcp__a__t") == nullptr);
     CHECK(registry.Find("mcp__a___x") != nullptr);
 }
 
-TEST_CASE("ReplaceMcpTools: first registration wins within a batch, foreign names refused", "[mcp_tool]") {
+TEST_CASE("ReplaceGroupTools: first registration wins within a batch, foreign names refused", "[mcp_tool]") {
     ToolRegistry registry;
+    registry.ReserveNamespace("mcp__");
     auto invoker = std::make_shared<StubInvoker>(OkOutcome("x"));
 
     std::vector<std::unique_ptr<Tool>> batch;
@@ -231,25 +235,26 @@ TEST_CASE("ReplaceMcpTools: first registration wins within a batch, foreign name
     batch.push_back(std::move(winner));
     batch.push_back(std::make_unique<McpTool>("s", Listing("t"), invoker));  // duplicate
     batch.push_back(std::make_unique<McpTool>("other", Listing("u"), invoker));  // wrong namespace
-    registry.ReplaceMcpTools("s", std::move(batch));
+    registry.ReplaceGroupTools(minimal::mcp::McpGroup("s"), std::move(batch));
 
     REQUIRE(registry.Find("mcp__s__t").get() == winner_ptr);
     CHECK(registry.Find("mcp__other__u") == nullptr);
 }
 
-TEST_CASE("ReplaceMcpTools: DefinitionsFor sees exactly the new set, sorted", "[mcp_tool]") {
+TEST_CASE("ReplaceGroupTools: DefinitionsFor sees exactly the new set, sorted", "[mcp_tool]") {
     ToolRegistry registry;
+    registry.ReserveNamespace("mcp__");
     auto invoker = std::make_shared<StubInvoker>(OkOutcome("x"));
 
     std::vector<std::unique_ptr<Tool>> zeta_batch;
     zeta_batch.push_back(std::make_unique<McpTool>("zeta", Listing("b"), invoker));
-    registry.ReplaceMcpTools("zeta", std::move(zeta_batch));
+    registry.ReplaceGroupTools(minimal::mcp::McpGroup("zeta"), std::move(zeta_batch));
 
     std::vector<std::unique_ptr<Tool>> alpha_batch;
     alpha_batch.push_back(std::make_unique<McpTool>("alpha", Listing("a"), invoker));
-    registry.ReplaceMcpTools("alpha", std::move(alpha_batch));
+    registry.ReplaceGroupTools(minimal::mcp::McpGroup("alpha"), std::move(alpha_batch));
 
-    const auto defs = registry.DefinitionsForMcpServers({"alpha", "zeta"});
+    const auto defs = registry.DefinitionsForGroups({minimal::mcp::McpGroup("alpha"), minimal::mcp::McpGroup("zeta")});
     REQUIRE(defs.size() == 2);
     CHECK(defs[0].name == "mcp__alpha__a");
     CHECK(defs[1].name == "mcp__zeta__b");

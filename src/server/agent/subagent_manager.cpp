@@ -1,7 +1,5 @@
 #include "minimal/agent/subagent_manager.hpp"
 
-#include "minimal/mcp/mcp_client_manager.hpp"
-
 #include <algorithm>
 #include <chrono>
 #include <future>
@@ -52,7 +50,7 @@ SubagentManager::SubagentManager(SessionRegistry& sessions, session::SessionData
                                   const AgentPresetRegistry& presets,
                                   std::int64_t max_concurrent_subagents,
                                   std::string default_subagent_model, common::Logger& logger,
-                                  mcp::McpClientManager* mcp_manager,
+                                  const tools::ToolSourceRegistry* tool_sources,
                                   std::shared_ptr<tools::PermissionAdvisor> advisor,
                                   bool advisor_inherit,
                                   std::chrono::milliseconds advisor_timeout,
@@ -63,7 +61,7 @@ SubagentManager::SubagentManager(SessionRegistry& sessions, session::SessionData
       max_concurrent_subagents_(max_concurrent_subagents),
       default_subagent_model_(std::move(default_subagent_model)),
       logger_(logger),
-      mcp_manager_(mcp_manager),
+      tool_sources_(tool_sources),
       advisor_(std::move(advisor)),
       advisor_inherit_(advisor_inherit),
       advisor_timeout_(advisor_timeout),
@@ -242,19 +240,43 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     // Skills are already clamped INSIDE Resolve (against this parent's map) --
     // they must be, because a preload entry is consumed at resolve time and a
     // post-resolve clamp could not stop the prompt injection.
-    child_preset.allowed_mcp_servers =
-        intersect_allowed(parent->preset().allowed_mcp_servers, child_preset.allowed_mcp_servers);
+    // Tool-source members intersect per source: a source the parent lacks
+    // contributes nothing, whatever the child preset says.
+    {
+        std::map<std::string, std::vector<std::string>> clamped;
+        for (const auto& [source, members] : child_preset.tool_sources) {
+            const auto parent_members = parent->preset().tool_sources.find(source);
+            if (parent_members == parent->preset().tool_sources.end()) continue;
+            auto kept = intersect_allowed(parent_members->second, members);
+            if (!kept.empty()) clamped.emplace(source, std::move(kept));
+        }
+        child_preset.tool_sources = std::move(clamped);
+    }
 
-    // A subagent whose preset requires a dead server DOES NOT START: an error
-    // ToolResultBlock the parent model adapts to, before any child row exists.
-    // Checked here, not in the child's construction, so the failure names the
-    // SERVER and lands as the spawn tool's result.
-    if (mcp_manager_ != nullptr) {
-        for (const auto& server : child_preset.allowed_mcp_servers) {
+    // A subagent whose preset requires a member that cannot come up DOES NOT
+    // START: an error ToolResultBlock the parent model adapts to, before any
+    // child row exists. Checked here, not in the child's construction, so the
+    // failure names the MEMBER and lands as the spawn tool's result.
+    for (const auto& [source_name, members] : child_preset.tool_sources) {
+        const std::shared_ptr<tools::ToolSource> source =
+            tool_sources_ != nullptr ? tool_sources_->Find(source_name) : nullptr;
+        for (const auto& member : members) {
             std::string error;
-            if (!mcp_manager_->EnsureAlive(server, error)) {
-                return SubagentOutcome::Error("subagent preset '" + preset_name +
-                                              "' requires MCP server '" + server +
+            bool up = false;
+            if (source == nullptr) {
+                error = "no loaded plugin provides tool source '" + source_name + "'";
+            } else {
+                try {
+                    up = source->Activate(member, error).has_value();
+                } catch (const std::exception& e) {
+                    error = e.what();
+                } catch (...) {
+                    error = "tool source '" + source_name + "' threw";
+                }
+            }
+            if (!up) {
+                return SubagentOutcome::Error("subagent preset '" + preset_name + "' requires " +
+                                              source_name + " member '" + member +
                                               "' which is unavailable: " + error);
             }
         }
@@ -282,7 +304,6 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     params.seed_grants = parent->granted_keys();
     params.policy_ceiling = parent->policy();
     params.permission_models_ceiling = parent->permission_models();
-    params.mcp_manager = mcp_manager_;
     // The spawn's model decision rides model_override: CreateResolved's
     // ResolveModel honors it for children too, so an unresolvable ref fails
     // the spawn with a named error before the child's first call. nullopt

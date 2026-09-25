@@ -269,7 +269,8 @@ TEST_CASE("PermissionModel: an executor always carries the MCP model while MCP i
     tools::ToolRegistry& registry = f.registry;
     std::vector<std::unique_ptr<tools::Tool>> batch;
     batch.push_back(std::make_unique<FakeTool>("mcp__gh__get_issue", ToolCategory::ReadOnly));
-    registry.ReplaceMcpTools("gh", std::move(batch));
+    registry.ReserveNamespace("mcp__");
+    registry.ReplaceGroupTools("mcp__gh__", std::move(batch));
     UnreachablePermissionChecker checker;
     // AllowAll would allow a ReadOnly tool; an MCP tool must still Ask
     // (the MCP model's default), never fall through to the category.

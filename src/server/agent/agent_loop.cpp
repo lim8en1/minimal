@@ -363,9 +363,8 @@ AgentLoop::SystemAndTools AgentLoop::BuildSystemAndTools() const {
     // sorted order -- this request is rebuilt every turn, so the merge must
     // preserve the deterministic prefix the prompt cache keys on.
     {
-        std::vector<llm::ToolDefinition> mcp_defs =
-            registry_.DefinitionsForMcpServers(mcp_servers_);
-        out.tools.insert(out.tools.end(), mcp_defs.begin(), mcp_defs.end());
+        std::vector<llm::ToolDefinition> group_defs = registry_.DefinitionsForGroups(tool_groups_);
+        out.tools.insert(out.tools.end(), group_defs.begin(), group_defs.end());
         // record_summary rides every request, whatever the preset allows: the
         // summarizer request reuses this exact tools array (plus one appended
         // instruction), so the tool must already be in it for the prompt
@@ -1287,7 +1286,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             // (a few lines above, this same tool round) already built them --
             // instead of the zero-arg overload, which would call
             // BuildSystemAndTools() a second time: a redundant
-            // DefinitionsFor/DefinitionsForMcpServers materialization and sort
+            // DefinitionsFor/DefinitionsForGroups materialization and sort
             // on every zero-usage round, which is every round against any
             // OpenAI-compatible proxy that does not report usage.
             const std::int64_t estimate =

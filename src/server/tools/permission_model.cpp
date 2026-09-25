@@ -75,6 +75,8 @@ public:
         return answer;
     }
 
+    std::string_view HookCategory() const override { return "mcp"; }
+
     std::string Describe(const void* layer) const override {
         if (layer == nullptr) return {};
         const auto& policy = *static_cast<const McpPermissionPolicy*>(layer);

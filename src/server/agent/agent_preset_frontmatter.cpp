@@ -342,6 +342,7 @@ bool IsKnownKey(const std::string& key) {
     static const std::unordered_map<std::string, char> kKnown{
         {"name", 0},          {"description", 0},   {"model", 0},
         {"allowed_tools", 0}, {"allowed_skills", 0},{"allowed_mcp_servers", 0},
+        {"tool_sources", 0},
         {"allowed_subagents", 0},
         {"permission_mode", 0}, {"permission", 0},  {"tools", 0},
         {"mcp_permissions", 0}, {"compression_prompt", 0}, {"compaction_strategy", 0},
@@ -427,6 +428,41 @@ nlohmann::json DecodeToolConfig(const YAML::Node& node) {
     return result;
 }
 
+// Legacy spellings of plugin-owned keys, from before the MCP client became a
+// plugin: each is read into the generic key under the plugin's name. A key
+// table, not MCP logic -- core does not interpret what it moves.
+constexpr const char* kLegacyMcpSource = "mcp";
+
+void AppendUnique(std::vector<std::string>& out, const std::vector<std::string>& items) {
+    for (const auto& item : items) {
+        if (std::find(out.begin(), out.end(), item) == out.end()) out.push_back(item);
+    }
+}
+
+// tool_sources: {<source>: [members]}, plus legacy allowed_mcp_servers.
+std::map<std::string, std::vector<std::string>> DecodeToolSources(const YAML::Node& node) {
+    std::map<std::string, std::vector<std::string>> result;
+    if (const YAML::Node value = node["tool_sources"]) {
+        if (!value.IsMap()) {
+            throw std::runtime_error(
+                "agent preset: tool_sources must be a map of {source: [members]}");
+        }
+        for (const auto& entry : value) {
+            const auto source = entry.first.as<std::string>();
+            if (source.empty() || !entry.second.IsSequence()) {
+                throw std::runtime_error("agent preset: tool_sources entry '" + source +
+                                         "' must be a named list of members");
+            }
+            std::vector<std::string> members;
+            for (const auto& item : entry.second) members.push_back(item.as<std::string>());
+            AppendUnique(result[source], members);
+        }
+    }
+    const auto legacy = OptionalStringList(node, "allowed_mcp_servers");
+    if (!legacy.empty()) AppendUnique(result[kLegacyMcpSource], legacy);
+    return result;
+}
+
 // plugin_permissions: {<model>: {...}} -- carried verbatim like tool_config;
 // only the outer shape is core's to check.
 nlohmann::json DecodePluginPermissions(const YAML::Node& node) {
@@ -486,7 +522,7 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
     }
     result.allowed_tools = OptionalStringList(node, "allowed_tools");
     result.allowed_skills = DecodeAllowedSkills(node);
-    result.allowed_mcp_servers = OptionalStringList(node, "allowed_mcp_servers");
+    result.tool_sources = DecodeToolSources(node);
     // Present-vs-absent is semantic here (absent = no restriction, present =
     // the exact allowlist), so this cannot go through OptionalStringList,
     // whose empty result is ambiguous. An empty entry would silently match

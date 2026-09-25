@@ -4,7 +4,6 @@
 #include <unordered_set>
 #include <utility>
 
-#include "minimal/mcp/naming.hpp"
 #include "minimal/tools/path_confinement.hpp"
 #include "minimal/tools/pattern_match.hpp"
 
@@ -20,8 +19,6 @@ llm::ToolResultBlock ErrorResult(const std::string& tool_use_id, std::string tex
 }
 
 }  // namespace
-
-std::string mcp_server_of(const std::string& tool_name) { return mcp::McpServerOf(tool_name); }
 
 ToolExecutor::ToolExecutor(ToolRegistry& registry, PermissionChecker& checker,
                             PermissionPolicy policy, PermissionModels models,
@@ -53,12 +50,17 @@ const McpPermissionPolicy& ToolExecutor::mcp_policy() const {
 
 namespace {
 
-// The hook-payload label. MCP tools carry a placeholder ReadOnly category (the
-// server-scoped McpPermissionPolicy governs them, never a category), so a
-// category of "read_only" on an arbitrary remote call would mislead a
-// `category` hook filter -- they are labelled "mcp".
-std::string_view HookCategoryName(const std::string& tool_name, ToolCategory category) {
-    return mcp_server_of(tool_name).empty() ? category_name(category) : "mcp";
+// The hook-payload label. A tool whose base mode a permission model owns
+// carries a placeholder category (MCP tools are ReadOnly by declaration; the
+// model governs them, never a category), so "read_only" on an arbitrary
+// remote call would mislead a `category` hook filter -- such tools are
+// labelled with the model's own HookCategory ("mcp"), when it names one.
+std::string HookCategoryName(const BoundPermissionModel* claimant, ToolCategory category) {
+    if (claimant != nullptr && replaces(claimant->model->Replaces(), PermissionStage::kBase)) {
+        const std::string_view label = claimant->model->HookCategory();
+        if (!label.empty()) return std::string(label);
+    }
+    return std::string(category_name(category));
 }
 
 }  // namespace
@@ -617,18 +619,23 @@ ToolExecutor::HookLabels ToolExecutor::hook_labels(const std::string& tool_name,
                                                    const nlohmann::json& input) const {
     HookLabels labels;
     labels.permission_key = std::string(registry_.PermissionKeyFor(tool_name));
+    const BoundPermissionModel* claimant = FindClaimant(models_, labels.permission_key);
     const std::shared_ptr<Tool> tool = registry_.Find(tool_name);
     if (tool == nullptr) {
-        labels.category = mcp_server_of(tool_name).empty() ? "unknown" : "mcp";
+        // No longer registered (a replaced group): the model's label still
+        // says what it was, else "unknown".
+        const std::string_view label =
+            claimant != nullptr ? claimant->model->HookCategory() : std::string_view{};
+        labels.category = label.empty() ? "unknown" : std::string(label);
         return labels;
     }
     try {
         labels.category =
-            HookCategoryName(tool_name, tool->category_for(input).value_or(tool->spec().category));
+            HookCategoryName(claimant, tool->category_for(input).value_or(tool->spec().category));
     } catch (...) {
         // category_for is plugin code reading model-written input; a label
         // is never worth a throw out of a hook emission.
-        labels.category = HookCategoryName(tool_name, tool->spec().category);
+        labels.category = HookCategoryName(claimant, tool->spec().category);
     }
     return labels;
 }

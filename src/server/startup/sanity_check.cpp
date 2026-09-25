@@ -24,6 +24,7 @@
 #include "minimal/tools/pattern_match.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/permission_model.hpp"
+#include "minimal/tools/tool_source.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace minimal::startup {
@@ -662,6 +663,9 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
     if (inputs_.registries.compaction_strategies != nullptr) {
         report("compaction strategy", inputs_.registries.compaction_strategies->collisions());
     }
+    if (inputs_.registries.tool_sources != nullptr) {
+        report("tool source", inputs_.registries.tool_sources->collisions());
+    }
     // Permission models: one per plugin (a second from the same plugin is a
     // collision), and a model may only claim its own plugin's tools --
     // ruling on another plugin's tools is exactly the power the seam
@@ -797,12 +801,41 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
         }
     }
 
-    // allowed_mcp_servers entries must name a configured server.
+    // tool_sources members must name a member the source knows. The MCP
+    // source is checked against mcps.json directly while the MCP client is
+    // core (it is registered after this check runs); any other source must
+    // be registered by a loaded plugin.
     for (const auto& [preset_name, raw] : presets_) {
-        for (const auto& server : raw.allowed_mcp_servers) {
-            if (bundle_.mcps.Find(server) == nullptr) {
-                results.push_back(Warning("naming_model", "agent preset '" + preset_name +
-                                      "': allowed_mcp_servers entry '" + server + "' matches no mcps.json server"));
+        for (const auto& [source_name, members] : raw.tool_sources) {
+            if (source_name == "mcp") {
+                for (const auto& server : members) {
+                    if (bundle_.mcps.Find(server) == nullptr) {
+                        results.push_back(Warning(
+                            "naming_model", "agent preset '" + preset_name +
+                                                "': allowed_mcp_servers entry '" + server +
+                                                "' matches no mcps.json server"));
+                    }
+                }
+                continue;
+            }
+            const auto source = inputs_.registries.tool_sources != nullptr
+                                    ? inputs_.registries.tool_sources->Find(source_name)
+                                    : nullptr;
+            if (source == nullptr) {
+                results.push_back(Warning("naming_model",
+                                          "agent preset '" + preset_name + "': tool source '" +
+                                              source_name +
+                                              "' is provided by no loaded plugin"));
+                continue;
+            }
+            const auto known = source->Members();
+            for (const auto& member : members) {
+                if (std::find(known.begin(), known.end(), member) == known.end()) {
+                    results.push_back(Warning("naming_model",
+                                              "agent preset '" + preset_name + "': tool source '" +
+                                                  source_name + "' has no member '" + member +
+                                                  "'"));
+                }
             }
         }
     }

@@ -131,6 +131,11 @@ McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistr
                                    const McpLimits& limits, common::Logger& logger,
                                    ChannelWiring channels)
     : registry_(registry), limits_(limits), logger_(logger), channels_(std::move(channels)) {
+    // The mcp__ namespace is this manager's: its servers' tool groups live
+    // there, and no other registrant may place names in it. Idempotent
+    // enough for tests that build a second manager over one registry: the
+    // repeat reservation is refused (logged), the first one stands.
+    if (!registry_.IsReserved(kMcpPrefix)) registry_.ReserveNamespace(std::string(kMcpPrefix));
     // The config is consumed here: handles carry their own entry copies, and
     // a second copy of the whole mcps.json is dead weight for the process
     // lifetime.
@@ -402,7 +407,7 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
             std::make_unique<McpTool>(entry.name, std::move(definition), invoker));
         ++registered;
     }
-    registry_.ReplaceMcpTools(entry.name, std::move(tools));
+    registry_.ReplaceGroupTools(McpGroup(entry.name), std::move(tools));
 
     // Captured BEFORE the connection is moved into the handle: the
     // instructions live on it, and the move nulls the local unique_ptr.
@@ -547,7 +552,7 @@ bool McpClientManager::SetEnabled(const std::string& server_name, bool enabled, 
     std::lock_guard<std::mutex> start_lock(handle->start_mu);
     if (!enabled) {
         RetireConnection(*handle);
-        registry_.ReplaceMcpTools(server_name, {});
+        registry_.ReplaceGroupTools(McpGroup(server_name), {});
     }
     {
         std::lock_guard<std::mutex> lock(handle->mu);
@@ -561,6 +566,15 @@ std::vector<std::string> McpClientManager::ServerNames() const {
     std::vector<std::string> names;
     names.reserve(handles_.size());
     for (const auto& [name, handle] : handles_) names.push_back(name);
+    return names;
+}
+
+std::vector<std::string> McpClientManager::ToolServerNames() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<std::string> names;
+    for (const auto& [name, handle] : handles_) {
+        if (!handle->is_channel) names.push_back(name);
+    }
     return names;
 }
 

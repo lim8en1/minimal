@@ -73,6 +73,7 @@ add_library(minimal_server_core SHARED
     mcp/mcp_tool.cpp
     mcp/mcp_connection.cpp
     mcp/mcp_client_manager.cpp
+    mcp/mcp_tool_source.cpp
     llm/provider_factory_registry.cpp
     llm/model_catalog.cpp
     llm/metadata_catalog.cpp

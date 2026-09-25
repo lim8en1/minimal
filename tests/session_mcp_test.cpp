@@ -16,6 +16,7 @@
 #include "minimal/config/mcps_config.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
+#include "minimal/mcp/mcp_tool_source.hpp"
 #include "minimal/rpc/session_wiring.hpp"
 #include "minimal/tools/tool_registry.hpp"
 #include "support/fakes.hpp"
@@ -54,7 +55,7 @@ struct Fixture {
         : mcp_config_path(WriteMcpsConfig(entries)) {
         preset.name = "test";
         preset.allowed_tools = {"*"};
-        preset.allowed_mcp_servers = allowed;
+        preset.tool_sources["mcp"] = allowed;
         preset.permission_mode = testing::AllowAllPolicy();
         preset.run_mode = tools::PermissionRunMode::Normal;
     }
@@ -75,6 +76,10 @@ struct Fixture {
         params.agent_preset = "test";
         params.project_root = std::filesystem::temp_directory_path();
         params.mcp_manager = manager.get();
+        sources.Register(mcp::kMcpToolSourceName,
+                         std::make_shared<mcp::McpToolSource>(*manager,
+                                                              minimal::common::DefaultLogger()));
+        params.environment.tool_sources = &sources;
         rpc::FinishSessionWiring(params);
 
         session = std::make_unique<agent::Session>(
@@ -105,6 +110,7 @@ struct Fixture {
     agent::SessionObserverRegistry observers{minimal::common::DefaultLogger()};
     tools::ToolRegistry registry;
     std::unique_ptr<mcp::McpClientManager> manager;
+    tools::ToolSourceRegistry sources;
     testing::FakeLlmProvider* provider = nullptr;
     testing::InMemoryHistoryStore* store = nullptr;
     std::unique_ptr<agent::Session> session;
@@ -240,7 +246,7 @@ TEST_CASE("de-scoping a server on /agent removes its tools without killing the p
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 
     agent::AgentPreset rescoped = fixture.preset;
-    rescoped.allowed_mcp_servers.clear();
+    rescoped.tool_sources.clear();
     fixture.session->ApplyPreset(rescoped);
 
     fixture.session->SubmitTurn("turn two");
@@ -352,9 +358,12 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
         mcp::McpLimits{std::chrono::seconds(2), std::chrono::seconds(2)},
         minimal::common::DefaultLogger());
 
+    tools::ToolSourceRegistry sources;
+    sources.Register(mcp::kMcpToolSourceName,
+                     std::make_shared<mcp::McpToolSource>(manager, minimal::common::DefaultLogger()));
     agent::SubagentManager subagents(sessions, db, presets, /*max_concurrent_subagents=*/4,
                                      /*default_subagent_model=*/"",
-                                     minimal::common::DefaultLogger(), &manager);
+                                     minimal::common::DefaultLogger(), &sources);
 
     const auto row = db.CreateSession("", std::nullopt, dir.path().string(), "main");
     agent::SessionParams parent_params;

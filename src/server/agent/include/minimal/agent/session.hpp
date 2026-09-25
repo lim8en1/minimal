@@ -61,6 +61,7 @@
 #include "minimal/tools/permission_checker.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
+#include "minimal/tools/tool_source.hpp"
 
 namespace minimal::mcp {
 class McpClientManager;       // borrowed via SessionParams::mcp_manager
@@ -125,6 +126,11 @@ struct SessionEnvironment {
     // (tests) skips the preset-name step of the resolution; the settings-level
     // strategy and the built-in remain.
     const agent::CompactionStrategyRegistry* compaction_strategies = nullptr;
+    // The dynamic tool sources a preset's tool_sources name (MCP servers are
+    // the first). Borrowed, process-wide, read-only after plugin load. Null:
+    // a preset naming any source gets an error event per member instead of
+    // its tools.
+    const tools::ToolSourceRegistry* tool_sources = nullptr;
 };
 
 struct SessionParams {
@@ -553,7 +559,7 @@ public:
     // ErrorEvent) and the session proceeds without it. Sets the loop's live
     // server list. Runs where blocking is allowed -- session construction and
     // the worker at a preset-switch boundary -- never the RPC reader.
-    void RefreshMcpServers();
+    void RefreshToolSources();
     const std::optional<common::ModelRef>& model_override() const override {
         return model_override_;
     }

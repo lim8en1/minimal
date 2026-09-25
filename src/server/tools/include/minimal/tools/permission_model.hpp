@@ -125,6 +125,11 @@ public:
     // on the session worker per gated call. May throw -- core answers Deny.
     virtual PermissionAnswer Resolve(PermissionStage stage, const PermissionQuery& query) const = 0;
 
+    // The `category` label tool hooks carry for the tools whose BASE stage
+    // this model owns (their declared category is a placeholder the model
+    // overrides). Empty: the declared category stands. MCP: "mcp".
+    virtual std::string_view HookCategory() const { return {}; }
+
     // One line for `/permissions show`. Default: nothing.
     virtual std::string Describe(const void* layer) const {
         (void)layer;

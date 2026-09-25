@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/mcp/naming.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -66,7 +67,7 @@ TEST_CASE("McpClientManager: one shared connection, discovered tools registered"
     std::string error;
     REQUIRE(fixture.manager->EnsureAlive("fake", error));
 
-    const auto tools = fixture.registry.DefinitionsForMcpServers({"fake"});
+    const auto tools = fixture.registry.DefinitionsForGroups({minimal::mcp::McpGroup("fake")});
     REQUIRE(tools.size() == 4);
     CHECK(tools[0].name == "mcp__fake__echo");
     CHECK(tools[0].input_schema.is_object());
@@ -104,7 +105,7 @@ TEST_CASE("McpClientManager: a restarted server respawns and re-discovers", "[mc
     const auto after = fixture.manager->StatusOf("fake");
     CHECK(after.generation == before.generation + 1);
 
-    const auto tools = fixture.registry.DefinitionsForMcpServers({"fake"});
+    const auto tools = fixture.registry.DefinitionsForGroups({minimal::mcp::McpGroup("fake")});
     CHECK(tools.size() == 4);  // re-registered, not duplicated
 }
 
@@ -201,7 +202,7 @@ TEST_CASE("McpClientManager: a server that cannot start is a surfaced error", "[
     CHECK_FALSE(fixture.manager->EnsureAlive("broken", error));
     CHECK(error != "untouched");
     CHECK_FALSE(fixture.manager->StatusOf("broken").alive);
-    CHECK(fixture.registry.DefinitionsForMcpServers({"broken"}).empty());
+    CHECK(fixture.registry.DefinitionsForGroups({minimal::mcp::McpGroup("broken")}).empty());
 }
 
 TEST_CASE("McpClientManager: unconfigured and disabled servers are not alive", "[mcp_manager]") {
@@ -232,12 +233,12 @@ TEST_CASE("McpClientManager: SetEnabled toggles a server live, no restart", "[mc
     CHECK(fixture.manager->StatusOf("off").enabled);
     CHECK(fixture.manager->EnsureAlive("off", error));
     CHECK(fixture.manager->StatusOf("off").alive);
-    CHECK_FALSE(fixture.registry.DefinitionsForMcpServers({"off"}).empty());
+    CHECK_FALSE(fixture.registry.DefinitionsForGroups({minimal::mcp::McpGroup("off")}).empty());
 
     CHECK(fixture.manager->SetEnabled("off", false, error));
     CHECK_FALSE(fixture.manager->StatusOf("off").enabled);
     CHECK_FALSE(fixture.manager->StatusOf("off").alive);
-    CHECK(fixture.registry.DefinitionsForMcpServers({"off"}).empty());
+    CHECK(fixture.registry.DefinitionsForGroups({minimal::mcp::McpGroup("off")}).empty());
 
     // Disabled again: the next EnsureAlive refuses to reconnect it.
     CHECK_FALSE(fixture.manager->EnsureAlive("off", error));
@@ -348,7 +349,7 @@ TEST_CASE("McpClientManager: server names that cannot be namespaced are refused"
     std::string error = "untouched";
     CHECK_FALSE(fixture.manager->EnsureAlive("bad__name", error));
     CHECK(error.find("cannot be namespaced") != std::string::npos);
-    CHECK(fixture.registry.DefinitionsForMcpServers({"broken"}).empty());
+    CHECK(fixture.registry.DefinitionsForGroups({minimal::mcp::McpGroup("broken")}).empty());
 }
 
 TEST_CASE("McpClientManager: a fresh verdict skips the wire ping", "[mcp_manager]") {

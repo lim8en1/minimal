@@ -527,12 +527,12 @@ public:
     void SetPreset(AgentPreset preset) { preset_ = std::move(preset); }
     const AgentPreset& preset() const { return preset_; }
 
-    // The allowed-AND-alive MCP server set, resolved by the session against the
-    // McpClientManager at construction and at every /agent switch (a preset
-    // change can re-scope the servers). A dead server's exclusion is exactly
-    // this list: the model never sees tools for a server that is not in it.
+    // The allowed-AND-active tool groups, resolved by the session through the
+    // tool sources at construction and at every /agent switch (a preset
+    // change can re-scope them). A dead member's exclusion is exactly this
+    // list: the model never sees tools for a group that is not in it.
     // WORKER THREAD ONLY, like SetPreset.
-    void SetMcpServers(std::vector<std::string> servers) { mcp_servers_ = std::move(servers); }
+    void SetToolGroups(std::vector<std::string> groups) { tool_groups_ = std::move(groups); }
 
     // The current turn's cancellation token, minted by the session when it
     // pops the turn. Handed to every ToolContext so blocking tools can wait
@@ -621,7 +621,7 @@ private:
     // the session's life -- loaded once at creation/resume -- so it never
     // disturbs the prompt-cache prefix mid-session.
     std::string project_context_;
-    std::vector<std::string> mcp_servers_;
+    std::vector<std::string> tool_groups_;
     tools::CancelTokenPtr cancel_token_;
     // See OpenToSteering(). Raised once the turn's user-visible content is in
     // the history (after the seed append, or after the wake turn's top flush);

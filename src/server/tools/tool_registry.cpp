@@ -5,7 +5,6 @@
 #include <utility>
 
 #include "minimal/common/logger.hpp"
-#include "minimal/mcp/naming.hpp"
 #include "minimal/tools/aliased_tool.hpp"
 
 namespace minimal::tools {
@@ -13,21 +12,26 @@ namespace minimal::tools {
 void ToolRegistry::Register(std::unique_ptr<Tool> tool) {
     if (!tool) return;
     const std::string name = tool->spec().name;
-    // The mcp__ namespace belongs to the MCP manager: ReplaceMcpTools is its
-    // only writer, and the executor routes every mcp__-prefixed name through
-    // the server-scoped permission chain (tools::mcp_server_of()). A PLUGIN
-    // registering such a name -- "mcp__shell" -- would ride that chain and
-    // inherit permission decisions for a server that does not exist, so
-    // attributed registrations are refused. Core built-ins (and the test
-    // harness, which registers fake MCP tools with empty attribution) keep
-    // access: they are the process's own code, not loadable input.
-    // DefinitionsFor()'s skip below stays as defense in depth.
-    if (!attribution_.empty() && name.rfind(mcp::kMcpPrefix, 0) == 0) {
-        common::DefaultLogger().warn(
-            "plugin '{}': tool '{}' registration refused -- the '{}' prefix is reserved for "
-            "MCP tools",
-            attribution_, name, mcp::kMcpPrefix);
-        return;
+    // A reserved namespace belongs to the plugin that reserved it: its tool
+    // groups are published through ReplaceGroupTools, and its permission
+    // model claims those names. ANOTHER plugin registering such a name --
+    // "mcp__shell" -- would ride that model and inherit decisions meant for
+    // a group that does not exist, so attributed registrations from anyone
+    // but the owner are refused. Core built-ins (and the test harness, which
+    // registers fake group tools with empty attribution) keep access: they
+    // are the process's own code, not loadable input. DefinitionsFor()'s
+    // skip below stays as defense in depth.
+    if (!attribution_.empty()) {
+        const std::lock_guard<std::shared_mutex> lock(mutex_);
+        if (const auto* ns = ReservedNamespaceOfUnlocked(name);
+            ns != nullptr && ns->owner != attribution_) {
+            common::DefaultLogger().warn(
+                "plugin '{}': tool '{}' registration refused -- the '{}' prefix is reserved by "
+                "{}",
+                attribution_, name, ns->prefix,
+                ns->owner.empty() ? std::string("core") : "plugin '" + ns->owner + "'");
+            return;
+        }
     }
     std::shared_ptr<Tool> shared = std::move(tool);
     // First registration owns the map slot, always -- before AND after alias
@@ -119,7 +123,7 @@ std::vector<std::string> ToolRegistry::PermissionKeys() const {
     std::vector<std::string> keys;
     keys.reserve(tools_.size());
     for (const auto& [name, tool] : tools_) {
-        if (mcp_owners_.count(name)) continue;
+        if (group_owners_.count(name)) continue;
         keys.push_back(std::string(PermissionKeyForUnlocked(name)));
     }
     std::sort(keys.begin(), keys.end());
@@ -131,7 +135,7 @@ std::vector<std::string> ToolRegistry::DotenvProtectedPermissionKeys() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<std::string> keys;
     for (const auto& [name, tool] : tools_) {
-        if (mcp_owners_.count(name)) continue;
+        if (group_owners_.count(name)) continue;
         if (tool && tool->default_dotenv_protected()) {
             keys.push_back(std::string(PermissionKeyForUnlocked(name)));
         }
@@ -203,12 +207,12 @@ std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsFor(
     out.reserve(allow_all ? tools_.size() : allowed.size());
 
     for (const auto& [name, tool] : tools_) {
-        // MCP tools are NEVER governed by allowed_tools -- they belong to the
-        // separate server-scoped chain (allowed_mcp_servers + the manager's
-        // live set) and are added by DefinitionsForMcpServers(). Letting "*"
-        // sweep them in here would advertise a dead or de-scoped server's
+        // Reserved-namespace (tool group) names are NEVER governed by
+        // allowed_tools -- they belong to the preset's tool_sources and the
+        // source's live set, and are added by DefinitionsForGroups(). Letting
+        // "*" sweep them in here would advertise a dead or de-scoped group's
         // tools to the model.
-        if (name.rfind(mcp::kMcpPrefix, 0) == 0) continue;
+        if (ReservedNamespaceOfUnlocked(name) != nullptr) continue;
         // Filter on the PERMISSION key, not the map key: allowed_tools never
         // references an alias (ARCHITECTURE.md, "Name collisions and aliases"),
         // so an aliased tool is addressed by its original/qualified name while
@@ -229,23 +233,17 @@ std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsFor(
     return out;
 }
 
-std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsForMcpServers(
-        const std::vector<std::string>& servers) const {
-    if (servers.empty()) return {};
-    std::vector<std::string> prefixes;
-    prefixes.reserve(servers.size());
-    for (const auto& server : servers) {
-        prefixes.push_back(std::string(mcp::kMcpPrefix) + server + std::string(mcp::kMcpSeparator));
-    }
-
+std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsForGroups(
+        const std::vector<std::string>& groups) const {
+    if (groups.empty()) return {};
     std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<llm::ToolDefinition> out;
-    for (const auto& [name, tool] : tools_) {
-        for (const auto& prefix : prefixes) {
-            if (name.rfind(prefix, 0) == 0) {
-                out.push_back(tool->spec().definition);
-                break;
-            }
+    // Matched on the RECORDING group, never on a name prefix: group "mcp__a__"
+    // must not sweep in "mcp__a___x" of group "mcp__a_".
+    for (const auto& [name, group] : group_owners_) {
+        if (std::find(groups.begin(), groups.end(), group) == groups.end()) continue;
+        if (const auto it = tools_.find(name); it != tools_.end()) {
+            out.push_back(it->second->spec().definition);
         }
     }
     std::sort(out.begin(), out.end(),
@@ -253,6 +251,37 @@ std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsForMcpServers(
                   return a.name < b.name;
               });
     return out;
+}
+
+bool ToolRegistry::ReserveNamespace(std::string prefix) {
+    const std::lock_guard<std::shared_mutex> lock(mutex_);
+    if (prefix.empty()) return false;
+    for (const auto& ns : namespaces_) {
+        // Overlap either way is a collision: one prefix inside another would
+        // let the inner owner's group names ride the outer owner's model.
+        if (ns.prefix.rfind(prefix, 0) == 0 || prefix.rfind(ns.prefix, 0) == 0) {
+            common::DefaultLogger().warn(
+                "tool namespace '{}' refused for {} -- it overlaps '{}' reserved by {}", prefix,
+                attribution_.empty() ? std::string("core") : "plugin '" + attribution_ + "'",
+                ns.prefix, ns.owner.empty() ? std::string("core") : "plugin '" + ns.owner + "'");
+            return false;
+        }
+    }
+    namespaces_.push_back(ReservedNamespace{std::move(prefix), attribution_});
+    return true;
+}
+
+bool ToolRegistry::IsReserved(std::string_view name) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return ReservedNamespaceOfUnlocked(name) != nullptr;
+}
+
+const ToolRegistry::ReservedNamespace* ToolRegistry::ReservedNamespaceOfUnlocked(
+    std::string_view name) const {
+    for (const auto& ns : namespaces_) {
+        if (name.rfind(ns.prefix, 0) == 0) return &ns;
+    }
+    return nullptr;
 }
 
 void ToolRegistry::SetPermissionKeys(std::unordered_map<std::string, std::string> keys) {
@@ -265,15 +294,20 @@ std::string_view ToolRegistry::PermissionKeyFor(std::string_view surface_name) c
     return PermissionKeyForUnlocked(surface_name);
 }
 
-void ToolRegistry::ReplaceMcpTools(const std::string& server_name,
-                                   std::vector<std::unique_ptr<Tool>> tools) {
-    const std::string prefix = std::string(mcp::kMcpPrefix) + server_name + std::string(mcp::kMcpSeparator);
+void ToolRegistry::ReplaceGroupTools(const std::string& group,
+                                     std::vector<std::unique_ptr<Tool>> tools) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
+    // A group lives inside a reserved namespace, or it is not a group: an
+    // unreserved prefix would let its names collide with Register()ed tools.
+    if (group.empty() || ReservedNamespaceOfUnlocked(group) == nullptr) {
+        common::DefaultLogger().warn(
+            "tool group '{}' refused -- it is not inside a reserved tool namespace", group);
+        return;
+    }
 
-    // Retire the server's previous set: out of the map. Matching is on the
-    // RECORDING owner (the server that registered the tool), not the string
-    // prefix and not the parsed name: both "mcp__a__" prefix-matching and
-    // McpServerOf parsing would also erase every tool of server "a_" -- a
+    // Retire the group's previous set: out of the map. Matching is on the
+    // RECORDING group, not the string prefix: prefix-matching "mcp__a__"
+    // would also erase every tool of group "mcp__a_" ("mcp__a___x") -- a
     // restart of "a" wiping a superset namespace. The owner map is the only
     // source of truth that survives ambiguous names. An executor already
     // holding the shared_ptr from Find() keeps the object alive for as long
@@ -281,9 +315,9 @@ void ToolRegistry::ReplaceMcpTools(const std::string& server_name,
     // itself); when the last reference drops, the object destroys itself. No
     // retired list, no process-lifetime accounting.
     for (auto it = tools_.begin(); it != tools_.end();) {
-        const auto owner = mcp_owners_.find(it->first);
-        if (owner != mcp_owners_.end() && owner->second == server_name) {
-            mcp_owners_.erase(owner);
+        const auto owner = group_owners_.find(it->first);
+        if (owner != group_owners_.end() && owner->second == group) {
+            group_owners_.erase(owner);
             it = tools_.erase(it);
         } else {
             ++it;
@@ -296,15 +330,15 @@ void ToolRegistry::ReplaceMcpTools(const std::string& server_name,
     for (auto& tool : tools) {
         if (!tool) continue;
         const std::string name = tool->spec().name;
-        if (name.rfind(prefix, 0) != 0) {
-            continue;  // foreign namespace: refused, destroyed with the batch
+        if (name.rfind(group, 0) != 0 || name.size() == group.size()) {
+            continue;  // outside this group's prefix: refused, destroyed with the batch
         }
         std::shared_ptr<Tool> shared = std::move(tool);
         if (tools_.count(name)) {
-            continue;  // duplicate within the batch: first wins
+            continue;  // duplicate within the batch (or another group's name): first wins
         }
         tools_.emplace(name, std::move(shared));
-        mcp_owners_.emplace(name, server_name);
+        group_owners_.emplace(name, group);
     }
 }
 

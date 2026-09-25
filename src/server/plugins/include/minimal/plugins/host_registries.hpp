@@ -15,6 +15,7 @@ namespace minimal::tools {
 class ToolRegistry;
 class PermissionAdvisorRegistry;
 class PermissionModelRegistry;
+class ToolSourceRegistry;
 }  // namespace minimal::tools
 namespace minimal::llm {
 class ProviderFactoryRegistry;
@@ -50,6 +51,7 @@ struct HostRegistries {
     rpc::AuthProviderRegistry* auth_providers = nullptr;
     tools::PermissionAdvisorRegistry* permission_advisors = nullptr;
     tools::PermissionModelRegistry* permission_models = nullptr;
+    tools::ToolSourceRegistry* tool_sources = nullptr;
     llm::ModelCatalogRegistry* model_catalogs = nullptr;
     llm::MetadataCatalogRegistry* metadata_catalogs = nullptr;
     llm::VariantParamsRegistry* variant_params = nullptr;

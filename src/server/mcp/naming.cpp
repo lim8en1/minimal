@@ -39,6 +39,15 @@ std::string McpToolName(std::string_view server_name, std::string_view tool_name
     return out;
 }
 
+std::string McpGroup(std::string_view server_name) {
+    std::string out;
+    out.reserve(kMcpPrefix.size() + server_name.size() + kMcpSeparator.size());
+    out.append(kMcpPrefix);
+    out.append(server_name);
+    out.append(kMcpSeparator);
+    return out;
+}
+
 std::string McpServerOf(std::string_view tool_name) {
     if (tool_name.substr(0, kMcpPrefix.size()) != kMcpPrefix) return {};
     const auto rest = tool_name.substr(kMcpPrefix.size());

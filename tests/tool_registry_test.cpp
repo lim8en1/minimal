@@ -11,16 +11,17 @@
 using namespace minimal;
 using namespace minimal::testing;
 
-TEST_CASE("Register refuses mcp__-prefixed names from a PLUGIN attribution",
+TEST_CASE("Register refuses names in another owner's reserved namespace",
           "[tool_registry][invariant]") {
-    // The mcp__ namespace belongs to the MCP manager (ReplaceMcpTools is its
-    // only writer) and the executor routes every mcp__ name through the
-    // server-scoped permission chain. A plugin registering "mcp__shell" would
-    // ride that chain -- permission decisions for a server that does not
-    // exist -- so plugin-attributed registration must refuse rather than
-    // serve. Core registrations (empty attribution: the process's own code,
-    // plus the test harness's fake MCP tools) keep access.
+    // A reserved namespace belongs to its owner (the MCP manager reserves
+    // mcp__; a plugin reserves its own): its permission model claims those
+    // names. A plugin registering "mcp__shell" would ride that model --
+    // permission decisions for a group that does not exist -- so
+    // registration from anyone but the owner must refuse rather than serve.
+    // Core registrations (empty attribution: the process's own code, plus the
+    // test harness's fake group tools) keep access.
     tools::ToolRegistry registry;
+    REQUIRE(registry.ReserveNamespace("mcp__"));  // core-owned
     registry.SetAttribution("shady");
     registry.Register(std::make_unique<FakeTool>("mcp__shell", tools::ToolCategory::Execute));
     CHECK(registry.Find("mcp__shell") == nullptr);
@@ -31,6 +32,38 @@ TEST_CASE("Register refuses mcp__-prefixed names from a PLUGIN attribution",
     CHECK(registry.Find("mcp__real") != nullptr);
     registry.Register(std::make_unique<FakeTool>("search", tools::ToolCategory::ReadOnly));
     CHECK(registry.Find("search") != nullptr);
+}
+
+TEST_CASE("ReserveNamespace: the owner may register in it, overlaps are refused",
+          "[tool_registry][invariant]") {
+    tools::ToolRegistry registry;
+    registry.SetAttribution("web");
+    REQUIRE(registry.ReserveNamespace("web__"));
+    registry.Register(std::make_unique<FakeTool>("web__fetch", tools::ToolCategory::ReadOnly));
+    registry.ClearAttribution();
+    CHECK(registry.Find("web__fetch") != nullptr);
+    CHECK(registry.IsReserved("web__anything"));
+    CHECK_FALSE(registry.IsReserved("webfetch"));
+
+    registry.SetAttribution("other");
+    CHECK_FALSE(registry.ReserveNamespace("web__x__"));  // inside web__
+    CHECK_FALSE(registry.ReserveNamespace("web"));       // contains web__
+    registry.Register(std::make_unique<FakeTool>("web__steal", tools::ToolCategory::ReadOnly));
+    registry.ClearAttribution();
+    CHECK(registry.Find("web__steal") == nullptr);
+
+    // Group tools: only inside a reserved namespace, and never in DefinitionsFor.
+    std::vector<std::unique_ptr<tools::Tool>> batch;
+    batch.push_back(std::make_unique<FakeTool>("web__g__a", tools::ToolCategory::ReadOnly));
+    registry.ReplaceGroupTools("web__g__", std::move(batch));
+    CHECK(registry.Find("web__g__a") != nullptr);
+    CHECK(registry.DefinitionsForGroups({"web__g__"}).size() == 1);
+    for (const auto& def : registry.DefinitionsFor({"*"})) CHECK(def.name.rfind("web__", 0) != 0);
+
+    std::vector<std::unique_ptr<tools::Tool>> stray;
+    stray.push_back(std::make_unique<FakeTool>("free__a", tools::ToolCategory::ReadOnly));
+    registry.ReplaceGroupTools("free__", std::move(stray));
+    CHECK(registry.Find("free__a") == nullptr);
 }
 
 TEST_CASE("Register keeps first-wins and parks the duplicate in shadowed_",

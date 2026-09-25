@@ -531,7 +531,7 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
         }
     }
     preset.allowed_skills = tool_skills;
-    preset.allowed_mcp_servers = raw.allowed_mcp_servers;
+    preset.tool_sources = raw.tool_sources;
     // Per-tool plugin config rides verbatim; namespaced slices are delivered
     // per-invocation by the agent loop (ToolContext::tool_config).
     preset.tool_config = raw.tool_config;

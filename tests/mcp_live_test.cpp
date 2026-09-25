@@ -22,6 +22,7 @@ using namespace std::chrono_literals;
 #include <catch2/catch_test_macros.hpp>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/mcp/naming.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -199,7 +200,7 @@ TEST_CASE("live gateway through the manager: tools registered and executed", "[m
     REQUIRE(manager.EnsureAlive("ida", error));
     CHECK(manager.StatusOf("ida").alive);
 
-    const auto defs = registry.DefinitionsForMcpServers({"ida"});
+    const auto defs = registry.DefinitionsForGroups({minimal::mcp::McpGroup("ida")});
     CHECK_FALSE(defs.empty());
     bool saw_list = false;
     for (const auto& def : defs) {

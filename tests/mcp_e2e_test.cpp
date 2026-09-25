@@ -22,6 +22,7 @@ using namespace std::chrono_literals;
 #include "minimal/config/mcps_config.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
+#include "minimal/mcp/mcp_tool_source.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
@@ -81,7 +82,8 @@ struct McpE2eFixture {
         sessions = std::make_unique<agent::SessionRegistry>(*presets, rpc::FinishSessionWiring,
             plugins::HostRegistries{.tools = &tools,
                                     .providers = &providers,
-                                    .observers = observers.get()},
+                                    .observers = observers.get(),
+                                    .tool_sources = &sources},
             *db, agent::LoopConfig{}, common::DefaultLogger());
 
         nlohmann::json entry = {{"name", "fake"},
@@ -92,6 +94,8 @@ struct McpE2eFixture {
         auto mcps = config::ParseMcpsConfig(nlohmann::json::array({entry}));
         manager = std::make_unique<mcp::McpClientManager>(std::move(mcps), tools, timeouts,
                                                           common::DefaultLogger());
+        sources.Register(mcp::kMcpToolSourceName,
+                         std::make_shared<mcp::McpToolSource>(*manager, common::DefaultLogger()));
 
         service = std::make_unique<rpc::SessionServiceImpl>(*sessions, *db,
                                                             config::SettingsConfig{},
@@ -136,6 +140,7 @@ struct McpE2eFixture {
     std::unique_ptr<agent::AgentPresetRegistry> presets;
     std::unique_ptr<agent::SessionObserverRegistry> observers;
     std::unique_ptr<session::SessionDatabase> db;
+    tools::ToolSourceRegistry sources;  // outlives sessions: declared before them
     std::unique_ptr<agent::SessionRegistry> sessions;
     std::unique_ptr<mcp::McpClientManager> manager;
     mcp::McpLimits timeouts{5s, 5s};
