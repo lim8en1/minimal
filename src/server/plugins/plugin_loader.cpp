@@ -264,6 +264,8 @@ void PluginLoader::BuildTargets() {
               [](const tools::PermissionAdvisorRegistry& registry, const std::string& plugin) {
                   return Repeat(registry.Has(plugin) ? 1 : 0, "permission prompts");
               });
+    AddTarget(targets_, "minimal_plugin_register_permission_models", "permission model",
+              registries_.permission_models, KindsOwned<tools::PermissionModelRegistry>);
     AddTarget(targets_, "minimal_plugin_register_model_catalogs", "catalog", registries_.model_catalogs,
               KindsOwned<llm::ModelCatalogRegistry>);
     AddTarget(targets_, "minimal_plugin_register_metadata_catalogs", "metadata",

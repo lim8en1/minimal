@@ -281,7 +281,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     params.run_mode_override = tools::clamp_run_mode(parent->run_mode(), child_preset.run_mode);
     params.seed_grants = parent->granted_keys();
     params.policy_ceiling = parent->policy();
-    params.mcp_policy_ceiling = parent->mcp_policy();
+    params.permission_models_ceiling = parent->permission_models();
     params.mcp_manager = mcp_manager_;
     // The spawn's model decision rides model_override: CreateResolved's
     // ResolveModel honors it for children too, so an unresolvable ref fails

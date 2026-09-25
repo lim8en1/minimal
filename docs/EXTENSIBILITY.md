@@ -4,7 +4,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 ## 1. The surface as it exists
 
-**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — fourteen optional `extern "C"` registration hooks (plus the required tag/name/version symbols), each `dlsym`'d by `plugin_loader.cpp`:
+**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — fifteen optional `extern "C"` registration hooks (plus the required tag/name/version symbols), each `dlsym`'d by `plugin_loader.cpp`:
 
 | Symbol | Status | What it grants |
 |---|---|---|
@@ -20,6 +20,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `minimal_plugin_register_context_contributors(ContextContributorRegistry&)` | **live** | sections pre-filled into every session's system context, after AGENTS.md and signal-channel context. Asked once per session in `SessionRegistry::CreateResolved` (creation, resume and subagent spawn alike) and frozen for the session so the prompt-cache prefix never shifts; recomputed on resume. Synchronous on the session-creation path -- a contributor keeps it local and cheap. Additive, rendered in load order; a throwing contributor is logged and skipped; each body is capped by `context_contributors.max_bytes_per_section` and an operator can switch a plugin's sections off with `context_contributors.disabled`. The `memory` plugin's index is the first consumer |
 | `minimal_plugin_register_auth_provider(...)` | live | exclusive connection policy; pass-through default |
 | `minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&)` | **live** | answers `Ask` automatically; abstains/throws to the wire checker — the human |
+| `minimal_plugin_register_permission_models(PermissionModelRegistry&)` | **live** | the permission model for the plugin's OWN tools, keyed by plugin name (`tools/permission_model.hpp`): claims its tools and replaces core resolution stages for them (`kBase`, `kNetwork`); config is opaque slices -- permissions.json `plugins.<plugin>`, preset `plugin_permissions.<plugin>`. Core keeps operator per-tool denies, subagent ceilings (the model re-resolved against the parent's layer), out_of_workdir, run modes, grants, advisor and the human; a throwing model answers Deny; claiming another plugin's tool is fatal at startup. The in-core MCP permission policy is the first model (bound directly until the MCP client moves to a plugin) |
 | `minimal_plugin_register_model_catalogs(ModelCatalogRegistry&)` | **live** | `"discover": true` providers list their models from the backend, lazily at first resolve; keyed by the same kind string as the provider factory |
 | `minimal_plugin_register_compaction_strategies(CompactionStrategyRegistry&)` | **live (S4)** | plugin compaction strategies keyed by name — `memory.compaction_strategy` in settings.json selects one. Core registers its built-in `"summarize"` strategy directly in `main.cpp` (never through this hook), and always snaps a strategy's proposed cut to a safe tool-call boundary before using it |
 | `minimal_plugin_register_hook_points(HookDispatcher&)` | **live** | named, veto-capable or observe-only events the plugin emits; hooks.json actions answer them — see §5 |

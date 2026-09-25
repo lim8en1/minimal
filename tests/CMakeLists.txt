@@ -41,6 +41,7 @@ add_executable(minimal_tests
     logger_test.cpp
     sqlite_util_test.cpp
     tool_executor_test.cpp
+    permission_model_test.cpp
     agent_loop_test.cpp
     http_client_test.cpp
     openai_request_test.cpp

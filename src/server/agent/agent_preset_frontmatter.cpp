@@ -347,6 +347,7 @@ bool IsKnownKey(const std::string& key) {
         {"mcp_permissions", 0}, {"compression_prompt", 0}, {"compaction_strategy", 0},
         {"mode", 0},          {"disable", 0},       {"hidden", 0},
         {"color", 0},         {"steps", 0},         {"tool_config", 0},
+        {"plugin_permissions", 0},
     };
     return kKnown.count(key) != 0;
 }
@@ -422,6 +423,27 @@ nlohmann::json DecodeToolConfig(const YAML::Node& node) {
                 "agent preset: tool_config has an empty-string namespace key");
         }
         result[ns] = YamlToJson(entry.second);
+    }
+    return result;
+}
+
+// plugin_permissions: {<model>: {...}} -- carried verbatim like tool_config;
+// only the outer shape is core's to check.
+nlohmann::json DecodePluginPermissions(const YAML::Node& node) {
+    nlohmann::json result = nlohmann::json::object();
+    const YAML::Node value = node["plugin_permissions"];
+    if (!value) return result;
+    if (!value.IsMap()) {
+        throw std::runtime_error(
+            "agent preset: plugin_permissions must be a map of {model: {...}}");
+    }
+    for (const auto& entry : value) {
+        const auto name = entry.first.as<std::string>();
+        if (name.empty()) {
+            throw std::runtime_error(
+                "agent preset: plugin_permissions has an empty-string model key");
+        }
+        result[name] = YamlToJson(entry.second);
     }
     return result;
 }
@@ -508,6 +530,7 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
         }
     }
     result.mcp_permissions = DecodeMcpPermissionsBlock(node);
+    result.plugin_permissions = DecodePluginPermissions(node);
     result.compression_prompt = OptionalString(node, "compression_prompt");
     result.compaction_strategy = OptionalString(node, "compaction_strategy");
 

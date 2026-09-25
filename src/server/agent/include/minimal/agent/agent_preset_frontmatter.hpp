@@ -80,6 +80,10 @@ struct AgentPresetFrontmatter {
     // startup warnings by the sanity check.
     std::vector<std::string> unknown_permission_keys;
     std::unordered_map<std::string, tools::PermissionMode> mcp_permissions;  // server -> mode
+    // plugin_permissions: {<model>: {...}} -- each plugin permission model's
+    // preset slice, verbatim (YamlToJson lowering). Core never reads inside a
+    // slice; the model's BuildLayer does. Empty object when absent.
+    nlohmann::json plugin_permissions = nlohmann::json::object();
     std::string compression_prompt;                 // filename under prompts/, "" = use default
     // Optional override of memory.compaction_strategy for THIS agent: the name
     // of a registered CompactionStrategy kind ("summarize" = free-text head,

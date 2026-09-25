@@ -19,6 +19,10 @@ struct PermissionsConfig {
     // two are JSON siblings, not nested, in permissions.json itself.
     tools::PermissionOverrideLayer global_layer;
     tools::PermissionMode mcp_default_mode = tools::PermissionMode::Ask;
+    // `plugins`: {<model>: {...}} -- each plugin permission model's global
+    // slice, verbatim. Core checks only the outer shape; the model's
+    // BuildLayer reads inside (tools/permission_model.hpp).
+    nlohmann::json plugin_slices = nlohmann::json::object();
     // The plugin name whose registered permission advisor answers Ask-gated
     // tool calls automatically (abstaining to the human). The first
     // plugin-name field in permissions.json -- the startup sanity check

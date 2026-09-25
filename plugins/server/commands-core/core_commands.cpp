@@ -656,12 +656,12 @@ private:
             for (const auto& entry : entries) out << " " << entry;
             out << "\n";
         }
-        const auto& mcp = executor.mcp_policy();
-        out << "mcp: default=" << mode_name(mcp.default_mode);
-        for (const auto& [server, mode] : mcp.per_server) {
-            out << " " << server << "=" << mode_name(mode);
+        // Each permission model describes its own layer; core knows none of
+        // their shapes.
+        for (const auto& bound : executor.permission_models()) {
+            const std::string line = bound.model->Describe(bound.layer.get());
+            if (!line.empty()) out << bound.name << ": " << line << "\n";
         }
-        out << "\n";
         const auto grants = executor.granted_keys();
         out << "session grants (" << grants.size() << ")";
         for (const auto& key : grants) out << "\n  " << key;

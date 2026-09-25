@@ -64,6 +64,7 @@ add_library(minimal_server_core SHARED
     tools/tool_registry.cpp
     tools/aliased_tool.cpp
     tools/tool_executor.cpp
+    tools/permission_model.cpp
     tools/tool_pool.cpp
     tools/skill_tool.cpp
     mcp/naming.cpp

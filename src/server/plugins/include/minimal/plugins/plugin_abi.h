@@ -62,6 +62,7 @@
 #include "minimal/tools/file_access.hpp"
 #include "minimal/tools/path_confinement.hpp"
 #include "minimal/tools/permission_advisor.hpp"
+#include "minimal/tools/permission_model.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 #include "minimal/plugins/service_registry.hpp"
@@ -322,6 +323,20 @@ void minimal_plugin_register_auth_provider(minimal::rpc::AuthProviderRegistry&,
 // advisor's answer exactly as for a human's.
 void minimal_plugin_register_permission_advisor(
     minimal::tools::PermissionAdvisorRegistry&,
+    const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL, one per plugin: contributes the PERMISSION MODEL for this
+// plugin's own tools, keyed by the plugin's name (tools/permission_model.hpp).
+// The model claims its tools and replaces core resolution stages for them
+// (the base mode, the network fold); core keeps everything around those
+// stages -- operator per-tool denies, subagent ceilings, out_of_workdir, run
+// modes, grants, the advisor and the human. Its configuration is opaque to
+// core: permissions.json `plugins.<plugin>` and a preset's
+// `plugin_permissions.<plugin>`, handed to BuildLayer. Claiming a tool
+// another plugin registered is FATAL at startup; a model that throws at
+// resolve time is answered with Deny.
+void minimal_plugin_register_permission_models(
+    minimal::tools::PermissionModelRegistry&,
     const minimal::plugins::PluginRegistrationContext&);
 
 // OPTIONAL, additive: contributes a model catalog, keyed by the SAME kind

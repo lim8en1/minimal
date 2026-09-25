@@ -109,6 +109,14 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
         if (doc.contains("mcp_default_mode")) {
             config.mcp_default_mode = ParsePermissionMode(doc.at("mcp_default_mode").get<std::string>());
         }
+        if (doc.contains("plugins")) {
+            const auto& slices = doc.at("plugins");
+            if (!slices.is_object()) {
+                throw std::runtime_error(
+                    "permissions.json: plugins must be an object of {model: {...}}");
+            }
+            config.plugin_slices = slices;
+        }
         if (doc.contains("advisor")) {
             config.advisor = doc.at("advisor").get<std::string>();
         }
@@ -126,7 +134,7 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
         CollectUnknownKeys(doc, "",
                            {"default_run_mode", "fallback", "per_tool_overrides",
                             "pattern_overrides", "external_directory_patterns",
-                            "pattern_precedence", "mcp_default_mode", "advisor",
+                            "pattern_precedence", "mcp_default_mode", "plugins", "advisor",
                             "advisor_inherit", "advisor_timeout_ms"},
                            config.unknown_keys);
         if (doc.contains("fallback")) {

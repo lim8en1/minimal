@@ -210,6 +210,23 @@ TEST_CASE("ParseAgentPresetFrontmatter: mcp_permissions decodes", "[agent_preset
     CHECK(preset.mcp_permissions.at("search") == PermissionMode::AlwaysAllow);
 }
 
+TEST_CASE("ParseAgentPresetFrontmatter: plugin_permissions carries slices verbatim",
+          "[agent_preset_frontmatter]") {
+    auto preset = Parse(
+        "---\n"
+        "name: build\n"
+        "plugin_permissions:\n"
+        "  tools-web:\n"
+        "    hosts:\n"
+        "      \"*.internal\": deny\n"
+        "---\n"
+        "body\n");
+    CHECK(preset.plugin_permissions["tools-web"]["hosts"]["*.internal"] == "deny");
+    CHECK(preset.extra_parameters.empty());
+
+    CHECK_THROWS(Parse("---\nname: build\nplugin_permissions: [a]\n---\nbody\n"));
+}
+
 TEST_CASE("ParseAgentPresetFrontmatter: malformed permission mode string throws", "[agent_preset_frontmatter]") {
     CHECK_THROWS_AS(Parse(
                         "---\n"

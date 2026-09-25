@@ -254,7 +254,7 @@ struct SessionParams {
     // folds in via most_restrictive() -- the per-category "child is never more
     // permissive than its parent" rule.
     std::optional<tools::PermissionPolicy> policy_ceiling;
-    std::optional<tools::McpPermissionPolicy> mcp_policy_ceiling;
+    std::optional<tools::PermissionModels> permission_models_ceiling;
     // Subagents only: fired ONCE on the worker when the session's single seeded
     // turn ends -- every exit path, success or failure, since a blocker waiting
     // on the result must unblock on failure too. The spawner uses it to capture
@@ -593,6 +593,9 @@ public:
     // spawner and a /-command want exactly the same thing.
     const tools::PermissionPolicy& policy() const { return executor_.policy(); }
     const tools::McpPermissionPolicy& mcp_policy() const { return executor_.mcp_policy(); }
+    const tools::PermissionModels& permission_models() const {
+        return executor_.permission_models();
+    }
     tools::PermissionRunMode run_mode() const { return executor_.run_mode(); }
     std::vector<std::string> granted_keys() const { return executor_.granted_keys(); }
 

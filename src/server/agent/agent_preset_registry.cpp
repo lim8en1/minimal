@@ -547,6 +547,13 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     // widen it. See the preset_is_trusted doc on BuildMcpPermissionPolicy.
     preset.mcp_permissions =
         BuildMcpPermissionPolicy(raw.mcp_permissions, permissions_.mcp_default_mode, !from_project);
+    // Plugin permission models: each binds the operator's permissions.json
+    // slice and this preset's own, under the same trust rule -- a model
+    // enforces "a project preset may only narrow" for its own slice.
+    if (permission_models_ != nullptr) {
+        preset.permission_models = permission_models_->Bind(
+            permissions_.plugin_slices, raw.plugin_permissions, !from_project);
+    }
     preset.run_mode = permissions_.default_run_mode;  // apply_run_mode() is applied once, downstream, by ToolExecutor
     preset.is_subagent = false;
 

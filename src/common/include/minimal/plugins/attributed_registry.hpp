@@ -51,6 +51,12 @@ public:
 
     bool Has(std::string_view kind) const { return entries_.find(kind) != entries_.end(); }
 
+    // The plugin holding `kind` (empty: core), or null when unregistered.
+    const std::string* OwnerOf(std::string_view kind) const {
+        const auto it = entries_.find(kind);
+        return it == entries_.end() ? nullptr : &it->second.plugin;
+    }
+
     // Sorted: map iteration order.
     std::vector<std::string> kinds() const {
         std::vector<std::string> out;

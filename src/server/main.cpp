@@ -318,6 +318,11 @@ int main(int argc, char** argv) {
     // name; permissions.json's "advisor" selects one. An empty registry is the
     // default -- every Ask reaches the human.
     minimal::tools::PermissionAdvisorRegistry permission_advisors;
+    // One per plugin, keyed by the plugin's name: the permission model for
+    // the tools that plugin registered (tools/permission_model.hpp). Bound to
+    // every resolved preset's slices; the sanity check refuses a model that
+    // claims another plugin's tool.
+    minimal::tools::PermissionModelRegistry permission_models;
     // Additive across plugins, keyed by the provider kind string: a backend can
     // be asked to LIST its models ("discover": true in providers.json), fetched
     // lazily at first resolve and never written back to the file.
@@ -413,6 +418,7 @@ int main(int argc, char** argv) {
         .observers = &observers,
         .auth_providers = &auth_providers,
         .permission_advisors = &permission_advisors,
+        .permission_models = &permission_models,
         .model_catalogs = &model_catalogs,
         .metadata_catalogs = &metadata_catalogs,
         .variant_params = &variant_params,
@@ -646,6 +652,9 @@ int main(int argc, char** argv) {
                                   minimal::agent::AgentPresetRegistry::MakeSkillDefinitionBuilder());
     presets->SetDefinitionBuilder(minimal::agent::kSpawnSubagentToolName,
                                   minimal::agent::MakeSpawnDefinitionBuilder());
+    // Same deadline: every preset binds the plugin permission models' slices
+    // at resolve time.
+    presets->SetPermissionModels(&permission_models);
 
     minimal::agent::LoopConfig loop_config;
     loop_config.auto_compact = settings.memory.auto_compact;

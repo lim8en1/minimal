@@ -23,6 +23,7 @@
 #include "minimal/plugins/service_registry.hpp"
 #include "minimal/tools/pattern_match.hpp"
 #include "minimal/tools/permission_advisor.hpp"
+#include "minimal/tools/permission_model.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace minimal::startup {
@@ -660,6 +661,17 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
     }
     if (inputs_.registries.compaction_strategies != nullptr) {
         report("compaction strategy", inputs_.registries.compaction_strategies->collisions());
+    }
+    // Permission models: one per plugin (a second from the same plugin is a
+    // collision), and a model may only claim its own plugin's tools --
+    // ruling on another plugin's tools is exactly the power the seam
+    // withholds (tools/permission_model.hpp).
+    if (inputs_.registries.permission_models != nullptr) {
+        report("permission model", inputs_.registries.permission_models->collisions());
+        for (const auto& error :
+             inputs_.registries.permission_models->ValidateClaims(*inputs_.registries.tools)) {
+            results.push_back(Fatal("name_collisions", error));
+        }
     }
 
     // Per-preset tool_config namespaces: the same fatal rule, one level up.

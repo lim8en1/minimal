@@ -506,6 +506,41 @@ TEST_CASE("AgentPresetRegistry: mcp_permissions per-server vs. global default", 
     CHECK(mcp.mode_for("unconfigured") == PermissionMode::AlwaysDeny);
 }
 
+TEST_CASE("AgentPresetRegistry: plugin permission models bind both slices",
+          "[agent_preset_registry][permission_model]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.WriteJson("permissions.json",
+                     {{"plugins", {{"mcp-client", {{"default", "deny"}}}}}});
+    config.Write("agents/build.md",
+                  "---\n"
+                  "name: build\n"
+                  "model: openai-main/gpt-4o-mini\n"
+                  "plugin_permissions:\n"
+                  "  mcp-client:\n"
+                  "    servers:\n"
+                  "      search: allow\n"
+                  "---\n"
+                  "body\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+    // Any registered model binds; the MCP model is a real one whose slices
+    // are easy to observe.
+    tools::PermissionModelRegistry models;
+    models.SetAttribution("mcp-client");
+    models.Register(tools::MakeMcpPermissionModel());
+    models.ClearAttribution();
+    registry.SetPermissionModels(&models);
+
+    const auto& bound = registry.Resolve("build").permission_models;
+    REQUIRE(bound.size() == 1);
+    CHECK(bound.front().name == "mcp-client");
+    const auto& policy = *static_cast<const tools::McpPermissionPolicy*>(bound.front().layer.get());
+    CHECK(policy.mode_for("search") == PermissionMode::AlwaysAllow);
+    CHECK(policy.mode_for("unconfigured") == PermissionMode::AlwaysDeny);
+}
+
 TEST_CASE("AgentPresetRegistry: compression_prompt loads the named prompts/<x>.md", "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();

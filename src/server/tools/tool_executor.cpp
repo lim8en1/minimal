@@ -24,21 +24,32 @@ llm::ToolResultBlock ErrorResult(const std::string& tool_use_id, std::string tex
 std::string mcp_server_of(const std::string& tool_name) { return mcp::McpServerOf(tool_name); }
 
 ToolExecutor::ToolExecutor(ToolRegistry& registry, PermissionChecker& checker,
-                            PermissionPolicy policy, McpPermissionPolicy mcp_policy,
+                            PermissionPolicy policy, PermissionModels models,
                             PermissionRunMode run_mode,
                             std::optional<PermissionPolicy> policy_ceiling,
-                            std::optional<McpPermissionPolicy> mcp_ceiling,
+                            std::optional<PermissionModels> models_ceiling,
                             std::vector<std::string> seed_grants,
                             const hooks::HookDispatcher* hooks)
     : registry_(registry),
       checker_(checker),
       policy_(std::move(policy)),
-      mcp_policy_(std::move(mcp_policy)),
+      models_(WithMcpModel(std::move(models))),
       run_mode_(run_mode),
       policy_ceiling_(std::move(policy_ceiling)),
-      mcp_ceiling_(std::move(mcp_ceiling)),
+      models_ceiling_(std::move(models_ceiling)),
       session_grants_(seed_grants.begin(), seed_grants.end()),
       hooks_(hooks) {}
+
+PermissionModels ToolExecutor::WithMcpModel(PermissionModels models) {
+    if (FindMcpPolicy(models) == nullptr) models.push_back(BindMcpPermissionModel({}));
+    return models;
+}
+
+const McpPermissionPolicy& ToolExecutor::mcp_policy() const {
+    static const McpPermissionPolicy kDefault;
+    const McpPermissionPolicy* bound = FindMcpPolicy(models_);
+    return bound != nullptr ? *bound : kDefault;
+}
 
 namespace {
 
@@ -95,6 +106,32 @@ void FoldDimensions(const PermissionPolicy& policy, const ConfineResult* outside
     }
 }
 
+// One replaced stage of a plugin permission model. Fail-closed: a model that
+// throws answers Deny, naming itself -- plugin code is not trusted to return
+// normally, like every other entry point.
+PermissionAnswer ResolveModelStage(const BoundPermissionModel& bound, PermissionStage stage,
+                                   const Tool& tool, std::string_view permission_key,
+                                   const nlohmann::json& input, const ToolContext& ctx,
+                                   const PermissionPolicy* core_policy, const void* layer) {
+    try {
+        return bound.model->Resolve(
+            stage, PermissionQuery{tool, permission_key, input, ctx, core_policy, layer});
+    } catch (const std::exception& e) {
+        return {PermissionMode::AlwaysDeny,
+                "permission model '" + bound.name + "' failed: " + e.what()};
+    } catch (...) {
+        return {PermissionMode::AlwaysDeny, "permission model '" + bound.name + "' failed"};
+    }
+}
+
+// The parent's binding of the same model, when the ceiling carries one.
+const BoundPermissionModel* FindByName(const PermissionModels& models, std::string_view name) {
+    for (const auto& bound : models) {
+        if (bound.name == name) return &bound;
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::json& input,
@@ -108,7 +145,14 @@ ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::js
     //    the surface: per_tool_overrides must keep governing a tool when an
     //    alias changes what the model sees. For unaliased tools the two agree.
     const std::string_view permission_key = registry_.PermissionKeyFor(name);
-    const std::string mcp_server = mcp_server_of(name);
+    // A plugin permission model governing this tool, and the core stages it
+    // takes over (permission_model.hpp). Everything it does not replace
+    // resolves through the core model below.
+    const BoundPermissionModel* claimant = FindClaimant(models_, permission_key);
+    const unsigned replaced = claimant != nullptr ? claimant->model->Replaces() : 0u;
+    const bool model_base = replaces(replaced, PermissionStage::kBase);
+    const bool model_network = replaces(replaced, PermissionStage::kNetwork);
+    const bool network_required = tool.network_access_required();
 
     // Path confinement, canonicalized at most ONCE: for a confinement-
     // supporting tool, PatternSubject() defaults to ExtractPath() (tool.hpp),
@@ -157,16 +201,27 @@ ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::js
     // `why` names the rule behind `mode`; every fold below that TIGHTENS the
     // mode replaces it, so it always explains the final answer.
     std::string why;
-    PermissionMode mode =
-        mcp_server.empty()
-            ? policy_.mode_for(permission_key, category, subjects, subject_is_path, &why)
-            : resolve_mcp_tool_mode(policy_, mcp_policy_, mcp_server, permission_key, &why);
+    PermissionMode mode = PermissionMode::AlwaysDeny;
+    if (model_base) {
+        PermissionAnswer answer = ResolveModelStage(*claimant, PermissionStage::kBase, tool,
+                                                    permission_key, input, ctx, &policy_,
+                                                    claimant->layer.get());
+        mode = answer.mode;
+        why = std::move(answer.why);
+    } else {
+        mode = policy_.mode_for(permission_key, category, subjects, subject_is_path, &why);
+    }
     auto tighten = [&](PermissionMode candidate, auto&& describe) {
         if (candidate < mode) {
             mode = candidate;
             why = describe();
         }
     };
+    // An operator's per-tool deny governs every tool, whoever models it.
+    if (model_base && policy_.per_tool_denies(permission_key)) {
+        tighten(PermissionMode::AlwaysDeny,
+                [&] { return "per-tool rule " + std::string(permission_key) + "=deny"; });
+    }
     // The confinement verdict of THIS invocation, consumed by both dimension
     // folds below and surfaced to Prepare for the execute-time re-check.
     bool checked = false;
@@ -184,7 +239,13 @@ ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::js
             inside = confined->ok && !confined->outside_project_root;
             if (!inside) outside = &*confined;
         }
-        FoldDimensions(policy_, outside, tool.network_access_required(), "", tighten);
+        FoldDimensions(policy_, outside, network_required && !model_network, "", tighten);
+        if (network_required && model_network) {
+            const PermissionAnswer answer =
+                ResolveModelStage(*claimant, PermissionStage::kNetwork, tool, permission_key,
+                                  input, ctx, &policy_, claimant->layer.get());
+            tighten(answer.mode, [&] { return "network access: " + answer.why; });
+        }
     }
 
     // 2b. Subagent ceiling, when one was handed down: a child is never more
@@ -198,34 +259,46 @@ ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::js
     //     matched on the surface name -- the child could run exactly the tools
     //     the parent's operator had renamed out of the deny list.
     if (mode != PermissionMode::AlwaysDeny) {
-        if (mcp_server.empty()) {
-            if (policy_ceiling_) {
-                // The ceiling's own pattern rules ride along: a parent's
-                // `{"git *": "ask"}` tightens the child's matching calls even
-                // when the child preset asked for allow. Folding
-                // most_restrictive keeps the ceiling one-directional -- its
-                // pattern-allows can never widen the child.
-                std::string ceiling_why;
-                const PermissionMode ceiling_mode = policy_ceiling_->mode_for(
-                    permission_key, category, subjects, subject_is_path, &ceiling_why);
-                tighten(ceiling_mode, [&] { return "parent session: " + ceiling_why; });
-                FoldDimensions(*policy_ceiling_, outside, tool.network_access_required(),
-                               "parent session, ", tighten);
+        // The parent's binding of the claimant's model: resolved against the
+        // parent's layer and core policy, it can only tighten.
+        const BoundPermissionModel* parent_model =
+            claimant != nullptr && models_ceiling_ ? FindByName(*models_ceiling_, claimant->name)
+                                                   : nullptr;
+        const PermissionPolicy* parent_policy = policy_ceiling_ ? &*policy_ceiling_ : nullptr;
+        if (model_base) {
+            if (parent_model != nullptr) {
+                const PermissionAnswer answer = ResolveModelStage(
+                    *parent_model, PermissionStage::kBase, tool, permission_key, input, ctx,
+                    parent_policy, parent_model->layer.get());
+                tighten(answer.mode, [&] { return "parent session: " + answer.why; });
             }
-        } else if (mcp_ceiling_) {
-            // McpPermissionPolicy carries no out_of_workdir/network dimensions
-            // to fold -- per-server modes (refined by the parent's per-tool
-            // rules) are all it has.
+            if (parent_policy != nullptr && parent_policy->per_tool_denies(permission_key)) {
+                tighten(PermissionMode::AlwaysDeny, [&] {
+                    return "parent session: per-tool rule " + std::string(permission_key) +
+                           "=deny";
+                });
+            }
+        } else if (parent_policy != nullptr) {
+            // The ceiling's own pattern rules ride along: a parent's
+            // `{"git *": "ask"}` tightens the child's matching calls even
+            // when the child preset asked for allow. Folding
+            // most_restrictive keeps the ceiling one-directional -- its
+            // pattern-allows can never widen the child.
             std::string ceiling_why;
-            const PermissionMode ceiling_mode =
-                policy_ceiling_ ? resolve_mcp_tool_mode(*policy_ceiling_, *mcp_ceiling_,
-                                                        mcp_server, permission_key, &ceiling_why)
-                                : mcp_ceiling_->mode_for(mcp_server);
-            tighten(ceiling_mode, [&] {
-                return "parent session: " +
-                       (ceiling_why.empty() ? Dimension("mcp " + mcp_server, ceiling_mode)
-                                            : ceiling_why);
-            });
+            const PermissionMode ceiling_mode = parent_policy->mode_for(
+                permission_key, category, subjects, subject_is_path, &ceiling_why);
+            tighten(ceiling_mode, [&] { return "parent session: " + ceiling_why; });
+        }
+        if (parent_policy != nullptr) {
+            FoldDimensions(*parent_policy, outside, network_required && !model_network,
+                           "parent session, ", tighten);
+        }
+        if (network_required && model_network && parent_model != nullptr) {
+            const PermissionAnswer answer = ResolveModelStage(
+                *parent_model, PermissionStage::kNetwork, tool, permission_key, input, ctx,
+                parent_policy, parent_model->layer.get());
+            tighten(answer.mode,
+                    [&] { return "parent session, network access: " + answer.why; });
         }
     }
 

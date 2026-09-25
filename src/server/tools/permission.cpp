@@ -442,6 +442,30 @@ PermissionMode McpPermissionPolicy::mode_for(std::string_view server_name) const
     return default_mode;
 }
 
+bool PermissionPolicy::per_tool_denies(std::string_view tool_name) const {
+    constexpr auto kDeny = PermissionMode::AlwaysDeny;
+    if (!layers) {
+        const auto it = per_tool_overrides.find(std::string(tool_name));
+        return it != per_tool_overrides.end() && it->second == kDeny;
+    }
+    const auto global_tool = layer_tool_mode(layers->global, tool_name);
+    const auto preset_tool = layer_tool_mode(layers->preset, tool_name);
+    if (!layers->preset_trusted) return global_tool == kDeny || preset_tool == kDeny;
+    return preset_tool ? *preset_tool == kDeny : global_tool == kDeny;
+}
+
+McpPermissionPolicy build_mcp_policy(
+    const std::unordered_map<std::string, PermissionMode>& preset_per_server,
+    PermissionMode global_default_mode, bool preset_trusted) {
+    McpPermissionPolicy policy;
+    for (const auto& [server, mode] : preset_per_server) {
+        policy.per_server[server] =
+            preset_trusted ? mode : most_restrictive(mode, global_default_mode);
+    }
+    policy.default_mode = global_default_mode;
+    return policy;
+}
+
 PermissionMode resolve_mcp_tool_mode(const PermissionPolicy& policy,
                                      const McpPermissionPolicy& mcp_policy,
                                      std::string_view server_name, std::string_view tool_name,

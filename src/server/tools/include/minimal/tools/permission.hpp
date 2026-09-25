@@ -258,6 +258,14 @@ struct PermissionPolicy {
         std::string source;  // which rule produced `base`, for explanations
     };
     ToolResolution resolve_tool(std::string_view tool_name, ToolCategory category) const;
+
+    // True when an operator per-tool rule on `tool_name` resolves to Deny --
+    // the preset's rule when a trusted preset speaks, else permissions.json's;
+    // an untrusted preset's deny counts too (it may always narrow). The kill
+    // switch ToolExecutor folds over a plugin permission model's answer:
+    // categories and patterns are the core model's business, but a per-tool
+    // deny governs every tool, whoever models it.
+    bool per_tool_denies(std::string_view tool_name) const;
 };
 
 struct McpPermissionPolicy {
@@ -266,6 +274,15 @@ struct McpPermissionPolicy {
 
     PermissionMode mode_for(std::string_view server_name) const;
 };
+
+// Seeds an McpPermissionPolicy from its two config layers. For an UNTRUSTED
+// (project-local) preset each per-server mode is folded with
+// most_restrictive() against the global default, so the preset may only
+// narrow -- `{server: allow}` under an Ask/Deny global floor cannot
+// auto-approve that server's calls.
+McpPermissionPolicy build_mcp_policy(
+    const std::unordered_map<std::string, PermissionMode>& preset_per_server,
+    PermissionMode global_default_mode, bool preset_trusted);
 
 // One MCP tool's mode: the server's mode (McpPermissionPolicy) refined by a
 // per-tool rule keyed by the full tool name (`mcp__<server>__<tool>`) in

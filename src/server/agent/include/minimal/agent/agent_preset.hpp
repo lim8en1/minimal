@@ -13,6 +13,7 @@
 #include "minimal/llm/chat.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/tools/permission.hpp"
+#include "minimal/tools/permission_model.hpp"
 
 namespace minimal::agent {
 
@@ -75,6 +76,9 @@ struct AgentPreset {
 
     tools::PermissionPolicy permission_mode;
     tools::McpPermissionPolicy mcp_permissions;
+    // Every registered plugin permission model, bound to this preset's
+    // slices (permission_model.hpp). Empty when no plugin registers a model.
+    tools::PermissionModels permission_models;
     tools::PermissionRunMode run_mode = tools::PermissionRunMode::Normal;
     std::string compression_prompt;  // loaded text, not a filename
     // True when compression_prompt came from the preset's own
@@ -127,6 +131,14 @@ struct AgentPreset {
     // AgentLoop::BuildChatRequest.
     bool is_subagent = false;
 };
+
+// Every permission model a session built from `preset` enforces: the bound
+// plugin models plus the in-core MCP model over preset.mcp_permissions.
+inline tools::PermissionModels PermissionModelsFor(const AgentPreset& preset) {
+    tools::PermissionModels models = preset.permission_models;
+    models.push_back(tools::BindMcpPermissionModel(preset.mcp_permissions));
+    return models;
+}
 
 // Stamps a resolved model onto a preset, replacing whatever it resolved to.
 //

@@ -78,9 +78,9 @@ Session::Session(SessionParams params, AgentPreset preset,
       // spawner has already clamped the override against the parent's run mode,
       // and hands down the parent's policies as ceilings and the parent's
       // grants as seed -- the whole inheritance lands in this one call.
-      executor_(registry, *checker_, preset_.permission_mode, preset_.mcp_permissions,
+      executor_(registry, *checker_, preset_.permission_mode, PermissionModelsFor(preset_),
                 params_.run_mode_override.value_or(preset_.run_mode), params_.policy_ceiling,
-                params_.mcp_policy_ceiling, params_.seed_grants, loop_config.hooks),
+                params_.permission_models_ceiling, params_.seed_grants, loop_config.hooks),
       // The sticky record starts where the executor starts; every later
       // writer (SetRunMode, the borrow path) keeps the two in sync.
       // ApplyPreset deliberately is NOT a writer: a preset re-resolution is
@@ -592,7 +592,7 @@ void Session::ApplyEffective(const AgentPreset& preset, llm::LlmProvider& provid
                              std::optional<tools::PermissionRunMode> run_mode) {
     loop_->SetPreset(preset);
     loop_->SetProvider(provider);
-    executor_.SetPolicies(preset.permission_mode, preset.mcp_permissions);
+    executor_.SetPolicies(preset.permission_mode, PermissionModelsFor(preset));
     if (run_mode) executor_.SetRunMode(*run_mode);
 }
 

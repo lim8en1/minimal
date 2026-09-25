@@ -210,6 +210,14 @@ public:
     // unregister (config is read once at startup).
     void SetDefinitionBuilder(std::string tool_name, PresetToolDefinitionBuilder builder);
 
+    // The plugin permission models every resolved preset binds its slices to
+    // (AgentPreset::permission_models). Same startup-only rule as the
+    // builders above: set after plugin load, before the first Resolve(). The
+    // registry must outlive this one. Null (the default) binds nothing.
+    void SetPermissionModels(const tools::PermissionModelRegistry* models) {
+        permission_models_ = models;
+    }
+
     // The `skill` tool's preset-scoped definition: the static base schema with
     // this preset's resolved (clamped, expanded, preload-consumed) skill
     // listing appended to the description -- the migration of what used to be
@@ -277,6 +285,7 @@ private:
     config::PermissionsConfig permissions_;
     const config::SkillRegistry& skills_;
     ToolPermissionKeys tool_permission_keys_;
+    const tools::PermissionModelRegistry* permission_models_ = nullptr;
     std::string subagent_prefix_;
     std::string default_compression_prompt_;
     std::string structured_compression_prompt_;  // prompts/compression-structured.md
