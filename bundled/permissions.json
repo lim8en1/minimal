@@ -11,5 +11,7 @@
 
   "per_tool_overrides": {},
 
-  "mcp_default_mode": "ask"
+  "plugins": {
+    "mcp": { "default": "ask" }
+  }
 }

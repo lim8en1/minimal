@@ -23,8 +23,8 @@ runtime. Copyable example agents, prompts, skills, and commands live in
 | `providers.json` | server | **required** | malformed → **fatal**; `{}` is valid but "no usable model" is fatal |
 | `permissions.json` | server | **required** | malformed → **fatal** |
 | `hooks.json` | server | optional | missing → no hooks; empty file treated as absent; malformed → **fatal** |
-| `mcps.json` | server | optional | missing → no MCP; malformed entries → warning, degrade to no MCP |
-| `channels.json` | server | optional | same degrade-to-warning behavior as `mcps.json` |
+| `mcps.json` | server (`mcp` plugin) | optional | read by the `mcp` plugin; missing → no MCP; malformed entries → warning, degrade to no MCP |
+| `channels.json` | server (`mcp` plugin) | optional | same degrade-to-warning behavior as `mcps.json` |
 | `plugins.json` | server | optional | malformed → warning, treated as empty (see docs/PLUGINS.md) |
 | `agents/<name>.md` | server | **at least one required** | none resolvable → **fatal** |
 | `prompts/<name>.md` | server | optional | missing `prompts/compression.md` → warning |
@@ -126,14 +126,13 @@ scrollback, and appear on the headless `compaction` JSONL line.
 ### `tools.*`
 
 `tools` is also passed **verbatim to plugins** as `tools_settings` — unknown
-subkeys are legal and plugin-owned. Core recognizes:
+subkeys are legal and plugin-owned. `tools.mcp.{connect_timeout_ms,
+request_timeout_ms, max_list_pages, restart_cooldown_ms}` is the `mcp`
+plugin's legacy spelling of its limits (its `plugins.json` `config` wins; see
+docs/PLUGINS.md). Core recognizes:
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `mcp.connect_timeout_ms` | int | `10000` | |
-| `mcp.request_timeout_ms` | int | `60000` | |
-| `mcp.max_list_pages` | int | `100` | must be ≥ 1 |
-| `mcp.restart_cooldown_ms` | int | `30000` | must be ≥ 0 |
 | `max_parallel_tool_calls` | int | `4` | must be ≥ 1; `1` = inline execution, no pool threads |
 | `max_input_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
 | `max_result_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
@@ -368,7 +367,10 @@ same list-or-map convention `allowed_skills` uses):
     "network": "ask"
   },
   "per_tool_overrides": {},
-  "mcp_default_mode": "ask"
+  "plugins": {
+    "mcp": { "default": "ask" },
+    "tools-web": { "hosts": { "*.internal": "deny" } }
+  }
 }
 ```
 
@@ -385,7 +387,8 @@ Mode vocabulary:
 | `pattern_overrides` | object | `{}` | tool permission key → **glob → mode** rules matched against the tool's subject (bash: the command line **and its stages** — see below; `read`/`write`/`edit`/`grep`/`glob`: the canonical path). Semantics: when any rule matches, the **most restrictive matching rule** replaces the category default, folded most-restrictively with an exact `per_tool_overrides` entry if there is one (so `"bash": "allow"` cannot defeat a matching deny); zero matches leave the exact entry or category default. Downstream folds (out-of-workdir, network, subagent ceilings, run modes) apply as always — a pattern can never bypass the substrate. An `ask` rule is never satisfied by a session grant: a held grant on `/usr/bin/git` does not carry `git push --force` past `"git push *": ask`. What most-restrictive folding cannot express: a strict broad rule plus a more-specific allow (`"git *": ask` + `"git status": allow` stays ask) — set `pattern_precedence: "specific"` for that |
 | `pattern_precedence` | string | `"restrictive"` | how matching pattern rules for one tool combine. `"restrictive"`: the most restrictive match wins. `"specific"`: a matching **deny** still wins outright; otherwise the most specific match wins (most literal characters; ties go to the stricter rule), so `"git *": ask` + `"git status": allow` allows `git status` and asks for everything else. For bash, every stage needs an allow winner and any ask or deny winner decides; normalized respellings still only tighten. Also settable per preset (`permission_mode.pattern_precedence`); a project-local preset cannot choose `"specific"` |
 | `external_directory_patterns` | object | `{}` | glob → mode rules on the `out_of_workdir` dimension, matched against the canonical **absolute** path of an invocation that resolved outside the project root; the most restrictive matching rule replaces the scalar `out_of_workdir` for that invocation |
-| `mcp_default_mode` | string | `"ask"` | default permission mode for MCP tools |
+| `plugins` | object | `{}` | plugin name → that plugin's permission-model slice, verbatim (core checks only that it is an object). `mcp`: `{"default": mode}` — the mode for MCP servers a preset does not name. `tools-web`: `{"default": mode, "hosts": {glob: mode}}` — per-host network rules for `web_fetch`/`web_search` (most specific glob wins; unmatched → `default`, else `fallback.network`) |
+| `mcp_default_mode` | string | — | legacy spelling of `plugins.mcp.default` (an explicit `plugins.mcp.default` wins) |
 | `advisor` | string | — | plugin name of a permission advisor; unknown name → warning |
 | `advisor_inherit` | bool | `false` | also let the advisor answer inside subagent sessions. An advisor decides one invocation at a time and never mints session grants |
 | `advisor_timeout_ms` | int | `30000` | ≥ 0; `0` disables the advisor budget |
@@ -517,13 +520,17 @@ not an array; per-entry problems become warnings and the good entries survive.
 | `headers` | no | string→string map (http); `${ENV_VAR}` interpolation applies |
 | `enabled` | no | bool, default `true` |
 
-Warnings at startup: stdio `command` not on PATH, http `url` not well-formed.
+Owned by the `mcp` plugin, which validates it and reports problems as startup
+warnings under its own name: stdio `command` not on PATH, http `url` not
+well-formed. With the plugin disabled the file is ignored.
 
 ## channels.json
 
 Top-level **object keyed by channel name** (external event ingress; stdio-only
 in v1). Name must match `[a-z0-9._-]`; `"sessions"` is reserved; a name that
-also appears in `mcps.json` → warning, channel skipped.
+also appears in `mcps.json` → warning, channel skipped. Owned by the `mcp`
+plugin, like `mcps.json`; its channels are delivered through core's signal
+router.
 
 | Field | Required | Notes |
 |---|---|---|
@@ -674,8 +681,8 @@ shows through.
   (see `Aliases` under the `plugins.json` docs in `docs/PLUGINS.md`); an
   unknown entry warns at startup ("matches no registered tool" — a typo, or
   the providing plugin is disabled). MCP tools are never governed by
-  `allowed_tools` — not even by `["*"]` — they follow `allowed_mcp_servers` /
-  `mcp_permissions`. Two names are conditional: `skill` only surfaces when
+  `allowed_tools` — not even by `["*"]` — they follow `tool_sources` /
+  `plugin_permissions`. Two names are conditional: `skill` only surfaces when
   `allowed_skills` is non-empty, and `spawn_subagent` is stripped from
   subagent sessions (no recursion is a hard rule, not preset config). The
   valid set is whatever is registered under `plugins.json`'s enablement; with
@@ -739,6 +746,19 @@ shows through.
    above. Any OTHER frontmatter key is passed through to the provider
    as a request parameter (`temperature`, `top_p`, `reasoningEffort`, ...),
    overriding the model config's value.
+- **`tool_sources:`** — dynamic tool members a plugin offers, per source:
+  `tool_sources: {mcp: [github, search]}` allows those `mcps.json` servers'
+  tools. Each member is brought up at session start and on `/agent`; one that
+  cannot come up is reported as a session error and its tools stay hidden.
+  A subagent keeps only members its parent also has. A source no loaded
+  plugin provides, or a member it does not know, warns at startup. Legacy:
+  `allowed_mcp_servers: [...]` reads as `tool_sources.mcp`.
+- **`plugin_permissions:`** — each plugin permission model's preset slice,
+  verbatim: `plugin_permissions: {mcp: {servers: {github: allow}}, tools-web:
+  {hosts: {"docs.python.org": allow}}}`. A preset's rule wins over
+  `permissions.json`'s `plugins` slice; a project-local preset may only
+  narrow. Legacy: `mcp_permissions: {server: mode}` reads as
+  `plugin_permissions.mcp.servers`.
 - **`tool_config:`** — per-tool/per-plugin configuration, a map of
   `{<namespace>: {...}}` addressed by the namespace a plugin's tools declare
   (`Tool::config_namespace()`; currently `python` for the tools-python
@@ -898,12 +918,15 @@ interrupt demonstrably landed.
 `default_agent_preset`; config/data dir missing or unwritable; session DB
 failure; a **bundled** plugin failing to load; service/tool/command name
 collisions; duplicate provider-kind registration; two plugins claiming one
-`tool_config` namespace.
+`tool_config` namespace; two plugins registering one tool source; a plugin
+permission model claiming another plugin's tool.
 
-**Warning (startup continues):** malformed `plugins.json` / `mcps.json` /
-`channels.json`; unregistered `backend` kind; `default_model` typo; broken
-non-default presets; missing `prompts/compression.md`; MCP command/url and
-channel command problems; unknown permission advisor; unknown
+**Warning (startup continues):** malformed `plugins.json`; anything a loaded
+plugin reports about its own config (the `mcp` plugin: malformed `mcps.json` /
+`channels.json`, MCP command/url and channel command problems) — printed under
+the plugin's name; unregistered `backend` kind; `default_model` typo; broken
+non-default presets; missing `prompts/compression.md`; a preset's
+`tool_sources` naming an unprovided source or unknown member; unknown permission advisor; unknown
 `compaction_strategy` (settings or an agent preset's frontmatter naming no
 registered kind); `max_concurrent_subagents` out of range; unknown
 `per_tool_overrides` keys; unclaimed `tool_config` namespaces; dangling

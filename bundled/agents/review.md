@@ -3,7 +3,7 @@ name: review
 description: Investigates and QAs code.
 allowed_tools: ["ask_user", "read", "grep", "glob", "bash", "write", "edit", "checklist"]
 allowed_skills: []
-allowed_mcp_servers: []
+tool_sources: {}
 permission_mode:
   read_only: allow
   file_write: deny

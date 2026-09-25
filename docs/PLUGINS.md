@@ -20,10 +20,11 @@ Installed to `<libdir>/minimal/plugins/server/`. All enabled by default unless n
 | `tools-search` | Tools `grep`, `glob` (RE2-backed, linear-time regex) |
 | `tool-ask` | Tool `ask_user` — structured model→operator questions (up to 4, options with descriptions, multi-select, always-available free text), answered through a client modal; see ARCHITECTURE.md "Asking the user" |
 | `tools-bash` | Tool `bash`; commands `/restart-shell`, `/tasks`; hook point `before_command`; per-session cwd/env retention |
-| `tools-web` | Tools `web_fetch`, `web_search` |
+| `tools-web` | Tools `web_fetch`, `web_search`; a per-host permission model for them (`plugins.tools-web` / `plugin_permissions.tools-web`, see its README) |
+| `mcp` | The MCP client: `mcps.json` servers as tool source `mcp` (`mcp__<server>__<tool>` tools), their per-server permission model, `/mcp`, the `mcp.endpoint` the `mcp-view` picker reads, and `channels.json` channels as external signal channels. Limits in its `config` (`connect_timeout_ms`, `request_timeout_ms`, `max_list_pages`, `restart_cooldown_ms`; legacy `settings.json` `tools.mcp.*` still read). Disabled, nothing MCP remains |
 | `provider-openai` | Provider kind `openai` (chat-completions shape) + model catalog for it |
 | `provider-anthropic` | Provider kind `anthropic` (Messages API, prompt caching) |
-| `commands-core` | Commands `/help`, `/clear`, `/compact`, `/agent`, `/model`, `/sessions`, `/connect` (stores a provider credential in `<data dir>/auth.json`) |
+| `commands-core` | Commands `/help`, `/clear`, `/compact`, `/agent`, `/model`, `/sessions`, `/connect` (stores a provider credential in `<data dir>/auth.json`) — `/mcp` is the `mcp` plugin's |
 | `commands-md` | Turns `commands/*.md` files into `/`-commands (config dir, project, and `.opencode/commands/`; opencode-syntax desugaring — see CONFIGURATION.md, how-to in COMMANDS_HOWTO.md) |
 | `checklist` | Tool `checklist` + cross-plugin RPC endpoint `checklist.rpc` |
 | `signals-message` | Tool `message_session` (cross-session messaging on the core `signals` service) |
@@ -38,6 +39,7 @@ Installed to `<libdir>/minimal/plugins/client/`.
 |---|---|
 | `logo` | The ASCII-banner start view (random banner per session) |
 | `cost-view` | The `{cost}` status-bar segment (polls `cost-tracker.rpc`, renders cumulative $ / tokens) |
+| `mcp-view` | The `/mcp` picker: the `mcp` modal view (`view_hint` "mcp") over the `mcp` plugin's `mcp.endpoint` — lists servers with live status, Enter toggles one |
 | `checklist-view` | The `{todo}` status-bar segment + the `checklist.panel` view (both poll `checklist.rpc` through one shared worker; the panel toggles between a focused-tab tasklist and a per-tab summary; default binding `ctrl+k`) |
 
 ## User plugins (`user-plugins/`)
@@ -187,9 +189,26 @@ object code.
   for it; see `minimal/agent/context_contributor.hpp`)
 - `minimal_plugin_register_auth_provider` — (exclusive)
 - `minimal_plugin_register_permission_advisor` — auto-answers `Ask` decisions
+- `minimal_plugin_register_permission_models` — the permission model for the
+  plugin's OWN tools (one per plugin; `minimal/tools/permission_model.hpp`):
+  claims them, replaces core's base and/or network stage for them, reads its
+  slices from `permissions.json` `plugins.<plugin>` and preset
+  `plugin_permissions.<plugin>`. Core still folds per-tool denies, ceilings,
+  run modes, grants and the prompt over its answer
+- `minimal_plugin_register_tool_sources` — dynamic tools a preset allows by
+  member (`tool_sources: {<source>: [members]}`); pair with
+  `ToolRegistry::ReserveNamespace` + `ReplaceGroupTools` in `register_tools`
+  (`minimal/tools/tool_source.hpp`)
+- `minimal_plugin_shutdown` — stop threads/processes after every session
+  ended (plugins are never unloaded)
 - `minimal_plugin_register_model_catalogs` — lazy model discovery
 - `minimal_plugin_register_compaction_strategies`
 - `minimal_plugin_register_hook_points` — new veto-capable hook events
+
+A plugin that owns a config file validates it itself and reports problems
+through `PluginRegistrationContext::report_warning`; the startup sanity check
+prints them under the plugin's name. Fail registration (throw) only for
+something the plugin cannot run without.
 
 **Per-preset tool config** — a tool can receive configuration from the active
 agent preset:
