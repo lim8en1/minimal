@@ -202,13 +202,13 @@ nlohmann::json ServerEventToJsonLine(const minimal::v1::ServerEvent& event) {
     } else if (event.has_subagent_started()) {
         line["type"] = "subagent_started";
         line["child_session_id"] = event.subagent_started().child_session_id();
-    } else if (event.has_ask_request()) {
-        // The headless client auto-declines these (SessionClient); the JSONL
-        // line says what was asked so a script's transcript shows why the
-        // model reported an unanswered question.
-        line["type"] = "ask_request";
-        line["request_id"] = event.ask_request().request_id();
-        line["questions"] = event.ask_request().questions_size();
+    } else if (event.has_plugin_prompt()) {
+        // The headless client answers these UNAVAILABLE (SessionClient); the
+        // JSONL line records the prompt so a script's transcript shows why
+        // the model reported that no one could answer.
+        line["type"] = "plugin_prompt";
+        line["request_id"] = event.plugin_prompt().request_id();
+        line["kind"] = event.plugin_prompt().kind();
     } else if (event.has_turn_completed()) {
         line["type"] = "turn_completed";
         line["hit_max_turns"] = event.turn_completed().hit_max_turns();
@@ -1518,9 +1518,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // the ask tool, so like the confirmation modal it nests below the
     // security prompts -- the three pending modal kinds are mutually
     // exclusive in SessionState.
-    bool show_ask = false;
-    auto ask_child = std::make_shared<Component>();
-    auto ask_host_interactive = minimal::client::MakeModalHost(ask_child, show_ask);
+    bool show_prompt = false;
+    auto prompt_child = std::make_shared<Component>();
+    auto prompt_host_interactive = minimal::client::MakeModalHost(prompt_child, show_prompt);
 
     // --- quit / close confirmation --------------------------------------------
     // THREE answers, not two (the close-vs-detach split): "close anyway"
@@ -1746,8 +1746,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         show_plugin_modal, open_picker, open_agent_picker, open_model_picker,
         open_subagent_model_picker, open_subagents_picker,
         [&picker_controller] { picker_controller.Poll(); }, tab_ui, theme,
-        message_registry, renderer_registry, display_registry, permission_child, show_permission,
-        confirmation_child, show_confirmation, ask_child, show_ask,
+        message_registry, renderer_registry, display_registry, env.prompt_registry,
+        permission_child, show_permission,
+        confirmation_child, show_confirmation, prompt_child, show_prompt,
         // The chat views this builds name these keys in their own text; the
         // user's keymap decides them (FrameRenderer's fallback builder gets
         // the same two).
@@ -2027,8 +2028,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // The ask host sits with the confirmation host -- below the security
     // prompts, above the pickers (the security modals must always be able to
     // take the top layer; the pending kinds are mutually exclusive anyway).
-    auto with_ask = Modal(with_quit_confirm, ask_host_interactive, &show_ask);
-    auto with_confirmation = Modal(with_ask, confirmation_host_interactive,
+    auto with_prompt = Modal(with_quit_confirm, prompt_host_interactive, &show_prompt);
+    auto with_confirmation = Modal(with_prompt, confirmation_host_interactive,
                                    &show_confirmation);
     auto with_permission = Modal(with_confirmation, permission_host_interactive, &show_permission);
 
@@ -2065,7 +2066,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                          show_agent_picker || show_model_picker ||
                          show_subagent_picker || show_theme_picker ||
                          show_keymap_help || show_commands_help || show_quit_confirm ||
-                         show_ask || show_confirmation || show_permission)) {
+                         show_prompt || show_confirmation || show_permission)) {
             *pasting = false;
         }
         return false;

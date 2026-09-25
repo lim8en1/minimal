@@ -147,25 +147,6 @@ std::optional<std::string> BashCommandOf(const std::string& tool_name,
     return it->get<std::string>();
 }
 
-// ask_user's input shape (tool-ask plugin): {"questions": [{"question":
-// ..., ...}]}. The question text is the row's orientation ("what was I
-// asked") -- the same job bash's $command does for its row -- and the raw
-// JSON dump of a full ask request is noise next to it.
-std::optional<std::string> AskQuestionOf(const std::string& tool_name,
-                                         const nlohmann::json& input) {
-    if (tool_name != kAskUserToolName) return std::nullopt;
-    const auto questions = input.find("questions");
-    if (questions == input.end() || !questions->is_array() || questions->empty() ||
-        !(*questions)[0].is_object()) {
-        return std::nullopt;
-    }
-    std::string question = (*questions)[0].value("question", std::string{});
-    if (question.empty()) return std::nullopt;
-    constexpr std::size_t kMaxQuestion = 120;
-    if (question.size() > kMaxQuestion) question = question.substr(0, kMaxQuestion) + "…";
-    return question;
-}
-
 // The single-line merge of the above, for a caller (the LIVE tool row) that
 // has no room for the persisted view's per-kind styling and just wants the
 // best available one-liner.
@@ -197,9 +178,6 @@ std::string OneLineSummary(std::string summary) {
 std::string SummarizeToolInput(const std::string& tool_name, const nlohmann::json& input) {
     if (const auto bash_command = BashCommandOf(tool_name, input); bash_command.has_value()) {
         return OneLineSummary("$ " + *bash_command);
-    }
-    if (const auto ask_question = AskQuestionOf(tool_name, input); ask_question.has_value()) {
-        return OneLineSummary(*ask_question);
     }
     return OneLineSummary(InputSummary(input));
 }
@@ -575,12 +553,6 @@ bool CollapsedByDefault(const ChatRow& row) {
         case ChatRowKind::Compaction:
             return true;
         case ChatRowKind::ToolActivity:
-            // ask_user's result body is the user's recorded choices ("the
-            // user selected: ...") -- the only durable confirmation of what
-            // they answered, since the modal closes the moment they submit.
-            // It renders expanded by default; the collapse toggle still
-            // works on it.
-            if (row.tool_name == kAskUserToolName) return false;
             // A diff is the review surface for a change the model just made,
             // and its hunks are small by construction: it starts expanded.
             if (row.tool_display.is_object()) {

@@ -52,6 +52,7 @@ struct PluginRecord {
     std::vector<std::string> registered_start_views;
     std::vector<std::string> registered_renderers;    // tool names
     std::vector<std::string> registered_display_kinds;
+    std::vector<std::string> registered_prompt_kinds;
     std::vector<std::string> registered_status_segments;
     std::vector<std::string> registered_grammars;     // language keys
     std::vector<std::string> registered_message_kinds;
@@ -86,7 +87,8 @@ public:
                        SyntaxGrammarRegistry& grammars, ChatSurfaceRegistry& chat_surface,
                        MarkdownEngineRegistry& markdown_engine,
                        StartViewRegistry& start_views, AttentionSink* attention,
-                       ClientApi* client_api, FocusProvider* focus);
+                       ClientApi* client_api, FocusProvider* focus,
+                       PromptRendererRegistry* prompt_renderers = nullptr);
     ~ClientPluginLoader();
 
     ClientPluginLoader(const ClientPluginLoader&) = delete;
@@ -108,6 +110,9 @@ private:
     ChatSurfaceRegistry& chat_surface_;
     MarkdownEngineRegistry& markdown_engine_;
     StartViewRegistry& start_views_;
+    // Null when the host offers no prompt slot (a test exercising other
+    // registries): a plugin's prompt renderers are then simply not loaded.
+    PromptRendererRegistry* prompt_renderers_ = nullptr;
     AttentionSink* attention_ = nullptr;
     ClientApi* client_api_ = nullptr;
     FocusProvider* focus_ = nullptr;

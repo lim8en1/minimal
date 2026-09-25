@@ -173,10 +173,20 @@ bool ChatView::IsCollapsed(const RowKey& key, const ChatRow& row) const {
         return fold_thinking_default_ == kFoldCollapsed;
     }
     if (row.kind == ChatRowKind::ToolActivity && fold_tool_default_ != kFoldDefaultAuto) {
-        // Including ask_user results: the expanded exception lives in the
-        // BUILT-IN default alone -- an explicit user choice ("collapsed")
-        // outranks it.
+        // Including rows whose display kind starts expanded (an ask's
+        // recorded answers): that exception lives in the BUILT-IN tier
+        // alone -- an explicit user choice ("collapsed") outranks it.
         return fold_tool_default_ == kFoldCollapsed;
+    }
+    // The built-in tier: a display renderer's opinion about its own kind
+    // first (keyed by kind, so an aliased tool keeps it), then core's.
+    if (row.kind == ChatRowKind::ToolActivity && row.tool_display.is_object()) {
+        const auto kind = row.tool_display.find("kind");
+        if (kind != row.tool_display.end() && kind->is_string()) {
+            if (const auto* renderer = display_renderers_.Find(kind->get<std::string>())) {
+                if (const auto opinion = renderer->collapsed_by_default()) return *opinion;
+            }
+        }
     }
     return CollapsedByDefault(row);
 }

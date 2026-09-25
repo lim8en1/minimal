@@ -2,14 +2,16 @@
 //
 // One tool. It turns a structured model request ("ask the operator which of
 // these approaches to take") into a blocking round-trip to the human via
-// ToolContext::ask_user -- the session's AskBroker wiring -- and returns the
-// answer as the tool result.
+// ToolContext::prompt_user -- core's opaque plugin prompt, kind "ask" -- and
+// returns the answer as the tool result. The client half is the `ask-view`
+// client plugin, which registers the "ask" prompt renderer and the "ask"
+// display renderer for the transcript row.
 //
 // The tool itself holds no state and reaches nothing session-scoped on its
 // own: every interactive capability arrives in the per-invocation
 // ToolContext, exactly like schedule_injection and friends. A session with
-// no ask broker (headless fixtures, tests) hands the tool a null handle and
-// it degrades to an error result instead of parking a worker nobody can
+// no prompt broker (headless fixtures, tests) hands the tool a null handle
+// and it reports "unavailable" instead of parking a worker nobody can
 // answer.
 //
 // Permission posture: ReadOnly, like the skill tool. The tool touches no

@@ -97,7 +97,7 @@ add_executable(minimal_tests
     auth_test.cpp
     wire_permission_checker_test.cpp
     wire_confirmation_broker_test.cpp
-    wire_ask_broker_test.cpp
+    wire_plugin_prompt_broker_test.cpp
     session_wiring_test.cpp
     session_observer_test.cpp
     context_contributor_test.cpp
@@ -162,7 +162,9 @@ add_executable(minimal_tests
     prompt_wrap_test.cpp
     prompt_editor_test.cpp
     modal_host_test.cpp
-    prompt_modal_test.cpp
+    ask_view_test.cpp
+    "${CMAKE_SOURCE_DIR}/plugins/client/ask-view/ask_modal.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/ask-view/ask_display.cpp"
     per_tab_prompt_editor_test.cpp
     keybindings_test.cpp
     keybinding_dispatch_test.cpp
@@ -265,6 +267,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/grep_tool.cpp"
     # tool-ask: the tool is pure plugin logic over ToolContext's ask seam.
     "${CMAKE_SOURCE_DIR}/plugins/server/tool-ask/ask_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tool-ask/ask_types.cpp"
     tool_ask_test.cpp
     # Same pattern for tools-web: pure logic plus a real loopback HTTP server
     # in the test itself (no fake to paper over the transport layer).
@@ -328,7 +331,8 @@ add_executable(minimal_tests
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/mcp/include"
     "${CMAKE_SOURCE_DIR}/plugins/server/mcp"
-    "${CMAKE_SOURCE_DIR}/plugins/client/mcp-view")
+    "${CMAKE_SOURCE_DIR}/plugins/client/mcp-view"
+    "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs")

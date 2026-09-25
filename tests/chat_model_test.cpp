@@ -155,13 +155,6 @@ TEST_CASE("SummarizeToolInput prefers bash's $command over a generic dump",
     CHECK(client::SummarizeToolInput("bash", input) == "$ ls -la");
 }
 
-TEST_CASE("SummarizeToolInput prefers ask_user's question text over a generic dump",
-          "[chat_model][tool_summary]") {
-    nlohmann::json input = nlohmann::json::parse(R"({"questions":[{"question":"which branch?"}]})");
-    CHECK(client::SummarizeToolInput(std::string(client::kAskUserToolName), input) ==
-         "which branch?");
-}
-
 TEST_CASE("SummarizeToolInput falls back to a truncated JSON dump for other tools",
           "[chat_model][tool_summary]") {
     nlohmann::json input = {{"path", "a.md"}};

@@ -68,39 +68,16 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
 ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const Theme& theme,
                                        std::function<void(std::string chosen)> on_answer);
 
-// The model's structured questions (tool-ask plugin): one modal, up to four
-// question blocks. `multiple` questions render checkboxes, single-pick
-// questions a radio list; `allow_other` questions get a trailing "Type your
-// own answer" entry IN THAT SAME LIST (not a separate control) -- so a real
-// pick and "other" can never both read as marked, and picking one always
-// visibly clears the other. Its free-text input line exists (and is
-// focusable) only while that entry is the current answer. Enter first
-// freezes the answers into a review list (one line per
-// question); Enter again submits whatever was answered (a question left
-// blank is simply not answered), Escape from review goes back to editing,
-// and Escape while editing dismisses -- the on_answer callback receives an
-// `answered == false` response, which the server turns into "user
-// dismissed", never into a selection. Unhandled keys fall through: Ctrl+C
-// still reaches the root dispatch's turn-cancel branch while the modal (or
-// its review list) is up.
-ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
-                              std::function<void(v1::AskUserResponse response)> on_answer);
+// Modal chrome shared by every blocking prompt -- core's permission and
+// confirmation modals and the prompt renderers client plugins register -- so a
+// plugin's modal looks like the core ones.
 
-// Whether ONE option row of a single-pick (radio) question wears the
-// "current choice" styling (bold label + selection highlight). An untouched
-// question wears it NOWHERE: FTXUI's Radiobox clamps its selected index from
-// -1 to 0 at first render, so without this gate option 0 renders
-// bold/highlighted before any interaction -- which reads as a pre-picked
-// answer the submission would not send (CollectAnswer/ReviewLine gate on
-// radio_touched; this is that same contract, in the render). Pure so the
-// rule is directly testable (tests/prompt_modal_test.cpp).
-bool RadioRowSelected(bool touched, bool active, bool focused);
-
-// One option row of an ask-modal question (radio or checkbox list). See the
-// RadioRowSelected comment for what `touched` gates.
-ftxui::Element WrappedOptionEntry(const ftxui::EntryState& s, const char* marker_on,
-                                  const char* marker_off, const std::string& description,
-                                  const ftxui::Decorator& selection,
-                                  const ftxui::Decorator& muted, bool touched);
+// A modal's internal divider (hairline role, not the window's attention tint).
+ftxui::Element ModalRule(const Theme& theme);
+// How tall the scrollable body may be before the pinned hint line and the
+// window borders stop fitting on screen.
+int ModalBodyHeightBudget();
+// The body: padded one column each side, in the body color.
+ftxui::Element ModalBody(const Theme& theme, ftxui::Element content);
 
 }  // namespace minimal::client

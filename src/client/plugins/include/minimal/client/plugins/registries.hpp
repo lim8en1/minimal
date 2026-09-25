@@ -28,6 +28,7 @@
 // loaded), so nothing renderable can capture a theme at registration.
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -161,8 +162,51 @@ class DisplayRenderer {
 public:
     virtual ~DisplayRenderer() = default;
     virtual std::string_view kind() const = 0;
+
+    // This kind's built-in collapse default, when it has an opinion: false =
+    // starts expanded (a diff, an ask's recorded answers), true = starts
+    // collapsed. nullopt defers to core's tool-row default. Only the
+    // least-specific tier -- ui.json and per-row toggles still win (ChatView
+    // owns that resolution). Keyed by kind, so an aliased tool keeps it.
+    virtual std::optional<bool> collapsed_by_default() const { return std::nullopt; }
     virtual ftxui::Element Render(const ToolResultView& result, const Theme& theme,
                                   const RowRenderContext& ctx) const = 0;
+};
+
+// --- Prompt renderers (keyed by plugin prompt kind) -------------------------
+
+// What a prompt renderer answers with -- the PluginPromptResponse minus the
+// request id, which the host fills in. `answer` is sent only with ANSWERED.
+struct PromptReply {
+    v1::PromptOutcome outcome = v1::PROMPT_OUTCOME_DISMISSED;
+    nlohmann::json answer = nullptr;
+};
+
+// Everything a prompt renderer builds its modal FROM. Valid only for the
+// Make() call: a component copies whatever it keeps.
+struct PromptView {
+    std::string_view kind;
+    // The server plugin's request, parsed from PluginPromptRequest.payload_json.
+    const nlohmann::json& payload;
+    // Who is asking, for the modal's wording: the tab's agent label ("" for
+    // the main agent, e.g. "review" on a subagent's tab).
+    std::string_view asker;
+};
+
+// Draws one KIND of plugin prompt (docs/EXTENSIBILITY.md, "Plugin prompts")
+// as a modal: the client half of a server plugin that calls
+// ToolContext::prompt_user. The host shows it in the prompt modal slot (below
+// the permission and confirmation modals), rebuilds it per request id, and
+// sends whatever `on_reply` receives. A kind with no renderer is answered
+// UNAVAILABLE by the host, never left hanging; so is a Make() that throws.
+class PromptRenderer {
+public:
+    virtual ~PromptRenderer() = default;
+    virtual std::string_view kind() const = 0;
+    // `theme` outlives the component. Call `on_reply` once; the host ignores
+    // any later call for the same request (the slot is gone by then).
+    virtual ftxui::Component Make(const PromptView& prompt, const Theme& theme,
+                                  std::function<void(PromptReply)> on_reply) const = 0;
 };
 
 // --- Message-kind presentation (keyed by ChatRowKind) -----------------------
@@ -571,6 +615,22 @@ public:
 
 private:
     std::vector<std::unique_ptr<DisplayRenderer>> renderers_;
+    std::string attribution_;
+    std::vector<Attribution> attributions_;
+};
+
+class PromptRendererRegistry : public RegistrationWindow {
+public:
+    void Register(std::unique_ptr<PromptRenderer> renderer);
+    const PromptRenderer* Find(std::string_view kind) const;
+    const std::vector<Attribution>& attributions() const { return attributions_; }
+
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+    void RemoveByAttribution(const std::string& plugin_name);
+
+private:
+    std::vector<std::unique_ptr<PromptRenderer>> renderers_;
     std::string attribution_;
     std::vector<Attribution> attributions_;
 };

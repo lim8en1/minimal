@@ -186,8 +186,8 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     if (pending_confirmation_) {
         s.pending_confirmation = *pending_confirmation_;
     }
-    if (pending_ask_) {
-        s.pending_ask = *pending_ask_;
+    if (pending_prompt_) {
+        s.pending_prompt = *pending_prompt_;
     }
     // LIGHT tool copy: ChatView::RenderLiveToolRow (the only deep-snapshot
     // tool reader) never reads buffered_output -- the running-tools panel is what
@@ -433,7 +433,7 @@ void SessionState::AppendStreamingText(std::string_view text) {
     }
     pending_permission_.reset();
     pending_confirmation_.reset();
-    pending_ask_.reset();
+    pending_prompt_.reset();
 }
 
 void SessionState::FinalizeStreamingText() {
@@ -555,7 +555,7 @@ void SessionState::MaybeGoIdleLocked() {
         std::any_of(tools_.begin(), tools_.end(), [](const ToolExecutionState& t) {
             return t.started && !t.is_background;
         });
-    if (!tool_active && !pending_permission_ && !pending_confirmation_ && !pending_ask_) {
+    if (!tool_active && !pending_permission_ && !pending_confirmation_ && !pending_prompt_) {
         state_ = turn_in_flight_ ? SessionStateKind::Working : SessionStateKind::Idle;
     }
 }
@@ -639,13 +639,13 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     // nothing left to answer. A turn cannot complete while its OWN prompt is
     // genuinely outstanding (the worker is blocked on it), so anything pending
     // here is stale. MaybeGoIdleLocked resolves the Waiting the missing
-    // message stop would have; it leaves an in-flight Error alone. Ask is the
+    // message stop would have; it leaves an in-flight Error alone. A plugin prompt is the
     // same shape as permission/confirmation here -- CancelAll covers all
     // three pending kinds identically -- so it resets alongside them; leaving
-    // it out stranded the tab Waiting with a dead ask modal after ESC.
+    // it out stranded the tab Waiting with a dead prompt modal after ESC.
     pending_permission_.reset();
     pending_confirmation_.reset();
-    pending_ask_.reset();
+    pending_prompt_.reset();
     MaybeGoIdleLocked();
     // The completed turn's messages are persisted now but NOT yet in the
     // scrollback window; bumping the version is what makes the chat view
@@ -916,7 +916,7 @@ void SessionState::OnError(const std::string& error_message) {
     cancel_requested_ = false;   // a cancel can BE the error path (dead stream)
     pending_permission_.reset();
     pending_confirmation_.reset();
-    pending_ask_.reset();
+    pending_prompt_.reset();
     // A queued run-mode change whose turn/stream just errored may never reach
     // its apply-time metadata event; the pending marker would outlive the
     // change it advertised. The confirming path (OnSessionMetadata) is the
@@ -964,7 +964,7 @@ void SessionState::OnSessionEnded() {
     cancel_requested_ = false;
     pending_permission_.reset();
     pending_confirmation_.reset();
-    pending_ask_.reset();
+    pending_prompt_.reset();
     pending_user_messages_.clear();   // same rule as OnError: nothing will retire it
     state_ = SessionStateKind::Done;
 }
@@ -1075,7 +1075,7 @@ void SessionState::SetPermissionRequest(std::unique_ptr<PendingPermission> req) 
     std::lock_guard lk(mtx_);
     pending_permission_ = std::move(*req);
     pending_confirmation_.reset();
-    pending_ask_.reset();
+    pending_prompt_.reset();
     // Waiting from ANY active-turn state: mid-turn prompts used to arrive
     // with the tab in Working/Thinking (a tool row, or streamed text, had
     // already moved it off Idle) and left it there -- the modal still showed,
@@ -1090,15 +1090,15 @@ void SessionState::SetConfirmationRequest(std::unique_ptr<PendingConfirmation> r
     std::lock_guard lk(mtx_);
     pending_confirmation_ = std::move(*req);
     pending_permission_.reset();
-    pending_ask_.reset();
+    pending_prompt_.reset();
     if (state_ != SessionStateKind::Error) {
         state_ = SessionStateKind::Waiting;
     }
 }
 
-void SessionState::SetAskRequest(std::unique_ptr<PendingAsk> req) {
+void SessionState::SetPluginPrompt(std::unique_ptr<PendingPluginPrompt> req) {
     std::lock_guard lk(mtx_);
-    pending_ask_ = std::move(*req);
+    pending_prompt_ = std::move(*req);
     pending_permission_.reset();
     pending_confirmation_.reset();
     if (state_ != SessionStateKind::Error) {
@@ -1117,8 +1117,8 @@ bool SessionState::ClearPendingFor(std::string_view request_id) {
         pending_confirmation_.reset();
         cleared = true;
     }
-    if (pending_ask_ && pending_ask_->request_id == request_id) {
-        pending_ask_.reset();
+    if (pending_prompt_ && pending_prompt_->request_id == request_id) {
+        pending_prompt_.reset();
         cleared = true;
     }
     return cleared;
@@ -2341,11 +2341,15 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         cp->detail = cr.detail();
         cp->options.assign(cr.options().begin(), cr.options().end());
         target->SetConfirmationRequest(std::move(cp));
-    } else if (event.has_ask_request()) {
-        auto ap = std::make_unique<PendingAsk>();
-        ap->request_id = event.ask_request().request_id();
-        ap->request = event.ask_request();
-        target->SetAskRequest(std::move(ap));
+    } else if (event.has_plugin_prompt()) {
+        const auto& wire = event.plugin_prompt();
+        auto pp = std::make_unique<PendingPluginPrompt>();
+        pp->request_id = wire.request_id();
+        pp->kind = wire.kind();
+        pp->payload = nlohmann::json::parse(wire.payload_json(), nullptr,
+                                            /*allow_exceptions=*/false);
+        if (pp->payload.is_discarded()) pp->payload = nullptr;
+        target->SetPluginPrompt(std::move(pp));
     } else if (event.has_tool_execution()) {
         const auto& te = event.tool_execution();
             if (te.started()) {
@@ -2993,7 +2997,7 @@ void AppState::AnswerPermission(const std::string& session_id, const std::string
 
     if (auto state = GetState(session_id)) {
         state->ClearPendingFor(request_id);
-        // Same re-derive as AnswerConfirmation/AnswerAsk: the server collects
+        // Same re-derive as AnswerConfirmation/AnswerPluginPrompt: the server collects
         // every permission for a round before starting any tool, so no tool
         // event or message stop necessarily follows THIS individual answer --
         // without this the tab stayed Waiting (with the attention glyph) for
@@ -3039,7 +3043,8 @@ void AppState::AnswerConfirmation(const std::string& session_id, const std::stri
     }
 }
 
-void AppState::AnswerAsk(const std::string& session_id, const v1::AskUserResponse& response) {
+void AppState::AnswerPluginPrompt(const std::string& session_id, const std::string& request_id,
+                                  v1::PromptOutcome outcome, const std::string& answer_json) {
     auto stream = GetStream(session_id);
     if (!stream) {
         if (auto state = GetState(session_id)) {
@@ -3051,7 +3056,10 @@ void AppState::AnswerAsk(const std::string& session_id, const v1::AskUserRespons
 
     v1::ClientEvent ev;
     ev.set_session_id(session_id);
-    *ev.mutable_ask_response() = response;
+    auto* response = ev.mutable_plugin_prompt_response();
+    response->set_request_id(request_id);
+    response->set_outcome(outcome);
+    if (outcome == v1::PROMPT_OUTCOME_ANSWERED) response->set_answer_json(answer_json);
     // Same refusal rule as AnswerPermission/AnswerConfirmation: keep the
     // modal up on a stalled stream rather than pretending the answer went
     // out (OnSendFailed, same reason as there).
@@ -3064,7 +3072,7 @@ void AppState::AnswerAsk(const std::string& session_id, const v1::AskUserRespons
     }
 
     if (auto state = GetState(session_id)) {
-        state->ClearPendingFor(response.request_id());
+        state->ClearPendingFor(request_id);
         // Same re-derive as the confirmation path: the worker was parked on
         // THIS answer, and nothing else will move the tab off Waiting.
         state->OnPendingResolved();

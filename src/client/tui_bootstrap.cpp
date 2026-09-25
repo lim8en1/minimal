@@ -124,7 +124,8 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                                            out.grammar_registry, out.surface_registry,
                                            out.engine_registry, out.start_view_registry,
                                            out.attention_sink.get(), out.host_client_api.get(),
-                                           out.host_focus_provider.get());
+                                           out.host_focus_provider.get(),
+                                           &out.prompt_registry);
         const auto records = loader.LoadAll(candidates);
 
         // Provenance-keyed severity, mirrored from the server's sanity check:
@@ -166,6 +167,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         feed(minimal::plugins::NameKind::ViewId, out.start_view_registry.attributions());
         feed(minimal::plugins::NameKind::ToolResultRenderer, out.renderer_registry.attributions());
         feed(minimal::plugins::NameKind::DisplayRenderer, out.display_registry.attributions());
+        feed(minimal::plugins::NameKind::PromptRenderer, out.prompt_registry.attributions());
         for (const auto& [kind, attribution] : out.message_registry.claims()) {
             names.Register(minimal::plugins::NameKind::MessageRenderer,
                            attribution.plugin_name, attribution.original_name);
@@ -187,6 +189,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             {minimal::plugins::NameKind::ViewId, &out.start_view_registry.attributions()},
             {minimal::plugins::NameKind::ToolResultRenderer, &out.renderer_registry.attributions()},
             {minimal::plugins::NameKind::DisplayRenderer, &out.display_registry.attributions()},
+            {minimal::plugins::NameKind::PromptRenderer, &out.prompt_registry.attributions()},
             {minimal::plugins::NameKind::StatusSegment, &out.status_registry.attributions()},
             {minimal::plugins::NameKind::SyntaxGrammar, &out.grammar_registry.attributions()},
         };
@@ -218,6 +221,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     collect_loaded(out.start_view_registry.attributions());
     collect_loaded(out.renderer_registry.attributions());
     collect_loaded(out.display_registry.attributions());
+    collect_loaded(out.prompt_registry.attributions());
     collect_loaded(out.status_registry.attributions());
     collect_loaded(out.grammar_registry.attributions());
 
@@ -355,6 +359,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     out.start_view_registry.Seal();
     out.renderer_registry.Seal();
     out.display_registry.Seal();
+    out.prompt_registry.Seal();
     out.message_registry.Seal();
     out.status_registry.Seal();
     out.grammar_registry.Seal();

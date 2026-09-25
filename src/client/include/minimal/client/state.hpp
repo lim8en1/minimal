@@ -198,12 +198,14 @@ struct PendingConfirmation {
     std::vector<std::string> options;
 };
 
-// A model-initiated ask (the server tool-ask plugin): 1-4 structured
-// questions rendered as one modal. The request is kept verbatim -- the modal
-// needs every question, option, description, and flag.
-struct PendingAsk {
+// A plugin prompt (PluginPromptRequest): a server plugin's blocking question
+// whose shape only the client plugin registered for `kind` understands (the
+// tool-ask/ask-view pair's "ask" is the bundled one). Core parses the payload
+// JSON and nothing more.
+struct PendingPluginPrompt {
     std::string request_id;
-    v1::AskUserRequest request;
+    std::string kind;
+    nlohmann::json payload;   // null when payload_json did not parse
 };
 
 // ============================================================================
@@ -307,7 +309,7 @@ public:
         // Pending modals
         std::optional<PendingPermission> pending_permission;
         std::optional<PendingConfirmation> pending_confirmation;
-        std::optional<PendingAsk> pending_ask;
+        std::optional<PendingPluginPrompt> pending_prompt;
 
         // Active tools in gate order (the order the model asked for them);
         // several may be RUNNING at once (parallel dispatch, width 4 by
@@ -679,7 +681,7 @@ public:
     // --- Pending interactions ---
     void SetPermissionRequest(std::unique_ptr<PendingPermission> req);
     void SetConfirmationRequest(std::unique_ptr<PendingConfirmation> req);
-    void SetAskRequest(std::unique_ptr<PendingAsk> req);
+    void SetPluginPrompt(std::unique_ptr<PendingPluginPrompt> req);
     // Clears any pending modal matching `request_id`. Returns TRUE when
     // something was actually cleared -- callers that must re-derive the tab
     // state afterwards (the worker was parked on that prompt) use the return
@@ -944,7 +946,7 @@ private:
     // Pending modals
     std::optional<PendingPermission> pending_permission_;
     std::optional<PendingConfirmation> pending_confirmation_;
-    std::optional<PendingAsk> pending_ask_;
+    std::optional<PendingPluginPrompt> pending_prompt_;
 
     // Tool executions (parallel dispatch; keyed by tool_use_id, not position)
     std::vector<ToolExecutionState> tools_;
@@ -1282,7 +1284,9 @@ public:
 
     void AnswerConfirmation(const std::string& session_id, const std::string& request_id,
                             const std::string& chosen_option);
-    void AnswerAsk(const std::string& session_id, const v1::AskUserResponse& response);
+    // `answer_json` rides only with PROMPT_OUTCOME_ANSWERED.
+    void AnswerPluginPrompt(const std::string& session_id, const std::string& request_id,
+                            v1::PromptOutcome outcome, const std::string& answer_json = {});
 
     // --- Focus (keybindings cycle forward/back through tabs in render order) ---
     void CycleFocusForward();

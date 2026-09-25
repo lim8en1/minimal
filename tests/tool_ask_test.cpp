@@ -1,8 +1,10 @@
-// The tool-ask plugin's tool: input validation, degrade-on-no-broker, and
-// answer formatting. The broker itself is a lambda in the ToolContext --
-// exactly the seam the tool consumes -- so the real round-trip behavior is
-// pinned down by wire_ask_broker_test.cpp, not duplicated here.
+// The tool-ask plugin's tool: input validation, the answer's per-slot
+// validation (the plugin's own, since core carries the answer opaquely),
+// per-outcome results, and answer formatting. The prompt broker is a lambda
+// in the ToolContext -- exactly the seam the tool consumes -- so the real
+// round-trip is pinned down by wire_plugin_prompt_broker_test.cpp.
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -17,10 +19,23 @@ namespace {
 
 tools::ToolContext Context() { return tools::ToolContext{common::DefaultLogger()}; }
 
-tools::ToolContext ContextWithBroker(tools::AskAnswer (*broker)(const tools::AskRequest&)) {
+tools::ToolContext ContextWithBroker(
+    std::function<tools::PromptResult(const tools::PromptRequest&)> broker) {
     tools::ToolContext ctx{common::DefaultLogger()};
-    ctx.ask_user = broker;
+    ctx.prompt_user = std::move(broker);
     return ctx;
+}
+
+// A broker that answers with these per-question slots.
+tools::ToolContext Answering(nlohmann::json answers) {
+    return ContextWithBroker([answers](const tools::PromptRequest&) {
+        return tools::PromptResult{tools::PromptOutcome::Answered,
+                                   nlohmann::json{{"answers", answers}}};
+    });
+}
+
+nlohmann::json Slot(std::vector<std::string> selected, std::string other = {}) {
+    return nlohmann::json{{"selected", selected}, {"other", other}};
 }
 
 nlohmann::json OneQuestion() {
@@ -36,12 +51,55 @@ nlohmann::json OneQuestion() {
 
 }  // namespace
 
-TEST_CASE("ask_user degrades to an error result when no ask broker is wired", "[tool_ask]") {
+TEST_CASE("ask_user reports unavailable, not an error, when no prompt broker is wired",
+          "[tool_ask]") {
     auto tool = tool_ask::MakeAskTool();
     tools::ToolContext ctx = Context();
     const auto result = tool->execute(OneQuestion(), ctx);
-    CHECK(result.is_error);
+    CHECK_FALSE(result.is_error);
     CHECK(result.content_text.find("not available") != std::string::npos);
+    CHECK(result.display.at("outcome") == "unavailable");
+}
+
+TEST_CASE("the prompt is kind \"ask\" carrying the validated request", "[tool_ask]") {
+    auto tool = tool_ask::MakeAskTool();
+    std::optional<tools::PromptRequest> seen;
+    tools::ToolContext ctx = ContextWithBroker([&seen](const tools::PromptRequest& request) {
+        seen = request;
+        return tools::PromptResult{};
+    });
+    tool->execute(OneQuestion(), ctx);
+    REQUIRE(seen.has_value());
+    CHECK(seen->kind == "ask");
+    const auto& question = seen->payload.at("questions").at(0);
+    CHECK(question.at("question") == "Which approach?");
+    CHECK(question.at("header") == "Approach");
+    CHECK(question.at("multiple") == false);
+    CHECK(question.at("allow_other") == true);
+    CHECK(question.at("options").at(1).at("label") == "patch");
+    CHECK(question.at("options").at(1).at("description") == "");
+}
+
+TEST_CASE("each outcome reads differently to the model", "[tool_ask]") {
+    auto tool = tool_ask::MakeAskTool();
+    const auto run = [&tool](tools::PromptOutcome outcome) {
+        tools::ToolContext ctx = ContextWithBroker(
+            [outcome](const tools::PromptRequest&) { return tools::PromptResult{outcome, nullptr}; });
+        return tool->execute(OneQuestion(), ctx);
+    };
+    const auto dismissed = run(tools::PromptOutcome::Dismissed);
+    const auto timed_out = run(tools::PromptOutcome::TimedOut);
+    const auto cancelled = run(tools::PromptOutcome::Cancelled);
+    const auto unavailable = run(tools::PromptOutcome::Unavailable);
+    for (const auto* result : {&dismissed, &timed_out, &cancelled, &unavailable}) {
+        CHECK_FALSE(result->is_error);   // an error would invite a retry
+    }
+    CHECK(dismissed.content_text.find("dismissed") != std::string::npos);
+    CHECK(timed_out.content_text.find("timeout") != std::string::npos);
+    CHECK(timed_out.content_text.find("dismissed") == std::string::npos);
+    CHECK(cancelled.content_text.find("cancelled") != std::string::npos);
+    CHECK(unavailable.content_text.find("not available") != std::string::npos);
+    CHECK(timed_out.display.at("outcome") == "timed_out");
 }
 
 TEST_CASE("ask_user enforces its input schema before asking anyone anything", "[tool_ask]") {
@@ -78,6 +136,34 @@ TEST_CASE("ask_user enforces its input schema before asking anyone anything", "[
         const auto result = tool->execute(input, ctx);
         CHECK(result.is_error);
     }
+    SECTION("duplicate option labels") {
+        nlohmann::json input = OneQuestion();
+        input["questions"][0]["options"][1]["label"] = "rewrite";
+        const auto result = tool->execute(input, ctx);
+        CHECK(result.is_error);
+        CHECK(result.content_text.find("unique") != std::string::npos);
+    }
+    SECTION("a wrongly typed optional field is an error, not silently dropped") {
+        nlohmann::json input = OneQuestion();
+        SECTION("header") { input["questions"][0]["header"] = 7; }
+        SECTION("description") { input["questions"][0]["options"][0]["description"] = false; }
+        SECTION("multiple") { input["questions"][0]["multiple"] = "yes"; }
+        SECTION("allow_other") { input["questions"][0]["allow_other"] = 1; }
+        const auto result = tool->execute(input, ctx);
+        CHECK(result.is_error);
+    }
+    SECTION("over-long strings") {
+        nlohmann::json input = OneQuestion();
+        SECTION("header") { input["questions"][0]["header"] = std::string(41, 'h'); }
+        SECTION("question") { input["questions"][0]["question"] = std::string(1001, 'q'); }
+        SECTION("label") { input["questions"][0]["options"][0]["label"] = std::string(201, 'l'); }
+        SECTION("description") {
+            input["questions"][0]["options"][0]["description"] = std::string(501, 'd');
+        }
+        const auto result = tool->execute(input, ctx);
+        CHECK(result.is_error);
+        CHECK(result.content_text.find("longer than") != std::string::npos);
+    }
     SECTION("too many options") {
         nlohmann::json options = nlohmann::json::array();
         for (int i = 0; i < 6; ++i) options.push_back(nlohmann::json{{"label", "x"}});
@@ -94,77 +180,89 @@ TEST_CASE("ask_user formats selections and free text as prose", "[tool_ask]") {
     auto tool = tool_ask::MakeAskTool();
 
     SECTION("a selected label is echoed verbatim") {
-        tools::ToolContext ctx = ContextWithBroker([]([[maybe_unused]] const tools::AskRequest& request) {
-            tools::AskAnswer answer;
-            answer.answered = true;
-            answer.slots.push_back({{"patch"}, {}});
-            return answer;
-        });
+        tools::ToolContext ctx = Answering({Slot({"patch"})});
         const auto result = tool->execute(OneQuestion(), ctx);
         CHECK_FALSE(result.is_error);
-        CHECK(result.content_text == "Approach: the user selected: patch");
+        CHECK(result.content_text == "1. Approach: the user selected: patch");
     }
 
     SECTION("free text reads as the user's answer") {
-        tools::ToolContext ctx = ContextWithBroker([](const tools::AskRequest&) {
-            tools::AskAnswer answer;
-            answer.answered = true;
-            answer.slots.push_back(tools::AskAnswer::Slot{{}, "use a config flag"});
-            return answer;
-        });
+        tools::ToolContext ctx = Answering({Slot({}, "use a config flag")});
         const auto result = tool->execute(OneQuestion(), ctx);
         CHECK_FALSE(result.is_error);
-        CHECK(result.content_text == "Approach: the user answered: use a config flag");
+        CHECK(result.content_text == "1. Approach: the user answered: \"use a config flag\"");
     }
 
     SECTION("a question left blank says so instead of inventing an answer") {
-        tools::ToolContext ctx = ContextWithBroker([](const tools::AskRequest&) {
-            tools::AskAnswer answer;
-            answer.answered = true;
-            answer.slots.push_back(tools::AskAnswer::Slot{});
-            return answer;
-        });
+        nlohmann::json input = OneQuestion();
+        input["questions"].push_back(input["questions"][0]);
+        input["questions"][1]["header"] = "Scope";
+        tools::ToolContext ctx = Answering({Slot({"patch"}), Slot({})});
+        const auto result = tool->execute(input, ctx);
+        CHECK_FALSE(result.is_error);
+        CHECK(result.content_text ==
+              "1. Approach: the user selected: patch\n2. Scope: the user did not answer");
+    }
+
+    SECTION("free text with a newline stays on one line") {
+        tools::ToolContext ctx = Answering({Slot({}, "line one\nline two")});
+        const auto result = tool->execute(OneQuestion(), ctx);
+        CHECK(result.content_text == "1. Approach: the user answered: \"line one\\nline two\"");
+    }
+
+    SECTION("submitting with nothing picked anywhere reads as a dismissal") {
+        tools::ToolContext ctx = Answering({Slot({})});
         const auto result = tool->execute(OneQuestion(), ctx);
         CHECK_FALSE(result.is_error);
-        CHECK(result.content_text == "Approach: the user did not answer");
+        CHECK(result.content_text.find("dismissed") != std::string::npos);
     }
 
     SECTION("multi-select lists every label") {
-        tools::ToolContext ctx = ContextWithBroker([](const tools::AskRequest&) {
-            tools::AskAnswer answer;
-            answer.answered = true;
-            answer.slots.push_back(tools::AskAnswer::Slot{{"rewrite", "patch"}, {}});
-            return answer;
-        });
-        const auto result = tool->execute(OneQuestion(), ctx);
-        CHECK_FALSE(result.is_error);
-        CHECK(result.content_text == "Approach: the user selected: rewrite, patch");
-    }
-
-    SECTION("a question without a header falls back to its index") {
         nlohmann::json input = OneQuestion();
-        input["questions"][0].erase("header");
-        tools::ToolContext ctx = ContextWithBroker([](const tools::AskRequest&) {
-            tools::AskAnswer answer;
-            answer.answered = true;
-            answer.slots.push_back({{"patch"}, {}});
-            return answer;
-        });
+        input["questions"][0]["multiple"] = true;
+        tools::ToolContext ctx = Answering({Slot({"rewrite", "patch"})});
         const auto result = tool->execute(input, ctx);
         CHECK_FALSE(result.is_error);
-        CHECK(result.content_text == "Question 1: the user selected: patch");
+        CHECK(result.content_text == "1. Approach: the user selected: rewrite, patch");
+    }
+
+    SECTION("a question without a header is named by its own text") {
+        nlohmann::json input = OneQuestion();
+        input["questions"][0].erase("header");
+        tools::ToolContext ctx = Answering({Slot({"patch"})});
+        const auto result = tool->execute(input, ctx);
+        CHECK_FALSE(result.is_error);
+        CHECK(result.content_text == "1. \"Which approach?\": the user selected: patch");
     }
 }
 
 TEST_CASE("a dismissed ask is a plain result the model adapts to, not an error",
           "[tool_ask]") {
     auto tool = tool_ask::MakeAskTool();
-    tools::ToolContext ctx = ContextWithBroker(
-        [](const tools::AskRequest&) { return tools::AskAnswer{}; });  // answered=false
+    tools::ToolContext ctx = ContextWithBroker([](const tools::PromptRequest&) {
+        return tools::PromptResult{tools::PromptOutcome::Dismissed, nullptr};
+    });
 
     const auto result = tool->execute(OneQuestion(), ctx);
     CHECK_FALSE(result.is_error);
     CHECK(result.content_text.find("dismissed") != std::string::npos);
+}
+
+TEST_CASE("allow_other reaches the request; it defaults to true", "[tool_ask]") {
+    auto tool = tool_ask::MakeAskTool();
+    std::optional<bool> seen;
+    tools::ToolContext ctx = ContextWithBroker([&seen](const tools::PromptRequest& request) {
+        seen = request.payload.at("questions").at(0).at("allow_other").get<bool>();
+        return tools::PromptResult{};
+    });
+    nlohmann::json input = OneQuestion();
+    seen.reset();
+    tool->execute(input, ctx);
+    CHECK(seen == true);
+    input["questions"][0]["allow_other"] = false;
+    seen.reset();
+    tool->execute(input, ctx);
+    CHECK(seen == false);
 }
 
 TEST_CASE("the ask tool is ReadOnly and never parallel-safe", "[tool_ask]") {
@@ -200,6 +298,7 @@ TEST_CASE("the advertised input schema is well-formed at every object level", "[
     CHECK(question_item.at("properties").contains("question"));
     CHECK(question_item.at("properties").contains("header"));
     CHECK(question_item.at("properties").contains("multiple"));
+    CHECK(question_item.at("properties").contains("allow_other"));
 
     const auto& options = question_item.at("properties").at("options");
     REQUIRE(options.is_object());
@@ -212,4 +311,57 @@ TEST_CASE("the advertised input schema is well-formed at every object level", "[
     REQUIRE(option_item.at("properties").is_object());
     CHECK(option_item.at("properties").contains("label"));
     CHECK(option_item.at("properties").contains("description"));
+}
+
+// The answer arrives from a client, so the tool reads it fail-closed per slot:
+// anything the question did not offer, or a shape its flags forbid, is "the
+// user did not answer" -- never an invented label.
+TEST_CASE("an answer slot the question does not allow is read as unanswered", "[tool_ask]") {
+    auto tool = tool_ask::MakeAskTool();
+    nlohmann::json input = OneQuestion();
+    input["questions"].push_back(input["questions"][0]);
+    input["questions"][1]["header"] = "Scope";
+
+    nlohmann::json bad;
+    SECTION("a label never offered") { bad = Slot({"maybe"}); }
+    SECTION("two picks on a single-select question") { bad = Slot({"rewrite", "patch"}); }
+    SECTION("free text mixed with a selection") { bad = Slot({"patch"}, "plus a note"); }
+    SECTION("wrong JSON types") { bad = nlohmann::json{{"selected", "patch"}}; }
+    SECTION("free text where allow_other is false") {
+        input["questions"][1]["allow_other"] = false;
+        bad = Slot({}, "neither");
+    }
+    tools::ToolContext ctx = Answering({Slot({"patch"}), bad});
+    const auto result = tool->execute(input, ctx);
+    CHECK(result.content_text ==
+          "1. Approach: the user selected: patch\n2. Scope: the user did not answer");
+}
+
+TEST_CASE("multi-select accepts several offered picks, not a repeated one", "[tool_ask]") {
+    auto tool = tool_ask::MakeAskTool();
+    nlohmann::json input = OneQuestion();
+    input["questions"][0]["multiple"] = true;
+    {
+        tools::ToolContext ctx = Answering({Slot({"patch", "rewrite"})});
+        CHECK(tool->execute(input, ctx).content_text ==
+              "1. Approach: the user selected: patch, rewrite");
+    }
+    {
+        tools::ToolContext ctx = Answering({Slot({"patch", "patch"})});
+        CHECK(tool->execute(input, ctx).content_text.find("dismissed") != std::string::npos);
+    }
+}
+
+TEST_CASE("the display payload records every question and its answer", "[tool_ask]") {
+    auto tool = tool_ask::MakeAskTool();
+    tools::ToolContext ctx = Answering({Slot({}, "my own")});
+    const auto result = tool->execute(OneQuestion(), ctx);
+    REQUIRE(result.display.is_object());
+    CHECK(result.display.at("kind") == "ask");
+    CHECK(result.display.at("outcome") == "answered");
+    const auto& question = result.display.at("questions").at(0);
+    CHECK(question.at("header") == "Approach");
+    CHECK(question.at("question") == "Which approach?");
+    CHECK(question.at("other") == "my own");
+    CHECK(question.at("selected").empty());
 }

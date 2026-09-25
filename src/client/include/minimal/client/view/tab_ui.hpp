@@ -41,7 +41,7 @@ namespace minimal::client {
 // rebuilt: either this is genuinely a new request for the tab whose id is
 // tracked alongside the old one, or focus has moved to a different tab
 // since the slot was last filled. The rebuild-on-new-request-id bookkeeping
-// is per-tab (TabUi), but permission_child/confirmation_child/ask_child are
+// is per-tab (TabUi), but permission_child/confirmation_child/prompt_child are
 // each ONE slot shared by every tab -- so a tab switch alone (A -> B -> A,
 // A's own request id unchanged throughout) can leave the slot holding B's
 // (possibly already-answered) modal while A's guard reads "unchanged,
@@ -73,7 +73,7 @@ struct TabUi {
     // the inner modal is rebuilt only when a NEW request_id arrives.
     std::string confirmation_for_request;
     // The model's ask modal (tool-ask plugin), same rebuild keying.
-    std::string ask_for_request;
+    std::string prompt_for_request;
     ftxui::Component surface_body;          // the chat surface's tab body (when slotted)
     plugins::ChatSurface* surface_for = nullptr;   // which surface instance built it
     // Per-tab ChatView: its row cache is keyed by transcript_version, a
@@ -154,12 +154,15 @@ public:
         plugins::MessageRendererRegistry& message_registry;
         plugins::ToolResultRendererRegistry& renderer_registry;
         plugins::DisplayRendererRegistry& display_registry;
+        // Plugin prompts are drawn by the renderer registered for their kind;
+        // an unclaimed kind is answered UNAVAILABLE (see MaintainModals).
+        const plugins::PromptRendererRegistry& prompt_registry;
         std::shared_ptr<ftxui::Component>& permission_child;
         bool& show_permission;
         std::shared_ptr<ftxui::Component>& confirmation_child;
         bool& show_confirmation;
-        std::shared_ptr<ftxui::Component>& ask_child;
-        bool& show_ask;
+        std::shared_ptr<ftxui::Component>& prompt_child;
+        bool& show_prompt;
         // The resolved chat.toggle_collapse / chat.load_older bindings, for
         // the ChatViews built here (their row hints and scrollback marker
         // name these keys).
@@ -210,7 +213,7 @@ private:
     SessionState::Snapshot focused_details_;
     // Which tab's request currently occupies each SHARED modal slot (see
     // MaintainModals): the rebuild-on-new-request-id guard is keyed per tab
-    // in TabUi, but permission_child/confirmation_child/ask_child are each
+    // in TabUi, but permission_child/confirmation_child/prompt_child are each
     // ONE slot for the whole app. Without this, focus moving A -> B -> A
     // left A's un-rebuilt guard reading "unchanged" while the shared slot
     // still held B's (possibly already-answered) modal -- A's own request
@@ -218,7 +221,7 @@ private:
     // session.
     std::string permission_slot_tab_;
     std::string confirmation_slot_tab_;
-    std::string ask_slot_tab_;
+    std::string prompt_slot_tab_;
     // Sentinel, not 0: forces the first call (before the loop starts) to
     // run regardless of whatever OpenTab's own bumps left UiVersion at.
     uint64_t last_ui_version_ = static_cast<uint64_t>(-1);

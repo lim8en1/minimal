@@ -25,6 +25,7 @@ enum class NameKind {
     ToolResultRenderer,
     MessageRenderer,   // client: keyed by ChatRowKind (its own namespace, not ToolResultRenderer's)
     DisplayRenderer,   // client: keyed by display-payload kind ("diff", "file", ...)
+    PromptRenderer,    // client: keyed by plugin prompt kind ("ask", ...)
     Service,
     StatusSegment,
     SyntaxGrammar,

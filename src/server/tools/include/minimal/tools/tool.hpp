@@ -13,7 +13,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/chat.hpp"
 #include "minimal/session/history_window.hpp"
-#include "minimal/tools/ask.hpp"
+#include "minimal/tools/prompt.hpp"
 #include "minimal/tools/cancel_token.hpp"
 #include "minimal/tools/permission.hpp"
 
@@ -149,17 +149,17 @@ struct ToolContext {
     // Optional -- a session may wire none -- and safe to call from any thread.
     std::function<void(const BackgroundTaskEvent&)> emit_task_event;
 
-    // --- Interactive ask (the tool-ask plugin's `ask_user`; see ask.hpp) ---
+    // --- Plugin prompt (see prompt.hpp; the tool-ask plugin's `ask_user`) ---
     //
-    // Blocks until a human answers, then returns the structured answer.
-    // Optional -- a session may wire no ask broker (headless fixtures, tests)
-    // -- and null means "host offers no interactive ask", which the tool
-    // surfaces as an error result rather than a hang. Not safe to call from a
-    // detached thread: it parks on the session's PendingRequests, so it must
-    // run where blocking is allowed, exactly like a permission prompt. The
-    // answer's lifetime discipline is the session's channels block, like the
-    // handles above.
-    std::function<AskAnswer(const AskRequest&)> ask_user;
+    // Blocks until a human answers the plugin-shaped prompt, then returns the
+    // outcome and the (unvalidated) answer. Optional -- a session may wire no
+    // prompt broker (headless fixtures, tests) -- and null means "host offers
+    // no interactive prompt", which a tool treats as PromptOutcome::
+    // Unavailable rather than a hang. Not safe to call from a detached
+    // thread: it parks on the session's PendingRequests, so it must run where
+    // blocking is allowed, exactly like a permission prompt. Its lifetime
+    // discipline is the session's channels block, like the handles above.
+    std::function<PromptResult(const PromptRequest&)> prompt_user;
 
     // Per-FILE permission for a tool that reads files its call never named --
     // grep/glob walking a tree. Permission gating resolves the call's own path

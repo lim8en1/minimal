@@ -1379,7 +1379,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                                   ctx.schedule_injection = session_.injection_sink;
                                   ctx.session_lifetime = session_.session_lifetime;
                                   ctx.emit_task_event = session_.task_event_sink;
-                                  ctx.ask_user = session_.ask_user;
+                                  ctx.prompt_user = session_.prompt_user;
                                   return ctx;
                               }(),
                               false};

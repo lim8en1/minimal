@@ -1,6 +1,9 @@
 #include "ask_tool.hpp"
 
+#include "ask_types.hpp"
+
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -9,6 +12,15 @@ namespace {
 
 constexpr std::size_t kMaxQuestions = 4;
 constexpr std::size_t kMaxOptions = 5;
+// Byte caps on the model-authored strings. The header renders as a title and
+// the labels come back verbatim as answer keys, so both stay short; the
+// question and descriptions wrap and only need a bound.
+constexpr std::size_t kMaxHeaderBytes = 40;
+constexpr std::size_t kMaxQuestionBytes = 1000;
+constexpr std::size_t kMaxLabelBytes = 200;
+constexpr std::size_t kMaxDescriptionBytes = 500;
+// How much of the question text stands in for a missing header in the result.
+constexpr std::size_t kMaxQuestionEcho = 60;
 
 tools::ToolSpec MakeSpec() {
     tools::ToolSpec spec;
@@ -50,12 +62,16 @@ tools::ToolSpec MakeSpec() {
         "The question, phrased so its answers are the options below.";
     question_schema["properties"]["header"]["type"] = "string";
     question_schema["properties"]["header"]["description"] =
-        "Short label for the question (1-6 words), shown as its title.";
+        "Short label for the question (1-6 words, at most 40 characters), shown as its "
+        "title.";
     question_schema["properties"]["options"]["type"] = "array";
     question_schema["properties"]["options"]["items"] = option_schema;
     question_schema["properties"]["multiple"]["type"] = "boolean";
     question_schema["properties"]["multiple"]["description"] =
         "true: several options may be selected. Default false.";
+    question_schema["properties"]["allow_other"]["type"] = "boolean";
+    question_schema["properties"]["allow_other"]["description"] =
+        "false: the user must pick one of the options, no typed answer. Default true.";
     question_schema["required"] = nlohmann::json::array({"question", "options"});
 
     nlohmann::json schema = nlohmann::json::object();
@@ -71,12 +87,41 @@ bool NonEmptyString(const nlohmann::json& value) {
     return value.is_string() && !value.get<std::string>().empty();
 }
 
+// Reads an OPTIONAL string field: absent leaves `out` alone; present but not a
+// string, or longer than `max_bytes`, is an error -- a wrong type is never
+// silently dropped.
+std::optional<std::string> OptionalString(const nlohmann::json& object, const char* key,
+                                          std::size_t max_bytes, std::string& out) {
+    if (!object.contains(key)) return std::nullopt;
+    const auto& value = object.at(key);
+    if (!value.is_string()) {
+        return std::string("ask_user \"") + key + "\" must be a string";
+    }
+    out = value.get<std::string>();
+    if (out.size() > max_bytes) {
+        return std::string("ask_user \"") + key + "\" is longer than " +
+               std::to_string(max_bytes) + " characters";
+    }
+    return std::nullopt;
+}
+
+// Same for an optional boolean.
+std::optional<std::string> OptionalBool(const nlohmann::json& object, const char* key,
+                                        bool& out) {
+    if (!object.contains(key)) return std::nullopt;
+    if (!object.at(key).is_boolean()) {
+        return std::string("ask_user \"") + key + "\" must be a boolean";
+    }
+    out = object.at(key).get<bool>();
+    return std::nullopt;
+}
+
 // Returns an error string on the first shape violation found, nullopt when
 // the input parses. Limits are enforced HERE, not in the broker: a model
 // that sends 40 questions gets a tool-result error it can adapt to, not a
 // silently truncated prompt.
 std::optional<std::string> ParseQuestions(const nlohmann::json& input,
-                                          tools::AskRequest& request) {
+                                          AskRequest& request) {
     if (!input.is_object() || !input.contains("questions") || !input.at("questions").is_array()) {
         return std::string("ask_user requires \"questions\" as an array");
     }
@@ -92,10 +137,14 @@ std::optional<std::string> ParseQuestions(const nlohmann::json& input,
         if (!item.is_object() || !NonEmptyString(item.value("question", nlohmann::json{}))) {
             return std::string("each question requires a non-empty \"question\" string");
         }
-        tools::AskQuestion question;
+        AskQuestion question;
         question.question = item.at("question").get<std::string>();
-        if (item.contains("header") && item.at("header").is_string()) {
-            question.header = item.at("header").get<std::string>();
+        if (question.question.size() > kMaxQuestionBytes) {
+            return "ask_user \"question\" is longer than " + std::to_string(kMaxQuestionBytes) +
+                   " characters";
+        }
+        if (auto error = OptionalString(item, "header", kMaxHeaderBytes, question.header)) {
+            return error;
         }
         if (!item.contains("options") || !item.at("options").is_array() ||
             item.at("options").empty()) {
@@ -109,35 +158,53 @@ std::optional<std::string> ParseQuestions(const nlohmann::json& input,
             if (!option.is_object() || !NonEmptyString(option.value("label", nlohmann::json{}))) {
                 return std::string("each option requires a non-empty \"label\" string");
             }
-            tools::AskOption parsed;
+            AskOption parsed;
             parsed.label = option.at("label").get<std::string>();
-            if (option.contains("description") && option.at("description").is_string()) {
-                parsed.description = option.at("description").get<std::string>();
+            if (parsed.label.size() > kMaxLabelBytes) {
+                return "ask_user option \"label\" is longer than " +
+                       std::to_string(kMaxLabelBytes) + " characters";
+            }
+            // The label IS the answer key: two identical labels would make
+            // the answer ambiguous.
+            for (const auto& earlier : question.options) {
+                if (earlier.label == parsed.label) {
+                    return "ask_user option labels must be unique within a question (\"" +
+                           parsed.label + "\" repeats)";
+                }
+            }
+            if (auto error = OptionalString(option, "description", kMaxDescriptionBytes,
+                                            parsed.description)) {
+                return error;
             }
             question.options.push_back(std::move(parsed));
         }
-        if (item.contains("multiple")) {
-            if (!item.at("multiple").is_boolean()) {
-                return std::string("ask_user \"multiple\" must be a boolean");
-            }
-            question.multiple = item.at("multiple").get<bool>();
-        }
+        if (auto error = OptionalBool(item, "multiple", question.multiple)) return error;
+        if (auto error = OptionalBool(item, "allow_other", question.allow_other)) return error;
         request.questions.push_back(std::move(question));
     }
     return std::nullopt;
 }
 
-// Prose result, one block per question -- how Claude Code formats answers.
-// The label is echoed verbatim, so the model correlates answer to question
-// without guessing; the header (or index) carries the correlation the other
-// way.
-std::string FormatAnswer(std::size_t index, const tools::AskQuestion& question,
-                         const tools::AskAnswer::Slot& slot) {
-    const std::string name = question.header.empty()
-                                 ? "Question " + std::to_string(index + 1)
-                                 : question.header;
+// Prose result, one line per question. The 1-based index always leads, so
+// duplicate or missing headers stay unambiguous; the header (or, without one,
+// the start of the question) names it. Labels are echoed verbatim, since they
+// were the model's own strings. Free text is JSON-quoted so a newline in it
+// cannot break the one-line-per-question shape.
+std::string FormatAnswer(std::size_t index, const AskQuestion& question,
+                         const AskSlot& slot) {
+    std::string name = question.header;
+    if (name.empty()) {
+        name = question.question.size() > kMaxQuestionEcho
+                   ? question.question.substr(0, kMaxQuestionEcho) + "..."
+                   : question.question;
+        name = nlohmann::json(name).dump(-1, ' ', false,
+                                         nlohmann::json::error_handler_t::replace);
+    }
+    name = std::to_string(index + 1) + ". " + name;
     if (!slot.other.empty()) {
-        return name + ": the user answered: " + slot.other;
+        return name + ": the user answered: " +
+               nlohmann::json(slot.other).dump(-1, ' ', false,
+                                               nlohmann::json::error_handler_t::replace);
     }
     if (slot.selected.empty()) {
         return name + ": the user did not answer";
@@ -148,6 +215,49 @@ std::string FormatAnswer(std::size_t index, const tools::AskQuestion& question,
         joined += label;
     }
     return name + ": the user selected: " + joined;
+}
+
+constexpr const char* kDismissedText =
+    "The user dismissed the questions without answering. Do not re-ask the same thing; "
+    "proceed with a sensible default or explain what you need in your reply.";
+constexpr const char* kTimedOutText =
+    "No answer arrived before the unattended-prompt timeout: the user is probably away. "
+    "Proceed with a sensible default and state the assumption you made in your reply.";
+constexpr const char* kCancelledText = "The questions were cancelled along with the turn.";
+constexpr const char* kUnavailableText =
+    "ask_user is not available in this session (no interactive user can answer); decide "
+    "without asking and state the assumption you made in your reply.";
+
+const char* OutcomeName(tools::PromptOutcome outcome) {
+    switch (outcome) {
+        case tools::PromptOutcome::Answered: return "answered";
+        case tools::PromptOutcome::Dismissed: return "dismissed";
+        case tools::PromptOutcome::TimedOut: return "timed_out";
+        case tools::PromptOutcome::Cancelled: return "cancelled";
+        case tools::PromptOutcome::Unavailable: return "unavailable";
+    }
+    return "unavailable";
+}
+
+// The transcript's record of the exchange, for the client's "ask" display
+// renderer: every question with what (if anything) the user answered. Never
+// sent to the model -- content_text is what it reads.
+nlohmann::json Display(const AskRequest& request, tools::PromptOutcome outcome,
+                       const std::vector<AskSlot>& slots) {
+    nlohmann::json questions = nlohmann::json::array();
+    for (std::size_t i = 0; i < request.questions.size(); ++i) {
+        nlohmann::json wire = nlohmann::json::object();
+        wire["header"] = request.questions[i].header;
+        wire["question"] = request.questions[i].question;
+        wire["selected"] = i < slots.size() ? slots[i].selected : std::vector<std::string>{};
+        wire["other"] = i < slots.size() ? slots[i].other : std::string{};
+        questions.push_back(std::move(wire));
+    }
+    nlohmann::json display = nlohmann::json::object();
+    display["kind"] = kPromptKind;
+    display["outcome"] = OutcomeName(outcome);
+    display["questions"] = std::move(questions);
+    return display;
 }
 
 }  // namespace
@@ -166,32 +276,41 @@ public:
     tools::ToolResult execute(const nlohmann::json& input, tools::ToolContext& ctx) override {
         // Input shape first: a model that sends garbage gets the schema error
         // it can fix, whether or not this session can ask at all.
-        tools::AskRequest request;
+        AskRequest request;
         if (const auto error = ParseQuestions(input, request)) {
             return {true, *error};
         }
-        if (!ctx.ask_user) {
-            return {true, "ask_user is not available in this session (no interactive user is "
-                          "attached); decide without asking"};
+
+        tools::PromptResult reply;   // Unavailable unless a broker says otherwise
+        if (ctx.prompt_user) reply = ctx.prompt_user({kPromptKind, ToPayload(request)});
+
+        std::vector<AskSlot> slots;
+        tools::PromptOutcome outcome = reply.outcome;
+        if (outcome == tools::PromptOutcome::Answered) {
+            slots = ReadAnswer(request, reply.answer);
+            // Submitted with nothing picked anywhere: that is a dismissal,
+            // not an answer, and the model should hear it the same way.
+            const bool any = std::any_of(slots.begin(), slots.end(), [](const AskSlot& slot) {
+                return !slot.selected.empty() || !slot.other.empty();
+            });
+            if (!any) outcome = tools::PromptOutcome::Dismissed;
         }
 
-        const tools::AskAnswer answer = ctx.ask_user(request);
-        if (!answer.answered) {
-            return {false,
-                    "The user dismissed the questions without answering. Do not re-ask the "
-                    "same thing; proceed with a sensible default or explain what you need "
-                    "in your reply."};
+        tools::ToolResult result;
+        switch (outcome) {
+            case tools::PromptOutcome::Answered:
+                for (std::size_t i = 0; i < request.questions.size(); ++i) {
+                    if (!result.content_text.empty()) result.content_text += "\n";
+                    result.content_text += FormatAnswer(i, request.questions[i], slots[i]);
+                }
+                break;
+            case tools::PromptOutcome::Dismissed: result.content_text = kDismissedText; break;
+            case tools::PromptOutcome::TimedOut: result.content_text = kTimedOutText; break;
+            case tools::PromptOutcome::Cancelled: result.content_text = kCancelledText; break;
+            case tools::PromptOutcome::Unavailable: result.content_text = kUnavailableText; break;
         }
-
-        std::string result;
-        for (std::size_t i = 0; i < request.questions.size(); ++i) {
-            const tools::AskAnswer::Slot empty;
-            const tools::AskAnswer::Slot& slot =
-                i < answer.slots.size() ? answer.slots[i] : empty;
-            if (!result.empty()) result += "\n";
-            result += FormatAnswer(i, request.questions[i], slot);
-        }
-        return {false, result};
+        result.display = Display(request, outcome, slots);
+        return result;
     }
 
     // The question text is the disclosure: an operator who pins this tool to

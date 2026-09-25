@@ -24,6 +24,8 @@ using RegisterRenderersFn =
     void (*)(ToolResultRendererRegistry&, const ClientPluginRegistrationContext&);
 using RegisterDisplayRenderersFn =
     void (*)(DisplayRendererRegistry&, const ClientPluginRegistrationContext&);
+using RegisterPromptRenderersFn =
+    void (*)(PromptRendererRegistry&, const ClientPluginRegistrationContext&);
 using RegisterMessageRenderersFn =
     void (*)(MessageRendererRegistry&, const ClientPluginRegistrationContext&);
 using RegisterStatusSegmentsFn =
@@ -108,7 +110,8 @@ ClientPluginLoader::ClientPluginLoader(ViewRegistry& views,
                                        ChatSurfaceRegistry& chat_surface,
                                        MarkdownEngineRegistry& markdown_engine,
                                        StartViewRegistry& start_views, AttentionSink* attention,
-                                       ClientApi* client_api, FocusProvider* focus)
+                                       ClientApi* client_api, FocusProvider* focus,
+                                       PromptRendererRegistry* prompt_renderers)
     : views_(views),
       renderers_(renderers),
       display_renderers_(display_renderers),
@@ -118,6 +121,7 @@ ClientPluginLoader::ClientPluginLoader(ViewRegistry& views,
       chat_surface_(chat_surface),
       markdown_engine_(markdown_engine),
       start_views_(start_views),
+      prompt_renderers_(prompt_renderers),
       attention_(attention),
       client_api_(client_api),
       focus_(focus) {}
@@ -209,6 +213,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         start_views_.RemoveByAttribution(record.name);
         renderers_.RemoveByAttribution(record.name);
         display_renderers_.RemoveByAttribution(record.name);
+        if (prompt_renderers_ != nullptr) prompt_renderers_->RemoveByAttribution(record.name);
         message_renderers_.RemoveByAttribution(record.name);
         status_segments_.RemoveByAttribution(record.name);
         grammars_.RemoveByAttribution(record.name);
@@ -274,6 +279,22 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         for (std::size_t i = before; i < display_renderers_.attributions().size(); ++i) {
             record.registered_display_kinds.push_back(
                 display_renderers_.attributions()[i].original_name);
+        }
+    }
+
+    if (auto register_prompt_renderers = Lookup<RegisterPromptRenderersFn>(
+            handle, "minimal_client_plugin_register_prompt_renderers");
+        register_prompt_renderers != nullptr && prompt_renderers_ != nullptr) {
+        auto& registry = *prompt_renderers_;
+        const std::size_t before = registry.attributions().size();
+        if (!GuardedRegistration(record, "minimal_client_plugin_register_prompt_renderers",
+                [&] { registry.SetAttribution(record.name); },
+                [&] { register_prompt_renderers(registry, context); },
+                [&] { registry.ClearAttribution(); }, rollback)) {
+            return record;
+        }
+        for (std::size_t i = before; i < registry.attributions().size(); ++i) {
+            record.registered_prompt_kinds.push_back(registry.attributions()[i].original_name);
         }
     }
 

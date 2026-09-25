@@ -2,10 +2,10 @@
 
 // Wires a session's transport-facing pieces: the EventTranslator transport,
 // the (possibly advisor-composed) permission checker, and the confirmation
-// and ask brokers. main.cpp hands this function to SessionRegistry as its
+// and plugin prompt brokers. main.cpp hands this function to SessionRegistry as its
 // SessionWiring step, so agent/ never names rpc/ -- it only ever sees
 // agent::SessionTransport, tools::PermissionChecker,
-// commands::ConfirmationBroker and tools::AskBroker.
+// commands::ConfirmationBroker and tools::PromptBroker.
 //
 // Composition call sites (SessionServiceImpl::ApplyAdvisor, SubagentManager's
 // advisor inheritance) only SELECT an advisor, via

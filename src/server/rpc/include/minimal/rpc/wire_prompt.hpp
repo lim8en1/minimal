@@ -1,7 +1,8 @@
 #pragma once
 
 // The skeleton every "ask the client and block" call shares:
-// WirePermissionChecker, WireConfirmationBroker and WireAskBroker each own one
+// WirePermissionChecker, WireConfirmationBroker and WirePluginPromptBroker each
+// own one
 // WirePrompt and keep only their own event construction and answer filtering.
 //
 // Ask() registers the request id BEFORE publishing -- the client can answer
@@ -30,7 +31,7 @@ namespace minimal::rpc {
 
 class WirePrompt {
 public:
-    // `id_prefix` ("perm-", "confirm-", "ask-") is a diagnostic for logs only;
+    // `id_prefix` ("perm-", "confirm-", "prompt-") is a diagnostic for logs only;
     // the typed answer narrowing is the safety mechanism. A zero
     // `unattended_timeout` waits forever.
     WirePrompt(std::string session_id, EventBroadcaster& queue, PendingRequests& pending,
@@ -46,6 +47,20 @@ public:
     // unattended timeout.
     template <typename Answer, typename Build>
     std::optional<Answer> Ask(Build&& build) {
+        return AskDetailed<Answer>(std::forward<Build>(build)).answer;
+    }
+
+    // Ask() plus WHY there is no answer, for a caller that reports it (the
+    // plugin prompt tells the model "timed out" apart from "cancelled").
+    // timed_out is inferred: no answer, the session not shut down, and the
+    // configured unattended timeout fully elapsed.
+    template <typename Answer>
+    struct Detailed {
+        std::optional<Answer> answer;
+        bool timed_out = false;
+    };
+    template <typename Answer, typename Build>
+    Detailed<Answer> AskDetailed(Build&& build) {
         const std::string request_id =
             id_prefix_ + std::to_string(next_id_.fetch_add(1, std::memory_order_relaxed));
         auto registration = pending_.Register(request_id);
@@ -57,14 +72,18 @@ public:
         // subscriber gets the prompt; the first answer wins.
         queue_.Publish(std::move(event));
 
+        const bool bounded = unattended_timeout_ > std::chrono::milliseconds::zero();
+        const auto started = std::chrono::steady_clock::now();
         const std::optional<PendingAnswer> answer = registration.AwaitResponse(
-            unattended_timeout_ > std::chrono::milliseconds::zero()
-                ? std::optional(unattended_timeout_)
-                : std::nullopt);
-        if (!answer) return std::nullopt;
+            bounded ? std::optional(unattended_timeout_) : std::nullopt);
+        if (!answer) {
+            return {std::nullopt,
+                    bounded && !pending_.shut_down() &&
+                        std::chrono::steady_clock::now() - started >= unattended_timeout_};
+        }
         const auto* typed = std::get_if<Answer>(&*answer);
-        if (typed == nullptr) return std::nullopt;
-        return *typed;
+        if (typed == nullptr) return {};
+        return {*typed, false};
     }
 
 private:

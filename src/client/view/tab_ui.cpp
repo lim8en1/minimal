@@ -358,26 +358,57 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
         deps_.show_confirmation = false;
     }
 
-    // The model's structured ask (tool-ask plugin): same rule again. The
-    // modal builds the whole AskUserResponse itself (it owns the per-question
-    // UI state the answers come from); Escape hands back an answered=false
-    // response, which AnswerAsk sends unchanged.
-    if (snap.pending_ask.has_value()) {
-        const auto& request = *snap.pending_ask;
-        if (ModalSlotStale(ui.ask_for_request, request.request_id, ask_slot_tab_, focused_)) {
-            ui.ask_for_request = request.request_id;
-            ask_slot_tab_ = focused_;
+    // A plugin prompt: same rule again, drawn by the client plugin that
+    // registered its kind (the renderer owns the answer's whole shape; core
+    // only relays the outcome and the JSON). No renderer for the kind, or a
+    // renderer that throws, is answered UNAVAILABLE at once -- the server
+    // worker is parked on this prompt and nothing else would ever answer it.
+    if (snap.pending_prompt.has_value()) {
+        const auto& request = *snap.pending_prompt;
+        if (ModalSlotStale(ui.prompt_for_request, request.request_id, prompt_slot_tab_, focused_)) {
+            ui.prompt_for_request = request.request_id;
+            prompt_slot_tab_ = focused_;
             const auto session_id = snap.session_id;
-            const auto request_copy = request;
+            const auto request_id = request.request_id;
             AppState& app = deps_.app;
-            *deps_.ask_child = MakeAskModal(request_copy, deps_.theme,
-                                            [&app, session_id](v1::AskUserResponse response) {
-                                                app.AnswerAsk(session_id, response);
-                                            });
+            const auto reply = [&app, session_id, request_id](plugins::PromptReply answer) {
+                app.AnswerPluginPrompt(
+                    session_id, request_id, answer.outcome,
+                    answer.outcome == v1::PROMPT_OUTCOME_ANSWERED
+                        ? answer.answer.dump(-1, ' ', false,
+                                             nlohmann::json::error_handler_t::replace)
+                        : std::string{});
+            };
+            ftxui::Component modal;
+            if (const auto* renderer = deps_.prompt_registry.Find(request.kind)) {
+                try {
+                    modal = renderer->Make(
+                        plugins::PromptView{.kind = request.kind,
+                                            .payload = request.payload,
+                                            .asker = snap.agent_preset},
+                        deps_.theme, reply);
+                } catch (const std::exception& error) {
+                    common::DefaultLogger().warn("prompt renderer for kind '{}' threw: {}",
+                                                 request.kind, error.what());
+                } catch (...) {
+                    common::DefaultLogger().warn(
+                        "prompt renderer for kind '{}' threw a non-standard exception",
+                        request.kind);
+                }
+            } else {
+                common::DefaultLogger().warn(
+                    "no prompt renderer for kind '{}': answering unavailable", request.kind);
+            }
+            if (modal == nullptr) {
+                *deps_.prompt_child = nullptr;
+                reply(plugins::PromptReply{v1::PROMPT_OUTCOME_UNAVAILABLE, nullptr});
+            } else {
+                *deps_.prompt_child = std::move(modal);
+            }
         }
-        deps_.show_ask = true;
+        deps_.show_prompt = *deps_.prompt_child != nullptr;
     } else {
-        deps_.show_ask = false;
+        deps_.show_prompt = false;
     }
 }
 
@@ -402,7 +433,7 @@ void TabMaintenance::Run() {
         focused_details_ = SessionState::Snapshot{};
         deps_.show_permission = false;
         deps_.show_confirmation = false;
-        deps_.show_ask = false;
+        deps_.show_prompt = false;
         return;
     }
     // A notice's self-expiry: one tick per pass THIS gate already let through,

@@ -65,7 +65,7 @@ Constraints that keep it safe:
 
 **Cost.** Low — one member, one producer, tests against an in-memory or SQLite reader.
 
-**Postscript — the pattern held.** This section's "optional member, filled per invocation by the agent loop, null when unavailable" became the template for every later `ToolContext` growth: background bash's three lifetime-safe handles (`schedule_injection` / `session_lifetime` / `emit_task_event`), and now `ask_user` — the interactive ask the `tool-ask` plugin blocks on (ARCHITECTURE.md, "Asking the user"). Same three properties each time: plain-data types cross no agent-layer boundary, the handle is produced in the ctx-builder from session-owned wiring, and null is a degrade path the tool surfaces, never a hang.
+**Postscript — the pattern held.** This section's "optional member, filled per invocation by the agent loop, null when unavailable" became the template for every later `ToolContext` growth: background bash's three lifetime-safe handles (`schedule_injection` / `session_lifetime` / `emit_task_event`), and now `prompt_user` — the opaque plugin prompt the `tool-ask` plugin blocks on (ARCHITECTURE.md, "Asking the user"). Same three properties each time: plain-data types cross no agent-layer boundary, the handle is produced in the ctx-builder from session-owned wiring, and null is a degrade path the tool surfaces, never a hang.
 
 ### 2.2 No sanctioned cross-plugin channel
 
@@ -391,7 +391,9 @@ Core kinds (v1):
 | `process` | `command`, `cwd`, `duration_ms`, `exit_code` or `signal` (neither when unknown), `cancelled`, `timed_out`, `output` (a tail of at most 16 KiB), `output_truncated` | `bash` |
 | `markdown` | `text` (optional; absent means the result text) | `checklist`, `skill` |
 
-A `diff` row starts expanded (it is the review surface for a change the model just made); every other tool row keeps the collapsed default.
+A `diff` row starts expanded (it is the review surface for a change the model just made); every other tool row keeps the collapsed default unless its kind's `DisplayRenderer` says otherwise through `collapsed_by_default()` (the least-specific tier; `ui.json`'s `fold_tools` and per-row toggles still win). Plugin kinds live beside the core ones: `ask` (the `tool-ask`/`ask-view` pair: `outcome`, `questions[]{header, question, selected[], other}`) starts expanded because it is the user's only record of what they answered.
+
+**Plugin prompts.** A server tool that must block on a human answer whose *shape* belongs to it calls `ToolContext::prompt_user({kind, payload})` (`minimal/tools/prompt.hpp`) and gets back `{outcome, answer}`. Core carries the payload and the answer as opaque JSON (`PluginPromptRequest`/`PluginPromptResponse`) and owns only the mechanism shared with the permission and confirmation prompts: register-before-publish, first answer wins, `PromptResolvedEvent`, `sessions.unattended_prompt_timeout_seconds`, the tab's Waiting state. The client routes a prompt to the `PromptRenderer` a client plugin registered for its kind (`minimal_client_plugin_register_prompt_renderers`), shown in the modal slot below the permission and confirmation modals; a kind nobody claimed, a renderer that throws, and the headless client all answer `UNAVAILABLE`, so a worker is never left parked. Outcomes: `Answered` (the tool validates the answer against its own request), `Dismissed`, `TimedOut`, `Cancelled` (turn cancel or session end) and `Unavailable`. The bundled pair is `tool-ask` (kind `ask`) and `ask-view`; the modal chrome core's own prompts use (`ModalBody`, `ModalRule`, `ModalBodyHeightBudget` in `minimal/client/view/prompt_modal.hpp`) is public so a plugin modal looks the same.
 
 ### 4.3 Rulings from the architecture review
 

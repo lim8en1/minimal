@@ -26,9 +26,11 @@ namespace {
 using ftxui::Element;
 using ftxui::Elements;
 
+}  // namespace
+
 // A modal's internal divider, in the hairline role rather than the window's
 // `attention` tint -- dividers are structure, not a call to act.
-Element Rule(const Theme& theme) {
+Element ModalRule(const Theme& theme) {
     return ftxui::separator() | ftxui::color(theme.ColorFor("border_unfocused"));
 }
 
@@ -50,6 +52,8 @@ int ModalBodyHeightBudget() {
     return std::max(dimy - 3, 1);
 }
 
+namespace {
+
 // One column of breathing room on each side: window() draws its border
 // flush against the content otherwise, so transcript-like text (a bash
 // command, a file path) reads as if it were spilling past the frame.
@@ -62,11 +66,11 @@ Element PadHorizontal(Element content) {
 // word inside it: an all-amber window left the summary, the hints and the
 // answers with no hierarchy. Explicitly colored rows (the title line, the
 // grant labels, muted hints) keep their own color; color() nests.
+}  // namespace
+
 Element ModalBody(const Theme& theme, Element content) {
     return PadHorizontal(std::move(content)) | ftxui::color(theme.ColorFor("assistant_message"));
 }
-
-}  // namespace
 
 namespace {
 
@@ -275,7 +279,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
                       ModalBody(theme, vbox({
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                          Rule(theme),
+                          ModalRule(theme),
                           paragraph(footer_text) | Muted(theme),
                       }))) |
                // 82, not 80: PadHorizontal above spends 2 columns of the
@@ -483,7 +487,7 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
                       ModalBody(theme, vbox({
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                          has_cancel ? Rule(theme) : emptyElement(),
+                          has_cancel ? ModalRule(theme) : emptyElement(),
                           has_cancel ? text("esc: cancel") | Muted(theme) : emptyElement(),
                       }))) |
                size(WIDTH, LESS_THAN, 72) | color(theme.ColorFor("attention"));  // see the 82 note above
@@ -501,413 +505,6 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
                 return true;
             }
             return false;   // no cancel option: Escape is not an answer
-        }
-        return false;
-    });
-}
-
-// --- Ask modal (tool-ask plugin) --------------------------------------------
-
-namespace {
-
-// Ephemeral per-question UI state, owned by the component itself (shared_ptr,
-// captured by every closure): the modal is rebuilt only when request_id
-// changes, and RunTui passes per-frame snapshot members -- so, exactly like
-// the permission modal's request copy, the state must outlive the factory
-// call that built the checkboxes pointing into it.
-struct AskModalState {
-    struct QuestionState {
-        // Entry strings: option labels only (descriptions render separately,
-        // wrapped, via each control's transform -- see WrappedOptionEntry).
-        // Stored here (not built per frame) because ftxui's
-        // ConstStringRef/ConstStringListRef borrow the storage.
-        std::vector<std::string> entries;
-        // multiple: one stable bool per option (deque, not vector<bool>:
-        // the checkboxes need stable bool* -- same rule as GrantToggles).
-        std::deque<bool> boxes;
-        // single: the radiobox's selected index, -1 = nothing picked.
-        int radio = -1;
-        // FTXUI's Radiobox clamps *selected from -1 to 0 the first time it
-        // RENDERS, with no user interaction -- so `radio >= 0` alone cannot
-        // distinguish "the user picked option 0" from "the user never
-        // touched this question." Only on_change (fired by an actual
-        // selection change, not the render-time clamp) sets this.
-        bool radio_touched = false;
-        // "Other" is not a separate flag: it is the TRAILING entry of
-        // `entries`/`boxes` (or `radio == options_size()`), appended when
-        // the question's allow_other is set -- see MakeAskModal. Keeping it
-        // in the same list as the real options makes exclusivity structural
-        // (a Radiobox only ever has one selected index; a checked "other"
-        // checkbox and a checked real checkbox are cross-cleared by index,
-        // not by a second independent bool that could disagree with them).
-        std::string other_text;
-    };
-    std::vector<QuestionState> questions;
-    // The two-phase submit: false is editing (widgets live); true is the
-    // frozen review list -- Enter confirms, Escape goes back to editing.
-    bool reviewing = false;
-};
-
-v1::AskUserResponse CollectAnswer(const PendingAsk& request, const AskModalState& state) {
-    v1::AskUserResponse response;
-    response.set_request_id(request.request_id);
-    response.set_answered(true);
-    for (int i = 0; i < request.request.questions_size(); ++i) {
-        const auto& question = request.request.questions(i);
-        const auto& qs = state.questions[i];
-        auto* slot = response.add_answers();
-        if (question.multiple()) {
-            // The trailing "other" checkbox (see QuestionState) wins only
-            // while it is itself checked -- cross-clearing at the widget
-            // layer (MakeAskModal) keeps it and the real boxes from ever
-            // being true at once, so this is a read of that invariant, not
-            // an independent tie-break.
-            if (question.allow_other() && !qs.boxes.empty() && qs.boxes.back() &&
-                !qs.other_text.empty()) {
-                slot->set_other(qs.other_text);
-                continue;
-            }
-            for (int j = 0; j < question.options_size(); ++j) {
-                if (qs.boxes[j]) slot->add_selected(question.options(j).label());
-            }
-        } else {
-            // The trailing "other" radio entry (index == options_size()):
-            // Radiobox's own single-selection means `radio` can never be
-            // both a real index and the other index at once.
-            const int other_index = question.options_size();
-            if (qs.radio_touched && qs.radio == other_index) {
-                if (!qs.other_text.empty()) slot->set_other(qs.other_text);
-            } else if (qs.radio_touched && qs.radio >= 0 && qs.radio < other_index) {
-                slot->add_selected(question.options(qs.radio).label());
-            }
-        }
-    }
-    return response;
-}
-
-v1::AskUserResponse DismissedAnswer(const PendingAsk& request) {
-    v1::AskUserResponse response;
-    response.set_request_id(request.request_id);
-    response.set_answered(false);
-    return response;
-}
-
-// One review-screen line for ONE question, mirroring CollectAnswer's slot
-// logic exactly -- whatever the review shows is what submission will send,
-// so a drift between the two would display one thing and answer another.
-std::string ReviewLine(const v1::AskQuestion& question,
-                       const AskModalState::QuestionState& qs) {
-    if (question.multiple()) {
-        if (question.allow_other() && !qs.boxes.empty() && qs.boxes.back() &&
-            !qs.other_text.empty()) {
-            return "-> your answer: " + qs.other_text;
-        }
-        std::string joined;
-        for (int j = 0; j < question.options_size() &&
-                        j < static_cast<int>(qs.boxes.size());
-             ++j) {
-            if (!qs.boxes[j]) continue;
-            if (!joined.empty()) joined += ", ";
-            joined += question.options(j).label();
-        }
-        return joined.empty() ? "(not answered)" : "-> " + joined;
-    }
-    const int other_index = question.options_size();
-    if (qs.radio_touched && qs.radio == other_index) {
-        return qs.other_text.empty() ? "(not answered)" : "-> your answer: " + qs.other_text;
-    }
-    if (qs.radio_touched && qs.radio >= 0 && qs.radio < other_index) {
-        return "-> " + question.options(qs.radio).label();
-    }
-    return "(not answered)";
-}
-
-}  // namespace
-
-// Whether ONE option row of a single-pick (radio) question wears the
-// "current choice" styling (bold label + selection highlight). An untouched
-// question wears it NOWHERE: FTXUI's Radiobox clamps its selected index from
-// -1 to 0 at first render, so without this gate option 0 renders
-// bold/highlighted before any interaction -- which reads as a pre-picked
-// answer the submission would not send (CollectAnswer/ReviewLine gate on
-// radio_touched; this is that same contract, in the render). Pure so the
-// rule is directly testable (tests/prompt_modal_test.cpp).
-bool RadioRowSelected(bool touched, bool active, bool focused) {
-    return touched && (active || focused);
-}
-
-// One option row: marker, then the label wrapped, then its description
-// wrapped and dimmed beneath it -- both hanging under the label column
-// instead of running off the modal's fixed width like a bare text() would.
-// Mirrors RadioboxOption::Simple()/CheckboxOption::Simple() styling (bold
-// when active, highlighted when focused) so the only visible change is wrapping.
-// `touched` gates the choice styling through RadioRowSelected: a radio list
-// the user has never interacted with wears no "current choice" look (see the
-// header doc); checkbox lists always pass true -- their markers, not the
-// focus, are what says "picked".
-ftxui::Element WrappedOptionEntry(const ftxui::EntryState& s, const char* marker_on,
-                                  const char* marker_off, const std::string& description,
-                                  const ftxui::Decorator& selection,
-                                  const ftxui::Decorator& muted, bool touched) {
-    using namespace ftxui;
-    Element marker = text(s.state ? marker_on : marker_off);
-    Element label = paragraph(s.label);
-    if (RadioRowSelected(touched, s.active, s.focused)) {
-        label |= bold;
-        label |= selection;
-    }
-    Elements column = {label};
-    if (!description.empty()) column.push_back(paragraph(description) | muted);
-    return hbox({marker, vbox(std::move(column)) | flex});
-}
-
-ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
-                              std::function<void(v1::AskUserResponse response)> on_answer) {
-    using namespace ftxui;
-
-    // Same rule as the other two modals: the request is COPIED, the callback
-    // captured by value -- both are per-frame snapshot members.
-    const auto request_state = std::make_shared<PendingAsk>(request);
-    const auto state = std::make_shared<AskModalState>();
-    state->questions.resize(request_state->request.questions_size());
-    const ftxui::Decorator selection = SelectionStyle(theme);
-    const ftxui::Decorator muted = Muted(theme);
-
-    Components question_components;
-    for (int i = 0; i < request_state->request.questions_size(); ++i) {
-        const auto& question = request_state->request.questions(i);
-        auto& qs = state->questions[i];
-
-        // ONE container child per question (this block): the renderer below
-        // addresses children as ChildAt(question index). The first draft
-        // pushed the allow_other rows as SEPARATE children of `all`, so with
-        // allow_other set -- which is always, it is not model-facing -- every
-        // question after the first rendered the PREVIOUS question's other
-        // block: questions 2..n existed in the container (focusable, so Tab
-        // kept landing somewhere) but never rendered.
-        Components block;
-
-        // "Type your own answer" is a TRAILING ENTRY of the same list
-        // (radio or checkbox), not a separate sibling control -- a sibling
-        // checkbox with its own independent bool let a real pick and "other"
-        // both read as marked at once, with CollectAnswer/ReviewLine silently
-        // picking a winner the editing view never showed. Folding it into
-        // the list makes exclusivity structural for the radio case (one
-        // Radiobox, one selected index) and at least keeps one consistent
-        // marker style for the checkbox case (exclusivity there is still
-        // cross-cleared by index below -- Checkbox has no built-in
-        // single-selection). The free-text Input is still a separate
-        // sibling component (neither Radiobox nor Checkbox can host an
-        // inline child): DetachAllChildren/Add toggles it into `other_container`
-        // from whichever on_change below currently owns "other"-ness, so an
-        // invisible-but-focusable Input is never left in the tree (the same
-        // "hidden choice" bug class the old sibling-checkbox design already
-        // guarded against).
-        const bool other_allowed = question.allow_other();
-        auto other_container = Container::Vertical({});
-        auto other_input = Input(&qs.other_text, "your answer");
-        const auto state_ref = state;   // shared_ptr copy: outlives the closures below
-        const int index = i;
-
-        if (question.multiple()) {
-            for (const auto& option : question.options()) {
-                qs.entries.push_back(option.label());
-                qs.boxes.push_back(false);
-            }
-            int other_j = -1;
-            if (other_allowed) {
-                qs.entries.push_back("Type your own answer");
-                qs.boxes.push_back(false);
-                other_j = static_cast<int>(qs.entries.size()) - 1;
-            }
-            Components boxes;
-            for (std::size_t j = 0; j < qs.entries.size(); ++j) {
-                const bool is_other = static_cast<int>(j) == other_j;
-                CheckboxOption option_state;
-                option_state.label = ConstStringRef(qs.entries[j]);
-                option_state.checked = Ref<bool>(&qs.boxes[j]);
-                // Checkbox's own EntryState.index is always -1 (it renders
-                // itself, not a list), so the description is baked into the
-                // closure by j rather than looked up through the entry state.
-                // The trailing "other" row has none of its own.
-                const std::string description =
-                    is_other ? "" : question.options(static_cast<int>(j)).description();
-                option_state.transform = [description, selection, muted](const EntryState& s) {
-                    // touched=true, always: a checkbox's picked-ness lives in
-                    // its own marker, not the focus styling.
-                    return WrappedOptionEntry(s, "▣ ", "☐ ", description, selection, muted,
-                                              /*touched=*/true);
-                };
-                if (is_other) {
-                    option_state.on_change = [other_container, other_input, state_ref, index] {
-                        auto& qs2 = state_ref->questions[index];
-                        other_container->DetachAllChildren();
-                        if (qs2.boxes.back()) {
-                            // Checking "other" cross-clears every real box --
-                            // the wire contract (WireAskBroker::SlotIsValid)
-                            // never accepts a selection alongside free text.
-                            for (std::size_t k = 0; k + 1 < qs2.boxes.size(); ++k) {
-                                qs2.boxes[k] = false;
-                            }
-                            other_container->Add(other_input);
-                        }
-                    };
-                } else {
-                    option_state.on_change = [j, other_container, state_ref, index,
-                                              other_allowed] {
-                        if (!other_allowed) return;
-                        auto& qs2 = state_ref->questions[index];
-                        if (qs2.boxes[j]) {
-                            qs2.boxes.back() = false;
-                            other_container->DetachAllChildren();
-                        }
-                    };
-                }
-                boxes.push_back(Checkbox(std::move(option_state)));
-            }
-            block.push_back(Container::Vertical(std::move(boxes)));
-        } else {
-            // Radiobox is the single-pick control: one stable index, no
-            // manual "uncheck the others" bookkeeping -- which is exactly
-            // why "other" lives as entries.back() here rather than a sibling
-            // checkbox: Radiobox enforces "at most one selected" for free,
-            // so a real pick and "other" can never both be current.
-            std::vector<std::string> entries;
-            for (const auto& option : question.options()) {
-                entries.push_back(option.label());
-            }
-            const int other_index = static_cast<int>(entries.size());
-            if (other_allowed) entries.push_back("Type your own answer");
-            qs.entries = std::move(entries);
-            RadioboxOption radio_state;
-            radio_state.entries = ConstStringListRef(&qs.entries);
-            radio_state.selected = &qs.radio;
-            radio_state.on_change = [state_ref, index, other_container, other_input,
-                                     other_index] {
-                auto& qs2 = state_ref->questions[index];
-                qs2.radio_touched = true;
-                other_container->DetachAllChildren();
-                if (qs2.radio == other_index) other_container->Add(other_input);
-            };
-            // Radiobox's EntryState.index tracks the list position, so the
-            // description can be looked up straight from the question --
-            // except for the trailing "other" entry, which has none.
-            // touched reads radio_touched LIVE (through the same shared_ptr
-            // on_change writes): the first arrow-down both records the touch
-            // and re-styles the list within the same repaint, so the clamp's
-            // option-0 highlight appears only once the cursor has actually
-            // moved.
-            radio_state.transform = [request_state, state_ref, index, selection, muted,
-                                     other_index](const EntryState& s) {
-                const std::string description =
-                    s.index == other_index
-                        ? ""
-                        : request_state->request.questions(index).options(s.index).description();
-                return WrappedOptionEntry(s, "◉ ", "○ ", description, selection, muted,
-                                          state_ref->questions[index].radio_touched);
-            };
-            block.push_back(Radiobox(std::move(radio_state)));
-        }
-
-        if (other_allowed) block.push_back(other_container);
-
-        question_components.push_back(Container::Vertical(std::move(block)));
-    }
-    auto all = Container::Vertical(std::move(question_components));
-    const auto all_val = all;   // outlives the factory: by value
-    const auto interacted = std::make_shared<bool>(false);
-
-    auto body = Renderer(all, [all_val, request_state, state, &theme, interacted] {
-        const PendingAsk& ask = *request_state;
-        Elements rows;
-        rows.push_back(text("the assistant asks") | bold | color(theme.ColorFor("attention")));
-        if (state->reviewing) {
-            // The frozen review list: one line per question, wording shared
-            // with CollectAnswer (see ReviewLine). Nothing here is editable
-            // -- the CatchEvent below freezes input -- so Enter is a genuine
-            // confirmation of what will be sent, not another way to type.
-            int first_line = -1;
-            for (int i = 0; i < ask.request.questions_size(); ++i) {
-                const auto& question = ask.request.questions(i);
-                if (i > 0) rows.push_back(Rule(theme));
-                const std::string name =
-                    question.header().empty()
-                        ? "Question " + std::to_string(i + 1)
-                        : question.header();
-                rows.push_back(text(name) | bold);
-                rows.push_back(paragraph(ReviewLine(question, state->questions[i])));
-                if (first_line < 0) first_line = static_cast<int>(rows.size()) - 1;
-            }
-            if (!(*interacted) && first_line >= 0) {
-                rows[first_line] |= focus;   // the viewport follows the review list
-            }
-            return window(text(" question "),
-                          ModalBody(theme, vbox({
-                              vbox(std::move(rows)) | yframe | vscroll_indicator |
-                                  size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                              Rule(theme),
-                              paragraph("enter: submit  ·  esc: edit answers") | Muted(theme),
-                          }))) |
-                   size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
-        }
-        for (int i = 0; i < ask.request.questions_size(); ++i) {
-            const auto& question = ask.request.questions(i);
-            if (i > 0) rows.push_back(Rule(theme));
-            if (!question.header().empty()) {
-                rows.push_back(text(question.header()) | bold);
-            }
-            rows.push_back(paragraph(question.question()));
-            rows.push_back(all_val->ChildAt(i)->Render());
-        }
-        if (!(*interacted)) {
-            rows[0] |= focus;   // the title anchors the viewport until first key
-        }
-        return window(text(" question "),
-                      ModalBody(theme, vbox({
-                          vbox(std::move(rows)) | yframe | vscroll_indicator |
-                              size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                          Rule(theme),
-                          paragraph("enter: review  ·  esc: dismiss  ·  tab/arrow: move  ·  "
-                                    "space: pick/toggle") |
-                              Muted(theme),
-                      }))) |
-               size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
-    });
-    return CatchEvent(body, [on_answer, request_state, state, interacted](const Event& event) {
-        *interacted = true;
-        if (event == Event::Return) {
-            if (state->reviewing) {
-                on_answer(CollectAnswer(*request_state, *state));
-            } else {
-                state->reviewing = true;   // first Enter: freeze into the review list
-            }
-            return true;
-        }
-        if (event == Event::Escape) {
-            // Escape peels ONE level: review back to editing, editing to
-            // dismissal -- never review straight to dismissal, and never a
-            // level the footer does not name. While editing this is exactly
-            // the pre-review modal's contract (dismiss = answered=false,
-            // "user dismissed", never a selection).
-            if (state->reviewing) {
-                state->reviewing = false;
-                return true;
-            }
-            on_answer(DismissedAnswer(*request_state));
-            return true;
-        }
-        if (state->reviewing) {
-            // Review mode freezes the picks: swallow everything the editing
-            // widgets could mutate with (arrows/tab/space/characters reach
-            // the live container even while nothing of it renders) so the
-            // list cannot change invisibly behind the review -- but return
-            // false for the rest, so Ctrl+C still falls through to the root
-            // dispatch's interrupt branch (turn.cancel's hardcoded second
-            // key in keybinding_dispatch). A turn.cancel REMAPPED onto a
-            // character key is eaten here -- known gap, same class the other
-            // modal factories accept by hardcoding Escape.
-            if (event == Event::CtrlC) return false;
-            return true;
         }
         return false;
     });

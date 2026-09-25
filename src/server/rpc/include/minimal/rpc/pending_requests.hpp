@@ -27,17 +27,18 @@
 #include <vector>
 
 #include "minimal/tools/permission_checker.hpp"
+#include "minimal/tools/prompt.hpp"
 
 namespace minimal::rpc {
 
 // WHAT AN ANSWER IS, made a type rather than left as a string. Three brokers
 // share one PendingRequests (the permission checker, the confirmation broker,
-// and the ask broker), and a bare std::string payload kept them apart only by
+// and the plugin prompt broker), and a bare std::string payload kept them apart only by
 // convention: the wire reader knew which kind it was dispatching, the waiter
 // guessed by parsing or comparing. With the variant, a cross-delivered answer
-// -- a client responding to an ask id with a permission payload, or vice
+// -- a client responding to a prompt id with a permission payload, or vice
 // versa -- is structurally unreadable at the waiter instead of merely failing
-// to parse. The "perm-"/"confirm-"/"ask-" id prefixes remain, as diagnostics,
+// to parse. The "perm-"/"confirm-"/"prompt-" id prefixes remain, as diagnostics,
 // but they are no longer load-bearing.
 struct PermissionAnswer {
     tools::PermissionDecision decision = tools::PermissionDecision::Deny;
@@ -54,18 +55,16 @@ struct PermissionAnswer {
 struct ConfirmationAnswer {
     std::string chosen_option;
 };
-// One answer slot per question of the ask, aligned by index with
-// AskUserRequest::questions. Wire shape is proto AskUserAnswer; see
-// wire_ask_broker.hpp for who validates the shape.
-struct AskUserAnswer {
-    struct Slot {
-        std::vector<std::string> selected;
-        std::string other;
-    };
-    std::vector<Slot> answers;
-    bool answered = false;
+// A plugin prompt's answer, verbatim off the wire (proto PluginPromptResponse).
+// Nothing is parsed here: WirePluginPromptBroker parses the JSON, and the tool
+// that asked validates it.
+struct PluginPromptAnswer {
+    // Only Answered, Dismissed or Unavailable ever arrive from a client; the
+    // reader maps the wire enum (UNSPECIFIED reads as Unavailable).
+    tools::PromptOutcome outcome = tools::PromptOutcome::Unavailable;
+    std::string answer_json;
 };
-using PendingAnswer = std::variant<PermissionAnswer, ConfirmationAnswer, AskUserAnswer>;
+using PendingAnswer = std::variant<PermissionAnswer, ConfirmationAnswer, PluginPromptAnswer>;
 
 class PendingRequests {
 public:

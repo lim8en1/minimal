@@ -337,26 +337,18 @@ Elements RenderToolActivityBlocks(const ChatRow& row, const Theme& theme,
         return {hbox(std::move(line))};
     }
 
-    // Expanded: the header (plus the command/question/summary line if any) is
+    // Expanded: the header (plus the command/summary line if any) is
     // the first chunk; the RESULT BODY is what can run long, and it gets its
     // own chunks (SplitTextBlocks) -- a 200-line tool log used to be one
     // indivisible scroll anchor.
     Elements first;
     first.push_back(hbox(std::move(line)));
     const auto bash_command = BashCommandOf(row.tool_name, row.tool_input);
-    const auto ask_question = AskQuestionOf(row.tool_name, row.tool_input);
     if (bash_command.has_value()) {
         // bash's real command, not a JSON dump of it -- the header IS the
         // orientation for the most common tool call.
         first.push_back(paragraph("$ " + *bash_command) |
                         color(theme.ColorForOr("tool", "syntax_function")));
-    } else if (ask_question.has_value()) {
-        // ask_user's real question, not a JSON dump of it. Non-dim: this
-        // row is the durable record of a human decision (expanded by
-        // default -- CollapsedByDefault), and the answers below it are the
-        // point of the whole transcript entry.
-        first.push_back(paragraph(*ask_question) |
-                        color(theme.ColorFor("system_message")));
     } else {
         // The input summary rides the header of every OTHER tool row
         // (pending and result alike): it is what makes "tool <name>" say

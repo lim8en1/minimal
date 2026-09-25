@@ -254,23 +254,27 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             return;
         }
 
-        case v1::ClientEvent::kAskResponse: {
+        case v1::ClientEvent::kPluginPromptResponse: {
             // Same shape as the confirmation case: the payload case IS the
             // type, Resolve is a no-op for an id with no live slot, and the
             // resolved broadcast dismisses the modal on every OTHER attached
-            // client. The answer rides unvalidated -- shape filtering belongs
-            // to the waiter (WireAskBroker), which holds the questions these
-            // answers answer.
-            const auto& ask_response = event.ask_response();
-            const auto& request_id = ask_response.request_id();
-            AskUserAnswer answer;
-            answer.answered = ask_response.answered();
-            for (const auto& wire_slot : ask_response.answers()) {
-                AskUserAnswer::Slot slot;
-                for (const auto& label : wire_slot.selected()) slot.selected.push_back(label);
-                slot.other = wire_slot.other();
-                answer.answers.push_back(std::move(slot));
+            // client. The answer rides unparsed -- parsing is the waiter's
+            // (WirePluginPromptBroker), validation the asking tool's.
+            const auto& response = event.plugin_prompt_response();
+            const auto& request_id = response.request_id();
+            PluginPromptAnswer answer;
+            switch (response.outcome()) {
+                case v1::PROMPT_OUTCOME_ANSWERED:
+                    answer.outcome = tools::PromptOutcome::Answered;
+                    break;
+                case v1::PROMPT_OUTCOME_DISMISSED:
+                    answer.outcome = tools::PromptOutcome::Dismissed;
+                    break;
+                default:   // UNAVAILABLE, UNSPECIFIED, or a value this build does not know
+                    answer.outcome = tools::PromptOutcome::Unavailable;
+                    break;
             }
+            answer.answer_json = response.answer_json();
             if (Transport(session).pending().Resolve(request_id, std::move(answer))) {
                 PublishPromptResolved(session, request_id);
             }

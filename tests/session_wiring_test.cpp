@@ -35,7 +35,7 @@ TEST_CASE("FinishSessionWiring builds every default when no advisor is selected"
     REQUIRE(params.transport != nullptr);
     REQUIRE(params.permission_checker != nullptr);
     REQUIRE(params.confirmation_broker != nullptr);
-    REQUIRE(params.ask_broker != nullptr);
+    REQUIRE(params.prompt_broker != nullptr);
     // No advisor applied, so no cancel source was minted for one.
     CHECK(params.advisor_cancel_source == nullptr);
 }

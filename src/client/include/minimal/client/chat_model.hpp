@@ -109,19 +109,13 @@ std::string FormatClockTime(int64_t unix_ms);
 // tiers). Shared between ChatView (which resolves the state) and core's
 // renderers (which render collapsed vs. expanded from it), so the threshold
 // cannot drift between "starts collapsed" and "looks collapsed". Thinking is
-// always collapsed by default; ToolActivity collapses unless the row is an
-// ask_user result -- its body IS the user's recorded choices, their only
-// durable confirmation of what they answered (the modal closes the moment
-// they submit); UserAttachment collapses only once its content passes a
+// always collapsed by default; ToolActivity collapses unless the row carries a
+// diff (a display renderer can also claim a default for its own kind -- see
+// DisplayRenderer::collapsed_by_default, which ChatView consults first);
+// UserAttachment collapses only once its content passes a
 // small size threshold -- most tool calls and most mentions are short
 // enough to just read.
 bool CollapsedByDefault(const ChatRow& row);
-
-// The tool-ask plugin's tool name, as the transcript's tool_use blocks carry
-// it. Shared by the collapse default and the row renderer so the two
-// special cases cannot drift apart (the plugin lives server-side; the client
-// has only the literal).
-inline constexpr std::string_view kAskUserToolName = "ask_user";
 
 // Rows in DISPLAY order (oldest first) from a DESCENDING-seq scrollback page --
 // exactly what GetMessages returns, so no caller re-sorts. User messages that
@@ -170,14 +164,10 @@ std::optional<std::string> BashCommandOf(const std::string& tool_name, const nlo
 // Newlines collapse to spaces; overlong commands truncate.
 std::string OneLineSummary(std::string summary);
 
-// ask_user's own question text, if `tool_name` is kAskUserToolName and
-// `input` has one.
-std::optional<std::string> AskQuestionOf(const std::string& tool_name, const nlohmann::json& input);
-
-// The single-line merge of the three above -- bash's $command, ask_user's
-// question, or the generic JSON dump, in that preference order. Shared by
-// the persisted ToolActivity renderer (core_registrations.cpp, which also
-// uses the three individually for their distinct per-kind styling) and the
+// The single-line merge of the two above -- bash's $command or the generic
+// JSON dump, in that preference order. Shared by the persisted ToolActivity
+// renderer (core_registrations.cpp, which also uses the two individually for
+// their distinct per-kind styling) and the
 // LIVE tool row renderers (ChatView::RenderLiveToolRow, RenderToolsPanel),
 // which have room for only one dim line and want it to read the same
 // whether the call is still running or already in the transcript.

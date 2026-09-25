@@ -114,6 +114,14 @@ void minimal_client_plugin_register_display_renderers(
     minimal::client::plugins::DisplayRendererRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
+// OPTIONAL, additive: modal renderers for one KIND of plugin prompt (the
+// client half of a server tool calling ToolContext::prompt_user), keyed by
+// kind. Two plugins claiming one kind is fatal at startup. A prompt whose kind
+// no plugin claims is answered UNAVAILABLE by the host.
+void minimal_client_plugin_register_prompt_renderers(
+    minimal::client::plugins::PromptRendererRegistry&,
+    const minimal::client::plugins::ClientPluginRegistrationContext&);
+
 // OPTIONAL, additive: message-kind presentation, keyed by ChatRowKind. Core
 // supplies the defaults for every kind a plugin does not claim.
 void minimal_client_plugin_register_message_renderers(

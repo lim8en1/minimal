@@ -60,54 +60,40 @@ message ConfirmationResponse {
   string chosen_option = 2;
 }
 
-// --- Model-initiated user questions ("tool-ask" plugin; ARCHITECTURE.md
-// "Asking the user") ---
+// --- Plugin prompts (ARCHITECTURE.md "Plugin prompts") ---
 //
-// A tool parks the session worker on an AskUserRequest and the model's tool
-// result carries the answer. Structured on purpose: up to four questions per
-// call, each with labeled options (plus one human-facing description each)
-// and optional multi-select, so a client renders real choices rather than
-// making the model parse a rephrased question.
+// A tool parks the session worker on a blocking question to the human whose
+// SHAPE belongs to a plugin: core carries an opaque JSON payload tagged with a
+// `kind`, and the client routes it to the prompt renderer a client plugin
+// registered for that kind (the tool-ask/ask-view pair's "ask" is the bundled
+// one). Core owns only the mechanism -- register-before-publish, first answer
+// wins, PromptResolvedEvent, the unattended timeout, the Waiting state -- and
+// never parses either JSON side.
 
-message AskOption {
-  string label = 1;       // what the model receives back verbatim
-  string description = 2; // human-facing elaboration; may be empty
+enum PromptOutcome {
+  PROMPT_OUTCOME_UNSPECIFIED = 0; // read as UNAVAILABLE
+  PROMPT_OUTCOME_ANSWERED = 1;    // answer_json holds the plugin's answer
+  PROMPT_OUTCOME_DISMISSED = 2;   // the user declined to answer (Escape)
+  // No human can answer here: a headless client, or a client with no
+  // renderer for this kind. Never a user decision.
+  PROMPT_OUTCOME_UNAVAILABLE = 3;
 }
 
-message AskQuestion {
-  string question = 1;
-  string header = 2; // short label for the question, e.g. "Approach"
-  repeated AskOption options = 3;
-  // Multiple answers may be chosen from `options` (checkboxes instead of a
-  // single pick).
-  bool multiple = 4;
-  // The client offers a free-text answer ("Type your own answer") alongside
-  // `options`. False = a strict pick from the offered choices.
-  bool allow_other = 5;
-}
-
-message AskUserRequest {
+message PluginPromptRequest {
   // Server-generated, same correlation rationale as PermissionRequest.
   string request_id = 1;
-  repeated AskQuestion questions = 2;
+  // Which prompt renderer draws this, e.g. "ask". Plugin-defined.
+  string kind = 2;
+  // The plugin's own request, serialized JSON. Core never parses it.
+  string payload_json = 3;
 }
 
-// One answer slot per AskQuestion, aligned by index. A dismissed/timeout
-// request answers with answered=false and empty slots.
-message AskUserAnswer {
-  // Exact labels chosen from that question's options (<=1 unless multiple).
-  repeated string selected = 1;
-  // The free-text answer when the user typed their own. Empty unless
-  // AskQuestion.allow_other was set.
-  string other = 2;
-}
-
-message AskUserResponse {
-  string request_id = 1; // echoes the server-generated id from AskUserRequest
-  repeated AskUserAnswer answers = 2;
-  // False when the user dismissed the questions (Escape) -- the server turns
-  // that, and an unattended timeout, into an unanswered AskAnswer.
-  bool answered = 3;
+message PluginPromptResponse {
+  string request_id = 1; // echoes the server-generated id from PluginPromptRequest
+  PromptOutcome outcome = 2;
+  // The renderer's answer, serialized JSON; meaningful only when ANSWERED.
+  // The tool that asked validates it against its own request.
+  string answer_json = 3;
 }
 
 message CancelTurn {
@@ -179,6 +165,8 @@ message EndSession {
 }
 
 message ClientEvent {
+  reserved 11;
+  reserved "ask_response"; // replaced by plugin_prompt_response
   // Redundant on every message rather than bound once via stream metadata —
   // trades a few bytes for messages that are self-describing on their own
   // (simpler to log/replay/test than reconstructing context from call metadata).
@@ -188,7 +176,7 @@ message ClientEvent {
     CommandInvocation command = 3;
     PermissionResponse permission_response = 4;
     ConfirmationResponse confirmation_response = 5;
-    AskUserResponse ask_response = 11;
+    PluginPromptResponse plugin_prompt_response = 14;
     CancelTurn cancel = 6;
     Attach attach = 7;
     RewindRequest rewind = 8;
@@ -526,7 +514,7 @@ message ResyncRequiredEvent {
   string reason = 1;
 }
 
-// S5.3: a permission_request, confirmation_request, or ask_request this
+// S5.3: a permission_request, confirmation_request, or plugin_prompt this
 // session broadcast to every subscriber has been answered by ONE of them
 // (first answer wins). Delivered to every subscriber, including the one that
 // answered -- clearing an already-cleared prompt is a no-op there -- so every
@@ -537,6 +525,8 @@ message PromptResolvedEvent {
 }
 
 message ServerEvent {
+  reserved 17;
+  reserved "ask_request"; // replaced by plugin_prompt
   // Which session this event belongs to. Required because one client multiplexes
   // several sessions (tabs), including subagent children of the focused session.
   string session_id = 1;
@@ -556,7 +546,7 @@ message ServerEvent {
     SessionEndedEvent session_ended = 14;
     ResyncRequiredEvent resync_required = 15;
     PromptResolvedEvent prompt_resolved = 16;
-    AskUserRequest ask_request = 17;                // blocks server-side until answered
+    PluginPromptRequest plugin_prompt = 21;         // blocks server-side until answered
     // A turn was ACCEPTED onto the session's work queue (not yet running --
     // the seed user row persists only when the worker pops it). Turn ids are
     // per-session monotonic; the text echoes the submission so a client can

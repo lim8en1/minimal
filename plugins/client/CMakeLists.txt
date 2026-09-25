@@ -29,3 +29,9 @@ add_subdirectory(checklist-view)
 # modal view over the server-side mcp plugin's endpoint. Core has no MCP UI.
 
 add_subdirectory(mcp-view)
+
+# ask-view is the client half of the tool-ask plugin pair: the "ask" prompt
+# renderer (the modal ask_user parks on) and the "ask" display renderer (its
+# transcript row). Core has no ask UI.
+
+add_subdirectory(ask-view)

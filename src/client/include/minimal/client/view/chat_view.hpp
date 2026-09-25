@@ -242,10 +242,11 @@ private:
     // Four-tier collapse resolution for one row, most specific first: an
     // explicit per-row toggle > the global collapse-all choice > the
     // ui.json kind default (fold_thinking_default_ / fold_tool_default_, 0 =
-    // unset) > the kind's own built-in default. The tool tier applies to
-    // every ToolActivity row INCLUDING an ask_user result: its expanded
-    // exception lives in the built-in default (CollapsedByDefault) alone --
-    // an explicit user choice outranks the safety default.
+    // unset) > the kind's own built-in default (a display renderer's
+    // collapsed_by_default() for the row's display kind, else
+    // CollapsedByDefault). The tool tier applies to every ToolActivity row
+    // INCLUDING one whose display kind starts expanded (an ask's recorded
+    // answers): an explicit user choice outranks the built-in default.
     bool IsCollapsed(const RowKey& key, const ChatRow& row) const;
 
     const Theme& theme_;

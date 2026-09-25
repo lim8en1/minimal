@@ -622,7 +622,7 @@ sidesteps the ambiguity rather than needing a distinguishing byte at all.
 | `tool_output_buffer_bytes` | int | `0` | |
 | `tools_panel_stdout_buffer_lines` | int | `0` | distinct from the server's `tools_view.stdout_buffer_lines` |
 | `fold_thinking` | string | `"auto"` | the startup auto-fold default for thinking rows: `auto` (built-in default), `expanded` or `collapsed`; anything else → warning + `auto`. `chat.toggle_thinking_fold` (`ctrl+alt+t`) flips it for every open tab and persists the new value back here |
-| `fold_tools` | string | `"auto"` | same for tool-activity rows; `chat.toggle_tool_fold` (`ctrl+alt+o`). `collapsed` also folds `ask_user` results — the explicit setting outranks the built-in "always show answers" default |
+| `fold_tools` | string | `"auto"` | same for tool-activity rows; `chat.toggle_tool_fold` (`ctrl+alt+o`). `collapsed` also folds `ask_user` results — the explicit setting outranks the `ask` display kind's built-in "always show answers" default |
 | `theme` | string | `""` (= `"dark"`) | names `themes/<name>.json`; unknown name → terminal defaults + warning |
 
 Unknown keys ignored; the file is never rewritten (it is yours) — the only

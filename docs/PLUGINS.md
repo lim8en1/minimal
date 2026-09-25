@@ -18,7 +18,7 @@ Installed to `<libdir>/minimal/plugins/server/`. All enabled by default unless n
 |---|---|
 | `tools-fs` | Tools `read`, `write`, `edit` |
 | `tools-search` | Tools `grep`, `glob` (RE2-backed, linear-time regex) |
-| `tool-ask` | Tool `ask_user` — structured model→operator questions (up to 4, options with descriptions, multi-select, always-available free text), answered through a client modal; see ARCHITECTURE.md "Asking the user" |
+| `tool-ask` | Tool `ask_user` — structured model→operator questions (up to 4, options with descriptions, multi-select, optional free text), asked through core's plugin prompt (kind `ask`) and answered in the `ask-view` client plugin's modal; see ARCHITECTURE.md "Asking the user" |
 | `tools-bash` | Tool `bash`; commands `/restart-shell`, `/tasks`; hook point `before_command`; per-session cwd/env retention |
 | `tools-web` | Tools `web_fetch`, `web_search`; a per-host permission model for them (`plugins.tools-web` / `plugin_permissions.tools-web`, see its README) |
 | `mcp` | The MCP client: `mcps.json` servers as tool source `mcp` (`mcp__<server>__<tool>` tools), their per-server permission model, `/mcp`, the `mcp.endpoint` the `mcp-view` picker reads, and `channels.json` channels as external signal channels. Limits in its `config` (`connect_timeout_ms`, `request_timeout_ms`, `max_list_pages`, `restart_cooldown_ms`; legacy `settings.json` `tools.mcp.*` still read). Disabled, nothing MCP remains |
@@ -39,6 +39,7 @@ Installed to `<libdir>/minimal/plugins/client/`.
 |---|---|
 | `logo` | The ASCII-banner start view (random banner per session) |
 | `cost-view` | The `{cost}` status-bar segment (polls `cost-tracker.rpc`, renders cumulative $ / tokens) |
+| `ask-view` | The client half of `tool-ask`: the `ask` prompt renderer (the question modal) and the `ask` display renderer (the transcript row, expanded by default). Disabled, every ask is answered "unavailable" |
 | `mcp-view` | The `/mcp` picker: the `mcp` modal view (`view_hint` "mcp") over the `mcp` plugin's `mcp.endpoint` — lists servers with live status, Enter toggles one |
 | `checklist-view` | The `{todo}` status-bar segment + the `checklist.panel` view (both poll `checklist.rpc` through one shared worker; the panel toggles between a focused-tab tasklist and a per-tab summary; default binding `ctrl+k`) |
 
@@ -239,7 +240,8 @@ The pattern ("per-preset tool config", the `allowed_skills` delivery shape):
    declared package contract under `python`.
 
 **Optional client registration hooks** (`src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h`):
-views, start views, per-tool renderers, message renderers, status-bar
+views, start views, per-tool renderers, display renderers, prompt renderers
+(the modal for a server plugin's `prompt_user` kind), message renderers, status-bar
 segments, syntax grammars, chat surface (exclusive), markdown engine
 (exclusive).
 
