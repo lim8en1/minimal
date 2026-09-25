@@ -433,6 +433,20 @@ TEST_CASE("web_fetch: an absolute redirect is followed", "[tools_web][fetch]") {
     CHECK(result.content_text == "final");
 }
 
+TEST_CASE("web_fetch: a redirect to another host is handed back, not followed",
+          "[tools_web][fetch]") {
+    // Permission was decided for this host; the other host's fetch must be
+    // its own gated call. (127.0.0.1 -> localhost: same machine, other host.)
+    LoopbackServer redirector({HttpResponseOf(302, "Found", "text/plain", "",
+                                              {"Location: http://localhost:9/elsewhere"})});
+    auto tool = MakeWebFetchTool(LocalSettings(), net::HttpClient{});
+    auto ctx = Context();
+    const auto result = tool->execute({{"url", redirector.url()}}, ctx);
+    CHECK(result.is_error);
+    CHECK(result.content_text.find("to another host: http://localhost:9/elsewhere") !=
+          std::string::npos);
+}
+
 TEST_CASE("web_fetch: a relative redirect is refused, not guessed at", "[tools_web][fetch]") {
     LoopbackServer server(
         {HttpResponseOf(302, "Found", "text/plain", "", {"Location: /login"})});

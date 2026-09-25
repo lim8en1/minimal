@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,5 +44,10 @@ struct UrlCheck {
 // for cut 1, the same class of tradeoff the tree already makes for other
 // library calls with no cancellable variant (cpp-mcp's blocking client).
 UrlCheck CheckUrl(const std::string& url, bool allow_private_hosts);
+
+// The host a URL names, lowercased, parsed exactly the way CheckUrl parses it
+// (userinfo stripped, IPv6 brackets removed) -- WITHOUT resolving anything,
+// so it is safe on the permission path. nullopt when there is none.
+std::optional<std::string> HostOf(const std::string& url);
 
 }  // namespace minimal::tools_web

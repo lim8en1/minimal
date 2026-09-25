@@ -10,6 +10,8 @@ client, settings parsing, URL policy, and truncation path.
 - Both are `read_only` and declare `network_access_required()`: the `network`
   permission (default `ask`) is their gate. Allowing Execute for a sandboxed
   bash does not allow fetching URLs, and `network: allow` does not allow bash.
+- **A permission model** (per-host rules, below) that refines `network` for
+  these two tools.
 - `web_search` is inert and self-describing when unconfigured: the tool still
   registers and reports that it needs `search_api_url`, rather than failing as
   misconfigured.
@@ -54,6 +56,37 @@ per tool. Every field is optional.
 | `search.default_max_results` | `5` | Result count when the model supplies none. |
 | `search.max_results` | `20` | Absolute ceiling. |
 | `search.timeout_ms` | `10000` | Hard wall-clock bound. |
+
+### Per-host permissions
+
+The plugin's permission model replaces core's single `network` mode for
+`web_fetch` (judged by its URL's host) and `web_search` (judged by the search
+backend's host). Configure it in `permissions.json`, and per preset:
+
+```json
+{ "plugins": { "tools-web": {
+    "default": "ask",
+    "hosts": { "*.internal": "deny", "*.example.com": "ask", "api.example.com": "allow" } } } }
+```
+
+```yaml
+plugin_permissions:
+  tools-web: { hosts: { "docs.python.org": allow } }
+```
+
+- Globs match the whole host, case-insensitively; the most specific matching
+  glob wins (ties go to the stricter mode). A preset's rule replaces the
+  operator's for the same glob.
+- An unmatched host takes `default`, else core's `network` mode -- with no
+  slice at all, nothing changes.
+- A preset that sets `network` itself (plan's `network: deny`) is not widened
+  by the operator's host rules; only the preset's own host rules can.
+- A project-local preset may only narrow.
+- Core still applies everything else: per-tool denies, subagent ceilings, run
+  modes, grants, the prompt.
+- `web_fetch` no longer follows a redirect to a *different host* (a decision
+  made for one host must not carry to another): it returns the target URL, and
+  fetching it is its own, gated call. Same-host hops still follow.
 
 ### Result size
 

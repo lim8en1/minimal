@@ -128,6 +128,12 @@ std::string ToLower(std::string text) {
 
 }  // namespace
 
+std::optional<std::string> HostOf(const std::string& url) {
+    const auto parsed = ParseUrl(url);
+    if (!parsed) return std::nullopt;
+    return ToLower(parsed->host);
+}
+
 UrlCheck CheckUrl(const std::string& url, bool allow_private_hosts) {
     const auto parsed = ParseUrl(url);
     if (!parsed) return UrlCheck{false, "could not parse a host from the URL", ""};

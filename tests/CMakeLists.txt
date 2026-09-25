@@ -273,7 +273,9 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/html_text.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/fetch_tool.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/search_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/host_permission_model.cpp"
     tools_web_test.cpp
+    tools_web_permission_test.cpp
     # Same pattern for typesafe-advisor: settings + decision + the retry/budget
     # HTTP loop, all compiled in; the .so itself is only exercised by the E2E.
     "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor/settings.cpp"

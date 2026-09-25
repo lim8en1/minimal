@@ -4,4 +4,5 @@ minimal_add_plugin(tools-web
     url_policy.cpp
     html_text.cpp
     fetch_tool.cpp
-    search_tool.cpp)
+    search_tool.cpp
+    host_permission_model.cpp)

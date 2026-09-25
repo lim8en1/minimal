@@ -198,6 +198,15 @@ public:
                     return Error("web_fetch: redirect (HTTP " + std::to_string(response.status) +
                                 ") with no absolute Location header to follow");
                 }
+                // Permission was decided for THIS host (host rules, tools-web's
+                // permission model): a hop to another host must be its own,
+                // gated call. The model gets the target to fetch explicitly.
+                // Same-host hops (http -> https, another port or path) follow.
+                if (HostOf(*next) != HostOf(url)) {
+                    return Error("web_fetch: redirected (HTTP " +
+                                 std::to_string(response.status) + ") to another host: " + *next +
+                                 " -- fetch that URL to follow it");
+                }
                 url = *next;
                 continue;
             }
