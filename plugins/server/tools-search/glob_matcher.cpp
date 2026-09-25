@@ -17,7 +17,7 @@ void EmitEscaped(std::string& out, char c) {
             out += '\\';
             break;
         default:
-            break;  // `*?[]` never reach here; anything else is inert in RE2
+            break;  // anything else is inert in RE2
     }
     out += c;
 }
@@ -245,10 +245,6 @@ std::optional<std::string> GlobToRegex(std::string_view glob, GlobFlags flags) {
 
 bool IsLiteralGlob(std::string_view glob) {
     return glob.find_first_of("*?[]{\\") == std::string_view::npos;
-}
-
-std::optional<std::string> CompileGlob(std::string_view glob, GlobFlags flags) {
-    return GlobToRegex(glob, flags);
 }
 
 }  // namespace minimal::tools_search

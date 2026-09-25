@@ -65,9 +65,14 @@ public:
         // are this set's slice.
         int depth = 0;
         GitignoreSet set;
+        // For a set from an ANCESTOR of the search root (depth 0): the search
+        // root's path below that ancestor, with a trailing '/' ("src/"). It
+        // is prepended to every slice, so the set matches paths relative to
+        // its own directory -- what anchored patterns mean. Empty otherwise.
+        std::string base;
     };
 
-    void Push(int depth, GitignoreSet set);
+    void Push(int depth, GitignoreSet set, std::string base = {});
     void Pop();
     // `rel`: path relative to the search root, POSIX separators. True when the
     // final verdict is "ignore".

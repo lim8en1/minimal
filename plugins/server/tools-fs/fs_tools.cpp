@@ -1,5 +1,6 @@
 #include "fs_tools.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -89,16 +90,20 @@ ToolResult CreateParents(const std::filesystem::path& absolute_path) {
 // The Ask prompt shows the path AS THE MODEL TYPED it, but a symlink planted
 // by an earlier round (or a ".." segment) hides where the operation actually
 // lands: the operator would consent to a name, not a destination. When the
-// canonical resolution differs from the naive join, append it so the
-// disclosure names the place too.
+// resolution differs from the naive join, append it so the disclosure names
+// the place too. Resolved through tools::confine -- the resolver execute()
+// itself uses -- and compared against the LEXICALLY normalized join, so a
+// cosmetic `./a` or `a//b` is not mistaken for a redirect.
 std::string DisclosedPath(const ToolContext& ctx, const std::string& typed) {
     std::error_code ec;
     const std::filesystem::path root = std::filesystem::weakly_canonical(ctx.project_root, ec);
     if (ec) return typed;
-    const std::filesystem::path direct = root / std::filesystem::path(typed);
-    const std::filesystem::path canonical = std::filesystem::weakly_canonical(direct, ec);
-    if (ec || canonical == direct) return typed;
-    return typed + " (resolves to " + canonical.string() + ")";
+    const auto resolved = tools::confine(ctx.project_root, typed, /*must_exist=*/false);
+    if (!resolved.ok) return typed;
+    auto direct = (root / std::filesystem::path(typed)).lexically_normal();
+    if (!direct.has_filename() && direct.has_parent_path()) direct = direct.parent_path();
+    if (resolved.absolute_path == direct) return typed;
+    return typed + " (resolves to " + resolved.absolute_path.string() + ")";
 }
 
 // The one session grant file edits offer: every write/edit of a file INSIDE
@@ -126,27 +131,71 @@ std::optional<tools::GrantOffer> ProjectEditGrant(const ToolContext& ctx, const 
 // 10 GB log was an OOM on the session worker. Everything the model sends is
 // range-checked in int64 (an out-of-range value is the model's mistake to see,
 // not a silent wrap), then clamped to `read.max_lines` -- `limit: 0` included,
-// whose "whole file" reading was exactly the unbounded case. *clamped tells
-// the caller to disclose it; the model must know its window was clipped.
-bool ClampReadWindow(std::int64_t raw_offset, std::int64_t raw_limit, const FsSettings& settings,
-                     int* offset_out, int* limit_out, bool* clamped_out, std::string& error) {
+// whose "whole file" reading was exactly the unbounded case -- and the clamp
+// is disclosed: the model must know the window it ASKED for was clipped.
+// `raw_limit` nullopt = the model named no window; the default applies, also
+// under the ceiling, and nothing the model asked for was cut, so there is no
+// clip notice (the truncation footer still says how to page on).
+ToolResult ReadWindowResult(const nlohmann::json& input, const std::filesystem::path& path,
+                            std::int64_t raw_offset, std::optional<std::int64_t> raw_limit,
+                            const FsSettings& settings) {
     if (raw_offset < 1 || raw_offset > std::numeric_limits<int>::max()) {
-        error = "offset must be a line number between 1 and " +
-                std::to_string(std::numeric_limits<int>::max());
-        return false;
+        return Error("offset must be a line number between 1 and " +
+                     std::to_string(std::numeric_limits<int>::max()));
     }
-    if (raw_limit < 0 || raw_limit > std::numeric_limits<int>::max()) {
-        error = "limit is out of range";
-        return false;
+    if (raw_limit && (*raw_limit < 0 || *raw_limit > std::numeric_limits<int>::max())) {
+        return Error("limit is out of range");
     }
-    *offset_out = static_cast<int>(raw_offset);
-    *limit_out = static_cast<int>(raw_limit);
-    *clamped_out = false;
-    if (*limit_out == 0 || *limit_out > settings.read_max_lines) {
-        *limit_out = settings.read_max_lines;
-        *clamped_out = true;
+    int limit = std::min(settings.read_default_limit_lines, settings.read_max_lines);
+    bool clamped = false;
+    if (raw_limit) {
+        limit = static_cast<int>(*raw_limit);
+        if (limit == 0 || limit > settings.read_max_lines) {
+            limit = settings.read_max_lines;
+            clamped = true;
+        }
     }
-    return true;
+
+    const auto window = tools::read_window(path, static_cast<int>(raw_offset), limit,
+                                           settings.read_max_line_length);
+    if (!window.ok) return Error(window.error);
+    std::string text = RenderWindow(window);
+    if (clamped) {
+        text += "\n[The requested window was clipped to the configured read ceiling (" +
+                std::to_string(settings.read_max_lines) + " lines).]";
+    }
+    return ToolResult{false, std::move(text), FileDisplay(input, window)};
+}
+
+// `write` and `edit create` -- the two whole-file-write paths -- share one
+// body, so the size ceiling, the parent creation and the diff payload cannot
+// drift between them. The ceiling is edit_max_editable_file_bytes, not a
+// separate knob: an uncapped write is just edit-with-larger-blast-radius --
+// the model hands over megabytes and the whole payload sits in memory twice
+// (input JSON plus the string) before a single byte lands. Checked BEFORE
+// CreateParents: a rejected write must not leave empty directory debris
+// behind it (`new/deep/dir` created, then refused). `field` names the input
+// field in the error; `overwrite_verb` is what the result calls replacing an
+// existing file.
+ToolResult WriteWholeFile(const nlohmann::json& input, const std::filesystem::path& path,
+                          const std::string& content, const char* field,
+                          const char* overwrite_verb, const FsSettings& settings) {
+    if (static_cast<std::int64_t>(content.size()) > settings.edit_max_editable_file_bytes) {
+        return Error(std::string(field) + " is " + std::to_string(content.size()) +
+                     " bytes, over the " + std::to_string(settings.edit_max_editable_file_bytes) +
+                     "-byte write limit; build the file with a shell command instead");
+    }
+    const auto parents = CreateParents(path);
+    if (parents.is_error) return Error(parents.content_text);
+
+    const auto previous = FileEditor::ReadForDiff(path, settings.edit_max_editable_file_bytes);
+    const auto outcome = tools::write_file(path, content);
+    if (!outcome.ok) return Error(outcome.error);
+    return ToolResult{false,
+                      std::string(outcome.created ? "Created" : overwrite_verb) + " " +
+                          DisplayPath(input) + " (" + std::to_string(outcome.bytes_written) +
+                          " bytes)",
+                      WriteDisplay(input, previous, content, outcome.created)};
 }
 
 // --- read -------------------------------------------------------------------
@@ -208,25 +257,11 @@ public:
         if (input.contains("limit") && !input.at("limit").is_number_integer()) {
             return Error("limit must be an integer");
         }
-        int offset = 1;
-        int limit = settings_.read_default_limit_lines;
-        bool clamped = false;
-        if (!ClampReadWindow(input.value("offset", static_cast<std::int64_t>(1)),
-                             input.value("limit",
-                                         static_cast<std::int64_t>(settings_.read_default_limit_lines)),
-                             settings_, &offset, &limit, &clamped, error)) {
-            return Error(error);
-        }
-
-        const auto window = tools::read_window(resolved.absolute_path, offset, limit,
-                                                settings_.read_max_line_length);
-        if (!window.ok) return Error(window.error);
-        std::string text = RenderWindow(window);
-        if (clamped) {
-            text += "\n[The requested window was clipped to the configured read ceiling (" +
-                    std::to_string(settings_.read_max_lines) + " lines).]";
-        }
-        return ToolResult{false, std::move(text), FileDisplay(input, window)};
+        std::optional<std::int64_t> limit;
+        if (input.contains("limit")) limit = input.at("limit").get<std::int64_t>();
+        return ReadWindowResult(input, resolved.absolute_path,
+                                input.value("offset", static_cast<std::int64_t>(1)), limit,
+                                settings_);
     }
 
 private:
@@ -299,36 +334,8 @@ public:
             return Error("missing required string field: content");
         }
 
-        const auto content = input.at("content").get<std::string>();
-
-        // The same ceiling edit enforces (edit_max_editable_file_bytes), not a
-        // separate knob: write is the one mutating path left uncapped, and an
-        // uncapped write is just edit-with-larger-blast-radius -- the model
-        // hands over megabytes and the whole payload sits in memory twice
-        // (input JSON plus the string) before a single byte lands. Named in
-        // the error so the model can adapt rather than retry blind.
-        // Checked BEFORE CreateParents: a rejected write must not leave empty
-        // directory debris behind it (`new/deep/dir` created, then refused).
-        if (static_cast<std::int64_t>(content.size()) > settings_.edit_max_editable_file_bytes) {
-            return Error("content is " + std::to_string(content.size()) +
-                         " bytes, over the " +
-                         std::to_string(settings_.edit_max_editable_file_bytes) +
-                         "-byte write limit; build the file with a shell command instead");
-        }
-
-        const auto parents = CreateParents(resolved.absolute_path);
-        if (parents.is_error) return Error(parents.content_text);
-
-        const auto previous = FileEditor::ReadForDiff(resolved.absolute_path,
-                                                      settings_.edit_max_editable_file_bytes);
-        const auto outcome = tools::write_file(resolved.absolute_path, content);
-        if (!outcome.ok) return Error(outcome.error);
-
-        return ToolResult{false,
-                          (outcome.created ? "Created " : "Wrote ") +
-                              resolved.absolute_path.string() + " (" +
-                              std::to_string(outcome.bytes_written) + " bytes)",
-                          WriteDisplay(input, previous, content, outcome.created)};
+        return WriteWholeFile(input, resolved.absolute_path, input.at("content").get<std::string>(),
+                              "content", "Wrote", settings_);
     }
 
 private:
@@ -358,7 +365,7 @@ public:
               {"view_range",
                {{"type", "array"},
                 {"items", {{"type", "integer"}}},
-                {"description", "[start, end] 1-based line range for view"}}},
+                {"description", "[start, end] 1-based inclusive line range for view; end -1 = to the end"}}},
               {"file_text", StringProperty("Full content, for create")},
               {"old_str", StringProperty("Exact string to replace; must occur exactly once")},
               {"new_str", StringProperty("Replacement string")},
@@ -445,7 +452,7 @@ private:
 
     ToolResult View(const nlohmann::json& input, const std::filesystem::path& path) {
         std::int64_t raw_offset = 1;
-        std::int64_t raw_limit = settings_.read_default_limit_lines;
+        std::optional<std::int64_t> raw_limit;
         if (auto it = input.find("view_range"); it != input.end()) {
             // The SHAPE is checked too, not just the elements: a non-array or
             // wrong-length view_range used to be silently ignored, and the
@@ -461,74 +468,47 @@ private:
             raw_offset = (*it)[0].get<std::int64_t>();
             const std::int64_t end = (*it)[1].get<std::int64_t>();
             // Bounded to int range BEFORE the subtraction below, not after:
-            // ClampReadWindow rejects an out-of-[1, INT_MAX] offset anyway,
+            // ReadWindowResult rejects an out-of-[1, INT_MAX] offset anyway,
             // but it never sees raw_limit until AFTER `end - raw_offset + 1`
             // has already run. [start, end] = [INT64_MIN, INT64_MAX] passed
             // the old `end < raw_offset` check and then overflowed that
             // subtraction (UB). Checking both endpoints here first means the
             // difference below can never exceed 2^32, nowhere near int64
-            // overflow.
-            if (raw_offset < 1 || raw_offset > std::numeric_limits<int>::max() || end < 1 ||
-                end > std::numeric_limits<int>::max()) {
+            // overflow. `end == -1` is text_editor's "to the end of the
+            // file", the vocabulary this tool adopts; it maps to limit 0,
+            // which is the read ceiling (clamp disclosed as usual).
+            if (raw_offset < 1 || raw_offset > std::numeric_limits<int>::max() ||
+                (end < 1 && end != -1) || end > std::numeric_limits<int>::max()) {
                 return Error("view_range values must be line numbers between 1 and " +
-                             std::to_string(std::numeric_limits<int>::max()));
+                             std::to_string(std::numeric_limits<int>::max()) +
+                             " (end may be -1 for the end of the file)");
             }
-            if (end < raw_offset) {
+            if (end == -1) {
+                raw_limit = 0;
+            } else if (end < raw_offset) {
                 // An inverted range is an error, not "unlimited": the old
                 // mapping through raw_limit = 0 produced a full read_max_lines
                 // window starting at `start` -- a huge read the model had not
                 // asked for, reported as an ordinary clamped read.
                 return Error("view_range end (" + std::to_string(end) +
                              ") is before start (" + std::to_string(raw_offset) + ")");
+            } else {
+                raw_limit = end - raw_offset + 1;
             }
-            raw_limit = end - raw_offset + 1;
         }
-        int offset = 1;
-        int limit = settings_.read_default_limit_lines;
-        bool clamped = false;
-        std::string error;
-        if (!ClampReadWindow(raw_offset, raw_limit, settings_, &offset, &limit, &clamped, error)) {
-            return Error(error);
-        }
-        const auto window = tools::read_window(path, offset, limit, settings_.read_max_line_length);
-        if (!window.ok) return Error(window.error);
-        std::string text = RenderWindow(window);
-        if (clamped) {
-            text += "\n[The requested window was clipped to the configured read ceiling (" +
-                    std::to_string(settings_.read_max_lines) + " lines).]";
-        }
-        return ToolResult{false, std::move(text), FileDisplay(input, window)};
+        return ReadWindowResult(input, path, raw_offset, raw_limit, settings_);
     }
 
     ToolResult Create(const nlohmann::json& input, const std::filesystem::path& path) {
         if (!input.contains("file_text") || !input.at("file_text").is_string()) {
             return Error("missing required string field: file_text");
         }
-        const auto file_text = input.at("file_text").get<std::string>();
-        // Same ceiling as WriteTool::execute (edit_max_editable_file_bytes):
-        // `edit create` is the other whole-file-write path, and leaving it
-        // uncapped let the model bypass `write`'s limit by naming the same
-        // operation through this command instead.
-        if (static_cast<std::int64_t>(file_text.size()) > settings_.edit_max_editable_file_bytes) {
-            return Error("file_text is " + std::to_string(file_text.size()) +
-                         " bytes, over the " +
-                         std::to_string(settings_.edit_max_editable_file_bytes) +
-                         "-byte write limit; build the file with a shell command instead");
-        }
-        // CreateParents runs here, AFTER the size check (moved out of the
-        // execute() dispatcher): a rejected create must not leave empty
-        // directory debris behind it (`new/deep/dir` created, then refused).
-        const auto parents = CreateParents(path);
-        if (parents.is_error) return Error(parents.content_text);
         // Overwrites, matching text_editor_20250728's `create`. Diverging would
         // defeat the point of adopting that vocabulary, and it is FileWrite-gated
-        // either way.
-        const auto previous =
-            FileEditor::ReadForDiff(path, settings_.edit_max_editable_file_bytes);
-        const auto outcome = tools::write_file(path, file_text);
-        if (!outcome.ok) return Error(outcome.error);
-        return ToolResult{false, (outcome.created ? "Created " : "Overwrote ") + path.string(),
-                          WriteDisplay(input, previous, file_text, outcome.created)};
+        // either way. Same body as `write` (WriteWholeFile): leaving this path
+        // uncapped once let the model bypass write's limit through it.
+        return WriteWholeFile(input, path, input.at("file_text").get<std::string>(), "file_text",
+                              "Overwrote", settings_);
     }
 
     ToolResult StrReplace(const nlohmann::json& input, const std::filesystem::path& path) {
@@ -546,7 +526,7 @@ private:
         const auto outcome =
             FileEditor::StrReplace(path, old_str, new_str, settings_.edit_max_editable_file_bytes);
         if (!outcome.ok) return Error(outcome.error);
-        return ToolResult{false, outcome.summary,
+        return ToolResult{false, outcome.summary + " in " + DisplayPath(input),
                           DiffDisplay(DisplayPath(input), outcome.before, outcome.after, false)};
     }
 
@@ -571,7 +551,7 @@ private:
                                 input.at("insert_text").get<std::string>(),
                                 settings_.edit_max_editable_file_bytes);
         if (!outcome.ok) return Error(outcome.error);
-        return ToolResult{false, outcome.summary,
+        return ToolResult{false, outcome.summary + " in " + DisplayPath(input),
                           DiffDisplay(DisplayPath(input), outcome.before, outcome.after, false)};
     }
 

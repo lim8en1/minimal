@@ -378,30 +378,48 @@ TEST_CASE("glob: head_limit truncates with a footer stating the total",
     CHECK(result.content_text.find("(10 total; showing newest 3)") != std::string::npos);
 }
 
-TEST_CASE("glob: a result-cap stop is reported, never called a plain total",
+TEST_CASE("glob: max_results caps what is shown, never what is walked or counted",
           "[tools_search][glob_tool]") {
-    // Regression: when the walker stopped at glob_max_results, stats.limit_stopped
-    // went unreported and the footer called the collected (capped) count a
-    // "total" and its head the "newest" -- both overstate what was actually
-    // seen (a name-sorted-DFS prefix, not the real total sorted by time).
+    // Regression: the walk used to STOP at glob_max_results matches in name
+    // order, so the "total" was the cap and the "newest" were only the newest
+    // of an alphabetical prefix. Now the whole tree is walked into a bounded
+    // heap: the total is exact, the newest are the newest of everything, and
+    // max_results caps only the rows returned.
     Fixture f;
     for (int i = 0; i < 10; ++i) f.Write("f" + std::to_string(i) + ".txt", "x");
+    // Newest by mtime but LAST by name: a name-ordered prefix would miss it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    f.Write("z_newest.txt", "x");
     f.settings.glob_max_results = 3;
     auto tool = tools_search::MakeGlobTool(f.settings);
     auto ctx = f.Context();
 
     const auto result = tool->execute({{"pattern", "*.txt"}}, ctx);
     CHECK_FALSE(result.is_error);
-    CHECK(result.content_text.find(" total;") == std::string::npos);
-    CHECK(result.content_text.find("newest") == std::string::npos);
-    CHECK(result.content_text.find("stopped early: result cap reached") != std::string::npos);
+    CHECK(result.content_text.rfind("z_newest.txt\n", 0) == 0);  // first row
+    CHECK(result.content_text.find("(11 total; showing newest 3)") != std::string::npos);
+    // The configured default (200) over the ceiling is not the model's doing.
+    CHECK(result.content_text.find("clipped") == std::string::npos);
 
-    // Even with head_limit large enough to show every collected match (no
-    // truncation from THAT budget), the cap notice must still appear -- the
-    // walk itself stopped early, which head_limit alone cannot see.
-    const auto shown_all =
-        tool->execute({{"pattern", "*.txt"}, {"head_limit", 1000}}, ctx);
-    CHECK(shown_all.content_text.find("stopped early: result cap reached") != std::string::npos);
+    // A head_limit the model asked past the ceiling IS disclosed.
+    const auto asked = tool->execute({{"pattern", "*.txt"}, {"head_limit", 1000}}, ctx);
+    CHECK(asked.content_text.find("(11 total; showing newest 3)") != std::string::npos);
+    CHECK(asked.content_text.find("head_limit clipped") != std::string::npos);
+}
+
+TEST_CASE("glob: an out-of-int head_limit is clamped, not wrapped",
+          "[tools_search][glob_tool]") {
+    // get<int>() wrapped 4294967301 to 5: a silent five-row answer.
+    Fixture f;
+    for (int i = 0; i < 10; ++i) f.Write("f" + std::to_string(i) + ".txt", "x");
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result =
+        tool->execute({{"pattern", "*.txt"}, {"head_limit", 4294967301LL}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(f.Lines(result).size() >= 10);
+    CHECK(result.content_text.find("showing newest") == std::string::npos);
 }
 
 TEST_CASE("glob: an empty result caused by cancellation says so, not a flat negative",
@@ -540,7 +558,16 @@ TEST_CASE("grep: a directory walk never searches dotenv files", "[tools_search][
     const auto result = tool->execute({{"pattern", "alpha"}}, ctx);
     CHECK_FALSE(result.is_error);
     CHECK(result.content_text.find("a.py") != std::string::npos);
-    CHECK(result.content_text.find(".env") == std::string::npos);
+    // Neither file is a result row -- and the skip is disclosed, so a match
+    // living only in a dotenv file never reads as "no matches".
+    CHECK(result.content_text.find("\n.env\n") == std::string::npos);
+    CHECK(result.content_text.rfind(".env\n", 0) == std::string::npos);
+    CHECK(result.content_text.find("sub/.env.local") == std::string::npos);
+    CHECK(result.content_text.find("2 protected file(s)") != std::string::npos);
+
+    const auto only_in_dotenv = tool->execute({{"pattern", "SECRET"}}, ctx);
+    CHECK(only_in_dotenv.content_text.rfind("No matches found\n", 0) == 0);
+    CHECK(only_in_dotenv.content_text.find("protected file(s)") != std::string::npos);
 
     // Rooted AT the file, the gate decides -- so the tool opts into the
     // default dotenv deny exactly like read.
@@ -914,4 +941,135 @@ TEST_CASE("grep discloses the pattern and search root", "[tools_search][grep_too
     const auto disclosure = tool->Disclose({{"pattern", "TODO"}, {"path", "src"}}, ctx);
     CHECK(disclosure.summary.find("TODO") != std::string::npos);
     CHECK(disclosure.summary.find("src") != std::string::npos);
+}
+
+// --- review wave: ancestor anchoring, literal glob, pre-filter, clamps --------
+
+TEST_CASE("walker: ancestor .gitignore patterns keep their anchoring",
+          "[tools_search][walker][gitignore]") {
+    // Ancestor sets used to be applied as if they lived IN the walk root, so
+    // a root `/build` (only the top-level build/) ignored `src/build`, and a
+    // root `docs/*.md` never matched under a walk rooted at `docs`.
+    Fixture f;
+    f.WriteIgnore("", "/build\ndocs/*.md\n");
+    f.Write("src/build/keep.txt", "x");
+    f.Write("docs/drop.md", "x");
+    f.Write("docs/keep.txt", "x");
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto src = tool->execute({{"pattern", "**/*"}, {"path", "src"}}, ctx);
+    CHECK(src.content_text.find("src/build/keep.txt") != std::string::npos);
+
+    const auto docs = tool->execute({{"pattern", "**/*"}, {"path", "docs"}}, ctx);
+    CHECK(docs.content_text.find("docs/keep.txt") != std::string::npos);
+    CHECK(docs.content_text.find("drop.md") == std::string::npos);
+}
+
+TEST_CASE("walker: a walk rooted inside an ignored directory searches it as asked",
+          "[tools_search][walker][gitignore]") {
+    // The model named the ignored tree explicitly; ancestor rules that would
+    // ignore everything in it are not applied, its own rules still are.
+    Fixture f;
+    f.WriteIgnore("", "build/\n");
+    f.Write("build/out/a.txt", "needle\n");
+    f.WriteIgnore("build/out", "*.tmp\n");
+    f.Write("build/out/b.tmp", "needle\n");
+    auto grep = tools_search::MakeGrepTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = grep->execute({{"pattern", "needle"}, {"path", "build/out"}}, ctx);
+    CHECK(result.content_text.find("build/out/a.txt") != std::string::npos);
+    CHECK(result.content_text.find("b.tmp") == std::string::npos);
+
+    // From the root, the ignored tree stays ignored.
+    const auto root = grep->execute({{"pattern", "needle"}}, ctx);
+    CHECK(root.content_text.find("a.txt") == std::string::npos);
+}
+
+TEST_CASE("glob: the literal fast path does not follow a symlinked directory out of the root",
+          "[tools_search][glob_tool]") {
+    Fixture f;
+    TempDir outside;
+    std::ofstream(outside.path() / "secret.txt") << "x";
+    std::error_code ec;
+    std::filesystem::create_directory_symlink(outside.path(), f.dir.path() / "link", ec);
+    REQUIRE_FALSE(ec);
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+
+    // Existing and missing outside files answer identically: no oracle.
+    CHECK(tool->execute({{"pattern", "link/secret.txt"}}, ctx).content_text == "No files found");
+    CHECK(tool->execute({{"pattern", "link/nope.txt"}}, ctx).content_text == "No files found");
+}
+
+TEST_CASE("glob: a literal pattern naming a file-valued path finds that file",
+          "[tools_search][glob_tool]") {
+    Fixture f;
+    f.Write("src/solo.txt", "x");
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+
+    CHECK(tool->execute({{"pattern", "solo.txt"}, {"path", "src/solo.txt"}}, ctx).content_text ==
+          "src/solo.txt\n");
+    CHECK(tool->execute({{"pattern", "other.txt"}, {"path", "src/solo.txt"}}, ctx).content_text ==
+          "No files found");
+}
+
+TEST_CASE("grep: the whole-buffer pre-filter never drops a line-anchored match",
+          "[tools_search][grep_tool]") {
+    // The pre-filter runs in (?m) mode; patterns whose meaning differs
+    // between one line and the whole buffer (\A, \z, a flag group turning
+    // multi-line off) bypass it. Every one of these must find line 2.
+    Fixture f;
+    f.Write("a.txt", "foo\nbar\nbaz\n");
+    auto tool = tools_search::MakeGrepTool(f.settings);
+    auto ctx = f.Context();
+
+    for (const char* pattern : {"^bar$", "\\Abar", "bar\\z", "(?-m)^bar$", "(?i)^BAR", "r$"}) {
+        INFO(pattern);
+        const auto result =
+            tool->execute({{"pattern", pattern}, {"output_mode", "content"}}, ctx);
+        CHECK_FALSE(result.is_error);
+        CHECK(result.content_text.find("a.txt:2:bar") != std::string::npos);
+    }
+    // And a miss is still a miss.
+    CHECK(tool->execute({{"pattern", "^ar"}}, ctx).content_text == "No matches found");
+}
+
+TEST_CASE("grep: files mode stops at the first hit; count mode still counts every line",
+          "[tools_search][grep_tool]") {
+    Fixture f;
+    f.Write("a.txt", "hit\nhit\nhit\n");
+    auto tool = tools_search::MakeGrepTool(f.settings);
+    auto ctx = f.Context();
+
+    CHECK(tool->execute({{"pattern", "hit"}}, ctx).content_text == "a.txt\n");
+    CHECK(tool->execute({{"pattern", "hit"}, {"output_mode", "count"}}, ctx).content_text ==
+          "a.txt:3\n");
+}
+
+TEST_CASE("grep: out-of-int numeric fields are clamped, not wrapped",
+          "[tools_search][grep_tool]") {
+    Fixture f;
+    for (int i = 0; i < 6; ++i) f.Write("f" + std::to_string(i) + ".txt", "hit\n");
+    f.settings.grep_max_results = 100;
+    auto tool = tools_search::MakeGrepTool(f.settings);
+    auto ctx = f.Context();
+
+    // 4294967301 used to wrap to 5 -- one file silently missing.
+    const auto result = tool->execute({{"pattern", "hit"}, {"head_limit", 4294967301LL}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.find("f5.txt") != std::string::npos);
+    CHECK(result.content_text.find("head_limit clipped") != std::string::npos);
+
+    // A huge offset is past everything, not wrapped to a small skip.
+    const auto skipped = tool->execute({{"pattern", "hit"}, {"offset", 4294967297LL}}, ctx);
+    CHECK(skipped.content_text.rfind("no matches at offset", 0) == 0);
+
+    // A huge context is clamped to the configured maximum, not wrapped negative.
+    CHECK_FALSE(tool->execute({{"pattern", "hit"}, {"output_mode", "content"},
+                               {"context_after", 4294967297LL}},
+                              ctx)
+                    .is_error);
 }

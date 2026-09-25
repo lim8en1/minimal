@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <fstream>
-#include <iterator>
+#include <optional>
 #include <system_error>
 #include <vector>
+
+#include <sys/stat.h>
 
 namespace minimal::tools_search {
 namespace {
@@ -13,6 +15,16 @@ bool DeadlineExceeded(const WalkOptions& options,
                       const std::chrono::steady_clock::time_point& start) {
     if (options.timeout == std::chrono::steady_clock::duration{0}) return false;
     return std::chrono::steady_clock::now() - start >= options.timeout;
+}
+
+// st_mtime at full resolution; the field's name is the one platform split.
+std::int64_t MtimeNs(const struct stat& st) {
+#if defined(__APPLE__)
+    const auto& ts = st.st_mtimespec;
+#else
+    const auto& ts = st.st_mtim;
+#endif
+    return static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
 }
 
 // Component-wise, not a string prefix: "/foo/ba" is not an ancestor of
@@ -80,19 +92,31 @@ struct State {
     // uninterruptible island inside the walk -- and the read is bounded by
     // kMaxGitignoreBytes.
     bool PushGitignore(const std::filesystem::path& dir, const std::string& rel) {
+        auto set = LoadGitignore(dir);
+        if (!set) return false;
+        const int depth =
+            rel.empty() ? 0
+                        : static_cast<int>(std::count(rel.begin(), rel.end(), '/')) + 1;
+        ignore_stack.Push(depth, std::move(*set));
+        return true;
+    }
+
+    // `dir`'s parsed .gitignore; nullopt when it has none (or the walk must
+    // stop -- `stop` says which).
+    std::optional<GitignoreSet> LoadGitignore(const std::filesystem::path& dir) {
         if (options.is_cancelled && options.is_cancelled()) {
             stop = Stop::kCancelled;
-            return false;
+            return std::nullopt;
         }
         if (DeadlineExceeded(options, start)) {
             stop = Stop::kTimedOut;
-            return false;
+            return std::nullopt;
         }
         std::error_code gi_ec;
         const auto gitignore = dir / ".gitignore";
-        if (!std::filesystem::is_regular_file(gitignore, gi_ec) || gi_ec) return false;
+        if (!std::filesystem::is_regular_file(gitignore, gi_ec) || gi_ec) return std::nullopt;
         std::ifstream in(gitignore, std::ios::binary);
-        if (!in) return false;
+        if (!in) return std::nullopt;
         // Size first, then a bounded read: seek-and-tell is what keeps the
         // cap honest -- reading through the iterator first and trimming after
         // would still allocate for the whole file.
@@ -106,11 +130,48 @@ struct State {
             in.read(content.data(), capped);
             content.resize(static_cast<std::size_t>(in.gcount()));
         }
-        const int depth =
-            rel.empty() ? 0
-                        : static_cast<int>(std::count(rel.begin(), rel.end(), '/')) + 1;
-        ignore_stack.Push(depth, GitignoreSet::Parse(content));
-        return true;
+        return GitignoreSet::Parse(content);
+    }
+
+    // The .gitignore files between `boundary` (inclusive) and `walk_root`
+    // (exclusive), pushed farthest first, each carrying the walk root's path
+    // below its own directory as its match base. Farthest first, nearest
+    // last: IsIgnored gives a LATER entry precedence over an earlier one, so
+    // a closer ancestor's rules override a farther one's, and the walk
+    // root's own .gitignore (pushed next, by the normal Walk flow) overrides
+    // all of them -- git's closer-wins precedence, preserved.
+    //
+    // When an ancestor set ignores the walk root or a directory on the way
+    // down to it, the model asked for an ignored tree BY NAME: nothing is
+    // pushed, so the tree is searched as asked (with its own rules) rather
+    // than coming back empty because everything in it is ignored.
+    void PushAncestorGitignores(const std::filesystem::path& boundary,
+                                const std::filesystem::path& walk_root) {
+        std::vector<std::filesystem::path> ancestors;
+        for (auto dir = walk_root.parent_path();; dir = dir.parent_path()) {
+            ancestors.push_back(dir);
+            if (dir == boundary) break;
+        }
+        std::reverse(ancestors.begin(), ancestors.end());
+
+        std::vector<std::pair<GitignoreSet, std::string>> sets;
+        for (const auto& dir : ancestors) {
+            auto set = LoadGitignore(dir);
+            if (stopping()) return;
+            if (!set) continue;
+            const std::string below = walk_root.lexically_relative(dir).generic_string();
+            // Every directory from just under `dir` down to the walk root.
+            for (std::size_t slash = below.find('/');; slash = below.find('/', slash + 1)) {
+                const std::string prefix =
+                    slash == std::string::npos ? below : below.substr(0, slash);
+                if (set->Match(prefix, /*is_dir=*/true) == GitignoreSet::Verdict::kIgnore) {
+                    return;  // explicitly-named ignored tree: no ancestor rules
+                }
+                if (slash == std::string::npos) break;
+            }
+            sets.emplace_back(std::move(*set), below + "/");
+        }
+        for (auto& [set, base] : sets) ignore_stack.Push(0, std::move(set), std::move(base));
     }
 
     // One stack frame: a directory whose children are listed up-front, with
@@ -163,9 +224,10 @@ struct State {
             }
             if (static_cast<int>(frame.children.size()) >= kMaxDirEntries) {
                 // Count the withheld remainder cheaply -- names only, no stat.
+                // increment(ec), never `++it`: the operator throws
+                // filesystem_error on a read error, out of the whole walk.
                 int withheld = 1;
-                for (++it; it != end; it.increment(iter_ec)) {
-                    if (iter_ec) break;
+                for (it.increment(iter_ec); !iter_ec && it != end; it.increment(iter_ec)) {
                     withheld += 1;
                 }
                 stats_.skipped_entries += withheld;
@@ -200,21 +262,20 @@ struct State {
             }
 
             const auto path = frame.children[frame.next++];
-            std::error_code ec;
-            const auto link_status = std::filesystem::symlink_status(path, ec);
-            if (ec) {
+            // ONE lstat per entry: it types the entry (without following a
+            // symlink) and carries the size and mtime a file needs -- the old
+            // symlink_status + file_size (+ the glob tool's last_write_time)
+            // was up to three syscalls per file on the hot path of every walk.
+            struct stat st {};
+            if (::lstat(path.c_str(), &st) != 0) {
                 stats_.skipped_errors += 1;
                 continue;
             }
-            const auto type = link_status.type();
             // Symlinks are never followed -- a symlinked directory is the
             // classic traversal loop, and a symlinked file can point outside
             // the search root. Sockets/fifos/devices are not search targets.
-            if (type != std::filesystem::file_type::directory &&
-                type != std::filesystem::file_type::regular) {
-                continue;
-            }
-            const bool is_dir = type == std::filesystem::file_type::directory;
+            if (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode)) continue;
+            const bool is_dir = S_ISDIR(st.st_mode);
 
             const auto filename = path.filename();
             // `.git` is skipped whatever it is: a DIRECTORY in a normal
@@ -249,19 +310,14 @@ struct State {
                 continue;
             }
 
-            std::uintmax_t size = 0;
-            size = std::filesystem::file_size(path, ec);
-            if (ec) {
-                stats_.skipped_errors += 1;
-                continue;
-            }
+            const auto size = static_cast<std::uintmax_t>(st.st_size);
             if (options.max_file_bytes > 0 &&
                 static_cast<std::int64_t>(size) > options.max_file_bytes) {
                 stats_.skipped_oversize += 1;
                 continue;
             }
 
-            if (!Report(WalkEntry{path, child_rel, false, size})) return;
+            if (!Report(WalkEntry{path, child_rel, false, size, MtimeNs(st)})) return;
             stats_.files_seen += 1;
         }
     }
@@ -291,19 +347,8 @@ WalkStats WalkTree(const std::filesystem::path& root, const WalkOptions& options
             const auto walk_root =
                 canon_ec ? root : std::filesystem::weakly_canonical(root, canon_ec);
             if (!canon_ec && boundary != walk_root && IsAncestorOf(boundary, walk_root)) {
-                // Farthest first, nearest last: IsIgnored gives a LATER
-                // entry precedence over an earlier one, so this ordering
-                // makes a closer ancestor's rules override a farther one's,
-                // and the walk root's own .gitignore (pushed next, by the
-                // normal Walk flow below) override all of them -- git's
-                // closer-wins precedence, preserved.
-                std::vector<std::filesystem::path> ancestors;
-                for (auto dir = walk_root.parent_path();; dir = dir.parent_path()) {
-                    ancestors.push_back(dir);
-                    if (dir == boundary) break;
-                }
-                std::reverse(ancestors.begin(), ancestors.end());
-                for (const auto& dir : ancestors) state.PushGitignore(dir, "");
+                state.PushAncestorGitignores(boundary, walk_root);
+                if (state.stopping()) return std::move(state).Finish();
             }
         }
         // The root's .gitignore is pushed by MakeFrame (via PushGitignore) at
@@ -313,14 +358,15 @@ WalkStats WalkTree(const std::filesystem::path& root, const WalkOptions& options
         state.Walk(root, "");
     } else if (status.type() == std::filesystem::file_type::regular) {
         // The root is itself a file: report it and nothing else.
-        const auto size = std::filesystem::file_size(root, ec);
-        if (ec) {
+        struct stat st {};
+        if (::lstat(root.c_str(), &st) != 0) {
             state.stats_.skipped_errors += 1;
         } else if (options.max_file_bytes > 0 &&
-                   static_cast<std::int64_t>(size) > options.max_file_bytes) {
+                   static_cast<std::int64_t>(st.st_size) > options.max_file_bytes) {
             state.stats_.skipped_oversize += 1;
         } else {
-            state.Report(WalkEntry{root, root.filename().generic_string(), false, size});
+            state.Report(WalkEntry{root, root.filename().generic_string(), false,
+                                   static_cast<std::uintmax_t>(st.st_size), MtimeNs(st)});
             if (!state.stopping()) state.stats_.files_seen += 1;
         }
     }

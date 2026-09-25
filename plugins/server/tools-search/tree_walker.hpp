@@ -45,11 +45,14 @@ struct WalkOptions {
     // apply at any depth in git, so a search scoped to a subdirectory that
     // never loads the project root's .gitignore returns hits inside
     // `<subdir>/build/` that a root-level search would have excluded, and the
-    // ".gitignore-aware" tool description promises otherwise. Loaded as
-    // depth-0 rules of the walk root itself, which is exactly correct for
-    // unanchored patterns; an ANCHORED ancestor pattern (rare in a top-level
-    // .gitignore) is applied at the walk root's level too, an approximation
-    // rather than true git semantics for that narrower case.
+    // ".gitignore-aware" tool description promises otherwise. Each ancestor
+    // set matches paths re-rooted at ITS OWN directory (the walk root's path
+    // below it is prefixed), so anchored patterns keep git's meaning too:
+    // a root `/build` does not ignore `src/build`, and `docs/*.md` applies
+    // under a walk rooted at `docs`. One deliberate exception: when the walk
+    // root itself sits inside a directory an ancestor set ignores, the model
+    // named an ignored tree explicitly, and the ancestor sets are not loaded
+    // (the walk root's own and deeper .gitignore files still apply).
     std::filesystem::path boundary_root;
 };
 
@@ -58,6 +61,9 @@ struct WalkEntry {
     std::string rel_path;  // POSIX separators, relative to the walk root
     bool is_dir = false;
     std::uintmax_t size = 0;  // files only
+    // Files only; 0 when unknown. From the same lstat that typed the entry --
+    // a consumer ordering by recency needs no extra syscall per file.
+    std::int64_t mtime_ns = 0;
 };
 
 struct WalkStats {

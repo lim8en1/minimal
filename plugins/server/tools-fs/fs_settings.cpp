@@ -1,18 +1,26 @@
 #include "fs_settings.hpp"
 
+#include <algorithm>
+#include <limits>
+
+#include "minimal/config/parse_util.hpp"
+
 namespace minimal::tools_fs {
 namespace {
 
+// config::ReadClampedInt64 rejects a non-integer number (`2000.7` for a line
+// limit would be silently truncated by get<T>()) and clamps into T's range,
+// so a huge configured value narrows safely instead of wrapping -- the same
+// reader tools-search uses. The floor of 0 is harmless: every field below is
+// a positive count, and the `<= 0` fallbacks in ParseFsSettings treat 0 the
+// same as a negative.
 template <typename T>
 T ValueOr(const nlohmann::json& parent, const char* section, const char* key, T fallback) {
     auto section_it = parent.find(section);
     if (section_it == parent.end() || !section_it->is_object()) return fallback;
-    auto key_it = section_it->find(key);
-    // is_number_INTEGER, not is_number: `2000.7` for a line limit would be
-    // silently truncated by get<T>() -- config that reads as valid but means
-    // something slightly different from what it says.
-    if (key_it == section_it->end() || !key_it->is_number_integer()) return fallback;
-    return key_it->get<T>();
+    return static_cast<T>(config::ReadClampedInt64(
+        *section_it, key, static_cast<std::int64_t>(fallback), 0,
+        static_cast<std::int64_t>(std::numeric_limits<T>::max())));
 }
 
 }  // namespace
@@ -38,6 +46,11 @@ FsSettings ParseFsSettings(const nlohmann::json& config) {
     if (settings.edit_max_editable_file_bytes <= 0) {
         settings.edit_max_editable_file_bytes = 5 * 1024 * 1024;
     }
+    // The default window lives under the ceiling: a default above it would
+    // be clipped on every call, which is the configuration contradicting
+    // itself, not something to report to the model each time.
+    settings.read_default_limit_lines =
+        std::min(settings.read_default_limit_lines, settings.read_max_lines);
     return settings;
 }
 

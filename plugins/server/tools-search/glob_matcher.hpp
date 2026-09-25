@@ -14,19 +14,17 @@ namespace minimal::tools_search {
 //   **     any run of characters including '/'; the three special placements
 //          `**/`, `/**`, and `/**/` mean "zero or more directories"
 //   [...]  character class, `!` after `[` negates (rewritten to `^`)
-//   {a,b}  alternation -- ONLY when `brace_alternation` is set. .gitignore
-//          patterns are NOT passed this flag: git treats `{` as a literal
-//          character, and the two callers must not silently agree to differ.
+//   {a,b}  alternation -- ONLY with kBraceAlternation. .gitignore patterns
+//          are NOT passed this flag: git treats `{` as a literal character,
+//          and the two callers must not silently agree to differ.
 //
-// `slash_anchors`: when true, a pattern containing a '/' is anchored to the
-// root of the searched tree; a pattern without one may match a basename at
-// any depth. This is the gitignore rule (see ignore_rules.hpp). The glob tool
-// and the grep glob-filter instead pass `force_anchored` -- `*.cpp` means
-// "top level only", `**/*.cpp` means "everywhere".
+// The result is an UNANCHORED body: anchoring is the caller's rule, not the
+// translator's. The glob tool always anchors (`^...$`: `*.cpp` is top level
+// only, `**/*.cpp` is everywhere); gitignore and grep's glob filter anchor a
+// pattern containing '/' and let one without match a basename at any depth.
 enum class GlobFlags : unsigned {
     kNone = 0,
     kBraceAlternation = 1u << 0,  // {a,b} -> (?:a|b)
-    kForceAnchored = 1u << 1,     // always anchor, ignore the slash heuristic
 };
 
 constexpr GlobFlags operator|(GlobFlags a, GlobFlags b) {
@@ -45,10 +43,5 @@ std::optional<std::string> GlobToRegex(std::string_view glob, GlobFlags flags);
 // True when the pattern contains no glob metacharacters, so it names at most
 // one concrete path -- the glob tool's fast path.
 bool IsLiteralGlob(std::string_view glob);
-
-// Convenience: translate, and report failure through the optional. Returns the
-// regex SOURCE -- RE2 is neither copyable nor movable, so handing back a
-// compiled object by value is not expressible; callers construct their own.
-std::optional<std::string> CompileGlob(std::string_view glob, GlobFlags flags);
 
 }  // namespace minimal::tools_search

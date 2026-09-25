@@ -7,9 +7,6 @@
 #include "glob_matcher.hpp"
 
 namespace minimal::tools_search {
-namespace {
-
-}  // namespace
 
 struct GitignoreSet::Rule {
     bool negated = false;
@@ -90,8 +87,13 @@ GitignoreSet GitignoreSet::Parse(std::string_view content) {
             // FullMatch pins both ends; the `^`/`$` on anchored rules are for
             // readability. Unanchored rules get the any-depth prefix and are
             // matched against the candidate's final component.
+            // Quiet: a malformed line in a user's .gitignore is expected
+            // input (it becomes a never-matching rule, below), not a server
+            // error worth a stderr line per walk.
+            re2::RE2::Options options;
+            options.set_log_errors(false);
             rule->re = std::make_unique<re2::RE2>(
-                anchored ? "^" + *body + "$" : "(?:.*/)?" + *body + "$");
+                anchored ? "^" + *body + "$" : "(?:.*/)?" + *body + "$", options);
         }
         // !rule->re: one untranslatable line (e.g. an unterminated `[`)
         // becomes a rule that can never match -- a malformed line cannot take
@@ -110,7 +112,7 @@ std::optional<GitignoreSet::Verdict> GitignoreSet::Match(std::string_view rel,
     // (`!keep.log` after `*.log`) work.
     std::optional<Verdict> verdict;
     for (const auto& rule : rules_) {
-        if (!rule->re) continue;
+        if (!rule->re || !rule->re->ok()) continue;
         if (rule->dir_only && !is_dir) continue;
         std::string_view subject = rel;
         if (!rule->anchored) {
@@ -124,8 +126,8 @@ std::optional<GitignoreSet::Verdict> GitignoreSet::Match(std::string_view rel,
     return verdict;
 }
 
-void GitignoreStack::Push(int depth, GitignoreSet set) {
-    entries_.push_back({depth, std::move(set)});
+void GitignoreStack::Push(int depth, GitignoreSet set, std::string base) {
+    entries_.push_back({depth, std::move(set), std::move(base)});
 }
 
 void GitignoreStack::Pop() { entries_.pop_back(); }
@@ -149,7 +151,9 @@ bool GitignoreStack::IsIgnored(std::string_view rel, bool is_dir) const {
             slice = slice.substr(slice.find('/') + 1);
         }
         if (slice.empty()) continue;
-        const auto set_verdict = entry.set.Match(slice, is_dir);
+        const auto set_verdict =
+            entry.base.empty() ? entry.set.Match(slice, is_dir)
+                               : entry.set.Match(entry.base + std::string(slice), is_dir);
         if (set_verdict) verdict = set_verdict;  // deeper sets override shallower
     }
     return verdict == GitignoreSet::Verdict::kIgnore;

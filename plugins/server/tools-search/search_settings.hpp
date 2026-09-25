@@ -26,7 +26,9 @@ struct SearchSettings {
     int grep_max_context_lines = 10;
     int grep_max_line_length = 2000;
 
-    // glob -- a full tree listing bounded the same way.
+    // glob -- a full tree listing bounded the same way. glob_max_results caps
+    // the rows one call RETURNS (head_limit's ceiling); the walk is bounded by
+    // the timeout alone, so the reported total stays exact.
     int glob_default_limit = 200;
     int glob_max_results = 2000;
     int glob_timeout_ms = 10000;

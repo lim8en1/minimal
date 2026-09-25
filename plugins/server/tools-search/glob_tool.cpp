@@ -1,6 +1,8 @@
 #include "glob_tool.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <system_error>
 #include <vector>
@@ -22,8 +24,7 @@ using tools::ToolSpec;
 
 ToolResult Error(std::string message) { return ToolResult{true, std::move(message)}; }
 
-// Deterministic secondary sort: mtime descending (newest first -- "what did I
-// just change" is the dominant glob intent), ties broken by rel path.
+// One result row; ordered by `newer` in GlobTool::execute.
 struct MatchedPath {
     std::string rel_path;
     bool is_dir = false;
@@ -116,9 +117,28 @@ public:
         if (input.contains("head_limit") && !input.at("head_limit").is_number_integer()) {
             return Error("head_limit must be an integer");
         }
-        const int head_limit = input.value("head_limit", settings_.glob_default_limit) > 0
-                                   ? input.value("head_limit", settings_.glob_default_limit)
-                                   : settings_.glob_default_limit;
+        // head_limit is read at full width and clamped BEFORE narrowing
+        // (`value(..., int)` wrapped 4294967301 to 5), then capped at
+        // glob_max_results -- the ceiling on paths one call returns. A cap
+        // the model asked past is disclosed; the configured default sitting
+        // over the ceiling is configuration, applied silently.
+        int head_limit = std::min(settings_.glob_default_limit, settings_.glob_max_results);
+        bool clamped = false;
+        if (input.contains("head_limit")) {
+            const auto& raw = input.at("head_limit");
+            const std::int64_t requested =
+                raw.is_number_unsigned()
+                    ? static_cast<std::int64_t>(std::min<std::uint64_t>(
+                          raw.get<std::uint64_t>(),
+                          static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())))
+                    : raw.get<std::int64_t>();
+            if (requested > settings_.glob_max_results) {
+                head_limit = settings_.glob_max_results;
+                clamped = true;
+            } else if (requested > 0) {
+                head_limit = static_cast<int>(requested);
+            }
+        }
 
         // Literal fast path: no metacharacters means at most one concrete
         // path; walking the tree to find it would be theatre.
@@ -142,24 +162,39 @@ public:
                     return Error("pattern must not traverse out of the search root");
                 }
             }
-            std::error_code ec;
-            const auto target = resolved.absolute_path / pattern;
-            const auto status = std::filesystem::symlink_status(target, ec);
-            if (ec || status.type() == std::filesystem::file_type::not_found) {
+            const std::string rel = pattern_path.generic_string();
+            if (!root_is_dir) {
+                // A file-valued `path`: the only thing a literal can name is
+                // that file itself (joining onto a FILE names nothing).
+                if (rel == resolved.absolute_path.filename().generic_string()) {
+                    return ToolResult{false, path_prefix + rel + "\n"};
+                }
                 return ToolResult{false, "No files found"};
             }
-            std::filesystem::path rel = pattern;
-            return ToolResult{false, path_prefix + rel.generic_string() + "\n"};
+            // Resolved through confine, like every model-supplied path: a
+            // plain symlink_status on the join followed symlinked
+            // INTERMEDIATE components, so `link/x` with link -> /etc
+            // answered whether /etc/x exists -- the same oracle as above,
+            // one indirection later. Only a target that canonicalizes inside
+            // the project counts as found.
+            const auto target = tools::confine(
+                ctx.project_root, (resolved.absolute_path / pattern_path).string(),
+                /*must_exist=*/true);
+            if (!target.ok || target.outside_project_root) {
+                return ToolResult{false, "No files found"};
+            }
+            return ToolResult{false, path_prefix + rel + "\n"};
         }
 
         // Glob patterns are always anchored to the search root (VS Code
         // semantics): `*.cpp` is top level only, `**/*.cpp` is everywhere.
         // A pattern that cannot be translated is a tool error, unlike in
         // gitignore where one bad line must not void a whole file.
-        const auto regex_source =
-            GlobToRegex(pattern, GlobFlags::kForceAnchored | GlobFlags::kBraceAlternation);
+        const auto regex_source = GlobToRegex(pattern, GlobFlags::kBraceAlternation);
         if (!regex_source) return Error("invalid glob pattern: " + pattern);
-        const re2::RE2 matcher("^" + *regex_source + "$");
+        re2::RE2::Options regex_options;
+        regex_options.set_log_errors(false);  // the error goes to the model
+        const re2::RE2 matcher("^" + *regex_source + "$", regex_options);
         if (!matcher.ok()) return Error("invalid glob pattern: " + pattern);
 
         WalkOptions options;
@@ -173,102 +208,84 @@ public:
         // `packages/x/build/` that a root-level search would have excluded.
         options.boundary_root = ctx.project_root;
 
-        std::vector<MatchedPath> matches;
+        // The newest `head_limit` matches, kept in a bounded heap while the
+        // WHOLE tree is walked: memory is O(head_limit) however many files
+        // match, the total is an exact count, and "newest" means newest of
+        // everything. (The old shape stopped the walk at glob_max_results
+        // matches in name order and sorted only those, so its "newest" were
+        // the newest of an alphabetical prefix.) Ordering: mtime descending
+        // -- "what did I just change" is the dominant glob intent -- ties by
+        // rel path, so equal-mtime output is deterministic.
+        const auto newer = [](const MatchedPath& a, const MatchedPath& b) {
+            if (a.mtime_ns != b.mtime_ns) return a.mtime_ns > b.mtime_ns;
+            return a.rel_path < b.rel_path;
+        };
+        std::vector<MatchedPath> kept;  // a heap under `newer`: front() is the OLDEST kept
+        kept.reserve(static_cast<std::size_t>(head_limit));
+        int total = 0;
         const auto stats = WalkTree(
             resolved.absolute_path, options, [&](const WalkEntry& entry) {
                 if (!re2::RE2::FullMatch(re2::StringPiece(entry.rel_path.data(), entry.rel_path.size()), matcher)) return true;
-                MatchedPath m;
-                m.rel_path = entry.rel_path;
-                m.is_dir = entry.is_dir;
-                if (!entry.is_dir) {
-                    std::error_code ec;
-                    const auto t = std::filesystem::last_write_time(entry.absolute_path, ec);
-                    if (!ec) {
-                        // Clock epochs differ across platforms; only the ORDER
-                        // matters, and any consistent nanosecond-scale tick
-                        // provides it.
-                        m.mtime_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                         t.time_since_epoch())
-                                         .count();
-                    }
+                total += 1;
+                // Directories carry mtime 0 (the walker stats them for type
+                // only): they sort after files, as they always have.
+                MatchedPath m{entry.rel_path, entry.is_dir, entry.is_dir ? 0 : entry.mtime_ns};
+                if (static_cast<int>(kept.size()) < head_limit) {
+                    kept.push_back(std::move(m));
+                    std::push_heap(kept.begin(), kept.end(), newer);
+                } else if (newer(m, kept.front())) {
+                    std::pop_heap(kept.begin(), kept.end(), newer);
+                    kept.back() = std::move(m);
+                    std::push_heap(kept.begin(), kept.end(), newer);
                 }
-                matches.push_back(std::move(m));
-                // The walker's hard ceiling; head_limit is applied after the
-                // sort, on the NEWEST matches, so collecting to max and
-                // stopping there is what makes the cap meaningful.
-                return static_cast<int>(matches.size()) < settings_.glob_max_results;
+                return true;
             });
 
-        if (matches.empty()) {
-            // A walker stat explaining an empty result is far more honest
-            // than a flat "No files found", which reads as a confident
-            // negative even when the walk actually timed out, was
-            // cancelled, or skipped entries it never got to enumerate --
-            // exactly the footer already reported below for a NON-empty
-            // result. (limit_stopped cannot fire with zero matches: the
-            // walker only stops at the cap after collecting some.)
-            if (stats.timed_out || stats.cancelled || stats.skipped_entries > 0 ||
-                stats.skipped_deep > 0) {
-                std::string out = "No files found";
-                if (stats.timed_out) out += " (stopped early: timeout)";
-                if (stats.cancelled) out += " (stopped early: cancelled)";
-                if (stats.skipped_entries > 0) {
-                    out += " (" + std::to_string(stats.skipped_entries) +
-                           " director(y entries) skipped: over the per-directory cap)";
-                }
-                if (stats.skipped_deep > 0) {
-                    out += " (" + std::to_string(stats.skipped_deep) +
-                           " director(ies) skipped: deeper than the walk depth cap)";
-                }
-                return ToolResult{false, out};
-            }
-            return ToolResult{false, "No files found"};
+        // Early stops and skips, in the order the non-empty footer uses.
+        std::vector<std::string> notes;
+        if (stats.timed_out) notes.push_back("stopped early: timeout");
+        if (stats.cancelled) notes.push_back("stopped early: cancelled");
+        if (stats.skipped_entries > 0) {
+            notes.push_back(std::to_string(stats.skipped_entries) +
+                            " director(y entries) skipped: over the per-directory cap");
+        }
+        if (stats.skipped_deep > 0) {
+            notes.push_back(std::to_string(stats.skipped_deep) +
+                            " director(ies) skipped: deeper than the walk depth cap");
         }
 
-        std::sort(matches.begin(), matches.end(), [](const MatchedPath& a, const MatchedPath& b) {
-            if (a.mtime_ns != b.mtime_ns) return a.mtime_ns > b.mtime_ns;
-            return a.rel_path < b.rel_path;
-        });
+        if (kept.empty()) {
+            // A walker stat explaining an empty result is far more honest
+            // than a flat "No files found", which reads as a confident
+            // negative even when the walk actually timed out, was cancelled,
+            // or skipped entries it never got to enumerate.
+            std::string out = "No files found";
+            for (const auto& note : notes) out += " (" + note + ")";
+            return ToolResult{false, out};
+        }
 
+        std::sort(kept.begin(), kept.end(), newer);
         std::string out;
-        const int shown = std::min<int>(head_limit, static_cast<int>(matches.size()));
-        for (int i = 0; i < shown; ++i) {
-            out += path_prefix + matches[i].rel_path;
-            if (matches[i].is_dir) out += '/';
+        for (const auto& match : kept) {
+            out += path_prefix + match.rel_path;
+            if (match.is_dir) out += '/';
             out += '\n';
         }
 
-        // "total"/"newest" are honest only when the walk saw every match.
-        // Once the walker's own result cap stopped it early (limit_stopped),
-        // `matches` is a name-sorted-DFS-order PREFIX of the real match set,
-        // not the whole thing sorted by time -- calling it a "total" and its
-        // head "newest" overstates what was actually collected.
-        const bool more = matches.size() > static_cast<std::size_t>(shown);
-        if (more) {
-            out += "(" + std::to_string(matches.size()) +
-                   (stats.limit_stopped ? " collected; showing first " : " total; showing newest ") +
-                   std::to_string(shown) + ")\n";
+        // A walk that stopped early saw only part of the tree: the total is
+        // a lower bound and "newest" is newest-of-what-was-seen, and the
+        // footer says so -- a partial result presented as complete is the
+        // one failure mode worse than a truncation.
+        const bool partial = stats.timed_out || stats.cancelled;
+        if (total > static_cast<int>(kept.size())) {
+            out += "(" + std::string(partial ? "at least " : "") + std::to_string(total) +
+                   " total; showing newest " + std::to_string(kept.size()) + ")\n";
         }
-        if (stats.limit_stopped) {
-            // Fires even when head_limit >= glob_max_results (every
-            // collected match is shown, `more` is false): the cap still
-            // stopped the WALK, so files beyond it were never even seen,
-            // let alone counted -- silence here read as a complete result.
-            out += "(stopped early: result cap reached; more files may exist beyond the " +
-                   std::to_string(matches.size()) + " collected)\n";
+        if (clamped) {
+            out += "(head_limit clipped to the configured glob max_results=" +
+                   std::to_string(settings_.glob_max_results) + ")\n";
         }
-        // A walk that stopped early is said so -- a partial result presented
-        // as complete is the one failure mode worse than a truncation.
-        if (stats.timed_out) out += "(stopped early: timeout)\n";
-        if (stats.cancelled) out += "(stopped early: cancelled)\n";
-        if (stats.skipped_entries > 0) {
-            out += "(" + std::to_string(stats.skipped_entries) +
-                   " director(y entries) skipped: over the per-directory cap)\n";
-        }
-        if (stats.skipped_deep > 0) {
-            out += "(" + std::to_string(stats.skipped_deep) +
-                   " director(ies) skipped: deeper than the walk depth cap)\n";
-        }
+        for (const auto& note : notes) out += "(" + note + ")\n";
         return ToolResult{false, out};
     }
 

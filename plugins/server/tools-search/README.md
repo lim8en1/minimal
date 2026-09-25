@@ -18,6 +18,17 @@ point of the harness.
 - Path safety is centralized in ToolExecutor, exactly as for tools-fs.
 - The `grep` timeout bounds the directory WALK; RE2 already guarantees the
   regex itself cannot hang. Partial results are reported on expiry.
+- `.gitignore` files are honored from the project root down, also when `path`
+  names a subdirectory: an ancestor's rules keep their anchoring (a root
+  `/build` does not ignore `src/build`). A `path` that is itself inside an
+  ignored directory is searched as asked; its own `.gitignore` still applies.
+- A directory-walking `grep` never searches dotenv files (`.env`, `.env.*`) and
+  says so in its footer; rooting `grep` at one goes through the permission
+  gate like `read`. Files too large for `grep.max_file_bytes` are skipped
+  whole, never searched as a truncated prefix.
+- `glob` walks the whole tree (within its timeout) and returns the newest
+  matches with an exact total; `glob.max_results` caps the rows returned, not
+  the walk.
 
 ## Configuration
 
@@ -50,10 +61,10 @@ per tool. Every field is optional; non-positive values fall back to defaults.
 | --- | --- | --- |
 | `grep.default_head_limit` | `250` | Result count the model sees when it supplies no `head_limit`. |
 | `grep.max_results` | `1000` | Absolute ceiling on collected results. |
-| `grep.max_file_bytes` | `1048576` (1 MiB) | Files larger than this are skipped. |
+| `grep.max_file_bytes` | `1048576` (1 MiB) | Files larger than this are skipped (whole, and disclosed). |
 | `grep.timeout_ms` | `10000` | Hard wall-clock bound on one invocation. |
 | `grep.max_context_lines` | `10` | Context lines shown around a match. |
 | `grep.max_line_length` | `2000` | Per-line truncation length. |
 | `glob.default_limit` | `200` | Result count the model sees when it supplies no limit. |
-| `glob.max_results` | `2000` | Absolute ceiling on collected results. |
+| `glob.max_results` | `2000` | Ceiling on paths one call returns (a larger `head_limit` is clipped and disclosed); the walk itself and the total are not capped. |
 | `glob.timeout_ms` | `10000` | Hard wall-clock bound on one invocation. |

@@ -830,3 +830,142 @@ TEST_CASE("read windows are clamped to the configured ceiling; the clamp is disc
     result = tool->execute({{"path", "big.txt"}, {"offset", 3000000000}}, ctx);
     CHECK(result.is_error);
 }
+
+// --- review wave: CRLF, view_range -1, disclosure, settings, diff ------------
+
+TEST_CASE("insert into a CRLF file writes CRLF, never a bare LF line", "[tools_fs][edit]") {
+    Fixture f;
+    f.Write("w.txt", "one\r\ntwo\r\n");
+    auto tool = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute({{"command", "insert"}, {"path", "w.txt"},
+                                       {"insert_line", 1}, {"insert_text", "a\nb\n"}},
+                                      ctx);
+    REQUIRE_FALSE(result.is_error);
+    CHECK(f.Read("w.txt") == "one\r\na\r\nb\r\ntwo\r\n");
+
+    // A mixed file is not normalized: only the inserted line is new bytes.
+    f.Write("m.txt", "one\r\ntwo\n");
+    REQUIRE_FALSE(tool->execute({{"command", "insert"}, {"path", "m.txt"}, {"insert_line", 0},
+                                 {"insert_text", "zero"}},
+                                ctx)
+                      .is_error);
+    CHECK(f.Read("m.txt") == "zero\none\r\ntwo\n");
+}
+
+TEST_CASE("str_replace matches an LF old_str in a CRLF file and keeps CRLF",
+          "[tools_fs][edit]") {
+    Fixture f;
+    f.Write("w.txt", "alpha\r\nbeta\r\ngamma\r\n");
+    auto tool = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute({{"command", "str_replace"}, {"path", "w.txt"},
+                                       {"old_str", "alpha\nbeta"}, {"new_str", "A\nB"}},
+                                      ctx);
+    REQUIRE_FALSE(result.is_error);
+    CHECK(f.Read("w.txt") == "A\r\nB\r\ngamma\r\n");
+
+    // An exact match is taken as-is, bytes untouched by any translation.
+    REQUIRE_FALSE(tool->execute({{"command", "str_replace"}, {"path", "w.txt"},
+                                 {"old_str", "gamma"}, {"new_str", "g\nG"}},
+                                ctx)
+                      .is_error);
+    CHECK(f.Read("w.txt") == "A\r\nB\r\ng\nG\r\n");
+}
+
+TEST_CASE("edit view accepts end -1 as 'to the end of the file'", "[tools_fs][edit]") {
+    Fixture f;
+    f.Write("a.txt", "one\ntwo\nthree\nfour\n");
+    auto tool = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result =
+        tool->execute({{"command", "view"}, {"path", "a.txt"}, {"view_range", {3, -1}}}, ctx);
+    REQUIRE_FALSE(result.is_error);
+    CHECK(result.content_text.find("two") == std::string::npos);
+    CHECK(result.content_text.find("3\tthree") != std::string::npos);
+    CHECK(result.content_text.find("4\tfour") != std::string::npos);
+
+    CHECK(tool->execute({{"command", "view"}, {"path", "a.txt"}, {"view_range", {1, -2}}}, ctx)
+              .is_error);
+}
+
+TEST_CASE("disclosure does not call a cosmetic ./ or // spelling a redirect",
+          "[tools_fs][disclosure]") {
+    Fixture f;
+    std::filesystem::create_directories(f.dir.path() / "sub");
+    f.Write("sub/a.txt", "x");
+    auto tool = tools_fs::MakeReadTool(f.settings);
+    auto ctx = f.Context();
+
+    CHECK(tool->Disclose({{"path", "./sub/a.txt"}}, ctx).summary.find("resolves to") ==
+          std::string::npos);
+    CHECK(tool->Disclose({{"path", "sub//a.txt"}}, ctx).summary.find("resolves to") ==
+          std::string::npos);
+    // A new file (write) resolves the same way.
+    auto write = tools_fs::MakeWriteTool(f.settings);
+    CHECK(write->Disclose({{"path", "./sub/new.txt"}, {"content", "x"}}, ctx)
+              .summary.find("resolves to") == std::string::npos);
+}
+
+TEST_CASE("a default read under a smaller ceiling is not reported as clipped",
+          "[tools_fs][read]") {
+    // The default window is not something the model asked for; clipping it to
+    // the ceiling is configuration, and the truncation footer already says
+    // how to page on.
+    Fixture f;
+    f.settings.read_max_lines = 2;  // default_limit_lines stays 2000
+    f.Write("a.txt", "one\ntwo\nthree\n");
+    auto tool = tools_fs::MakeReadTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute({{"path", "a.txt"}}, ctx);
+    REQUIRE_FALSE(result.is_error);
+    CHECK(result.content_text.find("three") == std::string::npos);
+    CHECK(result.content_text.find("clipped") == std::string::npos);
+    CHECK(result.content_text.find("Pass offset=3") != std::string::npos);
+}
+
+TEST_CASE("fs settings clamp huge values and keep the default under the ceiling",
+          "[tools_fs][settings]") {
+    const nlohmann::json huge = {{"read", {{"max_lines", 5000000000LL}}}};
+    CHECK(tools_fs::ParseFsSettings(huge).read_max_lines == std::numeric_limits<int>::max());
+
+    const nlohmann::json contradictory = {
+        {"read", {{"default_limit_lines", 500}, {"max_lines", 100}}}};
+    CHECK(tools_fs::ParseFsSettings(contradictory).read_default_limit_lines == 100);
+
+    const nlohmann::json fractional = {{"read", {{"max_lines", 99.5}}}};
+    CHECK(tools_fs::ParseFsSettings(fractional).read_max_lines == 2000);
+}
+
+TEST_CASE("write and edit results name the path as typed", "[tools_fs][write][edit]") {
+    Fixture f;
+    auto write = tools_fs::MakeWriteTool(f.settings);
+    auto edit = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+
+    CHECK(write->execute({{"path", "sub/w.txt"}, {"content", "abc"}}, ctx).content_text ==
+          "Created sub/w.txt (3 bytes)");
+    CHECK(write->execute({{"path", "sub/w.txt"}, {"content", "ab"}}, ctx).content_text ==
+          "Wrote sub/w.txt (2 bytes)");
+    CHECK(edit->execute({{"command", "create"}, {"path", "sub/w.txt"}, {"file_text", "a"}}, ctx)
+              .content_text == "Overwrote sub/w.txt (1 bytes)");
+    CHECK(edit->execute({{"command", "insert"}, {"path", "sub/w.txt"}, {"insert_line", 1},
+                         {"insert_text", "b"}},
+                        ctx)
+              .content_text == "inserted after line 1 in sub/w.txt");
+}
+
+TEST_CASE("DiffDisplay: a change to the final newline alone is a visible change",
+          "[tools_fs][display]") {
+    const auto added = tools_fs::DiffDisplay("a", "one\ntwo", "one\ntwo\n", false);
+    REQUIRE(added.at("hunks").size() == 1);
+    const auto& lines = added.at("hunks")[0].at("lines");
+    CHECK(lines[1] == nlohmann::json({{"op", "-"}, {"text", "two"}}));
+    CHECK(lines[2] == nlohmann::json({{"op", "+"}, {"text", "two"}}));
+
+    CHECK(tools_fs::DiffDisplay("a", "one\n", "one\n", false).at("hunks").empty());
+}

@@ -42,11 +42,49 @@ LoadedFile LoadWholeFile(const std::filesystem::path& path, std::int64_t max_byt
         loaded.error = "cannot open: " + path.string();
         return loaded;
     }
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    loaded.content = buffer.str();
+    // The size check above is a stat taken BEFORE the open; a file still
+    // being appended to (a live log) can be past the cap by the time it is
+    // read. The read itself is bounded, and crossing the cap rejects the
+    // whole file exactly like the stat path -- never a truncated prefix, which
+    // would edit (and write back) only part of the file.
+    char chunk[65536];
+    while (in) {
+        in.read(chunk, sizeof(chunk));
+        loaded.content.append(chunk, static_cast<std::size_t>(in.gcount()));
+        if (static_cast<std::int64_t>(loaded.content.size()) > max_bytes) {
+            loaded.content.clear();
+            loaded.error = "file grew past the " + std::to_string(max_bytes) +
+                           " byte edit limit while being read -- use a different approach for "
+                           "files this large";
+            return loaded;
+        }
+    }
     loaded.ok = true;
     return loaded;
+}
+
+// True when the file's line terminator is CRLF: at least one '\n', and EVERY
+// one preceded by '\r'. A mixed file is not CRLF -- normalizing it would
+// rewrite terminators on lines the caller never named.
+bool UsesCrlf(std::string_view text) {
+    bool any = false;
+    for (std::size_t pos = text.find('\n'); pos != std::string_view::npos;
+         pos = text.find('\n', pos + 1)) {
+        if (pos == 0 || text[pos - 1] != '\r') return false;
+        any = true;
+    }
+    return any;
+}
+
+// Every bare '\n' becomes "\r\n"; an existing "\r\n" is left alone.
+std::string LfToCrlf(std::string_view text) {
+    std::string out;
+    out.reserve(text.size() + text.size() / 16);
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\n' && (i == 0 || text[i - 1] != '\r')) out += '\r';
+        out += text[i];
+    }
+    return out;
 }
 
 std::size_t CountOccurrences(const std::string& haystack, std::string_view needle) {
@@ -96,7 +134,24 @@ EditOutcome FileEditor::StrReplace(const std::filesystem::path& path, std::strin
         return outcome;
     }
 
-    const std::size_t occurrences = CountOccurrences(loaded.content, old_str);
+    std::size_t occurrences = CountOccurrences(loaded.content, old_str);
+    // The model writes LF; a CRLF file never contains a multi-line LF
+    // old_str, and "not found" there is a dead end the model cannot see
+    // past (the \r is invisible in every view it has). When -- and only
+    // when -- the exact bytes miss in a consistently-CRLF file, retry with
+    // both strings translated to the file's own terminator.
+    std::string crlf_old;
+    std::string crlf_new;
+    if (occurrences == 0 && old_str.find('\n') != std::string_view::npos &&
+        UsesCrlf(loaded.content)) {
+        crlf_old = LfToCrlf(old_str);
+        crlf_new = LfToCrlf(new_str);
+        occurrences = CountOccurrences(loaded.content, crlf_old);
+        if (occurrences > 0) {
+            old_str = crlf_old;
+            new_str = crlf_new;
+        }
+    }
     if (occurrences == 0) {
         outcome.error = "old_str not found in " + path.string();
         return outcome;
@@ -125,7 +180,7 @@ EditOutcome FileEditor::StrReplace(const std::filesystem::path& path, std::strin
     }
 
     outcome.ok = true;
-    outcome.summary = "replaced 1 occurrence in " + path.filename().string();
+    outcome.summary = "replaced 1 occurrence";
     outcome.before = loaded.content;
     outcome.after = std::move(updated);
     return outcome;
@@ -153,12 +208,21 @@ EditOutcome FileEditor::Insert(const std::filesystem::path& path, int insert_lin
     // never touches the terminator; the two paths must agree.
     const bool ends_with_newline =
         !loaded.content.empty() && loaded.content.back() == '\n';
+    // A consistently-CRLF file is split and rejoined on "\r\n", and the
+    // inserted text is translated to it: the model writes LF, and a bare LF
+    // line in a CRLF file is a mixed-terminator file nobody asked for. Any
+    // other file (LF, or already mixed) keeps the byte-exact LF path.
+    const bool crlf = UsesCrlf(loaded.content);
+    const std::string_view eol = crlf ? "\r\n" : "\n";
 
     std::vector<std::string> lines;
     {
         std::istringstream in(loaded.content);
         std::string line;
-        while (std::getline(in, line)) lines.push_back(line);
+        while (std::getline(in, line)) {
+            if (crlf && !line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(line);
+        }
     }
 
     if (insert_line > static_cast<int>(lines.size())) {
@@ -171,6 +235,10 @@ EditOutcome FileEditor::Insert(const std::filesystem::path& path, int insert_lin
 
     std::string text(insert_text);
     if (!text.empty() && text.back() == '\n') text.pop_back();
+    if (crlf) {
+        if (!text.empty() && text.back() == '\r') text.pop_back();
+        text = LfToCrlf(text);
+    }
 
     lines.insert(lines.begin() + insert_line, std::move(text));
 
@@ -179,7 +247,7 @@ EditOutcome FileEditor::Insert(const std::filesystem::path& path, int insert_lin
         updated += lines[i];
         // Every line except the last keeps its terminator; the last only if the
         // file had one before the edit.
-        if (i + 1 < lines.size() || ends_with_newline) updated += '\n';
+        if (i + 1 < lines.size() || ends_with_newline) updated += eol;
     }
 
     if (auto size_error = CheckResultSize(updated, max_bytes)) {
@@ -194,8 +262,7 @@ EditOutcome FileEditor::Insert(const std::filesystem::path& path, int insert_lin
     }
 
     outcome.ok = true;
-    outcome.summary = "inserted after line " + std::to_string(insert_line) + " in " +
-                       path.filename().string();
+    outcome.summary = "inserted after line " + std::to_string(insert_line);
     outcome.before = loaded.content;
     outcome.after = std::move(updated);
     return outcome;

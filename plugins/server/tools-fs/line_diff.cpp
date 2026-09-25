@@ -21,7 +21,27 @@ struct Edit {
     std::string_view text;
 };
 
-using Lines = std::vector<std::string_view>;
+// A line plus whether it carried a '\n'. Only a file's last line can lack
+// one, and comparing the flag too is what makes a change to the final
+// newline alone -- invisible in the text -- still a changed line in the
+// diff, instead of an empty hunk list for an edit that did change bytes.
+struct Line {
+    std::string_view text;
+    bool terminated = true;
+    bool operator==(const Line& other) const {
+        return text == other.text && terminated == other.terminated;
+    }
+    bool operator!=(const Line& other) const { return !(*this == other); }
+};
+
+using Lines = std::vector<Line>;
+
+Lines ToLines(std::string_view text) {
+    Lines lines;
+    for (const auto line : SplitLines(text)) lines.push_back({line, true});
+    if (!lines.empty() && text.back() != '\n') lines.back().terminated = false;
+    return lines;
+}
 
 bool LooksBinary(std::string_view text) { return text.find('\0') != std::string_view::npos; }
 
@@ -39,15 +59,15 @@ std::vector<Edit> Backtrack(const std::vector<std::vector<int>>& trace, const Li
         const int prev_x = at(prev_k);
         const int prev_y = prev_x - prev_k;
         while (x > prev_x && y > prev_y) {
-            reversed.push_back({Op::kEqual, a[x - 1]});
+            reversed.push_back({Op::kEqual, a[x - 1].text});
             --x;
             --y;
         }
         if (d > 0) {
             if (x == prev_x) {
-                reversed.push_back({Op::kInsert, b[y - 1]});
+                reversed.push_back({Op::kInsert, b[y - 1].text});
             } else {
-                reversed.push_back({Op::kDelete, a[x - 1]});
+                reversed.push_back({Op::kDelete, a[x - 1].text});
             }
         }
         x = prev_x;
@@ -96,17 +116,19 @@ std::optional<std::vector<Edit>> Diff(const Lines& a, const Lines& b) {
     const Lines b_mid(b.begin() + prefix, b.end() - suffix);
 
     std::vector<Edit> edits;
-    for (std::size_t i = 0; i < prefix; ++i) edits.push_back({Op::kEqual, a[i]});
+    for (std::size_t i = 0; i < prefix; ++i) edits.push_back({Op::kEqual, a[i].text});
     if (a_mid.empty() || b_mid.empty()) {
         // Pure insertion or deletion (a created file included): no search needed.
-        for (const auto line : a_mid) edits.push_back({Op::kDelete, line});
-        for (const auto line : b_mid) edits.push_back({Op::kInsert, line});
+        for (const auto& line : a_mid) edits.push_back({Op::kDelete, line.text});
+        for (const auto& line : b_mid) edits.push_back({Op::kInsert, line.text});
     } else {
         auto middle = Myers(a_mid, b_mid);
         if (!middle) return std::nullopt;
         edits.insert(edits.end(), middle->begin(), middle->end());
     }
-    for (std::size_t i = a.size() - suffix; i < a.size(); ++i) edits.push_back({Op::kEqual, a[i]});
+    for (std::size_t i = a.size() - suffix; i < a.size(); ++i) {
+        edits.push_back({Op::kEqual, a[i].text});
+    }
     return edits;
 }
 
@@ -138,13 +160,15 @@ nlohmann::json Hunks(const std::vector<Edit>& edits) {
 
         const int old_count = old_before[end] - old_before[start];
         const int new_count = new_before[end] - new_before[start];
+        // Capped BEFORE this hunk's lines are materialized: past the cap the
+        // whole payload is dropped anyway, so building it first was waste.
+        emitted += static_cast<std::size_t>(end - start);
+        if (emitted > kMaxHunkLines) return nullptr;
         nlohmann::json lines = nlohmann::json::array();
         for (int i = start; i < end; ++i) {
             lines.push_back({{"op", std::string(1, static_cast<char>(edits[i].op))},
                              {"text", std::string(edits[i].text)}});
         }
-        emitted += static_cast<std::size_t>(end - start);
-        if (emitted > kMaxHunkLines) return nullptr;
         // Unified-diff convention: an empty side's start is the line BEFORE it.
         hunks.push_back({{"old_start", old_before[start] + (old_count > 0 ? 1 : 0)},
                          {"old_count", old_count},
@@ -176,7 +200,7 @@ std::vector<std::string_view> SplitLines(std::string_view text) {
 nlohmann::json DiffDisplay(std::string_view path, std::string_view old_text,
                            std::string_view new_text, bool created) {
     if (LooksBinary(old_text) || LooksBinary(new_text)) return nullptr;
-    const auto edits = Diff(SplitLines(old_text), SplitLines(new_text));
+    const auto edits = Diff(ToLines(old_text), ToLines(new_text));
     if (!edits) return nullptr;
     auto hunks = Hunks(*edits);
     if (hunks.is_null()) return nullptr;
