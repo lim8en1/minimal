@@ -18,10 +18,13 @@ namespace minimal::tools_python {
 // presets are made LOUD (see ClassifyDiff) rather than isolated; an override
 // is a purely additive v2 escape hatch.
 
-// The per-project install mutex: two sessions auto-ensuring concurrently must
-// not race pip. Keyed on the project root string (all sessions live in one
-// server process; an external terminal pip racing is the user's business,
-// same as any shared .venv today).
+// The per-project install mutex: two sessions ensuring packages concurrently
+// must not race pip, and the "which versions do other sessions depend on"
+// check must not race another session's install+spawn. Keyed on the project
+// root string (all sessions live in one server process; an external terminal
+// pip racing is the user's business, same as any shared .venv today).
+// EnsureEnvironment/EnsurePackages do NOT lock: the caller holds this across
+// the whole check -> install -> spawn -> register sequence.
 class ProjectInstallMutex {
 public:
     static ProjectInstallMutex& Instance();
@@ -37,7 +40,7 @@ struct EnvPlan {
     std::filesystem::path project_root;
     std::filesystem::path venv;         // <project_root>/.venv (always, v1)
     std::string venv_python;            // <venv>/bin/python (may not exist yet)
-    std::string system_python;          // settings.python resolved on PATH
+    std::string system_python;          // settings.python (resolved on PATH at launch)
     // The DECLARED contract: package specs plus "requirements:<path>" entries.
     std::vector<std::string> declared;
     // True when the session wants the venv: anything declared, or the venv
@@ -50,27 +53,27 @@ struct EnvPlan {
 EnvPlan MakeEnvPlan(const std::filesystem::path& project_root, const PythonSlice& slice,
                     const PythonSettings& settings);
 
-// The resolved interpreter binary (the venv's python when it exists, else the
-// system one). Exists for disclosure: the Ask prompt names the resolved path.
+// The interpreter binary an invocation runs: the venv's python whenever the
+// plan wants the venv (even before it exists -- the spawn creates it), else
+// the system one resolved on PATH. Exists for disclosure: the Ask prompt
+// names what will actually run.
 std::string ResolveInterpreterBinary(const EnvPlan& plan);
 
 // Creates the venv when missing (uv venv, else python -m venv) and installs
-// the declared packages/requirements into it. Blocking, bounded by
-// settings.install_timeout; serialized per project. Empty error string on
-// success. `note` describes what was done, for the tool result ("created
-// .venv (uv); installed: impacket").
+// plan.declared into it. Blocking, bounded by settings.install_timeout.
+// Caller holds ProjectInstallMutex for plan.project_root. Empty error string
+// on success; the return value describes what was done, for the tool result
+// ("created .venv (uv); ensured impacket (uv pip)").
 std::string EnsureEnvironment(const EnvPlan& plan, const PythonSettings& settings,
                               common::Logger& logger, std::string* error);
 
-// Installs additional specs into an EXISTING venv (the auto-ensure path on a
-// preset switch). Serialized per project like EnsureEnvironment.
+// Installs specs (package specs and "requirements:<path>" entries) into an
+// EXISTING venv -- uv pip when uv is on PATH, else the venv's own pip.
+// Caller holds ProjectInstallMutex for project_root.
 std::string EnsurePackages(const std::filesystem::path& project_root,
                            const std::string& venv_python, const std::vector<std::string>& specs,
                            const PythonSettings& settings, common::Logger& logger,
                            std::string* error);
-
-// Where uv lives, resolved once per process (empty = not installed).
-std::string ResolveUv(const PythonSettings& settings);
 
 // The child interpreter's full environment: the bash env allowlist (never the
 // server process's credentials), the venv's bin prepended to PATH,
@@ -98,7 +101,8 @@ DeclaredDiff ClassifyDiff(const std::vector<std::string>& current,
                           const std::vector<std::string>& interpreter_record);
 
 // The distribution name of a spec ("pefile==2023.2.7" -> "pefile",
-// "requirements:x" -> itself). Lowercased; -/_ folded, as pip treats them.
+// "requirements:x" -> itself). PEP 503-normalized: lowercased, runs of
+// -/_/. folded to one '-'.
 std::string SpecName(const std::string& spec);
 
 // Splits a declared/additive set into plain pip specs and requirements-file
@@ -108,6 +112,23 @@ std::string SpecName(const std::string& spec);
 // handed to pip/uv as a literal spec fails as an invalid requirement.
 // `requirement_paths` are relative, not yet resolved against a project root.
 // Pure; no I/O.
+// The cross-session half of the contract. The shared venv is used by every
+// session in the project, so a declared entry whose name another LIVE
+// session's interpreter already depends on at a different spec must not be
+// installed (it would re-version that session's environment underneath it):
+//   install   -- entries safe to install (new names, or identical specs);
+//   record    -- the interpreter's declared record: `install` plus, for each
+//                conflict, the spec the venv actually keeps;
+//   conflicts -- formatted for the one-time advisory.
+// Pure; no I/O.
+struct SharedResolution {
+    std::vector<std::string> install;
+    std::vector<std::string> record;
+    std::vector<std::string> conflicts;
+};
+SharedResolution ResolveAgainstShared(const std::vector<std::string>& declared,
+                                      const std::vector<std::string>& in_use);
+
 struct SplitSpecs {
     std::vector<std::string> package_specs;
     std::vector<std::string> requirement_paths;

@@ -102,55 +102,25 @@ EnvPlan MakeEnvPlan(const std::filesystem::path& project_root, const PythonSlice
 }
 
 std::string ResolveInterpreterBinary(const EnvPlan& plan) {
-    std::error_code ec;
-    if (std::filesystem::exists(plan.venv_python, ec)) return plan.venv_python;
-    return plan.system_python;
-}
-
-std::string ResolveUv(const PythonSettings& settings) {
-    // Resolved per call, cheaply: `command -v`-style PATH walk, no pipe.
-    const char* path_env = ::getenv("PATH");
-    if (path_env == nullptr || *path_env == '\0') return {};
-    std::error_code ec;
-    std::string_view path(path_env);
-    for (std::size_t start = 0; start <= path.size();) {
-        const auto end = path.find(':', start);
-        const auto dir = path.substr(start, end == std::string_view::npos ? std::string_view::npos
-                                                                          : end - start);
-        if (!dir.empty()) {
-            const auto candidate = std::filesystem::path(dir) / "uv";
-            if (std::filesystem::is_regular_file(candidate, ec)) return candidate.string();
-        }
-        if (end == std::string_view::npos) break;
-        start = end + 1;
-    }
-    (void)settings;
-    return {};
+    if (plan.wants_venv) return plan.venv_python;
+    const auto resolved = ResolveOnPath(plan.system_python);
+    return resolved.empty() ? plan.system_python : resolved;
 }
 
 std::string EnsureEnvironment(const EnvPlan& plan, const PythonSettings& settings,
                               common::Logger& logger, std::string* error) {
     std::string note;
-    const auto guard = ProjectInstallMutex::Instance().Lock(plan.project_root);
-    (void)guard;
-
+    *error = "";
     std::error_code ec;
-    const bool venv_ready = std::filesystem::exists(plan.venv_python, ec);
-    if (!venv_ready && plan.declared.empty() && !plan.wants_venv) {
-        *error = "";
-        return note;  // bare system python; nothing to build
-    }
-
-    if (!venv_ready) {
+    if (!std::filesystem::exists(plan.venv_python, ec)) {
         // CREATE. uv first (fast, no stdlib venv pitfalls), then the stdlib.
         std::string create_error;
         const auto helper_env = BuildChildEnv(plan, settings);
-        const std::string uv = ResolveUv(settings);
-        if (!uv.empty()) {
+        if (const std::string uv = ResolveOnPath("uv"); !uv.empty()) {
             const auto run = RunCaptured({uv, "venv", plan.venv.string()}, plan.project_root,
                                          helper_env, settings.install_timeout, 64 * 1024);
             if (run.ok && run.exit_status == 0) {
-                note += "created .venv (uv)";
+                note = "created .venv (uv)";
             } else {
                 create_error = "uv venv: " +
                                (run.error.empty() ? run.output : run.error + " " + run.output);
@@ -163,8 +133,7 @@ std::string EnsureEnvironment(const EnvPlan& plan, const PythonSettings& setting
                                          plan.project_root, helper_env, settings.install_timeout,
                                          64 * 1024);
             if (run.ok && run.exit_status == 0) {
-                note += note.empty() ? "created .venv (python -m venv)"
-                                     : "; created .venv (python -m venv)";
+                note = "created .venv (python -m venv)";
             } else {
                 create_error += "; python -m venv: " +
                                 (run.error.empty() ? run.output : run.error + " " + run.output);
@@ -180,39 +149,11 @@ std::string EnsureEnvironment(const EnvPlan& plan, const PythonSettings& setting
     // INSTALL the declared contract, additively and idempotently. uv makes the
     // satisfied-check near-instant; the venv's own pip costs a few seconds.
     if (!plan.declared.empty()) {
-        const auto split = SplitDeclared(plan.declared);
-        const auto& specs = split.package_specs;
-        const auto& requirement_paths = split.requirement_paths;
-        std::vector<std::string> argv;
-        std::string via;
-        if (const std::string uv = ResolveUv(settings); !uv.empty()) {
-            argv = {uv, "pip", "install", "--python", plan.venv_python};
-            via = "uv pip";
-        } else {
-            argv = {plan.venv_python, "-m", "pip", "install"};
-            via = "pip";
-        }
-        for (const auto& spec : specs) argv.push_back(spec);
-        for (const auto& req : requirement_paths) {
-            argv.push_back("-r");
-            argv.push_back((plan.project_root / req).string());
-        }
-        // Same child env as venv creation and EnsurePackages: the install is a
-        // helper command that may spawn subprocesses (source builds, VCS
-        // backends) and needs $HOME for caches -- an empty env strands those.
-        const auto run = RunCaptured(argv, plan.project_root, BuildChildEnv(plan, settings),
-                                     settings.install_timeout, 256 * 1024);
-        if (!run.ok || run.exit_status != 0) {
-            *error = "installing declared packages failed (" + via + "): " +
-                     (run.error.empty() ? run.output : run.error + " " + run.output);
-            return note;
-        }
-        note += note.empty() ? "" : "; ";
-        note += "ensured declared packages (" + via + ")";
-        logger.info("python: ensured declared set [{}] in {}", Join(plan.declared, ", "),
-                    plan.venv.string());
+        const auto installed = EnsurePackages(plan.project_root, plan.venv_python, plan.declared,
+                                              settings, logger, error);
+        if (!error->empty()) return note;
+        note += (note.empty() ? "" : "; ") + installed;
     }
-    *error = "";
     return note;
 }
 
@@ -220,48 +161,41 @@ std::string EnsurePackages(const std::filesystem::path& project_root,
                            const std::string& venv_python, const std::vector<std::string>& specs,
                            const PythonSettings& settings, common::Logger& logger,
                            std::string* error) {
-    const auto guard = ProjectInstallMutex::Instance().Lock(project_root);
-    (void)guard;
-
-    // ClassifyDiff's additive set (the only caller, via ApplyDiff) can carry
-    // "requirements:<path>" entries same as EnsureEnvironment's own declared
-    // set -- switching to a preset that newly declares a requirements file
-    // sent that literal string to pip as a package spec, which fails as an
-    // invalid requirement and errors every python_exec until a clean
-    // restart. Same split EnsureEnvironment uses.
+    *error = "";
+    if (specs.empty()) return {};
+    // "requirements:<path>" entries become -r arguments; handed to pip/uv as
+    // literal specs they fail as invalid requirements.
     const auto split = SplitDeclared(specs);
-    const auto& package_specs = split.package_specs;
-    const auto& requirement_paths = split.requirement_paths;
-
     std::vector<std::string> argv;
     std::string via;
-    if (const std::string uv = ResolveUv(settings); !uv.empty()) {
+    if (const std::string uv = ResolveOnPath("uv"); !uv.empty()) {
         argv = {uv, "pip", "install", "--python", venv_python};
         via = "uv pip";
     } else {
         argv = {venv_python, "-m", "pip", "install"};
         via = "pip";
     }
-    for (const auto& spec : package_specs) argv.push_back(spec);
-    for (const auto& req : requirement_paths) {
+    for (const auto& spec : split.package_specs) argv.push_back(spec);
+    for (const auto& req : split.requirement_paths) {
         argv.push_back("-r");
         argv.push_back((project_root / req).string());
     }
 
-    EnvPlan plan_like;
-    plan_like.project_root = project_root;
-    plan_like.venv = project_root / ".venv";
-    plan_like.wants_venv = true;
-    const auto run = RunCaptured(argv, project_root, BuildChildEnv(plan_like, settings),
+    // The same child env as the interpreter: an install may spawn
+    // subprocesses (source builds, VCS backends) and needs $HOME for caches.
+    EnvPlan env_plan;
+    env_plan.project_root = project_root;
+    env_plan.venv = project_root / ".venv";
+    env_plan.wants_venv = true;
+    const auto run = RunCaptured(argv, project_root, BuildChildEnv(env_plan, settings),
                                  settings.install_timeout, 256 * 1024);
     if (!run.ok || run.exit_status != 0) {
         *error = "installing " + Join(specs, ", ") + " failed (" + via + "): " +
                  (run.error.empty() ? run.output : run.error + " " + run.output);
         return {};
     }
-    logger.info("python: auto-ensured [{}] in {}", Join(specs, ", "), venv_python);
-    *error = "";
-    return "installed: " + Join(specs, ", ");
+    logger.info("python: ensured [{}] in {}", Join(specs, ", "), venv_python);
+    return "ensured " + Join(specs, ", ") + " (" + via + ")";
 }
 
 SplitSpecs SplitDeclared(const std::vector<std::string>& entries) {
@@ -278,10 +212,17 @@ SplitSpecs SplitDeclared(const std::vector<std::string>& entries) {
 
 std::string SpecName(const std::string& spec) {
     if (spec.rfind(kRequirementsPrefix, 0) == 0) return spec;  // paths are their own identity
+    // The name ends at the first version operator, extras bracket, marker,
+    // direct-URL `@`, or whitespace; PEP 503 normalization then lowercases
+    // and collapses every run of `-`, `_`, `.` into one `-`.
     std::string name;
     for (const char c : spec) {
-        if (c == '=' || c == '<' || c == '>' || c == '!' || c == '~' || c == '[' || c == ' ') break;
-        name.push_back(c == '_' ? '-' : static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        if (c == '\0' || std::strchr("=<>!~[;@(, \t", c) != nullptr) break;
+        if (c == '-' || c == '_' || c == '.') {
+            if (!name.empty() && name.back() != '-') name.push_back('-');
+            continue;
+        }
+        name.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
     }
     while (!name.empty() && name.back() == '-') name.pop_back();
     return name;
@@ -302,6 +243,25 @@ DeclaredDiff ClassifyDiff(const std::vector<std::string>& current,
         }
     }
     return diff;
+}
+
+SharedResolution ResolveAgainstShared(const std::vector<std::string>& declared,
+                                      const std::vector<std::string>& in_use) {
+    SharedResolution out;
+    std::unordered_map<std::string, std::string> used;  // name -> spec
+    for (const auto& spec : in_use) used.emplace(SpecName(spec), spec);
+    for (const auto& spec : declared) {
+        const auto it = used.find(SpecName(spec));
+        if (it != used.end() && it->second != spec) {
+            out.conflicts.push_back(spec + " (another session in this project runs " +
+                                    it->second + ")");
+            out.record.push_back(it->second);  // what the shared venv actually keeps
+            continue;
+        }
+        out.install.push_back(spec);
+        out.record.push_back(spec);
+    }
+    return out;
 }
 
 }  // namespace minimal::tools_python

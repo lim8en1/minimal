@@ -10,8 +10,8 @@ namespace minimal::tools_python {
 
 // /python -- the operator's window into this plugin's interpreters, living in
 // the plugin that owns the state (the /restart-shell and /tasks rule).
-// ReadOnly: listing touches nothing; `restart` is the operator's kill that
-// does not depend on the model asking nicely.
+// Listing touches nothing; `restart` is the operator's kill that does not
+// depend on the model asking nicely -- which is why this is not ReadOnly.
 class PythonCommand : public minimal::commands::HarnessCommand {
 public:
     explicit PythonCommand(InterpreterStore* store) : store_(store) {}

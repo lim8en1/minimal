@@ -13,21 +13,29 @@
 #include <thread>
 #include <utility>
 
+#include "minimal/common/utf8.hpp"
+
 #include "driver_source.hpp"
+#include "json_fields.hpp"
 
 namespace minimal::tools_python {
 namespace {
 
 using tools::BackgroundTaskEvent;
 
-// The reader's slice. Long enough that an idle interpreter costs almost
-// nothing; short enough that session-death expiry and an outside HardKill are
-// felt within a fraction of a second.
-constexpr int kPollSliceMs = 100;
-// A protocol line above this is corruption (the driver caps its own captures
-// far below); treated as death -- degradation, never a wedge.
-constexpr std::size_t kMaxLineBytes = 64ULL * 1024 * 1024;
+// The reader's slice. Everything that needs the reader promptly (a queued
+// request, a kill, protocol traffic) wakes poll() directly, and deadlines
+// shorten the slice; the slice itself only bounds how late a session's death
+// is noticed through session_lifetime -- OnSessionEnded's Erase already
+// kills, so this is the backstop, not the mechanism.
+constexpr int kPollSliceMs = 500;
 constexpr std::size_t kMaxDiagBytes = 64 * 1024;
+constexpr std::size_t kReadChunk = 16 * 1024;  // stack buffers; the reader nests three
+// How long DeliverResponse waits for live-stream bytes the driver reports
+// having written but the reader has not read yet. They are already in the
+// pipe (the driver writes them before the response line), so this only
+// bounds a driver whose count was off (a signal between write and count).
+constexpr auto kStreamOwedBudget = std::chrono::milliseconds(500);
 
 // Sync waiters poll the cancel flag on this slice while parked on the
 // interpreter cv (two cvs -- the token's and the interpreter's -- cannot be
@@ -43,23 +51,22 @@ int BoundedSlice(int slice_ms, std::chrono::steady_clock::duration until) {
     return static_cast<int>(std::min<std::int64_t>(slice_ms, ms));
 }
 
-// nlohmann's value() throws type_error when the key is present with the
-// wrong type -- fine for a JSON payload we authored ourselves, wrong for a
-// protocol line whose author is the driver process, which a corrupted or
-// hostile child (executed code writing to fd 3 -- see driver_source.hpp) can
-// shape however it likes. These never throw: a present-but-wrong-typed field
-// reads as absent, same as a missing one.
-std::string StringField(const nlohmann::json& body, const char* key,
-                        std::string fallback = {}) {
-    const auto it = body.find(key);
-    if (it == body.end() || !it->is_string()) return fallback;
-    return it->get<std::string>();
+// The protocol-line ceiling. The driver caps each free-text field (result,
+// stdout, stderr, exc_msg) at max_capture_bytes CHARACTERS, and json.dumps
+// ASCII-escapes: an astral code point is 12 bytes on the wire (two \uXXXX
+// escapes). A fixed limit let a raised max_capture_bytes turn ordinary
+// output into "corruption"; this derives it from the same knob.
+std::size_t MaxLineBytes(std::int64_t max_capture_bytes) {
+    constexpr std::size_t kFloor = 64ULL * 1024 * 1024;
+    constexpr std::size_t kFields = 4, kBytesPerChar = 12, kMarkerSlack = 64;
+    const auto cap = static_cast<std::size_t>(std::max<std::int64_t>(max_capture_bytes, 0));
+    return std::max(kFloor, kFields * kBytesPerChar * (cap + kMarkerSlack) + 64 * 1024);
 }
 
-bool BoolField(const nlohmann::json& body, const char* key, bool fallback = false) {
-    const auto it = body.find(key);
-    if (it == body.end() || !it->is_boolean()) return fallback;
-    return it->get<bool>();
+void SetNonBlocking(int fd) {
+    if (fd < 0) return;
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 }  // namespace
@@ -75,12 +82,23 @@ Interpreter::Interpreter(LaunchedInterpreter proc, InterpreterConfig config,
       diag_fd_(proc.diag_fd),
       stream_fd_(proc.stream_fd),
       user_in_fd_(proc.user_in_fd),
+      max_line_bytes_(MaxLineBytes(settings.max_capture_bytes)),
       declared_(config_.declared) {
-    // python_input never parks the session worker: a full pipe (the script is
-    // not consuming) must surface as a partial write, not a blocked write.
-    if (user_in_fd_.get() >= 0) {
-        const int flags = ::fcntl(user_in_fd_.get(), F_GETFL, 0);
-        if (flags >= 0) ::fcntl(user_in_fd_.get(), F_SETFL, flags | O_NONBLOCK);
+    // Every channel is non-blocking: the reader drains stream/diag to EAGAIN
+    // before handling a response, writes queued requests as the pipe drains,
+    // and python_input never parks the session worker on a full stdin pipe.
+    SetNonBlocking(in_fd_.get());
+    SetNonBlocking(stream_fd_.get());
+    SetNonBlocking(diag_fd_.get());
+    SetNonBlocking(user_in_fd_.get());
+    int wake[2];
+    if (::pipe(wake) == 0) {
+        wake_r_ = ScopedFd(wake[0]);
+        wake_w_ = ScopedFd(wake[1]);
+        for (const int fd : wake) {
+            ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+            SetNonBlocking(fd);
+        }
     }
 }
 
@@ -108,9 +126,9 @@ std::shared_ptr<Interpreter> Interpreter::Spawn(const InterpreterConfig& config,
     }
 
     // The interpreter owns the reader thread JOINABLY: the destructor kills
-    // the process first (EOF wakes the reader within one poll slice) and joins
-    // before any member dies, so the reader can safely touch members up to the
-    // moment join() returns.
+    // the process first (EOF wakes the reader) and joins before any member
+    // dies, so the reader can safely touch members up to the moment join()
+    // returns.
     std::shared_ptr<Interpreter> self(
         new Interpreter(std::move(proc), config, settings, logger));
     self->StartReader();
@@ -126,9 +144,8 @@ std::shared_ptr<Interpreter> Interpreter::Spawn(const InterpreterConfig& config,
             self->cv_.wait_until(lock, deadline);
         }
         // Read under the same lock the reader thread writes both fields
-        // under (ready_ at DrainLine's "ready" branch, diag_tail_ on every
-        // diagnostics chunk): the reader is still running here regardless of
-        // which way the wait ended, so an unlocked read races it.
+        // under: the reader is still running here regardless of which way the
+        // wait ended, so an unlocked read races it.
         ready = self->ready_;
         diag = self->diag_tail_;
     }
@@ -146,15 +163,138 @@ void Interpreter::StartReader() {
     reader_ = std::thread([this] { ReaderLoop(); });
 }
 
+void Interpreter::Wake() {
+    if (wake_w_.get() < 0) return;
+    const char byte = 1;
+    // A full wake pipe already guarantees a wakeup; EAGAIN is success.
+    [[maybe_unused]] const auto n = ::write(wake_w_.get(), &byte, 1);
+}
+
+void Interpreter::EmitEvent(const RequestHandles& handles, const std::string& id,
+                            BackgroundTaskEvent::State state) const {
+    if (!handles.emit_task_event) return;
+    try {
+        BackgroundTaskEvent event;
+        event.task_id = id;
+        event.tool_use_id = handles.tool_use_id;
+        event.command = handles.label;
+        event.pid = pid_;
+        event.state = state;
+        handles.emit_task_event(event);
+    } catch (...) {
+    }
+}
+
+void Interpreter::AttributeStreamLocked(std::string_view bytes) {
+    // FIFO: at most one request runs, and it is the not-done head. Bytes with
+    // no running request are the tail of an already-reconciled request whose
+    // count was off -- dropped (the final capture is the record).
+    auto p = RunningPendingLocked();
+    if (!p) return;
+    p->streamed += bytes.size();
+    p->ring.Append(bytes);
+    if (p->handles.emit_output) {
+        try {
+            p->handles.emit_output(bytes);
+        } catch (...) {
+        }
+    }
+}
+
+void Interpreter::AttributeDiagLocked(std::string_view bytes) {
+    diag_tail_.append(bytes);
+    if (diag_tail_.size() > kMaxDiagBytes) {
+        diag_tail_.erase(0, diag_tail_.size() - kMaxDiagBytes);
+    }
+    // Process-level output (fd 1/2: subprocesses, os.system, C extensions)
+    // while a request runs is that request's. Best-effort: a child that
+    // outlives its request writes into whatever runs next.
+    auto p = RunningPendingLocked();
+    if (!p) return;
+    const auto cap = static_cast<std::size_t>(settings_.max_capture_bytes);
+    if (p->process_output.size() < cap) {
+        const auto take = std::min(cap - p->process_output.size(), bytes.size());
+        p->process_output.append(bytes.substr(0, take));
+        p->process_dropped += bytes.size() - take;
+    } else {
+        p->process_dropped += bytes.size();
+    }
+    p->ring.Append(bytes);
+    if (p->handles.emit_output) {
+        try {
+            p->handles.emit_output(bytes);
+        } catch (...) {
+        }
+    }
+}
+
+bool Interpreter::ReadStream() {
+    char chunk[kReadChunk];
+    while (true) {
+        const ssize_t n = ::read(stream_fd_.get(), chunk, sizeof(chunk));
+        if (n > 0) {
+            const std::lock_guard<std::mutex> lock(mu_);
+            AttributeStreamLocked(std::string_view(chunk, static_cast<std::size_t>(n)));
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
+        return false;  // EOF or error
+    }
+}
+
+bool Interpreter::ReadDiag() {
+    char chunk[kReadChunk];
+    while (true) {
+        const ssize_t n = ::read(diag_fd_.get(), chunk, sizeof(chunk));
+        if (n > 0) {
+            const std::lock_guard<std::mutex> lock(mu_);
+            AttributeDiagLocked(std::string_view(chunk, static_cast<std::size_t>(n)));
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
+        return false;
+    }
+}
+
+void Interpreter::ReadStreamOwed(const std::shared_ptr<Pending>& p, std::uint64_t want) {
+    const auto deadline = std::chrono::steady_clock::now() + kStreamOwedBudget;
+    char chunk[kReadChunk];
+    while (want > 0) {
+        const auto len = static_cast<std::size_t>(std::min<std::uint64_t>(want, sizeof(chunk)));
+        const ssize_t n = ::read(stream_fd_.get(), chunk, len);
+        if (n > 0) {
+            const std::lock_guard<std::mutex> lock(mu_);
+            const std::string_view bytes(chunk, static_cast<std::size_t>(n));
+            p->streamed += bytes.size();
+            p->ring.Append(bytes);
+            if (p->handles.emit_output) {
+                try {
+                    p->handles.emit_output(bytes);
+                } catch (...) {
+                }
+            }
+            want -= static_cast<std::uint64_t>(n);
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) return;
+        const auto left = deadline - std::chrono::steady_clock::now();
+        if (left <= std::chrono::steady_clock::duration::zero()) return;
+        pollfd fd{stream_fd_.get(), POLLIN, 0};
+        ::poll(&fd, 1, BoundedSlice(50, left));
+    }
+}
+
 void Interpreter::ReaderLoop() {
     std::string line;
     bool out_open = true, diag_open = true, stream_open = true;
     while (out_open || diag_open || stream_open) {
         if (dead_.load(std::memory_order_acquire)) return;  // HardKill cleaned up already
         if (config_.session_lifetime.expired()) {
-            // Session terminate: the kill path. There is no synchronous plugin
-            // kill hook at teardown (OnSessionEnded is fire-and-forget) -- this
-            // expiry poll IS the mechanism, at one poll slice of lag.
+            // Session terminate: the backstop kill path (OnSessionEnded's
+            // Erase normally gets there first).
             HardKill("session ended");
             return;
         }
@@ -168,8 +308,10 @@ void Interpreter::ReaderLoop() {
         const auto now = std::chrono::steady_clock::now();
         int timeout = kPollSliceMs;
         std::shared_ptr<Pending> fire, kill;
+        bool want_write = false;
         {
             std::lock_guard<std::mutex> lock(mu_);
+            want_write = !outbox_.empty();
             if (auto p = RunningPendingLocked()) {
                 StampRunningLocked(p, now);
                 if (p->deadline) {
@@ -177,6 +319,7 @@ void Interpreter::ReaderLoop() {
                         p->deadline_fired = true;
                         p->deadline_fired_at = now;
                         fire = p;
+                        if (p->async) EmitEvent(p->handles, p->id, BackgroundTaskEvent::State::kTimedOut);
                     } else if (p->deadline_fired) {
                         const auto grace_end =
                             *p->deadline_fired_at + std::chrono::seconds(settings_.grace_seconds);
@@ -192,134 +335,119 @@ void Interpreter::ReaderLoop() {
             }
         }
         if (kill) {
-            HardKill(("request " + kill->id + " exceeded its max_runtime deadline and did not " +
-                      "react to the interrupt within " + std::to_string(settings_.grace_seconds) +
-                      "s; the interpreter was killed (state lost) to stop it")
-                         .c_str());
+            HardKill("request " + kill->id + " exceeded its max_runtime deadline and did not " +
+                     "react to the interrupt within " + std::to_string(settings_.grace_seconds) +
+                     "s; the interpreter was killed (state lost) to stop it");
             return;
         }
-        if (fire) {
-            if (fire->handles.emit_task_event) {
-                try {
-                    BackgroundTaskEvent event;
-                    event.task_id = fire->id;
-                    event.tool_use_id = fire->handles.tool_use_id;
-                    event.command = fire->handles.label;
-                    event.pid = pid_;
-                    event.state = BackgroundTaskEvent::State::kTimedOut;
-                    fire->handles.emit_task_event(event);
-                } catch (...) {
-                }
-            }
-            SoftInterrupt();
-        }
+        if (fire) SoftInterrupt();
 
-        pollfd fds[3];
-        int nfds = 0;
-        const int out_slot = out_open ? nfds++ : -1;
-        if (out_open) fds[out_slot] = pollfd{out_fd_.get(), POLLIN, 0};
-        const int diag_slot = diag_open ? nfds++ : -1;
-        if (diag_open) fds[diag_slot] = pollfd{diag_fd_.get(), POLLIN, 0};
-        const int stream_slot = stream_open ? nfds++ : -1;
-        if (stream_open) fds[stream_slot] = pollfd{stream_fd_.get(), POLLIN, 0};
+        pollfd fds[5];
+        nfds_t nfds = 0;
+        auto add = [&](bool on, int fd, short events) -> int {
+            if (!on || fd < 0) return -1;
+            fds[nfds] = pollfd{fd, events, 0};
+            return static_cast<int>(nfds++);
+        };
+        const int out_slot = add(out_open, out_fd_.get(), POLLIN);
+        const int diag_slot = add(diag_open, diag_fd_.get(), POLLIN);
+        const int stream_slot = add(stream_open, stream_fd_.get(), POLLIN);
+        const int in_slot = add(want_write, in_fd_.get(), POLLOUT);
+        const int wake_slot = add(true, wake_r_.get(), POLLIN);
 
-        const int rc = poll(fds, static_cast<nfds_t>(nfds), timeout);
+        const int rc = ::poll(fds, nfds, timeout);
         if (rc < 0) {
             if (errno == EINTR) continue;
-            MarkDead("interpreter pipe error", false);
+            HardKill("interpreter pipe error");
             return;
         }
+        auto ready = [&](int slot) {
+            return slot >= 0 && (fds[slot].revents & (POLLIN | POLLOUT | POLLHUP | POLLERR));
+        };
 
-        char chunk[8192];
-        if (stream_slot >= 0 && (fds[stream_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
-            const ssize_t n = read(stream_fd_.get(), chunk, sizeof(chunk));
-            if (n > 0) {
-                // Attribute to the running request (FIFO: at most one). An
-                // idle interpreter producing stream bytes is corruption from
-                // a previous life -- drained and dropped.
-                const std::lock_guard<std::mutex> lock(mu_);
-                if (auto p = RunningPendingLocked(); p && !p->done) {
-                    p->ring.Append(std::string_view(chunk, static_cast<std::size_t>(n)));
-                    if (p->handles.emit_output) {
-                        try {
-                            p->handles.emit_output(std::string_view(chunk, static_cast<std::size_t>(n)));
-                        } catch (...) {
-                        }
-                    }
-                }
-            } else if (n == 0 || errno != EINTR) {
-                stream_open = false;
+        if (ready(wake_slot)) {
+            char sink[64];
+            while (::read(wake_r_.get(), sink, sizeof(sink)) > 0) {
             }
         }
-        if (out_slot >= 0 && (fds[out_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
-            const ssize_t n = read(out_fd_.get(), chunk, sizeof(chunk));
+        if (ready(in_slot)) {
+            std::lock_guard<std::mutex> lock(mu_);
+            while (!outbox_.empty()) {
+                const ssize_t n = ::write(in_fd_.get(), outbox_.data(), outbox_.size());
+                if (n > 0) {
+                    outbox_.erase(0, static_cast<std::size_t>(n));
+                    continue;
+                }
+                if (n < 0 && errno == EINTR) continue;
+                if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    // The driver closed its stdin: it is dying; the EOF on the
+                    // protocol pipe reports it. Nothing more can be written.
+                    outbox_.clear();
+                }
+                break;
+            }
+        }
+        if (ready(stream_slot) && !ReadStream()) stream_open = false;
+        if (ready(diag_slot) && !ReadDiag()) diag_open = false;
+        if (ready(out_slot)) {
+            char chunk[kReadChunk];
+            const ssize_t n = ::read(out_fd_.get(), chunk, sizeof(chunk));
             if (n > 0) {
                 line.append(chunk, static_cast<std::size_t>(n));
                 std::size_t start = 0;
                 while (true) {
                     const auto pos = line.find('\n', start);
                     if (pos == std::string::npos) break;
-                    // DrainLine reads through StringField/BoolField, which
-                    // never throw -- this guard is a second line of defense,
-                    // not the mechanism: the reader thread has nowhere to
-                    // send an exception (it runs detached from any caller's
-                    // stack), so an uncaught throw here would std::terminate
-                    // the whole server over one malformed protocol line.
+                    // DrainLine reads through the non-throwing field helpers;
+                    // this guard is a second line of defense: the reader has
+                    // nowhere to send an exception, and an uncaught throw
+                    // here would std::terminate the whole server over one
+                    // malformed protocol line.
+                    bool alive = false;
                     try {
-                        DrainLine(std::string_view(line).substr(start, pos - start));
+                        alive = DrainLine(std::string_view(line).substr(start, pos - start));
                     } catch (const std::exception& error) {
                         logger_.warn("python[{}]: DrainLine threw: {}", pid_, error.what());
-                        MarkDead("protocol corruption", config_.session_lifetime.expired());
-                        return;
+                        HardKill("protocol corruption");
                     }
-                    if (dead_.load(std::memory_order_acquire)) return;
+                    if (!alive) return;
                     start = pos + 1;
                 }
                 line.erase(0, start);
-                if (line.size() > kMaxLineBytes) {
-                    MarkDead("interpreter produced an oversized protocol line", false);
+                if (line.size() > max_line_bytes_) {
+                    HardKill("interpreter produced an oversized protocol line");
                     return;
                 }
-            } else if (n == 0 || errno != EINTR) {
+            } else if (n == 0 || (errno != EINTR && errno != EAGAIN)) {
                 // EOF: the process exited on its own (crash, os._exit, kill).
-                MarkDead("interpreter exited" +
-                             (diag_tail_.empty() ? "" : ": " + diag_tail_),
-                         config_.session_lifetime.expired());
-                return;
-            }
-        }
-        if (diag_slot >= 0 && (fds[diag_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
-            const ssize_t n = read(diag_fd_.get(), chunk, sizeof(chunk));
-            if (n > 0) {
-                // Locked: Spawn's startup wait (and any future cross-thread
-                // reader) reads diag_tail_ under mu_, so the append must be
-                // under it too -- this was previously unsynchronized.
-                std::lock_guard<std::mutex> lock(mu_);
-                diag_tail_.append(chunk, static_cast<std::size_t>(n));
-                if (diag_tail_.size() > kMaxDiagBytes) {
-                    diag_tail_.erase(0, diag_tail_.size() - kMaxDiagBytes);
+                // Drain what it left on the diagnostics pipe for the report.
+                if (diag_open) ReadDiag();
+                std::string tail;
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    tail = diag_tail_;
                 }
-            } else if (n == 0 || errno != EINTR) {
-                diag_open = false;  // diagnostics closed; the protocol side keeps this loop alive
+                HardKill("interpreter exited" + (tail.empty() ? "" : ": " + tail));
+                return;
             }
         }
     }
 }
 
-void Interpreter::DrainLine(std::string_view line) {
-    if (line.empty()) return;
+bool Interpreter::DrainLine(std::string_view line) {
+    if (line.empty()) return true;
     nlohmann::json body = nlohmann::json::parse(line, nullptr, false);
     if (body.is_discarded() || !body.is_object()) {
         logger_.warn("python[{}]: undecodable protocol line ({} bytes)", pid_, line.size());
-        MarkDead("protocol corruption", config_.session_lifetime.expired());
-        return;
+        HardKill("protocol corruption");
+        return false;
     }
     if (body.contains("ready")) {
         std::lock_guard<std::mutex> lock(mu_);
         version_ = StringField(body, "version", "unknown");
         ready_ = true;
         cv_.notify_all();
-        return;
+        return true;
     }
     if (body.contains("idle_interrupted")) {
         // A SIGINT landed with nothing running: the driver spent it and keeps
@@ -330,17 +458,25 @@ void Interpreter::DrainLine(std::string_view line) {
         ++idle_interrupts_;
         ++progress_;
         cv_.notify_all();
-        return;
-    }
-    if (body.contains("bad_request")) {
-        logger_.warn("python[{}]: driver rejected a request: {}", pid_,
-                     StringField(body, "bad_request"));
-        return;
+        return true;
     }
     const auto id_it = body.find("id");
-    if (id_it == body.end() || !id_it->is_string()) {
+    const bool has_id = id_it != body.end() && id_it->is_string();
+    if (body.contains("bad_request")) {
+        const auto why = StringField(body, "bad_request");
+        logger_.warn("python[{}]: driver rejected a request: {}", pid_, why);
+        // With an id the request can be failed; without one it cannot be
+        // matched (the parent only ever sends well-formed lines).
+        if (has_id) {
+            RequestOutcome outcome;
+            outcome.error = "the interpreter rejected the request: " + why;
+            DeliverResponse(id_it->get<std::string>(), std::move(outcome), 0);
+        }
+        return !dead_.load(std::memory_order_acquire);
+    }
+    if (!has_id) {
         logger_.warn("python[{}]: protocol line without an id; ignoring", pid_);
-        return;
+        return true;
     }
     RequestOutcome outcome;
     outcome.ok = BoolField(body, "ok");
@@ -350,16 +486,18 @@ void Interpreter::DrainLine(std::string_view line) {
     outcome.stderr_text = StringField(body, "stderr");
     if (outcome.ok) {
         outcome.result = StringField(body, "result");
-        outcome.result_json = StringField(body, "result_json");
     } else {
         outcome.error = StringField(body, "error", "request failed");
         outcome.exc_type = StringField(body, "exc");
         outcome.exc_msg = StringField(body, "exc_msg");
     }
-    DeliverResponse(id_it->get<std::string>(), std::move(outcome));
+    DeliverResponse(id_it->get<std::string>(), std::move(outcome),
+                    UintField(body, "streamed"));
+    return !dead_.load(std::memory_order_acquire);
 }
 
-void Interpreter::DeliverResponse(const std::string& id, RequestOutcome outcome) {
+void Interpreter::DeliverResponse(const std::string& id, RequestOutcome outcome,
+                                  std::uint64_t streamed) {
     std::shared_ptr<Pending> p;
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -369,46 +507,66 @@ void Interpreter::DeliverResponse(const std::string& id, RequestOutcome outcome)
             return;
         }
         p = it->second;
+    }
+
+    // Stream reconciliation: `streamed` is exactly how many fd-4 bytes this
+    // request wrote, all of them before this response line. Fewer read so
+    // far: the rest is already in the pipe -- read it now, so the tail is not
+    // attributed to the next request. More: the reader overshot into the
+    // next request's first bytes (read before this line was) -- hand them on.
+    // Process output (fd 1/2) is drained too; it has no count, so it stays
+    // best-effort.
+    if (p->streamed < streamed) ReadStreamOwed(p, streamed - p->streamed);
+    ReadDiag();
+
+    bool async = false;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        // A kill that landed while the stream was reconciled (lock released
+        // above) already failed and reported this request; delivering too
+        // would report it twice.
+        if (p->done) return;
+        std::string overshoot;
+        if (p->streamed > streamed) {
+            overshoot = p->ring.TakeBack(p->streamed - streamed);
+            p->streamed = streamed;
+        }
         p->outcome = std::move(outcome);
+        if (!p->process_output.empty() || p->process_dropped > 0) {
+            p->outcome.process_output = p->process_output;
+            if (p->process_dropped > 0) {
+                p->outcome.process_output +=
+                    "\n[... " + std::to_string(p->process_dropped) + " bytes truncated ...]";
+            }
+        }
         // The deadline flag rides the outcome: a result that landed despite
         // the SIGINT is real, but the model must know the deadline was felt.
         p->outcome.deadline_interrupted = p->deadline_fired;
         p->done = true;
+        async = p->async;
         ++progress_;
         cv_.notify_all();
         // A SYNC request's result is CLAIMED by its WaitSync (which erases the
         // entry): the response can beat the waiter to the map, and erasing
-        // here would lose it -- the tool call would report a dead interpreter
-        // for a request that completed. Async entries are consumed here and
-        // now (the reader is their only consumer after the injection).
-        if (p->async) pending_.erase(it);
-        // The completion record (any delivery path): python_output's window
-        // onto the completion->injection gap. Bounded metadata ring.
+        // here would lose it. Async entries are consumed here and now.
+        if (async) pending_.erase(id);
         const auto now = std::chrono::steady_clock::now();
         const double seconds =
             p->running_since ? std::chrono::duration<double>(now - *p->running_since).count() : 0.0;
         finished_.push_back(FinishedEntry{p->id, p->outcome, seconds});
         if (finished_.size() > kFinishedRing) finished_.pop_front();
+        if (!overshoot.empty()) AttributeStreamLocked(overshoot);
     }
 
-    const bool session_dead = p->handles.session_lifetime.expired();
-    if (p->handles.emit_task_event) {
-        try {
-            BackgroundTaskEvent event;
-            event.task_id = p->id;
-            event.tool_use_id = p->handles.tool_use_id;
-            event.command = p->handles.label;
-            event.pid = pid_;
-            event.state = p->outcome.ok ? BackgroundTaskEvent::State::kCompleted
-                                        : BackgroundTaskEvent::State::kFailed;
-            p->handles.emit_task_event(event);
-        } catch (...) {
-        }
-    }
-    // The lifecycle event went out first, so a client marks the row terminal
-    // before (or at worst alongside) the injected result arrives. A session
-    // that is gone refuses the injection anyway -- skipping is equivalent.
-    if (p->async && !session_dead) InjectAsync(*p);
+    // Lifecycle events exist only for background (async or demoted) work;
+    // Started went out under mu_ before this request could complete, so a
+    // client never sees the terminal state first. A session that is gone
+    // refuses the injection anyway -- skipping is equivalent.
+    if (!async) return;
+    EmitEvent(p->handles, p->id,
+              p->outcome.ok ? BackgroundTaskEvent::State::kCompleted
+                            : BackgroundTaskEvent::State::kFailed);
+    if (!p->handles.session_lifetime.expired()) InjectAsync(*p);
 }
 
 void Interpreter::InjectAsync(const Pending& p) {
@@ -428,28 +586,28 @@ void Interpreter::InjectAsync(const Pending& p) {
 
 std::optional<std::string> Interpreter::Submit(const std::string& code, bool async,
                                                RequestHandles handles, std::string* error,
-                                               std::int64_t max_runtime_seconds) {
-    if (dead_.load(std::memory_order_acquire)) {
-        *error = "interpreter is not running";
-        return std::nullopt;
-    }
+                                               std::int64_t max_runtime_seconds,
+                                               std::size_t* queued_ahead) {
     static std::atomic<std::uint64_t> next_id{1};
     const auto id = "py-" + std::to_string(next_id.fetch_add(1, std::memory_order_relaxed));
-    auto payload = nlohmann::json{{"id", id}, {"code", code}}.dump();
+    auto payload = nlohmann::json{{"id", id}, {"code", code}}.dump(
+        -1, ' ', false, nlohmann::json::error_handler_t::replace);
     payload.push_back('\n');
 
     {
         std::lock_guard<std::mutex> lock(mu_);
-        // Rechecked under mu_: the outer check above and this insert are two
-        // separate critical sections, so MarkDead (dead_ := true, THEN locks
-        // mu_ to clear pending_) can land in between -- without this, the
-        // entry inserted here lands in a map MarkDead already cleared, with
-        // no reader left alive to ever mark it done. Acked "started" and
-        // never completed or failed.
+        // Checked under mu_: MarkDead sets dead_ and then clears pending_
+        // under this lock, so an entry inserted after a death is impossible
+        // and one inserted before it is failed by MarkDead.
         if (dead_.load(std::memory_order_acquire)) {
             *error = "interpreter is not running";
             return std::nullopt;
         }
+        std::size_t ahead = 0;
+        for (const auto& [other_id, other] : pending_) {
+            if (!other->done) ++ahead;
+        }
+        if (queued_ahead != nullptr) *queued_ahead = ahead;
         auto p = std::make_shared<Pending>(static_cast<std::size_t>(settings_.stream_head_bytes),
                                            static_cast<std::size_t>(settings_.stream_tail_bytes));
         p->id = id;
@@ -457,28 +615,14 @@ std::optional<std::string> Interpreter::Submit(const std::string& code, bool asy
         p->async = async;
         p->handles = std::move(handles);
         p->max_runtime_seconds = max_runtime_seconds > 0 ? max_runtime_seconds : 0;
+        // Started goes out under mu_, BEFORE the request line can reach the
+        // driver: the completion (emitted by the reader after it takes mu_)
+        // can never overtake it.
+        if (async) EmitEvent(p->handles, id, BackgroundTaskEvent::State::kStarted);
         pending_.emplace(id, std::move(p));
+        outbox_ += payload;
     }
-
-    // One writer at a time: both tools are parallel_safe() == false, so the
-    // loop runs them one at a time on the worker -- the serialized FIFO queue
-    // is the semantics. A line larger than the pipe buffer blocks here until
-    // the driver drains, which is exactly "queued behind the running request".
-    std::size_t written = 0;
-    while (written < payload.size()) {
-        const ssize_t n =
-            ::write(in_fd_.get(), payload.data() + written, payload.size() - written);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            {
-                std::lock_guard<std::mutex> lock(mu_);
-                pending_.erase(id);
-            }
-            *error = std::string("failed to write to the interpreter: ") + std::strerror(errno);
-            return std::nullopt;
-        }
-        written += static_cast<std::size_t>(n);
-    }
+    Wake();
     return id;
 }
 
@@ -508,20 +652,18 @@ Interpreter::WaitOutcome Interpreter::WaitSync(const std::string& id,
             return p->done ? WaitOutcome::kCompleted : WaitOutcome::kDead;
         }
         const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) {
-            // THE DEMOTION: the deadline converts the request to async
-            // delivery -- the interpreter and its state are untouched, and the
-            // reader will inject the result at a turn boundary when it
-            // eventually completes. Under mu_, so a response arriving in the
-            // race window is either seen as done above or delivered async.
+        const bool expired = now >= deadline;
+        const bool cancelled = !expired && cancel && cancel->IsCancelled();
+        if (expired || cancelled) {
+            // THE DEMOTION: the deadline (or CancelTurn, which never kills
+            // background work) converts the request to async delivery -- the
+            // interpreter and its state are untouched, and the reader injects
+            // the result when it completes. Under mu_, so a response arriving
+            // in the race window is either seen as done above or delivered
+            // async; it is now a background task, announced as one.
             p->async = true;
-            return WaitOutcome::kDemoted;
-        }
-        if (cancel && cancel->IsCancelled()) {
-            // CancelTurn never kills background work; identical to the
-            // deadline case, only the wording differs.
-            p->async = true;
-            return WaitOutcome::kCancelled;
+            EmitEvent(p->handles, p->id, BackgroundTaskEvent::State::kStarted);
+            return expired ? WaitOutcome::kDemoted : WaitOutcome::kCancelled;
         }
         cv_.wait_until(lock, std::min(deadline, now + kCancelSlice));
     }
@@ -546,12 +688,9 @@ void Interpreter::StampRunningLocked(const std::shared_ptr<Pending>& p,
     if (p->running_since) return;
     p->running_since = now;
     if (p->max_runtime_seconds > 0) {
-        // Clamped here too, not just at python_tools.cpp's parse site: this
-        // is the actual computation that overflows (converting
-        // std::chrono::seconds to a nanosecond-resolution duration multiplies
-        // by 1e9, wrapping above ~9.2e9 seconds), so Submit is not the only
-        // caller this needs to be safe against.
-        constexpr std::int64_t kMaxSaneRuntimeSeconds = 100'000'000;  // ~3.2 years
+        // Clamped here too, not just at the parse sites: this is the actual
+        // computation that overflows (seconds -> a nanosecond-resolution
+        // duration), so no caller of Submit can wrap it into the past.
         const auto seconds = std::min(p->max_runtime_seconds, kMaxSaneRuntimeSeconds);
         p->deadline = now + std::chrono::seconds(seconds);
     }
@@ -695,24 +834,17 @@ void Interpreter::AdoptDeclared(const std::vector<std::string>& added) {
 void Interpreter::MarkDead(std::string reason, bool session_dead) {
     bool expected = false;
     if (!dead_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
-    // `reason` rides into every pending outcome below; there is no separate
-    // death record to keep.
 
     std::vector<std::shared_ptr<Pending>> to_fail;
     {
         std::lock_guard<std::mutex> lock(mu_);
+        outbox_.clear();
         for (auto it = pending_.begin(); it != pending_.end();) {
             auto& p = it->second;
-            // A done-but-unclaimed entry (a sync request DeliverResponse
-            // already filled with its REAL outcome, whose WaitSync just
-            // hasn't run the `p->done` check yet) must be left ALONE, in the
-            // map, not just un-overwritten: WaitSync's very first lookup is
-            // `pending_.find(id)` -- a caller that has not reached its
-            // while-loop yet (this death can predate the caller by any
-            // amount) needs the entry still findABLE, not merely intact in
-            // memory, or it reads as kDead on a request that actually
-            // completed successfully. Only NOT-done entries are converted to
-            // a failure and removed; they are no longer "pending" anything.
+            // A done-but-unclaimed entry (a sync result DeliverResponse filled
+            // whose WaitSync has not run yet -- this death can predate the
+            // caller by any amount) stays in the map, findable, with its REAL
+            // outcome. Only NOT-done entries become failures and leave.
             if (p->done) {
                 ++it;
                 continue;
@@ -727,39 +859,23 @@ void Interpreter::MarkDead(std::string reason, bool session_dead) {
         ++progress_;
         cv_.notify_all();
     }
+    Wake();
     for (const auto& p : to_fail) {
         if (session_dead) continue;  // the session is gone; nothing to report to
-        // Only ASYNC requests are injected: their completion would otherwise
-        // never be delivered. A SYNC request's tool call is the delivery --
-        // WaitSync wakes on the filled outcome above (or returns kDead when
-        // the entry is already gone) and the tool reports the loss itself;
-        // injecting too would duplicate the tool_use_id's result, which the
-        // provider rejects as an unexpected tool_result.
+        // Only ASYNC requests are reported here: a SYNC request's tool call
+        // is the delivery (WaitSync wakes on the filled outcome), and a
+        // second result for the same tool_use_id is rejected by the provider.
         if (!p->async) continue;
-        // The session is ALIVE and this death is an explicit kill (or a
-        // crash): report each lost request honestly.
-        if (p->handles.emit_task_event) {
-            try {
-                BackgroundTaskEvent event;
-                event.task_id = p->id;
-                event.tool_use_id = p->handles.tool_use_id;
-                event.command = p->handles.label;
-                event.pid = pid_;
-                event.state = BackgroundTaskEvent::State::kFailed;
-                p->handles.emit_task_event(event);
-            } catch (...) {
-            }
-        }
+        EmitEvent(p->handles, p->id, BackgroundTaskEvent::State::kFailed);
         InjectAsync(*p);
     }
 }
 
-void Interpreter::HardKill(const char* reason) {
+void Interpreter::HardKill(const std::string& reason) {
     MarkDead(reason, config_.session_lifetime.expired());
-    // Idempotent the same way MarkDead is: a second HardKill call (session
-    // teardown racing an explicit kill, or ~Interpreter calling it again
-    // after an earlier death already reaped pid_) must not re-kill/re-reap a
-    // pid the OS may have recycled for an unrelated process since.
+    // Idempotent the same way MarkDead is: a second HardKill (session
+    // teardown racing an explicit kill, ~Interpreter after an earlier death)
+    // must not re-kill/re-reap a pid the OS may have recycled since.
     bool expected = false;
     if (!reaped_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
     // ReapAfterKill includes the group kill (plus the fork-to-setsid window
@@ -770,11 +886,9 @@ void Interpreter::HardKill(const char* reason) {
                      pid_, reason);
     }
     ForgetPgid(pid_);
-    // The reader exits on its next slice (dead_ is set). It holds NO
-    // shared_ptr -- it captures raw `this` (StartReader) -- so it is safe
-    // only because ~Interpreter joins it before any member is torn down
-    // (see the class comment's THREAD/OWNERSHIP CONTRACT). Do not drop that
-    // join.
+    // The reader exits on its next wakeup (dead_ is set, Wake() fired). It
+    // holds NO shared_ptr -- it captures raw `this` (StartReader) -- so it is
+    // safe only because ~Interpreter joins it before any member is torn down.
 }
 
 std::vector<std::string> Interpreter::PendingIds() {
@@ -808,14 +922,10 @@ std::vector<Interpreter::PendingRow> Interpreter::PendingRows() {
 }
 
 std::string FormatOutcome(const std::string& id, const RequestOutcome& outcome,
-                          std::size_t queued_behind, std::int64_t max_bytes) {
+                          std::size_t queued_ahead, std::int64_t max_bytes) {
     std::string text;
     if (outcome.ok) {
-        // JSON-preferred: a serializable trailing expression is displayed as
-        // its JSON rendering; the repr stays the fallback for rich objects.
-        const std::string& value =
-            outcome.result_json.empty() ? outcome.result : outcome.result_json;
-        text = id + (value.empty() ? " ok" : " ok: " + value);
+        text = id + (outcome.result.empty() ? " ok" : " ok: " + outcome.result);
     } else {
         text = id + " failed";
         if (!outcome.exc_type.empty()) {
@@ -831,20 +941,32 @@ std::string FormatOutcome(const std::string& id, const RequestOutcome& outcome,
                 "but still finished]";
     }
     if (!outcome.stdout_text.empty()) text += "\n--- stdout ---\n" + outcome.stdout_text;
+    if (!outcome.process_output.empty()) {
+        text += "\n--- process output (fd 1/2: subprocesses, os.system) ---\n" +
+                outcome.process_output;
+    }
     if (!outcome.stderr_text.empty()) text += "\n--- stderr ---\n" + outcome.stderr_text;
     if (!outcome.ok && !outcome.error.empty() && outcome.error != outcome.stderr_text) {
         text += "\n--- error ---\n" + outcome.error;
     }
-    if (queued_behind > 0) {
-        text += "\n[queued behind " + std::to_string(queued_behind) +
-                " other request(s) in this interpreter]";
+    if (queued_ahead > 0) {
+        text += "\n[ran after " + std::to_string(queued_ahead) +
+                " earlier request(s) queued in this interpreter]";
     }
     if (static_cast<std::int64_t>(text.size()) > max_bytes) {
         const auto cap = static_cast<std::size_t>(max_bytes);
         const auto head = cap / 4;
         const auto tail = cap - head;
-        text = text.substr(0, head) + "\n[... " + std::to_string(text.size() - cap) +
-               " bytes omitted ...]\n" + text.substr(text.size() - tail);
+        // UTF-8-safe cuts: never split a multi-byte sequence at either end.
+        std::string tail_text = text.substr(text.size() - tail);
+        std::size_t skip = 0;
+        while (skip < tail_text.size() &&
+               (static_cast<unsigned char>(tail_text[skip]) & 0xC0) == 0x80) {
+            ++skip;
+        }
+        text = common::TruncateUtf8Bytes(text, head) + "\n[... " +
+               std::to_string(text.size() - cap) + " bytes omitted ...]\n" +
+               tail_text.substr(skip);
     }
     return text;
 }

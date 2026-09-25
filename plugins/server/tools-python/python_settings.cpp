@@ -1,5 +1,7 @@
 #include "python_settings.hpp"
 
+#include <algorithm>
+
 namespace minimal::tools_python {
 namespace {
 
@@ -61,14 +63,10 @@ PythonSettings ParsePythonSettings(const nlohmann::json& config) {
     if (settings.stream_head_bytes <= 0) settings.stream_head_bytes = 256 * 1024;
     if (settings.stream_tail_bytes <= 0) settings.stream_tail_bytes = 768 * 1024;
     if (settings.background_max_runtime < 0) settings.background_max_runtime = 0;
-    // Feeds `now() + std::chrono::seconds(N)` (python_interpreter.cpp's
-    // StampRunningLocked): converting to a nanosecond-resolution duration
-    // overflows a 64-bit rep above ~9.2e9 seconds (~292 years) and wraps to a
-    // deadline in the past, hard-killing the interpreter almost immediately.
-    // Same ceiling python_tools.cpp applies to a request's own max_runtime.
-    constexpr std::int64_t kMaxSaneRuntimeSeconds = 100'000'000;  // ~3.2 years
-    if (settings.background_max_runtime > kMaxSaneRuntimeSeconds) {
-        settings.background_max_runtime = kMaxSaneRuntimeSeconds;
+    for (auto* seconds : {&settings.sync_wait_ceiling, &settings.startup_timeout,
+                          &settings.install_timeout, &settings.grace_seconds,
+                          &settings.background_max_runtime}) {
+        *seconds = std::min(*seconds, kMaxSaneRuntimeSeconds);
     }
     return settings;
 }

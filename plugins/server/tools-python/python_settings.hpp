@@ -8,6 +8,14 @@
 
 namespace minimal::tools_python {
 
+// Ceiling for every seconds value that feeds `now() + std::chrono::seconds(N)`
+// (request timeouts, max_runtime, background_max_runtime): converting to a
+// nanosecond-resolution duration overflows a 64-bit rep above ~9.2e9 seconds
+// (~292 years) and wraps to a deadline in the PAST -- a request would be
+// SIGINT'd and hard-killed at once despite asking for more time. Far past any
+// real deadline.
+inline constexpr std::int64_t kMaxSaneRuntimeSeconds = 100'000'000;  // ~3.2 years
+
 // This plugin's config, the "config" object on its plugins.json entry. Core
 // keeps it raw precisely so each plugin owns its schema -- this is that schema.
 // ALL times are SECONDS (this plugin's schema contract; interpreter interaction

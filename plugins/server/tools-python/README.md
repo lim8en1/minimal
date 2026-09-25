@@ -13,8 +13,8 @@ session-lifecycle observer.
   as bash: against an adversarial model, only a container helps.
 - **Tool**: `python_output` — poll background work without blocking: task
   listing (running/queued/finished) and byte-offset slices of a running
-  task's live stdout stream (or a finished task's final capture), with an
-  optional post-scope line regex.
+  task's live output (or a finished task's final stdout capture), with an
+  optional post-scope line regex. Category ReadOnly: polling runs nothing.
 - **Tool**: `python_input` — feed the stdin channel of the running code; a
   blocking `input()` parks the interpreter until this is called.
 - **Tool**: `python_interrupt` — sends SIGINT (or `kill=true` for the group).
@@ -30,9 +30,15 @@ session-lifecycle observer.
 - **Environment contract**: state is per-session; the environment is ONE shared
   `.venv` per project, created on demand. Agent presets declare package
   contracts via `tool_config.python` frontmatter (see below); the declared set
-  is diffed against the venv on every call — additive entries auto-install
-  (immediately importable), spec conflicts are reported loudly instead of
-  silently re-versioning the shared environment.
+  is diffed on every call against this interpreter's record AND every other
+  live session's in the project — additive entries auto-install (immediately
+  importable), spec conflicts are reported once instead of silently
+  re-versioning the shared environment under code that already imported it.
+- **Output**: `print`/`sys.stdout` is captured per request and streamed live;
+  process-level output (fd 1/2 — `subprocess`, `os.system`, C extensions) is
+  attributed to the running request and reported as its own section. A
+  trailing expression's `repr` is the result (`None` is no result, as in the
+  REPL); tracebacks show the executed source lines.
 
 ## Configuration
 
@@ -70,7 +76,7 @@ to 0, which means disabled/unlimited).
 | `install_timeout` | `300` | Bounded venv creation / package installation. |
 | `grace_seconds` | `2` | How long `python_interrupt` (and a `max_runtime` expiry) waits before reporting "no reaction" / escalating to the hard kill. |
 | `max_output_bytes` | `1048576` (1 MiB) | Bounds the persisted result text per request. |
-| `max_capture_bytes` | `1048576` (1 MiB) | Driver-side per-stream (stdout/stderr) capture cap; bounds the protocol line size. |
+| `max_capture_bytes` | `1048576` (1 MiB) | Per-field capture cap (stdout, stderr, process output, result, exception message); the protocol-line limit is derived from it. |
 | `rlimit_cpu_seconds` | `0` (off) | RLIMIT_CPU backstop for the interpreter process. Off by default: the interpreter's clock is the session's clock, and a CPU-spinning live session is the model's/user's to interrupt. |
 | `max_file_size_bytes` | `1073741824` (1 GiB) | RLIMIT_FSIZE backstop for files the executed code writes. |
 | `stream_head_bytes` | `262144` (256 KiB) | Live-output ring, head window (first bytes); `python_output` reads this while a task runs. |

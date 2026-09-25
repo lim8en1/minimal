@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -29,20 +30,32 @@ public:
     // reader thread converges on the same outcome through dead_).
     void Erase(const std::string& session_id, const char* reason);
 
+    // The declared records of every OTHER session's live venv interpreter in
+    // this project: what the shared venv must keep satisfying (see
+    // ResolveAgainstShared). Call under ProjectInstallMutex so a concurrent
+    // spawn cannot slip between this check and its own registration.
+    std::vector<std::string> DeclaredInProject(const std::filesystem::path& project_root,
+                                               const std::string& except_session) const;
+
     // Interpreters alive per session, for the /python command.
     struct Listing {
         std::string session_id;
-        pid_t pid;
-        bool alive;
-        std::string python;   // resolved binary
+        pid_t pid = -1;
+        bool alive = false;
+        std::string python;   // interpreter binary
         std::string version;
-        std::size_t declared_count;
-        bool venved;
+        std::size_t declared_count = 0;
+        bool venved = false;
         std::vector<Interpreter::PendingRow> pending;
     };
     std::vector<Listing> List(const std::string& session_id) const;
 
 private:
+    // The interpreters (and their session ids) matching `session_id` (empty =
+    // all), copied out under the registry lock.
+    std::vector<std::shared_ptr<Interpreter>> Snapshot(const std::string& session_id,
+                                                       std::vector<std::string>* ids) const;
+
     mutable std::mutex mu_;
     std::unordered_map<std::string, std::shared_ptr<Interpreter>> interpreters_;
 };

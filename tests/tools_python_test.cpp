@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <signal.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -355,13 +357,13 @@ TEST_CASE("the interpreter execs, evals, captures output and keeps state",
                              &outcome) == Interpreter::WaitOutcome::kCompleted);
     CHECK(outcome.result == "'hello world'");
 
-    // stdout is captured per request; a bare call expression yields repr(None).
+    // stdout is captured per request; a trailing None is no result (REPL rule).
     const auto id4 = interp->Submit("print('on stdout')", false, handles, &submit_error);
     REQUIRE(id4.has_value());
     REQUIRE(interp->WaitSync(*id4, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(10),
                              &outcome) == Interpreter::WaitOutcome::kCompleted);
     CHECK(outcome.stdout_text == "on stdout\n");
-    CHECK(outcome.result == "None");
+    CHECK(outcome.result.empty());
     CHECK(outcome.ok);
 }
 
@@ -783,7 +785,7 @@ TEST_CASE("StreamRing: head+tail retention, offsets, gap markers, clamping",
     }
 }
 
-TEST_CASE("structured returns: exc fields on failure, result_json on success",
+TEST_CASE("structured returns: exc fields, repr results, readable tracebacks",
           "[tools_python][interpreter]") {
     if (!HavePython3()) SKIP("python3 not available");
     TempDir dir;
@@ -793,7 +795,7 @@ TEST_CASE("structured returns: exc fields on failure, result_json on success",
     config.python_path = ResolveOnPath("python3");
     config.cwd = dir.path();
     config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()},
-                  {"PYTHONUNBUFFERED", "1"}};
+                  {"PYTHONUNBUFFERED", "1"}, {"_MINIMAL_PY_CAPTURE", "1024"}};
     config.session_lifetime = kLifetimeToken;
     std::string error;
     auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
@@ -816,27 +818,48 @@ TEST_CASE("structured returns: exc fields on failure, result_json on success",
     const auto text = FormatOutcome(*id, outcome, 0, 1 << 20);
     CHECK(text.find("exception: ValueError: boom") != std::string::npos);
 
-    const auto id2 = interp->Submit("{'a': 1, 'b': [1, 2]}", false, handles, &submit_error);
-    REQUIRE(id2.has_value());
-    REQUIRE(interp->WaitSync(*id2, nullptr, std::chrono::steady_clock::now() +
-                                                  std::chrono::seconds(10),
-                             &outcome) == Interpreter::WaitOutcome::kCompleted);
-    CHECK(outcome.ok);
-    CHECK(outcome.result_json == "{\"a\": 1, \"b\": [1, 2]}");
-    const auto text2 = FormatOutcome(*id2, outcome, 0, 1 << 20);
-    // JSON-preferred display: the dict renders as JSON, not as Python repr.
-    CHECK(text2.find("ok: {\"a\": 1, \"b\": [1, 2]}") != std::string::npos);
-    CHECK(text2.find("{'a': 1}") == std::string::npos);
+    auto run = [&](const std::string& code) {
+        const auto rid = interp->Submit(code, false, handles, &submit_error);
+        REQUIRE(rid.has_value());
+        REQUIRE(interp->WaitSync(*rid, nullptr,
+                                 std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                                 &outcome) == Interpreter::WaitOutcome::kCompleted);
+        return FormatOutcome(*rid, outcome, 0, 1 << 20);
+    };
 
-    // A non-serializable value falls back to repr, no result_json.
-    const auto id3 = interp->Submit("object()", false, handles, &submit_error);
-    REQUIRE(id3.has_value());
-    REQUIRE(interp->WaitSync(*id3, nullptr, std::chrono::steady_clock::now() +
-                                                  std::chrono::seconds(10),
-                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    // repr is the display: JSON would turn int keys into strings and tuples
+    // into lists.
+    const auto text2 = run("{1: 'a', 'b': (1, 2)}");
     CHECK(outcome.ok);
-    CHECK(outcome.result_json.empty());
-    CHECK(outcome.result.find("<object object at") != std::string::npos);
+    CHECK(outcome.result == "{1: 'a', 'b': (1, 2)}");
+    CHECK(text2.find("ok: {1: 'a', 'b': (1, 2)}") != std::string::npos);
+
+    // A trailing None is not a result (the REPL rule): print() as the last
+    // line must not append "ok: None".
+    const auto text3 = run("print('hi')");
+    CHECK(outcome.ok);
+    CHECK(outcome.result.empty());
+    CHECK(text3.find("None") == std::string::npos);
+    CHECK(text3.find("hi") != std::string::npos);
+
+    // Tracebacks show the executed source line and no driver frames.
+    run("def f():\n    return 1 / 0\n\nf()");
+    CHECK_FALSE(outcome.ok);
+    CHECK(outcome.stderr_text.find("return 1 / 0") != std::string::npos);
+    CHECK(outcome.stderr_text.find("_main") == std::string::npos);
+
+    // ...and inspect.getsource works on a function defined by an earlier request.
+    run("import inspect\ninspect.getsource(f)");
+    CHECK(outcome.ok);
+    CHECK(outcome.result.find("return 1 / 0") != std::string::npos);
+
+    // A huge exception message is capped like every other field -- uncapped,
+    // it produced a protocol line past the limit and killed the interpreter.
+    run("raise KeyError('k' * 3000)");
+    CHECK_FALSE(outcome.ok);
+    CHECK(outcome.exc_msg.size() < 1500);
+    CHECK(outcome.exc_msg.find("truncated") != std::string::npos);
+    CHECK(interp->alive());
 }
 
 TEST_CASE("finished tasks stay visible through the completion->injection gap",
@@ -1662,6 +1685,15 @@ TEST_CASE("python_output lists tasks, slices output, and greps",
     CHECK(grep.result.content_text.find("progress-line") == std::string::npos);
     CHECK(grep.result.content_text.find("[14] error-line") != std::string::npos);
 
+    // read: takes OFFSET,LENGTH -- and the OFFSET:LENGTH misspelling means
+    // the same thing instead of erroring.
+    for (const char* scope : {"read:14,10", "read:14:10"}) {
+        auto read = f.Output(nlohmann::json{{"task_id", id}, {"scope", scope}});
+        REQUIRE_FALSE(read.result.is_error);
+        CHECK(read.result.content_text.find("\nerror-line") != std::string::npos);
+        CHECK(read.result.content_text.find("[next: read:24,10]") != std::string::npos);
+    }
+
     // A bad regex is an error, not a crash.
     auto bad = f.Output(nlohmann::json{{"task_id", id}, {"grep", "(unclosed"}});
     CHECK(bad.result.is_error);
@@ -1770,4 +1802,274 @@ TEST_CASE("a startup timeout reads the diag tail without racing the reader threa
         // exercised.
         CHECK(error.find("not really python") != std::string::npos);
     }
+}
+
+// --- review regressions --------------------------------------------------------------
+
+namespace {
+
+std::shared_ptr<Interpreter> SpawnPlain(const TempDir& dir, PythonSettings settings = {}) {
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    INFO(error);
+    REQUIRE(interp != nullptr);
+    return interp;
+}
+
+RequestHandles PlainHandles() {
+    RequestHandles handles;
+    handles.session_lifetime = kLifetimeToken;
+    return handles;
+}
+
+}  // namespace
+
+TEST_CASE("a finished request's stream tail is never attributed to the next request",
+          "[tools_python][interpreter][stream]") {
+    // Regression: the reader read 8 KiB of live stream per iteration, so a
+    // request that printed more than that could still have bytes in the pipe
+    // when its response arrived -- and they landed in the NEXT request's ring.
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    auto interp = SpawnPlain(dir);
+    std::string submit_error;
+    for (int round = 0; round < 3; ++round) {
+        const auto big = interp->Submit("print('a' * 300000)", true, PlainHandles(), &submit_error);
+        const auto next = interp->Submit("print('B-START'); import time; time.sleep(30)", true,
+                                         PlainHandles(), &submit_error);
+        REQUIRE(big.has_value());
+        REQUIRE(next.has_value());
+        WaitFor([&] { return interp->ReadTaskOutput(*next, 0, 64).slice.total >= 8; },
+                std::chrono::seconds(10));
+        const auto read = interp->ReadTaskOutput(*next, 0, 64);
+        REQUIRE(read.found);
+        CHECK(read.slice.text == "B-START\n");
+        CHECK(read.slice.total == 8);
+        const auto baseline = interp->Progress();
+        interp->SoftInterrupt();
+        interp->WaitForInterrupt(baseline, std::chrono::seconds(5), nullptr);
+    }
+    CHECK(interp->alive());
+}
+
+TEST_CASE("an async request's Started event always precedes its terminal event",
+          "[tools_python][interpreter][events]") {
+    // Regression: python_exec emitted Started AFTER Submit wrote the request,
+    // so an instant request could complete (and emit Completed) first,
+    // leaving the client's row stuck "running".
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    auto interp = SpawnPlain(dir);
+    std::mutex mu;
+    std::vector<tools::BackgroundTaskEvent> events;
+    RequestHandles handles = PlainHandles();
+    handles.emit_task_event = [&](const tools::BackgroundTaskEvent& event) {
+        std::lock_guard<std::mutex> lock(mu);
+        events.push_back(event);
+    };
+    std::vector<std::string> ids;
+    std::string submit_error;
+    for (int i = 0; i < 20; ++i) {
+        const auto id = interp->Submit("1 + 1", true, handles, &submit_error);
+        REQUIRE(id.has_value());
+        ids.push_back(*id);
+    }
+    WaitFor([&] {
+        std::lock_guard<std::mutex> lock(mu);
+        return events.size() >= 40;
+    }, std::chrono::seconds(15));
+    std::lock_guard<std::mutex> lock(mu);
+    REQUIRE(events.size() == 40);
+    for (const auto& id : ids) {
+        std::vector<tools::BackgroundTaskEvent::State> states;
+        for (const auto& event : events) {
+            if (event.task_id == id) states.push_back(event.state);
+        }
+        REQUIRE(states.size() == 2);
+        CHECK(states[0] == tools::BackgroundTaskEvent::State::kStarted);
+        CHECK(states[1] == tools::BackgroundTaskEvent::State::kCompleted);
+    }
+}
+
+TEST_CASE("a sync request emits no background events unless it is demoted",
+          "[tools_python][interpreter][events]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    auto interp = SpawnPlain(dir);
+    std::mutex mu;
+    std::vector<tools::BackgroundTaskEvent> events;
+    RequestHandles handles = PlainHandles();
+    handles.emit_task_event = [&](const tools::BackgroundTaskEvent& event) {
+        std::lock_guard<std::mutex> lock(mu);
+        events.push_back(event);
+    };
+    std::string submit_error;
+    RequestOutcome outcome;
+    const auto fast = interp->Submit("2 + 2", false, handles, &submit_error);
+    REQUIRE(interp->WaitSync(*fast, nullptr,
+                             std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        CHECK(events.empty());
+    }
+    const auto slow = interp->Submit("import time; time.sleep(1); 'late'", false, handles,
+                                     &submit_error);
+    REQUIRE(interp->WaitSync(*slow, nullptr,
+                             std::chrono::steady_clock::now() + std::chrono::milliseconds(200),
+                             &outcome) == Interpreter::WaitOutcome::kDemoted);
+    WaitFor([&] {
+        std::lock_guard<std::mutex> lock(mu);
+        return events.size() >= 2;
+    }, std::chrono::seconds(10));
+    std::lock_guard<std::mutex> lock(mu);
+    REQUIRE(events.size() == 2);
+    CHECK(events[0].state == tools::BackgroundTaskEvent::State::kStarted);
+    CHECK(events[1].state == tools::BackgroundTaskEvent::State::kCompleted);
+}
+
+TEST_CASE("protocol corruption kills and reaps the interpreter process",
+          "[tools_python][interpreter]") {
+    // Regression: the reader marked a corrupt interpreter dead and returned,
+    // leaving the process running with nobody draining its pipes.
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    auto interp = SpawnPlain(dir);
+    const pid_t pid = interp->pid();
+    std::string submit_error;
+    interp->Submit(
+        "import sys\n"
+        "emit = sys.modules['__main__']._st['emit']\n"
+        "proto = emit.__closure__[0].cell_contents\n"
+        "proto.write('not json\\n'); proto.flush()\n"
+        "import time; time.sleep(30)",
+        true, PlainHandles(), &submit_error);
+    WaitFor([&] { return !interp->alive(); }, std::chrono::seconds(10));
+    CHECK_FALSE(interp->alive());
+    WaitFor([&] { return ::kill(pid, 0) != 0; }, std::chrono::seconds(5));
+    CHECK(::kill(pid, 0) != 0);
+}
+
+TEST_CASE("a request larger than the pipe buffer queues without blocking Submit",
+          "[tools_python][interpreter]") {
+    // Regression: Submit wrote the request line with blocking writes, so a
+    // big request behind a running one parked the session worker until the
+    // running request finished.
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    auto interp = SpawnPlain(dir);
+    std::string submit_error;
+    REQUIRE(interp->Submit("import time; time.sleep(30)", true, PlainHandles(), &submit_error));
+    const std::string big = "blob = '" + std::string(300000, 'x') + "'\nlen(blob)";
+    const auto started = std::chrono::steady_clock::now();
+    std::size_t ahead = 0;
+    const auto id = interp->Submit(big, false, PlainHandles(), &submit_error, 0, &ahead);
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(1));
+    REQUIRE(id.has_value());
+    CHECK(ahead == 1);
+
+    const auto baseline = interp->Progress();
+    interp->SoftInterrupt();
+    interp->WaitForInterrupt(baseline, std::chrono::seconds(5), nullptr);
+    RequestOutcome outcome;
+    REQUIRE(interp->WaitSync(*id, nullptr,
+                             std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result == "300000");
+}
+
+TEST_CASE("process-level output (subprocesses, os.system) is attributed to the request",
+          "[tools_python][interpreter]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    auto interp = SpawnPlain(dir);
+    std::string submit_error;
+    const auto id = interp->Submit(
+        "import os, subprocess\nos.system('echo from-shell')\n"
+        "subprocess.run(['echo', 'from-subprocess'])\nprint('from-print')",
+        false, PlainHandles(), &submit_error);
+    REQUIRE(id.has_value());
+    RequestOutcome outcome;
+    REQUIRE(interp->WaitSync(*id, nullptr,
+                             std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.stdout_text == "from-print\n");
+    CHECK(outcome.process_output.find("from-shell") != std::string::npos);
+    CHECK(outcome.process_output.find("from-subprocess") != std::string::npos);
+    const auto text = FormatOutcome(*id, outcome, 0, 1 << 20);
+    CHECK(text.find("--- process output") != std::string::npos);
+}
+
+TEST_CASE("idle interrupts storming the driver never kill it",
+          "[tools_python][interpreter][interrupt]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    auto interp = SpawnPlain(dir);
+    for (int i = 0; i < 50; ++i) {
+        interp->SoftInterrupt();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    REQUIRE(interp->alive());
+    std::string submit_error;
+    RequestOutcome outcome;
+    const auto id = interp->Submit("6 * 7", false, PlainHandles(), &submit_error);
+    REQUIRE(interp->WaitSync(*id, nullptr,
+                             std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.result == "42");
+}
+
+TEST_CASE("ResolveAgainstShared keeps another session's pins out of the shared venv",
+          "[tools_python][diff]") {
+    const auto shared = tools_python::ResolveAgainstShared(
+        {"foo==2", "bar", "baz==1", "requirements:r.txt"}, {"foo==1", "baz==1", "qux"});
+    CHECK((shared.install == std::vector<std::string>{"bar", "baz==1", "requirements:r.txt"}));
+    CHECK((shared.record ==
+           std::vector<std::string>{"foo==1", "bar", "baz==1", "requirements:r.txt"}));
+    REQUIRE(shared.conflicts.size() == 1);
+    CHECK(shared.conflicts[0].find("foo==2") != std::string::npos);
+    CHECK(shared.conflicts[0].find("foo==1") != std::string::npos);
+
+    const auto alone = tools_python::ResolveAgainstShared({"foo==2"}, {});
+    CHECK((alone.install == std::vector<std::string>{"foo==2"}));
+    CHECK(alone.conflicts.empty());
+}
+
+TEST_CASE("SpecName applies PEP 503 normalization and stops at markers and URLs",
+          "[tools_python][diff]") {
+    CHECK(SpecName("zope.interface") == "zope-interface");
+    CHECK(SpecName("Foo__Bar") == "foo-bar");
+    CHECK(SpecName("foo;python_version<'3.8'") == "foo");
+    CHECK(SpecName("pkg @ https://example.com/pkg.whl") == "pkg");
+    CHECK(SpecName("pkg@https://example.com/pkg.whl") == "pkg");
+    CHECK(SpecName("foo>=1,<2") == "foo");
+}
+
+TEST_CASE("StreamRing::TakeBack un-appends retained bytes across tail, gap, and head",
+          "[tools_python][stream]") {
+    tools_python::StreamRing small(4, 4);
+    small.Append("abc");
+    CHECK(small.TakeBack(2) == "bc");
+    CHECK(small.total() == 1);
+    small.Append("XYZ");  // head refills first
+    CHECK(small.Read(0, 16).text == "aXYZ");
+
+    tools_python::StreamRing ring(4, 4);
+    ring.Append("0123456789ABCDEF");  // head 0123, gap 4..11, tail CDEF
+    CHECK(ring.TakeBack(2) == "EF");
+    CHECK(ring.total() == 14);
+    CHECK(ring.TakeBack(4) == "CD");  // two tail bytes + two lost gap bytes
+    CHECK(ring.total() == 10);
+    ring.Append("xy");
+    const auto read = ring.Read(10, 2);
+    CHECK(read.text == "xy");
 }

@@ -53,6 +53,30 @@ public:
 
     std::uint64_t total() const { return total_; }
 
+    // Un-appends the last `n` bytes of the logical stream and returns the
+    // ones still retained (bytes that already fell into the dropped gap come
+    // back as nothing). For correcting attribution: bytes read before the
+    // reader learned where one request's stream ended belong to the next.
+    std::string TakeBack(std::uint64_t n) {
+        n = std::min(n, total_);
+        const auto from_tail = std::min<std::uint64_t>(n, tail_.size());
+        std::string taken = tail_.substr(tail_.size() - static_cast<std::size_t>(from_tail));
+        tail_.resize(tail_.size() - static_cast<std::size_t>(from_tail));
+        total_ -= from_tail;
+        auto rest = n - from_tail;
+        if (rest > 0) {
+            // The tail is exhausted; what remains is the gap, then the head.
+            const auto from_gap = std::min<std::uint64_t>(rest, total_ - head_.size());
+            total_ -= from_gap;
+            rest -= from_gap;
+            const auto from_head = std::min<std::uint64_t>(rest, head_.size());
+            taken.insert(0, head_.substr(head_.size() - static_cast<std::size_t>(from_head)));
+            head_.resize(head_.size() - static_cast<std::size_t>(from_head));
+            total_ -= from_head;
+        }
+        return taken;
+    }
+
     struct ReadResult {
         std::string text;         // retained slices, gap markers inline
         std::uint64_t total = 0;  // bytes ever appended (clamping reference)

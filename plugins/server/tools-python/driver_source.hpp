@@ -8,90 +8,137 @@
 //   parent -> child, fd 0:      {"id": "py-N", "code": "..."}
 //   child -> parent, fd 3:      {"id": "...", "ok": bool, "result": "repr or ''",
 //                                "stdout": "...", "stderr": "...",
-//                                "result_json": "..." (serializable results only),
+//                                "streamed": <bytes written to fd 4 for this request>,
 //                                "exc": "ValueError", "exc_msg": "..." (failures only)}
 //   startup, once:              {"ready": true, "version": "...", "executable": "..."}
-//   malformed request:          {"bad_request": "..."}  (no id; logged, skipped)
+//   malformed request:          {"bad_request": "...", "id": "..." (when recoverable)}
 //   SIGINT with nothing running: {"idle_interrupted": true}  (see below)
 //
+// Every free-text field (stdout, stderr, result, exc_msg) is capped at _MAX
+// characters; the parent derives its protocol-line limit from the same
+// setting (python_interpreter.cpp MaxLineBytes).
+//
 // LIVE STREAM (fd 4, unframed raw bytes): every chunk written to the RUNNING
-// request's stdout capture is ALSO written through to fd 4 immediately -- no
-// buffering, no threads, no framing. At most one request runs at a time (the
-// strict FIFO below), so the parent knows which request owns the stream
-// without any framing protocol; the parent bounds its own retention. Bounded
-// by nothing here BY DESIGN: a print storm streams through, the parent's
-// capped ring is the backpressure boundary, and the completion capture below
-// stays the authoritative record. stderr is NOT streamed: it carries only the
-// final traceback, which arrives with the response anyway.
+// request's stdout capture is ALSO written through to fd 4 immediately. At
+// most one request runs at a time (the strict FIFO below), and the response's
+// `streamed` count tells the parent exactly where one request's bytes end and
+// the next one's begin -- a reader that falls behind cannot misattribute a
+// finished request's tail to its successor. Bounded by nothing here BY
+// DESIGN: the parent's capped ring is the backpressure boundary, and the
+// completion capture stays the authoritative record. stderr is NOT streamed:
+// it carries only the final traceback, which arrives with the response.
 //
 // USER STDIN (fd 5): sys.stdin reads here, set ONCE globally (not per
 // request). A blocking input() parks the driver's single thread until the
-// parent feeds a line -- the intended semantics, interruptible like any
-// other blocking call (SIGINT raises KeyboardInterrupt out of the read).
+// parent feeds a line -- interruptible like any other blocking call.
 // There is no EOF: the parent holds its write end for the process's life.
 //
-// SIGINT SEMANTICS: the parent's soft interrupt targets the RUNNING request
-// (its per-request catch turns the KeyboardInterrupt into a failed response).
-// A SIGINT landing while the loop is idle would otherwise kill the driver --
-// the read itself raises -- so the read is wrapped and reported instead.
+// SIGINT SEMANTICS: one handler, one state variable -- no per-window patches.
+//   USER  (user code running): raise KeyboardInterrupt; the request fails and
+//         the interpreter survives.
+//   IDLE  (parked in the request read): emit {"idle_interrupted"} and keep
+//         reading -- the parent reports "nothing was running".
+//   BOOK  (driver bookkeeping: parsing a request, assembling a reply): never
+//         raise. Remembered, then spent at the next state change: entering
+//         USER fails that request at once (it was the parent's queue head),
+//         entering IDLE reports it as idle. A reply emitted in between
+//         clears it -- that completion IS the reaction to the signal.
+// USER is entered and left only inside the per-request try, so a raise can
+// never escape the loop. The handler is re-installed after every request in
+// case executed code replaced it.
 //
 // The serialized queue IS the driver: one read loop, strict FIFO. A blocking
 // request (an MSRPC call held in flight, a long download) queues every later
-// request behind it -- that is the chosen semantics; the parent reports the
-// queue depth in each reply's `pending` count.
+// request behind it -- that is the chosen semantics.
 //
 // SABOTAGE HARDENING (model error, not malice -- the permission gate is the
 // boundary, same ruling as bash):
 //   - fd 0 and fd 3 are the ONLY protocol channels, and fd 3 is dup'd to a
 //     private name at startup; the child's REAL fd 1/2 point at a diagnostics
-//     pipe. Executed code writing to "the real stdout" cannot corrupt
-//     responses.
-//   - executed code runs with sys.stdin reading the user-stdin pipe (fd 5):
-//     `input()` blocks until the parent feeds a line (python_input) instead
-//     of eating the next request frame -- see USER STDIN above.
+//     pipe the parent attributes to the running request (subprocess output).
+//   - executed code runs with sys.stdin reading the user-stdin pipe (fd 5).
 //   - stdout/stderr are captured per request into capped buffers
-//     (_MINIMAL_PY_CAPTURE env), so a print-storm bounds the pipe line size
-//     instead of growing memory without limit.
-//   - KeyboardInterrupt is caught PER REQUEST: a soft interrupt (SIGINT from
-//     the parent) fails the running request, and the driver survives.
-//   - anything that does corrupt the channels ends as EOF on the parent's
-//     reader, which marks the interpreter dead and auto-restarts on the next
-//     call -- degradation, never a wedge.
+//     (_MINIMAL_PY_CAPTURE env), so a print-storm bounds the line size.
+//   - anything that does corrupt the channels ends as a kill on the parent's
+//     side and an auto-restart on the next call -- degradation, never a wedge.
 
 namespace minimal::tools_python {
 
-inline constexpr const char* kDriverSource = R"PY(import ast, io, json, os, sys, traceback
+inline constexpr const char* kDriverSource = R"PY(import ast, io, json, linecache, os, signal, sys, threading, traceback
 
 _MAX = int(os.environ.get("_MINIMAL_PY_CAPTURE", str(1 << 20)))
 
+_IDLE, _BOOK, _USER = 0, 1, 2
+_st = {"mode": _BOOK, "pending": False, "emit": None}
+
+
+def _clean(text):
+    # Lone surrogates (surrogateescape'd filenames, broken decodes) would
+    # reach the parent as unpaired \udXXX escapes, which its JSON parser
+    # rejects -- and a rejected line reads as corruption. Replace them.
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
+def _cap(text):
+    if len(text) > _MAX:
+        text = text[:_MAX] + "\n[... %d chars truncated ...]" % (len(text) - _MAX)
+    return _clean(text)
+
+
+def _on_sigint(signum, frame):
+    mode = _st["mode"]
+    if mode == _USER:
+        raise KeyboardInterrupt
+    if mode == _IDLE:
+        try:
+            _st["emit"]({"idle_interrupted": True})
+        except BaseException:
+            pass
+        return
+    _st["pending"] = True
+
 
 class _Cap(io.TextIOBase):
+    encoding = "utf-8"
+    errors = "replace"
+
     def __init__(self, stream_fd=None):
         self._parts = []
         self._len = 0
         self.dropped = 0
-        # Non-None on the stdout cap: every chunk also streams through fd 4,
-        # synchronously with the write call. A dead/absent reader degrades to
-        # dropped bytes, never an exception in user code.
+        self.streamed = 0
+        # Non-None on the stdout cap: every chunk also streams through fd 4.
+        # A dead/absent reader degrades to dropped bytes, never an exception
+        # in user code. Locked: user threads print through the same object.
         self._fd = stream_fd
+        self._lock = threading.Lock()
 
     def writable(self):
         return True
 
+    def isatty(self):
+        return False
+
     def write(self, s):
-        if self._len < _MAX:
-            take = min(_MAX - self._len, len(s))
-            self._parts.append(s[:take])
-            self._len += take
-            if take < len(s):
+        if not isinstance(s, str):
+            raise TypeError("write() argument must be str, not %s" % type(s).__name__)
+        with self._lock:
+            if self._len < _MAX:
+                take = min(_MAX - self._len, len(s))
+                self._parts.append(s[:take])
+                self._len += take
                 self.dropped += len(s) - take
-        else:
-            self.dropped += len(s)
-        if self._fd is not None and s:
-            try:
-                os.write(self._fd, s.encode("utf-8", "replace"))
-            except OSError:
-                pass
+            else:
+                self.dropped += len(s)
+            if self._fd is not None and s:
+                data = s.encode("utf-8", "replace")
+                try:
+                    while data:
+                        n = os.write(self._fd, data)
+                        self.streamed += n
+                        data = data[n:]
+                except OSError:
+                    self._fd = None
         return len(s)
 
     def flush(self):
@@ -100,29 +147,21 @@ class _Cap(io.TextIOBase):
     def value(self):
         text = "".join(self._parts)
         if self.dropped:
-            text += "\n[... %d bytes truncated ...]" % self.dropped
+            text += "\n[... %d chars truncated ...]" % self.dropped
         return text
 
 
 def _main():
     proto_in = os.fdopen(os.dup(0), "r", encoding="utf-8", errors="replace")
-    # The original fd 0 is dup'd away above and then REPLACED (not just
-    # left open): sys.stdin is reassigned to user_stdin (fd 5) below, but
-    # code that does raw fd I/O -- subprocess.run() with no stdin=
-    # argument, os.system(), a prompt that reads fd 0 directly -- inherits
-    # the OS-level fd, not the sys.stdin object. Left as the real request
-    # pipe, that fd 0 lets a spawned subprocess silently consume or block on
-    # the next queued python_exec request frame; /dev/null makes it an
-    # ordinary, harmless empty stdin instead, matching what a fully-detached
-    # subprocess should see by default.
+    # fd 0 is REPLACED with /dev/null, not left as the request pipe: code
+    # doing raw fd I/O (subprocess.run() without stdin=, os.system) inherits
+    # the OS-level fd, and a live request pipe there would let a child
+    # consume or block on the next queued request frame.
     devnull_in = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull_in, 0)
     os.close(devnull_in)
-    # Dup'd to a private fd and the original closed -- see the SABOTAGE
-    # HARDENING note above. Leaving fd 3 itself open under proto_out let
-    # executed code (os.write(3, ...)) inject its own protocol lines
-    # directly, bypassing the response channel's only author being this
-    # driver.
+    # Dup'd to a private fd and the original closed: executed code writing
+    # os.write(3, ...) must not be able to inject protocol lines.
     proto_out = os.fdopen(os.dup(3), "w", encoding="utf-8")
     os.close(3)
     stream_out = 4
@@ -133,6 +172,10 @@ def _main():
         proto_out.write("\n")
         proto_out.flush()
 
+    _st["emit"] = emit
+    signal.signal(signal.SIGINT, _on_sigint)
+    driver_file = _main.__code__.co_filename
+
     sys.stdin = user_stdin
     sys.path.insert(0, os.getcwd())
 
@@ -141,16 +184,12 @@ def _main():
     emit({"ready": True, "version": sys.version.split()[0], "executable": sys.executable})
 
     while True:
-        try:
-            line = proto_in.readline()
-        except KeyboardInterrupt:
-            # A soft interrupt with no request running: spend the signal here
-            # and keep serving, so the parent can report "nothing was running"
-            # instead of losing the interpreter.
+        if _st["pending"]:
+            _st["pending"] = False
             emit({"idle_interrupted": True})
-            continue
-        except EOFError:
-            break
+        _st["mode"] = _IDLE
+        line = proto_in.readline()
+        _st["mode"] = _BOOK
         if not line:
             break
         line = line.strip()
@@ -158,95 +197,85 @@ def _main():
             continue
         try:
             req = json.loads(line)
-        except BaseException as exc:
-            # BaseException, not Exception: a SIGINT landing exactly here
-            # (the parent's soft interrupt is aimed at whatever is running,
-            # and the loop is always running SOMETHING) raises
-            # KeyboardInterrupt, which Exception does not catch -- letting it
-            # escape would exit _main() over a signal that hit request
-            # parsing rather than the request itself.
-            try:
-                emit({"bad_request": str(exc)})
-            except BaseException:
-                pass
+        except Exception as exc:
+            emit({"bad_request": str(exc)})
             continue
-        code = req.get("code")
-        if not isinstance(code, str):
-            emit({"bad_request": "missing 'code'"})
+        rid = req.get("id") if isinstance(req, dict) else None
+        code = req.get("code") if isinstance(req, dict) else None
+        if not isinstance(rid, str) or not isinstance(code, str):
+            bad = {"bad_request": "missing 'id' or 'code'"}
+            if isinstance(rid, str):
+                bad["id"] = rid
+            emit(bad)
             continue
+
         out, err = _Cap(stream_out), _Cap()
         old = (sys.stdout, sys.stderr, sys.stdin)
-        sys.stdout, sys.stderr = out, err
         ok = True
         result = ""
-        value = None
-        has_value = False
         exc_type = None
         exc_msg = None
+        # A per-request filename registered in linecache: tracebacks show the
+        # offending source lines, and inspect.getsource() works on functions
+        # defined by earlier requests.
+        fname = "<%s>" % rid
+        linecache.cache[fname] = (len(code), None, code.splitlines(True), fname)
         try:
-            # A trailing expression's value is the result -- even when it
-            # follows statements (which a plain eval-compile rejects). Split on
-            # the ast: exec the statement prefix, eval the trailing Expr node.
-            tree = ast.parse(code)
-            trailing = None
-            if tree.body and isinstance(tree.body[-1], ast.Expr):
-                trailing = tree.body[-1].value
-                tree.body = tree.body[:-1]
-            if tree.body:
-                exec(compile(tree, "<python-tool>", "exec"), G)
-            if trailing is not None:
-                value = eval(compile(ast.Expression(trailing), "<python-tool>", "eval"), G)
-                has_value = True
-                result = repr(value)
-                # Uncapped, unlike stdout/stderr/result_json just below: a
-                # harmless `list(range(10**7))` or a big file's `.read()` as
-                # the trailing expression built a repr past the parent's
-                # kMaxLineBytes protocol-line cap, which the parent reads as
-                # CORRUPTION and kills the whole interpreter over -- the same
-                # _MAX budget every other captured field already respects.
-                if len(result) > _MAX:
-                    result = result[:_MAX] + "\n[... %d bytes truncated ...]" % (
-                        len(result) - _MAX)
+            try:
+                sys.stdout, sys.stderr = out, err
+                _st["mode"] = _USER
+                if _st["pending"]:
+                    _st["pending"] = False
+                    raise KeyboardInterrupt
+                # A trailing expression's value is the result -- even when it
+                # follows statements. Split on the ast: exec the statement
+                # prefix, eval the trailing Expr node.
+                tree = ast.parse(code, fname)
+                trailing = None
+                if tree.body and isinstance(tree.body[-1], ast.Expr):
+                    trailing = tree.body[-1].value
+                    tree.body = tree.body[:-1]
+                if tree.body:
+                    exec(compile(tree, fname, "exec"), G)
+                if trailing is not None:
+                    value = eval(compile(ast.Expression(trailing), fname, "eval"), G)
+                    # None is not a result (the REPL rule): a trailing
+                    # print(...) must not append "ok: None" to every reply.
+                    if value is not None:
+                        result = repr(value)
+            finally:
+                _st["mode"] = _BOOK
+                sys.stdout, sys.stderr, sys.stdin = old
         except BaseException as e:
-            # KeyboardInterrupt included: a soft interrupt fails THIS request
-            # only -- the interpreter and its state survive.
             ok = False
             exc_type = type(e).__name__
-            exc_msg = str(e)
-            err.write(traceback.format_exc())
-        finally:
-            sys.stdout, sys.stderr, sys.stdin = old
-        try:
-            response = {"id": req.get("id"), "ok": ok, "result": result,
-                        "stdout": out.value(), "stderr": err.value()}
-            if exc_type is not None:
-                response["exc"] = exc_type
-                response["exc_msg"] = exc_msg
-            if has_value:
-                # The structured return: JSON when the value serializes cheaply,
-                # absent otherwise (the repr above is the fallback display).
-                try:
-                    rendered = json.dumps(value)
-                    if len(rendered) <= _MAX:
-                        response["result_json"] = rendered
-                except BaseException:
-                    pass
-            emit(response)
-        except BaseException:
-            # The code above already ran to completion -- ok/result/stdout/
-            # stderr are decided. Only reply BOOKKEEPING happens here
-            # (json.dumps, the write+flush inside emit), and it is NOT
-            # wrapped by the per-request catch above, so a SIGINT landing in
-            # exactly this window used to escape _main() entirely and take
-            # the whole interpreter down over how a result was reported, not
-            # what the result was. Best-effort fallback reply; if even that
-            # fails, drop it and keep serving -- the parent's own wait on
-            # this id times out instead of losing every other pending state.
             try:
-                emit({"id": req.get("id"), "ok": False, "exc": "InternalError",
-                      "exc_msg": "driver interrupted while replying"})
+                exc_msg = str(e)
             except BaseException:
-                pass
+                exc_msg = "<unprintable %s>" % exc_type
+            # Driver frames are noise in a user's traceback: start at the
+            # first frame of the executed code.
+            tb = e.__traceback__
+            while tb is not None and tb.tb_frame.f_code.co_filename == driver_file:
+                tb = tb.tb_next
+            if isinstance(e, SyntaxError):
+                tb = None
+            try:
+                err.write("".join(traceback.format_exception(type(e), e, tb)))
+            except BaseException:
+                err.write("%s: %s\n" % (exc_type, exc_msg))
+        response = {"id": rid, "ok": ok, "result": _cap(result),
+                    "stdout": _clean(out.value()), "stderr": _clean(err.value()),
+                    "streamed": out.streamed}
+        if exc_type is not None:
+            response["exc"] = exc_type
+            response["exc_msg"] = _cap(exc_msg)
+        # A reply is the reaction to any signal that landed since the
+        # request started: the completion is what the parent waits for.
+        _st["pending"] = False
+        emit(response)
+        if signal.getsignal(signal.SIGINT) is not _on_sigint:
+            signal.signal(signal.SIGINT, _on_sigint)
 
 
 try:

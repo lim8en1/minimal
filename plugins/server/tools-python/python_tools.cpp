@@ -11,13 +11,12 @@
 
 #include "minimal/common/logger.hpp"
 
-#include "driver_source.hpp"
+#include "json_fields.hpp"
 #include "python_env.hpp"
 
 namespace minimal::tools_python {
 namespace {
 
-using tools::BackgroundTaskEvent;
 using tools::PermissionDisclosure;
 using tools::ToolResult;
 
@@ -28,23 +27,6 @@ std::string FirstLine(const std::string& text, std::size_t max) {
     std::string line = text.substr(0, end == std::string::npos ? text.size() : end);
     if (line.size() > max) line = line.substr(0, max) + "...";
     return line;
-}
-
-// nlohmann's value() throws type_error on a present-but-wrong-typed key --
-// fine for our own JSON, wrong for MODEL input: `{"clean": "yes"}` is an
-// ordinary mistake to report as a field error, not an exception to escape
-// through Disclose/execute. These never throw: wrong-typed reads as absent.
-std::string StringField(const nlohmann::json& body, const char* key,
-                        std::string fallback = {}) {
-    const auto it = body.find(key);
-    if (it == body.end() || !it->is_string()) return fallback;
-    return it->get<std::string>();
-}
-
-bool BoolField(const nlohmann::json& body, const char* key, bool fallback = false) {
-    const auto it = body.find(key);
-    if (it == body.end() || !it->is_boolean()) return fallback;
-    return it->get<bool>();
 }
 
 RequestHandles BuildHandles(const std::string& tool_use_id, const std::string& code,
@@ -59,18 +41,22 @@ RequestHandles BuildHandles(const std::string& tool_use_id, const std::string& c
     return handles;
 }
 
-void EmitStarted(const RequestHandles& handles, const std::string& id, pid_t pid) {
-    if (!handles.emit_task_event) return;
-    try {
-        BackgroundTaskEvent event;
-        event.task_id = id;
-        event.tool_use_id = handles.tool_use_id;
-        event.command = handles.label;
-        event.pid = pid;
-        event.state = BackgroundTaskEvent::State::kStarted;
-        handles.emit_task_event(event);
-    } catch (...) {
+std::string Join(const std::vector<std::string>& items) {
+    std::string out;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        if (i != 0) out += ", ";
+        out += items[i];
     }
+    return out;
+}
+
+// The one-time advisory for declared entries that were NOT installed because
+// the shared venv already carries a different spec for the same name.
+std::string ConflictNotice(const std::vector<std::string>& conflicts) {
+    return "[declared conflict: " + Join(conflicts) +
+           " -- not installed: the project venv is shared, and re-versioning it would change "
+           "the environment under code that already imported the other version. Install "
+           "manually, or python_exec(clean=true) once no other session depends on it]";
 }
 
 }  // namespace
@@ -136,9 +122,15 @@ public:
         // The interpreter the invocation would run in, resolved without I/O
         // side effects beyond an exists() probe -- the same lower-bound rule
         // as bash's disclosure: it names what will run.
-        const auto slice = ParseSlice(ctx.tool_config);
-        const auto plan = MakeEnvPlan(ctx.project_root, slice, settings_);
-        const auto binary = ResolveInterpreterBinary(plan);
+        // A live interpreter runs its own binary; otherwise the one a spawn
+        // would start (the venv's python whenever the plan wants the venv).
+        std::string binary;
+        if (const auto interp = store_.Find(ctx.session_id); interp && interp->alive()) {
+            binary = interp->config().python_path;
+        } else {
+            const auto slice = ParseSlice(ctx.tool_config);
+            binary = ResolveInterpreterBinary(MakeEnvPlan(ctx.project_root, slice, settings_));
+        }
         disclosure.grants.push_back({"python_exec:" + binary, binary + " *"});
         disclosure.complete = true;
         return disclosure;
@@ -154,15 +146,8 @@ public:
             return Error("code exceeds " + std::to_string(kMaxCodeBytes) + " bytes; write it to a "
                          "file with the write tool and exec the file instead");
         }
-        // Both feed `now() + std::chrono::seconds(N)` downstream (here for
-        // `wait`, and in StampRunningLocked for max_runtime); converting
-        // std::chrono::seconds to a nanosecond-resolution duration multiplies
-        // by 1e9, which overflows a 64-bit rep above ~9.2e9 seconds (~292
-        // years) and wraps to a deadline in the PAST -- an interpreter is
-        // then SIGINT'd and hard-killed almost immediately despite the
-        // caller asking for MORE time, not a past one. Clamped well under
-        // that threshold and far past any real deadline.
-        constexpr std::int64_t kMaxSaneRuntimeSeconds = 100'000'000;  // ~3.2 years
+        // Both feed `now() + std::chrono::seconds(N)`: clamped (see
+        // kMaxSaneRuntimeSeconds).
         std::int64_t timeout = 0;
         if (auto it = input.find("timeout"); it != input.end() && it->is_number_integer() &&
                                                 it->get<std::int64_t>() >= 0) {
@@ -185,51 +170,30 @@ public:
         auto interp = store_.Find(ctx.session_id);
         std::string advisory;
         if (!interp || !interp->alive()) {
-            // (Re)start: materialize the environment, then spawn.
-            std::string ensure_error;
-            std::string note;
-            if (plan.wants_venv) {
-                note = EnsureEnvironment(plan, settings_, ctx.logger, &ensure_error);
-                if (!ensure_error.empty()) {
-                    return Error("could not prepare the python environment: " + ensure_error +
-                                 "\nThe interpreter was not started; nothing was lost.");
-                }
-            }
-            InterpreterConfig config;
-            config.python_path = plan.wants_venv ? plan.venv_python
-                                                 : ResolveInterpreterBinary(plan);
-            config.cwd = ctx.project_root;
-            config.venv = plan.wants_venv ? plan.venv : std::filesystem::path{};
-            config.declared = plan.declared;
-            config.env = BuildChildEnv(plan, settings_);
-            config.session_lifetime = ctx.session_lifetime;
-            std::string spawn_error;
-            interp = Interpreter::Spawn(config, settings_, ctx.logger, &spawn_error);
-            if (!interp) {
-                return Error("failed to start the python interpreter: " + spawn_error);
-            }
-            store_.Add(ctx.session_id, interp);
-            advisory = "[started " + interp->version() + " in " + config.python_path +
-                       (note.empty() ? "]" : "; " + note + "]");
+            std::string start_error;
+            interp = Start(plan, ctx, &advisory, &start_error);
+            if (!interp) return Error(start_error);
         } else {
             const auto diff_error = ApplyDiff(interp, plan, ctx, &advisory);
             if (!diff_error.empty()) return Error(diff_error);
         }
 
-        RequestHandles handles = BuildHandles(ctx.tool_use_id, code, ctx);
         const bool async = timeout == 0;
         std::string submit_error;
-        const auto id = interp->Submit(code, async, std::move(handles), &submit_error, max_runtime);
+        std::size_t ahead = 0;
+        const auto id = interp->Submit(code, async, BuildHandles(ctx.tool_use_id, code, ctx),
+                                       &submit_error, max_runtime, &ahead);
         if (!id) {
             return Error(submit_error +
                          "\nThe interpreter is gone; the next python_exec starts a fresh one.");
         }
+        const std::string queued =
+            ahead == 0 ? "" : " Queued behind " + std::to_string(ahead) + " running/queued request(s).";
 
         if (async) {
-            EmitStarted(BuildHandles(ctx.tool_use_id, code, ctx), *id, interp->pid());
             std::string ack =
                 *id + " started; its result arrives as a tool result before your next reply. "
-                      "python_output polls progress; python_interrupt stops it.";
+                      "python_output polls progress; python_interrupt stops it." + queued;
             if (max_runtime > 0) ack += " Deadline: " + std::to_string(max_runtime) + "s.";
             return Ok(ack + advisory);
         }
@@ -242,17 +206,16 @@ public:
         RequestOutcome outcome;
         switch (interp->WaitSync(*id, ctx.cancel_token, deadline, &outcome)) {
             case Interpreter::WaitOutcome::kCompleted: {
-                const auto queued = interp->PendingIds().size();
                 ToolResult result;
                 result.is_error = !outcome.ok;
                 result.content_text =
-                    FormatOutcome(*id, outcome, queued, settings_.max_output_bytes) + advisory;
+                    FormatOutcome(*id, outcome, ahead, settings_.max_output_bytes) + advisory;
                 return result;
             }
             case Interpreter::WaitOutcome::kDemoted:
                 return Ok(*id + " is still running after " + std::to_string(wait) +
                           "s; its result arrives as a tool result before your next reply. "
-                          "python_output polls progress; python_interrupt stops it." +
+                          "python_output polls progress; python_interrupt stops it." + queued +
                           advisory);
             case Interpreter::WaitOutcome::kCancelled:
                 return Ok(*id + " was cancelled while waiting; it continues in the interpreter "
@@ -270,6 +233,54 @@ private:
     static ToolResult Ok(std::string text) { return ToolResult{false, std::move(text)}; }
     static ToolResult Error(std::string text) { return ToolResult{true, std::move(text)}; }
 
+    // (Re)start: materialize the environment, spawn, register. For a venv
+    // plan the whole sequence runs under the project install lock, so the
+    // "what do other sessions depend on" check and this interpreter's
+    // registration are atomic with respect to every other session's.
+    std::shared_ptr<Interpreter> Start(const EnvPlan& plan, tools::ToolContext& ctx,
+                                       std::string* advisory, std::string* error) {
+        std::unique_lock<std::mutex> project_lock;
+        std::vector<std::string> record = plan.declared;
+        std::string note;
+        std::vector<std::string> conflicts;
+        if (plan.wants_venv) {
+            project_lock = ProjectInstallMutex::Instance().Lock(plan.project_root);
+            const auto shared = ResolveAgainstShared(
+                plan.declared, store_.DeclaredInProject(plan.project_root, ctx.session_id));
+            EnvPlan install_plan = plan;
+            install_plan.declared = shared.install;
+            std::string ensure_error;
+            note = EnsureEnvironment(install_plan, settings_, ctx.logger, &ensure_error);
+            if (!ensure_error.empty()) {
+                *error = "could not prepare the python environment: " + ensure_error +
+                         "\nThe interpreter was not started; nothing was lost.";
+                return nullptr;
+            }
+            record = shared.record;
+            conflicts = shared.conflicts;
+        }
+        InterpreterConfig config;
+        config.python_path = ResolveInterpreterBinary(plan);
+        config.cwd = ctx.project_root;
+        config.venv = plan.wants_venv ? plan.venv : std::filesystem::path{};
+        config.declared = record;
+        config.env = BuildChildEnv(plan, settings_);
+        config.session_lifetime = ctx.session_lifetime;
+        std::string spawn_error;
+        auto interp = Interpreter::Spawn(config, settings_, ctx.logger, &spawn_error);
+        if (!interp) {
+            *error = "failed to start the python interpreter: " + spawn_error;
+            return nullptr;
+        }
+        store_.Add(ctx.session_id, interp);
+        *advisory = "[started " + interp->version() + " in " + config.python_path +
+                    (note.empty() ? "]" : "; " + note + "]");
+        if (!conflicts.empty() && interp->NoticeShown("declared_conflict")) {
+            *advisory += " " + ConflictNotice(conflicts);
+        }
+        return interp;
+    }
+
     // The per-exec comparison (the preset switch machinery). Empty error
     // string = proceed; `advisory` gains the result-text notes.
     std::string ApplyDiff(const std::shared_ptr<Interpreter>& interp, const EnvPlan& plan,
@@ -277,42 +288,44 @@ private:
         const auto diff = ClassifyDiff(plan.declared, interp->Declared());
         std::string text;
         if (!interp->config().venv.empty()) {
+            std::vector<std::string> conflicts;
+            // Same name, different spec than THIS interpreter runs: the old
+            // version is already imported here, so never re-version it.
+            for (const auto& c : diff.conflicts) conflicts.push_back(c);
             if (!diff.additive.empty()) {
+                const auto project_lock = ProjectInstallMutex::Instance().Lock(plan.project_root);
+                const auto shared = ResolveAgainstShared(
+                    diff.additive, store_.DeclaredInProject(plan.project_root, ctx.session_id));
                 std::string install_error;
                 const auto note = EnsurePackages(ctx.project_root, plan.venv_python,
-                                                 diff.additive, settings_, ctx.logger,
+                                                 shared.install, settings_, ctx.logger,
                                                  &install_error);
                 if (!install_error.empty()) {
                     return "installing the preset's newly declared packages failed: " +
                            install_error + "\nThe interpreter and its state are untouched; "
                                            "install manually or adjust the preset.";
                 }
-                interp->AdoptDeclared(diff.additive);
-                text += note;
+                interp->AdoptDeclared(shared.record);
+                text += note.empty() ? "" : "[" + note + "]";
+                for (const auto& c : shared.conflicts) conflicts.push_back(c);
             }
-            if (!diff.conflicts.empty() && interp->NoticeShown("declared_conflict")) {
-                std::string joined;
-                for (std::size_t i = 0; i < diff.conflicts.size(); ++i) {
-                    if (i != 0) joined += ", ";
-                    joined += diff.conflicts[i];
-                }
-                text += (text.empty() ? "" : " ") + std::string("[declared conflict: ") + joined +
-                        " -- the preset now pins a different version than this interpreter runs; "
-                        "upgrading would affect every agent in this project. Install manually, "
-                        "or python_exec(clean=true) to restart in the new environment]";
+            if (!conflicts.empty() && interp->NoticeShown("declared_conflict")) {
+                text += (text.empty() ? "" : " ") + ConflictNotice(conflicts);
             }
         } else if (plan.wants_venv) {
             // Bare interpreter, but the environment now wants the venv (the
             // preset declares packages, or .venv appeared). Materialize it for
-            // the restart; the RUNNING interpreter cannot use it. Gated on
-            // NoticeShown (one-shot per interpreter): interp->config().venv
-            // stays empty until the restart actually happens, so without
-            // this gate EnsureEnvironment's full venv-creation-and-install
-            // ran again on EVERY python_exec call until clean=true, blocking
-            // the session worker under the project install mutex each time.
+            // the restart; the RUNNING interpreter cannot use it. One-shot per
+            // interpreter: without the gate the full venv creation + install
+            // re-ran on EVERY call until clean=true.
             if (interp->NoticeShown("bare_drift")) {
+                const auto project_lock = ProjectInstallMutex::Instance().Lock(plan.project_root);
+                const auto shared = ResolveAgainstShared(
+                    plan.declared, store_.DeclaredInProject(plan.project_root, ctx.session_id));
+                EnvPlan install_plan = plan;
+                install_plan.declared = shared.install;
                 std::string ensure_error;
-                EnsureEnvironment(plan, settings_, ctx.logger, &ensure_error);
+                EnsureEnvironment(install_plan, settings_, ctx.logger, &ensure_error);
                 if (!ensure_error.empty()) {
                     ctx.logger.warn("python[{}]: venv materialization failed: {}", ctx.session_id,
                                     ensure_error);
@@ -423,20 +436,21 @@ public:
     PythonOutputTool(PythonSettings settings, InterpreterStore& store)
         : settings_(std::move(settings)), store_(store) {
         spec_.name = "python_output";
-        spec_.category = tools::ToolCategory::Execute;
+        // Pure read of the plugin's own buffers: nothing runs, nothing is
+        // written -- polling must not cost a permission prompt.
+        spec_.category = tools::ToolCategory::ReadOnly;
         spec_.definition.name = "python_output";
         spec_.definition.description =
             "Poll background work in this session's Python interpreter without blocking.\n"
             "No arguments (or scope='all'): one status line per task -- running (age, live "
-            "output size), queued behind N, or finished (ok/failed, runtime; its result "
-            "arrives with the next turn if not already delivered).\n"
-            "task_id + scope: that task's output. scope is 'top:N', 'tail:N', or 'read:N:M' "
-            " -- byte-offset slices of the task's output stream (a running task's live ring; "
-            "a finished task's final capture). Responses carry the stream total and "
-            "next_offset for paging; output that fell out of a running task's ring comes "
-            "back as an explicit '[... N bytes lost ...]' marker.\n"
-            "grep (optional regex): filters the sliced text line-by-line; matches report "
-            "their byte offsets within the slice.";
+            "output size), queued behind N, or finished (ok/failed, runtime).\n"
+            "task_id + scope: that task's output. scope is 'top:N', 'tail:N', or "
+            "'read:OFFSET,LENGTH' -- byte-offset slices of the task's output stream (a running "
+            "task's live ring; a finished task's final stdout capture). Responses carry the "
+            "stream total and the next read for paging; output that fell out of a running "
+            "task's ring comes back as an explicit '[... N bytes lost ...]' marker.\n"
+            "grep (optional regex): filters the sliced text line-by-line; each match is "
+            "prefixed with its byte offset in the stream (usable as a read: offset).";
         spec_.definition.input_schema = nlohmann::json{
             {"type", "object"},
             {"properties",
@@ -447,11 +461,11 @@ public:
               {"scope",
                {{"type", "string"},
                 {"description", "'all' (list tasks), or with task_id: 'top:N', 'tail:N' "
-                                "(default: 8192), 'read:N,M' (byte offset N, length M)."}}},
+                                "(default: tail:8192), 'read:OFFSET,LENGTH'."}}},
               {"grep",
                {{"type", "string"},
                 {"description", "Regex applied to the sliced output's lines after scoping; "
-                                "matches report byte offsets within the slice."}}}}}};
+                                "matches report their stream byte offsets."}}}}}};
     }
 
     const tools::ToolSpec& spec() const override { return spec_; }
@@ -491,9 +505,7 @@ public:
                         break;
                     case TaskStatus::State::kFinished:
                         text += t.id + " -- finished (" + (t.ok ? "ok" : "failed") + ") in " +
-                                Seconds(t.seconds) +
-                                "; its result arrives with the next turn if not already "
-                                "delivered";
+                                Seconds(t.seconds);
                         break;
                 }
             }
@@ -530,13 +542,14 @@ public:
             length = static_cast<std::size_t>(ParseCount(scope, kDefaultTailBytes));
             scope_note = "top " + std::to_string(length);
         } else if (scope.rfind("read:", 0) == 0) {
-            const auto colon = scope.find(':');
-            const auto comma = scope.find(',', colon + 1);
-            if (comma == std::string::npos) {
-                return Error("scope 'read:N:M' takes 'read:<offset>,<length>'");
+            // 'read:OFFSET,LENGTH' is documented; 'read:OFFSET:LENGTH' is the
+            // obvious misspelling and means the same thing.
+            const auto sep = scope.find_first_of(",:", 5);
+            if (sep == std::string::npos) {
+                return Error("scope 'read:' takes 'read:<offset>,<length>'");
             }
-            offset = ParseCount(scope.substr(colon + 1, comma - colon - 1), 0);
-            length = static_cast<std::size_t>(ParseCount(scope.substr(comma + 1), 0));
+            offset = ParseCount(scope.substr(5, sep - 5), 0);
+            length = static_cast<std::size_t>(ParseCount(scope.substr(sep + 1), 0));
             scope_note = "read " + std::to_string(offset) + "+" + std::to_string(length);
         } else {
             return Error("unknown scope '" + scope +
@@ -600,8 +613,10 @@ public:
                 const auto line_end = nl == std::string::npos ? body.size() : nl + 1;
                 const std::string_view line(body.data() + pos, line_end - pos);
                 if (re2::RE2::PartialMatch(re2::StringPiece(line.data(), line.size()), matcher)) {
-                    filtered += "[" + std::to_string(pos) + "] " + std::string(line);
-                    if (!filtered.empty() && filtered.back() != '\n') filtered += "\n";
+                    // Stream offsets, not slice offsets: directly usable as
+                    // a read: offset (exact unless a gap marker precedes).
+                    filtered += "[" + std::to_string(offset + pos) + "] " + std::string(line);
+                    if (filtered.back() != '\n') filtered += "\n";
                 }
                 pos = line_end;
             }
@@ -610,8 +625,9 @@ public:
         if (body.empty()) body = "(no output in this range)";
         text += "\n" + body;
         if (read.slice.next < read.slice.total) {
+            const auto page = length > 0 ? length : kDefaultTailBytes;
             text += "\n[next: read:" + std::to_string(read.slice.next) + "," +
-                    std::to_string(std::min<std::size_t>(kDefaultTailBytes, 65536)) + "]";
+                    std::to_string(page) + "]";
         }
         return Ok(text);
     }
