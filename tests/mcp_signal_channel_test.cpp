@@ -12,7 +12,7 @@
 #include <string>
 #include <thread>
 
-#include "minimal/config/channels_config.hpp"
+#include "minimal/mcp/channels_config.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/mcp/mcp_connection.hpp"
 #include "minimal/mcp/signal_protocol.hpp"

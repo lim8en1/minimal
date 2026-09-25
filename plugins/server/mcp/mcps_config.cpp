@@ -1,4 +1,4 @@
-#include "minimal/config/mcps_config.hpp"
+#include "minimal/mcp/mcps_config.hpp"
 
 #include <stdexcept>
 #include <unordered_set>

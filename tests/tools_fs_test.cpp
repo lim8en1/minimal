@@ -550,7 +550,7 @@ TEST_CASE("out-of-workdir access is refused by the executor, not by the tool",
     policy.read_only = tools::PermissionMode::AlwaysAllow;
     policy.out_of_workdir = tools::PermissionMode::AlwaysDeny;
 
-    tools::ToolExecutor executor(registry, checker, policy, tools::McpPermissionPolicy{},
+    tools::ToolExecutor executor(registry, checker, policy, tools::PermissionModels{},
                                  tools::PermissionRunMode::Normal);
     auto ctx = f.Context();
 

@@ -63,10 +63,6 @@
 #include "minimal/tools/tool_registry.hpp"
 #include "minimal/tools/tool_source.hpp"
 
-namespace minimal::mcp {
-class McpClientManager;       // borrowed via SessionParams::mcp_manager
-}  // namespace minimal::mcp
-
 namespace minimal::agent {
 
 class ProviderResolver;       // borrowed via SessionParams::provider_resolver
@@ -203,7 +199,7 @@ struct SessionParams {
     // signal_selectors below as one group: all three are populated together
     // by ApplySignals and consumed together by CreateResolved.
     std::string signal_context;
-    // Borrowed, like mcp_manager. Set by ApplySignals only when the request
+    // Borrowed; outlives every session. Set by ApplySignals only when the request
     // declared selectors and a router is configured; null otherwise --
     // including every subagent, since subagents cannot subscribe.
     // CreateResolved uses this to register the session's subscriptions
@@ -268,10 +264,6 @@ struct SessionParams {
     // parent's completion injection.
     std::function<void(const TurnResult&)> on_turn_finished;
 
-    // Borrowed, like the registry: the manager outlives every session. Null
-    // (no mcps.json entries, or tests without MCP) simply means no live MCP
-    // servers and no liveness checks.
-    mcp::McpClientManager* mcp_manager = nullptr;
 
     // S5.3: sessions.unattended_prompt_timeout_seconds, set by the registry
     // funnel (SessionRegistry::set_prompt_timeout, mirroring
@@ -553,12 +545,12 @@ public:
     AgentPreset preset_snapshot() const override;
     void ApplyPreset(AgentPreset preset) override;
 
-    // Session-start and /agent liveness resolution against the McpClientManager:
-    // for every server in the preset's allowed_mcp_servers, EnsureAlive; a
-    // failure disables the server FOR THIS SESSION (recorded, surfaced as an
-    // ErrorEvent) and the session proceeds without it. Sets the loop's live
-    // server list. Runs where blocking is allowed -- session construction and
-    // the worker at a preset-switch boundary -- never the RPC reader.
+    // Session-start and /agent activation of the preset's tool_sources: every
+    // member is Activate()d through its source; a failure drops the member
+    // FOR THIS CALL (surfaced as an ErrorEvent) and the session proceeds
+    // without it. Sets the loop's active group list. Runs where blocking is
+    // allowed -- session construction and the worker at a preset-switch
+    // boundary -- never the RPC reader.
     void RefreshToolSources();
     const std::optional<common::ModelRef>& model_override() const override {
         return model_override_;
@@ -598,7 +590,6 @@ public:
     // preset() is the SessionControl override above -- one accessor, since the
     // spawner and a /-command want exactly the same thing.
     const tools::PermissionPolicy& policy() const { return executor_.policy(); }
-    const tools::McpPermissionPolicy& mcp_policy() const { return executor_.mcp_policy(); }
     const tools::PermissionModels& permission_models() const {
         return executor_.permission_models();
     }
@@ -801,7 +792,6 @@ private:
     const commands::ProjectCommandSource* project_commands_ = nullptr;
     const AgentPresetRegistry* presets_ = nullptr;
     ProviderResolver* provider_resolver_ = nullptr;
-    mcp::McpClientManager* mcp_manager_ = nullptr;
     // The process-wide hook dispatcher (track O), read from loop_config.hooks
     // in the constructor -- one field, not two (Phase 5 step 8):
     // LoopConfig::hooks already drives AgentLoop's compaction emissions, so

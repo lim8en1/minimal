@@ -13,7 +13,7 @@ TEST_CASE("ParsePermissionsConfig: empty doc yields documented defaults", "[perm
     auto config = ParsePermissionsConfig(nlohmann::json::object());
 
     CHECK(config.default_run_mode == PermissionRunMode::Normal);
-    CHECK(config.mcp_default_mode == PermissionMode::Ask);
+    CHECK(config.plugin_slices.empty());
     CHECK_FALSE(config.global_layer.read_only.has_value());
     CHECK_FALSE(config.global_layer.file_write.has_value());
     CHECK_FALSE(config.global_layer.execute.has_value());
@@ -59,8 +59,15 @@ TEST_CASE("ParsePermissionsConfig: all three default_run_mode values decode", "[
           PermissionRunMode::AllowOnly);
 }
 
-TEST_CASE("ParsePermissionsConfig: mcp_default_mode overridable", "[permissions_config]") {
-    CHECK(ParsePermissionsConfig({{"mcp_default_mode", "deny"}}).mcp_default_mode == PermissionMode::AlwaysDeny);
+TEST_CASE("ParsePermissionsConfig: legacy mcp_default_mode lands in the mcp plugin's slice",
+          "[permissions_config]") {
+    CHECK(ParsePermissionsConfig({{"mcp_default_mode", "deny"}}).plugin_slices["mcp"]["default"] ==
+          "deny");
+    // An explicit slice wins over the legacy key.
+    const auto both = ParsePermissionsConfig(
+        {{"mcp_default_mode", "deny"}, {"plugins", {{"mcp", {{"default", "allow"}}}}}});
+    CHECK(both.plugin_slices["mcp"]["default"] == "allow");
+    CHECK(both.unknown_keys.empty());
 }
 
 TEST_CASE("LoadPermissionsConfig: reads and parses a real file", "[permissions_config]") {

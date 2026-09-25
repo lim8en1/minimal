@@ -197,23 +197,21 @@ TEST_CASE("/subagent-model refuses malformed and unknown refs", "[commands]") {
 }
 
 TEST_CASE("bare /mcp opens the mcp picker rather than erroring", "[commands]") {
-    // Same shape as bare /agent //model: no data carried, the client fetches
-    // the server list itself over ListMcpServers.
+    // Same shape as bare /agent //model: no data carried, the client's
+    // mcp-view fetches the server list itself over the mcp plugin's endpoint.
     CommandFixture fixture;
+    fixture.SetupMcp(nlohmann::json::array());
     const auto result = fixture.Run("mcp");
     CHECK(result.status == Status::kOk);
     CHECK(result.display == commands::CommandDisplay::kView);
     CHECK(result.view_hint == "mcp");
 }
 
-TEST_CASE("/mcp with no manager reports unavailable rather than crashing", "[commands]") {
-    // The fixture's default CommandContext carries a null mcp_manager() --
-    // the guard every mcp_manager()-using branch needs, matching how a
-    // process with no mcps.json configured behaves in production.
+TEST_CASE("without the mcp plugin there is no /mcp", "[commands]") {
+    // /mcp belongs to the mcp plugin: core's own catalog does not carry it.
     CommandFixture fixture;
-    const auto result = fixture.Run("mcp", {"anything", "enable"});
-    CHECK(result.status == Status::kError);
-    CHECK(result.message.find("not available") != std::string::npos);
+    CHECK(fixture.registry.Find("mcp") == nullptr);
+    CHECK(fixture.Run("mcp", {"anything", "enable"}).status == Status::kError);
 }
 
 TEST_CASE("/mcp <name> enable toggles a disabled server live", "[commands]") {
@@ -1036,6 +1034,7 @@ TEST_CASE("picker commands answer their bare form beside a live turn; the argume
         CHECK(command->ReadOnlyFor(bare));         // opens a picker: touches nothing
         CHECK_FALSE(command->ReadOnlyFor(with_arg));  // mutates: turn boundary
     }
+    fixture.SetupMcp(nlohmann::json::array());
     const auto* mcp = fixture.registry.Find("mcp");
     REQUIRE(mcp != nullptr);
     CHECK(mcp->ReadOnlyFor(bare));

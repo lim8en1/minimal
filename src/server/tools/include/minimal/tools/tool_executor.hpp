@@ -3,7 +3,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -85,25 +84,6 @@ public:
                  std::optional<PermissionModels> models_ceiling = std::nullopt,
                  std::vector<std::string> seed_grants = {},
                  const hooks::HookDispatcher* hooks = nullptr);
-
-    // The form for callers still holding an McpPermissionPolicy: binds it to
-    // the in-core MCP model. A template only so a braced `{}` fourth argument
-    // is not ambiguous with the form above (it cannot deduce M, so `{}` means
-    // PermissionModels). Goes away when the MCP client leaves core.
-    template <typename M, std::enable_if_t<std::is_same_v<M, McpPermissionPolicy>, int> = 0>
-    ToolExecutor(ToolRegistry& registry, PermissionChecker& checker, PermissionPolicy policy,
-                 M mcp_policy, PermissionRunMode run_mode,
-                 std::optional<PermissionPolicy> policy_ceiling = std::nullopt,
-                 std::optional<McpPermissionPolicy> mcp_ceiling = std::nullopt,
-                 std::vector<std::string> seed_grants = {},
-                 const hooks::HookDispatcher* hooks = nullptr)
-        : ToolExecutor(registry, checker, std::move(policy),
-                       PermissionModels{BindMcpPermissionModel(std::move(mcp_policy))}, run_mode,
-                       std::move(policy_ceiling),
-                       mcp_ceiling ? std::optional<PermissionModels>(PermissionModels{
-                                         BindMcpPermissionModel(std::move(*mcp_ceiling))})
-                                   : std::nullopt,
-                       std::move(seed_grants), hooks) {}
 
     // NEVER THROWS. A tool_use the loop has already persisted must be answered
     // on every path, or history keeps an orphaned call that both wire formats
@@ -191,11 +171,7 @@ public:
     // subagent's ceiling is its parent's and a preset switch never lifts it.
     void SetPolicies(PermissionPolicy policy, PermissionModels models) {
         policy_ = std::move(policy);
-        models_ = WithMcpModel(std::move(models));
-    }
-    template <typename M, std::enable_if_t<std::is_same_v<M, McpPermissionPolicy>, int> = 0>
-    void SetPolicies(PermissionPolicy policy, M mcp_policy) {
-        SetPolicies(std::move(policy), PermissionModels{BindMcpPermissionModel(std::move(mcp_policy))});
+        models_ = std::move(models);
     }
 
     // The labels every tool hook payload carries (core.pre_tool_use,
@@ -236,15 +212,14 @@ public:
     // per-category half of "a child is never more permissive than its parent".
     const PermissionPolicy& policy() const { return policy_; }
     const PermissionModels& permission_models() const { return models_; }
-    // The MCP model's layer, or an all-default policy when none is bound.
-    const McpPermissionPolicy& mcp_policy() const;
 
 
 private:
-    // While MCP is core, every executor enforces the MCP model: a set without
-    // an MCP binding gets the all-default one (per-server Ask), so an mcp__
-    // tool can never fall through to the core model's category default.
-    static PermissionModels WithMcpModel(PermissionModels models);
+    // The bound model governing `permission_key`, or null. A tool inside a
+    // reserved namespace may only be governed by the namespace owner's model:
+    // another plugin's model claiming it is ignored.
+    const BoundPermissionModel* ClaimantFor(const PermissionModels& models,
+                                            std::string_view permission_key) const;
 
     // The real body of the gating phase, split out only so Prepare() can be the
     // one place the catch lives -- an inline try around a function this long

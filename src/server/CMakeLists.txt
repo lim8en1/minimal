@@ -30,8 +30,6 @@ add_library(minimal_server_core SHARED
     config/permissions_config.cpp
     config/hooks_config.cpp
     config/parse_util.cpp
-    config/mcps_config.cpp
-    config/channels_config.cpp
     config/config_bundle.cpp
     config/skill_registry.cpp
     config/project_dirs.cpp
@@ -67,13 +65,6 @@ add_library(minimal_server_core SHARED
     tools/permission_model.cpp
     tools/tool_pool.cpp
     tools/skill_tool.cpp
-    mcp/naming.cpp
-    mcp/signal_protocol.cpp
-    mcp/env_interpolation.cpp
-    mcp/mcp_tool.cpp
-    mcp/mcp_connection.cpp
-    mcp/mcp_client_manager.cpp
-    mcp/mcp_tool_source.cpp
     llm/provider_factory_registry.cpp
     llm/model_catalog.cpp
     llm/metadata_catalog.cpp
@@ -122,7 +113,6 @@ target_include_directories(minimal_server_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/commands/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/rpc/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/session/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}/mcp/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/startup/include")
 
 target_link_libraries(minimal_server_core

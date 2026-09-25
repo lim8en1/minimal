@@ -22,10 +22,11 @@
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/commands/command_registry.hpp"
-#include "minimal/config/mcps_config.hpp"
+#include "minimal/mcp/mcps_config.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
+#include "mcp_command.hpp"
 #include "temp_dir.hpp"
 
 namespace minimal::testing {
@@ -78,7 +79,7 @@ public:
         preset_ = presets_->Resolve("build");
 
         executor_ = std::make_unique<tools::ToolExecutor>(tools_, checker_, AllowAllPolicy(),
-                                                        tools::McpPermissionPolicy{},
+                                                        tools::PermissionModels{},
                                                         tools::PermissionRunMode::Normal);
         agent::SessionContext context{common::DefaultLogger()};
         context.session_id = "s1";
@@ -111,14 +112,13 @@ public:
                                 bool busy = false) {
         commands::CommandArgs args;
         args.positional = std::move(positional);
-        commands::CommandContext context(this, *presets_, confirmations, common::DefaultLogger(),
-                                         mcp_manager_.get());
+        commands::CommandContext context(this, *presets_, confirmations, common::DefaultLogger());
         return commands::Dispatch(registry, name, args, context, busy);
     }
 
-    // Wires a real McpClientManager for /mcp tests -- null (the default)
-    // exercises the "MCP is not available" guard every mcp_manager()-using
-    // command must have. `entries` is an mcps.json-shaped JSON array.
+    // Wires a real McpClientManager and registers the mcp plugin's /mcp over
+    // it, the way the plugin does -- without this call there is no /mcp at
+    // all (the plugin disabled). `entries` is an mcps.json-shaped JSON array.
     void SetupMcp(const nlohmann::json& entries) {
         const std::string path = (dir_.path() / "mcps_test.json").string();
         std::ofstream(path) << entries.dump();
@@ -126,6 +126,7 @@ public:
             config::LoadMcpsConfig(path), tools_,
             mcp::McpLimits{std::chrono::seconds(5), std::chrono::seconds(5)},
             common::DefaultLogger());
+        registry.Register(std::make_unique<mcp::McpCommand>(*mcp_manager_));
     }
     mcp::McpClientManager* mcp_manager() { return mcp_manager_.get(); }
 
@@ -231,7 +232,7 @@ public:
     tools::ToolRegistry& tools_for_test() { return tools_; }
     // Swaps the executor's policies the way a preset switch does.
     void SetPoliciesForTest(tools::PermissionPolicy policy) {
-        executor_->SetPolicies(std::move(policy), tools::McpPermissionPolicy{});
+        executor_->SetPolicies(std::move(policy), tools::PermissionModels{});
     }
     commands::ConfirmationBroker& registry_confirmations_for_test() { return confirmations; }
 

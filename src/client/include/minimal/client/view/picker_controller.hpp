@@ -60,13 +60,11 @@ public:
         std::shared_ptr<ftxui::Component>& picker_slot;
         std::shared_ptr<ftxui::Component>& agent_picker_slot;
         std::shared_ptr<ftxui::Component>& model_picker_slot;
-        std::shared_ptr<ftxui::Component>& mcp_picker_slot;
         std::shared_ptr<ftxui::Component>& subagent_picker_slot;
 
         bool& show_picker;
         bool& show_agent_picker;
         bool& show_model_picker;
-        bool& show_mcp_picker;
         bool& show_subagent_picker;
 
         // The session picker's delete flow stages its OWN confirmation
@@ -115,10 +113,6 @@ public:
     // /subagent-model <ref|inherit> instead of staging a desired model.
     void OpenSubagentModelPicker();
 
-    // The /mcp picker's list: every mcps.json entry's live status. One fresh
-    // fetch each time, like OpenAgentPicker -- the list is small.
-    void OpenMcpPicker();
-
     // The bare `/subagents` picker: one parent session's children, fetched
     // whole (ListSessions include_subagents, filtered to the parent) and
     // listed live-first; ctrl+a toggles ended rows into view. Selection
@@ -144,15 +138,9 @@ private:
     void RebuildPickerComponent();
     void RebuildAgentPickerComponent();
     void RebuildModelPickerComponent();
-    void RebuildMcpPickerComponent();
     void RebuildSubagentPickerComponent();
     // OpenModelPicker/OpenSubagentModelPicker's shared fetch-and-rebuild body.
     void OpenModelPickerFetch(bool refresh);
-    // Enter on a picker row: flips the server's enabled flag, then re-fetches
-    // and rebuilds -- the round trip on_refresh_discovery uses for models,
-    // minus the discovery-refresh option (there is nothing else to refresh
-    // here beyond the toggle itself).
-    void ToggleMcpServer(const std::string& name);
 
     // Queues `apply` to run on the LOOP THREAD from the next Poll(), and
     // wakes the pump so that Poll() actually gets called. The caller (an
@@ -229,9 +217,6 @@ private:
     // common case is "what is running right now"). No re-fetch -- the list
     // was fetched whole; only the row filter changes.
     bool subagent_include_ended_ = false;
-    // The /mcp picker's list: fetched whole on each open/toggle, like the
-    // model list -- a server list is small, no pagination.
-    std::vector<v1::McpServerSummary> mcp_picker_servers_;
 
     // The async completion handoff (see the file comment): a fetch running
     // on AppState's RPC worker pushes its apply-closure here under the lock

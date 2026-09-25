@@ -2,7 +2,7 @@
 
 #include <fstream>
 
-#include "minimal/config/mcps_config.hpp"
+#include "minimal/mcp/mcps_config.hpp"
 
 using namespace minimal::config;
 

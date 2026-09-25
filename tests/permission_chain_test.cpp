@@ -86,8 +86,3 @@ TEST_CASE("network chain", "[permission][chain]") {
     CHECK(resolve_network_chain(preset, global) == PermissionMode::AlwaysDeny);
 }
 
-TEST_CASE("mcp permission chain", "[permission][chain][mcp]") {
-    CHECK(resolve_mcp_chain(std::nullopt, PermissionMode::Ask) == PermissionMode::Ask);
-    CHECK(resolve_mcp_chain(std::nullopt, PermissionMode::AlwaysAllow) == PermissionMode::AlwaysAllow);
-    CHECK(resolve_mcp_chain(PermissionMode::AlwaysDeny, PermissionMode::AlwaysAllow) == PermissionMode::AlwaysDeny);
-}

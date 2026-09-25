@@ -79,30 +79,6 @@ ConfigBundle LoadConfigBundle(const std::filesystem::path& dir,
         results.push_back(Fatal("config_parse", std::string("plugins.json: ") + e.what()));
     }
 
-    // A broken mcps.json degrades to "no MCP servers" plus a warning: MCP is an
-    // optional feature the core serving path does not depend on.
-    try {
-        bundle.mcps = LoadMcpsConfig(dir / "mcps.json");
-    } catch (const std::exception& e) {
-        results.push_back(Warning("config_parse", std::string("mcps.json: ") + e.what() +
-                                                    "; no MCP servers will be configured"));
-    }
-    for (const auto& error : bundle.mcps.errors) {
-        results.push_back(Warning("mcp_servers", error));
-    }
-
-    // Same degrade-not-die shape as mcps.json: signals are an optional feature
-    // the core serving path does not depend on.
-    try {
-        bundle.channels = LoadChannelsConfig(dir / "channels.json");
-    } catch (const std::exception& e) {
-        results.push_back(Warning("config_parse", std::string("channels.json: ") + e.what() +
-                                                    "; no signal channels will be configured"));
-    }
-    for (const auto& error : bundle.channels.errors) {
-        results.push_back(Warning("channels", error));
-    }
-
     return bundle;
 }
 

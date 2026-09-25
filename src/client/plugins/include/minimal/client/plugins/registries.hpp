@@ -342,6 +342,15 @@ public:
     // here disables nothing yet (the host catches); render-time calls are
     // contained separately.
     virtual void OnTheme(const Theme& theme) { (void)theme; }
+
+    // Called on the UI thread each time the host makes the view visible (a
+    // command's view_hint, or its keybinding toggling it on) -- the moment a
+    // view over live server state (the mcp picker) starts a fresh fetch. Must
+    // not block: kick background work and return. Default no-op. A throw is
+    // contained by the host (logged; the view still opens). Const, like the
+    // rest of the dispatch surface (PluginViewEntry holds a const View*): a
+    // view keeps whatever it kicks behind its own pointer members.
+    virtual void OnShow() const {}
 };
 
 // A registered view's runtime dispatch entry: the view's own spec, its

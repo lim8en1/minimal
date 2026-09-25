@@ -484,15 +484,6 @@ nlohmann::json DecodePluginPermissions(const YAML::Node& node) {
     return result;
 }
 
-std::unordered_map<std::string, tools::PermissionMode> DecodeMcpPermissionsBlock(const YAML::Node& node) {
-    std::unordered_map<std::string, tools::PermissionMode> result;
-    const YAML::Node block = node["mcp_permissions"];
-    if (!block || !block.IsMap()) return result;
-    for (const auto& entry : block) {
-        result[entry.first.as<std::string>()] = config::ParsePermissionMode(entry.second.as<std::string>());
-    }
-    return result;
-}
 
 }  // namespace
 
@@ -565,8 +556,14 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
             }
         }
     }
-    result.mcp_permissions = DecodeMcpPermissionsBlock(node);
     result.plugin_permissions = DecodePluginPermissions(node);
+    // Legacy `mcp_permissions: {server: mode}` -> the mcp plugin's slice
+    // `plugin_permissions.mcp.servers` (key table; an explicit slice wins).
+    if (const YAML::Node legacy = node["mcp_permissions"]; legacy && legacy.IsMap()) {
+        auto& slice = result.plugin_permissions[kLegacyMcpSource];
+        if (!slice.is_object()) slice = nlohmann::json::object();
+        if (!slice.contains("servers")) slice["servers"] = YamlToJson(legacy);
+    }
     result.compression_prompt = OptionalString(node, "compression_prompt");
     result.compaction_strategy = OptionalString(node, "compaction_strategy");
 

@@ -172,27 +172,4 @@ public:
     std::vector<std::string> ValidateClaims(const ToolRegistry& tools) const;
 };
 
-// --- The MCP model (in core until the MCP client leaves core) ----------------
-//
-// Claims every mcp__<server>__<tool> name and replaces the base stage with the
-// server-scoped mode (McpPermissionPolicy) refined by per-tool rules on the
-// full name -- resolve_mcp_tool_mode, unchanged. Its layer is an
-// McpPermissionPolicy. While MCP is core it is not in the registry: sessions
-// bind it directly from AgentPreset::mcp_permissions (BindMcpPermissionModel).
-// Its BuildLayer slices -- global {"default": "<mode>"}, preset
-// {"servers": {"<server>": "<mode>"}} -- are what the legacy keys
-// (permissions.json mcp_default_mode, preset mcp_permissions) become once it
-// is registered by the MCP plugin.
-inline constexpr std::string_view kMcpPermissionModelName = "mcp";
-
-std::shared_ptr<const PermissionModel> MakeMcpPermissionModel();
-
-// Binds the MCP model to an already-built policy -- the form sessions and
-// tests that still hold an McpPermissionPolicy use.
-BoundPermissionModel BindMcpPermissionModel(McpPermissionPolicy policy);
-
-// The McpPermissionPolicy a bound model set carries for MCP, or null when the
-// set has no MCP binding.
-const McpPermissionPolicy* FindMcpPolicy(const PermissionModels& models);
-
 }  // namespace minimal::tools

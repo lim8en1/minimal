@@ -9,6 +9,7 @@
 #include "minimal/mcp/naming.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
+#include "minimal/mcp/mcp_permission_model.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
@@ -471,7 +472,7 @@ TEST_CASE("MCP tools resolve per-server, not per-tool", "[tool_executor][mcp]") 
     f.AddTool("mcp__search__query", ToolCategory::Execute);
     UnreachablePermissionChecker checker;
 
-    tools::McpPermissionPolicy mcp;
+    mcp::McpPermissionPolicy mcp;
     mcp.default_mode = PermissionMode::AlwaysDeny;
     mcp.per_server["search"] = PermissionMode::AlwaysAllow;
 
@@ -480,7 +481,9 @@ TEST_CASE("MCP tools resolve per-server, not per-tool", "[tool_executor][mcp]") 
     tools::PermissionPolicy policy;
     policy.execute = PermissionMode::Ask;
 
-    tools::ToolExecutor executor(f.registry, checker, policy, mcp, PermissionRunMode::Normal);
+    tools::ToolExecutor executor(f.registry, checker, policy,
+                                 tools::PermissionModels{mcp::BindMcpPermissionModel(mcp)},
+                                 PermissionRunMode::Normal);
     auto ctx = f.Context();
     const auto block = executor.Run("tu1", "mcp__search__query", nlohmann::json::object(), ctx);
 
@@ -844,14 +847,16 @@ TEST_CASE("an mcp ceiling governs mcp tools, not the policy ceiling",
     f.AddTool("mcp__search__query", ToolCategory::Execute);
     GrantingPermissionChecker checker;
 
-    tools::McpPermissionPolicy mcp;
+    mcp::McpPermissionPolicy mcp;
     mcp.default_mode = PermissionMode::AlwaysAllow;  // the child would run it freely
 
-    tools::McpPermissionPolicy mcp_ceiling;
+    mcp::McpPermissionPolicy mcp_ceiling;
     mcp_ceiling.default_mode = PermissionMode::Ask;  // the parent asked first
 
-    tools::ToolExecutor executor(f.registry, checker, AllowAllPolicy(), mcp,
-                                 PermissionRunMode::Normal, AllowAllPolicy(), mcp_ceiling);
+    tools::ToolExecutor executor(
+        f.registry, checker, AllowAllPolicy(),
+        tools::PermissionModels{mcp::BindMcpPermissionModel(mcp)}, PermissionRunMode::Normal,
+        AllowAllPolicy(), tools::PermissionModels{mcp::BindMcpPermissionModel(mcp_ceiling)});
     auto ctx = f.Context();
     CHECK_FALSE(executor.Run("tu1", "mcp__search__query", nlohmann::json::object(), ctx).is_error);
 
@@ -1450,8 +1455,10 @@ TEST_CASE("an MCP tool's per-tool rule refines its server's mode",
 
     tools::PermissionPolicy policy;
     policy.per_tool_overrides["mcp__gh__get_issue"] = PermissionMode::AlwaysAllow;
-    tools::McpPermissionPolicy mcp;  // default_mode: ask
-    tools::ToolExecutor executor(f.registry, checker, policy, mcp, PermissionRunMode::Normal);
+    mcp::McpPermissionPolicy mcp;  // default_mode: ask
+    tools::ToolExecutor executor(f.registry, checker, policy,
+                                 tools::PermissionModels{mcp::BindMcpPermissionModel(mcp)},
+                                 PermissionRunMode::Normal);
     auto ctx = f.Context();
 
     CHECK_FALSE(executor.Run("t1", "mcp__gh__get_issue", nlohmann::json::object(), ctx).is_error);
@@ -1469,13 +1476,13 @@ TEST_CASE("a global MCP tool allow cannot widen a preset's per-server deny",
     policy.layers = std::make_shared<const tools::ToolModeLayers>(
         tools::ToolModeLayers{tools::PermissionOverrideLayer{}, global, true});
 
-    tools::McpPermissionPolicy preset_denies;
+    mcp::McpPermissionPolicy preset_denies;
     preset_denies.per_server["gh"] = PermissionMode::AlwaysDeny;
-    CHECK(tools::resolve_mcp_tool_mode(policy, preset_denies, "gh", "mcp__gh__get_issue") ==
+    CHECK(mcp::ResolveMcpToolMode(policy, preset_denies, "gh", "mcp__gh__get_issue") ==
           PermissionMode::AlwaysDeny);
 
-    tools::McpPermissionPolicy global_default;  // preset silent on gh: ask default
-    CHECK(tools::resolve_mcp_tool_mode(policy, global_default, "gh", "mcp__gh__get_issue") ==
+    mcp::McpPermissionPolicy global_default;  // preset silent on gh: ask default
+    CHECK(mcp::ResolveMcpToolMode(policy, global_default, "gh", "mcp__gh__get_issue") ==
           PermissionMode::AlwaysAllow);
 }
 

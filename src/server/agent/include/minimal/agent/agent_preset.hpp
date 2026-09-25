@@ -78,7 +78,6 @@ struct AgentPreset {
     std::optional<std::int64_t> context_window_tokens;
 
     tools::PermissionPolicy permission_mode;
-    tools::McpPermissionPolicy mcp_permissions;
     // Every registered plugin permission model, bound to this preset's
     // slices (permission_model.hpp). Empty when no plugin registers a model.
     tools::PermissionModels permission_models;
@@ -135,12 +134,10 @@ struct AgentPreset {
     bool is_subagent = false;
 };
 
-// Every permission model a session built from `preset` enforces: the bound
-// plugin models plus the in-core MCP model over preset.mcp_permissions.
-inline tools::PermissionModels PermissionModelsFor(const AgentPreset& preset) {
-    tools::PermissionModels models = preset.permission_models;
-    models.push_back(tools::BindMcpPermissionModel(preset.mcp_permissions));
-    return models;
+// Every permission model a session built from `preset` enforces: the plugin
+// models bound to its slices.
+inline const tools::PermissionModels& PermissionModelsFor(const AgentPreset& preset) {
+    return preset.permission_models;
 }
 
 // Stamps a resolved model onto a preset, replacing whatever it resolved to.

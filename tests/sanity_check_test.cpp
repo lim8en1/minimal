@@ -18,6 +18,7 @@
 #include "minimal/startup/sanity_check.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/plugins/name_resolution.hpp"
+#include "minimal/tools/tool_source.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
@@ -116,6 +117,7 @@ struct Fixture {
     agent::CompactionStrategyRegistry compaction_strategies;
     config::SkillRegistry skills;
     plugins::ServiceRegistry service_registry;
+    tools::ToolSourceRegistry tool_sources;
     hooks::HookDispatcher hook_dispatcher{common::DefaultLogger()};
 
     Fixture() {
@@ -177,6 +179,7 @@ struct Fixture {
         registries.model_catalogs = &model_catalogs;
         registries.compaction_strategies = &compaction_strategies;
         registries.hooks = &hook_dispatcher;
+        registries.tool_sources = &tool_sources;
         return startup::SanityCheckInputs{config_dir, records, skills, plugin_config, resolution,
                                           registries};
     }
@@ -277,18 +280,26 @@ TEST_CASE("a malformed plugins.json warns but does not block startup", "[sanity_
     CHECK_FALSE(HasFatal(results));
 }
 
-TEST_CASE("a malformed mcps.json warns and disables all MCP servers", "[sanity_check][config_parse]") {
+TEST_CASE("a loaded plugin's reported config warnings print under its name",
+          "[sanity_check][plugin_warnings]") {
+    // The mcp plugin validates its own mcps.json/channels.json and reports
+    // problems through PluginRegistrationContext::report_warning; the check
+    // prints them beside core's findings, never as fatal.
     Fixture f;
     WriteGoodConfig(f.config_dir);
     ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
-    f.Write("mcps.json", "{ not json");
+    auto record = Record("mcp.so", "mcp", plugins::Provenance::Bundled, plugins::LoadStatus::Loaded);
+    record.warnings = {"mcps.json: not valid JSON; nothing from it is configured"};
+    auto failed = Record("x.so", "x", plugins::Provenance::User, plugins::LoadStatus::OpenFailed,
+                         "image not found");
+    failed.warnings = {"never printed: the plugin did not load"};
 
-    const auto results = RunChecks(f);
-    const auto hits = ByCheck(results, "config_parse");
+    const auto results = RunChecks(f, {record, failed});
+    const auto hits = ByCheck(results, "mcp");
     REQUIRE(hits.size() == 1);
     CHECK(hits[0]->severity == CheckSeverity::Warning);
     CHECK(hits[0]->message.find("mcps.json") != std::string::npos);
-    CHECK_FALSE(HasFatal(results));
+    CHECK(ByCheck(results, "x").empty());
 }
 
 // --- usable_provider ---------------------------------------------------------------
@@ -647,37 +658,6 @@ TEST_CASE("an absent compression prompt is loud", "[sanity_check][presets]") {
     }
 }
 
-// --- mcp_servers --------------------------------------------------------------------
-
-TEST_CASE("mcp entries are checked per transport", "[sanity_check][mcp_servers]") {
-    Fixture f;
-    WriteGoodConfig(f.config_dir);
-    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
-    f.Write("mcps.json",
-            R"([{"name":"good-stdio","transport":"stdio","command":"/bin/echo"},)"
-            R"({"name":"bad-stdio","transport":"stdio","command":"definitely-not-a-real-mcp-binary"},)"
-            R"({"name":"good-http","transport":"http","url":"https://mcp.example.com/sse"},)"
-            R"({"name":"bad-http","transport":"http","url":"ftp://nope"}])");
-
-    const auto results = RunChecks(f);
-    const auto hits = ByCheck(results, "mcp_servers");
-    REQUIRE(hits.size() == 2);
-    CHECK(hits[0]->message.find("bad-stdio") != std::string::npos);
-    CHECK(hits[1]->message.find("bad-http") != std::string::npos);
-    CHECK_FALSE(HasFatal(results));
-}
-
-TEST_CASE("disabled mcp entries are not checked", "[sanity_check][mcp_servers]") {
-    Fixture f;
-    WriteGoodConfig(f.config_dir);
-    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
-    f.Write("mcps.json",
-            R"([{"name":"off","transport":"stdio","command":"definitely-not-a-real-mcp-binary",)"
-            R"("enabled":false}])");
-
-    CHECK(ByCheck(RunChecks(f), "mcp_servers").empty());
-}
-
 // --- directories / session_db ---------------------------------------------------------
 
 TEST_CASE("an unwritable data dir is fatal", "[sanity_check][directories]") {
@@ -891,10 +871,31 @@ TEST_CASE("every not-loaded skill warns with its reason", "[sanity_check][naming
     CHECK(hits[0]->message.find("not loaded") != std::string::npos);
 }
 
-TEST_CASE("allowed_mcp_servers naming no configured server warns", "[sanity_check][naming_model]") {
+namespace {
+
+// A tool source with a fixed member list, for the preset member checks.
+class FixedToolSource final : public tools::ToolSource {
+public:
+    explicit FixedToolSource(std::vector<std::string> members) : members_(std::move(members)) {}
+    std::vector<std::string> Members() const override { return members_; }
+    std::optional<std::string> Activate(const std::string&, std::string&) override {
+        return std::nullopt;
+    }
+
+private:
+    std::vector<std::string> members_;
+};
+
+}  // namespace
+
+TEST_CASE("a preset tool_sources member the source does not know warns",
+          "[sanity_check][naming_model]") {
     Fixture f;
     WriteGoodConfig(f.config_dir);
     ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.tool_sources.Register("mcp", std::make_shared<FixedToolSource>(
+                                       std::vector<std::string>{"off"}));
+    // The legacy spelling reads as tool_sources.mcp.
     f.Write("agents/build.md",
             "---\nname: build\nmodel: fixture-main/test-model\nallowed_mcp_servers:\n  - ghost-mcp\n---\nBody.\n");
 
@@ -904,23 +905,34 @@ TEST_CASE("allowed_mcp_servers naming no configured server warns", "[sanity_chec
     CHECK(hits[0]->message.find("ghost-mcp") != std::string::npos);
 }
 
-// A disabled-but-PRESENT server is not "naming no configured server" -- it is
-// an auto-enable target (Session::RefreshMcpServers), not a config error.
-// Locks in the distinction this feature depends on: `Find() != nullptr`
-// governs this check, independent of `enabled`.
-TEST_CASE("allowed_mcp_servers naming a disabled-but-configured server warns nothing",
+// A configured member is fine whatever its enabled state -- a disabled MCP
+// server is an auto-enable target (McpToolSource::Activate), not a config
+// error, and Members() lists it.
+TEST_CASE("a preset tool_sources member the source knows warns nothing",
           "[sanity_check][naming_model]") {
     Fixture f;
     WriteGoodConfig(f.config_dir);
     ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
-    f.Write("mcps.json",
-            R"([{"name":"off","transport":"stdio","command":"definitely-not-a-real-mcp-binary",)"
-            R"("enabled":false}])");
+    f.tool_sources.Register("mcp", std::make_shared<FixedToolSource>(
+                                       std::vector<std::string>{"off"}));
     f.Write("agents/build.md",
-            "---\nname: build\nmodel: fixture-main/test-model\nallowed_mcp_servers:\n  - off\n---\nBody.\n");
+            "---\nname: build\nmodel: fixture-main/test-model\ntool_sources:\n  mcp: [off]\n---\nBody.\n");
+
+    CHECK(ByCheck(RunChecks(f), "naming_model").empty());
+}
+
+TEST_CASE("a preset naming a tool source no plugin provides warns",
+          "[sanity_check][naming_model]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.Write("agents/build.md",
+            "---\nname: build\nmodel: fixture-main/test-model\nallowed_mcp_servers: [x]\n---\nBody.\n");
 
     const auto results = RunChecks(f);
-    CHECK(ByCheck(results, "naming_model").empty());
+    const auto hits = ByCheck(results, "naming_model");
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0]->message.find("provided by no loaded plugin") != std::string::npos);
 }
 
 // --- tool_config namespaces --------------------------------------------------------------
@@ -1012,20 +1024,22 @@ TEST_CASE("independent failures all appear in one RunAll result", "[sanity_check
     WriteGoodConfig(f.config_dir);
     ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
     f.Write("settings.json", "{ not json");  // Fatal, first check to fire
-    f.Write("mcps.json", R"([{"name":"bad","transport":"stdio","command":"no-such-mcp-binary"}])");
+    auto mcp_record =
+        Record("mcp.so", "mcp", plugins::Provenance::Bundled, plugins::LoadStatus::Loaded);
+    mcp_record.warnings = {"mcps.json entry 'bad': command 'no-such-mcp-binary' does not resolve"};
 
     std::vector<plugins::PluginRecord> records = {
+        mcp_record,
         Record("tools-fs.so", "tools-fs", plugins::Provenance::Bundled, plugins::LoadStatus::OpenFailed,
-               "image not found")};  // Fatal, runs after mcp_servers
+               "image not found")};  // Fatal, runs after the plugin warnings
 
     const auto results = RunChecks(f, records);
 
     CHECK(ByCheck(results, "config_parse").size() == 1);
-    CHECK(ByCheck(results, "mcp_servers").size() == 1);
     CHECK(ByCheck(results, "plugins").size() == 1);
     REQUIRE(HasFatal(results));
     // The warning survives alongside the fatals -- nothing short-circuited.
-    const auto mcp = ByCheck(results, "mcp_servers");
+    const auto mcp = ByCheck(results, "mcp");
     REQUIRE(mcp.size() == 1);
     CHECK(mcp[0]->severity == CheckSeverity::Warning);
 }

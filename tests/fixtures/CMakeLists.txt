@@ -40,6 +40,7 @@ target_include_directories(typesafe-advisor-fixture PRIVATE
 minimal_add_fixture_plugin(fixture-service    fixture_service.cpp)
 minimal_add_fixture_plugin(fixture-service-b  fixture_service_b.cpp)
 minimal_add_fixture_plugin(fixture-hook       fixture_hook.cpp)
+minimal_add_fixture_plugin(fixture-lifecycle  fixture_lifecycle.cpp)
 minimal_add_fixture_plugin(fixture-endpoint   fixture_endpoint.cpp)
 minimal_add_fixture_plugin(fixture-project-commands fixture_project_commands.cpp)
 

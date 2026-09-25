@@ -12,7 +12,6 @@
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/common/model_ref.hpp"
-#include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 
 namespace minimal::agent {
@@ -37,7 +36,6 @@ std::optional<common::ModelRef> RequestedModel(const std::string& raw) {
 // Settings that are properties of the deployment, not of any stored row:
 // applied the same on creation and on resume.
 void ApplyDeploymentSettings(const LaunchContext& context, SessionParams& params) {
-    params.mcp_manager = context.mcp_manager;
     params.wake_on_injection = context.settings.background_wake;
     params.pause_auto_resume_on_submit = context.settings.pause_auto_resume_on_submit;
 }

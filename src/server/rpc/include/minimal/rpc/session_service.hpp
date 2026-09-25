@@ -47,10 +47,6 @@
 #include "minimal/session/session_reader.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
 
-namespace minimal::mcp {
-class McpClientManager;
-}  // namespace minimal::mcp
-
 namespace minimal::agent {
 class SignalRouter;  // signal subscriptions + delivery (borrowed via setter)
 }  // namespace minimal::agent
@@ -99,10 +95,6 @@ public:
                                   v1::ListAgentPresetsResponse*) override;
     grpc::Status ListModels(grpc::ServerContext*, const v1::ListModelsRequest*,
                             v1::ListModelsResponse*) override;
-    grpc::Status ListMcpServers(grpc::ServerContext*, const v1::ListMcpServersRequest*,
-                                v1::ListMcpServersResponse*) override;
-    grpc::Status SetMcpServerEnabled(grpc::ServerContext*, const v1::SetMcpServerEnabledRequest*,
-                                     v1::SetMcpServerEnabledResponse*) override;
     grpc::Status SuggestPaths(grpc::ServerContext*, const v1::SuggestPathsRequest*,
                               v1::SuggestPathsResponse*) override;
     grpc::Status ListCommands(grpc::ServerContext*, const v1::ListCommandsRequest*,
@@ -133,7 +125,6 @@ public:
     void set_project_commands(const commands::ProjectCommandSource* project_commands) {
         project_commands_ = project_commands;
     }
-    void set_mcp_manager(mcp::McpClientManager* manager) { mcp_manager_ = manager; }
 
     // Optional: null means ListAgentPresets answers with an empty list rather
     // than dropping the RPC -- a picker that gets nothing back reads as "no
@@ -238,7 +229,6 @@ private:
     // invocation with "not available" rather than dropping it.
     const commands::CommandRegistry* commands_ = nullptr;
     const commands::ProjectCommandSource* project_commands_ = nullptr;
-    mcp::McpClientManager* mcp_manager_ = nullptr;
     // Borrowed and optional: null = ListAgentPresets answers empty (see setter).
     const agent::AgentPresetRegistry* presets_ = nullptr;
     // Borrowed and optional: absent = pass-through (see auth_provider.hpp).

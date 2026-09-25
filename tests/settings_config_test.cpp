@@ -20,9 +20,6 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
     CHECK(config.memory.compaction_keep_recent_tokens == 0);
     CHECK(config.memory.scrollback_page_size == 0);
     CHECK(config.memory.compaction_strategy == "structured");
-    CHECK(config.tools.mcp.connect_timeout_ms == 10000);
-    CHECK(config.tools.mcp.request_timeout_ms == 60000);
-    CHECK(config.tools.mcp.max_list_pages == 100);
     CHECK(config.tools_view.stdout_buffer_lines == 100);
     CHECK(config.project_context.enabled == true);
     REQUIRE(config.project_context.files.size() == 2);
@@ -191,20 +188,13 @@ TEST_CASE("ParseSettingsConfig: tools.raw defaults to an empty object with no \"
     CHECK(config.tools.raw == nlohmann::json::object());
 }
 
-TEST_CASE("ParseSettingsConfig: tools.mcp knobs overridable, max_list_pages must be positive",
+TEST_CASE("ParseSettingsConfig: tools.mcp rides verbatim for the mcp plugin",
           "[settings_config]") {
-    nlohmann::json doc = {{"tools", {{"mcp", {{"connect_timeout_ms", 1000},
-                                               {"request_timeout_ms", 2000},
-                                               {"max_list_pages", 7}}}}}};
+    // The limits belong to the mcp plugin now (plugins/server/mcp/
+    // mcp_settings.hpp); core only carries the object through tools.raw.
+    nlohmann::json doc = {{"tools", {{"mcp", {{"max_list_pages", 0}}}}}};
     auto config = ParseSettingsConfig(doc);
-    CHECK(config.tools.mcp.connect_timeout_ms == 1000);
-    CHECK(config.tools.mcp.request_timeout_ms == 2000);
-    CHECK(config.tools.mcp.max_list_pages == 7);
-
-    CHECK_THROWS_AS(ParseSettingsConfig(nlohmann::json{
-                        {"tools", {{"mcp", {{"max_list_pages", 0}}}}}}), std::runtime_error);
-    CHECK_THROWS_AS(ParseSettingsConfig(nlohmann::json{
-                        {"tools", {{"mcp", {{"max_list_pages", -3}}}}}}), std::runtime_error);
+    CHECK(config.tools.raw["mcp"]["max_list_pages"] == 0);
 }
 
 TEST_CASE("ParseSettingsConfig: max_parallel_tool_calls defaults to 4, must be positive",

@@ -266,36 +266,26 @@ struct PermissionPolicy {
     // categories and patterns are the core model's business, but a per-tool
     // deny governs every tool, whoever models it.
     bool per_tool_denies(std::string_view tool_name) const;
+
+    // The operator's per-tool rules on `tool_name`, layer by layer -- for a
+    // plugin permission model that refines its own mode by the generic
+    // per-tool rules (the MCP model: a server's mode refined by a rule on the
+    // full mcp__ name). `layered` false: a flat (directly constructed)
+    // policy, whose single rule is in `flat`.
+    struct PerToolRules {
+        bool layered = false;
+        bool preset_trusted = true;
+        std::optional<PermissionMode> preset;
+        std::optional<PermissionMode> global;
+        std::optional<PermissionMode> flat;
+    };
+    PerToolRules per_tool_rules(std::string_view tool_name) const;
 };
 
-struct McpPermissionPolicy {
-    std::unordered_map<std::string, PermissionMode> per_server;
-    PermissionMode default_mode = PermissionMode::Ask;
-
-    PermissionMode mode_for(std::string_view server_name) const;
-};
-
-// Seeds an McpPermissionPolicy from its two config layers. For an UNTRUSTED
-// (project-local) preset each per-server mode is folded with
-// most_restrictive() against the global default, so the preset may only
-// narrow -- `{server: allow}` under an Ask/Deny global floor cannot
-// auto-approve that server's calls.
-McpPermissionPolicy build_mcp_policy(
-    const std::unordered_map<std::string, PermissionMode>& preset_per_server,
-    PermissionMode global_default_mode, bool preset_trusted);
-
-// One MCP tool's mode: the server's mode (McpPermissionPolicy) refined by a
-// per-tool rule keyed by the full tool name (`mcp__<server>__<tool>`) in
-// `policy`'s per_tool_overrides -- so `get_issue` can be allowed while
-// `delete_repo` asks. Same shape as a built-in's tool-vs-category precedence:
-// a preset per-tool rule wins; a global per-tool rule and a preset per-server
-// rule that both speak fold most-restrictively; a global per-tool rule beats
-// the global default; an untrusted preset only narrows.
-PermissionMode resolve_mcp_tool_mode(const PermissionPolicy& policy,
-                                     const McpPermissionPolicy& mcp_policy,
-                                     std::string_view server_name, std::string_view tool_name,
-                                     std::string* reason = nullptr);
-
+// "<where>: <key>=<mode>" -- the one shape every rule is named in, for
+// explanations. Exposed so plugin permission models name their rules the
+// same way core does.
+std::string rule_text(std::string_view where, std::string_view key, PermissionMode mode);
 
 // preset per-tool override -> {preset category, global per_tool_overrides}
 // (most_restrictive when both speak) -> global fallback.<category> ->
@@ -314,10 +304,6 @@ PermissionMode resolve_out_of_workdir_chain(const PermissionOverrideLayer& prese
 // dimension. preset.network -> global.network -> hard-coded default (Ask).
 PermissionMode resolve_network_chain(const PermissionOverrideLayer& preset,
                                       const PermissionOverrideLayer& global);
-
-// preset mcp_permissions[server] -> permissions.json mcp_default_mode -> Ask.
-PermissionMode resolve_mcp_chain(const std::optional<PermissionMode>& preset_per_server,
-                                  PermissionMode global_default_mode);
 
 // Merges the two config layers' pattern rules into one resolved set: the
 // preset entry REPLACES the global entry for an identical (tool, glob) pair --

@@ -542,11 +542,6 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     preset.permission_mode =
         BuildPermissionPolicy(raw.permission_mode, permissions_.global_layer, !from_project,
                               tool_permission_keys_.dotenv_protected);
-    // Same untrusted-content rule as the line above, for MCP: a project
-    // preset's per-server modes may only narrow the global default, never
-    // widen it. See the preset_is_trusted doc on BuildMcpPermissionPolicy.
-    preset.mcp_permissions =
-        BuildMcpPermissionPolicy(raw.mcp_permissions, permissions_.mcp_default_mode, !from_project);
     // Plugin permission models: each binds the operator's permissions.json
     // slice and this preset's own, under the same trust rule -- a model
     // enforces "a project preset may only narrow" for its own slice.

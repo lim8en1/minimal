@@ -2,7 +2,6 @@
 
 #include <algorithm>
 
-#include "minimal/mcp/mcp_client_manager.hpp"
 
 #include "minimal/agent/provider_resolver.hpp"
 
@@ -307,7 +306,6 @@ Session::Session(SessionParams params, AgentPreset preset,
     // this thread is allowed to block (the RPC reader is a different one),
     // and the loop must already carry its final group set when the first
     // turn can run.
-    mcp_manager_ = params_.mcp_manager;
     RefreshToolSources();
 
     observers_.NotifySessionCreated(InfoSnapshot());
@@ -635,7 +633,7 @@ void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
             return;
         }
     }
-    commands::CommandContext context(this, *presets_, *confirmations_, logger_, mcp_manager_,
+    commands::CommandContext context(this, *presets_, *confirmations_, logger_,
                                      project_registry);
     auto outcome =
         commands::Dispatch(*commands_, command.name, command.args, context, busy, project_registry);

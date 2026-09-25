@@ -19,9 +19,10 @@ using namespace std::chrono_literals;
 #include "fakes.hpp"
 #include "temp_dir.hpp"
 #include "minimal/rpc/session_wiring.hpp"
-#include "minimal/config/mcps_config.hpp"
+#include "minimal/mcp/mcps_config.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
+#include "minimal/mcp/mcp_permission_model.hpp"
 #include "minimal/mcp/mcp_tool_source.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
@@ -47,7 +48,7 @@ struct McpE2eFixture {
                                  {"models", {{"test-model", nlohmann::json::object()}}}}}}}}
                   .dump());
         Write("settings.json", nlohmann::json{{"default_agent_preset", "main"}}.dump());
-        Write("permissions.json", "{}");  // mcp_default_mode defaults to ASK
+        Write("permissions.json", "{}");  // the mcp model's default is ASK
         Write("agents/main.md",
               "---\nname: main\nmodel: main/test-model\nallowed_tools: [\"*\"]\n"
               "allowed_mcp_servers: [\"fake\"]\n---\nYou help.\n");
@@ -73,6 +74,12 @@ struct McpE2eFixture {
     void Start() {
         presets = std::make_unique<agent::AgentPresetRegistry>(dir, skills,
                                                                config::SettingsConfig{});
+        // The mcp plugin's permission model, bound to every preset the way
+        // the plugin registers it (permissions.json leaves its default: Ask).
+        permission_models.SetAttribution("mcp");
+        permission_models.Register(mcp::MakeMcpPermissionModel());
+        permission_models.ClearAttribution();
+        presets->SetPermissionModels(&permission_models);
         auto script_copy = script;
         providers.Register("fake", [script_copy](const llm::ProviderConfig&) {
             return std::make_unique<testing::ScriptedProvider>(script_copy);
@@ -101,7 +108,6 @@ struct McpE2eFixture {
                                                             config::SettingsConfig{},
                                                             config::PermissionsConfig{},
                                                             common::DefaultLogger());
-        service->set_mcp_manager(manager.get());
 
         socket = dir / "test.sock";
         server = std::make_unique<rpc::Server>(*service, socket);
@@ -137,6 +143,7 @@ struct McpE2eFixture {
     llm::ProviderFactoryRegistry providers;
     std::shared_ptr<testing::ScriptedProviderScript> script =
         std::make_shared<testing::ScriptedProviderScript>();
+    tools::PermissionModelRegistry permission_models;  // outlives presets
     std::unique_ptr<agent::AgentPresetRegistry> presets;
     std::unique_ptr<agent::SessionObserverRegistry> observers;
     std::unique_ptr<session::SessionDatabase> db;
@@ -198,7 +205,7 @@ TEST_CASE("tools from a stdio MCP server appear as mcp__server__tool and execute
     v1::ServerEvent event;
     while (stream->Read(&event)) {
         if (event.has_permission_request()) {
-            // MCP tools are Ask by default (mcp_default_mode): the first call
+            // MCP tools are Ask by default (the mcp model's default): the first call
             // must prompt, and the answer must unblock the worker.
             REQUIRE(stream->Write(PermissionAnswer(
                 session_id, event.permission_request().request_id(),
@@ -237,7 +244,7 @@ TEST_CASE("tools from a stdio MCP server appear as mcp__server__tool and execute
 }
 
 TEST_CASE("per-server MCP permission policy round-trips over the wire", "[mcp_e2e]") {
-    McpE2eFixture fixture;  // permissions.json leaves mcp_default_mode = ASK
+    McpE2eFixture fixture;  // permissions.json leaves the mcp default = ASK
     fixture.Script(testing::ToolUseResponse("call-1", "mcp__fake__echo", {{"text", "hi"}}));
     fixture.Script(testing::TextResponse("done"));
     fixture.Start();

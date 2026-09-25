@@ -124,6 +124,18 @@ v1::PermissionRunMode NextPermissionRunMode(const std::string& current) {
     return v1::PERMISSION_RUN_MODE_BYPASS;
 }
 
+void NotifyShown(const plugins::View& view) {
+    try {
+        view.OnShow();
+    } catch (const std::exception& error) {
+        common::DefaultLogger().warn("plugin view '{}' OnShow threw: {}",
+                                     std::string(view.spec().id), error.what());
+    } catch (...) {
+        common::DefaultLogger().warn("plugin view '{}' OnShow threw",
+                                     std::string(view.spec().id));
+    }
+}
+
 void FocusPanelOnOpen(std::vector<plugins::PluginViewEntry>& views,
                       plugins::PluginViewEntry& entry) {
     for (auto& other : views) other.focused = false;
@@ -721,6 +733,7 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
                 }
             }
             entry.visible = !entry.visible;
+            if (entry.visible) NotifyShown(*entry.view);
             if (entry.view->spec().placement == plugins::ViewPlacement::Panel) {
                 // Focus follows the toggle -- see the header's focus-rule
                 // contract.

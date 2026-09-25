@@ -47,9 +47,6 @@
 #include "minimal/hooks/hook_observer_bridge.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
-#include "minimal/mcp/mcp_client_manager.hpp"
-#include "minimal/mcp/mcp_tool_source.hpp"
-#include "minimal/mcp/signal_protocol.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/host_registries.hpp"
@@ -107,19 +104,6 @@ void OnShutdownSignal(int) {
         (void)ignored;  // a full pipe means a shutdown is already queued
     }
 }
-
-// The MCP manager as the producer behind channels.json's signal channels:
-// bringing a channel up is bringing its MCP connection up.
-class McpChannelSource final : public minimal::agent::ExternalChannelSource {
-public:
-    explicit McpChannelSource(minimal::mcp::McpClientManager& manager) : manager_(manager) {}
-    bool EnsureAlive(const std::string& channel, std::string& error) override {
-        return manager_.EnsureAlive(channel, error);
-    }
-
-private:
-    minimal::mcp::McpClientManager& manager_;
-};
 
 }  // namespace
 
@@ -742,88 +726,6 @@ int main(int argc, char** argv) {
     // started, so this is still ahead of any Find().
     session_support.Wire(sessions, *session_db, *presets);
 
-    // The signal router's channel registry, from the startup-parsed
-    // channels.json: subscriptions validate against declared channels, not
-    // connected ones. Populated below, once the MCP manager exists -- see
-    // there for why the enabled/reserved/collision filtering happens through
-    // it rather than by re-deriving the same rules here (declared here
-    // first, so it outlives the manager's wiring).
-
-    // The shared MCP server processes: one connection per enabled mcps.json
-    // entry, shared across every session. Core, like the MCP client itself.
-    // Nothing spawns here -- liveness checks fire when a session whose preset
-    // allows a server actually starts (ARCHITECTURE.md, MCP client). A missing
-    // mcps.json is the normal no-MCP state, not an error. Channel entries
-    // (channels.json) join the same map and lifecycle; their notifications
-    // route into the router above, their instructions feed session context.
-    minimal::mcp::McpLimits mcp_limits;
-    mcp_limits.connect = std::chrono::milliseconds(settings.tools.mcp.connect_timeout_ms);
-    mcp_limits.request = std::chrono::milliseconds(settings.tools.mcp.request_timeout_ms);
-    mcp_limits.max_list_pages = settings.tools.mcp.max_list_pages;
-    mcp_limits.restart_cooldown = std::chrono::milliseconds(settings.tools.mcp.restart_cooldown_ms);
-    minimal::mcp::ChannelWiring channel_wiring;
-    channel_wiring.config = bundle.channels;
-    channel_wiring.on_notification = [&signal_router](const std::string& channel,
-                                                      const std::string& raw) {
-        // Runs on the channel's read thread. The wire frame is the MCP
-        // transport's business; the router gets only the decoded signal
-        // (core.signals' external ingress), and delivery never blocks.
-        minimal::mcp::SignalFrame frame;
-        std::string error;
-        if (!minimal::mcp::ParseSignalNotification(raw, frame, error)) {
-            if (!error.empty()) {
-                minimal::common::DefaultLogger().warn("signal channel '{}': {}", channel, error);
-            }
-            return;
-        }
-        signal_router.DeliverExternal(channel, frame.signal, frame.content, frame.meta);
-    };
-    channel_wiring.on_connected = [&signal_router](const std::string& channel,
-                                                   const std::string& instructions) {
-        signal_router.SetChannelInstructions(channel, instructions);
-    };
-    auto mcp_manager = std::make_unique<minimal::mcp::McpClientManager>(
-        bundle.mcps, tools, mcp_limits, minimal::common::DefaultLogger(),
-        std::move(channel_wiring));
-    minimal::mcp::McpClientManager& mcp = *mcp_manager;
-    // The servers as a tool source: presets allow them under tool_sources.mcp
-    // (or the legacy allowed_mcp_servers). No session exists yet, so this is
-    // still ahead of the first activation.
-    tool_sources.Register(minimal::mcp::kMcpToolSourceName,
-                          std::make_shared<minimal::mcp::McpToolSource>(
-                              mcp, minimal::common::DefaultLogger()));
-
-    // Register with the router only the channels the manager actually built
-    // a handle for -- asking the manager directly, rather than re-deriving
-    // its enabled/reserved/collision rules here, is what keeps this in sync
-    // with EnsureAlive's own view: a subscription to anything else would pass
-    // CheckSelector and then either fail at EnsureAlive or, worse, silently
-    // resolve to an unrelated mcps.json server handle of the same name,
-    // producing "subscribed but no signal ever arrives" with no error
-    // anywhere. The sanity check already warns about both skip cases from
-    // the config side; this is the enforcement.
-    //
-    // The manager is each channel's producer: a session subscribing to one
-    // asks it (through the router) to bring the channel up. It outlives
-    // serving -- sessions are terminated before it is destroyed.
-    McpChannelSource mcp_channel_source(mcp);
-    {
-        const auto enabled_channels = mcp.EnabledChannelNames();
-        for (const auto& entry : bundle.channels.entries) {
-            if (std::find(enabled_channels.begin(), enabled_channels.end(), entry.name) ==
-                enabled_channels.end()) {
-                continue;
-            }
-            std::string error;
-            if (!signal_router.RegisterExternalChannel(
-                    minimal::agent::ExternalChannel{entry.name, entry.extended, entry.signals},
-                    &mcp_channel_source, error)) {
-                minimal::common::DefaultLogger().warn("signal channel '{}' skipped: {}",
-                                                      entry.name, error);
-            }
-        }
-    }
-
     // Registered by the harness itself, like SkillTool, but only NOW: the
     // manager needs the SessionRegistry to exist, and no session can build a
     // tool set before serving starts, so registering here is still before
@@ -856,7 +758,6 @@ int main(int argc, char** argv) {
     minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings, permissions,
                                              minimal::common::DefaultLogger(), registries);
     service.set_project_commands(&project_commands);
-    service.set_mcp_manager(&mcp);
     service.set_presets(presets.get());
     service.set_signal_router(&signal_router);
 
@@ -1012,6 +913,11 @@ int main(int argc, char** argv) {
     housekeeping.Stop();
     sessions.StopReaper();
     sessions.TerminateAll();
+    // Plugins that own threads, processes or connections tied to host
+    // objects (the MCP plugin's server processes and reaper) stop them now:
+    // every session is gone, and the registries they reference die with
+    // main's frame, before any plugin static destructor would run.
+    loader.ShutdownAll();
     // Drain and release the observers NOW, not in ~SessionObserverRegistry:
     // `observers` is declared before `services`, `session_support`,
     // `session_db` and `sessions`, so its destructor runs after all of them --

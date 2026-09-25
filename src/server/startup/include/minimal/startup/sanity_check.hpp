@@ -56,8 +56,7 @@ public:
 private:
     std::vector<CheckResult> check_providers();
     std::vector<CheckResult> check_presets();
-    std::vector<CheckResult> check_mcp_servers();
-    std::vector<CheckResult> check_channels();
+    std::vector<CheckResult> check_plugin_warnings();
     std::vector<CheckResult> check_directories();
     std::vector<CheckResult> check_plugins();
     std::vector<CheckResult> check_name_collisions();

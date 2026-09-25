@@ -125,7 +125,6 @@ public:
         std::function<void()> open_agent_picker;
         std::function<void()> open_model_picker;
         std::function<void()> open_subagent_model_picker;
-        std::function<void()> open_mcp_picker;
         // The `/subagents` view_hint: opens the focused session's subagent
         // picker. Takes the parent session id (the focused tab's session) --
         // the picker filters ListSessions to that parent's children.

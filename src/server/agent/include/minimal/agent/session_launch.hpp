@@ -20,9 +20,6 @@
 #include "minimal/session/session_database.hpp"
 #include "minimal/tools/permission.hpp"
 
-namespace minimal::mcp {
-class McpClientManager;
-}
 namespace minimal::tools {
 class PermissionAdvisorRegistry;
 }
@@ -58,7 +55,6 @@ struct LaunchContext {
     const config::PermissionsConfig& permissions;
     common::Logger& logger;
     const tools::PermissionAdvisorRegistry* advisors = nullptr;  // null: no advisor applies
-    mcp::McpClientManager* mcp_manager = nullptr;  // null: no MCP servers, no liveness checks
     SignalRouter* signal_router = nullptr;         // null: signals are not offered
 };
 

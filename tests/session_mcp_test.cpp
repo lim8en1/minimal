@@ -13,7 +13,7 @@
 #include "minimal/agent/subagent_manager.hpp"
 #include "minimal/agent/subagent_spawn.hpp"
 #include "minimal/common/logger.hpp"
-#include "minimal/config/mcps_config.hpp"
+#include "minimal/mcp/mcps_config.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/mcp/mcp_tool_source.hpp"
@@ -75,7 +75,6 @@ struct Fixture {
         params.session_id = "sess-mcp";
         params.agent_preset = "test";
         params.project_root = std::filesystem::temp_directory_path();
-        params.mcp_manager = manager.get();
         sources.Register(mcp::kMcpToolSourceName,
                          std::make_shared<mcp::McpToolSource>(*manager,
                                                               minimal::common::DefaultLogger()));
@@ -370,7 +369,6 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
     parent_params.session_id = row.session_id;
     parent_params.agent_preset = "main";
     parent_params.project_root = dir.path();
-    parent_params.mcp_manager = &manager;
     auto parent = sessions.Create(std::move(parent_params));
     // a client is present in every designed flow
     const auto parent_sub = testing::Transport(*parent).queue().Subscribe();

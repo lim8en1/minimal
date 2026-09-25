@@ -300,6 +300,9 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event);
 // lands on the first visible panel (next) or the last (prev); a single
 // visible panel simply keeps focus.
 
+// Tells a view it was just made visible (View::OnShow), containing a throw.
+void NotifyShown(const plugins::View& view);
+
 void FocusPanelOnOpen(std::vector<plugins::PluginViewEntry>& views,
                       plugins::PluginViewEntry& entry);
 void FocusPanelOnClose(std::vector<plugins::PluginViewEntry>& views,

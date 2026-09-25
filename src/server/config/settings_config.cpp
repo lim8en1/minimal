@@ -108,22 +108,6 @@ ToolsSettings ParseTools(const nlohmann::json& doc) {
     if (!doc.contains("tools")) return result;
     const auto& tools = doc.at("tools");
     result.raw = tools;
-    if (tools.contains("mcp") && tools.at("mcp").is_object()) {
-        const auto& mcp = tools.at("mcp");
-        result.mcp.connect_timeout_ms = mcp.value("connect_timeout_ms", result.mcp.connect_timeout_ms);
-        result.mcp.request_timeout_ms = mcp.value("request_timeout_ms", result.mcp.request_timeout_ms);
-        result.mcp.max_list_pages = mcp.value("max_list_pages", result.mcp.max_list_pages);
-        if (result.mcp.max_list_pages < 1) {
-            throw std::runtime_error(
-                "settings.json: tools.mcp.max_list_pages must be at least 1");
-        }
-        result.mcp.restart_cooldown_ms =
-            mcp.value("restart_cooldown_ms", result.mcp.restart_cooldown_ms);
-        if (result.mcp.restart_cooldown_ms < 0) {
-            throw std::runtime_error(
-                "settings.json: tools.mcp.restart_cooldown_ms must not be negative");
-        }
-    }
     result.max_parallel_tool_calls =
         tools.value("max_parallel_tool_calls", result.max_parallel_tool_calls);
     if (result.max_parallel_tool_calls < 1) {

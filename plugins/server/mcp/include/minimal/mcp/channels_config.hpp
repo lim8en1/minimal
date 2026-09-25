@@ -7,6 +7,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/agent/signal_service.hpp"
+
 namespace minimal::config {
 
 // One channels.json entry: an MCP stdio server that PUSHES signals into
@@ -68,17 +70,10 @@ ChannelsConfig ParseChannelsConfig(const nlohmann::json& doc);
 // installs configure no channels at all, exactly like mcps.json.
 ChannelsConfig LoadChannelsConfig(const std::filesystem::path& path);
 
-// The one name rule for BOTH halves of a "channel/signal" selector: lowercase
-// alphanumerics plus '.', '_' and '-'. One charset everywhere means a selector
-// is unambiguously split on the FIRST '/', and no case-confusion can smuggle a
-// near-miss name past a restricted allowlist. Exported because the router
-// validates inbound signal names against the same rule, and the sanity check
-// validates config against it.
-bool IsValidSignalName(std::string_view name);
-
-// The reserved internal channel name (cross-session messaging). A channels.json
-// entry with this name is refused by the sanity check and skipped by the
-// manager: the name belongs to the harness, not to an external process.
-inline constexpr std::string_view kReservedInternalChannelName = "sessions";
+// The signal system's name rule and reserved internal source, owned by core
+// (agent/signal_service.hpp) -- channels.json validates against the same
+// rule the router enforces.
+using agent::IsValidSignalName;
+inline constexpr std::string_view kReservedInternalChannelName = agent::kInternalSignalSource;
 
 }  // namespace minimal::config

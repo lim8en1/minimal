@@ -106,9 +106,6 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
             config.global_layer.pattern_precedence =
                 ParsePatternPrecedence(doc.at("pattern_precedence").get<std::string>());
         }
-        if (doc.contains("mcp_default_mode")) {
-            config.mcp_default_mode = ParsePermissionMode(doc.at("mcp_default_mode").get<std::string>());
-        }
         if (doc.contains("plugins")) {
             const auto& slices = doc.at("plugins");
             if (!slices.is_object()) {
@@ -116,6 +113,15 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
                     "permissions.json: plugins must be an object of {model: {...}}");
             }
             config.plugin_slices = slices;
+        }
+        // Legacy spelling from before the MCP client became a plugin: a key
+        // table, not MCP logic -- the value lands in the mcp plugin's slice
+        // verbatim, and the plugin's model parses it. An explicit
+        // plugins.mcp.default wins.
+        if (doc.contains("mcp_default_mode")) {
+            auto& slice = config.plugin_slices["mcp"];
+            if (!slice.is_object()) slice = nlohmann::json::object();
+            if (!slice.contains("default")) slice["default"] = doc.at("mcp_default_mode");
         }
         if (doc.contains("advisor")) {
             config.advisor = doc.at("advisor").get<std::string>();

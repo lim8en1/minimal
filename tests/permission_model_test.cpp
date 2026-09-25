@@ -9,6 +9,7 @@
 #include "minimal/tools/permission_model.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
+#include "minimal/mcp/mcp_permission_model.hpp"
 
 using namespace minimal;
 using namespace minimal::testing;
@@ -365,10 +366,10 @@ TEST_CASE("PermissionModelRegistry: a model may only claim its own plugin's tool
 
 TEST_CASE("MCP permission model: slices build the same policy as the legacy keys",
           "[permission_model][mcp]") {
-    const auto model = tools::MakeMcpPermissionModel();
+    const auto model = mcp::MakeMcpPermissionModel();
     auto policy_of = [&](const nlohmann::json& global, const nlohmann::json& preset, bool trusted) {
         const auto layer = model->BuildLayer(global, preset, trusted);
-        return *static_cast<const tools::McpPermissionPolicy*>(layer.get());
+        return *static_cast<const mcp::McpPermissionPolicy*>(layer.get());
     };
     const nlohmann::json global = {{"default", "deny"}};
     const nlohmann::json preset = {{"servers", {{"gh", "allow"}}}};

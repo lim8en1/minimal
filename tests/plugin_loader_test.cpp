@@ -456,6 +456,24 @@ TEST_CASE("a plugin entry with no config still loads with an empty context confi
           "fixture ok");
 }
 
+TEST_CASE("a plugin's reported warnings land on its record; shutdown runs once",
+          "[plugin_loader][lifecycle]") {
+    Harness h;
+    const auto records = h.loader.LoadAll({Enabled("fixture-lifecycle")});
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().status == LoadStatus::Loaded);
+    CHECK(records.front().warnings == std::vector<std::string>{"fixture config is odd"});
+
+    const auto* shutdowns =
+        static_cast<const int*>(h.service_registry.Find("fixture-lifecycle.shutdowns"));
+    REQUIRE(shutdowns != nullptr);
+    CHECK(*shutdowns == 0);
+    h.loader.ShutdownAll();
+    CHECK(*shutdowns == 1);
+    h.loader.ShutdownAll();  // idempotent
+    CHECK(*shutdowns == 1);
+}
+
 TEST_CASE("a plugin's hook points register before its tools, and land on the record",
           "[plugin_loader][track_o]") {
     Harness h;

@@ -7,7 +7,6 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/client/cli_args.hpp"
 #include "minimal/client/view/agent_picker.hpp"
-#include "minimal/client/view/mcp_picker.hpp"
 #include "minimal/client/view/model_picker.hpp"
 #include "minimal/client/view/session_picker.hpp"
 #include "minimal/client/view/subagent_picker.hpp"
@@ -374,66 +373,6 @@ void PickerController::RebuildModelPickerComponent() {
     callbacks.on_close = [this] { deps_.show_model_picker = false; };
     *deps_.model_picker_slot = MakeModelPicker(model_picker_models_, deps_.theme,
                                                std::move(callbacks));
-}
-
-// The /mcp picker: bare `/mcp` opens with a fresh fetch; toggling a row
-// re-fetches and rebuilds in place (ToggleMcpServer below) so the picker
-// always shows the server's actual post-toggle status rather than an
-// optimistic local flip. Runs the RPC on AppState's RPC worker, like every
-// other picker fetch -- SetMcpServerEnabled is normally instant, but a
-// server mid-teardown could still take a moment, and the loop thread must
-// never stall on it.
-void PickerController::OpenMcpPicker() {
-    deps_.show_mcp_picker = true;
-    mcp_picker_servers_.clear();
-    RebuildMcpPickerComponent();
-    deps_.app.RunOnRpcQueue([this] {
-        const auto result = deps_.client.ListMcpServers();
-        if (!result.status.ok()) {
-            minimal::common::DefaultLogger().warn("mcp picker fetch failed: {}",
-                                                  result.status.error_message());
-            return;
-        }
-        std::vector<v1::McpServerSummary> servers(result.response.servers().begin(),
-                                                  result.response.servers().end());
-        QueueApply([this, servers = std::move(servers)]() mutable {
-            mcp_picker_servers_ = std::move(servers);
-            RebuildMcpPickerComponent();
-        });
-    });
-}
-
-void PickerController::ToggleMcpServer(const std::string& name) {
-    bool enabled = false;
-    for (const auto& server : mcp_picker_servers_) {
-        if (server.name() == name) {
-            enabled = server.enabled();
-            break;
-        }
-    }
-    deps_.app.RunOnRpcQueue([this, name, enabled] {
-        const auto result = deps_.client.SetMcpServerEnabled(name, !enabled);
-        if (!result.status.ok() || !result.response.ok()) {
-            minimal::common::DefaultLogger().warn(
-                "mcp toggle for '{}' failed: {}", name,
-                !result.status.ok() ? result.status.error_message() : result.response.error());
-        }
-        const auto refreshed = deps_.client.ListMcpServers();
-        if (!refreshed.status.ok()) return;
-        std::vector<v1::McpServerSummary> servers(refreshed.response.servers().begin(),
-                                                  refreshed.response.servers().end());
-        QueueApply([this, servers = std::move(servers)]() mutable {
-            mcp_picker_servers_ = std::move(servers);
-            RebuildMcpPickerComponent();
-        });
-    });
-}
-
-void PickerController::RebuildMcpPickerComponent() {
-    *deps_.mcp_picker_slot =
-        MakeMcpPicker(mcp_picker_servers_, deps_.theme,
-                     {.on_toggle = [this](const std::string& name) { ToggleMcpServer(name); },
-                      .on_close = [this] { deps_.show_mcp_picker = false; }});
 }
 
 // The /subagents picker (see the header). One bounded fetch per open, like

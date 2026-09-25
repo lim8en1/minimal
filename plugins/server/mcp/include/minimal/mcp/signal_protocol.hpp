@@ -24,7 +24,7 @@
 #include <string>
 #include <string_view>
 
-#include "minimal/config/channels_config.hpp"
+#include "minimal/mcp/channels_config.hpp"
 
 namespace minimal::mcp {
 

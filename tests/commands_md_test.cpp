@@ -887,7 +887,7 @@ TEST_CASE("/help lists the effective catalog: project commands in, non-shadowabl
     }
 
     commands::CommandContext context(&fixture, fixture.registry_presets_for_test(),
-                                     fixture.confirmations, common::DefaultLogger(), nullptr,
+                                     fixture.confirmations, common::DefaultLogger(),
                                      &project_registry);
     const auto listing = commands::Dispatch(fixture.registry, "help", {}, context,
                                             /*busy=*/false, &project_registry);

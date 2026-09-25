@@ -8,13 +8,8 @@
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/message.hpp"
-#include "minimal/config/channels_config.hpp"
 
 namespace minimal::agent {
-
-static_assert(std::string_view(kInternalSignalSource) ==
-                  config::kReservedInternalChannelName,
-              "the internal source and channels.json's reserved name must agree");
 
 namespace {
 
@@ -40,7 +35,7 @@ bool IsReservedAttributeKey(const std::string& key) {
 std::map<std::string, std::string> SanitizeMeta(const std::map<std::string, std::string>& meta) {
     std::map<std::string, std::string> out;
     for (const auto& [key, value] : meta) {
-        if (!config::IsValidSignalName(key)) continue;
+        if (!IsValidSignalName(key)) continue;
         if (IsReservedAttributeKey(key)) continue;
         out.emplace(key, value);
     }
@@ -89,7 +84,7 @@ std::string WrapSignal(const std::string& source, const std::string& signal,
                        const std::string& content) {
     // Escaped like every other attribute below (EscapeAttrValue), not left
     // verbatim: both call sites today pre-validate source/signal against
-    // config::IsValidSignalName's [a-z0-9._-] charset, so this is currently
+    // IsValidSignalName's [a-z0-9._-] charset, so this is currently
     // unreachable in practice, but this function is documented (see the
     // header) as reusable beyond those two callers -- a future caller
     // passing an unvalidated value containing '"' would otherwise break out
@@ -101,7 +96,7 @@ std::string WrapSignal(const std::string& source, const std::string& signal,
         // The same charset rule as the wire params: a key outside it is
         // silently dropped rather than rejected -- one odd attribute must not
         // cost the whole signal.
-        if (!config::IsValidSignalName(key)) continue;
+        if (!IsValidSignalName(key)) continue;
         tag += " " + key + "=\"" + EscapeAttrValue(value) + "\"";
     }
     tag += ">";
@@ -111,7 +106,7 @@ std::string WrapSignal(const std::string& source, const std::string& signal,
 
 bool SignalRouter::RegisterExternalChannel(const ExternalChannel& channel,
                                            ExternalChannelSource* source, std::string& error) {
-    if (!config::IsValidSignalName(channel.name)) {
+    if (!IsValidSignalName(channel.name)) {
         error = "invalid channel name '" + channel.name + "' (names in [a-z0-9._-])";
         return false;
     }
@@ -129,7 +124,7 @@ bool SignalRouter::RegisterExternalChannel(const ExternalChannel& channel,
         return false;
     }
     for (const auto& signal : channel.signals) {
-        if (!config::IsValidSignalName(signal)) {
+        if (!IsValidSignalName(signal)) {
             error = "channel '" + channel.name + "' declares invalid signal '" + signal + "'";
             return false;
         }
@@ -169,7 +164,7 @@ bool SignalRouter::EnsureChannelAlive(const std::string& channel, std::string& e
 SignalDelivery SignalRouter::DeliverExternal(const std::string& channel, const std::string& signal,
                                              const std::string& content,
                                              const std::map<std::string, std::string>& meta) {
-    if (!config::IsValidSignalName(signal)) {
+    if (!IsValidSignalName(signal)) {
         // A bad NAME is a contract violation worth one line per drop (config
         // drift or a misbehaving producer), unlike a bad meta key.
         minimal::common::DefaultLogger().warn("signal channel '{}': dropped a signal with invalid name '{}'",
@@ -332,7 +327,7 @@ bool SignalRouter::CheckSelector(const std::string& selector, std::string& error
     const std::string signal_part =
         slash == std::string::npos ? std::string() : selector.substr(slash + 1);
     if (channel_part.empty() ||
-        (!signal_part.empty() && !config::IsValidSignalName(signal_part))) {
+        (!signal_part.empty() && !IsValidSignalName(signal_part))) {
         error = "invalid signal selector '" + selector +
                 "' (expected 'channel' or 'channel/signal', names in [a-z0-9._-])";
         return false;

@@ -37,7 +37,7 @@ TEST_CASE("cost of assembling a ChatRequest at 512k-token scale", "[.bench]") {
     tools::ToolRegistry registry;
     AlwaysAllowPermissionChecker checker;
     InMemoryHistoryStore store;
-    tools::ToolExecutor executor(registry, checker, AllowAllPolicy(), tools::McpPermissionPolicy{},
+    tools::ToolExecutor executor(registry, checker, AllowAllPolicy(), tools::PermissionModels{},
                                  tools::PermissionRunMode::Normal);
 
     agent::AgentPreset preset;

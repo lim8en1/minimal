@@ -18,7 +18,6 @@ struct PermissionsConfig {
     // has both shapes, so reusing it avoids a redundant struct even though the
     // two are JSON siblings, not nested, in permissions.json itself.
     tools::PermissionOverrideLayer global_layer;
-    tools::PermissionMode mcp_default_mode = tools::PermissionMode::Ask;
     // `plugins`: {<model>: {...}} -- each plugin permission model's global
     // slice, verbatim. Core checks only the outer shape; the model's
     // BuildLayer reads inside (tools/permission_model.hpp).

@@ -10,6 +10,7 @@
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/spawn_subagent_tool.hpp"
 #include "minimal/tools/skill_tool.hpp"
+#include "minimal/mcp/mcp_permission_model.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
@@ -485,7 +486,8 @@ TEST_CASE("AgentPresetRegistry: falls to hard-coded default with no config at al
           PermissionMode::Ask);
 }
 
-TEST_CASE("AgentPresetRegistry: mcp_permissions per-server vs. global default", "[agent_preset_registry]") {
+TEST_CASE("AgentPresetRegistry: legacy MCP keys bind through the mcp plugin's model",
+          "[agent_preset_registry][permission_model]") {
     TempConfigDir config;
     config.WriteDefaults();
     config.WriteJson("permissions.json", {{"mcp_default_mode", "deny"}});
@@ -500,10 +502,17 @@ TEST_CASE("AgentPresetRegistry: mcp_permissions per-server vs. global default", 
     config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
     AgentPresetRegistry registry(config.dir, skills,
                                   config::LoadSettingsConfig(config.dir / "settings.json"));
+    tools::PermissionModelRegistry models;
+    models.SetAttribution("mcp");
+    models.Register(mcp::MakeMcpPermissionModel());
+    models.ClearAttribution();
+    registry.SetPermissionModels(&models);
 
-    const auto& mcp = registry.Resolve("build").mcp_permissions;
-    CHECK(mcp.mode_for("search") == PermissionMode::AlwaysAllow);
-    CHECK(mcp.mode_for("unconfigured") == PermissionMode::AlwaysDeny);
+    const auto& bound = registry.Resolve("build").permission_models;
+    REQUIRE(bound.size() == 1);
+    const auto& policy = *static_cast<const mcp::McpPermissionPolicy*>(bound.front().layer.get());
+    CHECK(policy.mode_for("search") == PermissionMode::AlwaysAllow);
+    CHECK(policy.mode_for("unconfigured") == PermissionMode::AlwaysDeny);
 }
 
 TEST_CASE("AgentPresetRegistry: plugin permission models bind both slices",
@@ -529,14 +538,14 @@ TEST_CASE("AgentPresetRegistry: plugin permission models bind both slices",
     // are easy to observe.
     tools::PermissionModelRegistry models;
     models.SetAttribution("mcp-client");
-    models.Register(tools::MakeMcpPermissionModel());
+    models.Register(mcp::MakeMcpPermissionModel());
     models.ClearAttribution();
     registry.SetPermissionModels(&models);
 
     const auto& bound = registry.Resolve("build").permission_models;
     REQUIRE(bound.size() == 1);
     CHECK(bound.front().name == "mcp-client");
-    const auto& policy = *static_cast<const tools::McpPermissionPolicy*>(bound.front().layer.get());
+    const auto& policy = *static_cast<const mcp::McpPermissionPolicy*>(bound.front().layer.get());
     CHECK(policy.mode_for("search") == PermissionMode::AlwaysAllow);
     CHECK(policy.mode_for("unconfigured") == PermissionMode::AlwaysDeny);
 }

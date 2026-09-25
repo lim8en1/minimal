@@ -41,17 +41,4 @@ tools::PermissionPolicy BuildPermissionPolicy(
     bool preset_is_trusted = true,
     const std::vector<std::string>& dotenv_protected_permission_keys = {});
 
-// Exact -- McpPermissionPolicy's own two-layer shape already matches
-// resolve_mcp_chain() once per_server/default_mode are seeded this way.
-//
-// `preset_is_trusted` means what it means on BuildPermissionPolicy: for an
-// UNTRUSTED (project-local) preset each per-server mode is folded with
-// most_restrictive() against the global default, so the preset may only
-// narrow -- `mcp: {server: allow}` under an Ask/Deny global floor cannot
-// auto-approve that server's calls.
-tools::McpPermissionPolicy BuildMcpPermissionPolicy(
-    const std::unordered_map<std::string, tools::PermissionMode>& preset_mcp_permissions,
-    tools::PermissionMode global_mcp_default_mode,
-    bool preset_is_trusted);
-
 }  // namespace minimal::agent

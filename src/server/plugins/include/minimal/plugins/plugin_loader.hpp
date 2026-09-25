@@ -86,6 +86,10 @@ struct PluginRecord {
     // per entry. Absent label: the plugin registered nothing there.
     std::map<std::string, std::vector<std::string>> registered;
 
+    // Configuration problems the plugin reported through
+    // PluginRegistrationContext::report_warning during registration.
+    std::vector<std::string> warnings;
+
     const std::vector<std::string>& Registered(std::string_view label) const {
         static const std::vector<std::string> kNone;
         const auto it = registered.find(std::string(label));
@@ -125,6 +129,11 @@ public:
     // others: every outcome, good or bad, comes back as a PluginRecord.
     std::vector<PluginRecord> LoadAll(const std::vector<PluginCandidate>& candidates);
 
+    // Calls every LOADED plugin's optional minimal_plugin_shutdown, in reverse
+    // load order, containing throws. Idempotent; main.cpp calls it once, after
+    // the sessions are terminated.
+    void ShutdownAll();
+
     // Invokes every loaded plugin's OPTIONAL
     // minimal_plugin_register_project_commands hook against `registry` for
     // `project_root`. Called lazily, per root, by
@@ -156,6 +165,12 @@ private:
     std::filesystem::path plugin_data_root_;
     std::vector<std::unique_ptr<Target>> targets_;  // registration order
     std::vector<void*> handles_;  // never closed; see LIFETIME above
+    // The Loaded subset, in load order, with names: ShutdownAll's list.
+    std::vector<std::pair<std::string, void*>> loaded_;
+    bool shut_down_ = false;
+    // report_warning's sink, per plugin name: the loader outlives every
+    // context copy (project-command contexts are kept past LoadOne).
+    std::map<std::string, std::vector<std::string>> warnings_;
 
     // One entry per loaded plugin that exports
     // minimal_plugin_register_project_commands, checked once at LoadOne time

@@ -30,22 +30,21 @@ ToolExecutor::ToolExecutor(ToolRegistry& registry, PermissionChecker& checker,
     : registry_(registry),
       checker_(checker),
       policy_(std::move(policy)),
-      models_(WithMcpModel(std::move(models))),
+      models_(std::move(models)),
       run_mode_(run_mode),
       policy_ceiling_(std::move(policy_ceiling)),
       models_ceiling_(std::move(models_ceiling)),
       session_grants_(seed_grants.begin(), seed_grants.end()),
       hooks_(hooks) {}
 
-PermissionModels ToolExecutor::WithMcpModel(PermissionModels models) {
-    if (FindMcpPolicy(models) == nullptr) models.push_back(BindMcpPermissionModel({}));
-    return models;
-}
-
-const McpPermissionPolicy& ToolExecutor::mcp_policy() const {
-    static const McpPermissionPolicy kDefault;
-    const McpPermissionPolicy* bound = FindMcpPolicy(models_);
-    return bound != nullptr ? *bound : kDefault;
+const BoundPermissionModel* ToolExecutor::ClaimantFor(const PermissionModels& models,
+                                                      std::string_view permission_key) const {
+    const BoundPermissionModel* claimant = FindClaimant(models, permission_key);
+    if (claimant == nullptr) return nullptr;
+    // A namespace a PLUGIN reserved is governed by that plugin's model only.
+    // (A core-reserved namespace -- the test harness -- names no model.)
+    const auto owner = registry_.ReservedOwnerOf(permission_key);
+    return owner && !owner->empty() && *owner != claimant->name ? nullptr : claimant;
 }
 
 namespace {
@@ -150,7 +149,7 @@ ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::js
     // A plugin permission model governing this tool, and the core stages it
     // takes over (permission_model.hpp). Everything it does not replace
     // resolves through the core model below.
-    const BoundPermissionModel* claimant = FindClaimant(models_, permission_key);
+    const BoundPermissionModel* claimant = ClaimantFor(models_, permission_key);
     const unsigned replaced = claimant != nullptr ? claimant->model->Replaces() : 0u;
     const bool model_base = replaces(replaced, PermissionStage::kBase);
     const bool model_network = replaces(replaced, PermissionStage::kNetwork);
@@ -210,6 +209,13 @@ ToolExecutor::Verdict ToolExecutor::Explain(const Tool& tool, const nlohmann::js
                                                     claimant->layer.get());
         mode = answer.mode;
         why = std::move(answer.why);
+    } else if (claimant == nullptr && registry_.IsReserved(permission_key)) {
+        // A dynamic tool in a reserved namespace that no model governs (its
+        // plugin registered none, or none is bound to this preset): its
+        // declared category is a placeholder, so the category default would
+        // be a guess. Fail closed to a human.
+        mode = PermissionMode::Ask;
+        why = "no permission model governs " + std::string(permission_key);
     } else {
         mode = policy_.mode_for(permission_key, category, subjects, subject_is_path, &why);
     }
@@ -619,7 +625,7 @@ ToolExecutor::HookLabels ToolExecutor::hook_labels(const std::string& tool_name,
                                                    const nlohmann::json& input) const {
     HookLabels labels;
     labels.permission_key = std::string(registry_.PermissionKeyFor(tool_name));
-    const BoundPermissionModel* claimant = FindClaimant(models_, labels.permission_key);
+    const BoundPermissionModel* claimant = ClaimantFor(models_, labels.permission_key);
     const std::shared_ptr<Tool> tool = registry_.Find(tool_name);
     if (tool == nullptr) {
         // No longer registered (a replaced group): the model's label still

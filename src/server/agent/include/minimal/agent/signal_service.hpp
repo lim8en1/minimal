@@ -2,6 +2,7 @@
 
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // The core-provided signal service plugins reach through ServiceRegistry::
@@ -39,6 +40,21 @@ inline constexpr const char* kSignalServiceName = "core.signals";
 // The builtin INTERNAL source (cross-session messages). Never an external
 // channel: RegisterExternalChannel refuses the name.
 inline constexpr const char* kInternalSignalSource = "sessions";
+
+// The one name rule for channel names, signal names and meta keys -- both
+// halves of a "channel/signal" selector: lowercase alphanumerics plus '.',
+// '_' and '-'. One charset everywhere means a selector is unambiguously split
+// on the FIRST '/', and no case-confusion can smuggle a near-miss name past
+// a restricted allowlist. Producers validate their own config against it.
+inline bool IsValidSignalName(std::string_view name) {
+    if (name.empty()) return false;
+    for (const char c : name) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+                        c == '_' || c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
 
 // One external channel as the router needs it: its name and its allowlist.
 // Everything about HOW its events arrive (a process to spawn, a wire

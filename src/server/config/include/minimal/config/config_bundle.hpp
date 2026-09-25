@@ -10,9 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "minimal/config/channels_config.hpp"
 #include "minimal/config/hooks_config.hpp"
-#include "minimal/config/mcps_config.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/config/settings_config.hpp"
@@ -36,12 +34,11 @@ struct ConfigBundle {
     ProvidersConfig providers;
     bool providers_loaded = false;
     HooksConfig hooks;
-    McpsConfig mcps;          // degrades to empty on a load failure
-    ChannelsConfig channels;  // degrades to empty on a load failure
     // What went wrong loading, in file order. settings/permissions/providers/
     // hooks failures are Fatal (serving depends on them, or -- hooks -- a
-    // silently dropped guard would be the dangerous outcome); mcps, channels
-    // and a malformed plugins.json degrade with a Warning.
+    // silently dropped guard would be the dangerous outcome); a malformed
+    // plugins.json degrades with a Warning. (mcps.json and channels.json
+    // belong to the MCP plugin, which loads and validates them itself.)
     std::vector<CheckResult> problems;
 };
 

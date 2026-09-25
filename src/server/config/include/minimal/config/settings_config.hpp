@@ -60,25 +60,7 @@ struct MemorySettings {
 // Kept as raw pass-through JSON: each plugin owns the schema of its own slice
 // (tools-fs parses its own tool config, tools-bash parses `bash`), so core
 // never has to match or break their shapes.
-struct McpSettings {
-    // Spawn/handshake deadline and per-call deadline: a dead or hanging MCP
-    // server must degrade to a tool error, never a hung session worker.
-    std::int64_t connect_timeout_ms = 10000;
-    std::int64_t request_timeout_ms = 60000;
-    // tools/list pagination cap (both transports). A server that never
-    // stops returning nextCursor pages would otherwise wedge the connection's
-    // worker thread (each page is individually within request_timeout). The
-    // stdio transport answers from a single request and needs no cap.
-    std::int64_t max_list_pages = 100;
-    // Floor between restart ATTEMPTS for one server after a failed one (not a
-    // cap on liveness checks -- a reused, healthy connection is unaffected).
-    // Without it, a subagent spawn loop against a down server pays a full
-    // spawn+initialize+discovery attempt per spawn, at spawn rate.
-    std::int64_t restart_cooldown_ms = 30000;
-};
-
 struct ToolsSettings {
-    McpSettings mcp;
     // How many tool calls from one assistant turn may execute concurrently
     // (parallel dispatch -- see ARCHITECTURE.md "Tool dispatch"). 1 reproduces
     // the sequential behavior exactly. This is a WIDTH, not a thread-pool size:

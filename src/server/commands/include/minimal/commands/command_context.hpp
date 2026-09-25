@@ -33,7 +33,6 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/common/model_ref.hpp"
 #include "minimal/config/providers_config.hpp"
-#include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/tools/tool_executor.hpp"
 
 namespace minimal::commands {
@@ -153,10 +152,6 @@ public:
     // session-bound command can never observe the null. Commands reach the
     // session through session() (asserts non-null); a sessionless-capable one
     // branches on has_session() first.
-    // `mcp_manager` is NULLABLE too: a build with no mcps.json configured (or
-    // a test fixture with no manager at all) still constructs a valid
-    // context -- a command that needs it (e.g. /mcp) checks for null and
-    // reports "MCP is not available" rather than crashing.
     // `project_commands` is NULLABLE: the project-scoped half of the catalog
     // this invocation's session sees (ProjectCommandSource), null when there
     // is no session or no project scope. A command that lists or explains
@@ -164,13 +159,11 @@ public:
     // so it sees exactly what dispatch runs.
     CommandContext(SessionControl* session, const agent::AgentPresetRegistry& presets,
                    ConfirmationBroker& confirmations, common::Logger& logger,
-                   mcp::McpClientManager* mcp_manager = nullptr,
                    const CommandRegistry* project_commands = nullptr)
         : session_(session),
           presets_(presets),
           confirmations_(confirmations),
           logger_(logger),
-          mcp_manager_(mcp_manager),
           project_commands_(project_commands) {}
 
     // The session, as much of a command may touch. Implemented by agent::Session.
@@ -186,7 +179,6 @@ public:
     const config::ProvidersConfig& providers() const { return presets_.providers(); }
     ConfirmationBroker& confirmations() { return confirmations_; }
     common::Logger& logger() { return logger_; }
-    mcp::McpClientManager* mcp_manager() const { return mcp_manager_; }
     const CommandRegistry* project_commands() const { return project_commands_; }
 
 private:
@@ -194,7 +186,6 @@ private:
     const agent::AgentPresetRegistry& presets_;
     ConfirmationBroker& confirmations_;
     common::Logger& logger_;
-    mcp::McpClientManager* mcp_manager_;
     const CommandRegistry* project_commands_;
 };
 

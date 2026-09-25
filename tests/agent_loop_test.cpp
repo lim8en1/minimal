@@ -214,7 +214,7 @@ struct Harness {
                                                          checker_override ? *checker_override
                                                                           : checker,
                                                          executor_policy,
-                                                         tools::McpPermissionPolicy{},
+                                                         tools::PermissionModels{},
                                                          PermissionRunMode::Normal);
         agent::SessionContext session{common::DefaultLogger()};
         session.session_id = "s1";
@@ -369,7 +369,7 @@ TEST_CASE("a store failure appending tool results repairs history_ before rethro
     registry.Register(std::make_unique<testing::FakeTool>("read", ToolCategory::ReadOnly));
     testing::AlwaysAllowPermissionChecker checker;
     tools::ToolExecutor executor(registry, checker, testing::AllowAllPolicy(),
-                                 tools::McpPermissionPolicy{}, PermissionRunMode::Normal);
+                                 tools::PermissionModels{}, PermissionRunMode::Normal);
 
     // Append #1 is the seed user message ("go"); #2 is the assistant
     // message carrying tool_use (both succeed); #3 is the results message

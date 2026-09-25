@@ -3,7 +3,6 @@
 #include <stdexcept>
 #include <utility>
 
-#include "minimal/mcp/naming.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace minimal::tools {
@@ -19,74 +18,6 @@ nlohmann::json SliceFor(const nlohmann::json& slices, const std::string& name) {
     const auto it = slices.find(name);
     return it == slices.end() ? nlohmann::json() : *it;
 }
-
-PermissionMode ParseMode(const nlohmann::json& value, const std::string& where) {
-    if (value.is_string()) {
-        if (auto mode = mode_from_name(value.get<std::string>())) return *mode;
-    }
-    throw std::runtime_error(where + " must be \"allow\", \"ask\" or \"deny\"");
-}
-
-class McpPermissionModel final : public PermissionModel {
-public:
-    unsigned Replaces() const override { return static_cast<unsigned>(PermissionStage::kBase); }
-
-    bool Claims(std::string_view permission_key) const override {
-        return !mcp::McpServerOf(permission_key).empty();
-    }
-
-    // global {"default": mode}; preset {"servers": {server: mode}}.
-    PermissionLayer BuildLayer(const nlohmann::json& global_slice,
-                               const nlohmann::json& preset_slice,
-                               bool preset_trusted) const override {
-        PermissionMode global_default = PermissionMode::Ask;
-        if (global_slice.is_object() && global_slice.contains("default")) {
-            global_default = ParseMode(global_slice.at("default"), "mcp default");
-        }
-        std::unordered_map<std::string, PermissionMode> per_server;
-        if (preset_slice.is_object() && preset_slice.contains("servers")) {
-            const auto& servers = preset_slice.at("servers");
-            if (!servers.is_object()) {
-                throw std::runtime_error("mcp servers must be a map of {server: mode}");
-            }
-            for (const auto& [server, mode] : servers.items()) {
-                per_server[server] = ParseMode(mode, "mcp server '" + server + "'");
-            }
-        }
-        return std::make_shared<const McpPermissionPolicy>(
-            build_mcp_policy(per_server, global_default, preset_trusted));
-    }
-
-    PermissionAnswer Resolve(PermissionStage stage, const PermissionQuery& query) const override {
-        (void)stage;  // kBase is the only stage this model replaces
-        static const McpPermissionPolicy kDefault;
-        const auto& policy = query.layer != nullptr
-                                 ? *static_cast<const McpPermissionPolicy*>(query.layer)
-                                 : kDefault;
-        const std::string server = mcp::McpServerOf(query.permission_key);
-        PermissionAnswer answer;
-        if (query.core_policy != nullptr) {
-            answer.mode = resolve_mcp_tool_mode(*query.core_policy, policy, server,
-                                                query.permission_key, &answer.why);
-        } else {
-            answer.mode = policy.mode_for(server);
-            answer.why = "mcp " + server + "=" + std::string(mode_name(answer.mode));
-        }
-        return answer;
-    }
-
-    std::string_view HookCategory() const override { return "mcp"; }
-
-    std::string Describe(const void* layer) const override {
-        if (layer == nullptr) return {};
-        const auto& policy = *static_cast<const McpPermissionPolicy*>(layer);
-        std::string out = "default=" + std::string(mode_name(policy.default_mode));
-        for (const auto& [server, mode] : policy.per_server) {
-            out += " " + server + "=" + std::string(mode_name(mode));
-        }
-        return out;
-    }
-};
 
 }  // namespace
 
@@ -148,25 +79,6 @@ std::vector<std::string> PermissionModelRegistry::ValidateClaims(const ToolRegis
         }
     }
     return errors;
-}
-
-std::shared_ptr<const PermissionModel> MakeMcpPermissionModel() {
-    static const auto model = std::make_shared<const McpPermissionModel>();
-    return model;
-}
-
-BoundPermissionModel BindMcpPermissionModel(McpPermissionPolicy policy) {
-    return BoundPermissionModel{std::string(kMcpPermissionModelName), MakeMcpPermissionModel(),
-                                std::make_shared<const McpPermissionPolicy>(std::move(policy))};
-}
-
-const McpPermissionPolicy* FindMcpPolicy(const PermissionModels& models) {
-    for (const auto& bound : models) {
-        if (bound.name == kMcpPermissionModelName && bound.layer) {
-            return static_cast<const McpPermissionPolicy*>(bound.layer.get());
-        }
-    }
-    return nullptr;
 }
 
 }  // namespace minimal::tools

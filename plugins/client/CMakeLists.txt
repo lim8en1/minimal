@@ -24,3 +24,8 @@ add_subdirectory(cost-view)
 # shape (background poll, tab-switch refresh, unfilled-segment degradation).
 
 add_subdirectory(checklist-view)
+
+# mcp-view is the client half of the mcp plugin pair: the `/mcp` picker as a
+# modal view over the server-side mcp plugin's endpoint. Core has no MCP UI.
+
+add_subdirectory(mcp-view)

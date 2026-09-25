@@ -238,8 +238,6 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
         deps_.open_model_picker();   // core mapping: bare `/model`
     } else if (notice.view_hint == "subagent-models") {
         deps_.open_subagent_model_picker();   // core mapping: bare `/subagent-model`
-    } else if (notice.view_hint == "mcp") {
-        deps_.open_mcp_picker();   // core mapping: bare `/mcp`
     } else if (notice.view_hint == "subagents") {
         // core mapping: `/subagents` -- the picker lists the FOCUSED
         // session's own children (a read-only command, so it fires just as
@@ -253,6 +251,7 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
             const bool was_visible = entry.visible;
             entry.visible = true;
             if (!was_visible) FocusPanelOnOpen(deps_.plugin_views, entry);
+            NotifyShown(*view);
         }
         if (view->spec().placement == plugins::ViewPlacement::Modal) {
             // REUSE the staged component (bootstrap built one instance per

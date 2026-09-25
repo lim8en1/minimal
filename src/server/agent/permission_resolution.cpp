@@ -89,18 +89,4 @@ tools::PermissionPolicy BuildPermissionPolicy(
     return policy;
 }
 
-tools::McpPermissionPolicy BuildMcpPermissionPolicy(
-    const std::unordered_map<std::string, tools::PermissionMode>& preset_mcp_permissions,
-    tools::PermissionMode global_mcp_default_mode,
-    bool preset_is_trusted) {
-    // Untrusted mode: fold each per-server mode against what the global
-    // default ALONE would produce -- the preset may narrow (Allow -> Ask, or
-    // anything -> Deny) but never widen (Ask -> Allow). Same trust clamp as
-    // the sibling BuildPermissionPolicy: a repo-shipped preset must not be
-    // able to auto-approve MCP calls. One implementation, shared with the MCP
-    // permission model's BuildLayer.
-    return tools::build_mcp_policy(preset_mcp_permissions, global_mcp_default_mode,
-                                   preset_is_trusted);
-}
-
 }  // namespace minimal::agent

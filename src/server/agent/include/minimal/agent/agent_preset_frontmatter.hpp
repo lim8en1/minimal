@@ -82,7 +82,6 @@ struct AgentPresetFrontmatter {
     // `pattern:` or `file_writes:` used to vanish silently). Reported as
     // startup warnings by the sanity check.
     std::vector<std::string> unknown_permission_keys;
-    std::unordered_map<std::string, tools::PermissionMode> mcp_permissions;  // server -> mode
     // plugin_permissions: {<model>: {...}} -- each plugin permission model's
     // preset slice, verbatim (YamlToJson lowering). Core never reads inside a
     // slice; the model's BuildLayer does. Empty object when absent.

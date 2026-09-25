@@ -23,6 +23,7 @@
 #include "minimal/rpc/session_wiring.hpp"
 #include "minimal/rpc/transport_channels.hpp"
 #include "minimal/tools/permission_advisor.hpp"
+#include "minimal/mcp/mcp_permission_model.hpp"
 #include "temp_dir.hpp"
 
 #include "bash_session_state.hpp"
@@ -1776,11 +1777,17 @@ TEST_CASE("a preset switch installs the new preset's permission policy",
     auto plan = fixture.preset;
     plan.name = "plan";
     plan.permission_mode.file_write = tools::PermissionMode::AlwaysDeny;
-    plan.mcp_permissions.default_mode = tools::PermissionMode::AlwaysDeny;
+    mcp::McpPermissionPolicy plan_mcp;
+    plan_mcp.default_mode = tools::PermissionMode::AlwaysDeny;
+    plan.permission_models = {mcp::BindMcpPermissionModel(plan_mcp)};
     fixture.session->ApplyPreset(plan);
 
     CHECK(fixture.session->policy().file_write == tools::PermissionMode::AlwaysDeny);
-    CHECK(fixture.session->mcp_policy().default_mode == tools::PermissionMode::AlwaysDeny);
+    // The plugin models follow the preset too.
+    const auto& models = fixture.session->permission_models();
+    REQUIRE(models.size() == 1);
+    CHECK(static_cast<const mcp::McpPermissionPolicy*>(models.front().layer.get())->default_mode ==
+          tools::PermissionMode::AlwaysDeny);
 }
 
 TEST_CASE(

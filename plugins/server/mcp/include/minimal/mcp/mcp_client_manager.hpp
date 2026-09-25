@@ -10,8 +10,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "minimal/config/channels_config.hpp"
-#include "minimal/config/mcps_config.hpp"
+#include "minimal/mcp/channels_config.hpp"
+#include "minimal/mcp/mcps_config.hpp"
 #include "minimal/mcp/mcp_connection.hpp"
 #include "minimal/tools/tool_registry.hpp"
 

@@ -299,7 +299,34 @@ add_executable(minimal_tests
     hook_dispatcher_test.cpp
     hooks_tool_executor_test.cpp
     hooks_session_test.cpp
-    service_registry_test.cpp)
+    service_registry_test.cpp
+    # Same pattern for the mcp plugin: the whole client (manager, transports,
+    # configs, permission model, command, endpoint, channel glue) is plugin
+    # logic over core headers; plugin.cpp stays out.
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_client_manager.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_connection.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_tool_source.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/env_interpolation.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/naming.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/signal_protocol.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcps_config.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/channels_config.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_permission_model.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_settings.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_validation.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_channels.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_command.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_plugin_endpoint.cpp"
+    mcp_plugin_test.cpp
+    # The client half of the pair: the picker's pure row model.
+    "${CMAKE_SOURCE_DIR}/plugins/client/mcp-view/mcp_picker_model.cpp"
+    mcp_view_test.cpp)
+
+target_include_directories(minimal_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp/include"
+    "${CMAKE_SOURCE_DIR}/plugins/server/mcp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/mcp-view")
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs")
@@ -339,6 +366,7 @@ add_dependencies(minimal_tests
     fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
     fixture-throws fixture-advisor typesafe-advisor-fixture fixture-service fixture-service-b
     fixture-hook
+    fixture-lifecycle
     fixture-client fixture-client-exclusive fixture-client-partial-throw fixture-endpoint
     fixture-client-bad-abi fixture-user)
 target_compile_definitions(minimal_tests PRIVATE
@@ -429,7 +457,17 @@ option(MINIMAL_ENABLE_LIVE_MCP_TESTS
        "Build the live MCP smoke test (needs 'gateway' on PATH or MINIMAL_MCP_LIVE_SERVER)" OFF)
 if(MINIMAL_ENABLE_LIVE_MCP_TESTS)
     add_executable(minimal_mcp_live_test mcp_live_test.cpp)
-    target_sources(minimal_mcp_live_test PRIVATE support/test_main.cpp)
+    target_sources(minimal_mcp_live_test PRIVATE support/test_main.cpp
+        "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_client_manager.cpp"
+        "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_connection.cpp"
+        "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_tool.cpp"
+        "${CMAKE_SOURCE_DIR}/plugins/server/mcp/env_interpolation.cpp"
+        "${CMAKE_SOURCE_DIR}/plugins/server/mcp/naming.cpp"
+        "${CMAKE_SOURCE_DIR}/plugins/server/mcp/signal_protocol.cpp"
+        "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcps_config.cpp"
+        "${CMAKE_SOURCE_DIR}/plugins/server/mcp/channels_config.cpp")
+    target_include_directories(minimal_mcp_live_test PRIVATE
+        "${CMAKE_SOURCE_DIR}/plugins/server/mcp/include")
     target_link_libraries(minimal_mcp_live_test PRIVATE
         minimal::test_support
         Catch2::Catch2)

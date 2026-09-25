@@ -294,6 +294,23 @@ void PluginLoader::BuildTargets() {
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
 
+void PluginLoader::ShutdownAll() {
+    if (shut_down_) return;
+    shut_down_ = true;
+    using ShutdownFn = void (*)();
+    for (auto it = loaded_.rbegin(); it != loaded_.rend(); ++it) {
+        auto fn = Lookup<ShutdownFn>(it->second, "minimal_plugin_shutdown");
+        if (fn == nullptr) continue;
+        try {
+            fn();
+        } catch (const std::exception& e) {
+            common::DefaultLogger().warn("plugin '{}': shutdown threw: {}", it->first, e.what());
+        } catch (...) {
+            common::DefaultLogger().warn("plugin '{}': shutdown threw", it->first);
+        }
+    }
+}
+
 PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     PluginRecord record;
     record.file = candidate.file;
@@ -360,6 +377,9 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // keyed by the plugin's declared name, because only the host can guarantee
     // it exists before the hooks that will use it run.
     context.storage = storage_;
+    context.report_warning = [this, name = record.name](const std::string& message) {
+        warnings_[name].push_back(message);
+    };
     if (!plugin_data_root_.empty() && !record.name.empty()) {
         if (!IsSafeDataDirName(record.name)) {
             // Skip provisioning, keep loading: the plugin simply runs with
@@ -404,6 +424,9 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         std::vector<std::string> owned = target->Owned(record.name);
         if (!owned.empty()) record.registered[target->label] = std::move(owned);
     }
+    if (const auto it = warnings_.find(record.name); it != warnings_.end()) {
+        record.warnings = it->second;
+    }
 
     // The OPTIONAL per-root commands hook is never CALLED here (there is no
     // project root at startup) -- only remembered, with a copy of this
@@ -418,6 +441,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // Loaded only after the LAST hook completed: the sanity check skips
     // Loaded records, so a failure must never be reported as one.
     record.status = LoadStatus::Loaded;
+    loaded_.emplace_back(record.name, handle);
 
     return record;
 }

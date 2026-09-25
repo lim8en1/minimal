@@ -197,7 +197,8 @@ TEST_CASE("ParseAgentPresetFrontmatter: empty-string override key throws", "[age
                     std::runtime_error);
 }
 
-TEST_CASE("ParseAgentPresetFrontmatter: mcp_permissions decodes", "[agent_preset_frontmatter]") {
+TEST_CASE("ParseAgentPresetFrontmatter: legacy mcp_permissions lands in the mcp plugin's slice",
+          "[agent_preset_frontmatter]") {
     auto preset = Parse(
         "---\n"
         "name: build\n"
@@ -206,8 +207,7 @@ TEST_CASE("ParseAgentPresetFrontmatter: mcp_permissions decodes", "[agent_preset
         "---\n"
         "body\n");
 
-    REQUIRE(preset.mcp_permissions.count("search") == 1);
-    CHECK(preset.mcp_permissions.at("search") == PermissionMode::AlwaysAllow);
+    CHECK(preset.plugin_permissions["mcp"]["servers"]["search"] == "allow");
 }
 
 TEST_CASE("ParseAgentPresetFrontmatter: plugin_permissions carries slices verbatim",

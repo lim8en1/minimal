@@ -3,6 +3,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -91,6 +92,10 @@ public:
 
     // True when `name` falls inside any reserved namespace.
     bool IsReserved(std::string_view name) const;
+
+    // The owner of the reserved namespace `name` falls in -- a plugin name,
+    // or empty for core -- or nullopt when it falls in none.
+    std::optional<std::string> ReservedOwnerOf(std::string_view name) const;
 
     std::size_t size() const { return tools_.size(); }
 

@@ -29,6 +29,7 @@
 //      directory resolution the server uses.
 
 #include <filesystem>
+#include <functional>
 #include <string>
 
 #include "minimal/common/abi_tag.hpp"
@@ -119,6 +120,15 @@ struct PluginRegistrationContext {
     // files here, inheriting the concurrency discipline as its own obligation
     // (WAL, a single-writer mutex).
     std::filesystem::path data_dir;
+
+    // Reports a configuration problem the operator should see at startup --
+    // a plugin that validates its own config files (the MCP plugin's
+    // mcps.json/channels.json) calls this instead of failing registration
+    // over one bad entry. Collected per plugin and printed by the startup
+    // sanity check as Warnings, beside core's own findings. Meaningful during
+    // registration only; null when the host collects nothing (a test), which
+    // a plugin treats as "log it instead".
+    std::function<void(const std::string&)> report_warning;
 };
 
 // --- The generic client channel (track E5; docs/EXTENSIBILITY.md 2.5) -------
@@ -377,6 +387,15 @@ void minimal_plugin_register_model_catalogs(minimal::llm::ModelCatalogRegistry&,
 void minimal_plugin_register_metadata_catalogs(
     minimal::llm::MetadataCatalogRegistry&,
     const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL: called once at orderly shutdown, after every session has been
+// terminated and before the host's registries are destroyed, in reverse load
+// order. A plugin that owns threads, child processes or connections tied to
+// host objects (the MCP plugin's server processes, its reaper) stops them
+// here -- plugins are never dlclosed, and static destructors would run after
+// the host objects they reference are gone. Must not throw (a throw is
+// logged and ignored).
+void minimal_plugin_shutdown();
 
 // OPTIONAL, additive: contributes the wire-shape a backend kind wants for one
 // "@effort" variant (ARCHITECTURE.md, "Core vs. plugin surface" -- relocated

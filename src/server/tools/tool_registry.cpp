@@ -276,6 +276,12 @@ bool ToolRegistry::IsReserved(std::string_view name) const {
     return ReservedNamespaceOfUnlocked(name) != nullptr;
 }
 
+std::optional<std::string> ToolRegistry::ReservedOwnerOf(std::string_view name) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    const auto* ns = ReservedNamespaceOfUnlocked(name);
+    return ns != nullptr ? std::optional<std::string>(ns->owner) : std::nullopt;
+}
+
 const ToolRegistry::ReservedNamespace* ToolRegistry::ReservedNamespaceOfUnlocked(
     std::string_view name) const {
     for (const auto& ns : namespaces_) {

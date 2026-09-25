@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "minimal/tools/permission.hpp"
+#include "minimal/mcp/mcp_permission_model.hpp"
 
 using namespace minimal::tools;
 
@@ -120,7 +121,7 @@ TEST_CASE("a matching deny pattern survives an AlwaysAllow exact override",
 }
 
 TEST_CASE("MCP permission is server-scoped", "[permission][mcp]") {
-    McpPermissionPolicy policy;
+    minimal::mcp::McpPermissionPolicy policy;
     policy.default_mode = PermissionMode::Ask;
     policy.per_server["trusted-search"] = PermissionMode::AlwaysAllow;
 

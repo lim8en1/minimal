@@ -71,7 +71,7 @@ struct LoopHarness {
 
         executor = std::make_unique<tools::ToolExecutor>(registry, checker,
                                                          testing::AllowAllPolicy(),
-                                                         tools::McpPermissionPolicy{},
+                                                         tools::PermissionModels{},
                                                          tools::PermissionRunMode::Normal);
         agent::SessionContext session{common::DefaultLogger()};
         session.session_id = "s1";

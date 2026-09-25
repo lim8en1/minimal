@@ -171,7 +171,10 @@ std::optional<PermissionMode> WinSpecific(const std::vector<PermissionPatternRul
     return best->mode;
 }
 
-// "<where>: <key>=<mode>" -- the one shape every rule is named in.
+
+
+}  // namespace
+
 std::string rule_text(std::string_view where, std::string_view key, PermissionMode mode) {
     std::string out(where);
     out += ": ";
@@ -180,8 +183,6 @@ std::string rule_text(std::string_view where, std::string_view key, PermissionMo
     out += mode_name(mode);
     return out;
 }
-
-}  // namespace
 
 PermissionPolicy::ToolResolution PermissionPolicy::resolve_tool(std::string_view tool_name,
                                                                 ToolCategory category) const {
@@ -435,13 +436,6 @@ bool PermissionPolicy::ask_pattern_matches(std::string_view tool_name,
     return false;
 }
 
-PermissionMode McpPermissionPolicy::mode_for(std::string_view server_name) const {
-    if (auto it = per_server.find(std::string(server_name)); it != per_server.end()) {
-        return it->second;
-    }
-    return default_mode;
-}
-
 bool PermissionPolicy::per_tool_denies(std::string_view tool_name) const {
     constexpr auto kDeny = PermissionMode::AlwaysDeny;
     if (!layers) {
@@ -454,66 +448,20 @@ bool PermissionPolicy::per_tool_denies(std::string_view tool_name) const {
     return preset_tool ? *preset_tool == kDeny : global_tool == kDeny;
 }
 
-McpPermissionPolicy build_mcp_policy(
-    const std::unordered_map<std::string, PermissionMode>& preset_per_server,
-    PermissionMode global_default_mode, bool preset_trusted) {
-    McpPermissionPolicy policy;
-    for (const auto& [server, mode] : preset_per_server) {
-        policy.per_server[server] =
-            preset_trusted ? mode : most_restrictive(mode, global_default_mode);
-    }
-    policy.default_mode = global_default_mode;
-    return policy;
-}
-
-PermissionMode resolve_mcp_tool_mode(const PermissionPolicy& policy,
-                                     const McpPermissionPolicy& mcp_policy,
-                                     std::string_view server_name, std::string_view tool_name,
-                                     std::string* reason) {
-    const PermissionMode server_mode = mcp_policy.mode_for(server_name);
-    // McpPermissionPolicy::per_server carries only the PRESET's entries (the
-    // global side is default_mode), so its presence is "the preset spoke".
-    const bool preset_spoke_for_server =
-        mcp_policy.per_server.count(std::string(server_name)) != 0;
-    const std::string server_text =
-        rule_text(preset_spoke_for_server ? "preset mcp server" : "mcp default", server_name,
-                  server_mode);
-    auto answer = [&](PermissionMode mode, std::string why) {
-        if (reason != nullptr) *reason = std::move(why);
-        return mode;
-    };
-
-    if (!policy.layers) {
-        if (auto it = policy.per_tool_overrides.find(std::string(tool_name));
-            it != policy.per_tool_overrides.end()) {
-            return answer(it->second, rule_text("per-tool rule", tool_name, it->second));
+PermissionPolicy::PerToolRules PermissionPolicy::per_tool_rules(std::string_view tool_name) const {
+    PerToolRules rules;
+    if (!layers) {
+        if (auto it = per_tool_overrides.find(std::string(tool_name));
+            it != per_tool_overrides.end()) {
+            rules.flat = it->second;
         }
-        return answer(server_mode, server_text);
+        return rules;
     }
-    const auto global_tool = layer_tool_mode(policy.layers->global, tool_name);
-    const auto preset_tool = layer_tool_mode(policy.layers->preset, tool_name);
-    if (!policy.layers->preset_trusted) {
-        // server_mode is already clamped by BuildMcpPermissionPolicy.
-        PermissionMode mode = global_tool && !preset_spoke_for_server
-                                  ? *global_tool
-                                  : fold_optional(global_tool, server_mode).value();
-        std::string why = mode == server_mode
-                              ? server_text
-                              : rule_text("permissions.json", tool_name, mode);
-        if (preset_tool && *preset_tool < mode) {
-            mode = *preset_tool;
-            why = rule_text("project preset", tool_name, mode);
-        }
-        return answer(mode, std::move(why));
-    }
-    if (preset_tool) return answer(*preset_tool, rule_text("preset", tool_name, *preset_tool));
-    if (global_tool) {
-        if (preset_spoke_for_server && server_mode < *global_tool) {
-            return answer(server_mode, server_text);
-        }
-        return answer(*global_tool, rule_text("permissions.json", tool_name, *global_tool));
-    }
-    return answer(server_mode, server_text);
+    rules.layered = true;
+    rules.preset_trusted = layers->preset_trusted;
+    rules.preset = layer_tool_mode(layers->preset, tool_name);
+    rules.global = layer_tool_mode(layers->global, tool_name);
+    return rules;
 }
 
 PermissionMode resolve_permission_chain(const std::string& tool_name, ToolCategory category,
@@ -539,11 +487,6 @@ PermissionMode resolve_network_chain(const PermissionOverrideLayer& preset,
     return PermissionMode::Ask;
 }
 
-PermissionMode resolve_mcp_chain(const std::optional<PermissionMode>& preset_per_server,
-                                  PermissionMode global_default_mode) {
-    if (preset_per_server) return *preset_per_server;
-    return global_default_mode;
-}
 
 void merge_pattern_layers(
     const PermissionOverrideLayer& preset, const PermissionOverrideLayer& global,

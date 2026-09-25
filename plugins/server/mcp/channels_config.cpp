@@ -1,4 +1,4 @@
-#include "minimal/config/channels_config.hpp"
+#include "minimal/mcp/channels_config.hpp"
 
 #include <stdexcept>
 #include <unordered_set>
@@ -7,16 +7,6 @@
 #include "minimal/config/parse_util.hpp"
 
 namespace minimal::config {
-
-bool IsValidSignalName(std::string_view name) {
-    if (name.empty()) return false;
-    for (const char c : name) {
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
-                        c == '_' || c == '-';
-        if (!ok) return false;
-    }
-    return true;
-}
 
 namespace {
 
