@@ -11,36 +11,15 @@
 namespace minimal::client {
 namespace {
 
-// "#rrggbb" -> Color, case-insensitive, tolerant: anything malformed yields
+// A row's "#rrggbb"/"#rgb" tint -> Color, tolerant: anything malformed yields
 // nullopt (theme default) rather than an exception -- a picker row's cosmetics
 // must never break rendering. Downsampled to the theme's depth like every
 // theme role: a preset's raw truecolor used to reach 256/16-color terminals.
 std::optional<ftxui::Color> RowColor(const std::string& value, ColorDepth depth) {
-    if (value.size() != 7 || value.front() != '#') return std::nullopt;
-    auto nibble = [](char c) -> int {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-        return -1;
-    };
-    // Each nibble is checked BEFORE combining: with only the combined results
-    // guarded, a valid high nibble and an invalid low one (nibble(hi)*16 +
-    // nibble(lo) == hi*16 - 1) could produce a small plausible value -- e.g.
-    // "#1g0000" would decode as 0x0f rather than being rejected.
-    const int hi_hi = nibble(value[1]);
-    const int hi_lo = nibble(value[2]);
-    const int mid_hi = nibble(value[3]);
-    const int mid_lo = nibble(value[4]);
-    const int lo_hi = nibble(value[5]);
-    const int lo_lo = nibble(value[6]);
-    if (hi_hi < 0 || hi_lo < 0 || mid_hi < 0 || mid_lo < 0 || lo_hi < 0 || lo_lo < 0) {
-        return std::nullopt;
-    }
-    const int hi = hi_hi * 16 + hi_lo;
-    const int mid = mid_hi * 16 + mid_lo;
-    const int lo = lo_hi * 16 + lo_lo;
-    const ftxui::Color c = Downsample(static_cast<std::uint8_t>(hi), static_cast<std::uint8_t>(mid),
-                                      static_cast<std::uint8_t>(lo), depth);
+    const auto rgb = TryParseHexColor(value);
+    if (!rgb) return std::nullopt;
+    const auto [r, g, b] = *rgb;
+    const ftxui::Color c = Downsample(r, g, b, depth);
     // ColorDepth::None: no tint, so the window's own color still applies.
     if (c == ftxui::Color::Default) return std::nullopt;
     return c;

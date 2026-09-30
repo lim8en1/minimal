@@ -6,6 +6,7 @@
 
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/utf8.hpp"
+#include "minimal/client/view/live_tool_row.hpp"
 #include "minimal/client/view/tool_status.hpp"
 
 namespace minimal::client {
@@ -66,49 +67,26 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
         for (const auto& tool : tab.tools) {
             any = true;
             Elements line;
-            const std::string name = tool.tool_name.empty() ? std::string("tool") : tool.tool_name;
-            const ToolStatus status = tool.started    ? ToolStatus::Running
-                                      : tool.is_error ? ToolStatus::Failed
-                                                      : ToolStatus::Ok;
             line.push_back(text(" "));
-            line.push_back(ToolHeadline(status, name, theme));
+            line.push_back(ToolHeadline(LiveToolStatus(tool), LiveToolName(tool), theme));
             // The session as a fixed-width column, so the summaries line up
             // across tabs instead of starting wherever each name ended.
             std::string session = TruncateUtf8Columns(tab.display_name, kSessionColumn);
             session += std::string(
                 kSessionColumn - std::min(kSessionColumn, Utf8ColumnWidth(session)), ' ');
             line.push_back(text("  " + session) | Muted(theme));
-            // OneLineSummary guards BOTH paths -- a background bash row's
-            // wire-carried command can be multi-line, and this panel's rows
-            // are single text() lines like the live tool row's.
-            const std::string summary =
-                (tool.summary.has_value() && !tool.summary->empty())
-                    ? OneLineSummary(*tool.summary)
-                    : SummarizeToolInput(tool.tool_name, tool.input);
-            if (!summary.empty()) {
-                // Shrinks first, so the elapsed field after it stays visible.
+            if (const std::string summary = LiveToolSummary(tool); !summary.empty()) {
+                // Shrinks first, so the fields after it stay visible.
                 line.push_back(text("  " + summary) | Muted(theme) | flex_shrink);
             }
-            // "started-at" (ARCHITECTURE.md's promised column) plus elapsed:
-            // without a ticking number, a long-running cross-session command
-            // that has gone quiet is indistinguishable from a hung one.
+            // "started-at" (ARCHITECTURE.md's promised column) plus timing:
+            // a quiet long-running command must not read as a hung one.
             if (tool.started_at_unix_ms.count() >= 0) {
                 const std::string stamp = FormatClockTime(tool.started_at_unix_ms.count());
-                if (!stamp.empty()) {
-                    line.push_back(text("  " + stamp) | Muted(theme));
-                }
+                if (!stamp.empty()) line.push_back(text("  " + stamp) | Muted(theme));
             }
-            if (tool.started) {
-                if (tool.started_at_unix_ms.count() >= 0) {
-                    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                            std::chrono::system_clock::now().time_since_epoch())
-                                            .count();
-                    const auto elapsed_ms =
-                        std::max<std::int64_t>(0, now_ms - tool.started_at_unix_ms.count());
-                    line.push_back(text("  " + FormatDuration(elapsed_ms)) | Muted(theme));
-                }
-            } else if (tool.duration.count() >= 0) {
-                line.push_back(text("  " + FormatDuration(tool.duration.count())) | Muted(theme));
+            if (const std::string timing = LiveToolTiming(tool); !timing.empty()) {
+                line.push_back(text("  " + timing) | Muted(theme));
             }
             rows.push_back(hbox(std::move(line)));
             // The published view (state.hpp): a shared, immutable string the
@@ -140,7 +118,7 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
                 while (pos < tail.size()) {
                     const std::size_t newline = tail.find('\n', pos);
                     const std::size_t end = newline == std::string_view::npos ? tail.size() : newline;
-                    rows.push_back(text("   " + std::string(tail.substr(pos, end - pos))) |
+                    rows.push_back(text("   " + ExpandTabs(tail.substr(pos, end - pos))) |
                                    color(theme.ColorFor("system_message")));
                     if (newline == std::string_view::npos) break;
                     pos = newline + 1;

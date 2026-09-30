@@ -20,9 +20,27 @@ std::string CommandCatalogCache::ScopeKey(const std::string& session_id,
     return session_id.empty() ? "r:" + project_root : "s:" + session_id;
 }
 
+namespace {
+// A server list plus the client's own entries -- the one merge rule, shared by
+// Seed and the fetch completion (which cannot use MergeLocked: it holds only a
+// weak reference to the state).
+CommandCatalogCache::Snapshot Merge(CommandCatalogCache::Entries server,
+                                    const CommandCatalogCache::Entries& client_side) {
+    server.insert(server.end(), client_side.begin(), client_side.end());
+    return std::make_shared<const CommandCatalogCache::Entries>(std::move(server));
+}
+}  // namespace
+
 CommandCatalogCache::Snapshot CommandCatalogCache::MergeLocked(Entries server) const {
-    server.insert(server.end(), state_->client_side.begin(), state_->client_side.end());
-    return std::make_shared<const Entries>(std::move(server));
+    return Merge(std::move(server), state_->client_side);
+}
+
+void CommandCatalogCache::SetClientSide(Entries client_side) {
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->client_only = std::make_shared<const Entries>(client_side);
+    state_->client_side = std::move(client_side);
+    state_->slots.clear();
+    state_->seed.reset();
 }
 
 void CommandCatalogCache::Seed(const std::string& session_id, const std::string& project_root,
@@ -68,8 +86,7 @@ CommandCatalogCache::Snapshot CommandCatalogCache::Get(const std::string& sessio
             // A failure keeps the last known list; the next Get past
             // min_refresh retries.
             if (!server) return;
-            server->insert(server->end(), state->client_side.begin(), state->client_side.end());
-            slot.snapshot = std::make_shared<const Entries>(std::move(*server));
+            slot.snapshot = Merge(std::move(*server), state->client_side);
         });
     }
     return answer;

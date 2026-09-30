@@ -5,8 +5,8 @@
 // resolution -> theme load -> keybindings load/keymap parse -> status format
 // parse -> syntax highlighter/markdown renderer/engine wiring -> chat
 // surface wiring. ARCHITECTURE.md's "config + client plugins" ORDER MATTERS
-// comment (app.cpp) states the exact dependency chain; this file performs it
-// verbatim, just no longer inline in a 1000+ line function.
+// comment (tui_app.cpp) states the exact dependency chain; this file
+// performs it, outside RunTui.
 //
 // *** ADDRESS-STABILITY CONTRACT -- READ BEFORE TOUCHING THIS FILE ***
 // Several fields below hold a pointer or reference into ANOTHER field of the
@@ -67,6 +67,14 @@ namespace minimal::client {
 using plugins::PluginViewEntry;
 
 struct TuiEnvironment {
+    // Fields hold pointers into this object's own other fields (the
+    // address-stability contract above), so the type itself refuses to move.
+    TuiEnvironment() = default;
+    TuiEnvironment(const TuiEnvironment&) = delete;
+    TuiEnvironment& operator=(const TuiEnvironment&) = delete;
+    TuiEnvironment(TuiEnvironment&&) = delete;
+    TuiEnvironment& operator=(TuiEnvironment&&) = delete;
+
     std::filesystem::path config_dir;
     ColorDepth depth = ColorDepth::Truecolor;
     UiConfig ui;

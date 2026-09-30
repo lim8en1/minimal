@@ -9,13 +9,26 @@
 namespace minimal::client {
 
 namespace {
-// How long the writer waits for a new event before re-checking closing_. Bounds how
-// long Close() takes once triggered.
-inline constexpr std::chrono::milliseconds kWriterWakeup = std::chrono::milliseconds(50);
-// @-mention suggestions run on the frame loop while the user types -- a wedged
-// server must cost the editor a bounded pause, not the UI (this was the one
-// unary call with no deadline; every other caller bounds its fetches).
-inline constexpr std::chrono::milliseconds kSuggestPathsDeadline = std::chrono::milliseconds(250);
+// Unary deadlines. Every call is bounded: a wedged (or still-spawning) server
+// must surface as DEADLINE_EXCEEDED, never a hang of whatever thread asked.
+// The default: listings, lookups, deletes, one scrollback page.
+inline constexpr std::chrono::seconds kUnaryDeadline{2};
+// Session creation (a create or a stream's Open) and plugin calls touch the
+// database or plugin code: generous, still bounded.
+inline constexpr std::chrono::seconds kCreateDeadline{5};
+inline constexpr std::chrono::seconds kPluginCallDeadline{5};
+// The keep-alive: a missed beat costs nothing, so it gives up quickly.
+inline constexpr std::chrono::seconds kPingDeadline{1};
+// A model-list REFRESH waits on every discover-entry's catalog fetch
+// (parallel server-side, bounded by the slowest provider's own timeout).
+inline constexpr std::chrono::seconds kListModelsRefreshDeadline{15};
+// @-mention suggestions answer while the user types: a bounded pause for the
+// editor's query, never for the UI.
+inline constexpr std::chrono::milliseconds kSuggestPathsDeadline{250};
+
+std::chrono::system_clock::time_point In(std::chrono::milliseconds d) {
+    return std::chrono::system_clock::now() + d;
+}
 // How long Detach() waits for its writer to flush the DETACH before issuing
 // the context cancel as a last resort (see Stream::Detach): long enough for
 // any healthy round trip, far short of hanging quit forever.
@@ -79,7 +92,7 @@ SessionClient::CreateResult SessionClient::CreateSession(const CreateOptions& op
     // Deadline like every other unary call: a wedged (or still-spawning)
     // server must surface as DEADLINE_EXCEEDED, not hang headless startup
     // forever. Generous -- session creation touches the DB -- but bounded.
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    context.set_deadline(In(kCreateDeadline));
     v1::CreateSessionRequest request;
     if (!options.resume_session_id.empty()) {
         // Resume: the stored session keeps its name, preset, and project_root.
@@ -102,27 +115,23 @@ SessionClient::CreateResult SessionClient::CreateSession(const CreateOptions& op
     return CreateResult{response.session().session_id(), status};
 }
 
-SessionClient::GetMessagesResult SessionClient::GetMessages(const std::string& session_id,
-                                                             std::optional<int64_t> before_seq,
-                                                             int32_t limit) {
+SessionClient::GetMessagesResult SessionClient::GetMessagesPage(
+    const v1::GetMessagesRequest& request) {
     grpc::ClientContext context;
-    // Deadline like the other unary calls: an unbounded GetMessages on a
-    // wedged server blocked headless startup indefinitely.
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
-    v1::GetMessagesRequest request;
-    request.set_session_id(session_id);
-    if (before_seq) request.set_before_seq(*before_seq);
-    request.set_limit(limit);
-
+    context.set_deadline(In(kUnaryDeadline));
     GetMessagesResult result;
     result.status = stub_->GetMessages(&context, request, &result.response);
     return result;
 }
 
-grpc::Status SessionClient::GetMessages(grpc::ClientContext* context,
-                                        const v1::GetMessagesRequest& request,
-                                        v1::GetMessagesResponse* response) {
-    return stub_->GetMessages(context, request, response);
+SessionClient::GetMessagesResult SessionClient::GetMessages(const std::string& session_id,
+                                                            std::optional<int64_t> before_seq,
+                                                            int32_t limit) {
+    v1::GetMessagesRequest request;
+    request.set_session_id(session_id);
+    if (before_seq) request.set_before_seq(*before_seq);
+    request.set_limit(limit);
+    return GetMessagesPage(request);
 }
 
 SessionClient::ListAllSessionsResult SessionClient::ListAllSessions(
@@ -150,7 +159,7 @@ SessionClient::ListAllSessionsResult SessionClient::ListAllSessions(
 
 SessionClient::ListSessionsResult SessionClient::ListSessions(const ListSessionsOptions& options) {
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    context.set_deadline(In(kUnaryDeadline));
     v1::ListSessionsRequest request;
     request.set_project_root(options.project_root);
     request.set_include_all_dirs(options.include_all_dirs);
@@ -166,7 +175,7 @@ SessionClient::ListSessionsResult SessionClient::ListSessions(const ListSessions
 
 SessionClient::GetSessionResult SessionClient::GetSession(const std::string& session_id) {
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    context.set_deadline(In(kUnaryDeadline));
     v1::GetSessionRequest request;
     request.set_session_id(session_id);
 
@@ -182,7 +191,7 @@ SessionClient::GetSessionResult SessionClient::GetSession(const std::string& ses
 // thread for the default gRPC deadline.
 grpc::Status SessionClient::Ping() {
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(1));
+    context.set_deadline(In(kPingDeadline));
     v1::PingRequest request;
     v1::PingResponse response;
     return stub_->Ping(&context, request, &response);
@@ -192,7 +201,7 @@ v1::CommandResult SessionClient::RunSessionlessCommand(const std::string& name,
                                                        const std::vector<std::string>& positional,
                                                        const std::string& raw) {
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    context.set_deadline(In(kUnaryDeadline));
     v1::RunSessionlessCommandRequest request;
     request.set_name(name);
     for (const auto& value : positional) request.mutable_args()->add_positional(value);
@@ -213,7 +222,7 @@ v1::CommandResult SessionClient::RunSessionlessCommand(const std::string& name,
 SessionClient::ListCommandsResult SessionClient::ListCommands(const std::string& project_root,
                                                               const std::string& session_id) {
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    context.set_deadline(In(kUnaryDeadline));
     v1::ListCommandsRequest request;
     request.set_project_root(project_root);
     request.set_session_id(session_id);
@@ -225,7 +234,7 @@ SessionClient::ListCommandsResult SessionClient::ListCommands(const std::string&
 SessionClient::ListAgentPresetsResult SessionClient::ListAgentPresets(
     const std::string& project_root) {
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    context.set_deadline(In(kUnaryDeadline));
     v1::ListAgentPresetsRequest request;
     request.set_project_root(project_root);
     ListAgentPresetsResult result;
@@ -239,8 +248,9 @@ SessionClient::ListModelsResult SessionClient::ListModels(const ListModelsOption
     // server-side, bounded by the slowest provider's own timeout); a bare
     // listing touches only config. The 15 s covers the refresh path's worst
     // case without letting a hung provider wedge the picker indefinitely.
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(
-                              options.refresh_discovery ? 15 : 2));
+    context.set_deadline(
+        In(options.refresh_discovery ? std::chrono::milliseconds(kListModelsRefreshDeadline)
+                                     : std::chrono::milliseconds(kUnaryDeadline)));
     ListModelsResult result;
     v1::ListModelsRequest request;
     request.set_refresh_discovery(options.refresh_discovery);
@@ -250,7 +260,7 @@ SessionClient::ListModelsResult SessionClient::ListModels(const ListModelsOption
 
 grpc::Status SessionClient::DeleteSession(const std::string& session_id) {
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    context.set_deadline(In(kUnaryDeadline));
     v1::DeleteSessionRequest request;
     request.set_session_id(session_id);
     v1::DeleteSessionResponse response;
@@ -261,7 +271,7 @@ SessionClient::PluginCallResult SessionClient::PluginCall(const std::string& plu
                                                           const std::string& method,
                                                           const std::string& json_payload) {
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    context.set_deadline(In(kPluginCallDeadline));
     v1::PluginCallRequest request;
     request.set_plugin_name(plugin_name);
     request.set_method(method);
@@ -342,7 +352,7 @@ SessionClient::SuggestPathsResult SessionClient::SuggestPaths(const std::string&
                                                               const std::string& prefix,
                                                               int32_t limit) {
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + kSuggestPathsDeadline);
+    context.set_deadline(In(kSuggestPathsDeadline));
     v1::SuggestPathsRequest request;
     request.set_session_id(session_id);
     request.set_prefix(prefix);
@@ -356,7 +366,7 @@ SessionClient::SuggestPathsResult SessionClient::SuggestPaths(const std::string&
 SessionClient::SuggestPathsResult SessionClient::SuggestPathsForRoot(
     const std::string& project_root, const std::string& prefix, int32_t limit) {
     grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + kSuggestPathsDeadline);
+    context.set_deadline(In(kSuggestPathsDeadline));
     v1::SuggestPathsRequest request;
     request.set_project_root(project_root);
     request.set_prefix(prefix);
@@ -497,8 +507,7 @@ grpc::Status SessionClient::RunCommand(
     // A per-client counter, not a constant: two commands on different streams
     // of the same client would echo-collide on a shared "cmd-1" if a future
     // change ever multiplexed them.
-    command->set_request_id(
-        "cmd-" + std::to_string(command_counter_.fetch_add(1, std::memory_order_relaxed) + 1));
+    command->set_request_id(NextCommandRequestId());
     command->set_name(options.name);
     for (const auto& value : options.positional) command->mutable_args()->add_positional(value);
     command->mutable_args()->set_raw(options.raw);
@@ -606,10 +615,10 @@ SessionClient::Stream::~Stream() { Close(); }
 
 std::optional<std::string> SessionClient::Stream::Open(const CreateOptions& opts) {
     grpc::ClientContext context;
-    // Bounded like every other unary call here: the TUI calls Open on the loop
-    // thread (first-run create, typing on an empty app), and a hung server
-    // must not hang the frame loop past this.
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    // Bounded like every other unary call here: the TUI calls Open on its
+    // RPC worker (EnsureSession), and a hung server must not hold that worker
+    // -- and every request queued behind it -- past this.
+    context.set_deadline(In(kCreateDeadline));
     v1::CreateSessionRequest request;
     if (!opts.resume_session_id.empty()) {
         // RESUME of a stored session: the stored row governs name, agent_preset
@@ -940,17 +949,13 @@ void SessionClient::Stream::LaunchWriterThread() {
             bool enqueued = false;
             {
                 std::unique_lock lk(qmtx_);
-                send_cv_.wait_for(lk, kWriterWakeup, [this] {
-                    return closing_.load() || !send_queue_.empty();
-                });
-                if (send_queue_.empty()) {
-                    // Either a timeout with nothing queued (wait_for's predicate can
-                    // return false on timeout, which this loop must not treat as "an
-                    // event is ready" -- front()/pop_front() on an empty deque is UB),
-                    // or closing_ with the queue already drained.
-                    if (closing_.load()) break;
-                    continue;
-                }
+                // No poll timer: every enqueue (Send) and every closing_ flip
+                // (Close, Detach, the reader's exit latch) happens under qmtx_
+                // and is followed by a notify, so a plain wait cannot miss
+                // one. The old 50 ms wait_for woke every idle stream's writer
+                // 20 times a second for nothing.
+                send_cv_.wait(lk, [this] { return closing_.load() || !send_queue_.empty(); });
+                if (send_queue_.empty()) break;   // closing_, with the queue drained
                 ev = std::move(send_queue_.front());
                 send_queue_.pop_front();
                 enqueued = true;

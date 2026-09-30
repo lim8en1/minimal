@@ -245,4 +245,35 @@ inline std::string TruncateUtf8Columns(const std::string& text, std::size_t max_
     return text.substr(0, cut) + "\xE2\x80\xA6";  // U+2026 HORIZONTAL ELLIPSIS
 }
 
+// Tabs to spaces at 4-column stops, for text drawn through ftxui::text(),
+// which draws a tab as nothing. Columns restart at each newline; a UTF-8
+// sequence advances one column (continuation bytes do not count -- the
+// byte-counting copies this replaced put stops late after any non-ASCII).
+// `strip_cr` drops carriage returns, which text() would draw as junk.
+inline std::string ExpandTabs(std::string_view text, bool strip_cr = true) {
+    if (text.find('\t') == std::string_view::npos &&
+        (!strip_cr || text.find('\r') == std::string_view::npos)) {
+        return std::string(text);
+    }
+    std::string out;
+    out.reserve(text.size());
+    std::size_t column = 0;
+    for (const char c : text) {
+        if (c == '\t') {
+            const std::size_t pad = 4 - (column % 4);
+            out.append(pad, ' ');
+            column += pad;
+        } else if (c == '\n') {
+            out += c;
+            column = 0;
+        } else if (c == '\r' && strip_cr) {
+            continue;
+        } else {
+            out += c;
+            if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) ++column;
+        }
+    }
+    return out;
+}
+
 }  // namespace minimal::client

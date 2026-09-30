@@ -9,6 +9,7 @@
 #include <md4c.h>
 
 #include "minimal/client/render/syntax_highlighter.hpp"
+#include "minimal/client/utf8.hpp"
 
 namespace minimal::client {
 
@@ -56,29 +57,6 @@ struct Block {
     std::vector<Elements> table_rows;
 };
 
-// ftxui's text() drops tab characters entirely (its Screen writer never emits
-// them), so Makefile/YAML-style tab indentation silently vanished from code
-// blocks. Expand each tab to the next 4-column stop -- 4 rather than the 8 of
-// the traditional terminal tab stop because the rendered blocks are already
-// indented 2 spaces, and 8-column stops on top of that pushed typical code
-// past the frame width.
-std::string ExpandCodeTabs(std::string_view code) {
-    if (code.find('\t') == std::string_view::npos) return std::string(code);
-    std::string out;
-    out.reserve(code.size());
-    std::size_t column = 0;
-    for (const char c : code) {
-        if (c == '\t') {
-            const std::size_t stop = (column / 4 + 1) * 4;
-            out.append(stop - column, ' ');
-            column = stop;
-        } else {
-            out.push_back(c);
-            column = (c == '\n') ? 0 : column + 1;
-        }
-    }
-    return out;
-}
 
 // md4c reports entities VERBATIM ("&amp;", "&#38;", "&#x26;" arrive as their
 // literal source bytes) and leaves decoding to the consumer (md4c.h). Decode
@@ -525,7 +503,7 @@ private:
         // Tabs are expanded BEFORE any path that builds Elements: ftxui's
         // text() drops them, which silently deleted Makefile/YAML-style tab
         // indentation (ExpandCodeTabs, above, for why 4-column stops).
-        block.code_text = ExpandCodeTabs(block.code_text);
+        block.code_text = ExpandTabs(block.code_text, /*strip_cr=*/false);
         Elements lines;
         if (highlighter_ != nullptr && !block.code_language.empty()) {
             lines = highlighter_->Highlight(block.code_text, block.code_language,

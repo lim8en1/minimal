@@ -204,28 +204,6 @@ std::vector<std::string> SplitTextBlocks(std::string_view body) {
 // Extracted from ChatView::RebuildRows verbatim; the kind table's semantics
 // live here now. Every renderer colors through the theme, never hardcoded.
 
-// Tool output is preformatted: paragraph() keeps its spacing and line breaks,
-// but ftxui's text layer drops tab characters outright -- Makefile/Go/TSV
-// indentation vanished. 4-column stops, like the code blocks.
-std::string ExpandTabs(std::string_view body) {
-    std::string out;
-    out.reserve(body.size());
-    std::size_t column = 0;
-    for (const char c : body) {
-        if (c == '\t') {
-            const std::size_t pad = 4 - (column % 4);
-            out.append(pad, ' ');
-            column += pad;
-        } else if (c == '\n') {
-            out += c;
-            column = 0;
-        } else if (c != '\r') {
-            out += c;
-            ++column;
-        }
-    }
-    return out;
-}
 
 // The row's own speaker bar ("▎") is drawn by ChatView as a full-height gutter
 // now -- a layout concern, like the timestamp -- so these labels are words

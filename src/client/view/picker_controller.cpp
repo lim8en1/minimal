@@ -1,11 +1,11 @@
 #include "minimal/client/view/picker_controller.hpp"
 
-#include <filesystem>
 #include <iterator>
+#include <optional>
 #include <utility>
 
 #include "minimal/common/logger.hpp"
-#include "minimal/client/cli_args.hpp"
+#include "minimal/client/command_line.hpp"
 #include "minimal/client/view/agent_picker.hpp"
 #include "minimal/client/view/model_picker.hpp"
 #include "minimal/client/view/session_picker.hpp"
@@ -53,6 +53,35 @@ std::string PickerController::OpenPickedSession(const std::string& session_id, b
         // visible (an Error-state tab), never silent.
     }
     return deps_.app.ResumeTab(session_id);
+}
+
+template <typename T>
+void PickerController::RunFetch(FetchState& state,
+                                std::function<std::optional<T>(std::string& error)> fetch,
+                                std::function<void(T&&)> apply, std::function<void()> rebuild,
+                                const char* what) {
+    deps_.app.RunOnRpcQueue(
+        [this, &state, fetch = std::move(fetch), apply = std::move(apply),
+         rebuild = std::move(rebuild), what] {
+            std::string error;
+            std::optional<T> data = fetch(error);
+            if (!data) {
+                minimal::common::DefaultLogger().warn("{} fetch failed: {}", what, error);
+                if (error.empty()) error = "the server did not answer";
+            }
+            // `state` is loop-thread data: touched only inside the apply.
+            QueueApply([&state, data = std::move(data), error, apply, rebuild]() mutable {
+                state.loading = false;
+                if (data) {
+                    state.error.clear();
+                    apply(std::move(*data));
+                } else {
+                    state.error = error;
+                }
+                rebuild();
+            });
+        },
+        /*must_run=*/true, AppState::RpcLane::kBulk);
 }
 
 void PickerController::QueueApply(std::function<void()> apply) {
@@ -159,7 +188,7 @@ void PickerController::FetchPickerPage(bool reset) {
                                          std::make_move_iterator(rows.end()));
             RebuildPickerComponent();
         });
-    });
+    }, /*must_run=*/true, AppState::RpcLane::kBulk);
 }
 
 // Rebuilds the picker component from picker_data_'s CURRENT contents --
@@ -275,32 +304,25 @@ void PickerController::OpenAgentPicker() {
     agent_picker_presets_.clear();
     agent_fetch_.Begin();
     RebuildAgentPickerComponent();
-    deps_.app.RunOnRpcQueue([this] {
-        // The client's cwd is the same project root session creation sends
-        // (app.cpp), so the picker's project scope matches the sessions this
-        // client creates here. A resumed session whose stored root differs
-        // still resolves correctly server-side: /agent re-resolves against the
-        // SESSION's root, and the resolved preset is what runs.
-        const auto result =
-            deps_.client.ListAgentPresets(std::filesystem::current_path().string());
-        if (!result.status.ok()) {
-            minimal::common::DefaultLogger().warn("agent picker fetch failed: {}",
-                                                  result.status.error_message());
-            QueueApply([this, error = result.status.error_message()] {
-                agent_fetch_.loading = false;
-                agent_fetch_.error = error.empty() ? "the server did not answer" : error;
-                RebuildAgentPickerComponent();
-            });
-            return;
-        }
-        std::vector<v1::AgentPresetSummary> presets(result.response.presets().begin(),
-                                                     result.response.presets().end());
-        QueueApply([this, presets = std::move(presets)]() mutable {
+    // The client's cwd is the same project root session creation sends, so
+    // the picker's project scope matches the sessions this client creates. A
+    // resumed session whose stored root differs still resolves correctly
+    // server-side: /agent re-resolves against the SESSION's root.
+    RunFetch<std::vector<v1::AgentPresetSummary>>(
+        agent_fetch_,
+        [this](std::string& error) -> std::optional<std::vector<v1::AgentPresetSummary>> {
+            const auto result = deps_.client.ListAgentPresets(CurrentProjectRootOrEmpty());
+            if (!result.status.ok()) {
+                error = result.status.error_message();
+                return std::nullopt;
+            }
+            return std::vector<v1::AgentPresetSummary>(result.response.presets().begin(),
+                                                       result.response.presets().end());
+        },
+        [this](std::vector<v1::AgentPresetSummary>&& presets) {
             agent_picker_presets_ = std::move(presets);
-            agent_fetch_.loading = false;
-            RebuildAgentPickerComponent();
-        });
-    });
+        },
+        [this] { RebuildAgentPickerComponent(); }, "agent picker");
 }
 
 // The model picker: bare /model opens with what the server already knows;
@@ -328,26 +350,19 @@ void PickerController::OpenModelPickerFetch(bool refresh) {
     RebuildModelPickerComponent();
     SessionClient::ListModelsOptions opts;
     opts.refresh_discovery = refresh;
-    deps_.app.RunOnRpcQueue([this, opts] {
-        const auto result = deps_.client.ListModels(opts);
-        if (!result.status.ok()) {
-            minimal::common::DefaultLogger().warn("model picker fetch failed: {}",
-                                                  result.status.error_message());
-            QueueApply([this, error = result.status.error_message()] {
-                model_fetch_.loading = false;
-                model_fetch_.error = error.empty() ? "the server did not answer" : error;
-                RebuildModelPickerComponent();
-            });
-            return;
-        }
-        std::vector<v1::ModelSummary> models(result.response.models().begin(),
-                                             result.response.models().end());
-        QueueApply([this, models = std::move(models)]() mutable {
-            model_picker_models_ = std::move(models);
-            model_fetch_.loading = false;
-            RebuildModelPickerComponent();
-        });
-    });
+    RunFetch<std::vector<v1::ModelSummary>>(
+        model_fetch_,
+        [this, opts](std::string& error) -> std::optional<std::vector<v1::ModelSummary>> {
+            const auto result = deps_.client.ListModels(opts);
+            if (!result.status.ok()) {
+                error = result.status.error_message();
+                return std::nullopt;
+            }
+            return std::vector<v1::ModelSummary>(result.response.models().begin(),
+                                                 result.response.models().end());
+        },
+        [this](std::vector<v1::ModelSummary>&& models) { model_picker_models_ = std::move(models); },
+        [this] { RebuildModelPickerComponent(); }, "model picker");
 }
 
 void PickerController::RebuildModelPickerComponent() {
@@ -405,37 +420,32 @@ void PickerController::OpenSubagentsPicker(const std::string& parent_session_id)
     subagent_children_.clear();
     subagent_fetch_.Begin();
     RebuildSubagentPickerComponent();
-    deps_.app.RunOnRpcQueue([this, parent_session_id] {
-        // include_all_dirs: the GROUP's own project root governs where its
-        // children live, not this client's cwd -- the same rule
-        // AttachSessionGroup's child scan uses.
-        // Every page, filtered as it arrives: one 200-row page silently
-        // dropped the children of any session older than the 200 most
-        // recently updated.
-        SessionClient::ListSessionsOptions opts;
-        opts.include_all_dirs = true;
-        opts.include_subagents = true;
-        opts.limit = 200;
-        auto result = deps_.client.ListAllSessions(opts, [&](const v1::SessionSummary& row) {
-            return row.parent_session_id() == parent_session_id;
-        });
-        if (!result.status.ok()) {
-            minimal::common::DefaultLogger().warn("subagent picker fetch failed: {}",
-                                                  result.status.error_message());
-            QueueApply([this, error = result.status.error_message()] {
-                subagent_fetch_.loading = false;
-                subagent_fetch_.error = error.empty() ? "the server did not answer" : error;
-                RebuildSubagentPickerComponent();
+    RunFetch<std::vector<v1::SessionSummary>>(
+        subagent_fetch_,
+        [this, parent_session_id](std::string& error)
+            -> std::optional<std::vector<v1::SessionSummary>> {
+            // include_all_dirs: the GROUP's own project root governs where
+            // its children live, not this client's cwd (AttachSessionGroup's
+            // rule). Every page, filtered as it arrives: one 200-row page
+            // silently dropped the children of any session older than the
+            // 200 most recently updated.
+            SessionClient::ListSessionsOptions opts;
+            opts.include_all_dirs = true;
+            opts.include_subagents = true;
+            opts.limit = 200;
+            auto result = deps_.client.ListAllSessions(opts, [&](const v1::SessionSummary& row) {
+                return row.parent_session_id() == parent_session_id;
             });
-            return;
-        }
-        std::vector<v1::SessionSummary> children = std::move(result.sessions);
-        QueueApply([this, children = std::move(children)]() mutable {
+            if (!result.status.ok()) {
+                error = result.status.error_message();
+                return std::nullopt;
+            }
+            return std::move(result.sessions);
+        },
+        [this](std::vector<v1::SessionSummary>&& children) {
             subagent_children_ = std::move(children);
-            subagent_fetch_.loading = false;
-            RebuildSubagentPickerComponent();
-        });
-    });
+        },
+        [this] { RebuildSubagentPickerComponent(); }, "subagent picker");
 }
 
 void PickerController::RebuildSubagentPickerComponent() {

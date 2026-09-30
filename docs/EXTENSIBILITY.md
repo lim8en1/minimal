@@ -31,7 +31,7 @@ Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` /
 
 **Utilities half** — included from `plugin_abi.h`: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `SseParser`, `Logger`, `SessionReader` + `HistoryWindow`, `PluginStorage` (per-plugin KV, plus a per-plugin `data_dir` on the context) and `plugin_rpc.hpp` (the `PluginCall` dispatch convention), plus the registry headers. The frontmatter parser remains reachable through ordinary core linkage (plugins link `minimal_server_core`, a shared library) but is not declared surface.
 
-**Client ABI** (`src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h`) — **live**: `minimal_client_plugin_abi_tag` / `_name` / `_version` plus eight optional `minimal_client_plugin_register_*` hooks (views, start views, tool-result renderers, message-kind renderers, status segments, syntax grammars, and the exclusive chat-surface and markdown-engine slots), each taking `(Registry&, const ClientPluginRegistrationContext&)` — the context carries the per-plugin `config` slice, an `AttentionSink`, and the `ClientApi` data path (GetMessages paging + the PluginCall/PluginSubscribe channel). Loaded by `client_plugin_loader.cpp` (the server loader's twin: `RTLD_NOW|RTLD_LOCAL`, tag gate, guarded registration, attribution, never dlclosed) against `client-plugins.json` — a separate file from the server's `plugins.json`, so neither writer can stomp the other's entries. Client plugins link `minimal::client_core` (SHARED, like the server core) and install to `plugins/client/`. The generic channel dispatches server-side through the ServiceRegistry to a `PluginEndpoint` the pair plugin Provides under `PluginEndpointServiceName(name)` ("`<plugin_name>.endpoint`") -- suffixed, like `PluginRpcServiceName`, so a bare plugin_name key can never let PluginCall's lookup `static_cast` some other §2.2 service the same plugin registered.
+**Client ABI** (`src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h`) — **live**: `minimal_client_plugin_abi_tag` / `_name` / `_version` plus ten optional `minimal_client_plugin_register_*` hooks (views, start views, tool-result renderers, display-kind renderers, prompt renderers, message-kind renderers, status segments, syntax grammars, and the exclusive chat-surface and markdown-engine slots), each taking `(Registry&, const ClientPluginRegistrationContext&)` — the context carries the per-plugin `config` slice, an `AttentionSink`, the `ClientApi` data path (GetMessages paging + the PluginCall/PluginSubscribe channel) and a `FocusProvider` (which tab and session the user is on). The context struct itself is valid only during registration; the seams it points to live for the process. Loaded by `src/client/plugins/plugin_loader.cpp` (the server loader's twin: `RTLD_NOW|RTLD_LOCAL`, tag gate, guarded registration, attribution, never dlclosed; a second library reporting an already-loaded plugin's name is refused, since attribution and rollback are keyed by name) against `client-plugins.json` — a separate file from the server's `plugins.json`, so neither writer can stomp the other's entries. Client plugins link `minimal::client_core` (SHARED, like the server core) and install to `plugins/client/`. The generic channel dispatches server-side through the ServiceRegistry to a `PluginEndpoint` the pair plugin Provides under `PluginEndpointServiceName(name)` ("`<plugin_name>.endpoint`") -- suffixed, like `PluginRpcServiceName`, so a bare plugin_name key can never let PluginCall's lookup `static_cast` some other §2.2 service the same plugin registered.
 
 `tests/support/` is an **in-tree INTERFACE target** (`minimal::test_support`) used by the test suite only — it is not installed and not exported, so a plugin author cannot link the `FakeLlmProvider`/`ScriptedProvider`/permission fakes; they exist for this repo's tests.
 
@@ -147,7 +147,7 @@ void minimal_plugin_register_services(ServiceRegistry&,
 
 ### 2.5 No UI surface for server-plugin data
 
-**Status: LANDED.** The unary `PluginCall` RPC and the streaming `PluginSubscribe` RPC are both implemented in `session_service.cpp` and dispatch through §2.2's registry. Two dispatch conventions share the channel, and they cannot collide: a plugin can Provide a `PluginEndpoint` under **`<plugin_name>.endpoint`** (`PluginEndpointServiceName` — `Call` answers unary requests, `Subscribe` pushes to a `PluginSubscriptionSink` until the subscriber disconnects), or a `PluginRpcHandler` under **`<plugin_name>.rpc`** (`PluginRpcServiceName`; unary only, dispatched through `DispatchPluginCall`). `PluginCall` tries the `.endpoint` first, then falls back to `.rpc`; `PluginSubscribe` dispatches to `.endpoint` providers only. Both suffixes keep the dispatch target clear of plain §2.2 service names. Core defines the convention, never the payloads; `DispatchPluginCall` is grpc-free and unit-testable, and the transport only maps outcomes to statuses (`NOT_FOUND` = plugin disabled/absent, `INVALID_ARGUMENT` = bad request or handler refusal, `INTERNAL` = handler threw). No bundled plugin ships a `.endpoint` yet — `checklist` and `cost-tracker` are `.rpc` handlers, and their client views poll — so the in-tree exercise of `PluginSubscribe` awaits a first push-source consumer. *[Postscript: `checklist-view` became the first in-tree Panel **view** — `checklist.panel`, two surfaces over one poller — fed by a new client `FocusProvider` seam (which tab/session the user is on, the component-side twin of the status segments' per-render session id); it still polls, so the push-source statement stands.]* The client half is unchanged, below. **Hole remaining.** A plugin command's result has exactly one sanctioned presentation (since §4.4: a status line or a named view — never a chat row), and a plugin tool renders only as a generic collapsible row unless the plugin ships a client-side renderer.
+**Status: LANDED.** The unary `PluginCall` RPC and the streaming `PluginSubscribe` RPC are both implemented in `session_service.cpp` and dispatch through §2.2's registry. Two dispatch conventions share the channel, and they cannot collide: a plugin can Provide a `PluginEndpoint` under **`<plugin_name>.endpoint`** (`PluginEndpointServiceName` — `Call` answers unary requests, `Subscribe` pushes to a `PluginSubscriptionSink` until the subscriber disconnects), or a `PluginRpcHandler` under **`<plugin_name>.rpc`** (`PluginRpcServiceName`; unary only, dispatched through `DispatchPluginCall`). `PluginCall` tries the `.endpoint` first, then falls back to `.rpc`; `PluginSubscribe` dispatches to `.endpoint` providers only. Both suffixes keep the dispatch target clear of plain §2.2 service names. Core defines the convention, never the payloads; `DispatchPluginCall` is grpc-free and unit-testable, and the transport only maps outcomes to statuses (`NOT_FOUND` = plugin disabled/absent, `INVALID_ARGUMENT` = bad request or handler refusal, `INTERNAL` = handler threw). `checklist`, `cost-tracker` and `mcp` each Provide a `.endpoint`, and their client views (`checklist-view`, `cost-view`, `mcp-view`) hold `PluginSubscribe` push streams, falling back to polling only when the stream is unavailable. `checklist-view` is also the in-tree Panel **view** (`checklist.panel`), fed by the client `FocusProvider` seam (which tab/session the user is on, the component-side twin of the status segments' per-render session id). The client half is unchanged, below. **Hole remaining.** A plugin command's result has exactly one sanctioned presentation (since §4.4: a status line or a named view — never a chat row), and a plugin tool renders only as a generic collapsible row unless the plugin ships a client-side renderer.
 
 **Suggested architecture.** Two halves, split because they land in different tracks:
 
@@ -298,7 +298,7 @@ This section is the spec the client leaves its seams against. It revises the `AR
 
 - **Frame + shell**: `app.cpp` assembly, `ResizableSplit` proportions, the modal stack, the tab model, tab states/attention *derivation from wire events*, ordering key, group lifecycle, navigation.
 - **Transport + state**: `SessionClient` (demux by `session_id`, drain-before-`Finish`, attach obligations), `SessionState`/`AppState`, scrollback virtualization against `GetMessages`, the streaming buffer lifecycle.
-- **Input**: the prompt-editor shell (multiline input, keyboard-protocol handling). Completion *content* is pluggable (see below); the editor itself is not.
+- **Input**: the prompt-editor shell (multiline input, keyboard-protocol handling). Completion content comes from the server (the command catalog, `@`-mention resolution through the server's `MentionResolver` slot); there is no client-side completion registry, and the editor itself is not pluggable.
 - **Security UI**: the permission/confirmation modal — never pluggable, under any circumstance. The consent-scoping wording obligations are core-owned.
 - **The plugin host**: registries, slot routing, fallback rendering when a slot's plugin is disabled.
 
@@ -329,16 +329,19 @@ Rows from an assistant message carry `ChatRow::agent` / `ChatRow::model` — the
 **Chat surface — the one exclusive client slot.**
 
 ```cpp
-// src/client/plugins/chat_surface.hpp
+// src/client/plugins/include/minimal/client/plugins/registries.hpp
 class ChatSurface {
 public:
-    virtual const ChatSurfaceSpec& spec() const = 0;  // id (keybindings address it), title
-    virtual ftxui::Component component() = 0;         // the tab body
+    struct Spec { std::string id; std::string title; };  // id names it in diagnostics
+    virtual const Spec& spec() const = 0;
+    virtual ftxui::Component component() = 0;         // the tab body (one per tab)
     // The host pushes every ServerEvent for the session; the surface owns its
     // own presentation and buffering. Scrollback pages are fetched through the
     // same client API core uses -- exposed to client plugins as a utility. A
     // surface never opens its own connection.
     virtual void OnEvent(const v1::ServerEvent& event) = 0;
+    // The theme was (re)loaded -- at startup and on every /theme switch.
+    virtual void OnTheme(const Theme& theme) = 0;
 };
 ```
 
@@ -350,11 +353,13 @@ Exclusive because the interface is deliberately big — streaming lifecycle, scr
 class StatusSegment {
 public:
     virtual std::string_view id() const = 0;  // what {id} addresses in the format string
-    virtual std::string Render() const = 0;   // text; color via theme roles, never hardcoded
+    // Text for the focused tab's session ("" = sessionless); cheap, never
+    // blocks -- it runs every frame. Color via theme roles, never hardcoded.
+    virtual std::string Render(const std::string& focused_session_id) const = 0;
 };
 ```
 
-The format string (`"{version} | {tokens} | {git_branch}"`) is the ordering/selection config; a plugin adds content, the user keeps layout control. An unknown id renders nothing with a startup warning — the `keybindings.json` pattern for names unknown at compile time.
+The format string (`"{version} | {tokens} | {git_branch}"`) is the ordering/selection config; a plugin adds content, the user keeps layout control. An unknown id renders nothing with a startup warning — the `keybindings.json` pattern for names unknown at compile time. A segment that throws is hidden for the frame, logged once, and disabled after three consecutive throws.
 
 **Markdown engine.** The md4c adapter becomes the default registrant of an exclusive slot. The contract carries the streaming semantics explicitly — complete-text render *and* the `AppendDelta`/`Finalize` lifecycle, whose debounce-and-finalize property ("partial input cannot soundly parse"; `Finalize()` always reparses authoritatively) is the **implementer's** obligation, not the host's.
 
@@ -370,7 +375,7 @@ The format string (`"{version} | {tokens} | {git_branch}"`) is the ordering/sele
   "sections": { "git_plugin": { "branch": "#7dd3fc" } } }
 ```
 
-A section's roles are addressable only as `git_plugin.branch`, merged **after** core roles so a plugin can never shadow one; two sections with the same name, or roles naming no known plugin, are reported by the sanity check (the `naming_model` pattern).
+A section's roles are addressable only as `git_plugin.branch`, merged **after** core roles so a plugin can never shadow one. A section naming no loaded plugin is warned about when the theme loads -- at startup and on every `/theme` switch -- since its roles are unreachable. (Two sections with the same name cannot be reported: the JSON parser keeps the last duplicate key.)
 
 **Tool-result display payloads.** A tool result carries its text (what the model reads) and, optionally, a display payload for clients: `ToolResult::display`, a JSON object `{"kind": "<kind>", ...}`. The tool owns *what* its result is; the client owns *how* it looks.
 

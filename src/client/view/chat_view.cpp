@@ -7,6 +7,7 @@
 #include <set>
 
 #include "minimal/client/utf8.hpp"
+#include "minimal/client/view/live_tool_row.hpp"
 #include "minimal/client/view/tool_status.hpp"
 #include "minimal/common/logger.hpp"
 
@@ -42,29 +43,6 @@ private:
     std::shared_ptr<ftxui::Box> slot_;
 };
 
-// Live streaming text (thinking today) renders verbatim through
-// paragraph()/text(), and ftxui's text layer drops tab characters outright --
-// the same loss core_registrations.cpp's ExpandTabs fixes for tool output.
-// 4-column stops, like the code blocks; '\r' dropped.
-std::string ExpandTabsForDisplay(std::string_view body) {
-    std::string out;
-    out.reserve(body.size());
-    std::size_t column = 0;
-    for (const char c : body) {
-        if (c == '\t') {
-            const std::size_t pad = 4 - (column % 4);
-            out.append(pad, ' ');
-            column += pad;
-        } else if (c == '\n') {
-            out += c;
-            column = 0;
-        } else if (c != '\r') {
-            out += c;
-            ++column;
-        }
-    }
-    return out;
-}
 
 // The live thinking render's bounds (see RenderLiveThinking): how many
 // settled lines are kept/ drawn, and how many bytes of the trailing partial
@@ -110,7 +88,7 @@ ftxui::Color GutterColor(ChatRowKind kind, const Theme& theme) {
         case ChatRowKind::Switch:
             break;
     }
-    return theme.ColorForOr("muted", "system_message");
+    return MutedColor(theme);
 }
 
 // A full-height speaker bar: separatorCharacter fills its whole box, so the
@@ -412,46 +390,16 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
 ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const {
     using namespace ftxui;
     Elements line;
-    const ToolStatus status = tool.started    ? ToolStatus::Running
-                              : tool.is_error ? ToolStatus::Failed
-                                              : ToolStatus::Ok;
-    line.push_back(ToolHeadline(
-        status, tool.tool_name.empty() ? std::string("tool") : tool.tool_name, theme_));
-    // tool.summary is currently always empty on the wire (rendering from
-    // tool_name + input is the client's job); tool.input is what actually
-    // carries the model's call args, so it's the real fallback, not a rare
-    // one. OneLineSummary guards BOTH paths: a background bash row's
-    // wire-carried command (state.cpp OnBackgroundTask) can be multi-line,
-    // and text() draws one row regardless of embedded newlines -- the junk
-    // class frame_renderer.cpp's notice path documents.
-    const std::string summary =
-        (tool.summary.has_value() && !tool.summary->empty())
-            ? OneLineSummary(*tool.summary)
-            : SummarizeToolInput(tool.tool_name, tool.input);
-    if (!summary.empty()) {
+    line.push_back(ToolHeadline(LiveToolStatus(tool), LiveToolName(tool), theme_));
+    if (const std::string summary = LiveToolSummary(tool); !summary.empty()) {
         // The one part allowed to shrink: a long summary used to push the
-        // elapsed/clock fields after it off the edge of the row.
+        // timing field after it off the edge of the row.
         line.push_back(text("  " + summary) | Muted(theme_) | flex_shrink);
     }
-    // THE BUG this closes: a live "bash, bash, bash" list had no clock or
-    // elapsed anywhere, so a stuck step and a running one looked identical
-    // until the whole turn ended. Running: elapsed since started_at_unix_ms,
-    // ticking because AppState::FocusedTabHasRunningTool keeps the pump
-    // repainting even when the tool itself is silent (app.cpp). Settled: the
-    // server-measured duration_ms, the same number the persisted row will
-    // eventually show. started_at_unix_ms defaults to -1 (never populated) --
-    // skip rather than render a nonsense multi-decade "elapsed".
-    if (tool.started) {
-        if (tool.started_at_unix_ms.count() >= 0) {
-            const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::system_clock::now().time_since_epoch())
-                                    .count();
-            const auto elapsed_ms =
-                std::max<std::int64_t>(0, now_ms - tool.started_at_unix_ms.count());
-            line.push_back(text("  " + FormatDuration(elapsed_ms)) | Muted(theme_));
-        }
-    } else if (tool.duration.count() >= 0) {
-        line.push_back(text("  " + FormatDuration(tool.duration.count())) | Muted(theme_));
+    // Without a clock a stuck step and a running one looked identical until
+    // the whole turn ended.
+    if (const std::string timing = LiveToolTiming(tool); !timing.empty()) {
+        line.push_back(text("  " + timing) | Muted(theme_));
     }
     Element row = hbox(std::move(line));
     // Persisted rows get their clock stamp from ChatRow::created_at_unix_ms
@@ -500,7 +448,7 @@ ftxui::Element ChatView::RenderLiveThinking(const LiveTurnSegment& segment) {
                 const std::size_t newline = fresh.find('\n', start);
                 const std::size_t end =
                     newline == std::string_view::npos ? fresh.size() : newline;
-                const std::string line = ExpandTabsForDisplay(fresh.substr(start, end - start));
+                const std::string line = ExpandTabs(fresh.substr(start, end - start));
                 entry.settled_lines.push_back(paragraph(line));
                 start = end + 1;
             }
@@ -541,7 +489,7 @@ ftxui::Element ChatView::RenderLiveThinking(const LiveTurnSegment& segment) {
         body.push_back(entry.settled_lines[i]);   // shared Elements, cheap copy
     }
     if (!tail.empty()) {
-        body.push_back(paragraph(ExpandTabsForDisplay(tail)));
+        body.push_back(paragraph(ExpandTabs(tail)));
     }
     if (body.empty()) {
         body.push_back(text(""));

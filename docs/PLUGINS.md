@@ -26,9 +26,9 @@ Installed to `<libdir>/minimal/plugins/server/`. All enabled by default unless n
 | `provider-anthropic` | Provider kind `anthropic` (Messages API, prompt caching) |
 | `commands-core` | Commands `/help`, `/clear`, `/compact`, `/agent`, `/model`, `/sessions`, `/connect` (stores a provider credential in `<data dir>/auth.json`) — `/mcp` is the `mcp` plugin's |
 | `commands-md` | Turns `commands/*.md` files into `/`-commands (config dir, project, and `.opencode/commands/`; opencode-syntax desugaring — see CONFIGURATION.md, how-to in COMMANDS_HOWTO.md) |
-| `checklist` | Tool `checklist` + cross-plugin RPC endpoint `checklist.rpc` |
+| `checklist` | Tool `checklist` + cross-plugin RPC endpoint `checklist.rpc`, and the `checklist.endpoint` whose push stream `checklist-view` subscribes to |
 | `signals-message` | Tool `message_session` (cross-session messaging on the core `signals` service) |
-| `cost-tracker` | Command `/cost`; startup auto-refresh of pricing snapshots (also `--refresh-cost-rates`); per-session cost accumulation; RPC endpoint `cost-tracker.rpc` |
+| `cost-tracker` | Command `/cost`; startup auto-refresh of pricing snapshots (also `--refresh-cost-rates`); per-session cost accumulation; RPC endpoint `cost-tracker.rpc`, and the `cost-tracker.endpoint` whose totals push stream `cost-view` subscribes to |
 | `session-titler` | Session observer that auto-titles sessions (~100 tokens/session spend). **Ships disabled** |
 
 ## Bundled client plugins (`plugins/client/`)
@@ -38,10 +38,10 @@ Installed to `<libdir>/minimal/plugins/client/`.
 | Plugin | Provides |
 |---|---|
 | `logo` | The ASCII-banner start view (random banner per session) |
-| `cost-view` | The `{cost}` status-bar segment (polls `cost-tracker.rpc`, renders cumulative $ / tokens) |
+| `cost-view` | The `{cost}` and `{token_detail}` status-bar segments (subscribe to `cost-tracker.endpoint`'s totals stream, polling only as a fallback; render cumulative $ and the token breakdown) |
 | `ask-view` | The client half of `tool-ask`: the `ask` prompt renderer (the question modal) and the `ask` display renderer (the transcript row, expanded by default). Disabled, every ask is answered "unavailable" |
 | `mcp-view` | The `/mcp` picker: the `mcp` modal view (`view_hint` "mcp") over the `mcp` plugin's `mcp.endpoint` — lists servers with live status, Enter toggles one |
-| `checklist-view` | The `{todo}` status-bar segment + the `checklist.panel` view (both poll `checklist.rpc` through one shared worker; the panel toggles between a focused-tab tasklist and a per-tab summary; default binding `alt+l`) |
+| `checklist-view` | The `{todo}` status-bar segment + the `checklist.panel` view (both fed by one shared worker holding `checklist.endpoint`'s change stream, polling only as a fallback; the panel toggles between a focused-tab tasklist and a per-tab summary; default binding `alt+l`) |
 
 ## User plugins (`user-plugins/`)
 
@@ -247,8 +247,8 @@ segments, syntax grammars, chat surface (exclusive), markdown engine
 
 **Generic RPC channel:** the generic `PluginCall`/`PluginSubscribe` RPCs dispatch by plugin name through the `ServiceRegistry`, under two suffixed conventions that cannot collide:
 
-- **`<name>.rpc`** — a `PluginRpcHandler` (`plugin_rpc.hpp`): unary request/response. `checklist` and `cost-tracker` ship `.rpc` handlers (the `cost-view` client plugin polls `cost-tracker.rpc` this way).
-- **`<name>.endpoint`** — a `PluginEndpoint` (`plugin_abi.h`): unary `Call` plus a `Subscribe` half that pushes to the subscriber until it disconnects. `PluginSubscribe` dispatches to `.endpoint` providers only; no bundled plugin ships one yet.
+- **`<name>.rpc`** — a `PluginRpcHandler` (`plugin_rpc.hpp`): unary request/response. `checklist` and `cost-tracker` ship `.rpc` handlers for cross-plugin callers.
+- **`<name>.endpoint`** — a `PluginEndpoint` (`plugin_abi.h`): unary `Call` plus a `Subscribe` half that pushes to the subscriber until it disconnects. `PluginSubscribe` dispatches to `.endpoint` providers only. `checklist`, `cost-tracker` and `mcp` ship one; their client views subscribe.
 
 `PluginCall` tries `.endpoint` first, then falls back to `.rpc`.
 
@@ -318,7 +318,10 @@ the `on_session_end` disposition (`detach`, the default, or `kill`).
 ## Aliases
 
 Aliases live in the `"aliases"` map of `plugins.json` (client: the same map in
-`client-plugins.json`) and **rename what the model and the user see**:
+`client-plugins.json`) and **rename what the model and the user see**. On the
+CLIENT an alias only resolves a collision: both registrations stay live under
+their original names (lookups, keybindings and view hints hit the first), so
+the fatal duplicate becomes a coexistence rather than a rename:
 
 ```json
 { "aliases": { "bash_over_ssh.bash": "ssh_bash" } }

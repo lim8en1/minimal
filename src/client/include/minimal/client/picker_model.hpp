@@ -6,8 +6,9 @@
 // that shipped unnoticed inside app.cpp before ("jump.attention" scanning
 // from a fixed index instead of the focused tab). No FTXUI, no AppState, no
 // network -- (sessions, filter, sort) -> rows, over the same
-// v1::SessionSummary list app.cpp already fetches.
+// v1::SessionSummary list PickerController fetches.
 
+#include <chrono>
 #include <cstdint>
 #include <initializer_list>
 #include <string>
@@ -35,6 +36,18 @@ inline bool MatchesFilter(const std::string& lowered_filter,
         if (ToLower(field).find(lowered_filter) != std::string::npos) return true;
     }
     return false;
+}
+
+// The session-list row conventions every session-shaped picker shares: the
+// leading live marker (a dot for a session still running server-side, an
+// indent otherwise, so it scans down the column), and "now" for the relative
+// age column -- a caller passing a real value (tests) is honored as-is.
+inline const char* LiveMarker(bool is_live) { return is_live ? "● " : "  "; }
+inline std::int64_t NowUnixMsOr(std::int64_t now_unix_ms) {
+    if (now_unix_ms > 0) return now_unix_ms;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
 }
 
 enum class PickerSort { kRecent, kName };

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "minimal/client/picker_model.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/common/model_ref.hpp"
 
@@ -39,10 +40,7 @@ std::vector<ModelPickerRow> BuildModelPickerRows(
 
         // Match against the full ref, not the bare model id: the filter must
         // reach the provider half too ("local" should surface local/*).
-        if (!lowered_filter.empty() &&
-            ToLower(summary->ref()).find(lowered_filter) == std::string::npos) {
-            continue;
-        }
+        if (!MatchesFilter(lowered_filter, {summary->ref()})) continue;
 
         if (!header_emitted) {
             rows.push_back(ModelPickerRow{provider, "", /*header=*/true});

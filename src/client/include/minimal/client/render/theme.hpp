@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -13,6 +15,11 @@
 #include "minimal/client/render/color_downsample.hpp"
 
 namespace minimal::client {
+
+// "#rrggbb" or "#rgb" -> its channels; nullopt for anything else. The one
+// color-literal parser: theme loading (which turns nullopt into a load error
+// naming the role) and a picker row's own tint (which falls back silently).
+std::optional<std::tuple<uint8_t, uint8_t, uint8_t>> TryParseHexColor(std::string_view value);
 
 // A loaded theme: role/category name -> color, downsampled at load to what the
 // terminal can display. Roles are open-ended -- the syntax highlighter and the
@@ -91,6 +98,10 @@ ftxui::Decorator SelectionStyle(const Theme& theme);
 // role, falling back to system_message. This replaces SGR `dim`, which the
 // terminal renders however it likes (unreadable in practice). With neither
 // role set (NO_COLOR) it is a no-op: plain text, never dim.
+// The muted foreground: the "muted" role, falling back to "system_message".
+// The one resolution rule -- every de-emphasized element uses this color or
+// the Muted() decorator below.
+ftxui::Color MutedColor(const Theme& theme);
 ftxui::Decorator Muted(const Theme& theme);
 
 // Paints `bg` into every cell the element leaves at the terminal-default

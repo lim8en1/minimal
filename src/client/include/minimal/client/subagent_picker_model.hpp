@@ -27,6 +27,6 @@ struct SubagentPickerRow {
 // picker must be correct with the tab closed).
 std::vector<SubagentPickerRow> BuildSubagentPickerRows(
     const std::vector<v1::SessionSummary>& sessions, bool include_ended,
-    const std::string& filter);
+    const std::string& filter, std::int64_t now_unix_ms = 0);   // 0: the real clock
 
 }  // namespace minimal::client

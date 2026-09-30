@@ -113,13 +113,13 @@ public:
         bool Send(const v1::ClientEvent& event);
 
     // Half-close our send side, drain remaining server output, then Finish(). Safe from
-    // any thread (idempotent via launch_state_'s kClosed latch). Closing the last stream
-    // of a session terminates it server-side; closing one tab leaves others running.
+    // any thread (idempotent via launch_state_'s kClosed latch). A bare close is read by
+    // the server as a DETACH: the session keeps running (EndSession{TERMINATE} ends it).
     //
     // The bidi context is CANCELLED before the joins: a writer blocked in
     // Write() (server stopped reading) or a reader blocked in Read() (wedged
-    // connection) would otherwise hang Close() -- which runs on the UI
-    // thread from CloseTab/quit -- forever. Cancel costs queued-but-unsent
+    // connection) would otherwise hang Close() -- which runs on AppState's
+    // stream closer (CloseTab) or at quit -- forever. Cancel costs queued-but-unsent
     // events, which is consistent with Close's documented destructiveness:
     // the session is being torn down regardless.
     //
@@ -328,10 +328,9 @@ public:
     };
     GetMessagesResult GetMessages(const std::string& session_id,
                                   std::optional<int64_t> before_seq, int32_t limit);
-
-    // Caller-owned-context variant (the TUI bounds its fetches with a deadline).
-    grpc::Status GetMessages(grpc::ClientContext* context, const v1::GetMessagesRequest& request,
-                             v1::GetMessagesResponse* response);
+    // Any page shape (after_seq delta pages included), with the same bounded
+    // deadline -- what the TUI's scrollback fetch and the plugin seam use.
+    GetMessagesResult GetMessagesPage(const v1::GetMessagesRequest& request);
 
     // The session picker's list. project_root empty requires include_all_dirs.
     struct ListSessionsOptions {
@@ -354,6 +353,13 @@ public:
         grpc::Status status;
     };
     ListSessionsResult ListSessions(const ListSessionsOptions& options);
+
+    // The request id a /-command invocation carries ("cmd-N"), echoed on its
+    // CommandResult. ONE counter per client, for the headless and the TUI
+    // paths alike: two commands on two streams must never echo-collide.
+    std::string NextCommandRequestId() {
+        return "cmd-" + std::to_string(command_counter_.fetch_add(1, std::memory_order_relaxed) + 1);
+    }
     // Every page of a listing, following the (updated_at, id) keyset cursor
     // until a short page ends it. `options`' cursor fields are ignored (the
     // walk starts at the first page); `options.limit` is the page size.

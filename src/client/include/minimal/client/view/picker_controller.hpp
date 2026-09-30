@@ -35,6 +35,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -212,6 +213,16 @@ private:
             if (!keep_input) memory = std::make_shared<MenuMemory>();
         }
     };
+    // The agent/model/subagent pickers' one fetch shape: `fetch` runs on the
+    // bulk RPC lane and returns the data or sets `error`; back on the loop
+    // thread the result lands through `apply` (or the error into `state`),
+    // loading ends, and `rebuild` redraws the picker. (The session picker
+    // keeps its own: pagination and fetch generations.)
+    template <typename T>
+    void RunFetch(FetchState& state, std::function<std::optional<T>(std::string& error)> fetch,
+                  std::function<void(T&&)> apply, std::function<void()> rebuild,
+                  const char* what);
+
     FetchState session_fetch_;
     FetchState agent_fetch_;
     FetchState model_fetch_;

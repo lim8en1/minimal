@@ -80,4 +80,14 @@ int ModalBodyHeightBudget();
 // The body: padded one column each side, in the body color.
 ftxui::Element ModalBody(const Theme& theme, ftxui::Element content);
 
+// The whole chrome of a prompt-style modal: a titled window framed in the
+// attention color; `rows` in the body color, scrolling under the height
+// budget; the key hints (`footer`, omitted when empty) pinned below a rule --
+// visible however much content there is -- and wrapped rather than clipped.
+// `max_width` caps the frame; 82 leaves the body's hints 78 usable columns
+// after the body's own 2-column margin.
+inline constexpr int kModalMaxWidth = 82;
+ftxui::Element ModalFrame(const Theme& theme, const std::string& title, ftxui::Elements rows,
+                          const std::string& footer, int max_width = kModalMaxWidth);
+
 }  // namespace minimal::client

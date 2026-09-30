@@ -15,6 +15,31 @@
 
 namespace minimal::client {
 
+std::optional<std::tuple<uint8_t, uint8_t, uint8_t>> TryParseHexColor(std::string_view value) {
+    if ((value.size() != 7 && value.size() != 4) || value[0] != '#') return std::nullopt;
+    // Each digit is validated on its own: combining first could turn a valid
+    // high nibble and an invalid low one into a plausible small value.
+    const auto digit = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    int d[6] = {};
+    const std::size_t n = value.size() - 1;
+    for (std::size_t i = 0; i < n; ++i) {
+        d[i] = digit(value[i + 1]);
+        if (d[i] < 0) return std::nullopt;
+    }
+    if (n == 3) {
+        return std::make_tuple(static_cast<uint8_t>(d[0] * 17), static_cast<uint8_t>(d[1] * 17),
+                               static_cast<uint8_t>(d[2] * 17));
+    }
+    return std::make_tuple(static_cast<uint8_t>(d[0] * 16 + d[1]),
+                           static_cast<uint8_t>(d[2] * 16 + d[3]),
+                           static_cast<uint8_t>(d[4] * 16 + d[5]));
+}
+
 namespace {
 
 // "#rrggbb" or "#rgb". Anything else is a malformed theme, and a malformed
@@ -22,30 +47,9 @@ namespace {
 // leave the user hunting for which of their colors is off.
 std::tuple<uint8_t, uint8_t, uint8_t> ParseHexColor(std::string_view value,
                                                     std::string_view role) {
-    const auto bad = [&]() -> std::runtime_error {
-        return std::runtime_error("theme role '" + std::string(role) +
-                                  "': color '" + std::string(value) +
-                                  "' is not #rrggbb or #rgb");
-    };
-    if (value.size() != 7 && value.size() != 4) throw bad();
-    if (value[0] != '#') throw bad();
-
-    const auto digit = [&](char c) -> int {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-        throw bad();
-    };
-
-    if (value.size() == 4) {
-        const int r = digit(value[1]), g = digit(value[2]), b = digit(value[3]);
-        return {static_cast<uint8_t>(r * 17), static_cast<uint8_t>(g * 17),
-                static_cast<uint8_t>(b * 17)};
-    }
-    const int r = digit(value[1]) * 16 + digit(value[2]);
-    const int g = digit(value[3]) * 16 + digit(value[4]);
-    const int b = digit(value[5]) * 16 + digit(value[6]);
-    return {static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b)};
+    if (const auto rgb = TryParseHexColor(value)) return *rgb;
+    throw std::runtime_error("theme role '" + std::string(role) + "': color '" +
+                             std::string(value) + "' is not #rrggbb or #rgb");
 }
 
 // FillBackground's node: lays out exactly like its child, then back-fills the
@@ -92,9 +96,12 @@ ftxui::Decorator SelectionStyle(const Theme& theme) {
     return ftxui::color(fg) | ftxui::bgcolor(bg);
 }
 
+ftxui::Color MutedColor(const Theme& theme) {
+    return theme.ColorForOr("muted", "system_message");
+}
+
 ftxui::Decorator Muted(const Theme& theme) {
-    ftxui::Color c = theme.ColorFor("muted");
-    if (c == ftxui::Color::Default) c = theme.ColorFor("system_message");
+    const ftxui::Color c = MutedColor(theme);
     // Not color(Default): that would reset an enclosing tint (a modal's
     // attention color) back to the terminal's foreground.
     if (c == ftxui::Color::Default) return [](ftxui::Element e) { return e; };

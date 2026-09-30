@@ -6,6 +6,8 @@
 # which is what lets client plugins link minimal::client_core directly.
 add_library(minimal_client_core SHARED
     cli_args.cpp
+    command_line.cpp
+    command_router.cpp
     server_spawn.cpp
     session_client.cpp
     rpc_queue.cpp
@@ -51,6 +53,7 @@ add_library(minimal_client_core SHARED
     view/frame_renderer.cpp
     view/prompt_modal.cpp
     view/modal_host.cpp
+    view/modal_stack.cpp
     render/color_downsample.cpp
     render/theme.cpp
     render/syntax_highlighter.cpp
@@ -111,7 +114,7 @@ endif()
 
 # The TUI client and the headless -p mode are one binary: `minimal` dispatches on
 # argv. -p is the smallest real client and doubles as the end-to-end test harness.
-add_executable(minimal app.cpp)
+add_executable(minimal app.cpp client_entry.cpp headless.cpp tui_app.cpp)
 target_link_libraries(minimal PRIVATE minimal::client_core)
 
 # Find libminimal_client_core next to the binary, in the build tree and once

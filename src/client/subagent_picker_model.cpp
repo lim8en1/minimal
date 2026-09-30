@@ -31,7 +31,7 @@ std::string Label(const v1::SessionSummary& session, std::int64_t now_unix_ms) {
     // summary carries is_live only (see the header).
     const std::string state = session.is_live() ? "running" : "ended";
     std::string count = std::to_string(session.message_count()) + " msgs";
-    return std::string(session.is_live() ? "● " : "  ") + DisplayName(session) + "  ·  " + count +
+    return std::string(LiveMarker(session.is_live())) + DisplayName(session) + "  ·  " + count +
            "  ·  " + state + "  ·  " + RelativeAge(session.updated_at_unix_ms(), now_unix_ms);
 }
 
@@ -39,11 +39,8 @@ std::string Label(const v1::SessionSummary& session, std::int64_t now_unix_ms) {
 
 std::vector<SubagentPickerRow> BuildSubagentPickerRows(
     const std::vector<v1::SessionSummary>& sessions, bool include_ended,
-    const std::string& filter) {
-    const std::int64_t now_unix_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch())
-            .count();
+    const std::string& filter, std::int64_t now_unix_ms) {
+    now_unix_ms = NowUnixMsOr(now_unix_ms);
     const std::string lowered_filter = ToLower(filter);
 
     std::vector<const v1::SessionSummary*> matched;

@@ -438,17 +438,8 @@ ftxui::Component MakeAskModal(std::vector<AskQuestion> questions, std::string as
                 if (first_line < 0) first_line = static_cast<int>(rows.size()) - 1;
             }
             if (!state->interacted && first_line >= 0) rows[first_line] |= focus;
-            return window(text(" review answers "),
-                          minimal::client::ModalBody(
-                              theme, vbox({
-                                         vbox(std::move(rows)) | yframe | vscroll_indicator |
-                                             size(HEIGHT, LESS_THAN,
-                                                  minimal::client::ModalBodyHeightBudget()),
-                                         minimal::client::ModalRule(theme),
-                                         paragraph("enter: submit  ·  esc: edit answers") |
-                                             minimal::client::Muted(theme),
-                                     }))) |
-                   size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
+            return minimal::client::ModalFrame(theme, "review answers", std::move(rows),
+                                               "enter: submit  ·  esc: edit answers");
         }
         for (int i = 0; i < count; ++i) {
             const auto& question = state->questions[i];
@@ -465,17 +456,8 @@ ftxui::Component MakeAskModal(std::vector<AskQuestion> questions, std::string as
                 : "enter: pick & next  ·  1-9: pick  ·  space: pick/toggle  ·  "
                   "tab: skip  ·  esc: dismiss";
         const std::string window_title =
-            count > 1 ? " " + std::to_string(count) + " questions " : std::string(" question ");
-        return window(text(window_title),
-                      minimal::client::ModalBody(
-                          theme, vbox({
-                                     vbox(std::move(rows)) | yframe | vscroll_indicator |
-                                         size(HEIGHT, LESS_THAN,
-                                              minimal::client::ModalBodyHeightBudget()),
-                                     minimal::client::ModalRule(theme),
-                                     paragraph(hints) | minimal::client::Muted(theme),
-                                 }))) |
-               size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
+            count > 1 ? std::to_string(count) + " questions" : std::string("question");
+        return minimal::client::ModalFrame(theme, window_title, std::move(rows), hints);
     });
 
     const auto dismiss = [reply] { reply({v1::PROMPT_OUTCOME_DISMISSED, nullptr}); };

@@ -72,6 +72,19 @@ Element ModalBody(const Theme& theme, Element content) {
     return PadHorizontal(std::move(content)) | ftxui::color(theme.ColorFor("assistant_message"));
 }
 
+Element ModalFrame(const Theme& theme, const std::string& title, Elements rows,
+                   const std::string& footer, int max_width) {
+    using namespace ftxui;
+    Elements body{vbox(std::move(rows)) | yframe | vscroll_indicator |
+                  size(HEIGHT, LESS_THAN, ModalBodyHeightBudget())};
+    if (!footer.empty()) {
+        body.push_back(ModalRule(theme));
+        body.push_back(paragraph(footer) | Muted(theme));
+    }
+    return window(text(" " + title + " "), ModalBody(theme, vbox(std::move(body)))) |
+           size(WIDTH, LESS_THAN, max_width) | color(theme.ColorFor("attention"));
+}
+
 namespace {
 
 // The answer list, numbered 1-4 in this order (PermissionChoice order).
@@ -275,19 +288,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
         // can run past the modal's own width (interior padding narrows it
         // further) -- text() would silently clip the tail (the exact "toggle
         // grants" the user needs), paragraph() wraps onto a second line.
-        return window(text(" permission "),
-                      ModalBody(theme, vbox({
-                          vbox(std::move(rows)) | yframe | vscroll_indicator |
-                              size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                          ModalRule(theme),
-                          paragraph(footer_text) | Muted(theme),
-                      }))) |
-               // 82, not 80: PadHorizontal above spends 2 columns of the
-               // modal's own width on the new interior margin -- widening
-               // the cap by the same 2 keeps the footer's actual usable
-               // width (and therefore its one-line layout) unchanged from
-               // before the margin was added.
-               size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
+        return ModalFrame(theme, "permission", std::move(rows), footer_text);
     });
     // RunTui's on_answer reads toggles.GrantedKeys(request) -- the filtered
     // keys ride along from state it owns, so the modal never mints a key.
@@ -483,14 +484,8 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
         // Content scrolls; the esc hint stays pinned below it. (No esc hint
         // at all when the wire request offers no cancel option -- see the
         // CatchEvent below.)
-        return window(text(" confirm "),
-                      ModalBody(theme, vbox({
-                          vbox(std::move(rows)) | yframe | vscroll_indicator |
-                              size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                          has_cancel ? ModalRule(theme) : emptyElement(),
-                          has_cancel ? text("esc: cancel") | Muted(theme) : emptyElement(),
-                      }))) |
-               size(WIDTH, LESS_THAN, 72) | color(theme.ColorFor("attention"));  // see the 82 note above
+        return ModalFrame(theme, "confirm", std::move(rows),
+                          has_cancel ? "esc: cancel" : "", /*max_width=*/72);
     });
     // Escape picks the "cancel" option when the modal offers one: both
     // destructive confirms do, and the picker/permission modals already honor

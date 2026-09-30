@@ -45,16 +45,11 @@ public:
                                            int limit) override {
         if (client_ == nullptr) return std::nullopt;
 
-        v1::GetMessagesResponse response;
-        grpc::ClientContext context;
         // Bounded, like core's own scrollback refresh: a wedged server costs
         // the caller one failed page, never a hung thread.
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
-        v1::GetMessagesRequest request;
-        request.set_session_id(session_id);
-        if (before_seq.has_value()) request.set_before_seq(*before_seq);
-        request.set_limit(limit);
-        if (!client_->GetMessages(&context, request, &response).ok()) return std::nullopt;
+        const auto result = client_->GetMessages(session_id, before_seq, limit);
+        if (!result.status.ok()) return std::nullopt;
+        const v1::GetMessagesResponse& response = result.response;
 
         MessagePage page;
         for (const auto& stored : response.messages()) {

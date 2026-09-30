@@ -9,7 +9,7 @@
 #include <iterator>
 #include <utility>
 
-#include "minimal/client/cli_args.hpp"
+#include "minimal/client/command_line.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/common/logger.hpp"
 
@@ -83,13 +83,13 @@ std::vector<ToolExecutionState> SessionState::CopyToolsLocked(bool include_outpu
     return out;
 }
 
-SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output) {
-    std::lock_guard lk(mtx_);
-    Snapshot s;
+// The fields BOTH snapshots carry: identity, derived state, usage, turn
+// flags and the status-bar metadata. One list, so a field added for the tab
+// bar cannot reach one snapshot and not the other.
+void SessionState::FillCommonLocked(Snapshot& s) const {
     s.session_id = session_id_;
     s.display_name = display_name_;
     s.state = state_;
-    s.tools = CopyToolsLocked(include_tool_output);
     s.input_tokens = input_tokens_;
     s.output_tokens = output_tokens_;
     s.cache_read_tokens = cache_read_tokens_;
@@ -105,6 +105,13 @@ SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output)
     s.permission_mode = permission_mode_;
     s.paused = paused_;
     s.context_window_tokens = context_window_tokens_;
+}
+
+SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output) {
+    std::lock_guard lk(mtx_);
+    Snapshot s;
+    FillCommonLocked(s);
+    s.tools = CopyToolsLocked(include_tool_output);
     // Deliberately NOT copied (heavy, and only the focused tab renders them):
     // scrollback_page, the streaming accumulations (has_streaming_text +
     // live_segments' copy-on-publish views instead), pending_permission/
@@ -162,9 +169,7 @@ void SessionState::SetBounds(int scrollback_max_messages, int tool_output_buffer
 SessionState::Snapshot SessionState::TakeSnapshot() {
     std::lock_guard lk(mtx_);
     Snapshot s;
-    s.session_id = session_id_;
-    s.display_name = display_name_;
-    s.state = state_;
+    FillCommonLocked(s);
     s.scrollback_page = scrollback_page_shared_;   // shared, copy-on-apply
     s.compactions = compactions_shared_;
     s.pending_user_messages = pending_user_messages_;
@@ -196,13 +201,6 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     // every tool's full (up to 64 KiB) live buffer on every focused-tab deep
     // snapshot for a consumer that ignores it.
     s.tools = CopyToolsLocked(/*include_output=*/false);
-    s.input_tokens = input_tokens_;
-    s.output_tokens = output_tokens_;
-    s.cache_read_tokens = cache_read_tokens_;
-    s.cache_write_tokens = cache_write_tokens_;
-    s.cancel_requested = cancel_requested_;
-    s.turn_in_flight = turn_in_flight_ || !commands_in_flight_.empty();
-    s.live_view_truncated = live_view_truncated_;
     s.transcript_version = transcript_version_;
     s.fetch_generation = fetch_generation_;
     s.rewind_epoch = rewind_epoch_;
@@ -212,14 +210,6 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.turn_seq = turn_seq_;
     s.latest_notice = latest_notice_;
     s.notice_seq = notice_seq_;
-    s.model = model_;
-    s.agent_preset = agent_preset_;
-    s.desired_model = desired_model_;
-    s.desired_agent_preset = desired_agent_;
-    s.desired_permission_mode = desired_permission_mode_;
-    s.permission_mode = permission_mode_;
-    s.paused = paused_;
-    s.context_window_tokens = context_window_tokens_;
     s.refresh_seq = refresh_seq_;
     s.refresh_succeeded = refresh_succeeded_;
     return s;
@@ -330,6 +320,37 @@ std::vector<std::string> SessionState::ConvergenceCommands() const {
     return out;
 }
 
+// A NEW TURN begins only after the previous one ENDED (TurnCompleted/Error):
+// message stops fire between tool cycles WITHIN a turn, so arming on
+// is_streaming_ alone would re-key the stream mid-turn. The first event of the
+// new turn -- text, thinking or a tool call, whichever arrives first -- bumps
+// turn_seq_, arms the interrupt probe, and clears BOTH flat accumulations.
+// Both: the turn-end refresh (async) owns clearing the previous turn's tails
+// (ClearStreamingIfCurrentTurn), and whichever path arms first consumes
+// turn_ended_ -- the three copies this replaced each cleared only their own
+// buffer, so e.g. a thinking-first turn kept the old turn's text tail and
+// fused the next text onto it. Returns whether a new turn started (what
+// authorizes clearing a sticky Error).
+// Every pending prompt at once (permission, confirmation, plugin prompt):
+// the three are mutually exclusive, and every site that ends one kind ends all.
+void SessionState::ClearPendingPromptsLocked() {
+    pending_permission_.reset();
+    pending_confirmation_.reset();
+    pending_prompt_.reset();
+}
+
+bool SessionState::ArmNewTurnLocked() {
+    if (!turn_ended_) return false;
+    ++turn_seq_;
+    turn_ended_ = false;
+    turn_in_flight_ = true;
+    streaming_accumulated_.clear();
+    streaming_truncated_ = false;
+    thinking_accumulated_.clear();
+    thinking_truncated_ = false;
+    return true;
+}
+
 void SessionState::AppendStreamingText(std::string_view text) {
     std::lock_guard lk(mtx_);
     // Track C4: a NEW live segment starts on a fresh turn (live_segments_
@@ -396,25 +417,10 @@ void SessionState::AppendStreamingText(std::string_view text) {
     // "a genuinely new turn just started" signal (vs. a stray late event for
     // the turn that just errored), and it is what authorizes clearing a
     // sticky Error state a few lines down -- see that guard's comment.
-    const bool starting_new_turn = turn_ended_;
-    if (turn_ended_) {
-        ++turn_seq_;
-        turn_ended_ = false;
-        // First delta of a NEW turn: arm the interrupt probe. This is the
-        // only arming site an INJECTED turn gets (a subagent completion
-        // triggers a seedless turn without OnChatSubmitted), so both delta
-        // paths carry it.
-        turn_in_flight_ = true;
-        // The turn-end REFRESH (async) owns clearing the previous turn's
-        // accumulated tail via ClearStreamingIfCurrentTurn. If this delta is
-        // the FIRST of the new turn and wins that race, appending onto the
-        // old tail fused the two turns into one document with no separator
-        // -- markdown from the old turn eats this one whole. Clear now: the
-        // old tail reappears from the store when the refresh lands, which is
-        // authoritative anyway.
-        streaming_accumulated_.clear();
-        streaming_truncated_ = false;
-    }
+    // First delta of a NEW turn arms it (ArmNewTurnLocked) -- the only arming
+    // an INJECTED turn gets (a subagent completion triggers a seedless turn
+    // without OnChatSubmitted).
+    const bool starting_new_turn = ArmNewTurnLocked();
     // Flat accumulation cap: further deltas are DROPPED once the truncation
     // marker is in place (appending them past the cap would make the cap
     // decorative and re-grow the per-frame snapshot cost). The transcript
@@ -442,9 +448,7 @@ void SessionState::AppendStreamingText(std::string_view text) {
     if (state_ != SessionStateKind::Error || starting_new_turn) {
         state_ = SessionStateKind::Thinking;
     }
-    pending_permission_.reset();
-    pending_confirmation_.reset();
-    pending_prompt_.reset();
+    ClearPendingPromptsLocked();
 }
 
 void SessionState::FinalizeStreamingText() {
@@ -459,7 +463,7 @@ void SessionState::FinalizeStreamingText() {
 // order, and reasoning is one of them (typically the FIRST, before the first
 // text delta) -- without a segment the ChatView could only show the flat
 // string out of position or not at all. The flat accumulation stays for
-// Snapshot::streaming_thinking_text consumers; the segment is what renders.
+// the retirement matching and FlatThinkingText; the segment is what renders.
 void SessionState::AppendStreamingThinking(std::string_view text) {
     std::lock_guard lk(mtx_);
     // Turn arming mirrors AppendStreamingText exactly: thinking typically
@@ -474,19 +478,7 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
     // the same reason: it is what authorizes clearing a sticky Error state
     // below, since thinking typically opens the turn and so is often the
     // FIRST delta to see it end.
-    const bool starting_new_turn = turn_ended_;
-    if (turn_ended_) {
-        ++turn_seq_;
-        turn_ended_ = false;
-        // Same new-turn arming as AppendStreamingText: thinking typically
-        // OPENS the turn, so the interrupt probe is armed here first.
-        turn_in_flight_ = true;
-        // Same new-turn race as AppendStreamingText: a first thinking delta
-        // must not append onto the previous turn's thinking tail before the
-        // async refresh clears it.
-        thinking_accumulated_.clear();
-        thinking_truncated_ = false;
-    }
+    const bool starting_new_turn = ArmNewTurnLocked();
     thinking_turn_seq_ = turn_seq_;
     // Flat cap, same shape as streaming_accumulated_: truncate once, append
     // the marker, drop further deltas -- the transcript is authoritative.
@@ -684,9 +676,7 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     // same shape as permission/confirmation here -- CancelAll covers all
     // three pending kinds identically -- so it resets alongside them; leaving
     // it out stranded the tab Waiting with a dead prompt modal after ESC.
-    pending_permission_.reset();
-    pending_confirmation_.reset();
-    pending_prompt_.reset();
+    ClearPendingPromptsLocked();
     MaybeGoIdleLocked();
     // The completed turn's messages are persisted now but NOT yet in the
     // scrollback window; bumping the version is what makes the chat view
@@ -958,9 +948,7 @@ void SessionState::OnError(const std::string& error_message) {
     turn_in_flight_ = false;   // dead streams end turns too -- the probe must not latch
     commands_in_flight_.clear();   // nothing will answer them on this stream
     cancel_requested_ = false;   // a cancel can BE the error path (dead stream)
-    pending_permission_.reset();
-    pending_confirmation_.reset();
-    pending_prompt_.reset();
+    ClearPendingPromptsLocked();
     // A queued run-mode change whose turn/stream just errored may never reach
     // its apply-time metadata event; the pending marker would outlive the
     // change it advertised. The confirming path (OnSessionMetadata) is the
@@ -1006,9 +994,7 @@ void SessionState::OnSessionEnded() {
     turn_in_flight_ = false;   // terminal -- the probe must not survive the session
     commands_in_flight_.clear();
     cancel_requested_ = false;
-    pending_permission_.reset();
-    pending_confirmation_.reset();
-    pending_prompt_.reset();
+    ClearPendingPromptsLocked();
     pending_user_messages_.clear();   // same rule as OnError: nothing will retire it
     state_ = SessionStateKind::Done;
 }
@@ -1083,9 +1069,10 @@ void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_las
         has_earlier_ = true;
     } else {
         // Descending window: the cut rows sit at the FRONT.
-        while (!scrollback_page_.empty() && scrollback_page_.front().seq() > active_last_seq) {
-            scrollback_page_.erase(scrollback_page_.begin());
-        }
+        const auto first_kept = std::find_if(
+            scrollback_page_.begin(), scrollback_page_.end(),
+            [active_last_seq](const v1::StoredMessage& m) { return m.seq() <= active_last_seq; });
+        scrollback_page_.erase(scrollback_page_.begin(), first_kept);
         // Conservative: rows survived -> older pages may exist; setting true
         // when they don't just costs one empty "load older" round trip.
         has_earlier_ = !scrollback_page_.empty() ? true : has_earlier_;
@@ -1213,16 +1200,7 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     // path (if either) sees the next event for this turn no longer finds
     // turn_ended_ set, so it takes the same-turn "new block" branch instead
     // and never gets to clear its own buffer's previous-turn leftover.
-    const bool starting_new_turn = turn_ended_;
-    if (turn_ended_) {
-        ++turn_seq_;
-        turn_ended_ = false;
-        turn_in_flight_ = true;
-        streaming_accumulated_.clear();
-        streaming_truncated_ = false;
-        thinking_accumulated_.clear();
-        thinking_truncated_ = false;
-    }
+    const bool starting_new_turn = ArmNewTurnLocked();
     ToolExecutionState tool;
     tool.tool_use_id = evt.tool_use_id();
     tool.tool_name = evt.tool_name();
@@ -1488,11 +1466,14 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp, bool
         }
         if (!fresh.empty()) {
             int64_t expected_prev = held_newest;   // each accepted row must be exactly one newer
-            for (const auto& stored : fresh) {   // ascending; each lands at the window's front
+            for (const auto& stored : fresh) {
                 if (stored.seq() != expected_prev + 1) scrollback_gap_ = true;
                 expected_prev = stored.seq();
-                scrollback_page_.insert(scrollback_page_.begin(), stored);
             }
+            // Ascending -> the descending window's front, in ONE insert: a
+            // row-at-a-time insert(begin()) shifted the whole window per row
+            // (O(rows x window) for a 5000-row catch-up).
+            scrollback_page_.insert(scrollback_page_.begin(), fresh.rbegin(), fresh.rend());
             // Caught up to the server's newest: anything an older-page load
             // evicted from the window's NEWEST end is visible again. (A gap
             // INSIDE the window is a different flag and stays.)
@@ -1500,8 +1481,8 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp, bool
             // Sliding window, oldest end only: the same bound the
             // newest-slice assign applies, from the same direction.
             bool evicted_earlier = false;
-            while (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
-                scrollback_page_.pop_back();
+            if (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
+                scrollback_page_.resize(static_cast<std::size_t>(scrollback_max_messages_));
                 evicted_earlier = true;
             }
             // Rows the cap just evicted from the oldest end are fetchable
@@ -1562,8 +1543,11 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp, bool
         // clears when a delta fetch catches the window back up to the
         // server's newest (the delta branch above), which is exactly the
         // "reload NEWER pages on demand" the wire used to lack.
-        while (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
-            scrollback_page_.erase(scrollback_page_.begin());
+        if (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
+            const auto excess = scrollback_page_.size() -
+                                static_cast<std::size_t>(scrollback_max_messages_);
+            scrollback_page_.erase(scrollback_page_.begin(),
+                                   scrollback_page_.begin() + static_cast<std::ptrdiff_t>(excess));
             scrollback_trimmed_ = true;
         }
     }
@@ -2389,11 +2373,11 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         target->SetPluginPrompt(std::move(pp));
     } else if (event.has_tool_execution()) {
         const auto& te = event.tool_execution();
-            if (te.started()) {
-                target->OnToolStarted(te);
-            } else {
-                target->OnToolFinished(te.tool_use_id(), te);   // finished tool
-            }
+        if (te.started()) {
+            target->OnToolStarted(te);
+        } else {
+            target->OnToolFinished(te.tool_use_id(), te);   // finished tool
+        }
     } else if (event.has_tool_output_delta()) {
         target->OnToolOutputDelta(event.tool_output_delta().tool_use_id(),
                                    event.tool_output_delta().chunk());
@@ -2550,12 +2534,10 @@ void AppState::SetFocusedTab(const std::string& tab_id) {
     std::lock_guard lk(mtx_);
     // FindTab, not HasTab: HasTab locks mtx_ itself, and this mutex is not
     // recursive -- calling it here would deadlock every caller, including
-    // FocusWithWrap and the blocking-subagent auto-focus path.
+    // the blocking-subagent auto-focus path.
     if (FindTab(tab_id) != nullptr) focused_id_ = tab_id;
 }
 
-void AppState::CycleFocusForward() { FocusWithWrap(true); }
-void AppState::CycleFocusBackward() { FocusWithWrap(false); }
 
 void AppState::SetTabFilter(TabFilter filter) {
     std::lock_guard lk(mtx_);
@@ -2569,58 +2551,13 @@ TabFilter AppState::ActiveTabFilter() const {
     return tab_filter_;
 }
 
-void AppState::FocusWithWrap(bool forward) {
-    std::vector<std::string> order;
-    // focused_id_ copied under the SAME lock as order: a reader thread can
-    // write it via OnSubagentSpawned -> SetFocusedTab (the blocking-subagent
-    // auto-focus path) at any time, so reading it after the lock was
-    // released -- as this used to -- was an unlocked read racing that write
-    // (TSan-visible; no crash, just an occasionally stale `current`).
-    std::string focused;
-    {
-        std::lock_guard lk(mtx_);
-        for (const auto& tab : tabs_) order.push_back(tab.info.tab_id);
-        focused = focused_id_;
-    }
-    if (order.empty()) return;
-
-    const auto current = std::find(order.begin(), order.end(), focused);
-    if (current == order.end()) {     // nothing focused yet — focus first in render order
-        SetFocusedTab(order.front());
-        return;
-    }
-
-    const ssize_t idx = static_cast<ssize_t>(current - order.begin());
-    const ssize_t total = static_cast<ssize_t>(order.size());
-    const ssize_t next = forward ? (idx + 1) % total
-                                 : ((idx - 1 + total) % total);
-    SetFocusedTab(order[next]);
-}
-
 void AppState::SendChatTurn(const std::string& session_id, const std::string& text) {
-    auto stream = GetStream(session_id);
-    if (!stream) {
-        // A tab with no stream (a refused resume) must say so: a silent
-        // return here reads as "the model ignored me".
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot send: this session is not attached");
-            BumpUiVersion();
-        }
-        return;
-    }
-    if (RefuseIfEnded(session_id, "send")) return;
-
-    v1::ClientEvent ev;
-    ev.set_session_id(session_id);
-    ev.mutable_chat_turn()->set_text(text);
-    // A refused send is surfaced, not swallowed: the send queue is bounded
-    // (the server stopped reading) or the stream is dead -- either way, typed
-    // input silently vanishing reads as "the model ignored me".
-    if (!stream->Send(ev)) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot send: the stream is closing or stalled");
-            BumpUiVersion();
-        }
+    // A refused or stream-less send is surfaced (SendOnStream): typed input
+    // silently vanishing reads as "the model ignored me".
+    if (!SendOnStream(session_id, "send", [&](v1::ClientEvent& ev) {
+            ev.mutable_chat_turn()->set_text(text);
+            return true;
+        })) {
         return;
     }
 
@@ -2640,10 +2577,7 @@ void AppState::SendChatTurn(const std::string& session_id, const std::string& te
     // swaps in the authoritative expanded row within one round trip instead
     // of at turn end. Safe MID-TURN too (a submit while the agent is still
     // working): the apply's content-matched retirement only ever retires
-    // live segments the page proves persisted, so this fetch can no longer
-    // finalize the running turn's rows the way the old coarse clear did.
-    // One redundant fetch when the turn-end refresh fires anyway; the
-    // refresh machine tolerates out-of-band applies.
+    // live segments the page proves persisted.
     RequestScrollback(session_id, /*newest=*/true);
 }
 
@@ -3005,222 +2939,98 @@ void AppState::AnswerPermission(const std::string& session_id, const std::string
                                 v1::PermissionDecision decision,
                                 std::vector<std::string> granted_keys, std::string deny_message,
                                 bool stop_turn) {
-    const UiVersionBumpOnExit bump{*this};
-    // Mirror the wire guarantee (see ARCHITECTURE.md consent scoping): only keys actually
-    // offered by the PermissionRequest may be answered. The server filters extras too, but
-    // answering is a local no-op here so the round-trip stays cheap.
-    auto stream = GetStream(session_id);
-    if (!stream) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot answer: this session is not attached");
-        }
-        return;
-    }
-    if (RefuseIfEnded(session_id, "answer")) return;
-
-    v1::ClientEvent ev;
-    ev.set_session_id(session_id);
-    auto* pr = ev.mutable_permission_response();
-    pr->set_request_id(request_id);
-    pr->set_decision(decision);
-    for (auto& k : granted_keys) pr->add_granted_keys(k);
-    pr->set_deny_message(std::move(deny_message));
-    pr->set_stop_turn(stop_turn);
     // A refused send must NOT close the prompt: the server worker is parked
     // on this request, and clearing the pending entry locally would strand it
-    // there forever with the answer undelivered (the "blocked UI" failure).
-    // Surface the refusal and leave the modal up so the user can retry --
-    // OnSendFailed, not OnError: OnError would clear the very pending field
-    // (and set state_ = Error) this comment says must survive.
-    if (!stream->Send(ev)) {
-        if (auto state = GetState(session_id)) {
-            state->OnSendFailed("cannot answer: the stream is closing or stalled");
-            BumpUiVersion();
-        }
+    // there forever with the answer undelivered (the "blocked UI" failure) --
+    // hence kKeepPending (OnSendFailed: a notice, the modal stays up for a
+    // retry). Only keys the request offered are answered; the server filters
+    // extras too.
+    if (!SendOnStream(session_id, "answer", [&](v1::ClientEvent& ev) {
+            auto* pr = ev.mutable_permission_response();
+            pr->set_request_id(request_id);
+            pr->set_decision(decision);
+            for (auto& k : granted_keys) pr->add_granted_keys(k);
+            pr->set_deny_message(std::move(deny_message));
+            pr->set_stop_turn(stop_turn);
+            return true;
+        }, SendRefusal::kKeepPending)) {
         return;
     }
-
-    if (auto state = GetState(session_id)) {
-        state->ClearPendingFor(request_id);
-        // Same re-derive as AnswerConfirmation/AnswerPluginPrompt: the server collects
-        // every permission for a round before starting any tool, so no tool
-        // event or message stop necessarily follows THIS individual answer --
-        // without this the tab stayed Waiting (with the attention glyph) for
-        // the whole tool run that followed.
-        state->OnPendingResolved();
-    }
+    // The server collects every permission for a round before starting any
+    // tool, so no tool event or message stop necessarily follows THIS answer:
+    // without the re-derive the tab stayed Waiting for the whole tool run.
+    ResolvePending(session_id, request_id);
 }
 
 void AppState::AnswerConfirmation(const std::string& session_id, const std::string& request_id,
                                   const std::string& chosen_option) {
-    const UiVersionBumpOnExit bump{*this};
-    auto stream = GetStream(session_id);
-    if (!stream) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot answer: this session is not attached");
-        }
+    // Same refusal rule as AnswerPermission.
+    if (!SendOnStream(session_id, "answer", [&](v1::ClientEvent& ev) {
+            auto* cr = ev.mutable_confirmation_response();
+            cr->set_request_id(request_id);
+            cr->set_chosen_option(chosen_option);
+            return true;
+        }, SendRefusal::kKeepPending)) {
         return;
     }
-    if (RefuseIfEnded(session_id, "answer")) return;
-
-    v1::ClientEvent ev;
-    ev.set_session_id(session_id);
-    auto* cr = ev.mutable_confirmation_response();
-    cr->set_request_id(request_id);
-    cr->set_chosen_option(chosen_option);
-    // Same refusal rule as AnswerPermission: keep the modal up on a stalled
-    // stream rather than pretending the answer went out (OnSendFailed, same
-    // reason as there).
-    if (!stream->Send(ev)) {
-        if (auto state = GetState(session_id)) {
-            state->OnSendFailed("cannot answer: the stream is closing or stalled");
-            BumpUiVersion();
-        }
-        return;
-    }
-
-    if (auto state = GetState(session_id)) {
-        state->ClearPendingFor(request_id);
-        // No tool events or message stops follow a command confirmation: the
-        // worker was parked on THIS answer, so the tab must re-derive its
-        // state here or it stays stranded in Waiting forever.
-        state->OnPendingResolved();
-    }
+    // The worker was parked on THIS answer: nothing else re-derives the tab.
+    ResolvePending(session_id, request_id);
 }
 
 void AppState::AnswerPluginPrompt(const std::string& session_id, const std::string& request_id,
                                   v1::PromptOutcome outcome, const std::string& answer_json) {
-    // Every outcome changes what the frame shows: the modal closes on
-    // success, the notice appears on failure. The success path used to bump
-    // nothing, so the answered modal stayed up until some other event.
-    const UiVersionBumpOnExit bump{*this};
-    auto stream = GetStream(session_id);
-    if (!stream) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot answer: this session is not attached");
-        }
+    // Same refusal rule as AnswerPermission.
+    if (!SendOnStream(session_id, "answer", [&](v1::ClientEvent& ev) {
+            auto* response = ev.mutable_plugin_prompt_response();
+            response->set_request_id(request_id);
+            response->set_outcome(outcome);
+            if (outcome == v1::PROMPT_OUTCOME_ANSWERED) response->set_answer_json(answer_json);
+            return true;
+        }, SendRefusal::kKeepPending)) {
         return;
     }
-    if (RefuseIfEnded(session_id, "answer")) return;
-
-    v1::ClientEvent ev;
-    ev.set_session_id(session_id);
-    auto* response = ev.mutable_plugin_prompt_response();
-    response->set_request_id(request_id);
-    response->set_outcome(outcome);
-    if (outcome == v1::PROMPT_OUTCOME_ANSWERED) response->set_answer_json(answer_json);
-    // Same refusal rule as AnswerPermission/AnswerConfirmation: keep the
-    // modal up on a stalled stream rather than pretending the answer went
-    // out (OnSendFailed, same reason as there).
-    if (!stream->Send(ev)) {
-        if (auto state = GetState(session_id)) {
-            state->OnSendFailed("cannot answer: the stream is closing or stalled");
-            BumpUiVersion();
-        }
-        return;
-    }
-
-    if (auto state = GetState(session_id)) {
-        state->ClearPendingFor(request_id);
-        // Same re-derive as the confirmation path: the worker was parked on
-        // THIS answer, and nothing else will move the tab off Waiting.
-        state->OnPendingResolved();
-    }
+    ResolvePending(session_id, request_id);
 }
 
 void AppState::SendCommand(const std::string& session_id, const std::string& line) {
-    auto stream = GetStream(session_id);
-    if (!stream) {
-        // Same rule as SendChatTurn: a `/`-command on a stream-less tab
-        // (a refused resume) must say why nothing happened.
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot send: this session is not attached");
-            BumpUiVersion();
+    // Refusals are surfaced: a `/`-command silently vanishing reads as
+    // "the harness ignored me", indistinguishable from no visible result.
+    SendOnStream(session_id, "send", [&](v1::ClientEvent& ev) {
+        const auto invocation = SplitCommand(line);
+        auto* command = ev.mutable_command();
+        // Client-generated, echoed on the CommandResult (the client's one
+        // counter, shared with the headless path).
+        command->set_request_id(client_->NextCommandRequestId());
+        command->set_name(invocation.name);
+        for (const auto& value : invocation.positional) {
+            command->mutable_args()->add_positional(value);
         }
-        return;
-    }
-    if (RefuseIfEnded(session_id, "send")) return;
-
-    const auto invocation = SplitCommand(line);
-    v1::ClientEvent ev;
-    ev.set_session_id(session_id);
-    auto* command = ev.mutable_command();
-    // Client-generated, echoed on the CommandResult. The counter is per client,
-    // not a constant: two commands on two streams must not echo-collide.
-    static std::atomic<uint64_t> next_request_id{0};
-    command->set_request_id("cmd-" + std::to_string(next_request_id.fetch_add(1)));
-    command->set_name(invocation.name);
-    for (const auto& value : invocation.positional) {
-        command->mutable_args()->add_positional(value);
-    }
-    command->mutable_args()->set_raw(invocation.raw);
-    if (auto state = GetState(session_id)) state->OnCommandSent(command->request_id());
-    // A refused send is surfaced, not swallowed -- same rule as SendChatTurn/
-    // AnswerPermission/AnswerConfirmation: a `/`-command silently vanishing
-    // reads as "the harness ignored me", indistinguishable from it having
-    // been accepted and simply producing no visible result.
-    if (!stream->Send(ev)) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot send: the stream is closing or stalled");
-            BumpUiVersion();
-        }
-    }
+        command->mutable_args()->set_raw(invocation.raw);
+        if (auto state = GetState(session_id)) state->OnCommandSent(command->request_id());
+        return true;
+    });
 }
 
 void AppState::SendCancel(const std::string& session_id) {
-    // The "cancelling…" hint renders this frame, not the next event's.
-    const UiVersionBumpOnExit bump{*this};
-    auto stream = GetStream(session_id);
-    if (!stream) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot cancel: this session is not attached");
-        }
-        return;
-    }
-    if (RefuseIfEnded(session_id, "cancel")) return;
-    // The hint stands until the turn ends (TurnCompleted / Error / session
-    // end clear it) -- queuing the send alone would leave the press silent
-    // while the server winds down.
-    if (auto state = GetState(session_id)) state->RequestCancel();
-
-    v1::ClientEvent ev;
-    ev.set_session_id(session_id);
-    // include_queued: the interrupt takes the queued (not yet started)
-    // messages with it. A queued message the user cannot cancel is a message
-    // they cannot take back -- ESC means "stop everything you were going to
-    // do", and each dropped turn announces itself (TurnCanceledEvent) so the
-    // echoes come off the transcript.
-    ev.mutable_cancel()->set_include_queued(true);
-    if (!stream->Send(ev)) {
-        // Same ruling as SendCommand/SendChatTurn: an explicit user action
-        // must not vanish silently on a stalled stream. (The BumpUiVersion
-        // above covered the hint; this surfaces WHY it will never clear.)
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot cancel: the stream refused the event");
-            BumpUiVersion();
-        }
-    }
+    SendOnStream(session_id, "cancel", [&](v1::ClientEvent& ev) {
+        // The "cancelling…" hint stands until the turn ends (TurnCompleted /
+        // Error / session end clear it) -- the send alone would leave the
+        // press silent while the server winds down.
+        if (auto state = GetState(session_id)) state->RequestCancel();
+        // include_queued: the interrupt takes the queued (not yet started)
+        // messages with it -- ESC means "stop everything you were going to
+        // do", and each dropped turn announces itself (TurnCanceledEvent)
+        // so the echoes come off the transcript.
+        ev.mutable_cancel()->set_include_queued(true);
+        return true;
+    });
 }
 
 void AppState::SendCancelQueuedTurn(const std::string& session_id, std::uint64_t turn_id) {
-    const UiVersionBumpOnExit bump{*this};
-    auto stream = GetStream(session_id);
-    if (!stream) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot cancel the queued message: this session is not attached");
-        }
-        return;
-    }
-    if (RefuseIfEnded(session_id, "cancel")) return;
-    v1::ClientEvent ev;
-    ev.set_session_id(session_id);
-    ev.mutable_cancel_queued_turn()->set_turn_id(turn_id);
-    if (!stream->Send(ev)) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot cancel the queued message: the stream refused the event");
-            BumpUiVersion();
-        }
-    }
+    SendOnStream(session_id, "cancel the queued message", [&](v1::ClientEvent& ev) {
+        ev.mutable_cancel_queued_turn()->set_turn_id(turn_id);
+        return true;
+    });
 }
 
 void AppState::SendCancelQueuedTurnByTab(const std::string& tab_id, std::uint64_t turn_id) {
@@ -3230,24 +3040,10 @@ void AppState::SendCancelQueuedTurnByTab(const std::string& tab_id, std::uint64_
 }
 
 void AppState::SendSetRunMode(const std::string& session_id, v1::PermissionRunMode mode) {
-    auto stream = GetStream(session_id);
-    if (!stream) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot switch permission mode: this session is not attached");
-            BumpUiVersion();
-        }
-        return;
-    }
-    if (RefuseIfEnded(session_id, "set run mode")) return;
-
-    v1::ClientEvent ev;
-    ev.set_session_id(session_id);
-    ev.mutable_set_run_mode()->set_run_mode(mode);
-    if (!stream->Send(ev)) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot switch permission mode: the stream refused the event");
-            BumpUiVersion();
-        }
+    if (!SendOnStream(session_id, "switch permission mode", [&](v1::ClientEvent& ev) {
+            ev.mutable_set_run_mode()->set_run_mode(mode);
+            return true;
+        })) {
         return;
     }
     // The server applies the change immediately (an atomic flip, like
@@ -3257,70 +3053,32 @@ void AppState::SendSetRunMode(const std::string& session_id, v1::PermissionRunMo
     // from.
     if (auto state = GetState(session_id)) {
         state->SetDesiredPermissionMode(PermissionModeName(mode));
-        BumpUiVersion();
     }
 }
 
 void AppState::SendSetPaused(const std::string& session_id, bool paused) {
-    auto stream = GetStream(session_id);
-    if (!stream) {
-        if (auto state = GetState(session_id)) {
-            state->OnError(paused ? "cannot pause: this session is not attached"
-                                  : "cannot resume: this session is not attached");
-            BumpUiVersion();
-        }
-        return;
-    }
-    if (RefuseIfEnded(session_id, paused ? "pause" : "resume")) return;
-
-    v1::ClientEvent ev;
-    ev.set_session_id(session_id);
-    ev.mutable_set_paused()->set_paused(paused);
-    if (!stream->Send(ev)) {
-        if (auto state = GetState(session_id)) {
-            state->OnError(paused ? "cannot pause: the stream refused the event"
-                                  : "cannot resume: the stream refused the event");
-            BumpUiVersion();
-        }
-        return;
-    }
     // No desired-state marker: the server applies this on its reader thread
-    // (an atomic flip, no turn-boundary wait) and the metadata event that
-    // confirms it is already in flight. Optimistically bump so the frame
-    // re-renders the moment the metadata lands.
-    BumpUiVersion();
+    // (an atomic flip, no turn-boundary wait), and the confirming metadata
+    // event is already in flight.
+    SendOnStream(session_id, paused ? "pause" : "resume", [&](v1::ClientEvent& ev) {
+        ev.mutable_set_paused()->set_paused(paused);
+        return true;
+    });
 }
 
 void AppState::SendRewind(const std::string& session_id, std::optional<int64_t> target_seq,
                           bool redo) {
-    auto stream = GetStream(session_id);
-    if (!stream) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot send: this session is not attached");
-            BumpUiVersion();
+    SendOnStream(session_id, redo ? "redo" : "rewind", [&](v1::ClientEvent& ev) {
+        auto* rewind = ev.mutable_rewind();
+        if (redo) {
+            rewind->set_redo(true);
+        } else if (target_seq.has_value()) {
+            rewind->set_target_seq(*target_seq);
+        } else {
+            return false;   // neither a target nor redo: nothing to send
         }
-        return;
-    }
-    if (RefuseIfEnded(session_id, "rewind")) return;
-
-    v1::ClientEvent ev;
-    ev.set_session_id(session_id);
-    auto* rewind = ev.mutable_rewind();
-    if (redo) {
-        rewind->set_redo(true);
-    } else if (target_seq.has_value()) {
-        rewind->set_target_seq(*target_seq);
-    } else {
-        return;   // neither a target nor redo: nothing to send
-    }
-    // Same refusal rule as SendCommand/SendChatTurn: a rewind/redo the user
-    // explicitly asked for must not vanish silently on a stalled stream.
-    if (!stream->Send(ev)) {
-        if (auto state = GetState(session_id)) {
-            state->OnError("cannot send: the stream is closing or stalled");
-            BumpUiVersion();
-        }
-    }
+        return true;
+    });
 }
 
 // The /pause // /resume guard. The lookup is TAB-keyed (GetDetails matches
@@ -3455,12 +3213,8 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
         // blanked the turn's live rows until a retry happened to succeed.
         bool applied_all = true;
         for (int page = 0; page < 50; ++page) {
-            v1::GetMessagesResponse resp;
-            grpc::ClientContext context;
-            // Bounded: the fetch runs off the loop thread now, but a wedged
-            // server must not wedge the worker (and therefore every OTHER
-            // queued request) indefinitely.
-            context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+            // Bounded (GetMessagesPage's deadline): a wedged server must not
+            // wedge the worker, and every OTHER queued request with it.
             v1::GetMessagesRequest request;
             request.set_session_id(session_id);
             if (cursor.has_value()) {
@@ -3469,8 +3223,9 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
                 request.set_after_seq(after);
             }
             request.set_limit(100);
-            if (const grpc::Status status = client_->GetMessages(&context, request, &resp);
-                !status.ok()) {
+            auto fetched = client_->GetMessagesPage(request);
+            const v1::GetMessagesResponse& resp = fetched.response;
+            if (const grpc::Status& status = fetched.status; !status.ok()) {
                 // Resolve the attempt without applying anything: the fetch that
                 // opened the mismatch is still open, so the next frame's
                 // maintain() sees fetch_generation != fetched_generation again
@@ -3699,6 +3454,48 @@ AppState::TabEntry* AppState::FindTabBySession(const std::string& session_id) {
         if (tab.info.session_id == session_id) return &tab;
     }
     return nullptr;
+}
+
+bool AppState::SendOnStream(const std::string& session_id, const std::string& what,
+                            const std::function<bool(v1::ClientEvent&)>& fill,
+                            SendRefusal refusal) {
+    // Every outcome can change what the frame shows (a notice, a hint, a
+    // closed modal): one bump, after the change.
+    const UiVersionBumpOnExit bump{*this};
+    auto stream = GetStream(session_id);
+    if (!stream) {
+        // A tab with no stream (a refused resume) must say why nothing
+        // happened -- a silent return reads as "ignored".
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot " + what + ": this session is not attached");
+        }
+        return false;
+    }
+    if (RefuseIfEnded(session_id, what.c_str())) return false;
+    v1::ClientEvent ev;
+    ev.set_session_id(session_id);
+    if (!fill(ev)) return false;
+    // A refused send: the bounded send queue is full (the server stopped
+    // reading) or the stream is dead. Surfaced, never swallowed.
+    if (!stream->Send(ev)) {
+        if (auto state = GetState(session_id)) {
+            const std::string message = "cannot " + what + ": the stream is closing or stalled";
+            if (refusal == SendRefusal::kKeepPending) {
+                state->OnSendFailed(message);
+            } else {
+                state->OnError(message);
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
+void AppState::ResolvePending(const std::string& session_id, const std::string& request_id) {
+    if (auto state = GetState(session_id)) {
+        state->ClearPendingFor(request_id);
+        state->OnPendingResolved();
+    }
 }
 
 bool AppState::RefuseIfEnded(const std::string& session_id, const char* verb) {

@@ -34,9 +34,61 @@
 #include <string>
 #include <vector>
 
-#include "minimal/client/view/prompt_editor.hpp"
 
 namespace minimal::client {
+
+// One /-command the editor may offer. From ListCommands, pulled per tab
+// scope by the host (CommandCatalogCache), plus client-intercepted entries.
+struct CommandCatalogEntry {
+    std::string name;
+    std::string summary;
+    bool read_only = false;
+    bool submits_prompt = false;  // PromptShorthand: the one kind that submits a turn
+    // Command::RequiresSession: excluded from /-autocomplete (and the /help
+    // overlay) while the focused tab has no session -- a command that cannot
+    // run without one is never offered as one.
+    bool requires_session = true;
+};
+
+// True when the command is usable on a tab with NO session: either the
+// server marks it requires_session=false, or it is one of the two
+// desired-state commands (/agent, /model) whose bare form opens a
+// client-owned picker and whose named form sets the tab's desired state --
+// neither ever refuses for want of a session (app.cpp's submit_command
+// intercepts both before any dispatch). ONE rule gates the /-autocomplete,
+// the /help overlay, and the sessionless refusal, so a command offered on a
+// sessionless tab is never one that would only refuse there. The names are
+// necessarily hardcoded: the interception that makes them sessionless-safe
+// is client-side by design (the server's taxonomy is per-command, and these
+// two are per-invocation).
+inline bool UsableWithoutSession(const CommandCatalogEntry& entry) {
+    return !entry.requires_session || entry.name == "agent" || entry.name == "model";
+}
+
+// True when the command is usable on a SUBAGENT tab. A child's command
+// surface is READ-ONLY server-side (SessionServiceImpl::DispatchCommand
+// refuses everything else), so the palette offers only what would not be
+// refused there: read-only catalog entries (/cost, /sessions, ...), plus the
+// two client-intercepted commands that work on a child (/new opens a tab of
+// its own; /detach-session closes the focused child). /agent and /model are
+// deliberately NOT usable: their bare forms open pickers and their named
+// forms stage desired state, all aimed at the focused tab's session -- and
+// choosing what a CHILD runs on is the parent preset's business, not the
+// observer's. ONE rule gates the /-autocomplete and the /help overlay, the
+// same pattern as UsableWithoutSession above.
+inline bool UsableOnSubagent(const CommandCatalogEntry& entry) {
+    return entry.read_only || entry.name == "new" || entry.name == "detach-session";
+}
+
+// Returns a SHARED SNAPSHOT, never null: the catalog is refreshed in the
+// background (CommandCatalogCache) and replaced wholesale, so a caller keeps
+// the one it got valid for as long as it holds it, and the pointer's identity
+// tells a caller whether the catalog changed since it last looked. Invoked on
+// every frame while a line still reads like a `/`-command name; a
+// shared_ptr copy, not a vector copy.
+using CommandCatalogSource =
+    std::function<std::shared_ptr<const std::vector<CommandCatalogEntry>>()>;
+
 
 class CommandCatalogCache {
 public:
@@ -60,6 +112,11 @@ public:
     // connect-time fetch) and makes it the fallback for scopes not yet
     // fetched. A later Get for the same scope still refreshes on schedule.
     void Seed(const std::string& session_id, const std::string& project_root, Entries server);
+
+    // Replaces the client's own entries (the ones appended after every
+    // server list). Meant for startup, before the first Seed/Get: lists
+    // merged under the old entries are dropped and refetch.
+    void SetClientSide(Entries client_side);
 
     // Never null. See the header comment.
     Snapshot Get(const std::string& session_id, const std::string& project_root);

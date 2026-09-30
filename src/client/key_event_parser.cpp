@@ -5,16 +5,12 @@
 #include <cctype>
 #include <unordered_map>
 
+#include "minimal/client/utf8.hpp"   // ToLower
+
 namespace minimal::client {
 namespace {
 
 using ftxui::Event;
-
-std::string ToLower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-}
 
 // "ctrl+shift+tab" -> {"ctrl", "shift", "tab"}. No empty tokens: "a++b" or a
 // leading/trailing '+' yields no match downstream rather than a crash.

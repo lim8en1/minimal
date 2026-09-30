@@ -10,7 +10,6 @@
 #include <optional>
 #include <set>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -861,6 +860,9 @@ private:
     // republished only when the segment changed since the last deep
     // snapshot. The working `text` strings never leave SessionState.
     // mtx_ held by caller.
+    void FillCommonLocked(Snapshot& s) const;   // caller holds mtx_
+    bool ArmNewTurnLocked();                     // caller holds mtx_; see the .cpp
+    void ClearPendingPromptsLocked();            // caller holds mtx_
     std::vector<LiveTurnSegment> CopyLiveSegmentsLocked() const;
 
     mutable std::mutex mtx_;
@@ -1028,7 +1030,6 @@ enum class TabFilter {
     Agents,  // root tabs only -- subagent children hidden
 };
 
-// TEMPORARY DEBUG globals removed -- see git history for the deadlock diagnosis.
 class AppState {
 public:
     explicit AppState(std::shared_ptr<SessionClient> client);
@@ -1318,9 +1319,7 @@ public:
     void AnswerPluginPrompt(const std::string& session_id, const std::string& request_id,
                             v1::PromptOutcome outcome, const std::string& answer_json = {});
 
-    // --- Focus (keybindings cycle forward/back through tabs in render order) ---
-    void CycleFocusForward();
-    void CycleFocusBackward();
+    // --- Focus (tab cycling lives in keybinding_dispatch: NextVisibleTab) ---
     void SetFocusedTab(const std::string& tab_id);
 
     // --- Tab-bar filter (tab.filter_group / tab.filter_agents) --------------
@@ -1514,6 +1513,7 @@ public:
     // runs before this returns, so no stream thread outlives AppState.
     void StopRpcQueue() {
         rpc_queue_.Stop();
+        bulk_queue_.Stop();
         closer_.Stop();
     }
 
@@ -1549,8 +1549,16 @@ public:
     // sends, the picker's DeleteSession) and must never be dropped by the
     // queue's eviction (rpc_queue.hpp). A genuinely droppable keystroke-
     // class job (RequestSuggestPaths) submits directly with must_run=false.
-    void RunOnRpcQueue(std::function<void()> job, bool must_run = true) {
-        rpc_queue_.Submit(std::move(job), must_run);
+    //
+    // `lane`: kBulk for listing-sized work a user waits on only inside its own
+    // overlay (picker fetches, ListModels' up-to-15 s discovery refresh, a
+    // delete). One FIFO worker ran those ahead of the first message's
+    // EnsureSession, @-mention suggestions and scrollback refreshes; the bulk
+    // lane is its own worker, so a slow listing delays only other listings.
+    enum class RpcLane { kInteractive, kBulk };
+    void RunOnRpcQueue(std::function<void()> job, bool must_run = true,
+                       RpcLane lane = RpcLane::kInteractive) {
+        (lane == RpcLane::kBulk ? bulk_queue_ : rpc_queue_).Submit(std::move(job), must_run);
     }
 
 private:
@@ -1624,6 +1632,7 @@ private:
     // ordering for free, so e.g. a queued delete can never race ahead of a
     // list queued after it.
     RpcQueue rpc_queue_;
+    RpcQueue bulk_queue_;   // see RunOnRpcQueue's `lane`
     // Stream teardown off the loop thread: Stream::Close/Detach join the
     // reader and writer (Detach waits up to ~2 s each on a wedged server),
     // and CloseTab/EndTabSessions used to pay that on the UI thread -- the
@@ -1669,7 +1678,6 @@ private:
     // touch tabs_/SetFocusedTab mid-destruction.
     std::atomic<bool> shutting_down_{false};
 
-    void FocusWithWrap(bool forward);       // shared logic for the two cycle methods
     // Unlocked, mutex held by caller. Tab-keyed (the UI's primary axis).
     TabEntry* FindTab(const std::string& tab_id);
     // Session-keyed lookups: wire-event routing (events carry session_id),
@@ -1678,11 +1686,6 @@ private:
     TabEntry* FindTabBySession(const std::string& session_id);
     std::shared_ptr<SessionClient::Stream> GetStream(const std::string& session_id);
 
-    // Refuses VISIBLY when the tab's session has ended (wire SessionEnded /
-    // stream close): the server drops everything for a terminated session --
-    // usually silently -- so a send into it must not be queued. Returns true
-    // (and surfaces the error on the tab) when sending must stop. `verb`
-    // words the refusal ("send", "answer", "cancel").
     // RPC-worker only: creates the session for a sessionless tab (Stream::Open
     // with the staged create-options), registers the stream, then drains the
     // entry's pending actions. Returns the session id ("" on refusal, with the
@@ -1692,6 +1695,27 @@ private:
     // Kicks EnsureSession onto the RPC worker (callers hold no lock).
     void RunEnsure(const std::string& tab_id);
 
+    // How a send the stream REFUSED is reported: kError marks the tab
+    // errored (OnError); kKeepPending only raises a notice (OnSendFailed),
+    // leaving the prompt being answered up for a retry -- clearing it would
+    // strand the server worker parked on the answer.
+    enum class SendRefusal { kError, kKeepPending };
+    // The shared shape of every outbound ClientEvent: resolve the session's
+    // stream (a stream-less tab says so), refuse an ended session, let `fill`
+    // build the event (false: nothing to send), send it, surface a refusal.
+    // `what` completes "cannot <what>: ...". Bumps UiVersion on the way out.
+    // True when the event went out.
+    bool SendOnStream(const std::string& session_id, const std::string& what,
+                      const std::function<bool(v1::ClientEvent&)>& fill,
+                      SendRefusal refusal = SendRefusal::kError);
+    // An answered prompt: clear it and re-derive the tab's state (the worker
+    // was parked on this answer; nothing else moves the tab off Waiting).
+    void ResolvePending(const std::string& session_id, const std::string& request_id);
+    // Refuses VISIBLY when the tab's session has ended (wire SessionEnded /
+    // stream close): the server drops everything for a terminated session --
+    // usually silently -- so a send into it must not be queued. Returns true
+    // (and surfaces the error on the tab) when sending must stop. `verb`
+    // words the refusal ("send", "answer", "cancel").
     bool RefuseIfEnded(const std::string& session_id, const char* verb);
     // OWNING copy: a raw pointer here escaped the lock and could be destroyed
     // by CloseTab (which erases the TabEntry and drops the shared_ptr) while

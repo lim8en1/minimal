@@ -28,6 +28,7 @@ add_executable(minimal_tests
     client_plugins_test.cpp
     commands_test.cpp
     command_catalog_test.cpp
+    command_router_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/commands-core/core_commands.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/commands-md/commands_md.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/commands-md/commands_md_parse.cpp"
@@ -161,6 +162,7 @@ add_executable(minimal_tests
     prompt_wrap_test.cpp
     prompt_editor_test.cpp
     modal_host_test.cpp
+    modal_stack_test.cpp
     ask_view_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view/ask_modal.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view/ask_display.cpp"

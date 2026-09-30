@@ -22,19 +22,6 @@ using ftxui::Elements;
 constexpr std::size_t kOutputTailBytes = 4000;   // the default row's own bound
 constexpr std::size_t kCommandHeaderChars = 120;
 
-// Tabs and CRs mis-measure in a terminal cell grid; this text is display-only.
-std::string Printable(std::string_view line) {
-    std::string out;
-    out.reserve(line.size());
-    for (const char c : line) {
-        if (c == '\t') {
-            out += "    ";
-        } else if (c != '\r') {
-            out += c;
-        }
-    }
-    return out;
-}
 
 // The path's extension when a grammar supports it. The highlighter's alias
 // table already maps the common extensions ("py", "rs", "h") to languages.
@@ -152,7 +139,7 @@ private:
         std::vector<std::string> texts;
         std::vector<std::string> new_side;
         for (const auto& line : hunk.at("lines")) {
-            texts.push_back(Printable(line.at("text").get_ref<const std::string&>()));
+            texts.push_back(ExpandTabs(line.at("text").get_ref<const std::string&>()));
             if (line.at("op").get_ref<const std::string&>() != "-") new_side.push_back(texts.back());
         }
         const Elements highlighted = CodeLines(new_side, language, highlighter_, theme);
@@ -213,7 +200,7 @@ public:
 
         std::vector<std::string> lines;
         for (const auto& line : display.at("lines")) {
-            lines.push_back(Printable(line.get_ref<const std::string&>()));
+            lines.push_back(ExpandTabs(line.get_ref<const std::string&>()));
         }
         const Elements code = CodeLines(lines, LanguageOf(path, highlighter_), highlighter_, theme);
         const std::size_t gutter = std::to_string(end).size();
@@ -279,7 +266,7 @@ public:
             output.pop_back();
         }
         if (!output.empty()) {
-            parts.push_back(paragraph((cut ? "... " : "") + Printable(output)) |
+            parts.push_back(paragraph((cut ? "... " : "") + ExpandTabs(output)) |
                             color(theme.ColorFor("system_message")));
         }
         return vbox(std::move(parts));

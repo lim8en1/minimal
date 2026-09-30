@@ -50,7 +50,7 @@ inline std::string ToolStatusGlyph(ToolStatus status) {
 
 inline ftxui::Color ToolStatusColor(ToolStatus status, const Theme& theme) {
     switch (status) {
-        case ToolStatus::Pending: return theme.ColorForOr("muted", "system_message");
+        case ToolStatus::Pending: return MutedColor(theme);
         case ToolStatus::Running: return theme.ColorFor("working");
         case ToolStatus::Ok: return theme.ColorForOr("success", "working");
         case ToolStatus::Failed: return theme.ColorFor("error");

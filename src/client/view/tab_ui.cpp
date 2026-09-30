@@ -437,9 +437,9 @@ void TabMaintenance::Run() {
     // snapshot HandleNotice/the renderer see, instead of lingering one extra
     // frame.
     deps_.app.TickTabNotice(focused_);
-    // ONE deep snapshot per pass: GetDetails is a full protobuf copy of the
-    // scrollback window (up to scrollback_window_max_messages rows), and
-    // this used to be paid up to three times per frame. Maintain() may
+    // ONE deep snapshot per pass: GetDetails copies the live segments, the
+    // tools and the pending prompts (the scrollback page itself is shared,
+    // copy-on-apply), and this used to be paid up to three times per frame. Maintain() may
     // replace it with a fresher one if a scrollback refresh fires (it must
     // -- the refresh mutates SessionState out from under the copy this call
     // started with); HandleNotice and the renderer both read whatever

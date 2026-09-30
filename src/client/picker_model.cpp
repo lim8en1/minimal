@@ -28,7 +28,7 @@ std::string Label(const v1::SessionSummary& session, std::size_t name_width,
     const std::size_t pad = name_width - std::min(name_width, Utf8ColumnWidth(name));
     std::string count = std::to_string(session.message_count()) + " msgs";
     if (count.size() < 9) count.insert(0, 9 - count.size(), ' ');
-    return std::string(session.is_live() ? "● " : "  ") + name + std::string(pad, ' ') + "  " +
+    return std::string(LiveMarker(session.is_live())) + name + std::string(pad, ' ') + "  " +
            count + "  " + RelativeAge(session.updated_at_unix_ms(), now_unix_ms);
 }
 
@@ -52,11 +52,7 @@ std::string RelativeAge(std::int64_t unix_ms, std::int64_t now_unix_ms) {
 std::vector<PickerRow> BuildPickerRows(const std::vector<v1::SessionSummary>& sessions,
                                        const std::string& filter, PickerSort sort,
                                        std::int64_t now_unix_ms) {
-    if (now_unix_ms <= 0) {
-        now_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          std::chrono::system_clock::now().time_since_epoch())
-                          .count();
-    }
+    now_unix_ms = NowUnixMsOr(now_unix_ms);
     const std::string lowered_filter = ToLower(filter);
 
     std::vector<const v1::SessionSummary*> matched;

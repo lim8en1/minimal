@@ -6,7 +6,7 @@
 // the attention-jump scan starting from a fixed index instead of the focused
 // tab (so it could jump backwards, or land back on the very tab that was
 // Waiting), and the group-navigation cycle needing the same "find my own
-// index among a filtered subset" shape. `RunTui` is a single ~1100-line
+// index among a filtered subset" shape. `RunTui` (tui_app.cpp) is one long
 // function with no test surface reachable through it (three of the TUI's
 // worst bugs shipped and went unnoticed for a full milestone specifically
 // because nothing there is unit-testable); pulling the PURE parts out into
@@ -14,9 +14,9 @@
 // AppState instance required -- means this class of bug is now a directly
 // testable one instead of something only a person at a keyboard finds.
 //
-// None of this touches AppState or FTXUI: every function here is
-// (tabs, ...) -> result, driven entirely by the value snapshot app.cpp
-// already takes every frame.
+// The PURE functions below touch neither AppState nor FTXUI: (tabs, ...) ->
+// result, over the value snapshot the frame already takes. The KeyContext /
+// HandleGlobalKey half further down is the dispatch those feed, and does.
 
 #include <functional>
 #include <memory>
@@ -54,13 +54,13 @@ std::string NextAttentionTab(const std::vector<AppState::TabSnapshot>& tabs,
 bool AnyWorkInFlight(const std::vector<AppState::TabSnapshot>& tabs,
                     const std::vector<std::string>& ids);
 
-// tab.close: the session ids to close for `sid`, in CLOSE order (root FIRST,
+// tab.close: the TAB ids to close for `tab_id`, in CLOSE order (root FIRST,
 // children after -- render order; so a confirmation or a close loop can act
 // on the list directly without re-deriving order). Closing a root tab closes
-// its whole group; closing a subagent tab closes only itself. Empty if `sid`
-// names no known tab.
+// its whole group; closing a subagent tab closes only itself. Empty if
+// `tab_id` names no known tab.
 std::vector<std::string> TabsToClose(const std::vector<AppState::TabSnapshot>& tabs,
-                                     const std::string& sid);
+                                     const std::string& tab_id);
 
 // --- Tab-bar filter (tab.filter_group / tab.filter_agents) -------------------
 //
@@ -210,19 +210,19 @@ struct KeyContext {
     std::function<void()> open_keymap_help;
     std::function<void()> request_quit;         // ctrl+q / idle ctrl+c: app.cpp owns the confirm-if-busy logic
     std::function<void(const std::string&)> close_tab;
-    std::function<void(const std::string& session_id, int delta_rows)> scroll_chat;   // ChatView::ScrollBy, if that tab has one
+    std::function<void(const std::string& tab_id, int delta_rows)> scroll_chat;   // ChatView::ScrollBy, if that tab has one
     // The MOUSE WHEEL variant: same tab lookup, but routes to
     // ChatView::ScrollWheelBy, whose time gate absorbs the event flood a
     // trackpad/terminal momentum emits (one report per scroll tick, dozens
     // per flick). Keyboard scrolling stays ungated -- key repeat is already
     // rate-limited by the OS.
-    std::function<void(const std::string& session_id, int delta_rows)> scroll_chat_wheel;
+    std::function<void(const std::string& tab_id, int delta_rows)> scroll_chat_wheel;
     // chat.scroll_bottom (PageDown): ChatView::ScrollToBottom, if that tab has
     // one. Resets the scroll anchor scrolling up leaves behind -- there was
     // previously no way back to the newest row except scrolling all the way
     // down one row at a time, or losing the scroll position on the next
     // turn.
-    std::function<void(const std::string& session_id)> scroll_chat_to_bottom;
+    std::function<void(const std::string& tab_id)> scroll_chat_to_bottom;
     // tab.close, when AnyWorkInFlight over `ids`: app.cpp stages its
     // PendingClose and opens the confirmation modal. Not called when nothing
     // is in flight -- HandleGlobalKey closes those tabs directly via close_tab.
@@ -230,33 +230,33 @@ struct KeyContext {
 
     // chat.row_up/chat.row_down: ChatView::MoveRowFocus, if that tab has one.
     // Same sign convention as scroll_chat (positive = toward older).
-    std::function<void(const std::string& session_id, int delta)> move_row_focus;
+    std::function<void(const std::string& tab_id, int delta)> move_row_focus;
     // chat.toggle_collapse: ChatView::ToggleCollapseFocused.
-    std::function<void(const std::string& session_id)> toggle_collapse_focused;
+    std::function<void(const std::string& tab_id)> toggle_collapse_focused;
     // chat.toggle_collapse_all: ChatView::ToggleCollapseAll.
-    std::function<void(const std::string& session_id)> toggle_collapse_all;
+    std::function<void(const std::string& tab_id)> toggle_collapse_all;
     // Mouse-click collapse: maps a left-press's screen y onto the focused
     // tab's ChatView (ToggleCollapseAt). True when a collapsible row was
     // under the click and its state was flipped -- the event is consumed
     // ONLY then; a miss (empty space, a non-collapsible row, a sessionless
     // tab) returns false so the click keeps falling through.
-    std::function<bool(const std::string& session_id, int screen_y)> toggle_collapse_at;
+    std::function<bool(const std::string& tab_id, int screen_y)> toggle_collapse_at;
     // Mouse-click cancel for a QUEUED message row: maps a left-press's
     // screen y onto the focused tab's ChatView (CancelPendingAt) and sends
     // CancelQueuedTurn for the row's turn id. True when the click hit a
     // cancellable queued row -- consumed BEFORE toggle_collapse_at is
     // consulted, since a queued row is never collapsible but must not fall
     // through to selection either.
-    std::function<bool(const std::string& session_id, int screen_y)> cancel_pending_at;
+    std::function<bool(const std::string& tab_id, int screen_y)> cancel_pending_at;
     // chat.toggle_timestamps: ChatView::ToggleTimestamps.
-    std::function<void(const std::string& session_id)> toggle_timestamps;
+    std::function<void(const std::string& tab_id)> toggle_timestamps;
     // chat.toggle_thinking_fold / chat.toggle_tool_fold: flip the kind's
     // fold default on EVERY open tab's ChatView (the toggles are
     // session-wide preferences) and persist the new state to ui.json.
     // Unbound keys never reach these -- no null check needed on the call
     // sites, matching every handler above.
-    std::function<void(const std::string& session_id)> toggle_thinking_fold;
-    std::function<void(const std::string& session_id)> toggle_tool_fold;
+    std::function<void(const std::string& tab_id)> toggle_thinking_fold;
+    std::function<void(const std::string& tab_id)> toggle_tool_fold;
 
     // True while a bracketed paste (DECSET 2004) is in progress -- kept live
     // by the prompt editor's own CatchEvent (prompt_editor.cpp), shared here
@@ -267,8 +267,8 @@ struct KeyContext {
     // alt+key press.
     bool& pasting;
 
-    // True while the prompt editor's own @/-suggestion list is open (the
-    // single app-wide PromptEditorState's list_open) -- so a busy-tab
+    // True while the focused tab's prompt editor has its @/-suggestion list
+    // open (its PromptEditorState's list_open) -- so a busy-tab
     // Escape can defer to the editor's own dismiss-the-list handling
     // instead of reading as turn.cancel first. Null-checked at the call
     // site (every real caller sets it; test fixtures may not need to).
