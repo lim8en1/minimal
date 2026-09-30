@@ -44,6 +44,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -120,6 +121,15 @@ struct PromptHistory {
     void Record(const std::string& line);
     std::vector<std::string> entries;
 
+    // Keeps the timeline across launches: loads `path` (a JSON array of
+    // lines) into `entries` now, and every Record() rewrites it atomically.
+    // Bounded on disk too: the newest entries up to kPersistMaxBytes -- one
+    // pasted log must not make every submit rewrite megabytes. Never set
+    // (the default): memory only, the test/private-history case. A missing
+    // or unreadable file starts empty; a failed write is logged, not fatal.
+    void PersistTo(std::filesystem::path path);
+    static constexpr std::size_t kPersistMaxBytes = 1024 * 1024;
+
     // A live browse position (PromptEditorState::history_cursor) registers
     // its address here for as long as its editor is alive, while `entries`
     // is shared across tabs (history != nullptr in MakePromptEditor) -- see
@@ -129,7 +139,9 @@ struct PromptHistory {
     void UnregisterCursor(std::optional<std::size_t>* cursor);
 
 private:
+    void Save() const;
     std::vector<std::optional<std::size_t>*> cursors_;
+    std::filesystem::path persist_path_;
 };
 
 // The @-mention query seam (T2: async). `nullopt` means "still waiting --

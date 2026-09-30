@@ -69,6 +69,9 @@ struct UiConfig {
     int scrollback_window_max_messages = 0;
     int tool_output_buffer_bytes = 0;
     int tools_panel_stdout_buffer_lines = 0;
+    // The tools panel's (and every plugin panel's) height in rows; 0 (unset)
+    // = the built-in 12. ui.json values below 3 are ignored.
+    int panel_height = 0;
 
     // The startup auto-fold default for Thinking / ToolActivity rows:
     // kFoldDefaultAuto = built-in kind default (CollapsedByDefault),

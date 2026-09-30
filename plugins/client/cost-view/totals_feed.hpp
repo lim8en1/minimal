@@ -28,6 +28,7 @@
 // or for one in-flight PluginCall (5 s deadline). Bounded either way; never
 // detached (see background_poller.hpp).
 
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <optional>
@@ -62,6 +63,11 @@ public:
     TotalsFeed(const TotalsFeed&) = delete;
     TotalsFeed& operator=(const TotalsFeed&) = delete;
 
+    // The host's repaint request (HostUi), called after new data lands --
+    // outside the feed's lock. Optional: null (the default) means the data
+    // shows at the next frame something else causes.
+    void SetHostUi(plugins::HostUi* ui) { ui_.store(ui, std::memory_order_release); }
+
     // The cached string for the session, "" when nothing is known. Also the
     // focus hint: a changed session id wakes the fallback poller at once.
     std::string Render(const std::string& focused_session_id, TotalsField field) const;
@@ -78,10 +84,15 @@ private:
     void PollFallback();
     void ApplyLocked(const std::string& session_id, const nlohmann::json& totals);
     void EvictClosedTabs();
+    void RequestRedraw() const {
+        if (auto* ui = ui_.load(std::memory_order_acquire)) ui->RequestRedraw();
+    }
     std::optional<nlohmann::json> Fetch(const std::string& session_id) const;
 
     plugins::ClientApi* api_;
     plugins::FocusProvider* focus_;
+    // Atomic: set after the constructor has already started the worker.
+    std::atomic<plugins::HostUi*> ui_{nullptr};
     Timing timing_;
 
     // mtx_/cv_/stop_ live in BackgroundPoller (protected base members),

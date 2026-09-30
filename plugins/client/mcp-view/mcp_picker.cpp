@@ -72,7 +72,8 @@ private:
 
 }  // namespace
 
-McpFeed::McpFeed(plugins::ClientApi* api) : api_(api), worker_([this] { Run(); }) {}
+McpFeed::McpFeed(plugins::ClientApi* api, plugins::HostUi* ui)
+    : api_(api), ui_(ui), worker_([this] { Run(); }) {}
 
 McpFeed::~McpFeed() {
     {
@@ -144,16 +145,20 @@ void McpFeed::Toggle(const std::string& name) {
 void McpFeed::FetchList() {
     const auto answer = api_->PluginCall(kServerPlugin, "list", "{}");
     auto servers = answer ? ParseServerList(*answer) : std::nullopt;
-    std::lock_guard<std::mutex> lock(mu_);
-    if (servers) {
-        servers_ = std::move(*servers);
-        status_.clear();
-    } else {
-        // No answer: the server-side mcp plugin is disabled or absent (or the
-        // call failed). Say so rather than showing an empty, healthy list.
-        status_ = "mcp plugin unavailable";
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (servers) {
+            servers_ = std::move(*servers);
+            status_.clear();
+        } else {
+            // No answer: the server-side mcp plugin is disabled or absent (or
+            // the call failed). Say so rather than showing an empty, healthy
+            // list.
+            status_ = "mcp plugin unavailable";
+        }
+        ++generation_;
     }
-    ++generation_;
+    if (ui_ != nullptr) ui_->RequestRedraw();   // outside mu_: host code
 }
 
 std::uint64_t McpFeed::generation() const {
@@ -171,7 +176,8 @@ std::string McpFeed::status() const {
     return status_;
 }
 
-McpPickerView::McpPickerView(plugins::ClientApi* api) : feed_(std::make_shared<McpFeed>(api)) {}
+McpPickerView::McpPickerView(plugins::ClientApi* api, plugins::HostUi* ui)
+    : feed_(std::make_shared<McpFeed>(api, ui)) {}
 
 const plugins::ViewSpec& McpPickerView::spec() const {
     static const plugins::ViewSpec kSpec{"mcp", "mcp servers", plugins::ViewPlacement::Modal};

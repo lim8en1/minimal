@@ -63,6 +63,7 @@ std::string FixturePath(const std::string& name) {
 struct LoadedFixtures {
     ViewRegistry views;
     StartViewRegistry start_views;
+    ClientCommandRegistry client_commands;
     ToolResultRendererRegistry renderers;
     DisplayRendererRegistry display_renderers;
     MessageRendererRegistry message_renderers;
@@ -95,7 +96,9 @@ struct LoadedFixtures {
                                   f->message_renderers, f->status_segments, f->grammars,
                                   f->chat_surface,
                                   f->markdown_engine, f->start_views, f->attention_sink.get(),
-                                  f->client_api.get(), f->focus_provider.get());
+                                  f->client_api.get(), f->focus_provider.get(),
+                                  /*prompt_renderers=*/nullptr, /*ui=*/nullptr,
+                                  &f->client_commands);
         f->records = loader.LoadAll(candidates);
         return f;
     }
@@ -267,6 +270,12 @@ TEST_CASE("the client loader loads a real plugin through a real dlopen",
 
     REQUIRE(fixtures->renderers.Find("fixture_tool") != nullptr);
     REQUIRE(fixtures->display_renderers.Find("fixture_kind") != nullptr);
+
+    // A client-side /-command, attributed and runnable.
+    REQUIRE(fixtures->client_commands.commands().size() == 1);
+    CHECK(fixtures->client_commands.commands().front()->name() == "fixture-cmd");
+    CHECK(record.registered_client_commands == std::vector<std::string>{"fixture-cmd"});
+    fixtures->client_commands.commands().front()->Run({"a"}, "a b");
     CHECK(record.registered_display_kinds == std::vector<std::string>{"fixture_kind"});
 
     bool has_minilang = false;

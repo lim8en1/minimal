@@ -7,6 +7,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <ftxui/dom/node.hpp>
+#include <ftxui/screen/screen.hpp>
+
+#include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/view/tab_bar.hpp"
 
@@ -185,4 +189,24 @@ TEST_CASE("ComputeTabBarBadge: identical lists stay inactive regardless of filte
     CHECK(badge.label == "agents");
     CHECK(badge.hidden == 0);
     CHECK(badge.attention == 0);
+}
+
+TEST_CASE("tab bar hit boxes map a click to the tab under it", "[tab_bar]") {
+    auto a = FilterTab("tab-a", false, 1);
+    a.display_name = "alpha";
+    a.is_focused = true;
+    auto b = FilterTab("tab-b", false, 2);
+    b.display_name = "beta";
+    const auto theme = minimal::client::Theme::Parse(R"({"name":"t","colors":{}})",
+                                                      minimal::client::ColorDepth::Truecolor);
+    minimal::client::TabHitBoxes hits;
+    auto bar = minimal::client::RenderTabBar({a, b}, theme, {}, &hits);
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(80), ftxui::Dimension::Fixed(1));
+    ftxui::Render(screen, bar);   // the layout pass fills the boxes
+    REQUIRE(hits.cells.size() == 2);
+    const auto& first = *hits.cells[0].second;
+    const auto& second = *hits.cells[1].second;
+    CHECK(hits.TabAt(first.x_min, 0) == "tab-a");
+    CHECK(hits.TabAt(second.x_max, 0) == "tab-b");
+    CHECK(hits.TabAt(79, 0).empty());   // past the last cell
 }

@@ -20,6 +20,8 @@ using RegisterViewsFn =
     void (*)(ViewRegistry&, const ClientPluginRegistrationContext&);
 using RegisterStartViewsFn =
     void (*)(StartViewRegistry&, const ClientPluginRegistrationContext&);
+using RegisterClientCommandsFn =
+    void (*)(ClientCommandRegistry&, const ClientPluginRegistrationContext&);
 using RegisterRenderersFn =
     void (*)(ToolResultRendererRegistry&, const ClientPluginRegistrationContext&);
 using RegisterDisplayRenderersFn =
@@ -112,7 +114,8 @@ ClientPluginLoader::ClientPluginLoader(ViewRegistry& views,
                                        MarkdownEngineRegistry& markdown_engine,
                                        StartViewRegistry& start_views, AttentionSink* attention,
                                        ClientApi* client_api, FocusProvider* focus,
-                                       PromptRendererRegistry* prompt_renderers)
+                                       PromptRendererRegistry* prompt_renderers, HostUi* ui,
+                                       ClientCommandRegistry* client_commands)
     : views_(views),
       renderers_(renderers),
       display_renderers_(display_renderers),
@@ -125,7 +128,9 @@ ClientPluginLoader::ClientPluginLoader(ViewRegistry& views,
       prompt_renderers_(prompt_renderers),
       attention_(attention),
       client_api_(client_api),
-      focus_(focus) {}
+      focus_(focus),
+      ui_(ui),
+      client_commands_(client_commands) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 ClientPluginLoader::~ClientPluginLoader() = default;
@@ -210,6 +215,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     context.attention = attention_;
     context.client_api = client_api_;
     context.focus = focus_;
+    context.ui = ui_;
 
     // Partial-registration rollback, captured BEFORE the first hook runs
     // (ported from the server loader, plugin_loader.cpp:233-260). Every
@@ -218,6 +224,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     auto rollback = [this, &record] {
         views_.RemoveByAttribution(record.name);
         start_views_.RemoveByAttribution(record.name);
+        if (client_commands_ != nullptr) client_commands_->RemoveByAttribution(record.name);
         renderers_.RemoveByAttribution(record.name);
         display_renderers_.RemoveByAttribution(record.name);
         if (prompt_renderers_ != nullptr) prompt_renderers_->RemoveByAttribution(record.name);
@@ -257,6 +264,23 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         for (std::size_t i = before; i < start_views_.attributions().size(); ++i) {
             record.registered_start_views.push_back(
                 start_views_.attributions()[i].original_name);
+        }
+    }
+
+    if (client_commands_ != nullptr) {
+        if (auto register_client_commands = Lookup<RegisterClientCommandsFn>(
+                handle, "minimal_client_plugin_register_client_commands")) {
+            const std::size_t before = client_commands_->attributions().size();
+            if (!GuardedRegistration(record, "minimal_client_plugin_register_client_commands",
+                    [&] { client_commands_->SetAttribution(record.name); },
+                    [&] { register_client_commands(*client_commands_, context); },
+                    [&] { client_commands_->ClearAttribution(); }, rollback)) {
+                return record;
+            }
+            for (std::size_t i = before; i < client_commands_->attributions().size(); ++i) {
+                record.registered_client_commands.push_back(
+                    client_commands_->attributions()[i].original_name);
+            }
         }
     }
 

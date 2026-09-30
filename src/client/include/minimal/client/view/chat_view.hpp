@@ -221,6 +221,9 @@ private:
     // page via a fetch, which mid-turn nothing submits) -- "tools as soon
     // as they are executed". Called once per Tool-kind live_segments entry,
     // interleaved with the text segments around it (track C4).
+    // A live row drawn by the PLUGIN that claimed its kind (ctx.live set), or
+    // null -- core's own live rendering then draws it.
+    ftxui::Element RenderLiveWithPlugin(const ChatRow& row) const;
     ftxui::Element RenderLiveToolRow(const ToolExecutionState& tool) const;
     // ONE live thinking segment's body. Replaces the old
     // paragraph(whole_accumulated_text) per changed frame: a long reasoning

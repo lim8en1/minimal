@@ -20,7 +20,8 @@ ColorDepth DetectColorDepth();
 // The env-reading split out so the decision is testable without mutating the
 // process environment. Any pointer may be null (variable unset).
 ColorDepth ColorDepthFromEnv(const char* colorterm, const char* term,
-                             const char* no_color = nullptr);
+                             const char* no_color = nullptr,
+                             const char* term_program = nullptr);
 
 // Truecolor -> the nearest palette entry for the given depth. Identity for
 // Truecolor. Nearest means smallest squared RGB distance, with the 256-color

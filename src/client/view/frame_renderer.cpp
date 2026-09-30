@@ -138,7 +138,7 @@ ftxui::Element FrameRenderer::Render() {
     // a tab filter is active, when the badge alone justifies the row (it
     // names the filter and counts the hidden '!' tabs).
     if (!space_critical && (visible_tabs.size() > 1 || badge.active)) {
-        rows.push_back(RenderTabBar(visible_tabs, deps_.theme, badge));
+        rows.push_back(RenderTabBar(visible_tabs, deps_.theme, badge, &tab_hits_));
     }
 
     const std::string& focused = deps_.focused;
@@ -562,6 +562,7 @@ ftxui::Element FrameRenderer::Render() {
         // the frame's focused handle is a TAB id, so the snapshot's session
         // id goes out (empty = no tab / sessionless).
         const std::string id(segment->id());
+        if (IsKnownStatusSegment(id)) continue;   // core ids are reserved (warned at startup)
         GuardPluginCall("segment:" + id, "status segment '" + id + "'", [&] {
             values[id] = segment->Render(focused_details.session_id);
         });

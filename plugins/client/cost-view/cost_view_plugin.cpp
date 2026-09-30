@@ -60,6 +60,7 @@ void minimal_client_plugin_register_status_segments(
     // thread) down -- the registry owns the segments, and neither outliving
     // nor underliving the other is expressible this way.
     auto feed = std::make_shared<TotalsFeed>(context.client_api, context.focus);
+    feed->SetHostUi(context.ui);
     registry.Register(std::make_unique<TotalsSegment>("cost", TotalsField::kCost, feed));
     registry.Register(
         std::make_unique<TotalsSegment>("token_detail", TotalsField::kTokenDetail, feed));

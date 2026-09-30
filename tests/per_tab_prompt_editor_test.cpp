@@ -13,6 +13,7 @@
 #include <ftxui/screen/screen.hpp>
 
 #include "minimal/client/view/prompt_editor.hpp"
+#include "temp_dir.hpp"
 
 namespace minimal::client {
 namespace {
@@ -235,3 +236,22 @@ TEST_CASE("PerTabPromptEditors: QueryPendingHint reads only the asked tab",
 }
 
 }  // namespace minimal::client
+
+TEST_CASE("prompt history persists across instances, newest last", "[prompt_editor][history]") {
+    minimal::testing::TempDir dir;
+    const auto path = dir.path() / "prompt_history.json";
+    {
+        minimal::client::PromptHistory first;
+        first.PersistTo(path);   // no file yet: starts empty
+        CHECK(first.entries.empty());
+        first.Record("one");
+        first.Record("two\nlines");
+    }
+    minimal::client::PromptHistory second;
+    second.Record("typed before load");   // this run's entries follow the loaded ones
+    second.PersistTo(path);
+    REQUIRE(second.entries.size() == 3);
+    CHECK(second.entries[0] == "one");
+    CHECK(second.entries[1] == "two\nlines");
+    CHECK(second.entries[2] == "typed before load");
+}

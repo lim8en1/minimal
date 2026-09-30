@@ -19,6 +19,11 @@ namespace minimal::client {
 struct StatusSegment {
     bool is_segment = false;  // false: literal text between {..} groups
     std::string text;         // the literal, or the segment id without braces
+    // "{id?}": the segment may legitimately be absent (a plugin that is not
+    // installed or is disabled) -- it renders nothing either way, but its
+    // absence is not warned about at startup. The default format marks the
+    // bundled plugins' segments this way.
+    bool optional = false;
 };
 
 // Parses "{version} | {tokens}" into its pieces. Unbalanced braces are literal

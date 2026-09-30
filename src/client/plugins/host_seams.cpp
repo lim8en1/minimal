@@ -15,23 +15,31 @@ namespace {
 
 class HostAttentionSink final : public AttentionSink {
 public:
-    explicit HostAttentionSink(AttentionState* state) : state_(state) {}
+    HostAttentionSink(AttentionState* state, HostUi* ui) : state_(state), ui_(ui) {}
 
     void RaiseTab(const std::string& session_id) override {
         if (state_ != nullptr) state_->RaiseTab(session_id);
+        Redraw();
     }
     void ClearTab(const std::string& session_id) override {
         if (state_ != nullptr) state_->ClearTab(session_id);
+        Redraw();
     }
     void RaiseGlobal() override {
         if (state_ != nullptr) state_->RaiseGlobal();
+        Redraw();
     }
     void ClearGlobal() override {
         if (state_ != nullptr) state_->ClearGlobal();
+        Redraw();
     }
 
 private:
+    void Redraw() {
+        if (ui_ != nullptr) ui_->RequestRedraw();
+    }
     AttentionState* state_;  // host-owned; may be null when the seam is not offered
+    HostUi* ui_;             // likewise; null: no repaint request
 };
 
 // --- HostClientApi --------------------------------------------------------------
@@ -133,8 +141,18 @@ std::vector<TabInfo> HostFocusProvider::Tabs() const {
     return out;
 }
 
-std::unique_ptr<AttentionSink> MakeHostAttentionSink(AttentionState* state) {
-    return std::make_unique<HostAttentionSink>(state);
+void HostFocusProvider::RequestRedraw() {
+    std::lock_guard lk(mtx_);
+    if (app_ != nullptr) app_->NotifyExternalUpdate();   // an atomic bump; never blocks
+}
+
+void HostFocusProvider::ShowView(const std::string& view_id) {
+    std::lock_guard lk(mtx_);
+    if (app_ != nullptr) app_->RequestView(view_id);
+}
+
+std::unique_ptr<AttentionSink> MakeHostAttentionSink(AttentionState* state, HostUi* ui) {
+    return std::make_unique<HostAttentionSink>(state, ui);
 }
 
 std::unique_ptr<ClientApi> MakeHostClientApi(SessionClient* client) {

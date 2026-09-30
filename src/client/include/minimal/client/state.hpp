@@ -1367,6 +1367,10 @@ public:
     // shape, so the frame renders it like any other outcome). The staging
     // paths (/agent //model on a sessionless tab) report through this.
     void TabNotice(const std::string& tab_id, const std::string& message);
+    // Opens the view `view_id` on the focused tab, through the same path a
+    // command result's view_hint takes (a VIEW-display notice the maintenance
+    // pass routes once). False with no tab to carry it.
+    bool RequestView(const std::string& view_id);
 
     // Drops the tab's notice line immediately, if one is showing. For the
     // client-native commands (bare /help, /keymap, bare /theme //agent

@@ -30,6 +30,7 @@
 // or for one in-flight PluginCall (5 s deadline). Bounded either way; never
 // detached (see background_poller.hpp).
 
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <set>
@@ -60,6 +61,10 @@ public:
     ChecklistFeed(plugins::ClientApi* api, plugins::FocusProvider* focus, Timing timing);
     explicit ChecklistFeed(plugins::ClientApi* api, plugins::FocusProvider* focus = nullptr)
         : ChecklistFeed(api, focus, Timing{}) {}
+    // The host's repaint request (HostUi), called after new data lands --
+    // outside the feed's lock. Optional: null means the data shows at the next
+    // frame something else causes.
+    void SetHostUi(plugins::HostUi* ui) { ui_.store(ui, std::memory_order_release); }
     ~ChecklistFeed();
 
     ChecklistFeed(const ChecklistFeed&) = delete;
@@ -97,6 +102,11 @@ private:
 
     plugins::ClientApi* api_;
     plugins::FocusProvider* focus_;
+    // Atomic: set after the constructor has already started the worker.
+    std::atomic<plugins::HostUi*> ui_{nullptr};
+    void RequestRedraw() const {
+        if (auto* ui = ui_.load(std::memory_order_acquire)) ui->RequestRedraw();
+    }
     Timing timing_;
 
     // mtx_/cv_/stop_ live in BackgroundPoller (protected base members),

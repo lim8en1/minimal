@@ -246,6 +246,12 @@ public:
             case MD_BLOCK_H:
                 rendered = RenderInlineBlock(block) | ftxui::bold;
                 if (block.heading_level <= 2) rendered = rendered | ftxui::underlined;
+                // The "heading" role, else the theme's accent: bold alone
+                // read as emphasized body text, not as structure.
+                if (theme_ != nullptr) {
+                    const ftxui::Color heading = theme_->ColorForOr("heading", "border_focused");
+                    if (heading != ftxui::Color::Default) rendered = rendered | ftxui::color(heading);
+                }
                 break;
             case MD_BLOCK_CODE:
                 rendered = RenderCode(block);

@@ -104,6 +104,7 @@ bool TotalsFeed::OnPayload(const std::string& json_payload) {
             cache_[focused] = Entry{};
         }
     }
+    RequestRedraw();   // outside mtx_: the host's seam is host code
     return true;
 }
 
@@ -120,6 +121,10 @@ void TotalsFeed::PollFallback() {
             if (stop_) return;
             if (totals.has_value()) {
                 ApplyLocked(session_id, *totals);
+                lock.unlock();
+                RequestRedraw();   // outside mtx_
+                lock.lock();
+                if (stop_) return;
             } else if (const auto it = cache_.find(session_id); it != cache_.end()) {
                 it->second.stale = true;
             }

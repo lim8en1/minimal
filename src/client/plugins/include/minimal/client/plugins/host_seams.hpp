@@ -21,7 +21,9 @@ namespace plugins {
 // The AttentionSink handed to plugins, backed by the shared AttentionState
 // block AppState reads. Null state = the seam is not offered (a sink that
 // ignores its calls), which keeps a fixture plugin loadable without a TUI.
-std::unique_ptr<AttentionSink> MakeHostAttentionSink(AttentionState* state);
+// `ui` (optional): every raise/clear also requests a redraw, so the tab bar
+// shows the change now rather than at the next unrelated event.
+std::unique_ptr<AttentionSink> MakeHostAttentionSink(AttentionState* state, HostUi* ui = nullptr);
 
 // The ClientApi handed to plugins: scrollback pages over the host's ONE
 // SessionClient, bounded like core's own refresh. Null client behaves the
@@ -36,7 +38,9 @@ std::unique_ptr<ClientApi> MakeHostClientApi(SessionClient* client);
 // AppState is built. Until (and unless) it attaches, the seam refuses:
 // FocusedSessionId() answers "" and Tabs() answers empty, which is exactly
 // how the interface's own null-degrade rule reads to a plugin.
-class HostFocusProvider final : public FocusProvider {
+// It is also the host's HostUi (RequestRedraw): the same AppState target,
+// the same Attach/Detach lifetime.
+class HostFocusProvider final : public FocusProvider, public HostUi {
 public:
     // Once, after AppState is constructed.
     void Attach(AppState* app);
@@ -53,6 +57,9 @@ public:
 
     std::string FocusedSessionId() const override;
     std::vector<TabInfo> Tabs() const override;
+    // Held under the same lock as the reads: a no-op once Detach() returned.
+    void RequestRedraw() override;
+    void ShowView(const std::string& view_id) override;
 
 private:
     mutable std::mutex mtx_;

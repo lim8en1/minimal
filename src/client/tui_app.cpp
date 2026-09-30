@@ -343,6 +343,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // old single-editor behavior).
     minimal::client::PerTabPromptEditors prompt_editors;
     minimal::client::PromptHistory prompt_history;
+    // Up-arrow recall survives restarts (data dir, beside the client log).
+    try {
+        prompt_history.PersistTo(minimal::common::DataDir() / "prompt_history.json");
+    } catch (const std::exception& error) {   // no $HOME: recall stays per-run
+        minimal::common::DefaultLogger().warn("prompt history not persisted: {}", error.what());
+    }
     // Declared here (not beside `suggest` below, which is its only other
     // reader) so close_tab -- defined before the rest of the editor wiring
     // exists -- can erase a closed tab's slot and not leak it.
@@ -723,6 +729,37 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         open_picker_fn();
         return true;
     }});
+    // Plugin-contributed client commands (ClientCommandRegistry), after the
+    // client's own: a name the table already holds stays the client's. A
+    // plugin command needing a session is refused visibly on a sessionless
+    // tab, the same rule the server's catalog gets below.
+    for (const auto& plugin_command : env.client_command_registry.commands()) {
+        const std::string name(plugin_command->name());
+        if (command_router.Has(name)) {
+            minimal::common::DefaultLogger().warn(
+                "client plugin command '/{}' is ignored: the client already has a command "
+                "by that name",
+                name);
+            continue;
+        }
+        const bool needs_session = plugin_command->requires_session();
+        command_router.Add({name, std::string(plugin_command->summary()), false, needs_session,
+                            [&, command = plugin_command.get(), name,
+                             needs_session](const CommandInvocationText& parsed) {
+            if (needs_session && app->FocusedSessionId().empty()) {
+                focused_notice("/" + name + " needs a session; send a message to start one first");
+                return true;
+            }
+            try {
+                command->Run(parsed.positional, parsed.raw);
+            } catch (const std::exception& error) {
+                focused_notice("/" + name + " failed: " + error.what());
+            } catch (...) {
+                focused_notice("/" + name + " failed");
+            }
+            return true;
+        }});
+    }
     // The catalog lists the table's own commands after every server list;
     // seeded only now that the table is complete.
     command_catalog_cache.SetClientSide(command_router.CatalogEntries());
@@ -1166,7 +1203,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // forms open their pickers directly.
 
     // --- frame -----------------------------------------------------------------
-    int panel_height = 12;
+    const int panel_height = env.ui.panel_height > 0 ? env.ui.panel_height : 12;   // ui.json
     // AnyWorkInFlight (keybinding_dispatch.hpp): the caller's tab snapshots
     // carry the state already -- re-snapshotting every tab (a full deep copy)
     // per keypress was pure waste.
@@ -1327,7 +1364,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         [&prompt_editors, &app] { return prompt_editors.CurrentState(app->FocusedTabId()).list_open; },
         [&tab_ui](const std::string& tab_id, int y) {
             return WithChat(tab_ui, tab_id, [y](auto& chat) { return chat.ViewportContainsY(y); });
-        }};
+        },
+        [&frame_renderer](int x, int y) { return frame_renderer.TabAt(x, y); }};
     auto with_keys = CatchEvent(session_view, [&](const Event& event) {
         return minimal::client::HandleGlobalKey(key_ctx, event);
     });

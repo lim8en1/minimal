@@ -6,9 +6,12 @@
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
+#include <nlohmann/json.hpp>
 
+#include "minimal/client/config_file_io.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/prompt_wrap.hpp"
+#include "minimal/common/logger.hpp"
 
 #include <string>
 #include <vector>
@@ -147,6 +150,11 @@ std::string CommandPrefixOf(const std::string& text) {
 
 }  // namespace
 
+namespace {
+// 500 recent entries is far past what arrow-up recall is used for.
+constexpr std::size_t kMaxHistoryEntries = 500;
+}  // namespace
+
 void PromptHistory::Record(const std::string& line) {
     // Skip a consecutive duplicate of the last entry -- repeatedly
     // submitting the same line, or repeating what recall just brought back,
@@ -158,7 +166,6 @@ void PromptHistory::Record(const std::string& line) {
     // Bounded: a long-lived TUI session otherwise kept every submitted line
     // for the process's whole life. 500 recent entries is far past what
     // arrow-up recall is used for.
-    constexpr std::size_t kMaxHistoryEntries = 500;
     if (entries.size() > kMaxHistoryEntries) {
         const std::size_t trimmed = entries.size() - kMaxHistoryEntries;
         entries.erase(entries.begin(), entries.begin() + static_cast<long>(trimmed));
@@ -175,6 +182,44 @@ void PromptHistory::Record(const std::string& line) {
                 cursor->reset();
             }
         }
+    }
+    Save();
+}
+
+void PromptHistory::PersistTo(std::filesystem::path path) {
+    persist_path_ = std::move(path);
+    std::string text;
+    if (!TryReadConfigFile(persist_path_, &text)) return;
+    const auto doc = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (!doc.is_array()) return;
+    std::vector<std::string> loaded;
+    for (const auto& line : doc) {
+        if (line.is_string()) loaded.push_back(line.get<std::string>());
+    }
+    // Loaded lines come BEFORE anything recorded this run, under the same
+    // entry bound Record keeps.
+    entries.insert(entries.begin(), loaded.begin(), loaded.end());
+    if (entries.size() > kMaxHistoryEntries) {
+        entries.erase(entries.begin(),
+                      entries.begin() + static_cast<long>(entries.size() - kMaxHistoryEntries));
+    }
+}
+
+void PromptHistory::Save() const {
+    if (persist_path_.empty()) return;
+    // The newest entries that fit the byte budget, oldest first on disk.
+    std::size_t bytes = 0;
+    std::size_t first = entries.size();
+    while (first > 0 && bytes + entries[first - 1].size() <= kPersistMaxBytes) {
+        bytes += entries[first - 1].size();
+        --first;
+    }
+    nlohmann::json doc = nlohmann::json::array();
+    for (std::size_t i = first; i < entries.size(); ++i) doc.push_back(entries[i]);
+    if (!WriteConfigFileAtomic(persist_path_,
+                               doc.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace))) {
+        common::DefaultLogger().warn("prompt history: could not write {}",
+                                     persist_path_.string());
     }
 }
 

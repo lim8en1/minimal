@@ -34,6 +34,7 @@
 // is harmless, but the derived class owns getting the ORDER right.
 
 #include <condition_variable>
+#include <cstdio>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -46,7 +47,18 @@ protected:
 
     // Defensive only -- see the file comment. The derived destructor should
     // already have called Stop() itself before its own members went away.
-    ~BackgroundPoller() { Stop(); }
+    // A worker still running here means the derived class never called Stop()
+    // in ITS destructor: by now its members are already destroyed while the
+    // worker may still be reading them. Joined anyway -- and said out loud,
+    // so the bug shows up in the log rather than as a rare crash.
+    ~BackgroundPoller() {
+        if (worker_.joinable()) {
+            std::fprintf(stderr,
+                         "minimal: BackgroundPoller destroyed with its worker running -- the "
+                         "derived class must call Stop() in its own destructor\n");
+        }
+        Stop();
+    }
 
     BackgroundPoller(const BackgroundPoller&) = delete;
     BackgroundPoller& operator=(const BackgroundPoller&) = delete;

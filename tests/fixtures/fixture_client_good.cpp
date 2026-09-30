@@ -117,6 +117,16 @@ private:
 
 }  // namespace
 
+// A client-side /-command: echoes its raw arguments into a counter the test
+// can read back through the registry.
+class FixtureClientCommand final : public plugins::ClientCommand {
+public:
+    std::string_view name() const override { return "fixture-cmd"; }
+    std::string_view summary() const override { return "fixture client command"; }
+    void Run(const std::vector<std::string>&, const std::string& raw) override { last_raw = raw; }
+    std::string last_raw;
+};
+
 extern "C" {
 // The compile-time tag, not AbiTag(): see client_plugin_abi.h.
 const char* minimal_client_plugin_abi_tag() { return MINIMAL_ABI_TAG; }
@@ -168,6 +178,11 @@ void minimal_client_plugin_register_syntax_grammars(
 void minimal_client_plugin_register_start_views(
     plugins::StartViewRegistry& registry, const plugins::ClientPluginRegistrationContext&) {
     registry.Register(std::make_unique<FixtureStartView>());
+}
+
+void minimal_client_plugin_register_client_commands(
+    plugins::ClientCommandRegistry& registry, const plugins::ClientPluginRegistrationContext&) {
+    registry.Register(std::make_unique<FixtureClientCommand>());
 }
 
 void minimal_client_plugin_register_views(plugins::ViewRegistry& registry,

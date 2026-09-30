@@ -118,6 +118,7 @@ bool ChecklistFeed::OnPayload(const std::string& json_payload) {
     }
 
     Seed();
+    RequestRedraw();   // outside mtx_: the host's seam is host code
 
     std::lock_guard<std::mutex> lock(mtx_);
     refresh_requested_ = false;
@@ -184,6 +185,7 @@ void ChecklistFeed::PollFallback(std::chrono::milliseconds period) {
                 }
             }
         }
+        RequestRedraw();   // outside mtx_
 
         auto wait = timing_.poll_interval;
         for (int i = 1; i < failures && wait < timing_.max_fallback_period; ++i) wait *= 2;

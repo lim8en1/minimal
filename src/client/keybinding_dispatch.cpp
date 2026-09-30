@@ -606,6 +606,13 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
             }
             return true;
         }
+        // Left-press on a tab-bar cell focuses that tab.
+        if (mouse.button == Mouse::Left && mouse.motion == Mouse::Pressed && ctx.tab_at) {
+            if (const std::string tab = ctx.tab_at(mouse.x, mouse.y); !tab.empty()) {
+                ctx.app.SetFocusedTab(tab);
+                return true;
+            }
+        }
         // Left-press on a QUEUED message row cancels that message before it
         // ever runs (a queued row is never collapsible, but the click must
         // not fall through to text selection either). Consumed only when a

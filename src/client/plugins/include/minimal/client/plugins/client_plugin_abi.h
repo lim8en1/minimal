@@ -53,6 +53,10 @@ struct ClientPluginRegistrationContext {
     // per-render argument. Null on the same terms as `attention` -- a plugin
     // degrades to focus-blind content, never an error.
     FocusProvider* focus = nullptr;
+
+    // Ask the host to repaint (registries.hpp HostUi) after the plugin's own
+    // data changed off the UI thread. Null on the same terms as `attention`.
+    HostUi* ui = nullptr;
 };
 
 }  // namespace minimal::client::plugins
@@ -97,6 +101,13 @@ void minimal_client_plugin_register_views(
 // like every other view id.
 void minimal_client_plugin_register_start_views(
     minimal::client::plugins::StartViewRegistry&,
+    const minimal::client::plugins::ClientPluginRegistrationContext&);
+
+// OPTIONAL, additive: client-side /-commands (registries.hpp ClientCommand),
+// run in the TUI without a server round trip. The client's own commands win a
+// name collision (the plugin's is ignored with a warning).
+void minimal_client_plugin_register_client_commands(
+    minimal::client::plugins::ClientCommandRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
 // OPTIONAL, additive: renderers for one tool's result, keyed by tool name. A

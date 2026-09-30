@@ -14,9 +14,13 @@
 // scroll out of view, and never silently clips mid-cell.
 
 #include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/box.hpp>
 
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
@@ -72,7 +76,24 @@ TabBarBadge ComputeTabBarBadge(const std::vector<AppState::TabSnapshot>& all,
 // `badge` (default: inactive) renders nothing -- the plain bar. When active,
 // its width is carved out of the overflow window's budget first, so visible
 // cells + markers + badge always fit together.
+// Where each VISIBLE tab's cell was laid out, by tab id -- filled by
+// RenderTabBar when asked, read after the frame's layout (the boxes are
+// written by FTXUI's layout pass) to map a click to the tab under it.
+struct TabHitBoxes {
+    std::vector<std::pair<std::string, std::shared_ptr<ftxui::Box>>> cells;
+    // The tab id at screen (x, y), "" when no tab cell is there.
+    std::string TabAt(int x, int y) const {
+        for (const auto& [tab_id, box] : cells) {
+            if (x >= box->x_min && x <= box->x_max && y >= box->y_min && y <= box->y_max) {
+                return tab_id;
+            }
+        }
+        return {};
+    }
+};
+
 ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, const Theme& theme,
-                            const TabBarBadge& badge = {});
+                            const TabBarBadge& badge = {},
+                            TabHitBoxes* hits = nullptr);
 
 }  // namespace minimal::client

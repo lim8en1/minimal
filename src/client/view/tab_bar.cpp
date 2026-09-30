@@ -219,8 +219,9 @@ TabBarBadge ComputeTabBarBadge(const std::vector<AppState::TabSnapshot>& all,
 }
 
 ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, const Theme& theme,
-                            const TabBarBadge& badge) {
+                            const TabBarBadge& badge, TabHitBoxes* hits) {
     using namespace ftxui;
+    if (hits != nullptr) hits->cells.clear();
     if (tabs.empty()) return emptyElement();
 
     std::vector<std::string> labels;
@@ -272,7 +273,13 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
     }
     for (std::size_t i = window.visible_start; i < window.visible_end; ++i) {
         if (!cells.empty()) cells.push_back(text(" │ ") | Muted(theme));  // never let labels fuse
-        cells.push_back(RenderTabCell(tabs[i], labels[i], theme));
+        Element cell = RenderTabCell(tabs[i], labels[i], theme);
+        if (hits != nullptr) {
+            auto box = std::make_shared<Box>();
+            cell = std::move(cell) | reflect(*box);
+            hits->cells.emplace_back(tabs[i].tab_id, std::move(box));
+        }
+        cells.push_back(std::move(cell));
     }
     if (window.hidden_after > 0) {
         cells.push_back(text(" " + std::to_string(window.hidden_after) + "»") | Muted(theme));

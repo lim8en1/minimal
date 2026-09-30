@@ -62,4 +62,16 @@ TEST_CASE("Downsample at ColorDepth::None emits no color at all") {
         // And the old two-arg call sites keep their behavior.
         CHECK(ColorDepthFromEnv("truecolor", "xterm") == ColorDepth::Truecolor);
     }
+TEST_CASE("ColorDepthFromEnv recognizes a truecolor terminal without COLORTERM") {
+    CHECK(ColorDepthFromEnv(nullptr, "xterm-kitty") == ColorDepth::Truecolor);
+    CHECK(ColorDepthFromEnv(nullptr, "xterm-direct") == ColorDepth::Truecolor);
+    CHECK(ColorDepthFromEnv(nullptr, "xterm-256color", nullptr, "iTerm.app") ==
+          ColorDepth::Truecolor);
+    // Apple's Terminal renders 256 colors only.
+    CHECK(ColorDepthFromEnv(nullptr, "xterm-256color", nullptr, "Apple_Terminal") ==
+          ColorDepth::Palette256);
+    // NO_COLOR still wins over everything.
+    CHECK(ColorDepthFromEnv("truecolor", "xterm-kitty", "1", "iTerm.app") == ColorDepth::None);
+}
+
 }  // namespace minimal::client

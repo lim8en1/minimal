@@ -3,9 +3,11 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <system_error>
 
 #include "minimal/client/config_file_io.hpp"
+#include "minimal/client/key_event_parser.hpp"
 #include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
@@ -25,7 +27,7 @@ namespace {
 // on. {version} and {session} are out of the default -- the banner/help carry
 // the one, the tab bar the other -- but remain available ids.
 constexpr const char* kDefaultStatusFormat =
-    "{activity} · {tokens} · {cost} · {token_detail}{>}{model} · {agent} · {permission_mode} · "
+    "{activity} · {tokens} · {cost?} · {token_detail?}{>}{model} · {agent} · {permission_mode} · "
     "{paused}";
 
 }  // namespace
@@ -54,9 +56,10 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // is a member of `out` itself -- see the address-stability contract in
     // the header -- so `&out.attention_state` stays valid as long as `out`
     // is never relocated, which is the caller's obligation.
-    out.attention_sink = plugins::MakeHostAttentionSink(&out.attention_state);
+    out.host_focus_provider = plugins::MakeHostFocusProvider();   // also the HostUi seam
+    out.attention_sink =
+        plugins::MakeHostAttentionSink(&out.attention_state, out.host_focus_provider.get());
     out.host_client_api = plugins::MakeHostClientApi(&client);
-    out.host_focus_provider = plugins::MakeHostFocusProvider();
 
     plugins::RegisterCoreSyntaxGrammars(out.grammar_registry);
 
@@ -125,7 +128,8 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                                            out.engine_registry, out.start_view_registry,
                                            out.attention_sink.get(), out.host_client_api.get(),
                                            out.host_focus_provider.get(),
-                                           &out.prompt_registry);
+                                           &out.prompt_registry, out.host_focus_provider.get(),
+                                           &out.client_command_registry);
         const auto records = loader.LoadAll(candidates);
         for (const auto& record : records) {
             if (record.ok()) out.loaded_plugins.push_back(record.name);
@@ -168,6 +172,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         };
         feed(minimal::plugins::NameKind::ViewId, out.view_registry.attributions());
         feed(minimal::plugins::NameKind::ViewId, out.start_view_registry.attributions());
+        feed(minimal::plugins::NameKind::Command, out.client_command_registry.attributions());
         feed(minimal::plugins::NameKind::ToolResultRenderer, out.renderer_registry.attributions());
         feed(minimal::plugins::NameKind::DisplayRenderer, out.display_registry.attributions());
         feed(minimal::plugins::NameKind::PromptRenderer, out.prompt_registry.attributions());
@@ -248,8 +253,38 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // Plugin views: register each id's suggested default keybinding only where
     // nothing binds it yet (the user's file wins), and remember the runtime
     // dispatch entries.
+    // Core actions dispatch BEFORE plugin views (keybinding_dispatch.cpp), so
+    // a view bound to a key a core action also uses can never be reached:
+    // warn, naming both, instead of leaving a silently dead key.
+    std::map<std::string, std::string> core_keys;   // normalized key -> core action
+    for (const auto& [action, key] : keys.all()) {
+        // Plugin view ids the user bound in keybindings.json are not core.
+        if (key.empty() || out.view_registry.Find(action) != nullptr) continue;
+        core_keys.emplace(NormalizeKeySpec(key), action);
+    }
     for (const auto& view : out.view_registry.views()) {
+        // A command's view_hint resolves the core overlays first
+        // (TabMaintenance::HandleNotice), so a plugin view with one of their
+        // names can never be opened by a hint.
+        for (const char* core_view : {"sessions", "agents", "models", "subagent-models",
+                                      "subagents"}) {
+            if (view->spec().id == core_view) {
+                std::fprintf(stderr,
+                             "minimal: warning: plugin view '%s' shares a core view name; "
+                             "command view hints open the core view instead\n",
+                             core_view);
+            }
+        }
         keys.EnsureDefault(view->spec().id, view->spec().default_keybinding);
+        const std::string bound = keys.KeyFor(view->spec().id);
+        if (const auto clash = core_keys.find(NormalizeKeySpec(bound));
+            !bound.empty() && clash != core_keys.end()) {
+            std::fprintf(stderr,
+                         "minimal: warning: plugin view '%s' is bound to '%s', which '%s' "
+                         "already uses -- the view's key does nothing; rebind one in "
+                         "keybindings.json\n",
+                         view->spec().id.c_str(), bound.c_str(), clash->second.c_str());
+        }
         // Plugin component code: a throw out of component() would propagate
         // into the frame assembly (and, later, the ftxui loop, where it would
         // std::terminate). Contained like every other plugin call site:
@@ -301,6 +336,16 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     for (const auto& id : minimal::client::UnknownStatusSegments(status_format_string)) {
         if (out.status_registry.Find(id) == nullptr) {
             std::fprintf(stderr, "minimal: unknown status segment '{%s}'\n", id.c_str());
+        }
+    }
+    // Core segment ids are reserved: a plugin segment reusing one is ignored
+    // (the frame skips it) -- it used to overwrite the core value silently.
+    for (const auto& segment : out.status_registry.segments()) {
+        if (minimal::client::IsKnownStatusSegment(segment->id())) {
+            std::fprintf(stderr,
+                         "minimal: warning: a plugin status segment reuses the core id "
+                         "'{%s}'; the core segment is kept\n",
+                         std::string(segment->id()).c_str());
         }
     }
 
@@ -355,6 +400,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // bypassing the collision and attribution rules.
     out.view_registry.Seal();
     out.start_view_registry.Seal();
+    out.client_command_registry.Seal();
     out.renderer_registry.Seal();
     out.display_registry.Seal();
     out.prompt_registry.Seal();

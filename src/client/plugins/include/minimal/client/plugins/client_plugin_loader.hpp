@@ -58,6 +58,7 @@ struct PluginRecord {
     std::vector<std::string> registered_status_segments;
     std::vector<std::string> registered_grammars;     // language keys
     std::vector<std::string> registered_message_kinds;
+    std::vector<std::string> registered_client_commands;
     bool registered_chat_surface = false;
     bool registered_markdown_engine = false;
 
@@ -90,7 +91,9 @@ public:
                        MarkdownEngineRegistry& markdown_engine,
                        StartViewRegistry& start_views, AttentionSink* attention,
                        ClientApi* client_api, FocusProvider* focus,
-                       PromptRendererRegistry* prompt_renderers = nullptr);
+                       PromptRendererRegistry* prompt_renderers = nullptr,
+                       HostUi* ui = nullptr,
+                       ClientCommandRegistry* client_commands = nullptr);
     ~ClientPluginLoader();
 
     ClientPluginLoader(const ClientPluginLoader&) = delete;
@@ -125,6 +128,8 @@ private:
     AttentionSink* attention_ = nullptr;
     ClientApi* client_api_ = nullptr;
     FocusProvider* focus_ = nullptr;
+    HostUi* ui_ = nullptr;
+    ClientCommandRegistry* client_commands_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

@@ -5,6 +5,7 @@
 
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/status_format.hpp"
+#include "minimal/client/view/status_bar.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
@@ -118,6 +119,17 @@ TEST_CASE("bundled/keybindings.json has an entry for every core action",
 }
 
 // --- status format ----------------------------------------------------------
+
+TEST_CASE("status format: {id?} marks a segment optional -- no unknown-id warning",
+          "[keybindings][status_format]") {
+    const auto parts = client::ParseStatusFormat("{tokens} | {cost?}");
+    REQUIRE(parts.size() == 3);
+    CHECK(parts[2].is_segment);
+    CHECK(parts[2].text == "cost");   // the marker is not part of the id
+    CHECK(parts[2].optional);
+    CHECK_FALSE(parts[0].optional);
+    CHECK(client::UnknownStatusSegments("{cost?} {todo}") == std::vector<std::string>{"todo"});
+}
 
 TEST_CASE("status format splits literals from segments", "[status_format]") {
     const auto parts = client::ParseStatusFormat("{version} | {tokens}");

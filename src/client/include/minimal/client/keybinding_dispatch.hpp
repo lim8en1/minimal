@@ -280,6 +280,10 @@ struct KeyContext {
     // the event falls through to those components. Null: every wheel event
     // scrolls the chat (the pre-routing behavior; test fixtures).
     std::function<bool(const std::string& tab_id, int y)> chat_contains_y;
+
+    // The tab whose tab-bar cell is at screen (x, y), "" for none: a left
+    // press there focuses it. Null: the tab bar takes no clicks.
+    std::function<std::string(int x, int y)> tab_at;
 };
 
 // The global-keybinding CatchEvent body (app.cpp's with_keys), as a function

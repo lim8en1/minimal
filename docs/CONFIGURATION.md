@@ -8,7 +8,7 @@ this order (both server and client):
 3. `$HOME/.config/minimal` — default (not the macOS `~/Library` path)
 
 Runtime state (SQLite session store, logs, plugin KV storage) lives in a
-separate data dir: `$XDG_DATA_HOME/minimal`, else `$HOME/.local/share/minimal`.
+separate data dir: `$XDG_DATA_HOME/minimal`, else `$HOME/.local/share/minimal`. The TUI keeps its up-arrow prompt history there too (`prompt_history.json`: the newest 500 submitted lines, at most 1 MiB); delete the file to clear it.
 
 The config dir is seeded from `bundled/` at `cmake --install` time (see
 BUILD.md); existing files are never overwritten. Nothing is seeded at server
@@ -617,10 +617,11 @@ sidesteps the ambiguity rather than needing a distinguishing byte at all.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `status_format` | string | built-in default | segment ids in braces with literal text between; the default is `{activity} · {tokens} · {cost} · {token_detail}{>}{model} · {agent} · {permission_mode}`. Core ids: `activity`, `tokens`, `model`, `agent`, `permission_mode`, `session`, `version`; plugin ids (e.g. cost-view's `cost`, `token_detail`) too. `{>}` right-aligns everything after it. An empty segment takes its separator with it; when the bar overflows, whole segments drop lowest-priority first (`version`, `token_detail`, `session` … `permission_mode` last) — a value is never clipped |
+| `status_format` | string | built-in default | segment ids in braces with literal text between; the default is `{activity} · {tokens} · {cost?} · {token_detail?}{>}{model} · {agent} · {permission_mode}`. Core ids: `activity`, `tokens`, `model`, `agent`, `permission_mode`, `session`, `paused`, `version`; plugin ids (e.g. cost-view's `cost`, `token_detail`) too. An unknown id is warned about at startup unless it is written `{id?}` -- optional, for a plugin segment that may not be installed. A plugin segment cannot take a core id: it is ignored with a warning. `{>}` right-aligns everything after it. An empty segment takes its separator with it; when the bar overflows, whole segments drop lowest-priority first (`version`, `token_detail`, `session` … `permission_mode` last) — a value is never clipped |
 | `scrollback_window_max_messages` | int | `0` (= built-in) | must be positive if set |
 | `tool_output_buffer_bytes` | int | `0` | |
 | `tools_panel_stdout_buffer_lines` | int | `0` | distinct from the server's `tools_view.stdout_buffer_lines` |
+| `panel_height` | int | unset (12) | rows for the tools panel and plugin panels; minimum 3 |
 | `fold_thinking` | string | `"auto"` | the startup auto-fold default for thinking rows: `auto` (built-in default), `expanded` or `collapsed`; anything else → warning + `auto`. `chat.toggle_thinking_fold` (`ctrl+alt+t`) flips it for every open tab and persists the new value back here |
 | `fold_tools` | string | `"auto"` | same for tool-activity rows; `chat.toggle_tool_fold` (`ctrl+alt+o`). `collapsed` also folds `ask_user` results — the explicit setting outranks the `ask` display kind's built-in "always show answers" default |
 | `theme` | string | `""` (= `"dark"`) | names `themes/<name>.json`; unknown name → terminal defaults + warning |
@@ -636,7 +637,7 @@ Shape: `{ "name": ..., "colors": { ... } }` — hex color roles as in
 `bundled/themes/dark.json`: UI roles (`user_message`, `assistant_message`,
 `thinking`, `working`, `system_message`, `muted`, `error`, `attention`,
 `border_focused`, `border_unfocused`, `row_focused`, `status_bar_bg`,
-`background`, `banner_art`, `banner_hint`, `tool`, `success`, `cursor`), syntax roles (`syntax_keyword`,
+`background`, `banner_art`, `banner_hint`, `tool`, `success`, `cursor`, `heading`), syntax roles (`syntax_keyword`,
 `syntax_string`, `syntax_comment`, `syntax_number`, `syntax_function`,
 `syntax_type`, `syntax_operator`, `syntax_plain`) and diff roles
 (`diff_added`, `diff_removed`, `diff_hunk`).
@@ -653,12 +654,17 @@ Shape: `{ "name": ..., "colors": { ... } }` — hex color roles as in
 - `tool` colors tool-call headers (falls back to `syntax_function`); keep it
   distinct from `user_message` so tool rows never read as your own turns.
 - `success` colors a successful tool outcome (falls back to `working`).
+- `heading` colors markdown headings (falls back to `border_focused`).
 - `background` is **optional**: when set it paints every cell the UI leaves
   unpainted; when omitted the terminal's own (possibly transparent)
   background shows through.
 
 A missing role falls back to the terminal default. With `NO_COLOR` set or
-`TERM=dumb`, no colors are emitted at all.
+`TERM=dumb`, no colors are emitted at all. Otherwise the depth follows
+`COLORTERM` (`truecolor`/`24bit`), then the terminal's own identity (`TERM`
+naming kitty, alacritty, wezterm, foot, ghostty or a `-direct` entry;
+`TERM_PROGRAM` iTerm.app, WezTerm, vscode, ghostty, Hyper or Tabby), then a
+`256color` `TERM`, else 16 colors.
 
 Bundled themes: `dark`, `light`, `lucent-crm`, `lucent-crm-light`,
 `lucent-grn`, `lucent-grn-light` — each sets its own `background` (dark

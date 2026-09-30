@@ -10,13 +10,14 @@ namespace minimal::client::plugins {
 // --- AttentionState ----------------------------------------------------------
 
 void AttentionState::RaiseTab(const std::string& session_id) {
+    if (session_id.empty()) return;   // "" is every sessionless tab, never one session
     std::lock_guard<std::mutex> lock(mtx_);
     tab_[session_id] = true;
 }
 
 void AttentionState::ClearTab(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mtx_);
-    tab_[session_id] = false;
+    tab_.erase(session_id);   // erased, not set false: the map only holds raised tabs
 }
 
 void AttentionState::RaiseGlobal() {
@@ -30,6 +31,7 @@ void AttentionState::ClearGlobal() {
 }
 
 bool AttentionState::TabRaised(const std::string& session_id) const {
+    if (session_id.empty()) return false;
     std::lock_guard<std::mutex> lock(mtx_);
     const auto it = tab_.find(session_id);
     return it != tab_.end() && it->second;
@@ -103,6 +105,33 @@ void ViewRegistry::RemoveByAttribution(const std::string& plugin_name) {
     }
     attributions_.resize(write);
     views_.resize(write);
+}
+
+void ClientCommandRegistry::Register(std::unique_ptr<ClientCommand> command) {
+    if (sealed_) {
+        common::DefaultLogger().warn(
+            "client plugin '{}': registration ignored -- the registries were sealed after "
+            "startup (registration-time-only contract)",
+            attribution_.empty() ? "<core>" : attribution_);
+        return;
+    }
+    if (command == nullptr || command->name().empty()) return;
+    attributions_.push_back({attribution_, std::string(command->name())});
+    commands_.push_back(std::move(command));
+}
+
+void ClientCommandRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < attributions_.size(); ++read) {
+        if (attributions_[read].plugin_name == plugin_name) continue;
+        if (write != read) {
+            attributions_[write] = std::move(attributions_[read]);
+            commands_[write] = std::move(commands_[read]);
+        }
+        ++write;
+    }
+    attributions_.resize(write);
+    commands_.resize(write);
 }
 
 void StartViewRegistry::Register(std::unique_ptr<StartView> view) {

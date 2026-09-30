@@ -339,6 +339,45 @@ TEST_CASE("HostFocusProvider::Detach makes Tabs()/FocusedSessionId() safe to cal
     CHECK(provider->Tabs().empty());
 }
 
+TEST_CASE("HostUi::RequestRedraw bumps the UI version while attached, not after Detach",
+          "[app_state][host_seams]") {
+    // A plugin whose data changed on its own thread asks for a frame: the
+    // pump repaints only when UiVersion moves.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+    AppState app(fixture.client);
+
+    auto provider = minimal::client::plugins::MakeHostFocusProvider();
+    minimal::client::plugins::HostUi& ui = *provider;
+    ui.RequestRedraw();   // not attached yet: a no-op, never a crash
+    provider->Attach(&app);
+    const auto before = app.UiVersion();
+    ui.RequestRedraw();
+    CHECK(app.UiVersion() > before);
+    provider->Detach();
+    const auto detached = app.UiVersion();
+    ui.RequestRedraw();
+    CHECK(app.UiVersion() == detached);
+}
+
+TEST_CASE("RequestView stages a VIEW notice on the focused tab", "[app_state][host_seams]") {
+    // HostUi::ShowView's route: the same VIEW-display notice a command's
+    // view_hint produces, which the maintenance pass opens once.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+    AppState app(fixture.client);
+    CHECK_FALSE(app.RequestView("fixture.modal"));   // no tab to carry it
+    const auto tab = app.OpenTab(fixture.Options("view"));
+    app.SetFocusedTab(tab);
+    REQUIRE(app.RequestView("fixture.modal"));
+    const auto snap = app.GetDetails(tab);
+    REQUIRE(snap.latest_notice.has_value());
+    CHECK(snap.latest_notice->display == minimal::v1::COMMAND_DISPLAY_VIEW);
+    CHECK(snap.latest_notice->view_hint == "fixture.modal");
+}
+
 TEST_CASE("HasQueuedWork sees a sessionless tab's queued action before "
           "EnsureSession resolves it",
           "[app_state]") {

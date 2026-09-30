@@ -55,10 +55,11 @@ namespace {
 // already destroyed.
 std::weak_ptr<ChecklistFeed> shared_instance;
 std::shared_ptr<ChecklistFeed> SharedFeed(plugins::ClientApi* api,
-                                          plugins::FocusProvider* focus) {
+                                          plugins::FocusProvider* focus, plugins::HostUi* ui) {
     auto feed = shared_instance.lock();
     if (feed == nullptr) {
         feed = std::make_shared<ChecklistFeed>(api, focus);
+        feed->SetHostUi(ui);
         shared_instance = feed;
     }
     return feed;
@@ -76,7 +77,7 @@ void minimal_client_plugin_register_status_segments(
     // segment that can never do anything.
     if (context.client_api == nullptr) return;
     registry.Register(std::make_unique<ChecklistStatusSegment>(
-        SharedFeed(context.client_api, context.focus)));
+        SharedFeed(context.client_api, context.focus, context.ui)));
 }
 
 void minimal_client_plugin_register_views(
@@ -88,7 +89,7 @@ void minimal_client_plugin_register_views(
     // follows for a missing api.
     if (context.client_api == nullptr || context.focus == nullptr) return;
     registry.Register(std::make_unique<ChecklistPanelView>(
-        SharedFeed(context.client_api, context.focus), context.focus));
+        SharedFeed(context.client_api, context.focus, context.ui), context.focus));
 }
 
 }  // extern "C"

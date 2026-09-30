@@ -387,6 +387,28 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
 // entry, in ARRIVAL order interleaved with the text segments around it,
 // rather than looping the whole snapshot.tools list unconditionally last --
 // see the file's Render() for why that ordering was wrong.
+ftxui::Element ChatView::RenderLiveWithPlugin(const ChatRow& row) const {
+    if (!message_renderers_.PluginClaimed(row.kind)) return nullptr;
+    const auto* renderer = message_renderers_.Find(row.kind);
+    if (renderer == nullptr) return nullptr;
+    const plugins::RowRenderContext ctx{.collapsed = false,
+                                        .toggle_collapse_hint = toggle_collapse_hint_,
+                                        .collapse_marker = "",
+                                        .continuation = false,
+                                        .live = true};
+    // Plugin code on the render path, contained like the settled rows': a
+    // throw falls back to core's own live rendering for this frame.
+    try {
+        return renderer->Render(row, theme_, ctx);
+    } catch (const std::exception& error) {
+        common::DefaultLogger().warn("live {} renderer threw: {}", ToString(row.kind), error.what());
+    } catch (...) {
+        common::DefaultLogger().warn("live {} renderer threw a non-standard exception",
+                                     ToString(row.kind));
+    }
+    return nullptr;
+}
+
 ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const {
     using namespace ftxui;
     Elements line;
@@ -1028,6 +1050,12 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // Elements up to 20x/s, which froze the frame loop on a long
             // reasoning stream.
             if (segment.Text().empty()) continue;
+            ChatRow live_row{.kind = ChatRowKind::Thinking, .text = segment.Text()};
+            if (Element plugin_row = RenderLiveWithPlugin(live_row)) {
+                column.push_back(WithGutter(std::move(plugin_row), assistant_gutter));
+                column.push_back(text(" "));
+                continue;
+            }
             ftxui::Element thinking_body = RenderLiveThinking(segment);
             column.push_back(WithGutter(
                 vbox({text("thinking") | color(theme_.ColorFor("thinking")), thinking_body}),
@@ -1047,7 +1075,15 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // here is how a late refresh made the turn's tool calls vanish.
             if (tool == nullptr) tool = segment.final_tool.get();
             if (tool != nullptr) {
-                column.push_back(WithGutter(RenderLiveToolRow(*tool), assistant_gutter));
+                ChatRow live_row{.kind = ChatRowKind::ToolActivity,
+                                 .tool_name = tool->tool_name,
+                                 .tool_input = tool->input,
+                                 .tool_is_error = tool->is_error,
+                                 .tool_pending = tool->started};
+                Element plugin_row = RenderLiveWithPlugin(live_row);
+                column.push_back(WithGutter(plugin_row ? std::move(plugin_row)
+                                                       : RenderLiveToolRow(*tool),
+                                            assistant_gutter));
                 // Consecutive calls stack as a list, like the settled rows.
                 const bool next_is_tool = i + 1 < snapshot.live_segments.size() &&
                                           snapshot.live_segments[i + 1].kind ==

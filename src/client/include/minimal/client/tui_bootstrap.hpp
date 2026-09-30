@@ -83,15 +83,17 @@ struct TuiEnvironment {
     // input, at startup and on every /theme switch.
     std::vector<std::string> loaded_plugins;
     plugins::AttentionState attention_state;
+    // Concrete type: tui_app.cpp attaches the (later-constructed) AppState
+    // after BuildTuiEnvironment returns -- see host_seams.hpp for why the
+    // seam's target cannot be supplied at construction time. Declared before
+    // attention_sink, which holds it as its HostUi: it must outlive the sink.
+    std::unique_ptr<plugins::HostFocusProvider> host_focus_provider;
     std::unique_ptr<plugins::AttentionSink> attention_sink;
     std::unique_ptr<plugins::ClientApi> host_client_api;
-    // Concrete type: app.cpp attaches the (later-constructed) AppState after
-    // BuildTuiEnvironment returns -- see host_seams.hpp for why the seam's
-    // target cannot be supplied at construction time.
-    std::unique_ptr<plugins::HostFocusProvider> host_focus_provider;
 
     plugins::ViewRegistry view_registry;
     plugins::StartViewRegistry start_view_registry;
+    plugins::ClientCommandRegistry client_command_registry;
     plugins::ToolResultRendererRegistry renderer_registry;
     plugins::DisplayRendererRegistry display_registry;
     plugins::PromptRendererRegistry prompt_registry;

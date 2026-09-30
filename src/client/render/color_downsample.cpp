@@ -71,8 +71,8 @@ ftxui::Color Downsample16(uint8_t r, uint8_t g, uint8_t b) {
 
 }  // namespace
 
-ColorDepth ColorDepthFromEnv(const char* colorterm, const char* term,
-                             const char* no_color) {
+ColorDepth ColorDepthFromEnv(const char* colorterm, const char* term, const char* no_color,
+                             const char* term_program) {
     // NO_COLOR: set to any non-empty value disables color (https://no-color.org
     // de-facto standard). TERM=dumb means the terminal renders no SGR at all.
     // Both used to be ignored and colors were emitted regardless.
@@ -81,6 +81,25 @@ ColorDepth ColorDepthFromEnv(const char* colorterm, const char* term,
     if (colorterm != nullptr) {
         const std::string_view value(colorterm);
         if (value == "truecolor" || value == "24bit") return ColorDepth::Truecolor;
+    }
+    // COLORTERM does not survive every hop (ssh, sudo, tmux without
+    // update-environment), and a truecolor terminal without it fell to 16
+    // colors. The terminal's own identity is the fallback: TERM names a
+    // truecolor terminal or a "-direct" terminfo entry, or TERM_PROGRAM does.
+    // Apple's Terminal is deliberately absent -- it renders 256 colors only.
+    if (term != nullptr) {
+        const std::string_view value(term);
+        for (const std::string_view known :
+             {"-direct", "kitty", "alacritty", "wezterm", "foot", "ghostty"}) {
+            if (value.find(known) != std::string_view::npos) return ColorDepth::Truecolor;
+        }
+    }
+    if (term_program != nullptr) {
+        const std::string_view value(term_program);
+        for (const std::string_view known :
+             {"iTerm.app", "WezTerm", "vscode", "ghostty", "Hyper", "Tabby"}) {
+            if (value == known) return ColorDepth::Truecolor;
+        }
     }
     if (term != nullptr && std::string_view(term).find("256color") != std::string_view::npos) {
         return ColorDepth::Palette256;
@@ -93,9 +112,11 @@ ColorDepth DetectColorDepth() {
     const auto colorterm = common::LookupEnv("COLORTERM");
     const auto term = common::LookupEnv("TERM");
     const auto no_color = common::LookupEnv("NO_COLOR");
+    const auto term_program = common::LookupEnv("TERM_PROGRAM");
     return ColorDepthFromEnv(colorterm ? colorterm->c_str() : nullptr,
                              term ? term->c_str() : nullptr,
-                             no_color ? no_color->c_str() : nullptr);
+                             no_color ? no_color->c_str() : nullptr,
+                             term_program ? term_program->c_str() : nullptr);
 }
 
 ftxui::Color Downsample(uint8_t r, uint8_t g, uint8_t b, ColorDepth depth) {

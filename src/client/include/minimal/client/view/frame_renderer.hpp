@@ -36,6 +36,7 @@
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/status_format.hpp"
+#include "minimal/client/view/tab_bar.hpp"
 #include "minimal/client/view/tab_ui.hpp"
 
 namespace minimal::client {
@@ -64,7 +65,7 @@ public:
         plugins::MarkdownEngine& engine;
 
         bool& show_panel;
-        int panel_height;   // constant for now; a resize handle is future polish (ARCHITECTURE.md)
+        int panel_height;   // rows for the tools panel and plugin panels (ui.json panel_height)
         // ui.json's tools_panel_stdout_buffer_lines, or the built-in default
         // (100) -- already resolved by the caller (RunTui), same "0 means
         // default" convention AppState::SetUiBounds uses.
@@ -94,6 +95,10 @@ public:
 
     ftxui::Element Render();
 
+    // The tab under screen (x, y) in the last laid-out frame ("" = none):
+    // a click on the tab bar focuses that tab.
+    std::string TabAt(int x, int y) const { return tab_hits_.TabAt(x, y); }
+
 private:
     // Start views: what renders while a session (or the app itself) has no
     // content yet -- the plugin-owned banner slot. All registered views
@@ -114,7 +119,8 @@ private:
     static constexpr int kPluginThrowLimit = 3;
     bool GuardPluginCall(const std::string& key, const std::string& what,
                          const std::function<void()>& call);
-    std::map<std::string, int> plugin_throws_;   // consecutive, per key; -1 = disabled
+    std::map<std::string, int> plugin_throws_;
+    TabHitBoxes tab_hits_;   // the tab bar's cells, as last laid out   // consecutive, per key; -1 = disabled
 
     // Tools-panel render cache: RenderToolsPanel's input fetches every tab's
     // tool rows (state.hpp's copy-on-publish `buffered_output` -- cheap since

@@ -65,6 +65,23 @@ using LanguageFnPtr = minimal::client::LanguageFnPtr;
 //
 // Implemented by the host over a shared attention state block; handed to
 // plugins in the registration context.
+// The host UI seam. The frame repaints only when the app's own state moved
+// (the pump is event-driven), so a plugin whose data changed on its OWN thread
+// -- a feed landing new totals, a picker's list arriving -- showed nothing
+// until some unrelated event happened to redraw. RequestRedraw asks for the
+// next frame. Thread-safe, never blocks, cheap (a counter bump); calling it
+// with nothing new is harmless.
+class HostUi {
+public:
+    virtual ~HostUi() = default;
+    virtual void RequestRedraw() = 0;
+    // Opens a registered view (panel or modal) by id, the way a command's
+    // view_hint does -- the route a plugin's own /-command takes to show its
+    // UI. Takes effect on the next frame, on the focused tab; a no-op with no
+    // tab open or for an id no view answers to.
+    virtual void ShowView(const std::string& view_id) = 0;
+};
+
 class AttentionSink {
 public:
     virtual ~AttentionSink() = default;
@@ -121,6 +138,12 @@ struct RowRenderContext {
     // should not repeat it -- a tool-calling turn used to say "assistant" once
     // per text segment. See LabelContinuations (chat_model.hpp).
     bool continuation = false;
+    // The row is part of the turn that is still streaming: its text may be a
+    // partial prefix, and it renders again as it grows (every frame while it
+    // changes -- keep it cheap). Only a PLUGIN-claimed kind is asked to draw
+    // live rows (Thinking, ToolActivity); core keeps its own incremental live
+    // rendering for the kinds it owns.
+    bool live = false;
 };
 
 // Everything a tool-result renderer draws FROM. One struct rather than a
@@ -246,10 +269,12 @@ public:
 // layout control. An unknown id renders nothing with a startup warning --
 // the keybindings.json rule for names unknown at compile time.
 //
-// Render() is called on the render thread each frame (~20 Hz): it must be
-// cheap and must never block -- a segment that needs live data (a plugin RPC,
-// say) fetches it on its OWN background thread and has Render() read a cached
-// answer, never call out synchronously from here. Color comes from theme
+// Render() is called on the render thread every frame (up to ~20 Hz while
+// anything changes): it must be cheap and must never block -- a segment that
+// needs live data (a plugin RPC, say) fetches it on its OWN background thread
+// and has Render() read a cached answer, never call out synchronously from
+// here. Frames are event-driven: when that thread's data changes, it asks for
+// one through the context's HostUi (RequestRedraw). Color comes from theme
 // roles, never hardcoded; the v1 contract is text (the core segments are
 // strings too). `focused_session_id` is the render-time input every other
 // registry already takes (see the file banner) -- a segment that cares about
@@ -570,6 +595,40 @@ private:
     std::vector<Attribution> attributions_;
 };
 
+// A client-side /-command a plugin contributes: it runs in the TUI and never
+// reaches the server (compare a server plugin's command, which runs on the
+// session worker). Listed in /-autocomplete and the /help overlay beside the
+// server's commands; a name the client's own commands already use is ignored
+// with a startup warning. Run() executes on the UI thread: cheap, never
+// blocking -- hand slow work to the plugin's own thread, then RequestRedraw or
+// ShowView through the context's HostUi.
+class ClientCommand {
+public:
+    virtual ~ClientCommand() = default;
+    virtual std::string_view name() const = 0;      // without the leading '/'
+    virtual std::string_view summary() const = 0;   // the autocomplete line
+    virtual bool requires_session() const { return false; }
+    // `positional`: whitespace-split arguments; `raw`: everything after the
+    // name, untouched.
+    virtual void Run(const std::vector<std::string>& positional, const std::string& raw) = 0;
+};
+
+class ClientCommandRegistry : public RegistrationWindow {
+public:
+    void Register(std::unique_ptr<ClientCommand> command);
+    const std::vector<std::unique_ptr<ClientCommand>>& commands() const { return commands_; }
+
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+    const std::vector<Attribution>& attributions() const { return attributions_; }
+    void RemoveByAttribution(const std::string& plugin_name);
+
+private:
+    std::vector<std::unique_ptr<ClientCommand>> commands_;
+    std::string attribution_;
+    std::vector<Attribution> attributions_;
+};
+
 class StartViewRegistry : public RegistrationWindow {
 public:
     void Register(std::unique_ptr<StartView> view);
@@ -646,6 +705,14 @@ public:
     const MessageRenderer* Find(ChatRowKind kind) const;
     // (kind, plugin) pairs, for the collision scan.
     const std::vector<std::pair<ChatRowKind, Attribution>>& claims() const { return claims_; }
+    // Whether the ACTIVE renderer for `kind` is a plugin's (the first claim),
+    // not core's default fill.
+    bool PluginClaimed(ChatRowKind kind) const {
+        for (const auto& [claimed, attribution] : claims_) {
+            if (claimed == kind) return !attribution.plugin_name.empty();
+        }
+        return false;
+    }
 
     void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
     void ClearAttribution() { attribution_.clear(); }

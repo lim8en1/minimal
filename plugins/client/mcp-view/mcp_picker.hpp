@@ -36,7 +36,9 @@ namespace plugins = minimal::client::plugins;
 // process-lifetime, this .so is never unloaded).
 class McpFeed {
 public:
-    explicit McpFeed(plugins::ClientApi* api);
+    // `ui` (optional): asked for a repaint whenever a fetch lands, so the
+    // picker leaves "loading" as soon as the list arrives.
+    McpFeed(plugins::ClientApi* api, plugins::HostUi* ui = nullptr);
     ~McpFeed();
 
     void Refresh();
@@ -54,6 +56,7 @@ private:
     void FetchList();
 
     plugins::ClientApi* api_;
+    plugins::HostUi* ui_;
     mutable std::mutex mu_;
     std::condition_variable cv_;
     std::deque<std::function<void()>> tasks_;
@@ -66,7 +69,7 @@ private:
 
 class McpPickerView final : public plugins::View {
 public:
-    explicit McpPickerView(plugins::ClientApi* api);
+    McpPickerView(plugins::ClientApi* api, plugins::HostUi* ui = nullptr);
 
     const plugins::ViewSpec& spec() const override;
     ftxui::Component component() override;

@@ -240,7 +240,9 @@ The pattern ("per-preset tool config", the `allowed_skills` delivery shape):
    declared package contract under `python`.
 
 **Optional client registration hooks** (`src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h`):
-views, start views, per-tool renderers, display renderers, prompt renderers
+views, start views, client-side /-commands (run in the TUI, no server round
+trip; the client's own commands win a name collision), per-tool renderers,
+display renderers, prompt renderers
 (the modal for a server plugin's `prompt_user` kind), message renderers, status-bar
 segments, syntax grammars, chat surface (exclusive), markdown engine
 (exclusive).

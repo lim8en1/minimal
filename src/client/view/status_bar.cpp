@@ -80,7 +80,7 @@ bool IsKnownStatusSegment(std::string_view id) {
 std::vector<std::string> UnknownStatusSegments(const std::string& format) {
     std::vector<std::string> unknown;
     for (const auto& part : ParseStatusFormat(format)) {
-        if (part.is_segment && !IsKnownStatusSegment(part.text)) {
+        if (part.is_segment && !part.optional && !IsKnownStatusSegment(part.text)) {
             unknown.push_back(part.text);   // registry (E5) or typo -- named either way
         }
     }

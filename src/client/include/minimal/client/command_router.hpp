@@ -36,6 +36,7 @@ class CommandRouter {
 public:
     // A later Add of the same name replaces the earlier one.
     void Add(ClientCommand command);
+    bool Has(const std::string& name) const { return commands_.count(name) != 0; }
 
     // The listed (summary-bearing) commands, as catalog entries, in name
     // order -- what CommandCatalogCache appends to every server listing.

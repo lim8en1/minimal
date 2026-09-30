@@ -428,3 +428,33 @@ TEST_CASE("chat view: scrolled away, content arriving below does not move the vi
     (void)RenderElement(view.Render(grown), 80, 24);
     CHECK_FALSE(view.HasUnseenBelow());
 }
+
+namespace {
+// Claims Thinking the way a plugin does, and says whether it was asked live.
+class LiveProbeThinking final : public plugins::MessageRenderer {
+public:
+    ftxui::Element Render(const ChatRow& row, const Theme&,
+                          const plugins::RowRenderContext& ctx) const override {
+        return ftxui::text(std::string(ctx.live ? "LIVE:" : "DONE:") + row.text);
+    }
+};
+}  // namespace
+
+TEST_CASE("chat view: a plugin-claimed kind draws the live streaming row too") {
+    ChatViewFixture fx;
+    plugins::MessageRendererRegistry messages;
+    messages.SetAttribution("probe-plugin");
+    messages.Register(ChatRowKind::Thinking, std::make_unique<LiveProbeThinking>());
+    messages.ClearAttribution();
+    plugins::RegisterCoreMessageRenderers(messages);   // core fills the rest
+    ChatView view(fx.theme, messages, fx.tool_renderers, fx.display_renderers);
+
+    auto snap = SnapshotWithNumberedLines("s", 1, 1);
+    LiveTurnSegment thinking;
+    thinking.kind = LiveTurnSegment::Kind::Thinking;
+    thinking.segment_id = 1;
+    thinking.text_view = std::make_shared<const std::string>("pondering");
+    snap.live_segments.push_back(thinking);
+    const auto frame = RenderElement(view.Render(snap), 80, 24);
+    CHECK(frame.find("LIVE:pondering") != std::string::npos);
+}
