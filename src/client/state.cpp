@@ -2880,19 +2880,6 @@ void AppState::TabNotice(const std::string& tab_id, const std::string& message) 
     }
 }
 
-bool AppState::RequestView(const std::string& view_id) {
-    const std::string tab = FocusedTabId();
-    const auto state = tab.empty() ? nullptr : GetStateByTab(tab);
-    if (!state) return false;
-    v1::CommandResult notice;
-    notice.set_status(v1::COMMAND_STATUS_OK);
-    notice.set_display(v1::COMMAND_DISPLAY_VIEW);
-    notice.set_view_hint(view_id);
-    state->OnCommandResult(notice);
-    BumpUiVersion();
-    return true;
-}
-
 bool AppState::ClearTabNotice(const std::string& tab_id) {
     if (auto state = GetStateByTab(tab_id)) {
         if (!state->ClearNotice()) return false;

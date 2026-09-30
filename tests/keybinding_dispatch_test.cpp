@@ -613,3 +613,38 @@ TEST_CASE("ClosePluginModal with nothing shown is a quiet no-op",
     CHECK_FALSE(ClosePluginModal(views, slot, show_modal));
     CHECK_FALSE(show_modal);
 }
+
+// --- HostUi view requests (ApplyViewRequest) ---------------------------------
+
+TEST_CASE("view requests: show, focus and hide panels; open and close a modal",
+          "[keybinding_dispatch][view_requests]") {
+    using Op = plugins::ViewRequest::Op;
+    std::vector<plugins::PluginViewEntry> views{Panel("p1"), Panel("p2"), ModalEntry("m1")};
+    // A modal entry needs a component to open; the stubs return none, so give it one.
+    views[2].component = ftxui::Renderer([] { return ftxui::text("m1"); });
+    ftxui::Component slot;
+    bool show_modal = false;
+
+    CHECK(minimal::client::ApplyViewRequest(views, {Op::kShow, "p1"}, slot, show_modal));
+    CHECK(views[0].visible);
+    CHECK(views[0].focused);
+    CHECK(minimal::client::ApplyViewRequest(views, {Op::kSetPanelVisible, "p2", true}, slot, show_modal));
+    CHECK(views[1].focused);
+    CHECK(minimal::client::ApplyViewRequest(views, {Op::kFocusPanel, "p1"}, slot, show_modal));
+    CHECK(views[0].focused);
+    CHECK_FALSE(views[1].focused);
+    CHECK(minimal::client::ApplyViewRequest(views, {Op::kSetPanelVisible, "p1", false}, slot, show_modal));
+    CHECK_FALSE(views[0].visible);
+    CHECK(views[1].focused);   // focus moves to the remaining visible panel
+
+    CHECK(minimal::client::ApplyViewRequest(views, {Op::kShow, "m1"}, slot, show_modal));
+    CHECK(show_modal);
+    CHECK(slot == views[2].component);
+    CHECK(minimal::client::ApplyViewRequest(views, {Op::kClose, "m1"}, slot, show_modal));
+    CHECK_FALSE(show_modal);
+
+    // No-ops: unknown id, panel-only ops on a modal, focusing a hidden panel.
+    CHECK_FALSE(minimal::client::ApplyViewRequest(views, {Op::kShow, "nope"}, slot, show_modal));
+    CHECK_FALSE(minimal::client::ApplyViewRequest(views, {Op::kSetPanelVisible, "m1", true}, slot, show_modal));
+    CHECK_FALSE(minimal::client::ApplyViewRequest(views, {Op::kFocusPanel, "p1"}, slot, show_modal));
+}

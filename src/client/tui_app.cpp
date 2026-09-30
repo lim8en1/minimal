@@ -1112,7 +1112,16 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         *app, engine, view_registry, plugin_views, plugin_modal_child,
         show_plugin_modal, open_picker, open_agent_picker, open_model_picker,
         open_subagent_model_picker, open_subagents_picker,
-        [&picker_controller] { picker_controller.Poll(); }, tab_ui, theme,
+        // Loop-thread work queued from other threads: picker fetch results,
+        // and plugins' HostUi view requests (show/close/focus).
+        [&] {
+            picker_controller.Poll();
+            for (const auto& request : env.host_focus_provider->TakeViewRequests()) {
+                minimal::client::ApplyViewRequest(plugin_views, request, *plugin_modal_child,
+                                                  show_plugin_modal);
+            }
+        },
+        tab_ui, theme,
         message_registry, renderer_registry, display_registry, env.prompt_registry,
         permission_child, show_permission,
         confirmation_child, show_confirmation, prompt_child, show_prompt,

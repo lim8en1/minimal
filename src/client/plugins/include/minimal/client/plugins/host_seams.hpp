@@ -3,6 +3,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "minimal/client/plugins/registries.hpp"
@@ -23,6 +24,16 @@ namespace plugins {
 // ignores its calls), which keeps a fixture plugin loadable without a TUI.
 // `ui` (optional): every raise/clear also requests a redraw, so the tab bar
 // shows the change now rather than at the next unrelated event.
+// One queued HostUi view operation (see HostUi): produced on any thread by
+// HostFocusProvider, applied on the UI thread (keybinding_dispatch.hpp
+// ApplyViewRequest).
+struct ViewRequest {
+    enum class Op { kShow, kClose, kSetPanelVisible, kFocusPanel };
+    Op op = Op::kShow;
+    std::string view_id;
+    bool visible = true;   // kSetPanelVisible only
+};
+
 std::unique_ptr<AttentionSink> MakeHostAttentionSink(AttentionState* state, HostUi* ui = nullptr);
 
 // The ClientApi handed to plugins: scrollback pages over the host's ONE
@@ -60,10 +71,23 @@ public:
     // Held under the same lock as the reads: a no-op once Detach() returned.
     void RequestRedraw() override;
     void ShowView(const std::string& view_id) override;
+    void CloseView(const std::string& view_id) override;
+    void SetPanelVisible(const std::string& view_id, bool visible) override;
+    void FocusPanel(const std::string& view_id) override;
+
+    // The UI thread's half: every view request queued since the last call,
+    // oldest first.
+    std::vector<ViewRequest> TakeViewRequests();
 
 private:
+    void Enqueue(ViewRequest request);
+
     mutable std::mutex mtx_;
     AppState* app_ = nullptr;  // guarded by mtx_; host-owned, null until Attach/after Detach
+    // Its own lock, never held together with mtx_ (Enqueue releases it
+    // before RequestRedraw takes mtx_).
+    std::mutex requests_mtx_;
+    std::vector<ViewRequest> requests_;
 };
 
 std::unique_ptr<HostFocusProvider> MakeHostFocusProvider();

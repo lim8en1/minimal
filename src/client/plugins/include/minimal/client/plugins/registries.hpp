@@ -75,11 +75,18 @@ class HostUi {
 public:
     virtual ~HostUi() = default;
     virtual void RequestRedraw() = 0;
-    // Opens a registered view (panel or modal) by id, the way a command's
-    // view_hint does -- the route a plugin's own /-command takes to show its
-    // UI. Takes effect on the next frame, on the focused tab; a no-op with no
-    // tab open or for an id no view answers to.
+    // View control, by registered view id. Callable from any thread: each is
+    // queued and applied on the UI thread before the next frame (in call
+    // order). An id no view answers to is a no-op.
+    // Shows a panel (and focuses it) or opens a modal (replacing any other
+    // plugin modal) -- the route a plugin's own /-command takes to its UI.
     virtual void ShowView(const std::string& view_id) = 0;
+    // Hides a panel, or closes a modal if it is the one showing.
+    virtual void CloseView(const std::string& view_id) = 0;
+    // Panels only: show (and focus) or hide.
+    virtual void SetPanelVisible(const std::string& view_id, bool visible) = 0;
+    // Panels only, and only a visible one: it receives key events next.
+    virtual void FocusPanel(const std::string& view_id) = 0;
 };
 
 class AttentionSink {

@@ -30,6 +30,7 @@
 #include <ftxui/component/event.hpp>
 
 #include "minimal/client/keybindings.hpp"
+#include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/state.hpp"
 
@@ -329,6 +330,14 @@ void CyclePanelFocus(std::vector<plugins::PluginViewEntry>& views, bool forward)
 void ShowPluginView(std::vector<plugins::PluginViewEntry>& views,
                     plugins::PluginViewEntry& entry,
                     ftxui::Component& modal_slot, bool& show_modal);
+
+// Applies one queued HostUi view request (host_seams.hpp) on the UI thread,
+// through the same helpers the keybinding path uses. Returns whether anything
+// changed; an id no entry answers to, or an op that does not fit the view's
+// placement, is a no-op.
+bool ApplyViewRequest(std::vector<plugins::PluginViewEntry>& views,
+                      const plugins::ViewRequest& request, ftxui::Component& modal_slot,
+                      bool& show_modal);
 
 // Host-level close for the ONE plugin modal slot, callable from OUTSIDE
 // HandleGlobalKey's own dispatch. FTXUI's Modal() gives the shown modal

@@ -184,6 +184,38 @@ void ShowPluginView(std::vector<plugins::PluginViewEntry>& views,
     NotifyShown(*entry.view);
 }
 
+bool ApplyViewRequest(std::vector<plugins::PluginViewEntry>& views,
+                      const plugins::ViewRequest& request, ftxui::Component& modal_slot,
+                      bool& show_modal) {
+    using Op = plugins::ViewRequest::Op;
+    for (auto& entry : views) {
+        if (entry.view->spec().id != request.view_id) continue;
+        const bool is_panel = entry.view->spec().placement == plugins::ViewPlacement::Panel;
+        const bool show = request.op == Op::kShow ||
+                          (request.op == Op::kSetPanelVisible && request.visible);
+        if (request.op == Op::kSetPanelVisible && !is_panel) return false;
+        if (request.op == Op::kFocusPanel) {
+            if (!is_panel || !entry.visible) return false;
+            FocusPanelOnOpen(views, entry);
+            return true;
+        }
+        if (show) {
+            ShowPluginView(views, entry, modal_slot, show_modal);
+            return true;
+        }
+        // Close / hide.
+        if (!entry.visible) return false;
+        entry.visible = false;
+        if (is_panel) {
+            FocusPanelOnClose(views, entry);
+        } else {
+            show_modal = false;
+        }
+        return true;
+    }
+    return false;
+}
+
 void CyclePanelFocus(std::vector<plugins::PluginViewEntry>& views, bool forward) {
     std::vector<plugins::PluginViewEntry*> visible;
     for (auto& entry : views) {

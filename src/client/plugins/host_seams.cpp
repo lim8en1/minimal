@@ -146,9 +146,35 @@ void HostFocusProvider::RequestRedraw() {
     if (app_ != nullptr) app_->NotifyExternalUpdate();   // an atomic bump; never blocks
 }
 
+void HostFocusProvider::Enqueue(ViewRequest request) {
+    {
+        std::lock_guard lk(requests_mtx_);
+        requests_.push_back(std::move(request));
+    }
+    RequestRedraw();   // the frame that applies it
+}
+
 void HostFocusProvider::ShowView(const std::string& view_id) {
-    std::lock_guard lk(mtx_);
-    if (app_ != nullptr) app_->RequestView(view_id);
+    Enqueue({ViewRequest::Op::kShow, view_id});
+}
+
+void HostFocusProvider::CloseView(const std::string& view_id) {
+    Enqueue({ViewRequest::Op::kClose, view_id});
+}
+
+void HostFocusProvider::SetPanelVisible(const std::string& view_id, bool visible) {
+    Enqueue({ViewRequest::Op::kSetPanelVisible, view_id, visible});
+}
+
+void HostFocusProvider::FocusPanel(const std::string& view_id) {
+    Enqueue({ViewRequest::Op::kFocusPanel, view_id});
+}
+
+std::vector<ViewRequest> HostFocusProvider::TakeViewRequests() {
+    std::lock_guard lk(requests_mtx_);
+    std::vector<ViewRequest> out;
+    out.swap(requests_);
+    return out;
 }
 
 std::unique_ptr<AttentionSink> MakeHostAttentionSink(AttentionState* state, HostUi* ui) {

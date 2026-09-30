@@ -18,8 +18,9 @@ constexpr const char* kServerPlugin = "mcp";
 // worker only publishes data, this component (UI thread) turns it into rows.
 class McpPickerComponent final : public ftxui::ComponentBase {
 public:
-    McpPickerComponent(std::shared_ptr<McpFeed> feed, const client::Theme* theme)
-        : feed_(std::move(feed)), theme_(theme) {}
+    McpPickerComponent(std::shared_ptr<McpFeed> feed, const client::Theme* theme,
+                       plugins::HostUi* ui)
+        : feed_(std::move(feed)), theme_(theme), ui_(ui) {}
 
     ftxui::Element OnRender() override {
         RebuildIfStale();
@@ -56,8 +57,12 @@ private:
                 [feed = feed_](const client::MenuRow& row) {
                     if (!row.header && !row.id.empty()) feed->Toggle(row.id);
                 },
-            // Escape never reaches here: the host closes plugin modals.
-            .on_close = [] {},
+            // The host closes plugin modals on Escape before this sees it; a
+            // close the menu itself decides on goes through the host seam.
+            .on_close =
+                [ui = ui_] {
+                    if (ui != nullptr) ui->CloseView("mcp");
+                },
         };
         if (menu_) DetachAllChildren();
         menu_ = client::MakeFilterableMenuModal(build_rows, spec, callbacks, *theme_);
@@ -66,6 +71,7 @@ private:
 
     std::shared_ptr<McpFeed> feed_;
     const client::Theme* theme_;
+    plugins::HostUi* ui_;
     ftxui::Component menu_;
     std::uint64_t built_generation_ = 0;
 };
@@ -177,7 +183,7 @@ std::string McpFeed::status() const {
 }
 
 McpPickerView::McpPickerView(plugins::ClientApi* api, plugins::HostUi* ui)
-    : feed_(std::make_shared<McpFeed>(api, ui)) {}
+    : feed_(std::make_shared<McpFeed>(api, ui)), ui_(ui) {}
 
 const plugins::ViewSpec& McpPickerView::spec() const {
     static const plugins::ViewSpec kSpec{"mcp", "mcp servers", plugins::ViewPlacement::Modal};
@@ -185,7 +191,7 @@ const plugins::ViewSpec& McpPickerView::spec() const {
 }
 
 ftxui::Component McpPickerView::component() {
-    return ftxui::Make<McpPickerComponent>(feed_, &theme_);
+    return ftxui::Make<McpPickerComponent>(feed_, &theme_, ui_);
 }
 
 }  // namespace minimal::mcp_view

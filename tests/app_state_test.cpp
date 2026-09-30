@@ -361,21 +361,26 @@ TEST_CASE("HostUi::RequestRedraw bumps the UI version while attached, not after 
     CHECK(app.UiVersion() == detached);
 }
 
-TEST_CASE("RequestView stages a VIEW notice on the focused tab", "[app_state][host_seams]") {
-    // HostUi::ShowView's route: the same VIEW-display notice a command's
-    // view_hint produces, which the maintenance pass opens once.
-    ClientFixture fixture;
-    fixture.Script("hi");
-    fixture.Start();
-    AppState app(fixture.client);
-    CHECK_FALSE(app.RequestView("fixture.modal"));   // no tab to carry it
-    const auto tab = app.OpenTab(fixture.Options("view"));
-    app.SetFocusedTab(tab);
-    REQUIRE(app.RequestView("fixture.modal"));
-    const auto snap = app.GetDetails(tab);
-    REQUIRE(snap.latest_notice.has_value());
-    CHECK(snap.latest_notice->display == minimal::v1::COMMAND_DISPLAY_VIEW);
-    CHECK(snap.latest_notice->view_hint == "fixture.modal");
+TEST_CASE("HostUi view requests queue from any thread and drain in order",
+          "[app_state][host_seams]") {
+    // Plugins call these from their own threads; the UI thread applies them.
+    auto provider = minimal::client::plugins::MakeHostFocusProvider();
+    minimal::client::plugins::HostUi& ui = *provider;
+    std::thread worker([&ui] {
+        ui.ShowView("a");
+        ui.SetPanelVisible("b", false);
+    });
+    worker.join();
+    ui.CloseView("a");
+    const auto requests = provider->TakeViewRequests();
+    REQUIRE(requests.size() == 3);
+    using Op = minimal::client::plugins::ViewRequest::Op;
+    CHECK(requests[0].op == Op::kShow);
+    CHECK(requests[0].view_id == "a");
+    CHECK(requests[1].op == Op::kSetPanelVisible);
+    CHECK_FALSE(requests[1].visible);
+    CHECK(requests[2].op == Op::kClose);
+    CHECK(provider->TakeViewRequests().empty());   // drained
 }
 
 TEST_CASE("HasQueuedWork sees a sessionless tab's queued action before "

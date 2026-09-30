@@ -137,7 +137,9 @@ public:
         // on the loop thread -- ARCHITECTURE.md review) must never touch its
         // modal's Component slot from that thread; this is the loop-thread
         // side of that handoff.
-        std::function<void()> poll_pickers;
+        // (It also applies plugins' queued HostUi view requests: the same
+        // "loop-thread side of a cross-thread handoff" shape.)
+        std::function<void()> drain_loop_work;
         // NOT owned -- see the file comment on declaration ordering.
         std::map<std::string, TabUi>& tab_ui;
 

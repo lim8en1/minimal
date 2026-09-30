@@ -78,6 +78,7 @@ public:
 
 private:
     std::shared_ptr<McpFeed> feed_;
+    plugins::HostUi* ui_;
     client::Theme theme_;
 };
 

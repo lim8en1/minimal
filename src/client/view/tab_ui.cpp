@@ -416,7 +416,7 @@ void TabMaintenance::Run() {
     // calls AppState::NotifyExternalUpdate, the same BumpUiVersion every
     // ordinary mutation goes through) -- draining it here, unconditionally,
     // is what turns that wake into an actual rebuild of the picker's modal.
-    if (deps_.poll_pickers) deps_.poll_pickers();
+    if (deps_.drain_loop_work) deps_.drain_loop_work();
 
     const auto tabs = deps_.app.GetAllTabs();
     focused_.clear();
