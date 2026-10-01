@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 
 #include <ftxui/component/component.hpp>
@@ -9,8 +10,8 @@ namespace minimal::client {
 // A modal layer's host: a STABLE component in the FTXUI tree whose inner
 // modal component is swapped at runtime (per request_id, per open) and whose
 // event forwarding is gated on a visibility flag read LIVE at event time.
-// RunTui builds one per layer (permission prompt, wire confirmation, session
-// picker, plugin modals) and passes the same flag to ftxui's Modal()
+// TuiApp builds one per layer (permission prompt, wire confirmation, plugin
+// prompt, pickers; plugin views use MakePluginModalHost below) and passes the same flag to ftxui's Modal()
 // decorator, which reads it through a pointer.
 //
 // The signature takes the flag by reference ON PURPOSE. The returned
@@ -25,5 +26,16 @@ namespace minimal::client {
 
 ftxui::Component MakeModalHost(const std::shared_ptr<ftxui::Component>& child,
                                const bool& show);
+
+// The plugin modal layer's host: MakeModalHost's focus behaviour (the shown
+// host is what ftxui::Modal() routes keys to) plus the two things plugin code
+// needs around it. A throw from the plugin's component -- render or event --
+// is contained and logged, never fatal (a throwing render draws nothing that
+// frame). And Escape is the HOST's: it calls `close` before the plugin sees
+// the key, because Modal() gives the layer exclusive input while it is shown,
+// so a plugin that never handles Escape would otherwise trap every key until
+// the terminal is killed.
+ftxui::Component MakePluginModalHost(const std::shared_ptr<ftxui::Component>& child,
+                                     const bool& show, std::function<void()> close);
 
 }  // namespace minimal::client

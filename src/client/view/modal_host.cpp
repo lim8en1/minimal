@@ -6,6 +6,8 @@
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/event.hpp>
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::client {
 
 namespace {
@@ -49,7 +51,60 @@ private:
     const bool* show_;
 };
 
+// Same focus overrides as ModalHostImpl (see there for why they are what
+// makes keys reach the modal at all); the plugin modal used to be a plain
+// Renderer+CatchEvent, so with it open every key -- Escape and ctrl+q
+// included -- was dropped and the UI read as frozen.
+class PluginModalHostImpl : public ComponentBase {
+public:
+    PluginModalHostImpl(std::shared_ptr<Component> slot, const bool* show,
+                        std::function<void()> close)
+        : slot_(std::move(slot)), show_(show), close_(std::move(close)) {}
+
+private:
+    Element OnRender() override {
+        if (!*slot_) return emptyElement();
+        try {
+            return (*slot_)->Render();
+        } catch (const std::exception& error) {
+            common::DefaultLogger().error("plugin modal threw: {}", error.what());
+        } catch (...) {
+            common::DefaultLogger().error("plugin modal threw a non-standard exception");
+        }
+        return emptyElement();
+    }
+    bool OnEvent(Event event) override {
+        if (!*show_ || !*slot_) return false;
+        if (event == Event::Escape) {
+            if (close_) close_();
+            return true;
+        }
+        // Plugin component code: a throw escaping into the ftxui loop would
+        // std::terminate the process. Logged, and the event treated as
+        // consumed.
+        try {
+            return (*slot_)->OnEvent(std::move(event));
+        } catch (const std::exception& error) {
+            common::DefaultLogger().warn("plugin modal view threw on event: {}", error.what());
+        } catch (...) {
+            common::DefaultLogger().warn("plugin modal view threw on event (non-standard exception)");
+        }
+        return true;
+    }
+    bool Focusable() const override { return *show_ && (bool)*slot_; }
+    Component ActiveChild() override { return *show_ ? *slot_ : nullptr; }
+
+    std::shared_ptr<Component> slot_;
+    const bool* show_;
+    std::function<void()> close_;
+};
+
 }  // namespace
+
+ftxui::Component MakePluginModalHost(const std::shared_ptr<ftxui::Component>& child,
+                                     const bool& show, std::function<void()> close) {
+    return Make<PluginModalHostImpl>(child, &show, std::move(close));
+}
 
 ftxui::Component MakeModalHost(const std::shared_ptr<ftxui::Component>& child,
                                const bool& show) {

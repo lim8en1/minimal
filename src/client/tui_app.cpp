@@ -426,42 +426,10 @@ void TuiApp::BuildModals() {
     // can never preempt the security UI, which is the invariant the nesting
     // itself enforces (view/modal_stack.hpp).
     //
-    // NOT MakeModalHost: a throwing PLUGIN modal must hide itself for the
-    // frame (never fatal), so the render side keeps its own containment.
-    auto plugin_modal_render = Renderer([child = plugin_modal_child_] {
-        if (!*child) return emptyElement();
-        try {
-            return (*child)->Render();
-        } catch (const std::exception& error) {
-            common::DefaultLogger().error("plugin modal threw: {}", error.what());
-        } catch (...) {
-            common::DefaultLogger().error("plugin modal threw a non-standard exception");
-        }
-        return emptyElement();
-    });
-    plugin_modal_host_ = CatchEvent(plugin_modal_render, [this](const Event& event) {
-        if (!show_plugin_modal_ || !*plugin_modal_child_) return false;
-        // Host-level close, ahead of the plugin: FTXUI's Modal() gives this
-        // component exclusive input while show_plugin_modal_ is true, so
-        // HandleGlobalKey's own toggle keybinding can never run again to
-        // close it (see ClosePluginModal's header comment). A plugin whose
-        // own component neither consumes Escape nor otherwise clears the
-        // flag would otherwise trap every key until the terminal is killed.
-        if (event == Event::Escape) {
-            ClosePluginModal(env_.plugin_views, plugin_modal_child_, show_plugin_modal_);
-            return true;
-        }
-        // Plugin component code: a throw escaping into the ftxui loop would
-        // std::terminate the process. Contained like the render side above --
-        // logged, and the event treated as consumed.
-        try {
-            return (*plugin_modal_child_)->OnEvent(event);
-        } catch (const std::exception& error) {
-            common::DefaultLogger().warn("plugin modal view threw on event: {}", error.what());
-        } catch (...) {
-            common::DefaultLogger().warn("plugin modal view threw on event (non-standard exception)");
-        }
-        return true;
+    // The host closes it on Escape (ClosePluginModal) and contains the
+    // plugin's throws -- see MakePluginModalHost.
+    plugin_modal_host_ = MakePluginModalHost(plugin_modal_child_, show_plugin_modal_, [this] {
+        ClosePluginModal(env_.plugin_views, plugin_modal_child_, show_plugin_modal_);
     });
     modals_.Set(ModalId::kPluginModal, plugin_modal_host_);
 

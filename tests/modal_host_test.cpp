@@ -1,6 +1,7 @@
 // Regression tier for src/client/view/modal_host.{hpp,cpp}: the modal-layer
-// host that app.cpp's four swappable-child modals (permission prompt, wire
-// confirmation, session picker, plugin modals) are built on.
+// hosts the TUI's swappable-child modals are built on (MakeModalHost:
+// permission prompt, wire confirmation, pickers; MakePluginModalHost: plugin
+// views).
 //
 // The bug this locks out: the first handlers captured the visibility flag BY
 // VALUE, latching the startup `false` forever. The modal still rendered
@@ -16,6 +17,7 @@
 #include "ftxui_harness.hpp"
 #include "minimal/client/view/modal_host.hpp"
 
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -132,4 +134,45 @@ TEST_CASE("MakeModalHost: render mirrors the child slot", "[modal_host]") {
     std::vector<std::string> seen;
     *child_slot = MakeRecordingChild(seen);
     CHECK_THAT(RenderFrame(host), Catch::Matchers::ContainsSubstring("modal body"));
+}
+
+TEST_CASE("MakePluginModalHost: keys reach the plugin through ftxui::Modal()",
+          "[modal_host][regression]") {
+    // The /mcp freeze: the plugin layer was a plain Renderer+CatchEvent, so
+    // once it opened Modal()'s Container saw nothing focusable and dropped
+    // every key -- the filter, Escape, even ctrl+q.
+    auto child_slot = std::make_shared<ftxui::Component>();
+    bool show = false;
+    int closes = 0;
+    auto host = minimal::client::MakePluginModalHost(child_slot, show, [&] {
+        ++closes;
+        show = false;
+    });
+    auto main = ftxui::Renderer([] { return ftxui::text("main"); });
+    auto modal = Modal(main, host, &show);
+
+    std::vector<std::string> seen;
+    *child_slot = MakeRecordingChild(seen);
+    show = true;
+
+    CHECK(SendEvent(modal, ftxui::Event::Character("a")));
+    REQUIRE(seen == std::vector<std::string>{"a"});
+
+    // Escape is the host's: it closes, and the plugin never sees it.
+    CHECK(SendEvent(modal, ftxui::Event::Escape));
+    CHECK(closes == 1);
+    CHECK_FALSE(show);
+    CHECK(seen.size() == 1);
+}
+
+TEST_CASE("MakePluginModalHost: a throwing plugin is contained", "[modal_host]") {
+    auto child_slot = std::make_shared<ftxui::Component>();
+    bool show = true;
+    auto host = minimal::client::MakePluginModalHost(child_slot, show, [] {});
+    *child_slot = ftxui::CatchEvent(
+        ftxui::Renderer([]() -> ftxui::Element { throw std::runtime_error("render"); }),
+        [](const ftxui::Event&) -> bool { throw std::runtime_error("event"); });
+
+    CHECK(SendEvent(host, ftxui::Event::Character("x")));   // consumed, not fatal
+    CHECK(RenderFrame(host).find("render") == std::string::npos);
 }
