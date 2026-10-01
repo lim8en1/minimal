@@ -115,7 +115,7 @@ endif()
 
 # The TUI client and the headless -p mode are one binary: `minimal` dispatches on
 # argv. -p is the smallest real client and doubles as the end-to-end test harness.
-add_executable(minimal app.cpp client_entry.cpp headless.cpp tui_app.cpp)
+add_executable(minimal app.cpp client_entry.cpp headless.cpp tui_app.cpp tui_commands.cpp)
 target_link_libraries(minimal PRIVATE minimal::client_core)
 
 # Find libminimal_client_core next to the binary, in the build tree and once
