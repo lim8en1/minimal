@@ -138,3 +138,18 @@ TEST_CASE("CommandCatalogCache: a synchronous fetch completes inside Get without
     cache.Get({}, "/repo");   // starts and completes the fetch
     CHECK(NamesOf(cache.Get({}, "/repo")) == std::vector<std::string>{"now"});
 }
+
+TEST_CASE("UsableWithoutSession: prompt-submitting commands start the session, other session-bound ones do not") {
+    using minimal::client::UsableWithoutSession;
+    CommandCatalogEntry prompt;
+    prompt.name = "review";
+    prompt.submits_prompt = true;   // requires_session defaults to true
+    CommandCatalogEntry bound;
+    bound.name = "compact";
+    CommandCatalogEntry free_cmd;
+    free_cmd.name = "help";
+    free_cmd.requires_session = false;
+    CHECK(UsableWithoutSession(prompt));
+    CHECK_FALSE(UsableWithoutSession(bound));
+    CHECK(UsableWithoutSession(free_cmd));
+}

@@ -49,6 +49,10 @@ the project walk.
   other command-registry collision. Project commands load into their own
   per-root registry, so they never collide at startup; shadowing is decided
   at lookup (above).
+- A command can start a session: run it on a fresh tab (after picking a
+  model/agent if you like) and the client creates the session with the staged
+  model and agent, then runs the command on it. `model:`/`agent:` frontmatter
+  overrides only that command's turn.
 - Sources run in the session's project root, over the shared sidecar
   launcher (`src/server/sidecar`), with an allowlisted environment and stdin
   at `/dev/null`.

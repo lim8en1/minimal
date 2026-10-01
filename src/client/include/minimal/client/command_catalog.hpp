@@ -51,7 +51,9 @@ struct CommandCatalogEntry {
 };
 
 // True when the command is usable on a tab with NO session: either the
-// server marks it requires_session=false, or it is one of the two
+// server marks it requires_session=false, it submits a prompt (a PromptShorthand
+// such as a markdown /review: the host creates the session first, exactly as a
+// first chat message does, then runs the command on it), or it is one of the two
 // desired-state commands (/agent, /model) whose bare form opens a
 // client-owned picker and whose named form sets the tab's desired state --
 // neither ever refuses for want of a session (app.cpp's submit_command
@@ -62,7 +64,7 @@ struct CommandCatalogEntry {
 // is client-side by design (the server's taxonomy is per-command, and these
 // two are per-invocation).
 inline bool UsableWithoutSession(const CommandCatalogEntry& entry) {
-    return !entry.requires_session || entry.name == "agent" || entry.name == "model";
+    return !entry.requires_session || entry.submits_prompt || entry.name == "agent" || entry.name == "model";
 }
 
 // True when the command is usable on a SUBAGENT tab. A child's command

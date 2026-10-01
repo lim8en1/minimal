@@ -866,7 +866,8 @@ void TuiApp::SubmitChat(const std::string& text) {
 // Everything the client's own table does not handle. SESSIONLESS TABS: a
 // command the server catalog marks requires_session is refused client-side,
 // visibly, without creating a session; the genuinely sessionless ones ride
-// RunSessionlessCommand.
+// RunSessionlessCommand, and prompt-submitting ones (markdown commands) start
+// the session themselves.
 void TuiApp::SubmitCommand(const std::string& line) {
     if (command_router_.Dispatch(line)) return;
     if (!app_->FocusedSessionId().empty()) {
@@ -881,12 +882,14 @@ void TuiApp::SubmitCommand(const std::string& line) {
     const auto parsed = SplitCommand(line);
     bool known = false;
     bool sessionless = false;
+    bool submits_prompt = false;
     const auto scope = CommandScope();
     const bool commands_listed = command_catalog_cache_->Listed(scope.session_id, scope.project_root);
     for (const auto& entry : *CurrentCatalog()) {
         if (entry.name == parsed.name) {
             known = true;
             sessionless = !entry.requires_session;
+            submits_prompt = entry.submits_prompt;
             break;
         }
     }
@@ -894,6 +897,11 @@ void TuiApp::SubmitCommand(const std::string& line) {
     if (tab.empty()) return;
     if (!known && commands_listed) {
         app_->TabNotice(tab, "unknown command: /" + parsed.name + " (try /help)");
+    } else if (known && !sessionless && submits_prompt) {
+        // A prompt command starts the session, like a first message: the
+        // command parks on the tab, EnsureSession creates the session with
+        // the staged model/agent, then the command runs on the new stream.
+        app_->SubmitCommand(tab, line);
     } else if (!sessionless) {
         app_->TabNotice(tab, "/" + parsed.name + " needs a session; send a message to start one first");
     } else {
