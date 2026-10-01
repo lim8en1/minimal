@@ -1557,6 +1557,33 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
             }
             entry.connection.max_tokens_field = field.get<std::string>();
         }
+        // Transport timeouts, all optional, all in milliseconds. A local
+        // backend prefilling a huge prompt needs a longer first_byte than the
+        // defaults; a wrong type or a non-positive value is a named parse
+        // error rather than a silently ignored key.
+        if (provider_normalized.contains("timeouts")) {
+            const auto& timeouts = provider_normalized.at("timeouts");
+            if (!timeouts.is_object()) {
+                throw std::runtime_error("providers.json: " + where +
+                                         " field \"timeouts\" must be an object");
+            }
+            const auto read_ms = [&](const char* key, std::chrono::milliseconds& target) {
+                if (!timeouts.contains(key)) return;
+                const auto& value = timeouts.at(key);
+                constexpr std::int64_t kMaxMs = 24LL * 3600 * 1000;
+                if (!value.is_number_integer() || value.get<std::int64_t>() <= 0 ||
+                    value.get<std::int64_t>() > kMaxMs) {
+                    throw std::runtime_error("providers.json: " + where + " timeouts." + key +
+                                             " must be an integer in 1.." +
+                                             std::to_string(kMaxMs) + " (milliseconds)");
+                }
+                target = std::chrono::milliseconds(value.get<std::int64_t>());
+            };
+            read_ms("connect_ms", entry.connection.connect_timeout);
+            read_ms("request_ms", entry.connection.request_timeout);
+            read_ms("stream_idle_ms", entry.connection.stream_idle_timeout);
+            read_ms("first_byte_ms", entry.connection.first_byte_timeout);
+        }
         if (provider_normalized.contains("headers") && provider_normalized.at("headers").is_array()) {
             for (const auto& pair : provider_normalized.at("headers")) {
                 if (pair.is_array() && pair.size() == 2 && pair[0].is_string() &&
@@ -1617,6 +1644,10 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
             resolved.provider.model_name = model_name;
             resolved.provider.headers = entry.connection.headers;
             resolved.provider.max_tokens_field = entry.connection.max_tokens_field;
+            resolved.provider.connect_timeout = entry.connection.connect_timeout;
+            resolved.provider.request_timeout = entry.connection.request_timeout;
+            resolved.provider.stream_idle_timeout = entry.connection.stream_idle_timeout;
+            resolved.provider.first_byte_timeout = entry.connection.first_byte_timeout;
             resolved.parameters = InheritParameters(provider, model);
             resolved.max_tokens = InheritNumber<int>(provider, model, "max_tokens", model_where);
             resolved.context_window_tokens =

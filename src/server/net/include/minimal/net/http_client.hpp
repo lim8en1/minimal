@@ -30,6 +30,9 @@ struct HttpRequest {
     std::chrono::milliseconds connect_timeout{5000};
     std::chrono::milliseconds request_timeout{0};  // 0 = uncapped; caps the WHOLE transfer in every mode
     std::chrono::milliseconds idle_timeout{0};     // 0 = disabled; StreamPost() only
+    // Idle limit applied until the first response byte arrives (the server may
+    // be prefilling); 0 = idle_timeout throughout. StreamPost() only.
+    std::chrono::milliseconds first_byte_timeout{0};
     // Optional CURLOPT_RESOLVE entries ("host:port:addr"). For callers that
     // have ALREADY resolved and vetted the host themselves (the tools-web SSRF
     // policy passes the addresses its check validated): the transfer connects
@@ -37,6 +40,9 @@ struct HttpRequest {
     // check-time and connect-time resolution cannot disagree (DNS rebinding
     // TOCTOU). Empty by default -- libcurl resolves normally.
     std::vector<std::string> pinned_resolves;
+    // Polled by libcurl's progress callback (at least ~1/s, bytes or not);
+    // true aborts the transfer with HttpError{Cancelled}. Streaming mode only.
+    std::function<bool()> should_abort;
 };
 
 struct HttpResponse {

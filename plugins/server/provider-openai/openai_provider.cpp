@@ -51,6 +51,7 @@ net::HttpRequest OpenAiProvider::BuildHttpRequest(std::string body, bool streami
     // Never cap total duration of a stream; the idle timeout covers stalls.
     request.request_timeout = streaming ? std::chrono::milliseconds(0) : config_.request_timeout;
     request.idle_timeout = streaming ? config_.stream_idle_timeout : std::chrono::milliseconds(0);
+    request.first_byte_timeout = streaming ? config_.first_byte_timeout : std::chrono::milliseconds(0);
     return request;
 }
 
@@ -61,6 +62,7 @@ llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
     // RETRY ATTEMPT, since the loop calls this method once per attempt.
     net::HttpRequest http_request =
         BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/false, config_.max_tokens_field), /*streaming=*/false);
+    http_request.should_abort = request.should_abort;
 
     net::HttpResponse http_response;
     try {
@@ -89,6 +91,7 @@ llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
 llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request, const llm::StreamEventSink& sink) {
     net::HttpRequest http_request =
         BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/true, config_.max_tokens_field), /*streaming=*/true);
+    http_request.should_abort = request.should_abort;
 
     OpenAiStreamReassembler reassembler;
     net::SseParser sse_parser;

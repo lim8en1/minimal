@@ -93,6 +93,7 @@ llm::ChatRequest BuildSummarizerRequest(std::span<const llm::Message> history,
     // call is served by the session's own provider or small_model, emission
     // is decided by the parameters riding this request (see chat.hpp).
     request.session_id = params.session_id;
+    request.should_abort = params.is_cancelled;
     return request;
 }
 

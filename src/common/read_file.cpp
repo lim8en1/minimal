@@ -64,8 +64,10 @@ std::string ReadFileOrEmpty(const std::filesystem::path& path, std::size_t max_b
     ReadFileResult result = ReadFile(path, max_bytes);
     switch (result.status) {
         case ReadFileResult::Status::kOk: return std::move(result.contents);
-        case ReadFileResult::Status::kNotFound:
-        case ReadFileResult::Status::kCannotOpen: return {};
+        case ReadFileResult::Status::kNotFound: return {};
+        // An unreadable file is not an absent one: callers that rewrite it
+        // (plugins.json) or default it (hooks) would silently discard it.
+        case ReadFileResult::Status::kCannotOpen:
         case ReadFileResult::Status::kIoError:
         case ReadFileResult::Status::kTooLarge: throw std::runtime_error(result.error);
     }

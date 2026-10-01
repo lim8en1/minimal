@@ -22,6 +22,26 @@ namespace minimal::sidecar {
 namespace {
 // Post-kill reap ceiling: how long a bounded waitpid polls before giving up.
 constexpr int kPostKillReapMs = 5000;
+
+// Held from pipe creation through fork: where pipe2(O_CLOEXEC) is unavailable
+// the create-then-fcntl window would otherwise let a concurrent Launch fork a
+// child that inherits another session's pipe ends (its drain then never sees
+// EOF until that unrelated child exits).
+std::mutex& SpawnMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+bool MakeCloexecPipe(int pair[2]) {
+#ifdef __linux__
+    return pipe2(pair, O_CLOEXEC) == 0;
+#else
+    if (pipe(pair) != 0) return false;
+    fcntl(pair[0], F_SETFD, fcntl(pair[0], F_GETFD) | FD_CLOEXEC);
+    fcntl(pair[1], F_SETFD, fcntl(pair[1], F_GETFD) | FD_CLOEXEC);
+    return true;
+#endif
+}
 }  // namespace
 
 // --- ClampRlimit ---------------------------------------------------------------------
@@ -195,14 +215,13 @@ Launched Launch(const LaunchSpec& spec) {
         ScopedFd child;
     };
     std::vector<PipeFds> fds(spec.pipes.size());
+    std::unique_lock<std::mutex> spawn_lock(SpawnMutex());
     for (std::size_t i = 0; i < spec.pipes.size(); ++i) {
         int pair[2];
-        if (pipe(pair) != 0) {
+        if (!MakeCloexecPipe(pair)) {
             proc.spawn_error = std::string("pipe: ") + std::strerror(errno);
             return proc;
         }
-        fcntl(pair[0], F_SETFD, fcntl(pair[0], F_GETFD) | FD_CLOEXEC);
-        fcntl(pair[1], F_SETFD, fcntl(pair[1], F_GETFD) | FD_CLOEXEC);
         if (spec.pipes[i].child_end == PipePlan::ChildEnd::kRead) {
             fds[i].child = ScopedFd(pair[0]);
             fds[i].parent = ScopedFd(pair[1]);
@@ -278,6 +297,7 @@ Launched Launch(const LaunchSpec& spec) {
     }
 
     const pid_t pid = fork();
+    if (pid != 0) spawn_lock.unlock();
     if (pid < 0) {
         proc.spawn_error = std::string("fork: ") + std::strerror(errno);
         return proc;
@@ -288,6 +308,15 @@ Launched Launch(const LaunchSpec& spec) {
         // failure is _exit.
         setsid();  // Own session + process group (pgid == pid): killpg reaches
                    // the whole tree, since group membership is inherited by fork.
+
+        // The host ignores SIGPIPE (a dead gRPC peer must not kill it). An
+        // ignored disposition survives exec and cannot be trapped back by sh,
+        // so restore the default: `cmd | head` must die quietly, not print
+        // EPIPE noise into model-visible output.
+        signal(SIGPIPE, SIG_DFL);
+        sigset_t none;
+        sigemptyset(&none);
+        sigprocmask(SIG_SETMASK, &none, nullptr);
 
         // Length comes from the literal's type: strlen is avoided along with
         // strerror, since this is a post-fork child of a multithreaded process

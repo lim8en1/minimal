@@ -82,6 +82,8 @@ struct TransferState {
     const HttpBodyChunkSink* on_chunk = nullptr;
     bool headers_ready_fired = false;
     bool cancelled_by_sink = false;
+    const std::function<bool()>* should_abort = nullptr;
+    bool cancelled_by_abort = false;
     bool body_exceeded_cap = false;
 
     // Idle-timeout bookkeeping -- StreamPost() only. BOTH directions count as
@@ -91,6 +93,8 @@ struct TransferState {
     // "stalled" -- classified retryable, failed identically until the retries
     // ran out.
     std::chrono::milliseconds idle_timeout{0};
+    std::chrono::milliseconds first_byte_timeout{0};
+    bool saw_response_byte = false;
     std::chrono::steady_clock::time_point last_progress = std::chrono::steady_clock::now();
     curl_off_t last_dlnow = 0;
     curl_off_t last_ulnow = 0;
@@ -203,6 +207,11 @@ long KernelSendQueueBytes(curl_socket_t socket) {
 int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, curl_off_t /*ultotal*/,
                       curl_off_t ulnow) {
     auto& state = *static_cast<TransferState*>(clientp);
+    if (state.should_abort != nullptr && *state.should_abort && (*state.should_abort)()) {
+        state.cancelled_by_abort = true;
+        return 1;
+    }
+    if (state.idle_timeout.count() <= 0) return 0;
     auto now = std::chrono::steady_clock::now();
     // EITHER direction moving counts as progress. Upload progress was
     // commented out here, which made the entire upload phase of a streaming
@@ -222,7 +231,11 @@ int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, cu
         state.last_progress = now;
         return 0;
     }
-    if (now - state.last_progress > state.idle_timeout) return 1;  // nonzero -> abort
+    if (dlnow > 0) state.saw_response_byte = true;
+    const auto limit = (!state.saw_response_byte && state.first_byte_timeout.count() > 0)
+                           ? state.first_byte_timeout
+                           : state.idle_timeout;
+    if (now - state.last_progress > limit) return 1;  // nonzero -> abort
     return 0;
 }
 
@@ -245,6 +258,7 @@ int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, cu
     }
     switch (code) {
         case CURLE_ABORTED_BY_CALLBACK:
+            if (state.cancelled_by_abort) throw HttpError(HttpErrorKind::Cancelled, "aborted by caller");
             throw HttpError(HttpErrorKind::Timeout, "stream idle timeout exceeded");
         case CURLE_OPERATION_TIMEDOUT:
             throw HttpError(HttpErrorKind::Timeout, curl_easy_strerror(code));
@@ -289,6 +303,7 @@ HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode 
     state.on_headers = on_headers;
     state.on_chunk = on_chunk;
     state.idle_timeout = request.idle_timeout;
+    state.first_byte_timeout = request.first_byte_timeout;
     state.last_progress = std::chrono::steady_clock::now();
 
     curl_easy_setopt(handle, CURLOPT_URL, request.url.c_str());
@@ -371,7 +386,8 @@ HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode 
     curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, &WriteCallback);
     curl_easy_setopt(handle, CURLOPT_WRITEDATA, &state);
 
-    if (mode == Mode::Streaming && request.idle_timeout.count() > 0) {
+    if (mode == Mode::Streaming && request.should_abort) state.should_abort = &request.should_abort;
+    if (mode == Mode::Streaming && (request.idle_timeout.count() > 0 || request.should_abort)) {
         curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, &XferInfoCallback);
         curl_easy_setopt(handle, CURLOPT_XFERINFODATA, &state);

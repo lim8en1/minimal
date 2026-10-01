@@ -420,6 +420,7 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
     request.system = std::move(system_and_tools.system);
     request.tools = std::move(system_and_tools.tools);
     request.messages = history_;
+    request.should_abort = is_cancelled_;
     request.model = preset_.provider.model_name;
     request.parameters = preset_.parameters;
     request.max_tokens = FitOutputCap(preset_.max_tokens, preset_.context_window_tokens, input_tokens);
@@ -1426,6 +1427,10 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             prepared.tool_use_id = use->id;
             prepared.tool_name = use->name;
             bool denied_for_input = false;
+            // A cancel landing during an earlier call's prompt must also stop
+            // the remaining gates: otherwise each one raises a fresh prompt
+            // (the epoch bump only released the waiter that was parked).
+            if (!stop_requested && Cancelled()) stop_requested = true;
             if (stop_requested) {
                 // Not prompted, not run: see stop_requested above. Takes the
                 // same skip-Prepare path as an oversized input.

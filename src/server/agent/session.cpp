@@ -940,9 +940,17 @@ void Session::Cancel() {
     // is a read-modify-write, not a context-free store, and Cancel() (a
     // reader-thread method, like SetPaused) holds no other lock here so this
     // adds no deadlock risk.
+    bool was_paused = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        was_paused = IsPaused(pause_state_.load(std::memory_order_relaxed));
         ClearPausedLocked();
+    }
+    if (was_paused) {
+        // Clients show "paused" from the metadata event, and the worker may be
+        // parked on a predicate that held queued turns behind the pause.
+        EmitMetadataChanged();
+        turn_cv_.notify_all();
     }
 }
 
@@ -1271,6 +1279,10 @@ void Session::WorkerMain() {
                 // Idle: the wake paths. All of them hold while paused --
                 // a paused session makes no provider call nobody asked for.
                 if (IsPaused(pause_state_.load(std::memory_order_acquire))) return false;
+                // A finished subagent runs nothing more (the worker drops every
+                // wake silently); without this, steered text left in the queue
+                // keeps the predicate true and the worker spins at full speed.
+                if (subagent_finished_.load(std::memory_order_acquire)) return false;
                 if (ShouldWakeForInjections()) return true;
                 // Real-time steering sweep: a steering message that missed
                 // its turn's flush (the model had already returned EndTurn)

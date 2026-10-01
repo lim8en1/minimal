@@ -61,6 +61,7 @@ net::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool stre
     request.connect_timeout = config_.connect_timeout;
     request.request_timeout = streaming ? std::chrono::milliseconds(0) : config_.request_timeout;
     request.idle_timeout = streaming ? config_.stream_idle_timeout : std::chrono::milliseconds(0);
+    request.first_byte_timeout = streaming ? config_.first_byte_timeout : std::chrono::milliseconds(0);
     return request;
 }
 
@@ -71,6 +72,7 @@ llm::ChatResponse AnthropicProvider::Complete(const llm::ChatRequest& request) {
     const std::string session_id = SessionIdHeaderValue(request);
     net::HttpRequest http_request = BuildHttpRequest(
         GuardedBuildRequestBody(request, /*stream=*/false), /*streaming=*/false, session_id);
+    http_request.should_abort = request.should_abort;
 
     net::HttpResponse http_response;
     try {
@@ -101,6 +103,7 @@ llm::ChatResponse AnthropicProvider::StreamComplete(const llm::ChatRequest& requ
     const std::string session_id = SessionIdHeaderValue(request);
     net::HttpRequest http_request = BuildHttpRequest(
         GuardedBuildRequestBody(request, /*stream=*/true), /*streaming=*/true, session_id);
+    http_request.should_abort = request.should_abort;
 
     AnthropicStreamReassembler reassembler;
     net::SseParser sse_parser;

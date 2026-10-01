@@ -66,7 +66,7 @@ Full example (`bundled/settings.json`):
   "project_context": {
     "enabled": true,
     "files": ["AGENTS.md", "CLAUDE.md"],
-    "max_bytes": 0,
+    "max_bytes": 262144,
     "search_ancestors": false
   },
   "context_contributors": { "disabled": [], "max_bytes_per_section": 16384 },
@@ -203,7 +203,7 @@ requirements paths), delivered to the tools per invocation. See
 |---|---|---|---|
 | `enabled` | bool | `true` | |
 | `files` | string array | `["AGENTS.md", "CLAUDE.md"]` | plain file names only — no `/` or `\`, non-empty |
-| `max_bytes` | int | `0` | `0` = unlimited |
+| `max_bytes` | int | `262144` | `0` = unlimited. A symlinked file resolving outside its directory is ignored |
 | `search_ancestors` | bool | `false` | walk up from the project root |
 
 ### `context_contributors.*`
@@ -279,6 +279,7 @@ is a commented starting point.
 | `headers` | no | object | `{}` | extra HTTP headers sent on every request to this provider — chat *and* `GET <url>/models` discovery (e.g. `{"X-Title": "my-app"}`). Values must be scalars; a name duplicating one the backend already sets (Content-Type, Authorization) is yours to avoid |
 | `openrouter_app_id` | no | bool | `false` | `true`: every request carries OpenRouter's app-attribution headers (`X-Title: minimal`, `HTTP-Referer: https://github.com/lim8en1/minimal`) so usage is credited to the project on OpenRouter's app leaderboard. A same-named `headers` entry wins per name; any other type is a parse error |
 | `max_tokens` | no | int | — | required for the `anthropic` backend (here or per-model) or every request fails |
+| `timeouts` | no | object | see right | transport timeouts in milliseconds, each a positive integer: `connect_ms` (5000), `request_ms` (120000, non-streaming calls), `stream_idle_ms` (60000, silence between bytes once the response started), `first_byte_ms` (600000, wait for the first response byte after the request was sent — raise for local backends prefilling very large prompts) |
 | `max_tokens_field` | no | string | `"max_tokens"` | the JSON body key the output cap is emitted under (`openai` backend only). Newer OpenAI models reject the legacy `max_tokens` key and require `"max_completion_tokens"` — set that here. Any other value is a parse error. Ignored by the `anthropic` backend |
 | `context_window_tokens` | no | int | — | per provider = default for all its models |
 | `variants` | no | array or object | — | effort variants applied to EVERY model under the entry — see [Reasoning-effort variants](#reasoning-effort-variants) below. For a `discover: true` entry this is the autodiscovery recipe (with none, discovery autodetects: every model whose catalog advertises an effort ladder gets that ladder verbatim) |

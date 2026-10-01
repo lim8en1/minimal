@@ -147,7 +147,12 @@ std::optional<std::string> TaskRegistry::Start(StartArgs args, std::string* erro
     // STARTED goes out before any output delta can (the watcher does not
     // exist yet), so a client never sees output for a task it was not told
     // about.
-    EmitEvent(args.handles, *task, BackgroundTaskEvent::State::kStarted);
+    try {
+        EmitEvent(args.handles, *task, BackgroundTaskEvent::State::kStarted);
+    } catch (...) {
+        // A throwing handle callback must not leave a registered, running task
+        // behind an exception: the watcher still starts and owns the child.
+    }
 
     // The containment wrapper. Every plugin seam runs under a guard because
     // plugin code is arbitrary; a detached thread body is the one place where
@@ -158,8 +163,10 @@ std::optional<std::string> TaskRegistry::Start(StartArgs args, std::string* erro
     // allocator itself). Best-effort throughout: the first exception already
     // means something is broken, and a second must not escape.
     auto body = std::move(args.body);
-    auto cleanup = std::move(args.cleanup);
-    auto guarded = [task, body = std::move(body), cleanup = std::move(cleanup),
+    // `cleanup` is copied into the watcher, not moved: the thread-creation
+    // failure path below still needs the original to kill the launched child.
+    const auto cleanup = args.cleanup;
+    auto guarded = [task, body = std::move(body), cleanup,
                     handles = args.handles]() mutable {
         try {
             body(*task, handles);

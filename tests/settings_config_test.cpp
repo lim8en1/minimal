@@ -25,7 +25,7 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
     REQUIRE(config.project_context.files.size() == 2);
     CHECK(config.project_context.files[0] == "AGENTS.md");
     CHECK(config.project_context.files[1] == "CLAUDE.md");
-    CHECK(config.project_context.max_bytes == 0);
+    CHECK(config.project_context.max_bytes == 262144);
     CHECK(config.project_context.search_ancestors == false);
     CHECK(config.session_db_path.empty());
     CHECK(config.logging.level == "info");

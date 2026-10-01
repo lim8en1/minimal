@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -96,13 +97,26 @@ void WriteConfigIfChanged(const std::filesystem::path& path, const std::string& 
 int shutdown_pipe_fds[2] = {-1, -1};
 volatile sig_atomic_t shutdown_signal_fd = -1;
 
-void OnShutdownSignal(int) {
-    const char byte = 1;
-    const int fd = shutdown_signal_fd;
-    if (fd >= 0) {
-        const ssize_t ignored = ::write(fd, &byte, 1);
-        (void)ignored;  // a full pipe means a shutdown is already queued
+// Set once the watcher thread that drains the pipe is about to run. Before
+// that, nothing reads the byte: plugin load, MCP spawns and the sanity check
+// can take seconds (or hang), and a swallowed Ctrl+C leaves the operator with
+// no way out. Until then the signal keeps its default action.
+volatile sig_atomic_t shutdown_watcher_ready = 0;
+
+void OnShutdownSignal(int signal_number) {
+    const int saved_errno = errno;
+    if (shutdown_watcher_ready == 0) {
+        std::signal(signal_number, SIG_DFL);
+        ::raise(signal_number);
+    } else {
+        const char byte = 1;
+        const int fd = shutdown_signal_fd;
+        if (fd >= 0) {
+            const ssize_t ignored = ::write(fd, &byte, 1);
+            (void)ignored;  // a full pipe means a shutdown is already queued
+        }
     }
+    errno = saved_errno;
 }
 
 }  // namespace
@@ -886,6 +900,7 @@ int main(int argc, char** argv) {
     // returns, so it cannot touch `server` during teardown; its one blocking
     // read happens outside any lock, and its RequestShutdown call happens
     // before Wait() can return -- `server` is alive throughout.
+    shutdown_watcher_ready = 1;
     std::thread signal_watcher([&server] {
         char byte = 0;
         while (::read(shutdown_pipe_fds[0], &byte, 1) < 0 && errno == EINTR) {

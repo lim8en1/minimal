@@ -29,8 +29,9 @@ struct ReadFileResult {
 ReadFileResult ReadFile(const std::filesystem::path& path, std::size_t max_bytes = 64u << 20);
 
 // ReadFile for callers where "missing" and "empty" mean the same thing:
-// returns "" when the file cannot be opened, and throws std::runtime_error
-// when it is too large or an I/O error occurs mid-read (a silently truncated
+// returns "" only when the file does not exist, and throws std::runtime_error
+// when it exists but cannot be opened (permissions), is too large, or an I/O
+// error occurs mid-read (a silently truncated
 // string is worse than a loud failure).
 std::string ReadFileOrEmpty(const std::filesystem::path& path,
                             std::size_t max_bytes = 64u << 20);

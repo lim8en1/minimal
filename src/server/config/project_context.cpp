@@ -71,6 +71,17 @@ std::optional<ProjectContext> LoadProjectContext(const std::filesystem::path& pr
             const std::filesystem::path candidate = dir / name;
             ec.clear();
             if (!std::filesystem::is_regular_file(candidate, ec) || ec) continue;
+            // is_regular_file follows symlinks, and the body goes straight into
+            // the system prompt (and to the provider) with no permission
+            // prompt: a cloned repo's AGENTS.md -> ~/.aws/credentials must not
+            // be read. The resolved file has to stay inside the directory it
+            // was found in.
+            {
+                const auto resolved = std::filesystem::weakly_canonical(candidate, ec);
+                if (ec) continue;
+                const auto rel = resolved.lexically_relative(dir);
+                if (rel.empty() || *rel.begin() == "..") continue;
+            }
 
             ProjectContext context;
             context.source_path = candidate;

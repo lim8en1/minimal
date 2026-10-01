@@ -1,5 +1,5 @@
 // ReadFile's statuses, and ReadFileOrEmpty's failure contract on top of them:
-// loud on cap and I/O error, silent only on "cannot open".
+// loud on cap and I/O error, silent only on "not found".
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -112,4 +112,14 @@ TEST_CASE("ReadFile tells missing, unopenable, oversized and empty apart") {
     const auto exact = ReadFile(dir.path() / "exact.txt", 64);
     CHECK(exact.ok());
     CHECK(exact.contents == std::string(64, 'y'));
+}
+
+TEST_CASE("ReadFileOrEmpty throws on an unreadable file instead of reporting it absent") {
+    if (::geteuid() == 0) SKIP("root bypasses file permissions");
+    minimal::testing::TempDir dir;
+    const auto path = dir.path() / "locked.json";
+    std::ofstream(path) << "{}";
+    std::filesystem::permissions(path, std::filesystem::perms::none);
+    CHECK_THROWS_AS(ReadFileOrEmpty(path), std::runtime_error);
+    std::filesystem::permissions(path, std::filesystem::perms::owner_all);
 }

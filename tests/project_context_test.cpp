@@ -228,3 +228,23 @@ TEST_CASE("RenderProjectContextSection: empty body renders nothing", "[project_c
     context.file_name = "AGENTS.md";
     CHECK(RenderProjectContextSection(context).empty());
 }
+
+TEST_CASE("project context: a symlink resolving outside its directory is ignored",
+          "[project_context]") {
+    TempProject project;
+    TempProject outside;
+    outside.Write("secret.txt", "TOP SECRET\n");
+    std::filesystem::create_symlink(outside.dir / "secret.txt", project.dir / "AGENTS.md");
+
+    CHECK_FALSE(LoadProjectContext(project.dir, Settings()).has_value());
+}
+
+TEST_CASE("project context: a symlink staying inside its directory is read", "[project_context]") {
+    TempProject project;
+    project.Write("docs/rules.md", "inside\n");
+    std::filesystem::create_symlink(project.dir / "docs" / "rules.md", project.dir / "AGENTS.md");
+
+    const auto context = LoadProjectContext(project.dir, Settings());
+    REQUIRE(context.has_value());
+    CHECK(context->body == "inside\n");
+}

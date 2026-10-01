@@ -34,7 +34,7 @@ T LoadJsonConfig(const std::filesystem::path& path, const std::string& label,
                  const std::function<T(const nlohmann::json&)>& parse) {
     using Status = common::ReadFileResult::Status;
     common::ReadFileResult file = common::ReadFile(path);
-    if (file.status == Status::kNotFound || file.status == Status::kCannotOpen) {
+    if (file.status == Status::kNotFound) {
         if (absence == AbsencePolicy::kThrow) {
             throw std::runtime_error(label + ".json: " + file.error);
         }

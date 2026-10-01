@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -75,6 +76,13 @@ struct ChatRequest {
     std::string model;
     std::optional<int> max_tokens;
     bool stream = false;
+
+    // Polled by the transport while the call is in flight (at least about once
+    // a second, even when no bytes arrive); returning true abandons the
+    // transfer and the provider throws instead of waiting for the next event
+    // or the idle timeout. Without it a cancel during a silent prefill only
+    // lands when the backend finally speaks. Empty = never abort.
+    std::function<bool()> should_abort;
 
     // The harness session id, set by the agent loop on every request it builds
     // (compaction summarizer calls included). Empty means "unknown" -- tests

@@ -110,11 +110,12 @@ struct ToolsViewSettings {
 // CLAUDE.md sitting IN the project beats an AGENTS.md three levels up, because
 // closer instructions are more specific. Walking stops at the filesystem root,
 // which makes a ~/AGENTS.md a global fallback; that is a feature, not an
-// accident to fence off. max_bytes == 0 means unlimited.
+// accident to fence off. max_bytes == 0 means unlimited. A symlinked file
+// that resolves outside the directory it was found in is ignored.
 struct ProjectContextSettings {
     bool enabled = true;
     std::vector<std::string> files = {"AGENTS.md", "CLAUDE.md"};
-    std::int64_t max_bytes = 0;
+    std::int64_t max_bytes = 262144;
     bool search_ancestors = false;
 };
 
