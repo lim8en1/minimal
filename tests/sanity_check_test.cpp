@@ -906,8 +906,8 @@ TEST_CASE("a preset tool_sources member the source does not know warns",
 }
 
 // A configured member is fine whatever its enabled state -- a disabled MCP
-// server is an auto-enable target (McpToolSource::Activate), not a config
-// error, and Members() lists it.
+// server is not a config error (the user may enable it later), and
+// Members() lists it.
 TEST_CASE("a preset tool_sources member the source knows warns nothing",
           "[sanity_check][naming_model]") {
     Fixture f;

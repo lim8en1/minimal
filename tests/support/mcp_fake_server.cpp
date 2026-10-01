@@ -11,6 +11,7 @@
 //                      all the way to SIGKILL to reap it
 //   die_after_ms:N  -- normal, but the process _exit()s N ms after start
 //                      (dies right after a successful initialize)
+//   hang_init       -- never answers initialize (reads stdin, replies nothing)
 //   garbage         -- emits non-JSON junk on stdout forever (protocol corrupt)
 //
 // Requests are answered one at a time, in order, on the main thread: the
@@ -115,6 +116,9 @@ int main(int argc, char** argv) {
     StartOrphanWatchdog();
     WritePidFileIfRequested();
 
+    if (mode == "hang_init") {
+        for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
     if (mode == "garbage") {
         // Corrupt the protocol channel deliberately: junk on the pipe stdout.
         for (;;) {

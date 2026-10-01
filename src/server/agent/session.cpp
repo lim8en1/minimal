@@ -5,7 +5,9 @@
 
 #include "minimal/agent/provider_resolver.hpp"
 
+#include <chrono>
 #include <exception>
+#include <future>
 #include <stdexcept>
 #include <utility>
 
@@ -16,6 +18,10 @@
 
 namespace minimal::agent {
 namespace {
+
+// Overall budget for activating a preset's tool-source members (MCP connect +
+// tools/list), shared by all members.
+constexpr std::chrono::seconds kToolSourceStartupBudget{5};
 
 // Fails construction loudly, before any member is built, rather than letting
 // a missing wiring field surface later as a silently-dropped event. Every
@@ -309,12 +315,6 @@ Session::Session(SessionParams params, AgentPreset preset,
     // SessionParams::hooks in sync with LoopConfig::hooks by convention.
     hooks_ = loop_config.hooks;
 
-    // Tool-source activation at session start, BEFORE the worker exists:
-    // this thread is allowed to block (the RPC reader is a different one),
-    // and the loop must already carry its final group set when the first
-    // turn can run.
-    RefreshToolSources();
-
     observers_.NotifySessionCreated(InfoSnapshot());
     worker_ = std::thread([this] { WorkerMain(); });
 }
@@ -325,37 +325,79 @@ void Session::RefreshToolSources() {
     // session's life, and an /agent switch was the only way back. The
     // source's own cooldown is what keeps a genuinely-still-down member from
     // being re-attempted on every call here.
-    std::vector<std::string> groups;
+    //
+    // Members activate in PARALLEL under one shared deadline, so one hung
+    // server costs at most kToolSourceStartupBudget, not its full connect +
+    // tools/list timeouts. A member that misses the deadline is left out --
+    // its tools do NOT appear later on their own (a silent tool-set change
+    // would invalidate the provider's cached prefix); the user adds them with
+    // an explicit /mcp enable or reconnect, or the next /agent refresh.
+    struct Outcome {
+        std::optional<std::string> group;
+        std::string error;
+    };
+    struct Pending {
+        std::string source_name;
+        std::string member;
+        std::shared_future<Outcome> result;
+    };
+    std::vector<Pending> pending;
     const tools::ToolSourceRegistry* sources = params_.environment.tool_sources;
     for (const auto& [source_name, members] : preset_.tool_sources) {
         const std::shared_ptr<tools::ToolSource> source =
             sources != nullptr ? sources->Find(source_name) : nullptr;
         for (const auto& member : members) {
-            std::string error;
-            std::optional<std::string> group;
+            auto promise = std::make_shared<std::promise<Outcome>>();
+            pending.push_back({source_name, member, promise->get_future().share()});
             if (source == nullptr) {
-                error = "tool source '" + source_name +
-                        "' is not available (no loaded plugin provides it)";
-            } else {
-                try {
-                    group = source->Activate(member, error);
-                } catch (const std::exception& e) {
-                    error = e.what();
-                } catch (...) {
-                    error = "tool source '" + source_name + "' threw";
-                }
-            }
-            if (group) {
-                groups.push_back(std::move(*group));
+                Outcome outcome;
+                outcome.error = "tool source '" + source_name +
+                                "' is not available (no loaded plugin provides it)";
+                promise->set_value(std::move(outcome));
                 continue;
             }
-            // Surfaced, not swallowed: an error on the outbound stream is the
-            // same channel a failed turn uses, so the client sees WHY the
-            // member's tools never appeared.
-            EmitEvent(SessionEvent{SessionError{error}});
-            logger_.warn("session {}: tool source '{}' member '{}' unavailable: {}",
-                         params_.session_id, source_name, member, error);
+            // Detached: a member past the deadline must not block the session,
+            // and the thread owns everything it touches (source + promise).
+            std::thread([source, member, source_name, promise] {
+                Outcome outcome;
+                try {
+                    outcome.group = source->Activate(member, outcome.error);
+                } catch (const std::exception& e) {
+                    outcome.group.reset();
+                    outcome.error = e.what();
+                } catch (...) {
+                    outcome.group.reset();
+                    outcome.error = "tool source '" + source_name + "' threw";
+                }
+                promise->set_value(std::move(outcome));
+            }).detach();
         }
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + kToolSourceStartupBudget;
+    std::vector<std::string> groups;
+    for (auto& entry : pending) {
+        std::string error;
+        if (entry.result.wait_until(deadline) == std::future_status::ready) {
+            const Outcome& outcome = entry.result.get();
+            if (outcome.group) {
+                groups.push_back(*outcome.group);
+                continue;
+            }
+            error = outcome.error;
+        } else {
+            error = "did not become ready within " +
+                    std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                                       kToolSourceStartupBudget)
+                                       .count()) +
+                    "s; its tools are not loaded (reconnect it with /mcp to add them)";
+        }
+        // Surfaced, not swallowed: an error on the outbound stream is the
+        // same channel a failed turn uses, so the client sees WHY the
+        // member's tools never appeared.
+        EmitEvent(SessionEvent{SessionError{error}});
+        logger_.warn("session {}: tool source '{}' member '{}' unavailable: {}",
+                     params_.session_id, entry.source_name, entry.member, error);
     }
     loop_->SetToolGroups(std::move(groups));
 }
@@ -1241,6 +1283,12 @@ void Session::SetName(std::string name) {
 }
 
 void Session::WorkerMain() {
+    // Tool-source activation (MCP connect + tools/list) runs HERE, before the
+    // first queued item, not in the constructor: Create/Resume RPCs have a
+    // short client deadline and an unreachable server must never fail them.
+    // Work submitted meanwhile simply waits in the queue, so the loop still
+    // carries its final group set before the first provider request.
+    RefreshToolSources();
     while (true) {
         WorkItem item;
         bool wake_turn = false;

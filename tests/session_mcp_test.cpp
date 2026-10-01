@@ -284,7 +284,7 @@ TEST_CASE("CancelTurn wakes a blocked MCP tool call", "[session_mcp]") {
     REQUIRE(fixture.session->WaitForIdleForTesting(std::chrono::seconds(6)));
 }
 
-TEST_CASE("a preset's disabled-but-configured server is auto-enabled at session start",
+TEST_CASE("a preset's disabled-but-configured server stays disabled and the session starts",
           "[session_mcp]") {
     nlohmann::json disabled = StdioEntry("fake", "normal");
     disabled["enabled"] = false;
@@ -292,22 +292,17 @@ TEST_CASE("a preset's disabled-but-configured server is auto-enabled at session 
     fixture.Script(TextResponse("done"));
     fixture.Start();
 
-    // RefreshMcpServers ran in the constructor, before any turn: the
-    // disabled entry must already be live by the time the first turn's tool
-    // list is built.
-    CHECK(fixture.manager->StatusOf("fake").enabled);
-    CHECK(fixture.manager->StatusOf("fake").alive);
-
     REQUIRE(fixture.session->SubmitTurn("go"));
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 
+    // Never auto-enabled, never spawned; its tools are absent.
+    CHECK_FALSE(fixture.manager->StatusOf("fake").enabled);
+    CHECK_FALSE(fixture.manager->StatusOf("fake").alive);
     const auto& requests = fixture.provider->requests();
     REQUIRE_FALSE(requests.empty());
-    bool saw_echo = false;
     for (const auto& def : requests[0].tools) {
-        if (def.name == "mcp__fake__echo") saw_echo = true;
+        CHECK(def.name != "mcp__fake__echo");
     }
-    CHECK(saw_echo);
 }
 
 TEST_CASE("a subagent whose preset requires a dead server does not start", "[session_mcp]") {
@@ -386,4 +381,18 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
     CHECK(outcome.child_session_id.empty());
 
     std::remove(broken_config.c_str());
+}
+
+TEST_CASE("an enabled server that hangs on connect does not stall the session for its full timeout",
+          "[session_mcp]") {
+    Fixture fixture(nlohmann::json::array({StdioEntry("fake", "hang_init")}), {"fake"});
+    fixture.Script(TextResponse("done"));
+    const auto start = std::chrono::steady_clock::now();
+    fixture.Start();
+    REQUIRE(fixture.session->SubmitTurn("go"));
+    REQUIRE(fixture.session->WaitForIdleForTesting(9s));
+    CHECK(std::chrono::steady_clock::now() - start < 9s);
+    for (const auto& def : fixture.provider->requests().at(0).tools) {
+        CHECK(def.name.rfind("mcp__fake__", 0) != 0);
+    }
 }
