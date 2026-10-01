@@ -1,6 +1,7 @@
 #include "minimal/agent/agent_loop.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <limits>
 #include <mutex>
@@ -35,6 +36,28 @@ std::vector<const llm::ToolUseBlock*> ToolUsesOf(const llm::Message& message) {
 // at all short of this one. Truncation, not an error: a large result is not
 // a refusal the model needs to adapt its call to, just content it should
 // know was cut.
+// A provider's "this request does not fit the model's window" refusal. There
+// is no portable error code -- Anthropic, OpenAI and the local servers each
+// phrase it differently -- so this is a message heuristic over a non-retryable
+// 400/413. A false positive costs one compaction attempt; a false negative is
+// the old behaviour (the turn fails).
+bool IsContextOverflow(const llm::LlmError& error) {
+    if (error.category() != llm::LlmErrorCategory::RequestError) return false;
+    if (error.http_status() && *error.http_status() != 400 && *error.http_status() != 413) {
+        return false;
+    }
+    std::string message = error.what();
+    std::transform(message.begin(), message.end(), message.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (const char* needle :
+         {"context length", "context_length", "context window", "maximum context",
+          "prompt is too long", "input is too long", "too many tokens", "exceeds the limit",
+          "reduce the length", "request too large", "tokens exceed"}) {
+        if (message.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
 void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes) {
     if (max_bytes <= 0) return;
     const auto cap = static_cast<std::size_t>(max_bytes);
@@ -458,6 +481,15 @@ std::int64_t AgentLoop::EstimateContextTokens(const std::optional<std::string>& 
     return bytes / 4 + estimate_tokens(history_);
 }
 
+std::int64_t AgentLoop::ToolResultByteCap() const {
+    std::int64_t cap = config_.max_tool_result_bytes;
+    if (preset_.context_window_tokens && *preset_.context_window_tokens > 0) {
+        const std::int64_t window_cap = std::max<std::int64_t>(*preset_.context_window_tokens, 4096);
+        cap = cap > 0 ? std::min(cap, window_cap) : window_cap;
+    }
+    return cap;
+}
+
 void AgentLoop::MaybeCompact() {
     if (!config_.auto_compact) return;
 
@@ -500,7 +532,12 @@ void AgentLoop::MaybeCompact() {
         }
         return;
     }
-    if (tokens_.last_occupancy() < trigger) {
+    // The larger of the backend's last report and a fresh estimate. The report
+    // lags a round: it describes the PREVIOUS request, so a tool result (or
+    // mention) appended since is invisible to it, and one huge result would
+    // sail past the trigger straight into a window overflow.
+    const std::int64_t occupancy = std::max(tokens_.last_occupancy(), EstimateContextTokens());
+    if (occupancy < trigger) {
         // Back under the trigger: the "right after a compaction" window is
         // over, and a halted auto-compaction re-arms.
         auto_compacted_last_check_ = false;
@@ -540,7 +577,7 @@ void AgentLoop::MaybeCompact() {
         auto_compaction_halted_ = true;
         EmitCompactionNotice(
             "auto", "auto-compaction stopped: the context (~" +
-                        std::to_string(tokens_.last_occupancy()) +
+                        std::to_string(occupancy) +
                         " tokens) is still over the trigger (" + std::to_string(trigger) +
                         " tokens) right after the previous compaction; run /compact, raise the "
                         "trigger, or raise memory.compaction_replace_percent");
@@ -1217,7 +1254,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         // Built ONCE per tool round, not per attempt: the request is identical
         // across retries (nothing this loop does mutates preset or registry),
         // and rebuilding it re-serialized the whole history on every retry.
-        const llm::ChatRequest chat_request = BuildChatRequest();
+        llm::ChatRequest chat_request = BuildChatRequest();
         // Set before the call, not from the response: a turn that fails or is
         // cancelled before any response still reports the model it was aimed
         // at, and TurnSummary::model is populated on every exit path.
@@ -1225,12 +1262,28 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         llm::ChatResponse response;
         bool got_response = false;
         bool cancelled_in_backoff = false;
+        bool overflow_recovered = false;
         for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
             try {
                 response = provider_.get().StreamComplete(chat_request, event_sink_);
                 got_response = true;
                 break;
             } catch (const llm::LlmError& error) {
+                // The request did not fit the window (the estimate undercounted,
+                // or the window is smaller than declared): compact once and
+                // resend, instead of failing this turn and every later one.
+                if (!overflow_recovered && config_.auto_compact && IsContextOverflow(error)) {
+                    overflow_recovered = true;
+                    session_.logger.warn(
+                        "session {}: provider rejected the request as too large ({}); "
+                        "compacting and retrying once",
+                        session_.session_id, error.what());
+                    if (Compact("overflow").has_value()) {
+                        chat_request = BuildChatRequest();
+                        --attempt;  // the recovery does not spend a retry
+                        continue;
+                    }
+                }
                 // Retry policy lives here, not in the provider: only the loop
                 // knows whether another attempt is still wanted.
                 if (!error.is_retryable() || attempt == config_.max_retries) {
@@ -1605,7 +1658,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             // THE GLOBAL TOOL-RESULT CEILING (see CapToolResult): applies
             // regardless of which tool produced this, including MCP tools and
             // any third-party plugin tool that caps nothing on its own.
-            CapToolResult(tool_result, config_.max_tool_result_bytes);
+            CapToolResult(tool_result, ToolResultByteCap());
             if (const std::size_t dropped =
                     CapToolDisplay(tool_result, config_.max_tool_display_bytes)) {
                 session_.logger.warn(

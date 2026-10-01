@@ -898,6 +898,71 @@ TEST_CASE("compaction fires past the threshold and never touches the store",
     CHECK(h.store.messages.size() > store_after_first);
 }
 
+TEST_CASE("compaction trigger sees input the last usage report predates",
+          "[agent_loop][compaction]") {
+    // The backend's report describes the PREVIOUS request: a big message
+    // appended since is invisible to it. The estimate catches it.
+    Harness h;
+    h.provider.PushResponse(TextResponse("one"));
+    h.provider.PushResponse(TextResponse("two"));
+
+    int compactions = 0;
+    auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
+                                    const agent::CompactionRequest&) {
+        ++compactions;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    // TextResponse reports occupancy 15, well under the trigger.
+    h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(500)},
+            compactor);
+
+    h.loop->RunTurn(UserText("a"));
+    CHECK(compactions == 0);
+    h.loop->RunTurn(UserText(std::string(8000, 'x')));  // ~2000 tokens by the estimate
+    CHECK(compactions >= 1);
+}
+
+TEST_CASE("a context-overflow refusal compacts and retries once", "[agent_loop][compaction]") {
+    Harness h;
+    h.provider.PushResponse(TextResponse("one"));
+    h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::RequestError,
+                                       "prompt is too long: 300000 tokens > 200000 maximum", 400));
+    h.provider.PushResponse(TextResponse("two"));
+
+    int compactions = 0;
+    auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
+                                    const agent::CompactionRequest&) {
+        ++compactions;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    h.Build({}, agent::LoopConfig{.auto_compact = true}, compactor);
+
+    h.loop->RunTurn(UserText("a"));
+    const auto result = h.loop->RunTurn(UserText("b"));
+
+    CHECK(compactions == 1);
+    CHECK(h.provider.call_count() == 3);
+    CHECK(result.final_text == "two");
+}
+
+TEST_CASE("an unrelated request error is not mistaken for an overflow", "[agent_loop][compaction]") {
+    Harness h;
+    h.provider.PushResponse(TextResponse("one"));
+    h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::RequestError, "invalid model", 400));
+
+    int compactions = 0;
+    auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
+                                    const agent::CompactionRequest&) {
+        ++compactions;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    h.Build({}, agent::LoopConfig{.auto_compact = true}, compactor);
+
+    h.loop->RunTurn(UserText("a"));
+    CHECK_THROWS_AS(h.loop->RunTurn(UserText("b")), llm::LlmError);
+    CHECK(compactions == 0);
+}
+
 TEST_CASE("a zero-usage turn seeds occupancy from the request estimate",
           "[agent_loop][compaction]") {
     // The OpenAI-compatible proxy gap: the backend reports usage 0, which

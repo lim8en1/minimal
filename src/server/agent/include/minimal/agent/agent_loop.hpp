@@ -591,6 +591,10 @@ private:
     // when the mechanics are identical. A non-empty `prompt_override` (/compact
     // <name>) replaces the preset's compression prompt for THIS invocation only;
     // auto-compact and bare /compact never pass one.
+    // The byte ceiling for one tool result: the configured cap, tightened to
+    // what a quarter of the model's window can hold (about 4 bytes a token), so
+    // one result can never fill the context on its own. 0 = no ceiling.
+    std::int64_t ToolResultByteCap() const;
     std::optional<std::size_t> Compact(std::string_view trigger,
                                        std::string_view prompt_override = {});
     void FlushInjectedMessages();
