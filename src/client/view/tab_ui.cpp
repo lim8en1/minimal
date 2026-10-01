@@ -78,7 +78,7 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
     // segment's stable id (LiveTurnSegment::segment_id) -- NOT its vector
     // index. The old index-aligned vector assumed "segments only ever APPEND
     // within a turn", but three paths REMOVE without bumping turn_seq:
-    // RetireCoveredLiveSegments (a mid-turn page apply), the count cap's
+    // LiveTurnBuffer::Retire (a mid-turn page apply), the count cap's
     // trim, and ClearStreamingIfCurrentTurn. The survivors shift down, an
     // index-keyed slot's `seen` watermark then named a DIFFERENT segment,
     // and AppendDelta(text.substr(seen)) spliced the tail of one segment

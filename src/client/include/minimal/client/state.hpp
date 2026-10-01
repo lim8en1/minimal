@@ -44,12 +44,12 @@ public:
     // Streaming caps (see the members below). 2 MiB of live text is far past
     // what a human reads mid-turn; the transcript is authoritative -- the
     // turn-end refresh re-fetches the full persisted text.
-    static constexpr std::size_t kStreamingTextCapBytes = 2 * 1024 * 1024;
+    static constexpr std::size_t kStreamingTextCapBytes = LiveTurnBuffer::kTextCapBytes;
     // Live-segment count cap: the NEWEST segments are kept; on overflow the
-    // live_view_truncated_ latch stands and the status bar's {activity}
+    // truncation latch stands and the status bar's {activity}
     // segment carries an "earlier rows hidden" suffix while it does -- the
     // cut is visible in chrome, never as a synthetic row in the stream.
-    static constexpr std::size_t kMaxLiveSegments = 100;
+    static constexpr std::size_t kMaxLiveSegments = LiveTurnBuffer::kMaxSegments;
     // Consecutive scrollback-refresh failures after which the tab surfaces a
     // visible error notice (see NoteRefreshFailed). Below this the existing
     // frame-pass backoff (scrollback_refresh.hpp) handles the quiet retry;
@@ -196,7 +196,7 @@ public:
         bool cancel_requested = false;
 
         // The live view dropped older segments of the current turn (the
-        // kMaxLiveSegments count cap latched live_view_truncated_): the
+        // kMaxLiveSegments count cap latched the live buffer's truncation flag): the
         // status bar's {activity} suffix reports it until the turn-end
         // refresh retires the covered segments. Chrome-only signal -- no
         // synthetic segment exists in the stream.
@@ -404,7 +404,7 @@ public:
     void TickNotice(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now());
 
     // True while any tool is mid-call (started, not yet finished). A plain
-    // scan, not a copy -- unlike CopyToolsLocked, this never touches
+    // scan, not a copy -- unlike ToolRunTracker::Copy, this never touches
     // buffered_output, so it is cheap enough for the render pump to poll every
     // tick (see AppState::FocusedTabHasRunningTool). What it drives: a
     // foreground tool that prints nothing for a while produced no wire
@@ -480,7 +480,7 @@ public:
     // A GetMessages response that arrived after a rewind/redo superseded the
     // fetch that requested it: resolves the pending-fetch bookkeeping
     // (mirroring ApplyScrollbackPage's empty-page branch) WITHOUT touching
-    // scrollback_page_ -- OnSessionRewound already produced the authoritative
+    // the window -- OnSessionRewound already produced the authoritative
     // window, and this response no longer describes it. Deliberately not
     // NoteRefreshFailed: nothing failed, the fetch was just superseded, and
     // that path's failure-streak notice would be spurious here.
@@ -611,58 +611,14 @@ public:
 private:
     void MaybeGoIdleLocked();   // mtx_ held by caller
 
-    // Content-matched retirement of live segments that a scrollback apply
-    // has just proven persisted (mtx_ held by caller). `answered_tool_ids`
-    // carries every tool_use_id whose tool_result block is in the applied
-    // rows; `assistant_text` / `assistant_thinking` every text / thinking
-    // block of applied assistant messages. A Tool segment retires when its
-    // id is answered AND the tool is not still running (background rows
-    // especially: their detached task outlives the acked result); a Text or
-    // Thinking segment retires when its exact text is among the applied
-    // blocks (a cap-truncated segment matches by prefix -- the marker's tail
-    // is client-side presentation loss). This is what lets a fetch apply
-    // MID-TURN without double-rendering: the persisted rows that just landed
-    // replace exactly the live segments they cover, while anything still
-    // streaming or running stays live below them.
-    void RetireCoveredLiveSegments(const std::set<std::string>& answered_tool_ids,
-                                   const std::vector<std::string>& assistant_text,
-                                   const std::vector<std::string>& assistant_thinking);
-
-    // Shared by every live_segments_ append path (text/thinking deltas,
-    // OnToolStarted, OnBackgroundTask): enforces kMaxLiveSegments, keeping the
-    // NEWEST segments. No synthetic marker is inserted -- the overflow only
-    // latches live_view_truncated_, which the status bar reports. Within the
-    // kept segments, Text/Thinking are trimmed BEFORE Tool markers: a marker
-    // is a tiny struct, and its disappearance mid-turn is exactly the "tool
-    // calls invisible until finished" failure -- the persisted rows that
-    // would replace it only arrive with the refresh. (A Tool marker is only
-    // trimmed when the turn is entirely tool calls. The one bug class the
-    // 2026-09 permanent-sentinel design guarded -- an erase pass eating the
-    // marker -- is gone with the marker; the oldest-real-segment erase order
-    // it pinned is unchanged.)
-    // mtx_ held by caller.
-    void TrimLiveSegmentsLocked();
-
-    // Shared by every "drop all live streaming state" site (ClearStreaming,
-    // the full-clear branches of ClearStreamingIfCurrentTurn/
-    // RetireCoveredLiveSegments, OnResyncRequired, OnSessionRewound): resets
-    // the flat text/thinking accumulations, their truncation flags,
-    // is_streaming_, live_segments_, and live_view_truncated_. mtx_ held by
-    // caller.
-    void ClearStreamingLocked();
-
-    // TakeSnapshot's live_segments copy: field-copy of every segment with
-    // each text-bearing segment's copy-on-publish view (see LiveTurnSegment)
-    // republished only when the segment changed since the last deep
-    // snapshot. The working `text` strings never leave SessionState.
-    // mtx_ held by caller.
     void FillCommonLocked(Snapshot& s) const;   // caller holds mtx_
-    bool ArmNewTurnLocked();                     // caller holds mtx_; see the .cpp
+    // A new turn's first event: LiveTurnBuffer::Arm, plus the in-flight edge.
+    // Returns whether a new turn started. Caller holds mtx_.
+    bool ArmNewTurnLocked();
     // The only writers of turn_in_flight_ (caller holds mtx_): each edge
     // counts once (Snapshot::turns_started/turns_ended).
     void BeginTurnLocked();
     void EndTurnLocked(bool completed);
-    std::vector<LiveTurnSegment> CopyLiveSegmentsLocked() const;
 
     mutable std::mutex mtx_;
 
@@ -696,34 +652,12 @@ private:
     bool paused_ = false;
     int64_t context_window_tokens_ = 0;
 
-    // Streaming assistant text
-    // CAPPED (track R2): a runaway turn must not grow client memory (or the
-    // per-frame deep snapshot, which copies both members) without limit.
-    // streaming_accumulated_ stops at kStreamingTextCapBytes -- further
-    // deltas are dropped once a truncation marker has been appended; the
-    // count of live_segments_ stops at kMaxLiveSegments (newest kept, the
-    // overflow latching live_view_truncated_ for the status bar). The
-    // transcript itself is authoritative: the post-turn refresh re-fetches
-    // the full persisted text (scrollback_refresh.hpp).
-    std::string streaming_accumulated_;
-    // Live thinking accumulation (mirrors streaming_accumulated_):
-    // same cap-and-truncate budget as the flat text buffer, plus the turn
-    // stamp the turn-aware clear sites need to retire it only when the
-    // persisted page actually covers its turn.
-    std::string thinking_accumulated_;
-    bool thinking_truncated_ = false;       // thinking_accumulated_ hit its cap
-    uint64_t thinking_turn_seq_ = 0;        // the turn the accumulation belongs to
-    bool streaming_truncated_ = false;      // streaming_accumulated_ hit its cap
-    bool live_view_truncated_ = false;  // overflow dropped older live segments;
-                                        // surfaced by the status bar's {activity}
-    bool is_streaming_ = false;
-    uint64_t turn_seq_ = 0;    // increments when a NEW TURN's stream starts
-    bool turn_ended_ = true;   // armed by OnTurnCompleted/OnError; disarmed by the next delta
+    // The current turn's live material and identity (turn_seq, turn_ended).
+    LiveTurnBuffer live_;
     // The interrupt probe's turn-liveness signal (Snapshot::turn_in_flight):
-    // armed by OnChatSubmitted and by both delta arming branches (the same
-    // places turn_ended_ is disarmed), cleared ONLY by the turn-terminal
-    // events. Never disarmed mid-turn -- unlike turn_ended_, which flips at
-    // every block boundary.
+    // armed by OnChatSubmitted and by every new-turn arming (ArmNewTurnLocked),
+    // cleared ONLY by the turn-terminal events. Never disarmed mid-turn --
+    // unlike turn_ended, which flips at every turn end.
     bool turn_in_flight_ = false;
     std::uint64_t turns_started_ = 0;
     std::uint64_t turns_ended_ = 0;
@@ -732,12 +666,6 @@ private:
     // OnCommandResult); cleared with turn_in_flight_ by the stream-terminal
     // events. Folded into Snapshot::turn_in_flight.
     std::set<std::string> commands_in_flight_;
-    // This turn's live content in arrival order (track C4) -- see
-    // Snapshot::live_segments. Same clear sites as streaming_accumulated_.
-    std::vector<LiveTurnSegment> live_segments_;
-    // Source for LiveTurnSegment::segment_id. Starts at 1: 0 is the
-    // default-constructed "no id" value, never assigned to a real segment.
-    uint64_t next_segment_id_ = 1;
 
     // Pending modals (mutually exclusive).
     PendingPrompts prompts_;
@@ -832,7 +760,7 @@ public:
         bool cancel_requested = false;
 
         // The tab's live view dropped older segments of its current turn
-        // (SessionState's live_view_truncated_ latch, via GetAllTabs) -- the
+        // (the live buffer's truncation latch, via GetAllTabs) -- the
         // status bar's {activity} suffix reports it.
         bool live_view_truncated = false;
 

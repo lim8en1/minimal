@@ -8,7 +8,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -85,7 +87,7 @@ public:
     bool Done(std::string_view tool_use_id) const;
     std::optional<std::chrono::milliseconds> FastestRunningElapsed() const;
     const std::vector<ToolExecutionState>& rows() const { return rows_; }
-    // The snapshot copy; see SessionState::CopyToolsLocked's history.
+    // The snapshot copy; see ToolRunTracker::Copy.
     std::vector<ToolExecutionState> Copy(bool include_output) const;
 
     // See SessionState::ToolsVersion. Readable without the owner's lock.
@@ -107,7 +109,7 @@ private:
 class ScrollbackWindow {
 public:
     // What an applied page proved persisted: the facade retires the live
-    // segments it covers (SessionState::RetireCoveredLiveSegments).
+    // segments it covers (LiveTurnBuffer::Retire).
     struct Coverage {
         bool applied = false;   // rows changed (an empty page changes nothing)
         std::set<std::string> answered_tool_ids;
@@ -195,6 +197,89 @@ private:
     bool refresh_succeeded_ = false;
     int failures_ = 0;   // consecutive resolved-failed fetches
     std::uint64_t rewind_epoch_ = 0;
+};
+
+// The live half of the current turn: the arrival-ordered segments (text,
+// thinking, tool markers) the chat view renders while the turn streams, the
+// flat text/thinking accumulations retirement matches against, and the turn
+// identity (turn_seq / turn_ended) that keys stream recreation and the
+// turn-aware clears. Arming a new turn is reported, not acted on: whether a
+// turn is IN FLIGHT is the facade's (it spans submit, the terminal events and
+// the idle derivation).
+class LiveTurnBuffer {
+public:
+    // 2 MiB of live text is far past what a human reads mid-turn; the
+    // transcript is authoritative -- the turn-end refresh re-fetches the full
+    // persisted text.
+    static constexpr std::size_t kTextCapBytes = 2 * 1024 * 1024;
+    // The NEWEST segments are kept; on overflow the live_view_truncated latch
+    // stands (the status bar reports it) -- never a synthetic row.
+    static constexpr std::size_t kMaxSegments = 100;
+
+    // Consumes the "last turn ended" flag: true when this starts a new turn
+    // (turn_seq bumped, both flat accumulations cleared).
+    bool Arm();
+    // A text / thinking delta. Arms the turn when it is the turn's first
+    // event; returns whether it did.
+    bool AppendText(std::string_view text);
+    bool AppendThinking(std::string_view text);
+    // A tool call's (or reopened background row's) marker in the same
+    // arrival-order timeline.
+    void PushToolMarker(const std::string& tool_use_id);
+    void EndBlock() { is_streaming_ = false; }
+    void EndTurn() {
+        is_streaming_ = false;
+        turn_ended_ = true;
+    }
+
+    // Turn end: each Tool marker keeps a copy of its row's final state (the
+    // turn-end sweep drops the row; the marker stays until the refresh
+    // retires it). Live background rows are skipped: they outlive the turn.
+    void CaptureFinalTools(const std::vector<ToolExecutionState>& rows);
+    // Content-matched retirement after a page apply (see
+    // LiveTurnBuffer::Retire). `tool_done(id)`: whether a
+    // tool's marker may retire once its result row is persisted.
+    void Retire(const std::set<std::string>& answered_tool_ids,
+                const std::vector<std::string>& assistant_text,
+                const std::vector<std::string>& assistant_thinking,
+                const std::function<bool(const std::string&)>& tool_done);
+    // Retires the turns up to `turn_seq`, keeping a newer turn's material.
+    void ClearIfTurn(std::uint64_t turn_seq);
+    // Drops all live material (not the turn identity).
+    void Clear();
+
+    std::uint64_t turn_seq() const { return turn_seq_; }
+    bool turn_ended() const { return turn_ended_; }
+    bool is_streaming() const { return is_streaming_; }
+    bool view_truncated() const { return view_truncated_; }
+    bool has_text() const { return !text_.empty(); }
+    const std::string& flat_text() const { return text_; }
+    const std::string& flat_thinking() const { return thinking_; }
+    // The snapshot copy: every segment, each text-bearing one with its
+    // copy-on-publish view (republished only when it changed).
+    std::vector<LiveTurnSegment> CopySegments() const;
+
+private:
+    void Trim();
+    void PushSegment(LiveTurnSegment::Kind kind, std::uint64_t turn,
+                     const std::string& tool_use_id = {});
+    void AppendCapped(LiveTurnSegment& segment, std::string_view text);
+
+    // The flat accumulations: CAPPED at kTextCapBytes (track R2) -- further
+    // deltas are dropped once the truncation marker is appended.
+    std::string text_;
+    bool text_truncated_ = false;
+    std::string thinking_;
+    bool thinking_truncated_ = false;
+    std::uint64_t thinking_turn_seq_ = 0;   // the turn the thinking accumulation belongs to
+    std::vector<LiveTurnSegment> segments_;
+    // Source for LiveTurnSegment::segment_id. Starts at 1: 0 is the
+    // default-constructed "no id" value, never assigned to a real segment.
+    std::uint64_t next_segment_id_ = 1;
+    bool view_truncated_ = false;   // the count cap dropped older segments
+    bool is_streaming_ = false;     // a text/thinking block is open
+    std::uint64_t turn_seq_ = 0;    // increments when a NEW TURN's stream starts
+    bool turn_ended_ = true;        // armed by the turn's end; consumed by the next turn's first event
 };
 
 }  // namespace minimal::client

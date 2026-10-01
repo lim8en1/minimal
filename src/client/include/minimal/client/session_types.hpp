@@ -55,18 +55,18 @@ struct ToolExecutionState {
 
     // The published live-stdout view: WHAT SNAPSHOTS CARRY. Null unless the
     // snapshot was taken with include_tool_output (only the running-tools
-    // panel renders it). Shared, immutable -- CopyToolsLocked(true) hands
+    // panel renders it). Shared, immutable -- ToolRunTracker::Copy(true) hands
     // every consumer the SAME pointer until the buffer next changes, so a
     // rebuild of the panel (or any other include-output fetch) no longer
     // deep-copies up to tool_output_buffer_bytes_ (64 KiB default) per tool
     // per fetch; it pays one refcount bump.
     // mutable: publishing (rebuilding this pointer from the working buffer)
-    // happens inside CopyToolsLocked -- const, called from TakeLightSnapshot
+    // happens inside ToolRunTracker::Copy -- const, called from TakeLightSnapshot
     // -- the same cache-write-on-read rule as output_dirty below.
     mutable std::shared_ptr<const std::string> buffered_output;
     // Copy-on-publish stamp: set by every buffered_output_working mutation,
     // cleared when the pointer above is (re)published. mutable: publishing
-    // happens inside CopyToolsLocked (const, called from TakeLightSnapshot).
+    // happens inside ToolRunTracker::Copy (const, called from TakeLightSnapshot).
     mutable bool output_dirty = true;
 
     bool started = false;      // true once we've seen a start event for this tool
@@ -107,8 +107,8 @@ struct LiveTurnSegment {
     uint64_t turn_seq = 0;
     // Monotonic per-session identity, assigned at every push site. Stream
     // slots and render caches key on THIS, never on the vector index:
-    // segments are REMOVED mid-turn (RetireCoveredLiveSegments' page apply,
-    // TrimLiveSegmentsLocked's count cap, ClearStreamingIfCurrentTurn) and
+    // segments are REMOVED mid-turn (LiveTurnBuffer::Retire's page apply,
+    // LiveTurnBuffer's count cap, ClearStreamingIfCurrentTurn) and
     // the survivors shift down without any turn_seq bump -- an index-keyed
     // slot fed by seen-watermark appends spliced one segment's tail onto
     // another segment's buffered view, corrupted for the rest of the turn
@@ -129,7 +129,7 @@ struct LiveTurnSegment {
     // newest one, and the flat per-event copies are gone. Null for Tool
     // markers (which carry no text) and for empty segments.
     // mutable: publishing happens inside TakeSnapshot's segment copy, exactly
-    // like the tool-output cache inside CopyToolsLocked.
+    // like the tool-output cache inside ToolRunTracker::Copy.
     mutable std::shared_ptr<const std::string> text_view;
     mutable bool text_dirty = true;
     // True once `text` hit SessionState::kStreamingTextCapBytes: further

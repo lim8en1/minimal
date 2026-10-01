@@ -22,7 +22,7 @@ bool RpcQueue::Submit(Job job, const bool must_run) {
         if (queue_.size() >= capacity_) {
             // Drop-oldest, but never a must-run job: it resolves a latch whose
             // setter has already fired and whose only clearer is the job itself
-            // -- evicting it latched refresh_pending / older_fetch_pending_
+            // -- evicting it latched refresh_pending / the load-older latch
             // forever (refresh_seq is only bumped by a run, never by a drop).
             const auto droppable = std::find_if(queue_.begin(), queue_.end(),
                                                 [](const Item& item) { return !item.must_run; });

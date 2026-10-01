@@ -8,6 +8,27 @@
 
 namespace minimal::client {
 
+namespace {
+// Appended ONCE when a streaming buffer (flat accumulation or a single live
+// segment) hits LiveTurnBuffer::kTextCapBytes; further deltas are dropped
+// after it -- the transcript is authoritative, the turn-end refresh
+// re-fetches the full persisted text.
+constexpr std::string_view kStreamingTruncationMarker =
+    "\n··· live text truncated -- the full text is in the transcript ···\n";
+
+// Appends to a capped flat accumulation: truncate once, append the marker,
+// drop further deltas (appending past the cap would make it decorative).
+void AppendFlatCapped(std::string& buffer, bool& truncated, std::string_view text) {
+    if (truncated) return;
+    buffer.append(text);
+    if (buffer.size() > LiveTurnBuffer::kTextCapBytes) {
+        buffer = TruncateUtf8(buffer, LiveTurnBuffer::kTextCapBytes);
+        buffer.append(kStreamingTruncationMarker);
+        truncated = true;
+    }
+}
+}  // namespace
+
 // --- PendingPrompts ------------------------------------------------------------
 
 void PendingPrompts::SetPermission(PendingPermission request) {
@@ -374,7 +395,7 @@ ScrollbackWindow::Coverage ScrollbackWindow::ApplyPage(const v1::GetMessagesResp
     }
 
     // What the applied rows prove persisted (content-matched retirement --
-    // see SessionState::RetireCoveredLiveSegments).
+    // see LiveTurnBuffer::Retire).
     for (const auto& stored : resp.messages()) {
         const bool assistant = stored.message().role() == v1::ROLE_ASSISTANT;
         for (const auto& block : stored.message().content()) {
@@ -521,6 +542,302 @@ bool ScrollbackWindow::TryBeginOlderFetch() {
     if (older_fetch_pending_) return false;
     older_fetch_pending_ = true;
     return true;
+}
+
+// --- LiveTurnBuffer ----------------------------------------------------------------
+
+// A NEW TURN begins only after the previous one ENDED (TurnCompleted/Error):
+// message stops fire between tool cycles WITHIN a turn, so arming on
+// is_streaming_ alone would re-key the stream mid-turn. The first event of the
+// new turn -- text, thinking or a tool call, whichever arrives first -- bumps
+// turn_seq_ and clears BOTH flat accumulations. Both: the turn-end refresh
+// (async) owns clearing the previous turn's tails (ClearIfTurn), and
+// whichever path arms first consumes turn_ended_ -- three copies of this once
+// each cleared only their own buffer, so a thinking-first turn kept the old
+// turn's text tail and fused the next text onto it.
+bool LiveTurnBuffer::Arm() {
+    if (!turn_ended_) return false;
+    ++turn_seq_;
+    turn_ended_ = false;
+    text_.clear();
+    text_truncated_ = false;
+    thinking_.clear();
+    thinking_truncated_ = false;
+    return true;
+}
+
+void LiveTurnBuffer::PushSegment(LiveTurnSegment::Kind kind, std::uint64_t turn,
+                                 const std::string& tool_use_id) {
+    segments_.push_back(LiveTurnSegment{.kind = kind,
+                                        .turn_seq = turn,
+                                        .segment_id = next_segment_id_++,
+                                        .tool_use_id = tool_use_id});
+}
+
+// Per-segment cap: the flat budget and shape. The APPEND is guarded, not just
+// the resize: once text_truncated is set, further deltas for the segment are
+// dropped entirely, or the string keeps growing past the cap (deep-copied
+// every frame) without ever growing the visible text.
+void LiveTurnBuffer::AppendCapped(LiveTurnSegment& segment, std::string_view text) {
+    if (segment.text_truncated) return;
+    segment.text.append(text);
+    if (segment.text.size() > kTextCapBytes) {
+        segment.text = TruncateUtf8(segment.text, kTextCapBytes);
+        segment.text.append(kStreamingTruncationMarker);
+        segment.text_truncated = true;
+    }
+    // Invalidate the copy-on-publish view (see LiveTurnSegment): the next deep
+    // snapshot republishes this segment -- once, not per consumer.
+    segment.text_dirty = true;
+}
+
+bool LiveTurnBuffer::AppendText(std::string_view text) {
+    // Track C4: a NEW segment starts on a fresh turn (no segments), a block
+    // boundary (is_streaming_ false -- the previous block's stop finalized
+    // it), or when the most recent segment is a TOOL marker (text resumed
+    // after a tool call) -- so the view shows text and tool activity
+    // interleaved in arrival order.
+    const bool new_segment = segments_.empty() || !is_streaming_ ||
+                             segments_.back().kind != LiveTurnSegment::Kind::Text;
+    // turn_ended_ still true means THIS append is the new turn's first -- it
+    // bumps turn_seq_ below, so the segment must already carry that value.
+    const std::uint64_t segment_turn = turn_ended_ ? turn_seq_ + 1 : turn_seq_;
+    if (new_segment) PushSegment(LiveTurnSegment::Kind::Text, segment_turn);
+    AppendCapped(segments_.back(), text);
+    Trim();
+    // A new BLOCK within the same turn (text -> tool -> text, thinking ->
+    // text): without a separator the two blocks' raw markdown fuses into one
+    // document (an unclosed fence from block one would eat block two); a
+    // blank line is the break ComposeDocument puts between rendered blocks.
+    if (!turn_ended_ && !is_streaming_ && !text_.empty() && !text_truncated_) {
+        text_.append("\n\n");
+    }
+    const bool starting_new_turn = Arm();
+    AppendFlatCapped(text_, text_truncated_, text);
+    is_streaming_ = true;
+    return starting_new_turn;
+}
+
+// Thinking gets the text path's budget and turn arming, a SEPARATE flat
+// accumulation, and its own segment kind: reasoning is one of the turn's
+// blocks in arrival order (typically the first).
+bool LiveTurnBuffer::AppendThinking(std::string_view text) {
+    // ARMING RUNS BEFORE THE APPENDS: the clear inside Arm would otherwise
+    // wipe this very delta when it is the turn's first. It also stamps the
+    // turn so ClearIfTurn retires (or keeps) thinking and text consistently.
+    const bool starting_new_turn = Arm();
+    thinking_turn_seq_ = turn_seq_;
+    // Only the BYTES are dropped past the cap: the segment tracking below
+    // still runs, so a turn past 2 MiB of reasoning still opens segments.
+    AppendFlatCapped(thinking_, thinking_truncated_, text);
+    // reasoning -> text -> reasoning stays three segments in arrival order.
+    const bool new_segment = segments_.empty() || !is_streaming_ ||
+                             segments_.back().kind != LiveTurnSegment::Kind::Thinking;
+    if (new_segment) PushSegment(LiveTurnSegment::Kind::Thinking, turn_seq_);
+    AppendCapped(segments_.back(), text);
+    Trim();
+    is_streaming_ = true;
+    return starting_new_turn;
+}
+
+void LiveTurnBuffer::PushToolMarker(const std::string& tool_use_id) {
+    PushSegment(LiveTurnSegment::Kind::Tool, turn_seq_, tool_use_id);
+    // Same count cap the delta paths enforce: a tool-only run would otherwise
+    // grow the segments by one marker per call with no upper bound.
+    Trim();
+}
+
+// Oldest-first, but Text/Thinking go before Tool markers: a marker is a tiny
+// struct, and its disappearance mid-turn is exactly the "tool calls invisible
+// until finished" failure -- the persisted rows that would replace it only
+// arrive with the refresh. A Tool marker is trimmed only when the turn is
+// entirely tool calls. The cut itself is never rendered as a segment: the
+// latch it sets is what the status bar's {activity} suffix reports.
+void LiveTurnBuffer::Trim() {
+    if (segments_.size() <= kMaxSegments) return;
+    view_truncated_ = true;
+    while (segments_.size() > kMaxSegments) {
+        auto victim = std::find_if(segments_.begin(), segments_.end(), [](const LiveTurnSegment& s) {
+            return s.kind != LiveTurnSegment::Kind::Tool;
+        });
+        if (victim == segments_.end()) victim = segments_.begin();   // all tools: drop the oldest
+        segments_.erase(victim);
+    }
+}
+
+void LiveTurnBuffer::Clear() {
+    text_.clear();
+    text_truncated_ = false;
+    thinking_.clear();
+    thinking_truncated_ = false;
+    is_streaming_ = false;
+    segments_.clear();
+    view_truncated_ = false;
+}
+
+void LiveTurnBuffer::CaptureFinalTools(const std::vector<ToolExecutionState>& rows) {
+    // The chat view used to render a marker whose row was swept as NOTHING;
+    // whenever the post-turn refresh was late or never came, the turn's tool
+    // calls simply vanished. Output buffers are not copied: the live row
+    // never renders them.
+    for (auto& segment : segments_) {
+        if (segment.kind != LiveTurnSegment::Kind::Tool || segment.final_tool) continue;
+        for (const auto& row : rows) {
+            if (row.tool_use_id != segment.tool_use_id || ToolRunTracker::IsLiveBackground(row)) {
+                continue;
+            }
+            auto copy = std::make_shared<ToolExecutionState>();
+            copy->tool_use_id = row.tool_use_id;
+            copy->tool_name = row.tool_name;
+            copy->summary = row.summary;
+            copy->input = row.input;
+            copy->started_at_unix_ms = row.started_at_unix_ms;
+            copy->duration = row.duration;
+            copy->started = row.started;
+            copy->is_error = row.is_error;
+            copy->is_background = row.is_background;
+            segment.final_tool = std::move(copy);
+            break;
+        }
+    }
+}
+
+void LiveTurnBuffer::ClearIfTurn(std::uint64_t turn_seq) {
+    // Retire the live material of the turns the persisted page covers (seq <=
+    // the captured turn) -- keeping anything a NEWER turn has streamed since
+    // the fetch was submitted. A blanket clear was the stale-clear bug (the
+    // next turn lost its opening deltas); a blanket keep double-rendered the
+    // retired turn against the rows that now cover it.
+    const auto keep_end = std::stable_partition(
+        segments_.begin(), segments_.end(),
+        [turn_seq](const LiveTurnSegment& segment) { return segment.turn_seq > turn_seq; });
+    if (keep_end == segments_.begin()) {
+        Clear();   // nothing survives: the classic clear
+        return;
+    }
+    // The thinking accumulation is turn-stamped: retire it exactly when the
+    // persisted page covers its turn.
+    if (thinking_turn_seq_ <= turn_seq) {
+        thinking_.clear();
+        thinking_truncated_ = false;
+    }
+    // Rebuild the flat text from the surviving text segments (the blank-line
+    // break mirrors the within-turn block separator).
+    std::string rebuilt;
+    for (auto it = segments_.begin(); it != keep_end; ++it) {
+        if (it->kind != LiveTurnSegment::Kind::Text || it->text.empty()) continue;
+        if (!rebuilt.empty()) rebuilt.append("\n\n");
+        rebuilt.append(it->text);
+    }
+    text_ = std::move(rebuilt);
+    // The rebuild drops whatever pushed the old buffer past the cap (retired
+    // segments go with their turn), so the budget is fresh.
+    text_truncated_ = text_.size() > kTextCapBytes;
+    segments_.erase(keep_end, segments_.end());
+    // The retired segments are exactly what a count-cap overflow would have
+    // dropped; once the page covering them landed, the latch no longer holds.
+    view_truncated_ = false;
+}
+
+void LiveTurnBuffer::Retire(const std::set<std::string>& answered_tool_ids,
+                            const std::vector<std::string>& assistant_text,
+                            const std::vector<std::string>& assistant_thinking,
+                            const std::function<bool(const std::string&)>& tool_done) {
+    // Exact equality for Text/Thinking: the live segment IS the concatenation
+    // of the block's deltas, and the persisted block is the same block
+    // server-side. A cap-truncated segment never equals its block (the marker
+    // tail is client-side presentation loss), so it matches by prefix, with
+    // the marker stripped before comparing.
+    const auto text_matches = [](const LiveTurnSegment& segment,
+                                 const std::vector<std::string>& blocks) {
+        if (blocks.empty()) return false;
+        if (segment.text_truncated) {
+            std::string_view prefix = segment.text;
+            const auto cut = prefix.rfind(kStreamingTruncationMarker);
+            if (cut != std::string_view::npos) prefix.remove_suffix(prefix.size() - cut);
+            if (prefix.empty()) return false;
+            return std::any_of(blocks.begin(), blocks.end(), [prefix](const std::string& block) {
+                return block.size() >= prefix.size() &&
+                       std::string_view(block).substr(0, prefix.size()) == prefix;
+            });
+        }
+        return std::find(blocks.begin(), blocks.end(), segment.text) != blocks.end();
+    };
+    const auto covered = [&](const LiveTurnSegment& segment) {
+        if (segment.kind == LiveTurnSegment::Kind::Tool) {
+            // A still-running tool never retires even though its result row
+            // reached the page: only its ACK result is persisted (a
+            // background row's process keeps producing output; a foreground
+            // row still on the pool has not finished).
+            return answered_tool_ids.contains(segment.tool_use_id) && tool_done(segment.tool_use_id);
+        }
+        return text_matches(segment, segment.kind == LiveTurnSegment::Kind::Text
+                                         ? assistant_text
+                                         : assistant_thinking);
+    };
+    const auto keep_end = std::stable_partition(
+        segments_.begin(), segments_.end(), [&](const LiveTurnSegment& s) { return !covered(s); });
+    if (keep_end == segments_.begin()) {
+        Clear();   // the turn's whole live tail is covered by the page
+        return;
+    }
+    // Rebuild the flat accumulations from the survivors, in the shapes the
+    // append paths maintain: text joined by the blank block separator,
+    // thinking concatenated without one.
+    std::string rebuilt_text;
+    std::string rebuilt_thinking;
+    for (auto it = segments_.begin(); it != keep_end; ++it) {
+        if (it->kind == LiveTurnSegment::Kind::Text && !it->text.empty()) {
+            if (!rebuilt_text.empty()) rebuilt_text.append("\n\n");
+            rebuilt_text.append(it->text);
+        } else if (it->kind == LiveTurnSegment::Kind::Thinking) {
+            rebuilt_thinking.append(it->text);
+        }
+    }
+    text_ = std::move(rebuilt_text);
+    text_truncated_ = text_.size() > kTextCapBytes;
+    thinking_ = std::move(rebuilt_thinking);
+    thinking_truncated_ = thinking_.size() > kTextCapBytes;
+    // is_streaming_ describes the OPEN block, which is by construction the
+    // LAST segment (a tool marker is only pushed after its block closed). If
+    // the surviving tail ends on a Tool marker, the open-block notion goes
+    // with it, so the next delta opens a fresh segment instead of fusing onto
+    // a retired one. Checked on the SURVIVORS (after the erase):
+    // stable_partition moved the covered segments to the end.
+    segments_.erase(keep_end, segments_.end());
+    if (!segments_.empty() && segments_.back().kind == LiveTurnSegment::Kind::Tool) {
+        is_streaming_ = false;
+    }
+    view_truncated_ = false;   // see ClearIfTurn
+}
+
+std::vector<LiveTurnSegment> LiveTurnBuffer::CopySegments() const {
+    // Field-copy: the working `text` never leaves the buffer. Each
+    // text-bearing segment's copy-on-publish view is rebuilt -- one copy of
+    // that ONE segment -- only when it changed since the last deep snapshot,
+    // so settled segments share their view and only the newest pays per delta.
+    std::vector<LiveTurnSegment> out;
+    out.reserve(segments_.size());
+    for (const auto& segment : segments_) {
+        LiveTurnSegment s;
+        s.kind = segment.kind;
+        s.turn_seq = segment.turn_seq;
+        s.segment_id = segment.segment_id;
+        s.text_truncated = segment.text_truncated;
+        s.tool_use_id = segment.tool_use_id;
+        s.final_tool = segment.final_tool;
+        if ((segment.kind == LiveTurnSegment::Kind::Text ||
+             segment.kind == LiveTurnSegment::Kind::Thinking) &&
+            !segment.text.empty()) {
+            if (segment.text_view == nullptr || segment.text_dirty) {
+                segment.text_view = std::make_shared<const std::string>(segment.text);
+                segment.text_dirty = false;
+            }
+            s.text_view = segment.text_view;
+        }
+        out.push_back(std::move(s));
+    }
+    return out;
 }
 
 }  // namespace minimal::client

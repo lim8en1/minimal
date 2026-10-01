@@ -60,7 +60,7 @@ public:
     // `must_run` marks a job the drop-oldest eviction may NEVER drop. Jobs
     // that resolve a latch -- a scrollback refresh (clears the refresh
     // machine's refresh_pending via its refresh_seq bump), an older-page
-    // fetch (clears older_fetch_pending_ inside the job), an EnsureSession
+    // fetch (clears the load-older latch inside the job), an EnsureSession
     // or sessionless command (resolves queued user actions) -- strand that
     // latch forever when evicted: the setter already fired and the job was
     // the only clearer. Keystroke-class jobs (@-mention suggestions) carry
