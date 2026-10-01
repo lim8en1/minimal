@@ -112,6 +112,10 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         // docs/CONFIGURATION.md for the macOS Option+Enter caveat this
         // binding exists to be rebindable away from.
         {"prompt.newline", "alt+enter"},
+        // Prompt undo / redo, also consulted by the editor itself. Not
+        // ctrl+z: the terminal's suspend key.
+        {"prompt.undo", "alt+z"},
+        {"prompt.redo", "ctrl+alt+z"},
         {"app.quit", "ctrl+q"},
     };
     return kDefaults;

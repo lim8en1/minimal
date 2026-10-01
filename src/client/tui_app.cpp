@@ -843,11 +843,14 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // Recall is app-scoped: every tab's editor records into and recalls
         // from the ONE timeline (see prompt_editor.hpp's PromptHistory).
         &prompt_history,
-        // "prompt.newline": lets a user rebind the newline-insert key away
+        // The editor's own actions (prompt.newline / undo / redo), so a
+        // user's rebind takes effect -- e.g. moving the newline key away
         // from Alt+Enter (see prompt_editor.hpp's NEWLINE comment for why a
         // macOS user might need to -- Option+Enter is byte-ambiguous with
         // plain Enter on several terminals until configured).
-        [&keymap](const ftxui::Event& event) { return keymap.Matches("prompt.newline", event); });
+        [&keymap](std::string_view action, const ftxui::Event& event) {
+            return keymap.Matches(action, event);
+        });
     };
     // The stable FTXUI tree node: resolves the FOCUSED tab's editor at
     // render AND event time (a key in the same frame as a tab switch lands

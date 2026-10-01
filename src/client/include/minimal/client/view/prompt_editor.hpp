@@ -14,9 +14,12 @@
 // the kitty protocol is enabled -- cannot be distinguished from submit by
 // any in-app match; enable the terminal setting, or remap the
 // "prompt.newline" action in keybindings.json (e.g. to "shift+enter", or to
-// any key unrelated to Enter) -- MakePromptEditor's `is_newline_event`
+// any key unrelated to Enter) -- MakePromptEditor's `key_matches`
 // parameter below is how RunTui wires that binding in; the fallback used
 // when it is null is IsNewlineEvent's hardcoded default-key candidate list.
+//
+// UNDO: alt+z undoes the last edit, ctrl+alt+z redoes it (PromptUndo below).
+// Not ctrl+z: that is the terminal's suspend key.
 //
 // SOFT WRAP: the prompt body is rendered from WrapPromptContent's visual
 // lines (word-aware, to the terminal width, at most half the screen tall,
@@ -44,6 +47,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -51,6 +55,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <ftxui/component/component.hpp>
@@ -62,6 +67,56 @@
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::client {
+
+// The prompt's undo/redo history ("prompt.undo" / "prompt.redo"): bounded
+// stacks of {content, caret} snapshots. MakePromptEditor records the text as
+// it was BEFORE each edit, and coalesces runs so one undo reverts a word, not
+// a keystroke: consecutive inserts (or consecutive erases) at a contiguous
+// caret merge into one step until whitespace is typed, the caret jumps, or
+// more than kCoalesceGap passes. A whole bracketed paste is one step; every
+// other edit (kill line, completion accept, history recall, newline) is a
+// step of its own. Submit clears both stacks. Loop-thread only.
+class PromptUndo {
+public:
+    struct Snapshot {
+        std::string content;
+        int cursor = 0;
+    };
+    enum class Kind { Insert, Erase, Paste, Other };
+
+    static constexpr std::size_t kMaxSteps = 100;
+    static constexpr auto kCoalesceGap = std::chrono::seconds(1);
+
+    // An edit of `kind` turned `before` into text whose caret is now at
+    // `cursor_after`. `breaks_run` forces a new step (e.g. a typed space).
+    // Any new edit drops the redo stack.
+    void Record(Snapshot before, Kind kind, int cursor_after, bool breaks_run,
+                std::chrono::steady_clock::time_point now);
+    // The caret moved without an edit: the next edit starts a new step.
+    void BreakRun() { run_open_ = false; }
+
+    // Swap `current` for the previous (next) snapshot; nullopt when there is
+    // none. `current` goes onto the opposite stack.
+    std::optional<Snapshot> Undo(Snapshot current);
+    std::optional<Snapshot> Redo(Snapshot current);
+
+    // Drops both stacks (submit). Bumps generation(), which is how the editor
+    // tells "this event submitted" from "this event edited".
+    void Clear();
+    std::uint64_t generation() const { return generation_; }
+
+    std::size_t undo_depth() const { return undo_.size(); }
+    std::size_t redo_depth() const { return redo_.size(); }
+
+private:
+    std::vector<Snapshot> undo_;
+    std::vector<Snapshot> redo_;
+    bool run_open_ = false;
+    Kind run_kind_ = Kind::Other;
+    int run_cursor_ = 0;
+    std::chrono::steady_clock::time_point run_at_{};
+    std::uint64_t generation_ = 0;
+};
 
 // Owned by RunTui (one per app; the editor targets the FOCUSED tab).
 struct PromptEditorState {
@@ -107,6 +162,8 @@ struct PromptEditorState {
     // unsaved draft with a stale recall.
     std::optional<std::size_t> history_cursor;
     std::string history_draft;
+    // Per-tab like the draft it reverts.
+    PromptUndo undo;
 };
 
 // Submitted-line recall (up/down arrow, readline-like). APP-scoped by design
@@ -182,13 +239,13 @@ ftxui::Component MakePromptEditor(
     // instance to every tab's editor: recall is app-scoped by design (see
     // PromptHistory).
     PromptHistory* history = nullptr,
-    // "prompt.newline" (keybindings.json), pre-resolved: null (the default,
-    // every pre-existing call site) falls back to IsNewlineEvent's hardcoded
-    // six-candidate default-key list, unchanged from before this parameter
-    // existed. RunTui passes `[&keymap](event){ return
-    // keymap.Matches("prompt.newline", event); }` so a user's rebind (see
-    // the NEWLINE comment above) actually takes effect.
-    std::function<bool(const ftxui::Event&)> is_newline_event = nullptr);
+    // The editor's own keymap actions -- "prompt.newline", "prompt.undo",
+    // "prompt.redo" (keybindings.json) -- as `matches(action, event)`. RunTui
+    // passes `keymap.Matches` so a user's rebind (see the NEWLINE comment
+    // above) takes effect. Null (the default, test call sites) falls back to
+    // the default keys: IsNewlineEvent's hardcoded candidate list for the
+    // newline, alt+z / ctrl+alt+z for undo / redo.
+    std::function<bool(std::string_view action, const ftxui::Event&)> key_matches = nullptr);
 
 // THE PER-TAB PROMPT EDITOR. A stable outer component in the FTXUI tree that
 // owns one PromptEditorState + one editor Component PER TAB, built lazily on

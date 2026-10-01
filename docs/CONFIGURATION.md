@@ -569,7 +569,7 @@ number the tab bar shows), `group.previous`, `group.next`, `jump.attention`,
 `chat.row_down`, `chat.toggle_collapse`, `chat.toggle_collapse_all`,
 `chat.toggle_thinking_fold`, `chat.toggle_tool_fold`,
 `chat.toggle_timestamps`, `turn.cancel`, `session.pause`, `prompt.newline`,
-`app.quit`.
+`prompt.undo`, `prompt.redo`, `app.quit`.
 
 Modifiers: `ctrl` (or `control`), `alt` (or `option`/`opt`/`meta` — the
 macOS key's spelling), `shift`, joined by `+` in any order. macOS: Apple
@@ -612,6 +612,13 @@ setting isn't an option, rebind `prompt.newline` instead — e.g. to
 `"shift+enter"` (works out of the box on a kitty-protocol-aware terminal) or
 to any letter/digit spec unrelated to Enter (e.g. `"ctrl+alt+n"`), which
 sidesteps the ambiguity rather than needing a distinguishing byte at all.
+
+Prompt undo (`prompt.undo`, default `alt+z`; `prompt.redo`, default
+`ctrl+alt+z`): reverts the last edit to the prompt, per tab. Typing coalesces
+into one step per word (a typed space, a caret jump or a pause over a second
+starts a new one); a whole paste, a kill line (`ctrl+u`/`ctrl+k`), an
+accepted completion and a history recall are one step each. Up to 100 steps;
+submitting clears them. Not `ctrl+z` — that is the terminal's suspend key.
 
 ### ui.json
 

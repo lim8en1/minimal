@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/client/config_file_io.hpp"
+#include "minimal/client/key_event_parser.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/prompt_wrap.hpp"
 #include "minimal/common/logger.hpp"
@@ -148,7 +149,137 @@ std::string CommandPrefixOf(const std::string& text) {
     return text.substr(1);
 }
 
+// The editor's keymap actions at their default keys, for an editor built
+// without a keymap (see the header's `key_matches` comment).
+bool DefaultPromptKeyMatches(std::string_view action, const Event& event) {
+    static const std::vector<Event> kUndo = ParseKeySpec("alt+z");
+    static const std::vector<Event> kRedo = ParseKeySpec("ctrl+alt+z");
+    const auto any_of = [&event](const std::vector<Event>& keys) {
+        return std::find(keys.begin(), keys.end(), event) != keys.end();
+    };
+    if (action == "prompt.newline") return IsNewlineEvent(event);
+    if (action == "prompt.undo") return any_of(kUndo);
+    if (action == "prompt.redo") return any_of(kRedo);
+    return false;
+}
+
+// Undo/redo around the whole editor (PromptUndo). A ComponentBase subclass,
+// not a CatchEvent: recording needs the text AFTER the editor's handlers and
+// the Input have applied the event, and a CatchEvent runs before its child.
+// Its one child stays registered, so focus resolves through it unchanged.
+class UndoableEditor : public ftxui::ComponentBase {
+public:
+    UndoableEditor(ftxui::Component inner, PromptEditorState& state,
+                   std::shared_ptr<bool> pasting,
+                   std::function<bool(std::string_view, const Event&)> key_matches)
+        : state_(state), pasting_(std::move(pasting)), key_matches_(std::move(key_matches)) {
+        Add(std::move(inner));
+    }
+
+    bool OnEvent(Event event) override {
+        // Not mid-paste: a pasted byte that happens to equal the undo key
+        // (a macOS Option glyph) is content.
+        if (!*pasting_ && !event.is_mouse()) {
+            const bool undo = key_matches_("prompt.undo", event);
+            if (undo || key_matches_("prompt.redo", event)) {
+                PromptUndo::Snapshot current{state_.content, state_.cursor_position};
+                auto target = undo ? state_.undo.Undo(std::move(current))
+                                   : state_.undo.Redo(std::move(current));
+                if (target) Restore(std::move(*target));
+                return true;   // consumed even with nothing to undo: never typed as text
+            }
+        }
+
+        PromptUndo::Snapshot before{state_.content, state_.cursor_position};
+        const std::uint64_t generation = state_.undo.generation();
+        const bool was_pasting = *pasting_;
+        const bool handled = ComponentBase::OnEvent(event);
+        // Submitted: the stacks were cleared, and the line is gone for good.
+        if (state_.undo.generation() != generation) return handled;
+        // A new paste never merges into the previous one.
+        if (!was_pasting && *pasting_) state_.undo.BreakRun();
+        if (state_.content == before.content) {
+            if (state_.cursor_position != before.cursor) state_.undo.BreakRun();
+            return handled;
+        }
+        const PromptUndo::Kind kind = KindOf(event, before.content.size());
+        const bool breaks_run =
+            kind == PromptUndo::Kind::Insert &&
+            std::isspace(static_cast<unsigned char>(event.character().front()));
+        state_.undo.Record(std::move(before), kind, state_.cursor_position, breaks_run,
+                           std::chrono::steady_clock::now());
+        return handled;
+    }
+
+private:
+    PromptUndo::Kind KindOf(const Event& event, std::size_t size_before) const {
+        if (*pasting_) return PromptUndo::Kind::Paste;
+        if (event == Event::Backspace || event == Event::Delete) return PromptUndo::Kind::Erase;
+        // A typed printable character (the ctrl+letter bytes are "characters"
+        // to FTXUI too, and kill-line is its own step).
+        if (event.is_character() && !event.character().empty() &&
+            state_.content.size() > size_before) {
+            const auto first = static_cast<unsigned char>(event.character().front());
+            if (first >= 0x20 && first != 0x7f) return PromptUndo::Kind::Insert;
+        }
+        return PromptUndo::Kind::Other;
+    }
+
+    void Restore(PromptUndo::Snapshot snapshot) {
+        state_.content = std::move(snapshot.content);
+        state_.cursor_position =
+            std::clamp(snapshot.cursor, 0, static_cast<int>(state_.content.size()));
+        // The restored text is no longer the recalled history line.
+        state_.history_cursor.reset();
+    }
+
+    PromptEditorState& state_;
+    std::shared_ptr<bool> pasting_;
+    std::function<bool(std::string_view, const Event&)> key_matches_;
+};
+
 }  // namespace
+
+void PromptUndo::Record(Snapshot before, Kind kind, int cursor_after, bool breaks_run,
+                        std::chrono::steady_clock::time_point now) {
+    redo_.clear();
+    const bool coalesce =
+        run_open_ && !breaks_run && kind != Kind::Other && kind == run_kind_ &&
+        (kind == Kind::Paste || (before.cursor == run_cursor_ && now - run_at_ <= kCoalesceGap));
+    if (!coalesce) {
+        undo_.push_back(std::move(before));
+        if (undo_.size() > kMaxSteps) undo_.erase(undo_.begin());
+    }
+    run_open_ = kind != Kind::Other;
+    run_kind_ = kind;
+    run_cursor_ = cursor_after;
+    run_at_ = now;
+}
+
+std::optional<PromptUndo::Snapshot> PromptUndo::Undo(Snapshot current) {
+    if (undo_.empty()) return std::nullopt;
+    redo_.push_back(std::move(current));
+    Snapshot target = std::move(undo_.back());
+    undo_.pop_back();
+    run_open_ = false;
+    return target;
+}
+
+std::optional<PromptUndo::Snapshot> PromptUndo::Redo(Snapshot current) {
+    if (redo_.empty()) return std::nullopt;
+    undo_.push_back(std::move(current));
+    Snapshot target = std::move(redo_.back());
+    redo_.pop_back();
+    run_open_ = false;
+    return target;
+}
+
+void PromptUndo::Clear() {
+    undo_.clear();
+    redo_.clear();
+    run_open_ = false;
+    ++generation_;
+}
 
 namespace {
 // 500 recent entries is far past what arrow-up recall is used for.
@@ -240,14 +371,13 @@ ftxui::Component MakePromptEditor(
     std::function<bool()> session_available,
     std::function<bool()> subagent_read_only,
     std::shared_ptr<bool> pasting, PromptHistory* history,
-    std::function<bool(const ftxui::Event&)> is_newline_event) {
+    std::function<bool(std::string_view action, const ftxui::Event&)> key_matches) {
     using namespace ftxui;
-    // Null (every pre-existing call site): the hardcoded default-key list,
-    // unchanged behavior. RunTui passes a keymap-backed lambda instead (see
-    // the header's `is_newline_event` comment).
+    // Null (every test call site): the default keys. RunTui passes the
+    // keymap instead (see the header's `key_matches` comment).
+    if (!key_matches) key_matches = DefaultPromptKeyMatches;
     const std::function<bool(const Event&)> newline_check =
-        is_newline_event ? std::move(is_newline_event)
-                          : std::function<bool(const Event&)>(IsNewlineEvent);
+        [key_matches](const Event& event) { return key_matches("prompt.newline", event); };
     // Null (every pre-existing call site): a private timeline, same behavior
     // as before, no cross-editor sharing. OWNED BY THE CLOSURES (a shared_ptr
     // captured below), never a factory stack local -- the component outlives
@@ -514,6 +644,7 @@ ftxui::Component MakePromptEditor(
             // THIS tab only.
             hist.Record(line);
             state.history_cursor.reset();
+            state.undo.Clear();
             if (line.front() == '/') {
                 on_command(line);
             } else {
@@ -679,7 +810,9 @@ ftxui::Component MakePromptEditor(
         return false;   // everything else goes to the Input
     });
 
-    return Renderer(with_events,
+    auto undoable = Make<UndoableEditor>(with_events, state, pasting, key_matches);
+
+    return Renderer(undoable,
                     [=, &state, &theme, cached_command_prefix = std::string(),
                      cached_command_session_ok = false,
                      cached_command_subagent = false,

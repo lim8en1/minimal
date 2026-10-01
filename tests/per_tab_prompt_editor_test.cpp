@@ -127,6 +127,18 @@ TEST_CASE("PerTabPromptEditors: submit routes through the focused tab's state",
     CHECK(h.tabs.CurrentState("A").content == "from a");
 }
 
+TEST_CASE("PerTabPromptEditors: undo is per tab", "[prompt_editor][per_tab][undo]") {
+    Harness h(TestTheme());
+    h.focused = "A";
+    h.Type("alpha");
+    h.focused = "B";
+    h.Type("beta");
+    // Undo in B reverts only B's draft.
+    REQUIRE(h.host->OnEvent(ftx::Event::Character("\x1bz")));   // alt+z
+    CHECK(h.tabs.CurrentState("B").content.empty());
+    CHECK(h.tabs.CurrentState("A").content == "alpha");
+}
+
 TEST_CASE("PerTabPromptEditors: the shared history is app-scoped, the cursor per editor",
           "[prompt_editor][per_tab]") {
     Harness h(TestTheme());

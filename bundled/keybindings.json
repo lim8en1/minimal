@@ -38,5 +38,7 @@
   "turn.cancel": "escape",
   "session.pause": "alt+p",
   "prompt.newline": "alt+enter",
+  "prompt.undo": "alt+z",
+  "prompt.redo": "ctrl+alt+z",
   "app.quit": "ctrl+q"
 }
