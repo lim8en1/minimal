@@ -121,7 +121,7 @@ void OnShutdownSignal(int signal_number) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+static int RunServer(int argc, char** argv) {
     // Process-wide, deliberate, and UNCONDITIONAL: the hook executor and the
     // MCP stdio shim both write payloads into pipes a child may close without
     // reading. The shim used to install this lazily -- on first stdio-MCP
@@ -168,6 +168,17 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--version") == 0) {
             std::printf("minimal-server %s\n", minimal::common::Version());
             return 0;
+        } else if (std::strcmp(argv[i], "--listen") == 0) {
+            std::fprintf(stderr, "minimal-server: --listen needs a socket path\n");
+            return 2;
+        } else {
+            // A typo'd flag must not silently start the server on the default
+            // socket (--listen mistyped means a second server nobody addressed).
+            std::fprintf(stderr,
+                         "minimal-server: unknown argument '%s' (known: --listen <path>, "
+                         "--refresh-cost-rates, --version)\n",
+                         argv[i]);
+            return 2;
         }
     }
 
@@ -940,4 +951,18 @@ int main(int argc, char** argv) {
     // any observer-owned worker (session-titler's rename) reach exactly those.
     observers.Shutdown();
     return 0;
+}
+
+int main(int argc, char** argv) {
+    // Everything below the argument parse can throw (plugin discovery, config
+    // loading, registry construction): uncaught, that is std::terminate with
+    // no message, and an operator staring at a dead server with an empty log.
+    try {
+        return RunServer(argc, argv);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "minimal-server: fatal: %s\n", error.what());
+    } catch (...) {
+        std::fprintf(stderr, "minimal-server: fatal: unknown exception\n");
+    }
+    return 1;
 }

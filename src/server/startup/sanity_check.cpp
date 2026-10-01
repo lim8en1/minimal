@@ -216,13 +216,23 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
     }
 
     // A kind two plugins both register: the first wins silently -- make it loud.
+    // The registries' own collision record is reported as Fatal by
+    // check_name_collisions; a Warning for the same kind would say "the first
+    // wins" right beside an error saying the server cannot start.
+    const auto fatal_elsewhere = [](const auto* registry, const std::string& kind) {
+        if (registry == nullptr) return false;
+        for (const auto& collision : registry->collisions()) {
+            if (collision.kind == kind) return true;
+        }
+        return false;
+    };
     std::unordered_map<std::string, std::string> kind_owner;
     for (const auto& record : inputs_.plugin_records) {
         if (record.status != plugins::LoadStatus::Loaded) continue;
         const auto label = record.name.empty() ? record.file.filename().string() : record.name;
         for (const auto& kind : record.Registered("provider")) {
             const auto [it, inserted] = kind_owner.try_emplace(kind, label);
-            if (!inserted) {
+            if (!inserted && !fatal_elsewhere(inputs_.registries.providers, kind)) {
                 results.push_back(Warning("provider_kinds", "provider kind '" + kind + "' is registered by both " +
                                      it->second + " and " + label + "; the first wins"));
             }
@@ -238,7 +248,7 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
         const auto label = record.name.empty() ? record.file.filename().string() : record.name;
         for (const auto& kind : record.Registered("catalog")) {
             const auto [it, inserted] = catalog_owner.try_emplace(kind, label);
-            if (!inserted) {
+            if (!inserted && !fatal_elsewhere(inputs_.registries.model_catalogs, kind)) {
                 results.push_back(Warning("provider_catalogs",
                                           "model catalog for kind '" + kind +
                                               "' is registered by both " + it->second + " and " +
@@ -477,7 +487,7 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
     // the diagnostic actionable -- the name alone does not say which plugin to
     // disable. Tools, commands and services are separate namespaces, so the kind
     // is part of the answer rather than an aside.
-    enum class ClaimKind { kTool, kCommand, kService };
+    enum class ClaimKind { kTool, kCommand, kService, kHookPoint };
     const auto claimants = [this](const std::string& surface, ClaimKind& kind) {
         std::vector<std::string> owners;
         const auto add = [&owners](const std::string& plugin_name) {
@@ -519,12 +529,28 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
             }
             if (!owners.empty()) kind = ClaimKind::kService;
         }
+        if (!owners.empty()) return owners;
+
+        // A hook point collision (name_resolution merges those into the same
+        // fatal list). Without this arm the report read "provided by nothing".
+        if (inputs_.registries.hooks != nullptr) {
+            for (const auto& attr : inputs_.registries.hooks->attributions()) {
+                if (attr.point_name == surface) add(attr.plugin_name);
+            }
+            if (!owners.empty()) kind = ClaimKind::kHookPoint;
+        }
         return owners;
     };
 
     for (const auto& surface : resolution.result.fatal_collisions) {
         ClaimKind kind = ClaimKind::kTool;
         const auto owners = claimants(surface, kind);
+        if (kind == ClaimKind::kHookPoint) {
+            results.push_back(Fatal("name_collisions",
+                                    "hook point '" + surface + "' is registered by " +
+                                        JoinNames(owners) + " -- disable one of the plugins"));
+            continue;
+        }
         if (kind == ClaimKind::kService) {
             results.push_back(Fatal("name_collisions",
                                     "service name '" + surface + "' is provided by " +
@@ -896,6 +922,7 @@ std::vector<CheckResult> StartupSanityCheck::check_default_subagent_model() {
 
 std::vector<CheckResult> StartupSanityCheck::check_subagent_limit() {
     std::vector<CheckResult> results;
+    if (!bundle_.settings_loaded) return results;  // already Fatal under config_parse
     const auto limit = bundle_.settings.max_concurrent_subagents;
     if (limit <= 0) {
         results.push_back(Warning("subagent_limit", "settings.json max_concurrent_subagents is " +

@@ -166,21 +166,6 @@ private:
     // What agent::Launch/Fork borrow from this service.
     agent::LaunchContext MakeLaunchContext();
 
-    // Validates CreateSessionRequest.signals against the router and stages the
-    // session-side consequences onto params: the wake flag (a subscribed
-    // session exists to react, so it wakes for injections), the
-    // channel-instruction context, and the router pointer + selector list
-    // themselves. Actual subscription registration happens later, inside
-    // SessionRegistry::CreateResolved -- atomically with the session becoming
-    // findable, not from this RPC layer -- so this function only STAGES the
-    // decision, it never calls Subscribe. Shared by fresh creation and resume
-    // -- subscriptions never persist across a stream, so a resumed session
-    // gets whatever THIS request declares. No router, or an empty request:
-    // OK, no subscriptions, no wake change.
-    grpc::Status ApplySignals(const v1::CreateSessionRequest& request,
-                              agent::SessionParams& params) const;
-
-
     // The one decrement of attached_, shared by every exit -- the successful
     // detach, the attach-refused exits (which counted themselves first, see
     // OpenSession), and the unwinding exits. Firing the last-client callback

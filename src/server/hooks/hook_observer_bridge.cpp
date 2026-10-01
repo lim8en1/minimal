@@ -26,6 +26,7 @@ void HookObserverBridge::OnTurnCompleted(const agent::SessionInfo& info,
                                          const agent::TurnSummary& summary) {
     dispatcher_.EmitAsync(kStop, nlohmann::json{
                                      {"session_id", info.session_id},
+                                     {"project_root", info.project_root.string()},
                                      {"stop_reason", StopReasonName(summary.stop_reason)},
                                      {"duration_ms", summary.duration.count()},
                                      {"tool_names_invoked", summary.tool_names_invoked},
@@ -36,6 +37,7 @@ void HookObserverBridge::OnToolExecuted(const agent::SessionInfo& info,
                                         const agent::ToolInvocation& invocation) {
     dispatcher_.EmitAsync(kPostToolUse, nlohmann::json{
                                             {"session_id", info.session_id},
+                                            {"project_root", info.project_root.string()},
                                             {"tool_use_id", invocation.tool_use_id},
                                             {"tool_name", invocation.tool_name},
                                             // The registered filter fields: without
