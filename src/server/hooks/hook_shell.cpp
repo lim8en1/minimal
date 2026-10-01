@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "minimal/common/utf8.hpp"
 #include "minimal/sidecar/drain.hpp"
 #include "minimal/sidecar/process.hpp"
 
@@ -50,8 +51,9 @@ std::string FirstLine(std::string_view captured) {
         if (end == std::string_view::npos) break;
         start = end + 1;
     }
-    if (line.size() > kMaxBlockReasonBytes) line = line.substr(0, kMaxBlockReasonBytes);
-    return std::string(line);
+    // Cut on a character boundary and scrub: this is raw subprocess output
+    // that becomes a user-visible reason string.
+    return common::ScrubUtf8(common::TruncateUtf8Bytes(line, kMaxBlockReasonBytes));
 }
 
 }  // namespace

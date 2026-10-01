@@ -9,10 +9,17 @@ namespace {
 // The compaction records that ran at one of this page's seqs. Every record's
 // at_seq is the seq of an active message (the last one when it ran), so each
 // record belongs to exactly the one page holding that message.
+//
+// A delta fetch (after_seq) also owns the records at after_seq itself: a
+// compaction that ran right after the client's newest message has at_seq ==
+// after_seq, belongs to no page the client already has, and would otherwise
+// never be delivered to a client that missed its live event. The client
+// dedupes on (at_seq, created_at), so a repeat is harmless -- and an empty
+// delta still carries it.
 void AttachCompactions(const SessionDatabase& db, const std::string& session_id,
-                       MessagePage& page) {
-    if (page.messages.empty()) return;
-    std::int64_t low = page.messages.front().seq;
+                       MessagePage& page, std::optional<std::int64_t> after_seq = std::nullopt) {
+    if (page.messages.empty() && !after_seq) return;
+    std::int64_t low = after_seq ? *after_seq : page.messages.front().seq;
     std::int64_t high = low;
     for (const auto& stored : page.messages) {
         low = std::min(low, stored.seq);
@@ -33,7 +40,7 @@ MessagePage SessionReader::GetMessages(const std::string& session_id,
 MessagePage SessionReader::GetMessagesAfter(const std::string& session_id,
                                             std::int64_t after_seq, int limit) const {
     MessagePage page = db_.GetMessagesPageAfter(session_id, after_seq, limit);
-    AttachCompactions(db_, session_id, page);
+    AttachCompactions(db_, session_id, page, after_seq);
     return page;
 }
 

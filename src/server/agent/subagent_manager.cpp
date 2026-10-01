@@ -159,7 +159,10 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     // expanded at resolve); an empty list never reaches here because the loop
     // withholds the tool -- reaching this check at all means the model named
     // a preset explicitly, which the error below names.
-    const auto& allowed_subagents = parent->preset().allowed_subagents;
+    // The EFFECTIVE preset (loop_), not the sticky Session::preset(): a per-turn
+    // agent borrow narrows the parent for this turn, and a child must never be
+    // handed the wider sticky allowlists.
+    const auto& allowed_subagents = parent->loop().preset().allowed_subagents;
     if (allowed_subagents.has_value() &&
         std::find(allowed_subagents->begin(), allowed_subagents->end(), preset_name) ==
             allowed_subagents->end()) {
@@ -183,7 +186,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
             // ahead of the explicit choice -- the same rescue CreateResolved's
             // own model_override plumbing needs.
             child_preset = presets_.Resolve(preset_name, parent->info().project_root,
-                                            parent->preset().allowed_skills, spawn_model);
+                                            parent->loop().preset().allowed_skills, spawn_model);
         } else {
             // Nothing more specific: the child inherits its parent's model,
             // unless its preset declares one. PresetDeclaresModel is a cheap
@@ -194,7 +197,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
             // own model.
             if (presets_.PresetDeclaresModel(preset_name, parent->info().project_root)) {
                 child_preset = presets_.Resolve(preset_name, parent->info().project_root,
-                                                parent->preset().allowed_skills, std::nullopt);
+                                                parent->loop().preset().allowed_skills, std::nullopt);
                 spawn_model = std::nullopt;  // the preset's own choice stands
             } else {
                 std::optional<common::ModelRef> fallback;
@@ -213,9 +216,9 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
                                      default_subagent_model_);
                     }
                 }
-                if (!fallback) fallback = parent->preset().model_ref;
+                if (!fallback) fallback = parent->loop().preset().model_ref;
                 child_preset = presets_.Resolve(preset_name, parent->info().project_root,
-                                                parent->preset().allowed_skills, fallback);
+                                                parent->loop().preset().allowed_skills, fallback);
                 spawn_model = std::move(fallback);
             }
         }
@@ -236,7 +239,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
         child_preset.system_prompt = prefix + "\n" + child_preset.system_prompt;
     }
     child_preset.allowed_tools =
-        intersect_allowed(parent->preset().allowed_tools, child_preset.allowed_tools);
+        intersect_allowed(parent->loop().preset().allowed_tools, child_preset.allowed_tools);
     // Skills are already clamped INSIDE Resolve (against this parent's map) --
     // they must be, because a preload entry is consumed at resolve time and a
     // post-resolve clamp could not stop the prompt injection.
@@ -245,8 +248,8 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     {
         std::map<std::string, std::vector<std::string>> clamped;
         for (const auto& [source, members] : child_preset.tool_sources) {
-            const auto parent_members = parent->preset().tool_sources.find(source);
-            if (parent_members == parent->preset().tool_sources.end()) continue;
+            const auto parent_members = parent->loop().preset().tool_sources.find(source);
+            if (parent_members == parent->loop().preset().tool_sources.end()) continue;
             auto kept = intersect_allowed(parent_members->second, members);
             if (!kept.empty()) clamped.emplace(source, std::move(kept));
         }

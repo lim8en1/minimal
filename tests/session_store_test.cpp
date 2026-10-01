@@ -2184,9 +2184,17 @@ TEST_CASE("every compaction is a scrollback record positioned at its last messag
     REQUIRE(newest.compactions.size() == 2);
     const auto older = reader.GetMessages(id, std::optional<std::int64_t>{2}, 10);  // 1, 0
     CHECK(older.compactions.empty());
+    // A delta also carries the record AT after_seq (a client that missed the
+    // live event for a compaction right after its newest message needs it).
     const auto delta = reader.GetMessagesAfter(id, 2, 10);         // seq 3
-    REQUIRE(delta.compactions.size() == 1);
-    CHECK(delta.compactions[0].at_seq == 3);
+    REQUIRE(delta.compactions.size() == 2);
+    CHECK(delta.compactions[0].at_seq == 2);
+    CHECK(delta.compactions[1].at_seq == 3);
+    // ...even when no message is newer.
+    const auto caught_up = reader.GetMessagesAfter(id, 3, 10);
+    CHECK(caught_up.messages.empty());
+    REQUIRE(caught_up.compactions.size() == 1);
+    CHECK(caught_up.compactions[0].at_seq == 3);
 
     // /clear deactivates the checkpoint but keeps the records for scrollback.
     db.ClearCompactionCheckpoint(id);

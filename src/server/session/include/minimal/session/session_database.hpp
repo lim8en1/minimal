@@ -59,7 +59,8 @@ inline constexpr std::string_view kMessagesPageAfterSql =
 // include that tier instead.
 inline constexpr std::string_view kSessionsPageSql =
     "SELECT s.id, s.parent_session_id, s.name, s.name_source, s.project_root,"
-    " s.agent_preset, s.created_at, s.updated_at, s.message_count"
+    " s.agent_preset, s.created_at, s.updated_at, s.message_count,"
+    " s.forked_from_session_id, s.model, s.subagent_model"
     " FROM sessions s"
     " WHERE (?1 IS NULL OR s.project_root = ?1) AND (?2 OR s.parent_session_id IS NULL)"
     " AND s.updated_at <= COALESCE(?3, 9223372036854775807)"

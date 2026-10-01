@@ -416,6 +416,34 @@ std::vector<StoredMessage> DecodeRows(std::vector<RawRow> rows) {
     return out;
 }
 
+// One sessions row -> SessionSummary. Column order is the contract shared by
+// GetSession and kSessionsPageSql (0..11); the two used to carry their own
+// copies of this mapping, and the list query's copy silently lagged the
+// columns the detail query grew (fork source, model overrides).
+SessionSummary ReadSummaryRow(sqlite3_stmt* stmt) {
+    const auto text = [stmt](int column) {
+        return reinterpret_cast<const char*>(sqlite3_column_text(stmt, column));
+    };
+    const auto optional_text = [stmt, &text](int column) -> std::optional<std::string> {
+        if (sqlite3_column_type(stmt, column) != SQLITE_TEXT) return std::nullopt;
+        return std::string(text(column));
+    };
+    SessionSummary summary;
+    summary.session_id = text(0);
+    if (auto parent = optional_text(1)) summary.parent_session_id = std::move(*parent);
+    summary.name = text(2);
+    summary.name_source = text(3);
+    summary.project_root = text(4);
+    summary.agent_preset = text(5);
+    summary.created_at_unix_ms = sqlite3_column_int64(stmt, 6);
+    summary.updated_at_unix_ms = sqlite3_column_int64(stmt, 7);
+    summary.message_count = sqlite3_column_int(stmt, 8);
+    if (auto forked = optional_text(9)) summary.forked_from_session_id = std::move(*forked);
+    if (auto model = optional_text(10)) summary.model = std::move(*model);
+    if (auto sub = optional_text(11)) summary.subagent_model = std::move(*sub);
+    return summary;
+}
+
 }  // namespace
 
 const std::vector<Migration>& DefaultMigrations() { return DefaultMigrationsImpl(); }
@@ -1015,30 +1043,7 @@ std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& ses
         return std::nullopt;  // SQLITE_DONE: the row is not there
     }
 
-    SessionSummary summary;
-    summary.session_id = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 0));
-    if (sqlite3_column_type(query.stmt, 1) == SQLITE_TEXT) {
-        summary.parent_session_id =
-            reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
-    }
-    summary.name = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 2));
-    summary.name_source = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 3));
-    summary.project_root = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 4));
-    summary.agent_preset = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 5));
-    summary.created_at_unix_ms = sqlite3_column_int64(query.stmt, 6);
-    summary.updated_at_unix_ms = sqlite3_column_int64(query.stmt, 7);
-    summary.message_count = sqlite3_column_int(query.stmt, 8);
-    if (sqlite3_column_type(query.stmt, 9) == SQLITE_TEXT) {
-        summary.forked_from_session_id =
-            reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 9));
-    }
-    if (sqlite3_column_type(query.stmt, 10) == SQLITE_TEXT) {
-        summary.model = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 10));
-    }
-    if (sqlite3_column_type(query.stmt, 11) == SQLITE_TEXT) {
-        summary.subagent_model = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 11));
-    }
-    return summary;
+    return ReadSummaryRow(query.stmt);
 }
 
 bool SessionDatabase::SessionExists(const std::string& session_id) const {
@@ -1090,20 +1095,7 @@ std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilt
     std::vector<SessionSummary> out;
     int rc = SQLITE_OK;
     while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
-        SessionSummary summary;
-        summary.session_id = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 0));
-        if (sqlite3_column_type(query.stmt, 1) == SQLITE_TEXT) {
-            summary.parent_session_id =
-                reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
-        }
-        summary.name = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 2));
-        summary.name_source = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 3));
-        summary.project_root = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 4));
-        summary.agent_preset = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 5));
-        summary.created_at_unix_ms = sqlite3_column_int64(query.stmt, 6);
-        summary.updated_at_unix_ms = sqlite3_column_int64(query.stmt, 7);
-        summary.message_count = sqlite3_column_int(query.stmt, 8);
-        out.push_back(std::move(summary));
+        out.push_back(ReadSummaryRow(query.stmt));
     }
     CheckRowLoopEnd(db_, rc, "failed to list sessions");
     return out;

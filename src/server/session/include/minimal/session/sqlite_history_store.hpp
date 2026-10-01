@@ -35,8 +35,10 @@ public:
 
     // --- Session traversal (rewind) ------------------------------------------
     // Thin delegates; the transactions and the active-set semantics live in
-    // SessionDatabase. last_seq_ is deliberately left alone by both: it tracks
-    // the last APPENDED seq, and neither a mark nor an unmark appends.
+    // SessionDatabase. Both re-read last_seq_ from the ACTIVE transcript: a
+    // rewind moves the tail, and until the next append reclaims it every
+    // consumer of last_appended_seq() (the next turn's first_seq, a
+    // compaction's at_seq) must see the tail the user sees.
     bool SupportsRewind() const override { return true; }
     std::int64_t SetDiscardedAfter(std::int64_t target_seq) override;
     std::int64_t UnmarkDiscarded() override;

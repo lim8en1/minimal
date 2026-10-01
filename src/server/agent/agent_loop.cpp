@@ -776,11 +776,20 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
         keep_recent_tokens =
             std::max<std::int64_t>(1, total * (100 - config_.compaction_replace_percent) / 100);
     }
-    std::size_t candidate =
-        config_.compaction_strategy.cut_selector
-            ? config_.compaction_strategy.cut_selector(history_, keep_recent_tokens)
-        : keep_recent_tokens > 0 ? ProposeSummarizeCut(history_, keep_recent_tokens)
-                                 : history_.size() / 2;
+    // Strategy code is plugin code: a throwing selector or summarizer fails
+    // the COMPACTION (flagged by failure_guard, the turn continues
+    // uncompacted), not every turn that crosses the trigger.
+    std::size_t candidate = 0;
+    try {
+        candidate = config_.compaction_strategy.cut_selector
+                        ? config_.compaction_strategy.cut_selector(history_, keep_recent_tokens)
+                    : keep_recent_tokens > 0 ? ProposeSummarizeCut(history_, keep_recent_tokens)
+                                             : history_.size() / 2;
+    } catch (const std::exception& error) {
+        session_.logger.warn("session {}: compaction cut selector threw: {}", session_.session_id,
+                             error.what());
+        return std::nullopt;
+    }
 
     // The STRATEGY declining to cut anything is a DIFFERENT situation from
     // "no safe structural cut exists" below, and must not be handled by the
@@ -941,7 +950,13 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
                                                 {"occupancy_tokens", tokens_.last_occupancy()}});
     }
 
-    const auto result = summarizer(to_compact, *summarizer_provider, params);
+    std::optional<CompactionResult> result;
+    try {
+        result = summarizer(to_compact, *summarizer_provider, params);
+    } catch (const std::exception& error) {
+        session_.logger.warn("session {}: compaction summarizer threw: {}", session_.session_id,
+                             error.what());
+    }
     if (!result) {
         // No compaction this cycle; do not retry on every tool cycle of this turn.
         if (config_.hooks != nullptr) {
@@ -1106,8 +1121,20 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     return cut;
 }
 
+namespace {
+// Closes steering eligibility on EVERY exit from a turn, the throwing ones
+// included: after an LlmError the worker is still "running a turn" for the
+// post-turn bookkeeping, and a submission steered into that window would be
+// answered by nobody.
+struct SteeringCloser {
+    std::atomic<bool>& flag;
+    ~SteeringCloser() { flag.store(false, std::memory_order_release); }
+};
+}  // namespace
+
 TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
     TurnResult result;
+    SteeringCloser steering_closer{turn_open_to_steering_};
     compaction_failed_this_turn_ = false;
     // A stale open flag from a turn that exited via exception (RunTurnLoop's
     // rethrows skip the trailing lower) must not outlive it: steering
@@ -1138,6 +1165,7 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
 
 TurnResult AgentLoop::RunTurn() {
     TurnResult result;
+    SteeringCloser steering_closer{turn_open_to_steering_};
     compaction_failed_this_turn_ = false;
     turn_open_to_steering_.store(false, std::memory_order_release);
     // The wake path: no seed of its own -- the injected messages ARE the user
@@ -1331,6 +1359,27 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             tools::ToolContext ctx;
             bool to_pool = false;
         };
+        // The assistant message carrying these tool_use blocks is already
+        // appended and persisted. A throw anywhere from the gate through the
+        // run (Prepare, input.dump(), a pool Submit) would leave history_ and
+        // the store ending in unanswered tool_use -- a 400 on every later
+        // turn. Unwinding therefore answers them with synthesized errors;
+        // disarmed once the results append below, which repairs for itself.
+        // Declared before the pool guard so it runs after the pool has joined.
+        struct RoundRepairGuard {
+            AgentLoop& loop;
+            const std::vector<const llm::ToolUseBlock*>& tool_uses;
+            const int uncaught = std::uncaught_exceptions();
+            bool armed = true;
+            ~RoundRepairGuard() {
+                if (!armed || std::uncaught_exceptions() <= uncaught) return;
+                try {
+                    loop.RepairOrphanedToolUses(tool_uses);
+                } catch (...) {
+                    // The store is what is failing; the original exception wins.
+                }
+            }
+        } round_repair{*this, tool_uses};
         std::vector<PendingCall> calls;
         calls.reserve(tool_uses.size());
         // "Deny and stop" (PreparedInvocation::stop_turn): once any call of the
@@ -1616,6 +1665,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         }
         pool_.Wait();
 
+        round_repair.armed = false;
         try {
             AppendAndPersist(llm::Message{llm::Role::User, std::move(results)});
         } catch (...) {

@@ -7,9 +7,16 @@
 #include <variant>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/common/utf8.hpp"
 
 namespace minimal::rpc {
 namespace {
+
+// Every free-text field below goes through this: a proto3 `string` holding
+// ill-formed UTF-8 makes the peer's parse reject the WHOLE message, and the
+// text comes from places no one validated -- subprocess output, provider error
+// bodies, plugin messages, a tool's display JSON.
+std::string Clean(std::string_view text) { return common::ScrubUtf8(text); }
 
 // An integral double is narrowed back to a JSON integer -- see the header for
 // why. Guarded on range as well as integrality: a double past int64's limits
@@ -58,7 +65,7 @@ google::protobuf::Value JsonToValue(const nlohmann::json& value) {
             out.set_number_value(value.get<double>());
             break;
         case nlohmann::json::value_t::string:
-            out.set_string_value(value.get<std::string>());
+            out.set_string_value(Clean(value.get<std::string>()));
             break;
         case nlohmann::json::value_t::array: {
             auto* list = out.mutable_list_value();
@@ -70,7 +77,7 @@ google::protobuf::Value JsonToValue(const nlohmann::json& value) {
         case nlohmann::json::value_t::object: {
             auto* fields = out.mutable_struct_value()->mutable_fields();
             for (const auto& [key, element] : value.items()) {
-                (*fields)[key] = JsonToValue(element);
+                (*fields)[Clean(key)] = JsonToValue(element);
             }
             break;
         }
@@ -122,7 +129,7 @@ google::protobuf::Struct JsonToStruct(const nlohmann::json& value) {
     if (!value.is_object()) return out;
     auto* fields = out.mutable_fields();
     for (const auto& [key, element] : value.items()) {
-        (*fields)[key] = JsonToValue(element);
+        (*fields)[Clean(key)] = JsonToValue(element);
     }
     return out;
 }
@@ -295,10 +302,10 @@ v1::ContentBlock ToProto(const llm::ContentBlock& block) {
         [&out](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, llm::TextBlock>) {
-                out.mutable_text()->set_text(value.text);
+                out.mutable_text()->set_text(Clean(value.text));
             } else if constexpr (std::is_same_v<T, llm::ThinkingBlock>) {
                 auto* thinking = out.mutable_thinking();
-                thinking->set_text(value.text);
+                thinking->set_text(Clean(value.text));
                 if (value.signature) thinking->set_signature(*value.signature);
                 if (value.redacted_data) thinking->set_data(*value.redacted_data);
             } else if constexpr (std::is_same_v<T, llm::ToolUseBlock>) {
@@ -316,7 +323,7 @@ v1::ContentBlock ToProto(const llm::ContentBlock& block) {
                     // widening it stays a compile error here.
                     std::visit(
                         [result](const llm::TextBlock& text) {
-                            result->add_content()->mutable_text()->set_text(text.text);
+                            result->add_content()->mutable_text()->set_text(Clean(text.text));
                         },
                         inner);
                 }
@@ -430,7 +437,7 @@ v1::StreamEvent ToProto(const llm::StreamEvent& event) {
             } else if constexpr (std::is_same_v<T, llm::TextDeltaEvent>) {
                 auto* delta = out.mutable_text_delta();
                 delta->set_block_index(value.block_index);
-                delta->set_text(value.text);
+                delta->set_text(Clean(value.text));
             } else if constexpr (std::is_same_v<T, llm::ToolUseStartEvent>) {
                 auto* start = out.mutable_tool_use_start();
                 start->set_block_index(value.block_index);
@@ -439,11 +446,11 @@ v1::StreamEvent ToProto(const llm::StreamEvent& event) {
             } else if constexpr (std::is_same_v<T, llm::ToolUseInputDeltaEvent>) {
                 auto* delta = out.mutable_tool_use_input_delta();
                 delta->set_block_index(value.block_index);
-                delta->set_partial_json(value.partial_json);
+                delta->set_partial_json(Clean(value.partial_json));
             } else if constexpr (std::is_same_v<T, llm::ThinkingDeltaEvent>) {
                 auto* delta = out.mutable_thinking_delta();
                 delta->set_block_index(value.block_index);
-                delta->set_text(value.text);
+                delta->set_text(Clean(value.text));
             } else if constexpr (std::is_same_v<T, llm::ContentBlockStopEvent>) {
                 out.mutable_content_block_stop()->set_block_index(value.block_index);
             } else if constexpr (std::is_same_v<T, llm::MessageDeltaEvent>) {
@@ -502,7 +509,7 @@ std::optional<llm::StreamEvent> FromProto(const v1::StreamEvent& event) {
 v1::ErrorEvent ToProto(const llm::LlmError& error) {
     v1::ErrorEvent out;
     out.set_category(ToProto(error.category()));
-    out.set_message(error.what());
+    out.set_message(Clean(error.what()));
     if (error.http_status()) out.set_http_status(*error.http_status());
     // Sent rather than left for the client to re-derive from the category: the
     // retry rule is the server's, and duplicating it client-side is how the two
@@ -536,7 +543,7 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 auto* message = out.mutable_background_task();
                 message->set_task_id(value.task_id);
                 message->set_tool_use_id(value.tool_use_id);
-                message->set_command(value.command);
+                message->set_command(Clean(value.command));
                 message->set_pid(value.pid);
                 switch (value.state) {
                     case tools::BackgroundTaskEvent::State::kStarted:
@@ -568,12 +575,12 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
             } else if constexpr (std::is_same_v<T, agent::SubagentStarted>) {
                 auto* started = out.mutable_subagent_started();
                 started->set_child_session_id(value.child_session_id);
-                started->set_task(value.task);
+                started->set_task(Clean(value.task));
                 started->set_blocking(value.blocking);
             } else if constexpr (std::is_same_v<T, agent::SessionMetadataChanged>) {
                 auto* metadata = out.mutable_session_metadata();
                 metadata->set_session_id(out.session_id());
-                metadata->set_name(value.name);
+                metadata->set_name(Clean(value.name));
                 // `partial` mirrors today's two name-only emission sites
                 // (SetName, EmitDefaultNameIfComputed): the other fields are left
                 // at their proto default rather than sent as zero values that
@@ -603,12 +610,12 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
             } else if constexpr (std::is_same_v<T, agent::SessionError>) {
                 auto* error = out.mutable_error();
                 error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-                error->set_message(value.message);
+                error->set_message(Clean(value.message));
                 error->set_is_retryable(false);
             } else if constexpr (std::is_same_v<T, agent::TurnQueued>) {
                 auto* queued = out.mutable_turn_queued();
                 queued->set_turn_id(value.turn_id);
-                queued->set_text(value.text);
+                queued->set_text(Clean(value.text));
                 queued->set_steered(value.steered);
             } else if constexpr (std::is_same_v<T, agent::TurnCanceled>) {
                 auto* canceled = out.mutable_turn_canceled();
@@ -621,10 +628,10 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 compaction->set_folded_messages(value.folded_messages);
                 compaction->set_tokens_before(value.tokens_before);
                 compaction->set_tokens_after(value.tokens_after);
-                compaction->set_summary(value.summary_text);
+                compaction->set_summary(Clean(value.summary_text));
                 compaction->set_trigger(value.trigger);
                 compaction->set_created_at_unix_ms(value.created_at_unix_ms);
-                compaction->set_warning(value.warning);
+                compaction->set_warning(Clean(value.warning));
                 compaction->set_skipped(value.skipped);
             } else {
                 // Same guarantee as every other domain->wire visit in this file: a
@@ -646,15 +653,15 @@ v1::PermissionRequest ToProto(const tools::PermissionRequest& request) {
     // The disclosure's summary is the prompt line when there is one; the bare
     // tool name is the default Disclose() produces for a tool that has not opted
     // in, and is what request.summary already carries.
-    out.set_summary(request.disclosure.summary.empty() ? request.summary
-                                                       : request.disclosure.summary);
+    out.set_summary(Clean(request.disclosure.summary.empty() ? request.summary
+                                                             : request.disclosure.summary));
     for (const auto& offer : request.disclosure.grants) {
         auto* grant = out.add_grants();
         grant->set_key(offer.key);
-        grant->set_label(offer.label);
+        grant->set_label(Clean(offer.label));
     }
     out.set_complete(request.disclosure.complete);
-    out.set_reason(request.reason);
+    out.set_reason(Clean(request.reason));
     return out;
 }
 
@@ -688,10 +695,10 @@ v1::CompactionEvent ToProto(const session::CompactionRecord& record) {
     out.set_folded_messages(record.meta.folded_messages);
     out.set_tokens_before(record.meta.tokens_before);
     out.set_tokens_after(record.meta.tokens_after);
-    out.set_summary(llm::TextOf(record.summary.content));
+    out.set_summary(Clean(llm::TextOf(record.summary.content)));
     out.set_trigger(record.meta.trigger);
     out.set_created_at_unix_ms(record.created_at_unix_ms);
-    out.set_warning(record.meta.warning);
+    out.set_warning(Clean(record.meta.warning));
     out.set_skipped(record.meta.skipped);
     return out;
 }
@@ -735,7 +742,7 @@ void FillProto(v1::CommandResult& out, const commands::CommandResult& value) {
     out.set_status(value.status == commands::CommandResult::Status::kOk
                        ? v1::COMMAND_STATUS_OK
                        : v1::COMMAND_STATUS_ERROR);
-    out.set_message(value.message);
+    out.set_message(Clean(value.message));
     out.set_display(value.display == commands::CommandDisplay::kView
                         ? v1::COMMAND_DISPLAY_VIEW
                         : value.display == commands::CommandDisplay::kSilent

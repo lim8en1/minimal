@@ -550,3 +550,17 @@ TEST_CASE("a deny's message and stop ride through the wire conversion", "[proto_
     CHECK(out.deny_message == "use make -j4");
     CHECK(out.stop_turn);
 }
+
+TEST_CASE("free text with ill-formed UTF-8 is scrubbed at the wire boundary", "[proto_convert]") {
+    const std::string bad = std::string("hook said \xC3") + "\xFF end";
+
+    const auto error = ToProto("s1", agent::SessionEvent{agent::SessionError{"prompt rejected: " + bad}});
+    CHECK(error.error().message() == "prompt rejected: hook said \xEF\xBF\xBD\xEF\xBF\xBD end");
+
+    const auto llm_error = ToProto(llm::LlmError(llm::LlmErrorCategory::Transport, bad));
+    CHECK(llm_error.message().find("\xEF\xBF\xBD") != std::string::npos);
+
+    // The serialized message must round-trip: that is what a peer's parser demands.
+    v1::ServerEvent reparsed;
+    CHECK(reparsed.ParseFromString(error.SerializeAsString()));
+}

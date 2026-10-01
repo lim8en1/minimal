@@ -168,10 +168,15 @@ bool HookDispatcher::FilterMatches(const Action& action, const nlohmann::json& p
 std::optional<std::string> HookDispatcher::RunActions(
     const PointEntry& entry, nlohmann::json payload,
     const std::function<bool()>& is_cancelled) const {
+    // Once per emission, and with the replace handler: a payload field holding
+    // non-UTF-8 bytes (a project_root, a truncated summary) must not throw
+    // type_error.316 out of an Emit that is documented never to throw.
+    const std::string payload_text =
+        payload.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     for (const auto& action : entry.actions) {
         if (!FilterMatches(action, payload)) continue;
         const auto result =
-            RunShellAction(action.command, payload.dump(), action.timeout, is_cancelled);
+            RunShellAction(action.command, payload_text, action.timeout, is_cancelled);
         // Degraded backstops (host caps RLIMIT_* below the request) still run:
         // say so, or a capped host's hooks run silently weaker than asked.
         if (!result.warnings.empty()) {

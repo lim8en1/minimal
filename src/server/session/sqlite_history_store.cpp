@@ -31,11 +31,15 @@ void SqliteHistoryStore::ClearCompactionCheckpoint() {
 }
 
 std::int64_t SqliteHistoryStore::SetDiscardedAfter(std::int64_t target_seq) {
-    return db_.SetDiscardedAfter(session_id_, target_seq);
+    const std::int64_t changed = db_.SetDiscardedAfter(session_id_, target_seq);
+    last_seq_.store(db_.LastMessageSeq(session_id_), std::memory_order_release);
+    return changed;
 }
 
 std::int64_t SqliteHistoryStore::UnmarkDiscarded() {
-    return db_.UnmarkDiscarded(session_id_);
+    const std::int64_t changed = db_.UnmarkDiscarded(session_id_);
+    last_seq_.store(db_.LastMessageSeq(session_id_), std::memory_order_release);
+    return changed;
 }
 
 bool SqliteHistoryStore::SetDefaultNameIfUnset(const std::string& name) {

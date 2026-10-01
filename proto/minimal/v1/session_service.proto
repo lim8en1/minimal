@@ -650,7 +650,9 @@ message GetMessagesResponse {
   repeated StoredMessage messages = 1; // descending by seq (ascending on an after_seq fetch)
   bool has_more = 2;
   // The compactions that ran at one of this page's seqs (at_seq within the
-  // page), ascending by at_seq. Each belongs to exactly one page.
+  // page), ascending by at_seq. Each belongs to exactly one page. An after_seq
+  // fetch also includes the compactions at after_seq itself (possibly
+  // already held; clients dedupe).
   repeated CompactionEvent compactions = 3;
 }
 
