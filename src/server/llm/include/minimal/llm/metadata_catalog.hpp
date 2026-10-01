@@ -116,7 +116,12 @@ public:
     // fallback chain. Multiple fallbacks answering in turn would make
     // enrichment order-dependent, so only the FIRST registered fallback that
     // answers wins -- the same first-wins rule the kind slots apply.
-    MetadataCatalog* FindForQuery(const MetadataQuery& query) const;
+    //
+    // `match` is the mode the caller will look up with: a fallback is chosen by
+    // probing it with THAT mode, so an entry asking for Substring matching
+    // (dated ids) is not rejected by an exact-equality probe.
+    MetadataCatalog* FindForQuery(const MetadataQuery& query,
+                                  MetadataMatch match = MetadataMatch::Full) const;
 
     // The fallback chain, for diagnostics (the sanity check names what would
     // answer for a kind with no own slot).

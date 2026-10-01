@@ -184,6 +184,13 @@ std::optional<T> InheritNumber(const nlohmann::json& provider, const nlohmann::j
             throw std::runtime_error("providers.json: " + where + " field \"" + key +
                                      "\" must be an integer, got " + value.dump());
         }
+        // Both callers are limits (an output cap, a context window): zero or a
+        // negative is never meant, and a window of 0 would make the percent
+        // compaction trigger fire on every turn.
+        if (value.template get<std::int64_t>() < 1) {
+            throw std::runtime_error("providers.json: " + where + " field \"" + key +
+                                     "\" must be at least 1, got " + value.dump());
+        }
         return value.template get<T>();
     }
     return std::nullopt;
@@ -619,12 +626,17 @@ void ApplyAppAttribution(const nlohmann::json& provider, llm::ProviderConfig& co
 }  // namespace
 
 ProvidersConfig& ProvidersConfig::operator=(ProvidersConfig&& other) noexcept {
+    if (this == &other) return *this;  // would lock the same mutex twice
     std::lock_guard<std::mutex> a(cache_.mutex_);
     std::lock_guard<std::mutex> b(other.cache_.mutex_);
     catalog_.models_ = std::move(other.catalog_.models_);
     catalog_.providers_ = std::move(other.catalog_.providers_);
     cache_.gates_ = std::move(other.cache_.gates_);
     cache_.hook_ = std::move(other.cache_.hook_);
+    cache_.metadata_hook_ = std::move(other.cache_.metadata_hook_);
+    cache_.variant_params_hook_ = std::move(other.cache_.variant_params_hook_);
+    cache_.metadata_variants_ = std::move(other.cache_.metadata_variants_);
+    cache_.metadata_tombstones_ = std::move(other.cache_.metadata_tombstones_);
     cache_.generation_ = other.cache_.generation_;
     cache_.discovery_ = std::move(other.cache_.discovery_);
     cache_.overlay_ = std::move(other.cache_.overlay_);
@@ -1337,6 +1349,24 @@ std::vector<DiscoveryRefreshOutcome> ProvidersConfig::RefreshDiscovery() const {
         const DiscoveryOutcome outcome = FetchOutcome(entry);
 
         std::lock_guard<std::mutex> lock(cache_.mutex_);
+        // A FAILED refresh over a previously good fetch keeps the good data:
+        // the backend being down for this Ctrl+R must not empty the picker or
+        // make models that resolved a minute ago "unknown". The failure is
+        // reported in the outcome (and logged), not stored over the cache.
+        if (!outcome.ok) {
+            const auto previous = cache_.discovery_.find(name);
+            if (previous != cache_.discovery_.end() && previous->second.ok) {
+                const std::string error =
+                    outcome.error.empty() ? "catalog request failed" : outcome.error;
+                common::DefaultLogger().warn(
+                    "providers.json: discovery refresh for '{}' failed ({}); keeping the "
+                    "previous {} models",
+                    name, error, previous->second.models.size());
+                outcomes.push_back(
+                    DiscoveryRefreshOutcome{name, false, error, previous->second.models.size()});
+                continue;
+            }
+        }
         // Evict and republish atomically, under one lock acquisition: the
         // listing switches to the fresh data the moment the lock is released,
         // and readers holding snapshots of the old overlays keep those objects
@@ -1602,17 +1632,16 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
                 }
             }
         }
-        config.AddProvider(entry);
-
-        if (!has_models) continue;  // discover-only entry: nothing static to resolve
-
-        // provider_name doesn't vary per model, so check it once here rather
-        // than inside the loop below.
+        // Checked for every entry, discover-only ones included: discovered
+        // models are addressed as <provider>/<model> too, so a '/' in the
+        // name makes the reference ambiguous whether or not models are listed.
         if (provider_name.find('/') != std::string::npos) {
-            // Otherwise the reference cannot be parsed back apart.
             throw std::runtime_error("providers.json: provider '" + provider_name +
                                      "' contains a '/', which makes the reference ambiguous");
         }
+        config.AddProvider(entry);
+
+        if (!has_models) continue;  // discover-only entry: nothing static to resolve
 
         for (const auto& [model_name, model] : provider_normalized.at("models").items()) {
             const std::string model_where = "model '" + provider_name + "/" + model_name + "'";

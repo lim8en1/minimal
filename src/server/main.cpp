@@ -637,7 +637,7 @@ int main(int argc, char** argv) {
         [&metadata_catalogs, &logger = minimal::common::DefaultLogger()](
             const minimal::llm::MetadataQuery& query, minimal::llm::MetadataMatch match)
             -> std::optional<minimal::llm::DiscoveredModel> {
-            auto* catalog = metadata_catalogs.FindForQuery(query);
+            auto* catalog = metadata_catalogs.FindForQuery(query, match);
             if (catalog == nullptr) return std::nullopt;
             try {
                 return catalog->Lookup(query, match);

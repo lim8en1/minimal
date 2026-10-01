@@ -110,9 +110,11 @@ ToolsSettings ParseTools(const nlohmann::json& doc) {
     result.raw = tools;
     result.max_parallel_tool_calls =
         tools.value("max_parallel_tool_calls", result.max_parallel_tool_calls);
-    if (result.max_parallel_tool_calls < 1) {
+    // The pool starts one thread per slot, per session: an absurd value is a
+    // resource-exhaustion typo, not a tuning choice.
+    if (result.max_parallel_tool_calls < 1 || result.max_parallel_tool_calls > 64) {
         throw std::runtime_error(
-            "settings.json: tools.max_parallel_tool_calls must be at least 1");
+            "settings.json: tools.max_parallel_tool_calls must be between 1 and 64");
     }
     result.max_input_bytes = tools.value("max_input_bytes", result.max_input_bytes);
     if (result.max_input_bytes < 0) {

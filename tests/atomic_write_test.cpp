@@ -148,6 +148,15 @@ TEST_CASE("a new file lands with ordinary 0644 permissions, not mkstemp's 0600",
     CHECK((st.st_mode & 07777) == 0644);
 }
 
+TEST_CASE("a target filename near NAME_MAX still writes", "[atomic_write]") {
+    TempDir dir;
+    const auto path = dir.path() / (std::string(250, 'n') + ".txt");  // 254 bytes: valid
+
+    const auto outcome = tools::write_file(path, "content");
+    CHECK(outcome.ok);
+    CHECK(std::filesystem::exists(path));
+}
+
 TEST_CASE("create_perms overrides the default mode for a new file", "[atomic_write]") {
     TempDir dir;
     const auto path = dir.path() / "secret.txt";

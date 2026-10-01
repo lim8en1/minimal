@@ -39,7 +39,8 @@ void MetadataCatalogRegistry::RemoveByAttribution(const std::string& plugin_name
     }
 }
 
-MetadataCatalog* MetadataCatalogRegistry::FindForQuery(const MetadataQuery& query) const {
+MetadataCatalog* MetadataCatalogRegistry::FindForQuery(const MetadataQuery& query,
+                                                       MetadataMatch match) const {
     if (MetadataCatalog* own = Find(query.backend); own != nullptr) return own;
     // First registered fallback that ANSWERS wins; a nullopt answer falls
     // through to the next. Lookup is allowed to throw -- treated here as "no
@@ -48,7 +49,7 @@ MetadataCatalog* MetadataCatalogRegistry::FindForQuery(const MetadataQuery& quer
     // this seam makes.
     for (const auto& fallback : fallbacks_) {
         try {
-            if (fallback->Lookup(query, MetadataMatch::Full).has_value()) return fallback.get();
+            if (fallback->Lookup(query, match).has_value()) return fallback.get();
         } catch (...) {
         }
     }

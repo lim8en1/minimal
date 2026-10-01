@@ -54,6 +54,7 @@ enum class LoadStatus {
     // propagate through LoadAll into main(), which has no handler, killing the
     // process without naming the plugin responsible.
     RegistrationThrew,
+    DuplicateName,          // an already-loaded plugin reported the same name
 };
 
 struct PluginCandidate {

@@ -930,6 +930,28 @@ TEST_CASE("RefreshDiscovery reports a dead catalog instead of throwing",
     CHECK(outcomes[0].error.find("timed out") != std::string::npos);
 }
 
+TEST_CASE("a failed refresh keeps the last good discovery", "[providers][discover]") {
+    CountingHook hook;
+    hook.models = {{"old", 4096, nlohmann::json::object(), std::nullopt}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+    REQUIRE(config.Resolve(ModelRef{"local", "old"}) != nullptr);
+
+    hook.ok = false;
+    hook.error = "connection refused";
+    const auto outcomes = config.RefreshDiscovery();
+    REQUIRE(outcomes.size() == 2);
+    CHECK_FALSE(outcomes[0].ok);
+    CHECK(outcomes[0].error.find("connection refused") != std::string::npos);
+    CHECK(outcomes[0].model_count == 1);
+
+    // The model that resolved before the outage still resolves.
+    CHECK(config.Resolve(ModelRef{"local", "old"}) != nullptr);
+    CHECK(config.discovery_status("local").ok);
+}
+
 TEST_CASE("without a hook, discovery reports 'no discovery hook set'",
           "[providers][discover]") {
     // Tests and unhosted configs: a distinguishable state, not a silent

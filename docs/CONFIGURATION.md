@@ -133,7 +133,7 @@ docs/PLUGINS.md). Core recognizes:
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `max_parallel_tool_calls` | int | `4` | must be ≥ 1; `1` = inline execution, no pool threads |
+| `max_parallel_tool_calls` | int | `4` | 1..64; `1` = inline execution, no pool threads |
 | `max_input_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
 | `max_result_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
 | `max_display_bytes` | int | `131072` | ≥ 0; a tool result's client-only display payload over this is dropped (the client shows the text); `0` disables the limit |

@@ -66,7 +66,10 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
 
     // Same directory as the target, so the rename below stays within one
     // filesystem and is therefore atomic.
-    std::string temp_template = (parent / (confined_abs_path.filename().string() + ".XXXXXX")).string();
+    // A fixed-length leaf, not one derived from the target's name: a filename of
+    // 249+ bytes plus the suffix would exceed NAME_MAX and fail a write whose
+    // target itself is valid.
+    std::string temp_template = (parent / ".minimal-write.XXXXXX").string();
     std::vector<char> temp_path(temp_template.begin(), temp_template.end());
     temp_path.push_back('\0');
 
@@ -119,13 +122,17 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
             return outcome;
         }
     } else {
-        // mkstemp creates 0600; match what a normal file would get instead.
-        std::filesystem::permissions(temp.path(),
-                                     std::filesystem::perms::owner_read |
-                                         std::filesystem::perms::owner_write |
-                                         std::filesystem::perms::group_read |
-                                         std::filesystem::perms::others_read,
-                                     std::filesystem::perm_options::replace, ec);
+        // mkstemp creates 0600; give the file what a normal create would:
+        // 0666 filtered by the process umask (a user with umask 077 must not
+        // get world-readable files from the write tool).
+        static const mode_t kProcessUmask = [] {
+            const mode_t mask = ::umask(0);  // read-only query: umask has no getter
+            ::umask(mask);
+            return mask;
+        }();
+        std::filesystem::permissions(
+            temp.path(), static_cast<std::filesystem::perms>(0666 & ~kProcessUmask & 0777),
+            std::filesystem::perm_options::replace, ec);
         if (ec) {
             // Fail the write rather than rename silently-wrong modes in: a
             // permissions() failure here would otherwise publish 0600 where

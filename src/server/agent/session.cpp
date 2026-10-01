@@ -812,6 +812,21 @@ void Session::RunRewind(std::int64_t target_seq) {
     // truncated transcript, which is the state the user asked for. The reverse
     // order would leave memory describing turns the store still counts, and
     // the next append would land on top of rows the user rewound away.
+    //
+    // Everything that can fail on a READ happens before the cut: the rebuilt
+    // working set is loaded (and trimmed to the kept prefix) first, so a
+    // failed load refuses the rewind with the durable transcript untouched
+    // instead of reporting "refused" for a cut that already happened. Rows
+    // are moved out, never copied -- a long transcript is the case here.
+    const auto boundary = loop_->CheckpointBoundary();
+    const bool rebuild = boundary.has_value() && target_seq <= *boundary;
+    std::vector<session::StoredMessage> kept_rows;
+    if (rebuild) {
+        kept_rows = history_reader_->LoadAll(params_.session_id);
+        std::erase_if(kept_rows, [target_seq](const session::StoredMessage& row) {
+            return row.seq >= target_seq;
+        });
+    }
     store_->SetDiscardedAfter(target_seq);
 
     // TWO memory halves, decided by the checkpoint boundary. Above it, the
@@ -823,20 +838,18 @@ void Session::RunRewind(std::int64_t target_seq) {
     // discarded) is cleared with it. Best-effort, like every checkpoint write:
     // a failed clear degrades to a resume restoring a stale summary, never to
     // a lost transcript.
-    const auto boundary = loop_->CheckpointBoundary();
-    if (boundary.has_value() && target_seq <= *boundary) {
-        const auto rows = history_reader_->LoadAll(params_.session_id);
+    if (rebuild) {
+        const std::int64_t first_seq = kept_rows.empty() ? 0 : kept_rows.front().seq;
         std::vector<llm::Message> messages;
-        messages.reserve(rows.size());
-        for (auto& stored : rows) messages.push_back(std::move(stored.message));
+        messages.reserve(kept_rows.size());
+        for (auto& stored : kept_rows) messages.push_back(std::move(stored.message));
         try {
             store_->ClearCompactionCheckpoint();
         } catch (const std::exception& error) {
             logger_.warn("session {}: failed to clear compaction checkpoint: {}",
                          params_.session_id, error.what());
         }
-        loop_->ReseedFromStore(std::move(messages),
-                               rows.empty() ? 0 : rows.front().seq);
+        loop_->ReseedFromStore(std::move(messages), first_seq);
     } else {
         loop_->TruncateAfter(target_seq);
     }
@@ -864,12 +877,13 @@ void Session::RunRedo() {
     // The restored rows join the working set WITHOUT being re-appended -- the
     // resume seed's shape, applied to a live loop. LoadAfter reads the
     // just-restored rows; they are active again.
-    const auto rows = history_reader_->LoadAfter(params_.session_id, pre_active_last);
+    auto rows = history_reader_->LoadAfter(params_.session_id, pre_active_last);
     if (!rows.empty()) {
+        const std::int64_t first_seq = rows.front().seq;
         std::vector<llm::Message> messages;
         messages.reserve(rows.size());
         for (auto& stored : rows) messages.push_back(std::move(stored.message));
-        loop_->RestorePersisted(std::move(messages), rows.front().seq);
+        loop_->RestorePersisted(std::move(messages), first_seq);
     }
 
     observers_.NotifySessionRewound(InfoSnapshot(), -1);

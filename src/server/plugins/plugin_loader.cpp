@@ -202,6 +202,7 @@ std::string_view ToString(LoadStatus status) {
         case LoadStatus::MissingRequiredSymbol: return "missing required symbol";
         case LoadStatus::AbiMismatch:           return "abi mismatch";
         case LoadStatus::RegistrationThrew:     return "registration threw";
+        case LoadStatus::DuplicateName:         return "duplicate name";
     }
     return "unknown";
 }
@@ -362,6 +363,25 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // Safe now: the ABI matched, so these run against compatible types.
     if (const char* name = name_fn(); name != nullptr) record.name = name;
     if (const char* version = version_fn(); version != nullptr) record.version = version;
+
+    // An empty name is the sentinel core registrations attribute themselves
+    // to: if this plugin registered something and a later hook threw,
+    // rollback's Remove("") would strip core's entries. A duplicate name would
+    // make a rollback of the second copy strip the first's registrations. Both
+    // are rejected before any registration hook runs.
+    if (record.name.empty()) {
+        record.status = LoadStatus::MissingRequiredSymbol;
+        record.error = "minimal_plugin_name() returned null or an empty string";
+        return record;
+    }
+    for (const auto& [loaded_name, loaded_handle] : loaded_) {
+        if (loaded_name == record.name) {
+            record.status = LoadStatus::DuplicateName;
+            record.error = "a plugin named '" + record.name +
+                           "' is already loaded -- disable one of the two copies";
+            return record;
+        }
+    }
 
     // Everything the registration hooks see: the shared settings.json `tools`
     // object plus THIS plugin's own plugins.json `config` slice. Built once per

@@ -252,7 +252,10 @@ void EventBroadcaster::TakeResyncLocked(SubscriberState& sub, const char* reason
     v1::ServerEvent event;
     event.set_session_id(session_id_);
     event.mutable_resync_required()->set_reason(reason);
-    AcceptLocked(sub, std::move(event), SizeOf(event));
+    // Sized BEFORE the move: argument evaluation order is unspecified, and a
+    // moved-from event sizes to 0 (the byte accounting would drift).
+    const std::size_t bytes = SizeOf(event);
+    AcceptLocked(sub, std::move(event), bytes);
 }
 
 }  // namespace minimal::rpc
