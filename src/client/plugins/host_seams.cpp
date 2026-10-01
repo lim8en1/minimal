@@ -25,14 +25,6 @@ public:
         if (state_ != nullptr) state_->ClearTab(session_id);
         Redraw();
     }
-    void RaiseGlobal() override {
-        if (state_ != nullptr) state_->RaiseGlobal();
-        Redraw();
-    }
-    void ClearGlobal() override {
-        if (state_ != nullptr) state_->ClearGlobal();
-        Redraw();
-    }
 
 private:
     void Redraw() {

@@ -52,12 +52,9 @@ public:
         std::chrono::milliseconds fallback_period{std::chrono::seconds(30)};
     };
 
-    // Borrowed; either may be null. No ClientApi: nothing ever fills. No
-    // FocusProvider: cached entries for closed tabs are never evicted (a
-    // few short strings per session seen -- harmless, just unbounded).
-    TotalsFeed(plugins::ClientApi* api, plugins::FocusProvider* focus, Timing timing);
-    explicit TotalsFeed(plugins::ClientApi* api, plugins::FocusProvider* focus = nullptr)
-        : TotalsFeed(api, focus, Timing{}) {}
+    // Borrowed; may be null: nothing ever fills.
+    TotalsFeed(plugins::ClientApi* api, Timing timing);
+    explicit TotalsFeed(plugins::ClientApi* api) : TotalsFeed(api, Timing{}) {}
     ~TotalsFeed();
 
     TotalsFeed(const TotalsFeed&) = delete;
@@ -72,6 +69,12 @@ public:
     // focus hint: a changed session id wakes the fallback poller at once.
     std::string Render(const std::string& focused_session_id, TotalsField field) const;
 
+    // The focus hint, pushed (an Observer's OnFocusChanged): the poller
+    // follows the focused session even while no segment is rendered.
+    void SetFocus(const std::string& session_id) const;
+    // Drops a closed tab's figures (an Observer's OnTabClosed).
+    void Forget(const std::string& session_id);
+
 private:
     struct Entry {
         std::string cost;
@@ -83,14 +86,12 @@ private:
     bool OnPayload(const std::string& json_payload);
     void PollFallback();
     void ApplyLocked(const std::string& session_id, const nlohmann::json& totals);
-    void EvictClosedTabs();
     void RequestRedraw() const {
         if (auto* ui = ui_.load(std::memory_order_acquire)) ui->RequestRedraw();
     }
     std::optional<nlohmann::json> Fetch(const std::string& session_id) const;
 
     plugins::ClientApi* api_;
-    plugins::FocusProvider* focus_;
     // Atomic: set after the constructor has already started the worker.
     std::atomic<plugins::HostUi*> ui_{nullptr};
     Timing timing_;

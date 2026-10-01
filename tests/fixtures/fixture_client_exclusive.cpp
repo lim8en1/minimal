@@ -11,7 +11,7 @@ namespace plugins = minimal::client::plugins;
 class FixtureSurface final : public plugins::ChatSurface {
 public:
     const plugins::ChatSurface::Spec& spec() const override { return spec_; }
-    ftxui::Component component() override {
+    ftxui::Component component(const std::string&) override {
         return ftxui::Renderer([] { return ftxui::text("fixture surface"); });
     }
     void OnEvent(const minimal::v1::ServerEvent& event) override {

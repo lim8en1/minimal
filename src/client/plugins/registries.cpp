@@ -20,26 +20,11 @@ void AttentionState::ClearTab(const std::string& session_id) {
     tab_.erase(session_id);   // erased, not set false: the map only holds raised tabs
 }
 
-void AttentionState::RaiseGlobal() {
-    std::lock_guard<std::mutex> lock(mtx_);
-    global_ = true;
-}
-
-void AttentionState::ClearGlobal() {
-    std::lock_guard<std::mutex> lock(mtx_);
-    global_ = false;
-}
-
 bool AttentionState::TabRaised(const std::string& session_id) const {
     if (session_id.empty()) return false;
     std::lock_guard<std::mutex> lock(mtx_);
     const auto it = tab_.find(session_id);
     return it != tab_.end() && it->second;
-}
-
-bool AttentionState::GlobalRaised() const {
-    std::lock_guard<std::mutex> lock(mtx_);
-    return global_;
 }
 
 std::vector<std::string> AttentionState::RaisedTabs() const {

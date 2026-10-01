@@ -96,6 +96,9 @@ void SessionState::FillCommonLocked(Snapshot& s) const {
     s.cache_write_tokens = cache_write_tokens_;
     s.cancel_requested = cancel_requested_;
     s.turn_in_flight = turn_in_flight_ || !commands_in_flight_.empty();
+    s.turns_started = turns_started_;
+    s.turns_ended = turns_ended_;
+    s.last_turn_completed = last_turn_completed_;
     s.live_view_truncated = live_view_truncated_;
     s.model = model_;
     s.agent_preset = agent_preset_;
@@ -339,11 +342,24 @@ void SessionState::ClearPendingPromptsLocked() {
     pending_prompt_.reset();
 }
 
+void SessionState::BeginTurnLocked() {
+    if (turn_in_flight_) return;
+    turn_in_flight_ = true;
+    ++turns_started_;
+}
+
+void SessionState::EndTurnLocked(bool completed) {
+    if (!turn_in_flight_) return;
+    turn_in_flight_ = false;
+    ++turns_ended_;
+    last_turn_completed_ = completed;
+}
+
 bool SessionState::ArmNewTurnLocked() {
     if (!turn_ended_) return false;
     ++turn_seq_;
     turn_ended_ = false;
-    turn_in_flight_ = true;
+    BeginTurnLocked();
     streaming_accumulated_.clear();
     streaming_truncated_ = false;
     thinking_accumulated_.clear();
@@ -607,7 +623,7 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
     turn_ended_ = true;
-    turn_in_flight_ = false;   // the turn ended, whatever the stop reason
+    EndTurnLocked(/*completed=*/true);   // the turn ended, whatever the stop reason
     cancel_requested_ = false;   // the interrupted turn ended -- whatever the stop reason
     input_tokens_ = evt.usage().input_tokens();
     output_tokens_ = evt.usage().output_tokens();
@@ -945,7 +961,7 @@ void SessionState::OnError(const std::string& error_message) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
     turn_ended_ = true;   // the errored turn is over; the next stream is a new one
-    turn_in_flight_ = false;   // dead streams end turns too -- the probe must not latch
+    EndTurnLocked(/*completed=*/false);   // dead streams end turns too -- the probe must not latch
     commands_in_flight_.clear();   // nothing will answer them on this stream
     cancel_requested_ = false;   // a cancel can BE the error path (dead stream)
     ClearPendingPromptsLocked();
@@ -991,7 +1007,7 @@ void SessionState::OnSessionEnded() {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
     turn_ended_ = true;   // terminal: a final newest-fetch may still swap the partial stream
-    turn_in_flight_ = false;   // terminal -- the probe must not survive the session
+    EndTurnLocked(/*completed=*/false);   // terminal -- the probe must not survive the session
     commands_in_flight_.clear();
     cancel_requested_ = false;
     ClearPendingPromptsLocked();
@@ -1649,7 +1665,7 @@ void SessionState::OnChatSubmitted(const std::string& text) {
     // Done/Error session must still be interruptible before the first wire
     // event arrives. (The state transition below stays conditional; it is a
     // display choice, and Done/Error mean something to the renderer.)
-    turn_in_flight_ = true;
+    BeginTurnLocked();
     // Immediate state feedback, too: the turn was ACCEPTED onto the wire, so
     // the tab is no longer Idle even before the server says anything.
     if (state_ == SessionStateKind::Idle) state_ = SessionStateKind::Working;
@@ -3313,6 +3329,12 @@ std::vector<AppState::TabSnapshot> AppState::GetAllTabs(bool include_tool_output
         snap.cancel_requested = ss.cancel_requested;
         snap.paused = ss.paused;
         snap.turn_in_flight = ss.turn_in_flight;
+        snap.turns_started = ss.turns_started;
+        snap.turns_ended = ss.turns_ended;
+        snap.last_turn_completed = ss.last_turn_completed;
+        snap.model = ss.model;
+        snap.agent_preset = ss.agent_preset;
+        snap.permission_mode = ss.permission_mode;
         snap.live_view_truncated = ss.live_view_truncated;
         // The glyph merge (docs/EXTENSIBILITY.md 4.2, "Attention sink"): core
         // event derivation is the default source; a plugin raise wins until

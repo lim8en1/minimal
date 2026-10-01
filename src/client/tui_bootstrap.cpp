@@ -163,7 +163,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         const auto hooks = plugins::RegistryHooks(out.registries);
         std::vector<AliasCandidate> alias_candidates;
         for (const auto& hook : hooks) {
-            if (!hook.name_kind) continue;   // exclusive slots: first wins, no collision
+            if (!hook.name_kind) continue;   // keys that never collide
             for (const auto& attribution : hook.registry->attributions()) {
                 names.Register(*hook.name_kind, attribution.plugin_name,
                                attribution.original_name);

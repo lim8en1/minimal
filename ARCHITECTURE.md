@@ -1204,6 +1204,7 @@ extern "C" {
   void minimal_client_plugin_register_chat_surface(ChatSurfaceRegistry&, const ClientPluginRegistrationContext&);        // exclusive
   void minimal_client_plugin_register_markdown_engine(MarkdownEngineRegistry&, const ClientPluginRegistrationContext&);  // exclusive
   void minimal_client_plugin_register_syntax_grammars(SyntaxGrammarRegistry&, const ClientPluginRegistrationContext&);
+  void minimal_client_plugin_register_observers(ObserverRegistry&, const ClientPluginRegistrationContext&);
 }
 ```
 

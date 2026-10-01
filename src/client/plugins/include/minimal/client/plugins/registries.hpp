@@ -94,8 +94,6 @@ public:
     virtual ~AttentionSink() = default;
     virtual void RaiseTab(const std::string& session_id) = 0;
     virtual void ClearTab(const std::string& session_id) = 0;
-    virtual void RaiseGlobal() = 0;
-    virtual void ClearGlobal() = 0;
 };
 
 // The host-side state behind AttentionSink, shared by the sink and AppState.
@@ -106,18 +104,14 @@ class AttentionState {
 public:
     void RaiseTab(const std::string& session_id);
     void ClearTab(const std::string& session_id);
-    void RaiseGlobal();
-    void ClearGlobal();
 
     // A plugin raise wins until cleared; core derivation ORs in underneath.
     bool TabRaised(const std::string& session_id) const;
-    bool GlobalRaised() const;
     std::vector<std::string> RaisedTabs() const;
 
 private:
     mutable std::mutex mtx_;
     std::map<std::string, bool> tab_;
-    bool global_ = false;
 };
 
 // --- Row render context (collapse state) ------------------------------------
@@ -360,10 +354,13 @@ public:
     };
     virtual const Spec& spec() const = 0;
 
-    // The tab body. Built per open tab by the host; one component instance per
-    // tab. The host owns layout: a surface renders INSIDE the tab, it does not
-    // restructure the frame.
-    virtual ftxui::Component component() = 0;
+    // The body of tab `tab_id`. Built per open tab by the host; one
+    // component instance per tab. `tab_id` is FocusProvider's TabInfo::tab_id
+    // -- the key to that tab's session (Tabs(), or an Observer's events) and
+    // so to which of OnEvent's sessions this body shows. The host owns
+    // layout: a surface renders INSIDE the tab, it does not restructure the
+    // frame.
+    virtual ftxui::Component component(const std::string& tab_id) = 0;
 
     // The host pushes EVERY ServerEvent for the session -- the same events core
     // dispatches to its own state plane. A surface owns its presentation and
@@ -553,6 +550,56 @@ public:
     virtual std::vector<TabInfo> Tabs() const = 0;
 };
 
+// --- Observers (typed host events) -------------------------------------------
+
+// A tab's session metadata as merged so far (a partial re-emit never blanks a
+// field): what OnSessionMetadata reports when any of it changes.
+struct SessionMetadata {
+    std::string name;
+    std::string model;
+    std::string agent_preset;
+    std::string permission_mode;
+    bool operator==(const SessionMetadata&) const = default;
+};
+
+// What happened in the host, pushed instead of polled: a plugin that tracked
+// focus by scanning Tabs() on a heartbeat (or by noticing which session a
+// status segment was asked to render) reacts to the event instead.
+//
+// THREADING: every call arrives on the UI thread, between frames, in the
+// order the host observed the changes -- never concurrently with another
+// observer call. Keep them cheap (they delay the next frame); hand anything
+// slow to the plugin's own thread. Events are derived from the host's state
+// between frames, so two changes inside one frame arrive together, still in
+// order. A throw is contained and logged; an observer that keeps throwing is
+// disabled. Every method has a no-op default -- override what you need.
+class Observer {
+public:
+    virtual ~Observer() = default;
+
+    // A tab appeared (its session_id may still be "": a tab gets its session
+    // on its first message -- OnFocusChanged / OnSessionMetadata report it).
+    virtual void OnTabOpened(const TabInfo& tab) { (void)tab; }
+    // A tab closed; `tab` as last seen (its session, if it had one).
+    virtual void OnTabClosed(const TabInfo& tab) { (void)tab; }
+    // The focused tab changed, or the focused tab's session did. All fields
+    // "" when no tab is focused.
+    virtual void OnFocusChanged(const TabInfo& focused) { (void)focused; }
+    // A turn began on `tab`'s session (a submit, or a server-started turn).
+    virtual void OnTurnStarted(const TabInfo& tab) { (void)tab; }
+    // That turn ended: `completed` false when it died (an error, the session
+    // ending) rather than completing (any stop reason, cancellation included).
+    virtual void OnTurnCompleted(const TabInfo& tab, bool completed) {
+        (void)tab;
+        (void)completed;
+    }
+    // `tab`'s session metadata changed (also once when first known).
+    virtual void OnSessionMetadata(const TabInfo& tab, const SessionMetadata& metadata) {
+        (void)tab;
+        (void)metadata;
+    }
+};
+
 // A client-side /-command a plugin contributes: it runs in the TUI and never
 // reaches the server (compare a server plugin's command, which runs on the
 // session worker). Listed in /-autocomplete and the /help overlay beside the
@@ -731,6 +778,10 @@ struct SyntaxGrammarKey {
 struct ChatSurfaceKey {
     std::string_view operator()(const ChatSurface& surface) const { return surface.spec().id; }
 };
+// Observers have no identity to collide on: one constant key.
+struct ObserverKey {
+    std::string_view operator()(const Observer&) const { return "observer"; }
+};
 struct MarkdownEngineKey {
     std::string_view operator()(const MarkdownEngine&) const { return "markdown_engine"; }
 };
@@ -744,6 +795,7 @@ using PromptRendererRegistry = AdditiveRegistry<PromptRenderer, PromptRendererKe
 using StatusSegmentRegistry = AdditiveRegistry<StatusSegment, StatusSegmentKey>;
 // The language table the highlighter consults, in registration order.
 using SyntaxGrammarRegistry = AdditiveRegistry<SyntaxGrammar, SyntaxGrammarKey>;
+using ObserverRegistry = AdditiveRegistry<Observer, ObserverKey>;
 // Null get(): core's chat view stands.
 using ChatSurfaceRegistry = ExclusiveSlot<ChatSurface, ChatSurfaceKey>;
 // Null get(): the host registers the core md4c default.
@@ -784,6 +836,7 @@ struct ClientRegistries {
     MessageRendererRegistry message_renderers;
     StatusSegmentRegistry status_segments;
     SyntaxGrammarRegistry grammars;
+    ObserverRegistry observers;
     ChatSurfaceRegistry chat_surface;
     MarkdownEngineRegistry markdown_engine;
 };

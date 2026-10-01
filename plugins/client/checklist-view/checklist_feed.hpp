@@ -74,6 +74,9 @@ public:
     // the unfilled-segment rule), stale-marked when the stream is down. Also
     // the focus hint: a changed session id wakes the fallback poller at once.
     std::string SegmentText(const std::string& focused_session_id) const;
+    // The focus hint, pushed (an Observer's OnFocusChanged): the poller
+    // follows the focused session even while the segment is not rendered.
+    void SetFocus(const std::string& session_id) const;
 
     struct SessionSnapshot {
         std::vector<Item> items;

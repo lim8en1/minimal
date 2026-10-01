@@ -33,6 +33,7 @@ add_library(minimal_client_core SHARED
     plugins/core_registrations.cpp
     plugins/core_display_renderers.cpp
     plugins/host_seams.cpp
+    plugins/observer_events.cpp
     view/tab_bar.cpp
     view/chat_scroll_region.cpp
     view/chat_view.cpp

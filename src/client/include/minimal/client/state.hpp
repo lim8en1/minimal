@@ -414,6 +414,15 @@ public:
         // ctrl+c lethal (idle-quit) for exactly as long as the provider
         // stayed silent.
         bool turn_in_flight = false;
+        // Turns begun / ended since the tab opened (turn_in_flight's
+        // false->true and true->false edges), and how the last one ended:
+        // completed (a TurnCompletedEvent, any stop reason) or not (an error,
+        // the session ending). What plugin observers' turn events derive from:
+        // two counters cannot miss a turn that started and ended between two
+        // frames the way sampling turn_in_flight could.
+        std::uint64_t turns_started = 0;
+        std::uint64_t turns_ended = 0;
+        bool last_turn_completed = true;
 
         // --- Session metadata (the E5 emission, one per attach + on change) ---
         // The wire source for the status bar's {model} {agent}
@@ -862,6 +871,10 @@ private:
     // mtx_ held by caller.
     void FillCommonLocked(Snapshot& s) const;   // caller holds mtx_
     bool ArmNewTurnLocked();                     // caller holds mtx_; see the .cpp
+    // The only writers of turn_in_flight_ (caller holds mtx_): each edge
+    // counts once (Snapshot::turns_started/turns_ended).
+    void BeginTurnLocked();
+    void EndTurnLocked(bool completed);
     void ClearPendingPromptsLocked();            // caller holds mtx_
     std::vector<LiveTurnSegment> CopyLiveSegmentsLocked() const;
 
@@ -964,6 +977,9 @@ private:
     // events. Never disarmed mid-turn -- unlike turn_ended_, which flips at
     // every block boundary.
     bool turn_in_flight_ = false;
+    std::uint64_t turns_started_ = 0;
+    std::uint64_t turns_ended_ = 0;
+    bool last_turn_completed_ = true;
     // Request ids of /-commands sent and not yet answered (OnCommandSent /
     // OnCommandResult); cleared with turn_in_flight_ by the stream-terminal
     // events. Folded into Snapshot::turn_in_flight.
@@ -1085,6 +1101,15 @@ public:
         // reads Idle in the silent windows between message stops, so the
         // busy verdicts (TabBusyForInterrupt, AnyWorkInFlight) consult this.
         bool turn_in_flight = false;
+
+        // For plugin observers (see SessionState::Snapshot's fields of the
+        // same names).
+        std::uint64_t turns_started = 0;
+        std::uint64_t turns_ended = 0;
+        bool last_turn_completed = true;
+        std::string model;
+        std::string agent_preset;
+        std::string permission_mode;
     };
 
     // --- Tab management (all thread-safe) ---

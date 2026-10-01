@@ -108,7 +108,7 @@ public:
 class StubSurface final : public ChatSurface {
 public:
     const Spec& spec() const override { return spec_; }
-    ftxui::Component component() override {
+    ftxui::Component component(const std::string&) override {
         return ftxui::Renderer([] { return ftxui::text("stub surface"); });
     }
     void OnEvent(const v1::ServerEvent&) override {}
@@ -279,11 +279,6 @@ TEST_CASE("attention state: plugin raise wins until cleared", "[client_plugins]"
     attention.ClearTab("s1");
     CHECK_FALSE(attention.TabRaised("s1"));
     CHECK(attention.TabRaised("s2"));
-    CHECK_FALSE(attention.GlobalRaised());
-    attention.RaiseGlobal();
-    CHECK(attention.GlobalRaised());
-    attention.ClearGlobal();
-    CHECK_FALSE(attention.GlobalRaised());
 }
 
 TEST_CASE("the client loader verifies the ABI tag before any plugin code runs",

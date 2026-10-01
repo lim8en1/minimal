@@ -30,13 +30,17 @@ ChecklistFeed::~ChecklistFeed() {
     Stop();
 }
 
-std::string ChecklistFeed::SegmentText(const std::string& focused_session_id) const {
+void ChecklistFeed::SetFocus(const std::string& session_id) const {
     std::lock_guard<std::mutex> lock(mtx_);
-    if (focused_session_id != focused_session_id_) {
-        focused_session_id_ = focused_session_id;
-        refresh_requested_ = true;
-        cv_.notify_all();
-    }
+    if (session_id == focused_session_id_) return;
+    focused_session_id_ = session_id;
+    refresh_requested_ = true;
+    cv_.notify_all();
+}
+
+std::string ChecklistFeed::SegmentText(const std::string& focused_session_id) const {
+    SetFocus(focused_session_id);
+    std::lock_guard<std::mutex> lock(mtx_);
     const auto it = cache_.find(focused_session_id);
     if (it == cache_.end()) return {};
     std::string text = FormatSegmentText(it->second.items);

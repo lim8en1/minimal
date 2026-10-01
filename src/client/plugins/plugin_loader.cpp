@@ -122,6 +122,9 @@ std::vector<RegistryHook> RegistryHooks(ClientRegistries& r) {
              r.status_segments, NameKind::StatusSegment, kAliasable),
         Hook("grammars", "minimal_client_plugin_register_syntax_grammars", r.grammars,
              NameKind::SyntaxGrammar, kAliasable),
+        // No key to collide on (one constant per observer).
+        Hook("observers", "minimal_client_plugin_register_observers", r.observers,
+             std::nullopt, !kAliasable),
         Hook("chat_surface", "minimal_client_plugin_register_chat_surface", r.chat_surface,
              std::nullopt, !kAliasable),
         Hook("markdown_engine", "minimal_client_plugin_register_markdown_engine",

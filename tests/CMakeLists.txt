@@ -154,6 +154,7 @@ add_executable(minimal_tests
     syntax_highlighter_test.cpp
     session_state_test.cpp
     app_state_test.cpp
+    observer_events_test.cpp
     view_factory_test.cpp
     chat_view_scroll_test.cpp
     tab_bar_test.cpp

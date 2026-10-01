@@ -47,7 +47,20 @@ private:
 }  // namespace
 
 namespace {
-// One feed for both hooks: whichever runs first creates it, the second
+// Focus, pushed: the feed fetches the focused session's list even when
+// neither the segment nor the panel is showing.
+class ChecklistObserver final : public plugins::Observer {
+public:
+    explicit ChecklistObserver(std::shared_ptr<ChecklistFeed> feed) : feed_(std::move(feed)) {}
+    void OnFocusChanged(const plugins::TabInfo& focused) override {
+        feed_->SetFocus(focused.session_id);
+    }
+
+private:
+    std::shared_ptr<ChecklistFeed> feed_;
+};
+
+// One feed for every hook: whichever runs first creates it, the second
 // reuses it. WEAK: the registered segment and view own it, so it dies with
 // the host's registries -- while the ClientApi/FocusProvider seams its
 // worker calls are still alive. A strong static here kept the worker running
@@ -90,6 +103,16 @@ void minimal_client_plugin_register_views(
     if (context.client_api == nullptr || context.focus == nullptr) return;
     registry.Register(std::make_unique<ChecklistPanelView>(
         SharedFeed(context.client_api, context.focus, context.ui), context.focus));
+}
+
+// After the segment and view hooks (the host's hook order): observes the
+// feed they created, if either did.
+void minimal_client_plugin_register_observers(
+    plugins::ObserverRegistry& registry,
+    const plugins::ClientPluginRegistrationContext&) {
+    if (auto feed = shared_instance.lock()) {
+        registry.Register(std::make_unique<ChecklistObserver>(feed));
+    }
 }
 
 }  // extern "C"

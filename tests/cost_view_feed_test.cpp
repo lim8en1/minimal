@@ -138,20 +138,6 @@ private:
     std::map<std::string, int> calls_;
 };
 
-class StubFocus final : public plugins::FocusProvider {
-public:
-    explicit StubFocus(std::set<std::string> open) : open_(std::move(open)) {}
-    std::string FocusedSessionId() const override { return {}; }
-    std::vector<plugins::TabInfo> Tabs() const override {
-        std::vector<plugins::TabInfo> tabs;
-        for (const auto& id : open_) tabs.push_back({"tab-" + id, id, id});
-        return tabs;
-    }
-
-private:
-    std::set<std::string> open_;
-};
-
 constexpr TotalsFeed::Timing kFastTiming{20ms, 100ms};
 
 }  // namespace
@@ -159,7 +145,7 @@ constexpr TotalsFeed::Timing kFastTiming{20ms, 100ms};
 TEST_CASE("pushes fill a per-session cache; a switch to a cached session renders at once",
           "[cost_view]") {
     StreamApi api;
-    TotalsFeed feed(&api, nullptr, kFastTiming);
+    TotalsFeed feed(&api, kFastTiming);
     api.Push(TotalsPush("s2", 2.0));
     api.Push(TotalsPush("s1", 1.0));
 
@@ -172,7 +158,7 @@ TEST_CASE("pushes fill a per-session cache; a switch to a cached session renders
 
 TEST_CASE("a turns:0 push clears the session's figures", "[cost_view]") {
     StreamApi api;
-    TotalsFeed feed(&api, nullptr, kFastTiming);
+    TotalsFeed feed(&api, kFastTiming);
     api.Push(TotalsPush("s1", 1.0));
     REQUIRE(WaitFor([&] { return !feed.Render("s1", TotalsField::kCost).empty(); }));
 
@@ -183,7 +169,7 @@ TEST_CASE("a turns:0 push clears the session's figures", "[cost_view]") {
 TEST_CASE("an uncached focused session is seeded with exactly one call", "[cost_view]") {
     StreamApi api;
     api.SetTotals("s3", TotalsPush("s3", 3.0));
-    TotalsFeed feed(&api, nullptr, kFastTiming);
+    TotalsFeed feed(&api, kFastTiming);
 
     REQUIRE(WaitFor([&] { return !feed.Render("s3", TotalsField::kCost).empty(); }));
     CHECK(feed.Render("s3", TotalsField::kCost) == "$3.00 · 1.0k/2.0k tok");
@@ -200,7 +186,7 @@ TEST_CASE("an uncached focused session is seeded with exactly one call", "[cost_
 
 TEST_CASE("a dead stream marks figures stale, polls, and resubscribes", "[cost_view]") {
     StreamApi api;
-    TotalsFeed feed(&api, nullptr, kFastTiming);
+    TotalsFeed feed(&api, kFastTiming);
     api.Push(TotalsPush("s1", 1.0));
     REQUIRE(WaitFor([&] { return !feed.Render("s1", TotalsField::kCost).empty(); }));
 
@@ -221,27 +207,31 @@ TEST_CASE("a server without the stream still fills through polling", "[cost_view
     StreamApi api;
     api.SetRefuse(true);
     api.SetTotals("s1", TotalsPush("s1", 1.0));
-    TotalsFeed feed(&api, nullptr, kFastTiming);
+    TotalsFeed feed(&api, kFastTiming);
     CHECK(WaitFor(
         [&] { return feed.Render("s1", TotalsField::kCost) == "$1.00 · 1.0k/2.0k tok"; }));
 }
 
-TEST_CASE("closed tabs are evicted on a heartbeat", "[cost_view]") {
+TEST_CASE("a closed tab's figures are forgotten, the focused one's kept", "[cost_view]") {
     StreamApi api;
-    StubFocus focus({"s1"});
-    TotalsFeed feed(&api, &focus, kFastTiming);
-    api.Push(TotalsPush("s2", 2.0));   // not an open tab
+    TotalsFeed feed(&api, kFastTiming);
+    api.Push(TotalsPush("s2", 2.0));
     api.Push(TotalsPush("s1", 1.0));
     REQUIRE(WaitFor([&] { return !feed.Render("s1", TotalsField::kCost).empty(); }));
-    std::this_thread::sleep_for(100ms);   // several heartbeats while s1 is focused
+    REQUIRE(WaitFor([&] { return !feed.Render("s2", TotalsField::kCost).empty(); }));
+    feed.SetFocus("s1");
+    feed.Forget("s2");
+    feed.Forget("s1");   // focused: kept
     CHECK(feed.Render("s2", TotalsField::kCost).empty());
+    feed.SetFocus("s1");
+    CHECK_FALSE(feed.Render("s1", TotalsField::kCost).empty());
 }
 
 TEST_CASE("teardown is bounded by the stream's heartbeat", "[cost_view]") {
     StreamApi api;
     const auto start = std::chrono::steady_clock::now();
     {
-        TotalsFeed feed(&api, nullptr, kFastTiming);
+        TotalsFeed feed(&api, kFastTiming);
         REQUIRE(WaitFor([&] { return api.Subscribes() == 1; }));
     }
     CHECK(std::chrono::steady_clock::now() - start < 1s);

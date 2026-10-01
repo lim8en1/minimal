@@ -43,6 +43,26 @@ private:
     std::shared_ptr<TotalsFeed> feed_;
 };
 
+// Focus and tab closes, pushed: the feed follows the focused session even
+// when no {cost} segment is rendered, and drops a closed tab's figures.
+class TotalsObserver final : public plugins::Observer {
+public:
+    explicit TotalsObserver(std::shared_ptr<TotalsFeed> feed) : feed_(std::move(feed)) {}
+    void OnFocusChanged(const plugins::TabInfo& focused) override {
+        feed_->SetFocus(focused.session_id);
+    }
+    void OnTabClosed(const plugins::TabInfo& tab) override {
+        if (!tab.session_id.empty()) feed_->Forget(tab.session_id);
+    }
+
+private:
+    std::shared_ptr<TotalsFeed> feed_;
+};
+
+// The segments' feed, for the observer hook that runs after them. WEAK: the
+// registered segments own it (see the hook below).
+std::weak_ptr<TotalsFeed> shared_feed;
+
 }  // namespace
 
 extern "C" {
@@ -59,11 +79,20 @@ void minimal_client_plugin_register_status_segments(
     // shared_ptr: the LAST segment destroyed tears the feed (and its worker
     // thread) down -- the registry owns the segments, and neither outliving
     // nor underliving the other is expressible this way.
-    auto feed = std::make_shared<TotalsFeed>(context.client_api, context.focus);
+    auto feed = std::make_shared<TotalsFeed>(context.client_api);
     feed->SetHostUi(context.ui);
+    shared_feed = feed;
     registry.Register(std::make_unique<TotalsSegment>("cost", TotalsField::kCost, feed));
     registry.Register(
         std::make_unique<TotalsSegment>("token_detail", TotalsField::kTokenDetail, feed));
+}
+
+// Runs after register_status_segments (the host's hook order): no feed
+// there, nothing to observe.
+void minimal_client_plugin_register_observers(
+    plugins::ObserverRegistry& registry,
+    const plugins::ClientPluginRegistrationContext&) {
+    if (auto feed = shared_feed.lock()) registry.Register(std::make_unique<TotalsObserver>(feed));
 }
 
 }  // extern "C"

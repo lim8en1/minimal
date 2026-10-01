@@ -76,8 +76,8 @@ struct RegistryHook {
     std::string_view label;   // PluginRecord::registered's key
     const char* symbol;       // the optional minimal_client_plugin_register_* export
     RegistryBase* registry;
-    // The NameRegistry kind its keys collide under; nullopt for an exclusive
-    // slot, whose rule is its own (first wins, the rest warn).
+    // The NameRegistry kind its keys collide under; nullopt where keys never
+    // collide (an exclusive slot's rule is its own: first wins, the rest warn).
     std::optional<minimal::plugins::NameKind> name_kind;
     // A client-plugins.json alias may rename its entries.
     bool aliasable = false;

@@ -171,7 +171,7 @@ ftxui::Element FrameRenderer::Render() {
                 // view takes over next frame), and a body that never arrived
                 // simply skips this frame's body row.
                 try {
-                    ui.surface_body = effective_surface->component();
+                    ui.surface_body = effective_surface->component(focused);
                     ui.surface_for = effective_surface;
                 } catch (const std::exception& error) {
                     deps_.app.DisableChatSurface(error.what());

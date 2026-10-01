@@ -15,8 +15,8 @@ constexpr char kMethod[] = "totals";
 
 }  // namespace
 
-TotalsFeed::TotalsFeed(plugins::ClientApi* api, plugins::FocusProvider* focus, Timing timing)
-    : api_(api), focus_(focus), timing_(timing) {
+TotalsFeed::TotalsFeed(plugins::ClientApi* api, Timing timing)
+    : api_(api), timing_(timing) {
     // Constructor BODY, not an initializer -- see background_poller.hpp.
     Start([this] { RunLoop(); });
 }
@@ -27,13 +27,22 @@ TotalsFeed::~TotalsFeed() {
     Stop();
 }
 
-std::string TotalsFeed::Render(const std::string& focused_session_id, TotalsField field) const {
+void TotalsFeed::SetFocus(const std::string& session_id) const {
     std::lock_guard<std::mutex> lock(mtx_);
-    if (focused_session_id != focused_session_id_) {
-        focused_session_id_ = focused_session_id;
-        refresh_requested_ = true;
-        cv_.notify_all();
-    }
+    if (session_id == focused_session_id_) return;
+    focused_session_id_ = session_id;
+    refresh_requested_ = true;
+    cv_.notify_all();
+}
+
+void TotalsFeed::Forget(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (session_id != focused_session_id_) cache_.erase(session_id);
+}
+
+std::string TotalsFeed::Render(const std::string& focused_session_id, TotalsField field) const {
+    SetFocus(focused_session_id);
+    std::lock_guard<std::mutex> lock(mtx_);
     const auto it = cache_.find(focused_session_id);
     if (it == cache_.end()) return {};
     const std::string& text = field == TotalsField::kCost ? it->second.cost : it->second.detail;
@@ -88,8 +97,6 @@ bool TotalsFeed::OnPayload(const std::string& json_payload) {
         }
     }
 
-    if (type == "heartbeat") EvictClosedTabs();
-
     if (seed) {
         const auto totals = Fetch(focused);
         std::lock_guard<std::mutex> lock(mtx_);
@@ -139,16 +146,6 @@ void TotalsFeed::ApplyLocked(const std::string& session_id, const nlohmann::json
     entry.cost = FormatTotals(totals).value_or("");
     entry.detail = FormatTokenDetail(totals).value_or("");
     cache_[session_id] = std::move(entry);
-}
-
-void TotalsFeed::EvictClosedTabs() {
-    if (focus_ == nullptr) return;
-    // Outside mtx_: the provider is host code; never call out under our lock.
-    std::set<std::string> open;
-    for (const auto& tab : focus_->Tabs()) open.insert(tab.session_id);
-    std::lock_guard<std::mutex> lock(mtx_);
-    open.insert(focused_session_id_);
-    std::erase_if(cache_, [&open](const auto& item) { return open.count(item.first) == 0; });
 }
 
 std::optional<nlohmann::json> TotalsFeed::Fetch(const std::string& session_id) const {

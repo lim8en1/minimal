@@ -152,6 +152,12 @@ void minimal_client_plugin_register_syntax_grammars(
     minimal::client::plugins::SyntaxGrammarRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
+// OPTIONAL, additive: observers of host events (tab opened/closed, focus,
+// turn start/end, session metadata), delivered on the UI thread.
+void minimal_client_plugin_register_observers(
+    minimal::client::plugins::ObserverRegistry&,
+    const minimal::client::plugins::ClientPluginRegistrationContext&);
+
 // OPTIONAL, EXCLUSIVE: replace the whole chat view. One plugin; a second
 // registration warns and is ignored.
 void minimal_client_plugin_register_chat_surface(

@@ -51,6 +51,7 @@
 #include "minimal/client/tui_bootstrap.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/utf8.hpp"
+#include "minimal/client/plugins/observer_events.hpp"
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/view/chat_view.hpp"
 #include "minimal/client/view/frame_renderer.hpp"
@@ -1111,18 +1112,22 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // show_plugin_modal (above). `tab_maintenance` itself must never be
     // moved/copied for the rest of RunTui's lifetime -- Focused()/
     // FocusedDetails() return references into its own members.
+    // Plugin observers' events, derived between frames (observer_events.hpp).
+    minimal::client::plugins::ObserverPump observer_pump(*app, env.registries.observers);
     minimal::client::TabMaintenance tab_maintenance(minimal::client::TabMaintenance::Dependencies{
         *app, engine, view_registry, plugin_views, plugin_modal_child,
         show_plugin_modal, open_picker, open_agent_picker, open_model_picker,
         open_subagent_model_picker, open_subagents_picker,
         // Loop-thread work queued from other threads: picker fetch results,
-        // and plugins' HostUi view requests (show/close/focus).
+        // plugins' HostUi view requests (show/close/focus), and the plugin
+        // observers' events.
         [&] {
             picker_controller.Poll();
             for (const auto& request : env.host_focus_provider->TakeViewRequests()) {
                 minimal::client::ApplyViewRequest(plugin_views, request, *plugin_modal_child,
                                                   show_plugin_modal);
             }
+            observer_pump.Run();
         },
         tab_ui, theme,
         message_registry, renderer_registry, display_registry, env.registries.prompt_renderers,
