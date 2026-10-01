@@ -189,15 +189,9 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.has_streaming_text = !streaming_accumulated_.empty();
     s.is_streaming_finalized = !is_streaming_;   // not streaming => finalized this turn
     s.live_segments = CopyLiveSegmentsLocked();
-    if (pending_permission_) {
-        s.pending_permission = *pending_permission_;
-    }
-    if (pending_confirmation_) {
-        s.pending_confirmation = *pending_confirmation_;
-    }
-    if (pending_prompt_) {
-        s.pending_prompt = *pending_prompt_;
-    }
+    s.pending_permission = prompts_.permission();
+    s.pending_confirmation = prompts_.confirmation();
+    s.pending_prompt = prompts_.plugin_prompt();
     // LIGHT tool copy: ChatView::RenderLiveToolRow (the only deep-snapshot
     // tool reader) never reads buffered_output -- the running-tools panel is what
     // renders that, off TakeLightSnapshot(true) instead. This used to copy
@@ -334,14 +328,6 @@ std::vector<std::string> SessionState::ConvergenceCommands() const {
 // buffer, so e.g. a thinking-first turn kept the old turn's text tail and
 // fused the next text onto it. Returns whether a new turn started (what
 // authorizes clearing a sticky Error).
-// Every pending prompt at once (permission, confirmation, plugin prompt):
-// the three are mutually exclusive, and every site that ends one kind ends all.
-void SessionState::ClearPendingPromptsLocked() {
-    pending_permission_.reset();
-    pending_confirmation_.reset();
-    pending_prompt_.reset();
-}
-
 void SessionState::BeginTurnLocked() {
     if (turn_in_flight_) return;
     turn_in_flight_ = true;
@@ -464,7 +450,7 @@ void SessionState::AppendStreamingText(std::string_view text) {
     if (state_ != SessionStateKind::Error || starting_new_turn) {
         state_ = SessionStateKind::Thinking;
     }
-    ClearPendingPromptsLocked();
+    prompts_.ClearAll();
 }
 
 void SessionState::FinalizeStreamingText() {
@@ -579,7 +565,7 @@ void SessionState::MaybeGoIdleLocked() {
         std::any_of(tools_.begin(), tools_.end(), [](const ToolExecutionState& t) {
             return t.started && !t.is_background;
         });
-    if (!tool_active && !pending_permission_ && !pending_confirmation_ && !pending_prompt_) {
+    if (!tool_active && !prompts_.Any()) {
         state_ = turn_in_flight_ ? SessionStateKind::Working : SessionStateKind::Idle;
     }
 }
@@ -692,7 +678,7 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     // same shape as permission/confirmation here -- CancelAll covers all
     // three pending kinds identically -- so it resets alongside them; leaving
     // it out stranded the tab Waiting with a dead prompt modal after ESC.
-    ClearPendingPromptsLocked();
+    prompts_.ClearAll();
     MaybeGoIdleLocked();
     // The completed turn's messages are persisted now but NOT yet in the
     // scrollback window; bumping the version is what makes the chat view
@@ -964,7 +950,7 @@ void SessionState::OnError(const std::string& error_message) {
     EndTurnLocked(/*completed=*/false);   // dead streams end turns too -- the probe must not latch
     commands_in_flight_.clear();   // nothing will answer them on this stream
     cancel_requested_ = false;   // a cancel can BE the error path (dead stream)
-    ClearPendingPromptsLocked();
+    prompts_.ClearAll();
     // A queued run-mode change whose turn/stream just errored may never reach
     // its apply-time metadata event; the pending marker would outlive the
     // change it advertised. The confirming path (OnSessionMetadata) is the
@@ -1010,7 +996,7 @@ void SessionState::OnSessionEnded() {
     EndTurnLocked(/*completed=*/false);   // terminal -- the probe must not survive the session
     commands_in_flight_.clear();
     cancel_requested_ = false;
-    ClearPendingPromptsLocked();
+    prompts_.ClearAll();
     pending_user_messages_.clear();   // same rule as OnError: nothing will retire it
     state_ = SessionStateKind::Done;
 }
@@ -1122,9 +1108,7 @@ void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_las
 
 void SessionState::SetPermissionRequest(std::unique_ptr<PendingPermission> req) {
     std::lock_guard lk(mtx_);
-    pending_permission_ = std::move(*req);
-    pending_confirmation_.reset();
-    pending_prompt_.reset();
+    prompts_.SetPermission(std::move(*req));
     // Waiting from ANY active-turn state: mid-turn prompts used to arrive
     // with the tab in Working/Thinking (a tool row, or streamed text, had
     // already moved it off Idle) and left it there -- the modal still showed,
@@ -1137,9 +1121,7 @@ void SessionState::SetPermissionRequest(std::unique_ptr<PendingPermission> req) 
 
 void SessionState::SetConfirmationRequest(std::unique_ptr<PendingConfirmation> req) {
     std::lock_guard lk(mtx_);
-    pending_confirmation_ = std::move(*req);
-    pending_permission_.reset();
-    pending_prompt_.reset();
+    prompts_.SetConfirmation(std::move(*req));
     if (state_ != SessionStateKind::Error) {
         state_ = SessionStateKind::Waiting;
     }
@@ -1147,9 +1129,7 @@ void SessionState::SetConfirmationRequest(std::unique_ptr<PendingConfirmation> r
 
 void SessionState::SetPluginPrompt(std::unique_ptr<PendingPluginPrompt> req) {
     std::lock_guard lk(mtx_);
-    pending_prompt_ = std::move(*req);
-    pending_permission_.reset();
-    pending_confirmation_.reset();
+    prompts_.SetPluginPrompt(std::move(*req));
     if (state_ != SessionStateKind::Error) {
         state_ = SessionStateKind::Waiting;
     }
@@ -1157,20 +1137,7 @@ void SessionState::SetPluginPrompt(std::unique_ptr<PendingPluginPrompt> req) {
 
 bool SessionState::ClearPendingFor(std::string_view request_id) {
     std::lock_guard lk(mtx_);
-    bool cleared = false;
-    if (pending_permission_ && pending_permission_->request_id == request_id) {
-        pending_permission_.reset();
-        cleared = true;
-    }
-    if (pending_confirmation_ && pending_confirmation_->request_id == request_id) {
-        pending_confirmation_.reset();
-        cleared = true;
-    }
-    if (pending_prompt_ && pending_prompt_->request_id == request_id) {
-        pending_prompt_.reset();
-        cleared = true;
-    }
-    return cleared;
+    return prompts_.ClearFor(request_id);
 }
 
 void SessionState::OnPendingResolved() {

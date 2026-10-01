@@ -17,6 +17,7 @@ add_library(minimal_client_core SHARED
     subagent_picker_model.cpp
     keymap_help_model.cpp
     state.cpp
+    session_components.cpp
     command_catalog.cpp
     keybindings.cpp
     keybinding_dispatch.cpp
