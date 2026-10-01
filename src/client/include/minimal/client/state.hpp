@@ -670,43 +670,10 @@ private:
     std::string display_name_;   // tab/picker label; refreshed from server metadata
     SessionStateKind state_ = SessionStateKind::Idle;
 
-    // Scrollback window (descending by seq: front = newest). BOUNDED: loading
-    // older pages beyond scrollback_max_messages_ evicts from the newest end
-    // and sets scrollback_trimmed_ -- an unbounded append let a long PageUp
-    // materialize a 1M-token transcript in client memory.
-    std::vector<v1::StoredMessage> scrollback_page_;
-    // The shared, immutable view of scrollback_page_ handed out by
-    // TakeSnapshot. Rebuilt (one copy) at the end of ApplyScrollbackPage --
-    // the only mutation site -- so every snapshot between applies shares it.
-    std::shared_ptr<const std::vector<v1::StoredMessage>> scrollback_page_shared_ =
-        std::make_shared<const std::vector<v1::StoredMessage>>();
-    // See Snapshot::compactions. Deduplicated on (at_seq, created_at): a live
-    // event and the page that later carries the same record are one row.
-    std::vector<v1::CompactionEvent> compactions_;
-    std::shared_ptr<const std::vector<v1::CompactionEvent>> compactions_shared_ =
-        std::make_shared<const std::vector<v1::CompactionEvent>>();
-    // Merges `incoming` into compactions_ and republishes the shared view
-    // when anything changed. Caller holds mtx_.
-    template <typename Range>
-    void MergeCompactionsLocked(const Range& incoming);
-    int64_t last_loaded_seq_ = -1;      // oldest seq loaded so far (descending)
-    bool has_earlier_ = false;
+    // The transcript window and its refresh bookkeeping.
+    ScrollbackWindow window_;
     uint64_t transcript_version_ = 0;
     uint64_t fetch_generation_ = 0;   // see Snapshot::fetch_generation
-    uint64_t refresh_seq_ = 0;   // see Snapshot::refresh_seq
-    uint64_t rewind_epoch_ = 0;   // see CurrentRewindEpoch
-    bool refresh_succeeded_ = false;   // outcome of the attempt that bumped refresh_seq_
-    // Consecutive RESOLVED-FAILED scrollback fetches; reset by every
-    // successful apply. Drives the one-shot error notice in NoteRefreshFailed
-    // (retry pacing itself lives in scrollback_refresh.hpp's per-tab backoff).
-    int scrollback_failures_ = 0;
-    bool scrollback_trimmed_ = false;
-    bool scrollback_gap_ = false;   // see Snapshot::scrollback_gap
-    int scrollback_max_messages_ = kDefaultScrollbackWindowMaxMessages;
-
-    // The optimistic user-turn echoes (see Snapshot::pending_user_messages).
-    // FIFO, paired with their persisted rows in order on page applies.
-    std::vector<PendingUserMessage> pending_user_messages_;
 
     // Latest /-command outcome (transient notice line; never a chat row).
     // notice_seq_ advances on every OnCommandResult so consumers can tell a
@@ -716,10 +683,6 @@ private:
 
     // Set by RequestCancel, cleared when the turn actually ends.
     bool cancel_requested_ = false;
-
-    // The "load older" in-flight latch (see TryBeginOlderFetch). Never read
-    // outside mtx_.
-    bool older_fetch_pending_ = false;
 
     // Session metadata (see Snapshot). model_/agent_preset_ are EFFECTIVE
     // (wire truth); the desired_* pair is the client-chosen state awaiting

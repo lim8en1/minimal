@@ -9,7 +9,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -94,6 +96,105 @@ private:
     std::vector<ToolExecutionState> rows_;
     std::atomic<std::uint64_t> version_{0};
     int output_cap_bytes_ = 64 * 1024;
+};
+
+// The transcript window: keyset pages of persisted rows (descending by seq,
+// front = newest), bounded at max_messages, plus what rides with them -- the
+// context compactions, the optimistic user-turn echoes the persisted rows
+// retire, the "load older" latch, and the refresh bookkeeping the frame's
+// refresh state machine reads (refresh_seq / refresh_succeeded / the failure
+// streak / the rewind epoch).
+class ScrollbackWindow {
+public:
+    // What an applied page proved persisted: the facade retires the live
+    // segments it covers (SessionState::RetireCoveredLiveSegments).
+    struct Coverage {
+        bool applied = false;   // rows changed (an empty page changes nothing)
+        std::set<std::string> answered_tool_ids;
+        std::vector<std::string> assistant_text;
+        std::vector<std::string> assistant_thinking;
+    };
+
+    void SetMaxMessages(int max_messages) { max_messages_ = max_messages; }
+
+    // See SessionState::ApplyScrollbackPage. Resolves the refresh attempt
+    // (refresh_seq) and ends any failure streak.
+    Coverage ApplyPage(const v1::GetMessagesResponse& resp, bool delta);
+    // See SessionState::OnSessionRewound: trims the window (and compactions)
+    // to the active transcript, or clears it for a redo; drops the echoes;
+    // resolves the refresh attempt and bumps the rewind epoch.
+    void Rewind(std::int64_t truncated_to_seq, std::int64_t active_last_seq);
+    void MergeCompaction(const v1::CompactionEvent& evt);
+
+    // --- the optimistic echoes (Snapshot::pending_user_messages) ---
+    void SubmitEcho(const std::string& text);
+    void EchoQueued(std::uint64_t turn_id, const std::string& text);
+    // Removed: drops the echo. Not removed (already popped): keeps it, and
+    // returns true when an echo with that id exists -- the facade says the
+    // cancel lost the race.
+    bool EchoCanceled(std::uint64_t turn_id, bool removed);
+    void ClearEchoes() { echoes_.clear(); }
+    const std::vector<PendingUserMessage>& echoes() const { return echoes_; }
+
+    // --- refresh bookkeeping ---
+    // A failed attempt: resolves it and extends the streak; returns the
+    // streak's length.
+    int NoteFailure();
+    // A superseded response (a rewind landed while it was in flight).
+    void DiscardStale();
+    std::uint64_t refresh_seq() const { return refresh_seq_; }
+    bool refresh_succeeded() const { return refresh_succeeded_; }
+    std::uint64_t rewind_epoch() const { return rewind_epoch_; }
+
+    // --- the "load older" latch (SessionState::TryBeginOlderFetch) ---
+    bool TryBeginOlderFetch();
+    void EndOlderFetch() { older_fetch_pending_ = false; }
+
+    // --- reads ---
+    std::int64_t NewestSeq() const { return page_.empty() ? -1 : page_.front().seq(); }
+    bool has_earlier() const { return has_earlier_; }
+    std::int64_t last_loaded_seq() const { return last_loaded_seq_; }
+    bool trimmed() const { return trimmed_; }
+    bool gap() const { return gap_; }
+    const std::shared_ptr<const std::vector<v1::StoredMessage>>& page_view() const {
+        return page_shared_;
+    }
+    const std::shared_ptr<const std::vector<v1::CompactionEvent>>& compactions_view() const {
+        return compactions_shared_;
+    }
+
+private:
+    template <typename Range>
+    void MergeCompactions(const Range& incoming);
+    void RetireEchoes(const v1::GetMessagesResponse& resp);
+    void Publish() {
+        page_shared_ = std::make_shared<const std::vector<v1::StoredMessage>>(page_);
+    }
+
+    // BOUNDED: loading older pages beyond max_messages_ evicts from the
+    // newest end and sets trimmed_ -- an unbounded append let a long PageUp
+    // materialize a 1M-token transcript in client memory.
+    std::vector<v1::StoredMessage> page_;
+    // The shared, immutable view handed to snapshots; rebuilt (one copy) only
+    // when rows change, so every snapshot between applies shares it.
+    std::shared_ptr<const std::vector<v1::StoredMessage>> page_shared_ =
+        std::make_shared<const std::vector<v1::StoredMessage>>();
+    // Deduplicated on (at_seq, created_at): a live event and the page that
+    // later carries the same record are one row. Ascending by at_seq.
+    std::vector<v1::CompactionEvent> compactions_;
+    std::shared_ptr<const std::vector<v1::CompactionEvent>> compactions_shared_ =
+        std::make_shared<const std::vector<v1::CompactionEvent>>();
+    std::vector<PendingUserMessage> echoes_;   // FIFO, retired by their persisted rows
+    std::int64_t last_loaded_seq_ = -1;        // oldest seq loaded so far
+    bool has_earlier_ = false;
+    bool trimmed_ = false;
+    bool gap_ = false;
+    int max_messages_ = 2000;
+    bool older_fetch_pending_ = false;
+    std::uint64_t refresh_seq_ = 0;
+    bool refresh_succeeded_ = false;
+    int failures_ = 0;   // consecutive resolved-failed fetches
+    std::uint64_t rewind_epoch_ = 0;
 };
 
 }  // namespace minimal::client

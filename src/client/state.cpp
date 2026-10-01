@@ -128,7 +128,7 @@ std::string SessionState::FlatThinkingText() const {
 
 void SessionState::SetBounds(int scrollback_max_messages, int tool_output_buffer_bytes) {
     std::lock_guard lk(mtx_);
-    scrollback_max_messages_ = scrollback_max_messages;
+    window_.SetMaxMessages(scrollback_max_messages);
     tools_.SetOutputCap(tool_output_buffer_bytes);
 }
 
@@ -136,13 +136,13 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     std::lock_guard lk(mtx_);
     Snapshot s;
     FillCommonLocked(s);
-    s.scrollback_page = scrollback_page_shared_;   // shared, copy-on-apply
-    s.compactions = compactions_shared_;
-    s.pending_user_messages = pending_user_messages_;
+    s.scrollback_page = window_.page_view();   // shared, copy-on-apply
+    s.compactions = window_.compactions_view();
+    s.pending_user_messages = window_.echoes();
     s.pending_user_text =
-        pending_user_messages_.empty() ? std::string{} : pending_user_messages_.front().text;
-    s.has_earlier_messages = has_earlier_;
-    s.last_loaded_seq = last_loaded_seq_;
+        window_.echoes().empty() ? std::string{} : window_.echoes().front().text;
+    s.has_earlier_messages = window_.has_earlier();
+    s.last_loaded_seq = window_.last_loaded_seq();
     // The flat streaming/thinking accumulations are NOT copied here: they
     // duplicate live_segments' text, they change on every delta, and the
     // per-event deep copy of a growing stream was churn for consumers that
@@ -163,15 +163,15 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.tools = tools_.Copy(/*include_output=*/false);
     s.transcript_version = transcript_version_;
     s.fetch_generation = fetch_generation_;
-    s.rewind_epoch = rewind_epoch_;
+    s.rewind_epoch = window_.rewind_epoch();
     s.turn_ended = turn_ended_;
-    s.scrollback_trimmed = scrollback_trimmed_;
-    s.scrollback_gap = scrollback_gap_;
+    s.scrollback_trimmed = window_.trimmed();
+    s.scrollback_gap = window_.gap();
     s.turn_seq = turn_seq_;
     s.latest_notice = latest_notice_;
     s.notice_seq = notice_seq_;
-    s.refresh_seq = refresh_seq_;
-    s.refresh_succeeded = refresh_succeeded_;
+    s.refresh_seq = window_.refresh_seq();
+    s.refresh_succeeded = window_.refresh_succeeded();
     return s;
 }
 
@@ -867,13 +867,12 @@ bool SessionState::CurrentTurnEnded() const {
 
 uint64_t SessionState::CurrentRewindEpoch() const {
     std::lock_guard lk(mtx_);
-    return rewind_epoch_;
+    return window_.rewind_epoch();
 }
 
 void SessionState::DiscardStaleScrollbackPage() {
     std::lock_guard lk(mtx_);
-    refresh_succeeded_ = true;
-    ++refresh_seq_;
+    window_.DiscardStale();
 }
 
 void SessionState::OnError(const std::string& error_message) {
@@ -892,7 +891,7 @@ void SessionState::OnError(const std::string& error_message) {
     // The turn failed before any page apply could retire the echo; nothing
     // will, so drop it here rather than leaving a ghost of an unacknowledged
     // message above the error.
-    pending_user_messages_.clear();
+    window_.ClearEchoes();
     state_ = SessionStateKind::Error;
     // The message is part of the outcome: dropped here, an errored tab showed
     // only a state tint and "cannot send"/"connection lost"/"resume failed"
@@ -930,7 +929,7 @@ void SessionState::OnSessionEnded() {
     commands_in_flight_.clear();
     cancel_requested_ = false;
     prompts_.ClearAll();
-    pending_user_messages_.clear();   // same rule as OnError: nothing will retire it
+    window_.ClearEchoes();   // same rule as OnError: nothing will retire it
     state_ = SessionStateKind::Done;
 }
 
@@ -973,59 +972,15 @@ void SessionState::OnResyncRequired(const std::string& reason) {
 // the discarded rows. Not a turn terminator, so state_ is left alone.
 void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_last_seq) {
     std::lock_guard lk(mtx_);
-    // Compactions that ran on the rewound-away rows go with them (a redo's
-    // restored rows bring theirs back on the refetch).
-    {
-        const auto keep_up_to = truncated_to_seq < 0 ? int64_t{-2} : active_last_seq;
-        const std::size_t before = compactions_.size();
-        compactions_.erase(std::remove_if(compactions_.begin(), compactions_.end(),
-                                          [keep_up_to](const v1::CompactionEvent& evt) {
-                                              return evt.at_seq() > keep_up_to;
-                                          }),
-                           compactions_.end());
-        if (compactions_.size() != before) {
-            compactions_shared_ =
-                std::make_shared<const std::vector<v1::CompactionEvent>>(compactions_);
-        }
-    }
-    if (truncated_to_seq < 0) {
-        // REDO: the restored rows are unknown client-side -- clear the whole
-        // window so the refresh refetches them from the top.
-        scrollback_page_.clear();
-        has_earlier_ = true;
-    } else {
-        // Descending window: the cut rows sit at the FRONT.
-        const auto first_kept = std::find_if(
-            scrollback_page_.begin(), scrollback_page_.end(),
-            [active_last_seq](const v1::StoredMessage& m) { return m.seq() <= active_last_seq; });
-        scrollback_page_.erase(scrollback_page_.begin(), first_kept);
-        // Conservative: rows survived -> older pages may exist; setting true
-        // when they don't just costs one empty "load older" round trip.
-        has_earlier_ = !scrollback_page_.empty() ? true : has_earlier_;
-    }
-    last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
-    // The window was rebuilt wholesale: any previously-detected stitching gap
-    // describes rows that no longer exist in it.
-    scrollback_gap_ = false;
-    // The live-state wipe ClearStreaming does (inlined: it locks, we hold mtx_),
-    // plus the pending-turn bookkeeping -- the rewound turn's echo has nothing
-    // left to retire it and a pending cancel belongs to the discarded turn.
+    // The window (rows, compactions, echoes, refresh bookkeeping) follows the
+    // durable record; the live-state wipe goes with the rows it belonged to,
+    // and a pending cancel belongs to the discarded turn.
+    window_.Rewind(truncated_to_seq, active_last_seq);
     ClearStreamingLocked();
-    pending_user_messages_.clear();
     cancel_requested_ = false;
-    scrollback_page_shared_ =
-        std::make_shared<const std::vector<v1::StoredMessage>>(scrollback_page_);
-    // Same bookkeeping ApplyScrollbackPage resolves with: the version bump is
-    // the mismatch the refresh state machine refetches; the refresh_seq bump
-    // unsticks the tab_ui.cpp refresh latch. Neither one stops an
-    // ALREADY-IN-FLIGHT fetch from applying its (now stale) response -- that
-    // is rewind_epoch_'s job (RequestScrollback captures it at submit time,
-    // AppState::CurrentRewindEpoch(); DiscardStaleScrollbackPage above).
-    refresh_succeeded_ = true;
+    // The version bump is the mismatch the refresh state machine refetches.
     ++transcript_version_;
     ++fetch_generation_;
-    ++refresh_seq_;
-    ++rewind_epoch_;
 }
 
 // Pending modals -------------------------------------------------------------
@@ -1160,33 +1115,9 @@ void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
 
 // Scrollback -----------------------------------------------------------------
 
-template <typename Range>
-void SessionState::MergeCompactionsLocked(const Range& incoming) {
-    bool changed = false;
-    for (const auto& evt : incoming) {
-        const bool held = std::any_of(compactions_.begin(), compactions_.end(),
-                                      [&evt](const v1::CompactionEvent& have) {
-                                          return have.at_seq() == evt.at_seq() &&
-                                                 have.created_at_unix_ms() ==
-                                                     evt.created_at_unix_ms();
-                                      });
-        if (held) continue;
-        compactions_.push_back(evt);
-        changed = true;
-    }
-    if (!changed) return;
-    std::stable_sort(compactions_.begin(), compactions_.end(),
-                     [](const v1::CompactionEvent& a, const v1::CompactionEvent& b) {
-                         return a.at_seq() != b.at_seq()
-                                    ? a.at_seq() < b.at_seq()
-                                    : a.created_at_unix_ms() < b.created_at_unix_ms();
-                     });
-    compactions_shared_ = std::make_shared<const std::vector<v1::CompactionEvent>>(compactions_);
-}
-
 void SessionState::OnCompaction(const v1::CompactionEvent& evt) {
     std::lock_guard lk(mtx_);
-    MergeCompactionsLocked(std::array<v1::CompactionEvent, 1>{evt});
+    window_.MergeCompaction(evt);
     // The status bar reads last-turn occupancy; the compaction just replaced
     // it. The server's after-figure is an estimate, but so is any number the
     // bar could show before the next response reports real usage.
@@ -1200,129 +1131,8 @@ void SessionState::OnCompaction(const v1::CompactionEvent& evt) {
 
 void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp, bool delta) {
     std::lock_guard lk(mtx_);
-    refresh_succeeded_ = true;   // resolved OK, even when the page is empty
-    scrollback_failures_ = 0;   // a success ends any failure streak (and its notice)
-    MergeCompactionsLocked(resp.compactions());
-    if (resp.messages().empty()) {
-        // A delta fetch that returns nothing proves nothing about OLDER
-        // history -- has_more on an after_seq response means "more newer
-        // rows", which is definitionally false for an empty one. The
-        // load-older affordance must not move.
-        if (!delta) has_earlier_ = resp.has_more();
-        ++refresh_seq_;   // a resolved attempt (successful RPC, empty page) -- see NoteRefreshFailed
-        return;
-    }
-
-    // Set when the newest-slice assign below trims the fetched page to the
-    // configured cap -- distinct from scrollback_trimmed_, which specifically
-    // means NEWER rows were evicted; this is the opposite direction (we chose
-    // to keep fewer than the full fetch), so it only needs to correct
-    // has_earlier_.
-    bool assign_capped = false;
-    if (delta) {
-        // ASCENDING rows newer than the cursor the fetch was submitted with:
-        // merge onto the window's newest end, never replacing it. Rows the
-        // window already holds (a racing duplicate fetch, or the window's
-        // front having moved past part of the page between submit and apply)
-        // are skipped; a discontinuity against the held newest seq records
-        // scrollback_gap_ exactly as the older-page stitch below does --
-        // rows are only ever APPENDED server-side, so a hole here means rows
-        // were discarded (a rewind race that the epoch guard missed, or a
-        // redo) and a full refresh must reconcile the window.
-        const int64_t held_newest = scrollback_page_.empty() ? -1 : scrollback_page_.front().seq();
-        std::vector<v1::StoredMessage> fresh;   // ascending -> reversed into desc
-        for (const auto& stored : resp.messages()) {
-            if (stored.seq() <= held_newest) continue;   // already held
-            fresh.push_back(stored);
-        }
-        if (!fresh.empty()) {
-            int64_t expected_prev = held_newest;   // each accepted row must be exactly one newer
-            for (const auto& stored : fresh) {
-                if (stored.seq() != expected_prev + 1) scrollback_gap_ = true;
-                expected_prev = stored.seq();
-            }
-            // Ascending -> the descending window's front, in ONE insert: a
-            // row-at-a-time insert(begin()) shifted the whole window per row
-            // (O(rows x window) for a 5000-row catch-up).
-            scrollback_page_.insert(scrollback_page_.begin(), fresh.rbegin(), fresh.rend());
-            // Caught up to the server's newest: anything an older-page load
-            // evicted from the window's NEWEST end is visible again. (A gap
-            // INSIDE the window is a different flag and stays.)
-            if (!resp.has_more()) scrollback_trimmed_ = false;
-            // Sliding window, oldest end only: the same bound the
-            // newest-slice assign applies, from the same direction.
-            bool evicted_earlier = false;
-            if (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
-                scrollback_page_.resize(static_cast<std::size_t>(scrollback_max_messages_));
-                evicted_earlier = true;
-            }
-            // Rows the cap just evicted from the oldest end are fetchable
-            // earlier pages -- exactly the conservative rule OnSessionRewound
-            // applies (true costs at most one empty load-older round trip).
-            // Without this, a window that grew up from the transcript's first
-            // rows keeps has_earlier_ false forever (the first assign saw
-            // has_more false; delta applies never revisit it) and "load
-            // older" is wedged for the life of the tab.
-            if (evicted_earlier) has_earlier_ = true;
-        }
-        // The shared-page rebuild, retirement, and bookkeeping below are
-        // shared with the non-delta path.
-    } else if (scrollback_page_.empty() ||
-               resp.messages(0).seq() > scrollback_page_.front().seq()) {
-        // Newer than what we hold — keep only the contiguous newest slice (bounded memory).
-        scrollback_page_.assign(resp.messages().begin(), resp.messages().end());
-        scrollback_trimmed_ = false;
-        scrollback_gap_ = false;   // same reset as the newest-slice refresh's other boundary flag
-        // RequestScrollback always asks for up to 100 rows, independent of
-        // scrollback_max_messages_ -- without this, a newest apply could
-        // exceed the configured cap outright, and the VERY NEXT older-page
-        // load's eviction loop (below) would evict some of the rows just
-        // shown instead of only the ones it actually fetched.
-        if (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
-            scrollback_page_.resize(static_cast<std::size_t>(scrollback_max_messages_));
-            assign_capped = true;
-        }
-    } else {
-        // Older than (or overlapping) what we hold: append, SKIPPING rows we
-        // already hold. The assign branch above must only ever fire when the
-        // page's newest seq is genuinely newer than the window's -- a
-        // duplicate in-flight "load older" fetch (two presses inside one RPC
-        // round trip) returns the same before_seq page, and its apply taking
-        // the assign branch REPLACED the window with the older page: the
-        // newest rows vanished from the view.
-        const int64_t oldest_held = scrollback_page_.back().seq();
-        // Contiguity stitch: walking the page's DESC-order rows, each must be
-        // exactly one below the previous seq we hold/accepted. A row that
-        // lands BELOW that expectation means seqs are missing BETWEEN window
-        // and page (or inside the page) -- a server-side hole (deleted rows,
-        // a rewind race). The eviction marker (scrollback_trimmed_) cannot
-        // describe a hole in the middle, so this records scrollback_gap_ for
-        // the view the same way, and the newest-slice refresh clears both.
-        // Rows already held (seq >= oldest_held, a raced duplicate) and rows
-        // duplicating seqs the page itself already accepted are dropped.
-        int64_t expected_prev = oldest_held - 1;
-        for (const auto& stored : resp.messages()) {
-            if (stored.seq() >= oldest_held) continue;   // already held (or a raced duplicate)
-            if (stored.seq() > expected_prev) continue;  // duplicate within this page
-            if (stored.seq() < expected_prev) scrollback_gap_ = true;
-            expected_prev = stored.seq() - 1;
-            scrollback_page_.push_back(stored);
-        }
-        // Sliding window (track R2): an older-page load evicts from the
-        // window's NEWEST end to hold the cap -- flagged (scrollback_trimmed_)
-        // and rendered as a boundary marker, never a silent gap. The flag
-        // clears when a delta fetch catches the window back up to the
-        // server's newest (the delta branch above), which is exactly the
-        // "reload NEWER pages on demand" the wire used to lack.
-        if (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
-            const auto excess = scrollback_page_.size() -
-                                static_cast<std::size_t>(scrollback_max_messages_);
-            scrollback_page_.erase(scrollback_page_.begin(),
-                                   scrollback_page_.begin() + static_cast<std::ptrdiff_t>(excess));
-            scrollback_trimmed_ = true;
-        }
-    }
-
+    const ScrollbackWindow::Coverage coverage = window_.ApplyPage(resp, delta);
+    if (!coverage.applied) return;   // an empty page: resolved, nothing changed
     // Content-matched retirement: the rows just applied prove what is now
     // persisted, so live segments whose content they carry retire here rather
     // than waiting for the turn-end refresh. This is what makes a MID-TURN
@@ -1332,76 +1142,12 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp, bool
     // refresh's coarse clear (ClearStreamingIfCurrentTurn, called by the
     // fetcher after this) remains the belt-and-suspenders for anything the
     // exact match cannot name.
-    std::set<std::string> answered_tool_ids;
-    std::vector<std::string> assistant_text_blocks;
-    std::vector<std::string> assistant_thinking_blocks;
-    for (const auto& stored : resp.messages()) {
-        const bool assistant = stored.message().role() == v1::ROLE_ASSISTANT;
-        for (const auto& block : stored.message().content()) {
-            if (block.has_tool_result()) {
-                answered_tool_ids.insert(block.tool_result().tool_use_id());
-            } else if (assistant && block.has_text()) {
-                assistant_text_blocks.push_back(block.text().text());
-            } else if (assistant && block.has_thinking()) {
-                assistant_thinking_blocks.push_back(block.thinking().text());
-            }
-        }
-    }
-    if (!answered_tool_ids.empty() || !assistant_text_blocks.empty() ||
-        !assistant_thinking_blocks.empty()) {
-        RetireCoveredLiveSegments(answered_tool_ids, assistant_text_blocks,
-                                  assistant_thinking_blocks);
-    }
-
-    last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
-    // The server's own has_more() may say false (this genuinely was the
-    // whole remaining history) while assign_capped means we still chose to
-    // keep less than the full fetch -- "load older" must not read as
-    // exhausted in that case. A delta apply leaves the flag alone: has_more
-    // on an after_seq response speaks about NEWER rows, and only a real
-    // before_seq page (or a newest page) can prove anything about history
-    // below the window.
-    if (!delta) has_earlier_ = resp.has_more() || assign_capped;
-    // The one copy the shared page ever pays: rows changed, so the old
-    // snapshot's view must stay stable for whatever frame is still reading it.
-    scrollback_page_shared_ =
-        std::make_shared<const std::vector<v1::StoredMessage>>(scrollback_page_);
-    // Retire optimistic echoes whose persisted row just landed. Entries pair
-    // with their rows in FIFO order (the server queue is FIFO; each entry
-    // produces exactly one text-bearing user row when its turn pops), so the
-    // applied page's text-bearing USER rows newer than the OLDEST entry's
-    // baseline retire entries front-to-back, one row per entry. Rows the
-    // baseline filter excludes are the running turn's output (assistant rows)
-    // and injected tool-result-only user rows -- neither is an echo's row,
-    // which is exactly what the old single-slot "any newer seq" check got
-    // wrong (the previous turn's output retired the echo of a message still
-    // waiting in the queue).
-    if (!pending_user_messages_.empty()) {
-        const int64_t oldest_baseline = pending_user_messages_.front().baseline_seq;
-        std::vector<int64_t> user_text_seqs;   // ascending
-        for (const auto& stored : resp.messages()) {
-            if (stored.seq() <= oldest_baseline) continue;
-            if (stored.message().role() != v1::ROLE_USER) continue;
-            bool text_bearing = false;
-            for (const auto& block : stored.message().content()) {
-                if (block.has_text() && !block.text().text().empty()) {
-                    text_bearing = true;
-                    break;
-                }
-            }
-            if (text_bearing) user_text_seqs.push_back(stored.seq());
-        }
-        std::sort(user_text_seqs.begin(), user_text_seqs.end());
-        // Each persisted user row retires exactly one echo, oldest first; the
-        // seqs themselves were only the count's source, so the loop walks the
-        // count.
-        const auto retire_count = std::min(user_text_seqs.size(), pending_user_messages_.size());
-        pending_user_messages_.erase(pending_user_messages_.begin(),
-                                     pending_user_messages_.begin() +
-                                         static_cast<std::ptrdiff_t>(retire_count));
+    if (!coverage.answered_tool_ids.empty() || !coverage.assistant_text.empty() ||
+        !coverage.assistant_thinking.empty()) {
+        RetireCoveredLiveSegments(coverage.answered_tool_ids, coverage.assistant_text,
+                                  coverage.assistant_thinking);
     }
     ++transcript_version_;
-    ++refresh_seq_;
 }
 
 void SessionState::OnChatSubmitted(const std::string& text) {
@@ -1410,11 +1156,7 @@ void SessionState::OnChatSubmitted(const std::string& text) {
     // QUEUED server-side (runs after the current turn), and only the oldest
     // echo surviving meant every later queued message was invisible -- and
     // unaddressable by a per-message cancel -- for the whole wait.
-    PendingUserMessage entry;
-    entry.text = text;
-    // The page's NEWEST seq (descending window: front, not back/back).
-    entry.baseline_seq = scrollback_page_.empty() ? -1 : scrollback_page_.front().seq();
-    pending_user_messages_.push_back(std::move(entry));
+    window_.SubmitEcho(text);
     // The turn is in flight from this instant, whatever the display state
     // does -- UNCONDITIONALLY, not only from Idle: a submit right after a
     // Done/Error session must still be interruptible before the first wire
@@ -1434,52 +1176,30 @@ void SessionState::OnChatSubmitted(const std::string& text) {
 
 void SessionState::OnTurnQueued(std::uint64_t turn_id, const std::string& text) {
     std::lock_guard lk(mtx_);
-    // The server acks submissions in queue order; match the id to the OLDEST
-    // still-unassigned echo with the same text. A raced ack (two identical
-    // texts in flight) still pairs deterministically: both acks arrive in
-    // the same FIFO order the echoes sit in. An event with no matching echo
-    // is another client's submission -- ignored here.
-    for (auto& entry : pending_user_messages_) {
-        if (entry.turn_id == 0 && entry.text == text) {
-            entry.turn_id = turn_id;
-            return;
-        }
-    }
+    window_.EchoQueued(turn_id, text);
 }
 
 void SessionState::OnTurnCanceled(std::uint64_t turn_id, bool removed) {
     std::lock_guard lk(mtx_);
-    if (!removed) {
+    if (window_.EchoCanceled(turn_id, removed)) {
         // The click lost the race: the turn had already been popped and must
         // run. Say so -- a silent press reads as "the message was cancelled"
         // when it was not.
-        for (const auto& entry : pending_user_messages_) {
-            if (entry.turn_id == turn_id) {
-                latest_notice_ = CommandNotice{
-                    "queued message already started; it was not cancelled",
-                    /*is_error=*/true, v1::COMMAND_DISPLAY_STATUS, /*view_hint=*/{}};
-                ++notice_seq_;
-                return;
-            }
-        }
-        return;
-    }
-    for (auto it = pending_user_messages_.begin(); it != pending_user_messages_.end(); ++it) {
-        if (it->turn_id == turn_id) {
-            pending_user_messages_.erase(it);
-            return;
-        }
+        latest_notice_ = CommandNotice{"queued message already started; it was not cancelled",
+                                       /*is_error=*/true, v1::COMMAND_DISPLAY_STATUS,
+                                       /*view_hint=*/{}};
+        ++notice_seq_;
     }
 }
 
 bool SessionState::CanLoadMore() const {
     std::lock_guard lk(mtx_);
-    return has_earlier_;
+    return window_.has_earlier();
 }
 
 int64_t SessionState::NewestScrollbackSeq() const {
     std::lock_guard lk(mtx_);
-    return scrollback_page_.empty() ? -1 : scrollback_page_.front().seq();
+    return window_.NewestSeq();
 }
 
 std::string SessionState::SessionId() const {
@@ -1489,19 +1209,17 @@ std::string SessionState::SessionId() const {
 
 void SessionState::NoteRefreshFailed(const std::string& reason) {
     std::lock_guard lk(mtx_);
-    refresh_succeeded_ = false;   // resolved with a failure -- see Snapshot::refresh_succeeded
-    ++refresh_seq_;   // resolved (no content change) -- lets a mismatch retry next frame
-    // Retry PACING is scrollback_refresh.hpp's per-tab backoff; this counter
+    // Retry PACING is scrollback_refresh.hpp's per-tab backoff; the streak
     // only decides when the silence ends. A server that refuses every page
     // (an undecodable transcript row answers INTERNAL) used to retry forever
     // with no user-visible symptom -- a transcript frozen mid-conversation.
     // Fire ONCE per streak (==, not >=): further failures extend the backoff
     // window but must not spam the notice line every retry.
-    ++scrollback_failures_;
-    if (scrollback_failures_ == kScrollbackFailureNoticeAfter) {
+    const int failures = window_.NoteFailure();
+    if (failures == kScrollbackFailureNoticeAfter) {
         latest_notice_ = CommandNotice{
-            "transcript refresh failed " + std::to_string(scrollback_failures_) +
-                " times in a row" + (reason.empty() ? "" : ": " + reason) +
+            "transcript refresh failed " + std::to_string(failures) + " times in a row" +
+                (reason.empty() ? "" : ": " + reason) +
                 "; still retrying -- the transcript shown may be stale",
             /*is_error=*/true, v1::COMMAND_DISPLAY_STATUS, /*view_hint=*/{}};
         ++notice_seq_;
@@ -1510,14 +1228,12 @@ void SessionState::NoteRefreshFailed(const std::string& reason) {
 
 bool SessionState::TryBeginOlderFetch() {
     std::lock_guard lk(mtx_);
-    if (older_fetch_pending_) return false;
-    older_fetch_pending_ = true;
-    return true;
+    return window_.TryBeginOlderFetch();
 }
 
 void SessionState::EndOlderFetch() {
     std::lock_guard lk(mtx_);
-    older_fetch_pending_ = false;
+    window_.EndOlderFetch();
 }
 
 // ===========================================================================
