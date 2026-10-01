@@ -479,6 +479,18 @@ public:
     // directly. Returns what the sink returned -- see SessionEventSink's
     // comment for what the bool means.
     bool EmitEvent(const SessionEvent& event) { return event_sink_(event); }
+    // EmitEvent, logging (rather than ignoring) a refusal. `what` names the
+    // event in the warning. For the reader/worker paths that have nobody to
+    // report a failed emit to.
+    void EmitOrWarn(const SessionEvent& event, std::string_view what);
+    // Wakes a worker parked on turn_cv_ after a state change its predicate
+    // reads. The empty critical section closes the lost-wakeup window: the
+    // worker either saw the change before parking, or has not parked yet and
+    // must take mutex_ to do so.
+    void WakeWorker() {
+        { std::lock_guard<std::mutex> lock(mutex_); }
+        turn_cv_.notify_all();
+    }
 
     // This session's transport, for the layer that owns it (the RPC service
     // reaches its subscribers through the concrete type). Never null once

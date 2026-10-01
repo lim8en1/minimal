@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "minimal/rpc/proto_convert.hpp"
+#include "proto_inverse.hpp"
 
 using namespace minimal;
 using namespace minimal::rpc;

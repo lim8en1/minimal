@@ -1,25 +1,27 @@
 #include "minimal/hooks/hook_observer_bridge.hpp"
 
 namespace minimal::hooks {
+namespace {
+
+// session_created and session_ended describe the session the same way.
+nlohmann::json SessionPayload(const agent::SessionInfo& info) {
+    return nlohmann::json{
+        {"session_id", info.session_id},
+        {"parent_session_id", info.parent_session_id},
+        {"name", info.name},
+        {"agent_preset", info.agent_preset},
+        {"project_root", info.project_root.string()},
+    };
+}
+
+}  // namespace
 
 void HookObserverBridge::OnSessionCreated(const agent::SessionInfo& info) {
-    dispatcher_.EmitAsync(kSessionCreated, nlohmann::json{
-                                               {"session_id", info.session_id},
-                                               {"parent_session_id", info.parent_session_id},
-                                               {"name", info.name},
-                                               {"agent_preset", info.agent_preset},
-                                               {"project_root", info.project_root.string()},
-                                           });
+    dispatcher_.EmitAsync(kSessionCreated, SessionPayload(info));
 }
 
 void HookObserverBridge::OnSessionEnded(const agent::SessionInfo& info) {
-    dispatcher_.EmitAsync(kSessionEnded, nlohmann::json{
-                                             {"session_id", info.session_id},
-                                             {"parent_session_id", info.parent_session_id},
-                                             {"name", info.name},
-                                             {"agent_preset", info.agent_preset},
-                                             {"project_root", info.project_root.string()},
-                                         });
+    dispatcher_.EmitAsync(kSessionEnded, SessionPayload(info));
 }
 
 void HookObserverBridge::OnTurnCompleted(const agent::SessionInfo& info,

@@ -112,7 +112,7 @@ private:
     // anything) and core.subagent_completed (from the child's completion hook,
     // which fires on every exit path). The CHILD's own emissions -- its tools'
     // pre_tool_use, its user_prompt_submit -- are wired through the registry
-    // funnel setting SessionParams::hooks, not here.
+    // funnel (LoopConfig::hooks), not here.
     hooks::HookDispatcher* hooks_ = nullptr;
 };
 

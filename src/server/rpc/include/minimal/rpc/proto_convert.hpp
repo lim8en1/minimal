@@ -61,16 +61,12 @@ nlohmann::json ValueToJson(const google::protobuf::Value& value);
 // --- Enums -------------------------------------------------------------------
 
 v1::StopReason ToProto(llm::StopReason value);
-llm::StopReason FromProto(v1::StopReason value);
 
 v1::Role ToProto(llm::Role value);
-llm::Role FromProto(v1::Role value);
 
 v1::ToolCategory ToProto(tools::ToolCategory value);
-tools::ToolCategory FromProto(v1::ToolCategory value);
 
 v1::LlmErrorCategory ToProto(llm::LlmErrorCategory value);
-llm::LlmErrorCategory FromProto(v1::LlmErrorCategory value);
 
 v1::PermissionDecision ToProto(tools::PermissionDecision value);
 tools::PermissionDecision FromProto(v1::PermissionDecision value);
@@ -82,22 +78,21 @@ v1::PermissionRunMode ToProto(tools::PermissionRunMode value);
 std::optional<tools::PermissionRunMode> FromProto(v1::PermissionRunMode value);
 
 // --- Messages and content blocks ---------------------------------------------
+//
+// ToProto only for the domain types that are generated server-side. The
+// inverses (proto -> llm::Message and friends) have no production caller; the
+// tests keep them in tests/support/proto_inverse.hpp to prove the forward
+// direction is lossless.
 
 v1::Usage ToProto(const llm::Usage& value);
-llm::Usage FromProto(const v1::Usage& value);
 
 v1::ContentBlock ToProto(const llm::ContentBlock& block);
-// nullopt when the oneof is unset -- a default-constructed block off the wire.
-std::optional<llm::ContentBlock> FromProto(const v1::ContentBlock& block);
 
 v1::Message ToProto(const llm::Message& message);
-llm::Message FromProto(const v1::Message& message);
 
 // --- Stream events -----------------------------------------------------------
 
 v1::StreamEvent ToProto(const llm::StreamEvent& event);
-// nullopt when the oneof is unset.
-std::optional<llm::StreamEvent> FromProto(const v1::StreamEvent& event);
 
 // --- Errors ------------------------------------------------------------------
 
@@ -120,15 +115,6 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
 // PendingRequests, which owns correlation.
 v1::PermissionRequest ToProto(const tools::PermissionRequest& request);
 
-// `granted_keys` is filtered against `offered`: a client may only confirm grants
-// the server actually offered. The AUTHORITY for that rule is ToolExecutor,
-// which re-filters every response it receives -- wire answers AND plugin
-// advisor answers -- before remembering any key, and is the one place the rule
-// is enforced for all checker kinds. The filter here is the wire's
-// defense-in-depth: it drops minted keys at the boundary and logs them, so a
-// hostile or buggy client is visible instead of silently tolerated.
-tools::PermissionResponse FromProto(const v1::PermissionResponse& response,
-                                    const tools::PermissionDisclosure& offered);
 
 // --- Stored transcript (scrollback) ------------------------------------------
 //

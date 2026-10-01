@@ -51,9 +51,10 @@ namespace minimal::agent {
 //     </file-tree>
 //
 // NOT PermissionChecker-gated: the human typed the reference, exactly as if
-// they had pasted the content. Paths outside project_root are therefore allowed
-// too; only paths the filesystem cannot safely resolve at all (embedded NUL,
-// symlink loop) fail, via path_confinement::confine fail-closing.
+// they had pasted the content. Paths that resolve OUTSIDE project_root are left
+// verbatim, though: a mention must never inline material the read tool would
+// gate. Paths the filesystem cannot safely resolve at all (embedded NUL,
+// symlink loop) fail via path_confinement::confine fail-closing.
 //
 // A mention that cannot be resolved (typo, binary file, non-regular file)
 // produces NO block and its token stays verbatim in the text -- the model sees

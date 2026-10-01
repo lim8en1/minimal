@@ -205,6 +205,15 @@ void SessionServiceImpl::PublishPromptResolved(agent::Session& session,
     Transport(session).queue().Publish(std::move(event));
 }
 
+void SessionServiceImpl::ResolvePrompt(agent::Session& session, const std::string& request_id,
+                                       PendingAnswer answer) {
+    // Only the call that actually took the slot broadcasts: a duplicate or a
+    // late answer must not dismiss modals twice, and an unknown id is dropped.
+    if (Transport(session).pending().Resolve(request_id, std::move(answer))) {
+        PublishPromptResolved(session, request_id);
+    }
+}
+
 void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& session) {
     switch (event.payload_case()) {
         case v1::ClientEvent::kChatTurn: {
@@ -239,18 +248,13 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
                                        permission_response.granted_keys().end());
             answer.deny_message = permission_response.deny_message();
             answer.stop_turn = permission_response.stop_turn();
-            if (Transport(session).pending().Resolve(request_id, std::move(answer))) {
-                PublishPromptResolved(session, request_id);
-            }
+            ResolvePrompt(session, request_id, std::move(answer));
             return;
         }
 
         case v1::ClientEvent::kConfirmationResponse: {
-            const auto& request_id = event.confirmation_response().request_id();
-            if (Transport(session).pending().Resolve(
-                    request_id, ConfirmationAnswer{event.confirmation_response().chosen_option()})) {
-                PublishPromptResolved(session, request_id);
-            }
+            ResolvePrompt(session, event.confirmation_response().request_id(),
+                          ConfirmationAnswer{event.confirmation_response().chosen_option()});
             return;
         }
 
@@ -275,9 +279,7 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
                     break;
             }
             answer.answer_json = response.answer_json();
-            if (Transport(session).pending().Resolve(request_id, std::move(answer))) {
-                PublishPromptResolved(session, request_id);
-            }
+            ResolvePrompt(session, request_id, std::move(answer));
             return;
         }
 

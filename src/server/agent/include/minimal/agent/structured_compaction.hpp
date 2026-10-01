@@ -58,8 +58,10 @@ std::string RenderStructuredSummary(const StructuredSummary& summary);
 // The "structured" compaction strategy's Compactor half: the same call
 // compact_messages makes -- verbatim range, preset sampling, session routing
 // key, cancel sink, and the refusals for blank prompt / LlmError / Cancelled /
-// MaxTokens -- with the summarizer's output constrained to a forced
-// `record_summary` tool call whose input is the schema below, parsed and
+// MaxTokens -- with the summarizer's output requested as a `record_summary`
+// tool call (offered, NOT forced: a forced tool_choice invalidates the
+// messages cache and is a 400 on newer Claude models) whose input is the
+// schema below, parsed and
 // rendered through StructuredSummary.
 //
 // Degradation policy (why this does not just refuse): a refusal re-fires next

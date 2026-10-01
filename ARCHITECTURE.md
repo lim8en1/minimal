@@ -168,9 +168,11 @@ gRPC permits one concurrent reader and one concurrent writer on a `ServerReaderW
 // structurally unreadable at the waiter instead of merely failing to parse
 // there. The "perm-"/"confirm-" id prefixes remain as diagnostics; they are no
 // longer load-bearing.
-struct PermissionAnswer    { std::string serialized_response; };  // parsed on the worker
+struct PermissionAnswer    { PermissionDecision decision; std::vector<std::string> granted_keys;
+                             std::string deny_message; bool stop_turn; };  // grants filtered on the worker
 struct ConfirmationAnswer  { std::string chosen_option; };
-using PendingAnswer = std::variant<PermissionAnswer, ConfirmationAnswer>;
+struct PluginPromptAnswer  { PromptOutcome outcome; std::string answer_json; };
+using PendingAnswer = std::variant<PermissionAnswer, ConfirmationAnswer, PluginPromptAnswer>;
 
 class PendingRequests {
 public:
@@ -208,9 +210,11 @@ public:
 };
 ```
 
-Waits indefinitely by design -- no timeout, no fail-closed. A client is present by
-construction (no detached sessions), so a human may simply be away, and
-auto-denying their work is worse than waiting.
+Waits indefinitely by default -- no timeout, no fail-closed. A client is normally
+present, so a human may simply be away, and auto-denying their work is worse than
+waiting. `sessions.unattended_prompt_timeout_seconds` opts into a bound intended
+for detached sessions (today it applies to wire prompts whether or not a client is
+attached; a timed-out prompt answers as "no answer").
 
 **Cancellation** — `CancelTurn` sets one atomic flag, read in two places:
 
@@ -280,7 +284,7 @@ sessions left behind — shuts the server down within the linger), and the
 common case (one client, no detached sessions left behind) still exits
 promptly. Client auto-spawn (§ Non-interactive client, "Auto-spawn") stays
 correct under this. The Ping half (`rpc Ping(PingRequest)` on SessionService, wired into
-`ReaperConfig::client_idle_for`) exists because a live client can hold
+`ServerHousekeeping::Config::client_idle_for`) exists because a live client can hold
 neither a stream nor a session: the TUI creates its first session lazily on
 the first submission, so its empty-state welcome view attaches nothing —
 without a heartbeat the reaper read that silence as "nobody is here" and shut
@@ -312,7 +316,7 @@ not a designed flow.
 
 **Termination reuses the cancellation path** (atomic cancel flag → `bool` stream sink aborts the provider request → tools observe `is_cancelled`), then joins and reaps the worker. No new mechanism. Cancel is a GENERATION, not a flag: the worker records the generation when it pops a turn, and a turn is cancelled iff the generation has moved since — a flag cleared before the pop loses a cancel that landed while the worker was between turns, one cleared after the pop loses one that landed in the pop-to-clear window. A cancel landing inside a retry backoff reports `StopReason::Cancelled`, not `Unknown` — the headless exit code derives from this value. And the terminal state is on the wire: `Terminate` queues a `SessionEndedEvent` before closing the queue, so a client attached to a session killed server-side sees an explicit end instead of silence (see the termination ordering above).
 
-**Server shutdown must be *requested*, not performed, from an RPC handler or the reaper thread.** `Server::RequestShutdown()` only sets a flag; a thread inside `Server::Wait()` does the actual blocking `grpc::Server::Shutdown()`, which waits for every in-flight RPC to complete. Calling the blocking form directly from the tail of `OpenSession` (the handler thread) would wait for the very RPC calling it and hang the binary on every run; the same trap applies to `SessionRegistry::ReaperMain`, which fires `on_idle_expired` — wired to `RequestShutdown`, never `Shutdown` — from its own background thread once `ReaperConfig::idle_shutdown` elapses with zero attached clients and zero live sessions. Getting this wrong hangs the binary while every unit test still passes, because a test that merely records the callback never exercises it.
+**Server shutdown must be *requested*, not performed, from an RPC handler or the reaper thread.** `Server::RequestShutdown()` only sets a flag; a thread inside `Server::Wait()` does the actual blocking `grpc::Server::Shutdown()`, which waits for every in-flight RPC to complete. Calling the blocking form directly from the tail of `OpenSession` (the handler thread) would wait for the very RPC calling it and hang the binary on every run; the same trap applies to `SessionRegistry::ReaperMain`, which fires `on_idle_expired` — wired to `RequestShutdown`, never `Shutdown` — from its own background thread once `ServerHousekeeping::Config::idle_shutdown` elapses with zero attached clients and zero live sessions. Getting this wrong hangs the binary while every unit test still passes, because a test that merely records the callback never exercises it.
 
 **Shutdown is graceful under a deadline.** The blocking `Shutdown` inside `Wait()` passes a time limit (30 s): in-flight RPCs get the window to finish, then are cancelled. An unbounded graceful shutdown let a half-open stream — a client whose process died without closing its socket — block `Wait()` and therefore process exit indefinitely, since the stream errors only when something is left to error it. The deadline expiry is logged, so a forced cancellation is visible in the server log rather than merely abrupt.
 
@@ -435,7 +439,7 @@ public:
 // also couldn't express plugin-supplied providers.
 class ProviderFactoryRegistry {
 public:
-    void Register(std::string kind, std::function<std::unique_ptr<LlmProvider>(const ProviderConfig&)>);
+    bool Register(std::string kind, Factory factory);   // false: kind already registered (first wins)
     std::unique_ptr<LlmProvider> Create(std::string_view kind, const ProviderConfig&) const;
 };
 
@@ -1464,7 +1468,7 @@ RunTurn(session, seed_message):
   append + persist seed_message
   loop:
     if cancelled: break
-    if auto_compact && context_occupancy > trigger: compact()   # occupancy = last turn in+out;
+    if auto_compact && context_occupancy > trigger: compact()   # occupancy = last response's input + cache read/creation + output;
                                         # trigger resolved per session — §Context compaction
     request = BuildChatRequest(session)
     response = provider.StreamComplete(request, sink)    # sink emits StreamEvents; false => cancel

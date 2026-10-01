@@ -208,22 +208,27 @@ const SkillMeta* SkillRegistry::Find(std::string_view name) const {
     return nullptr;
 }
 
-std::optional<std::string> SkillRegistry::LoadBody(std::string_view name) const {
-    const SkillMeta* meta = Find(name);
-    if (meta == nullptr || !meta->loaded) return std::nullopt;
+namespace {
 
-    // Read failure must not fall through as an empty body: that would hand the
-    // model a successful-looking skill with no instructions in it.
+// The body of a loaded skill, frontmatter stripped. A read or parse failure
+// is nullopt, never an empty body: that would hand the model a
+// successful-looking skill with no instructions in it.
+std::optional<std::string> ReadSkillBody(const SkillMeta* meta) {
+    if (meta == nullptr || !meta->loaded) return std::nullopt;
     const std::optional<std::string> contents = ReadFile(meta->body_path);
     if (!contents) return std::nullopt;
-
-    ParsedFrontmatter parsed;
     try {
-        parsed = parse_frontmatter_markdown(*contents);
+        return parse_frontmatter_markdown(*contents).body;
     } catch (const std::exception&) {
         return std::nullopt;
     }
-    return parsed.body;
+}
+
+}  // namespace
+
+std::optional<std::string> SkillRegistry::LoadBody(std::string_view name) const {
+    const SkillMeta* meta = Find(name);
+    return ReadSkillBody(meta);
 }
 
 // --- project-local overlay -----------------------------------------------------
@@ -327,20 +332,7 @@ const SkillMeta* SkillRegistry::FindFor(const std::filesystem::path& project_roo
 std::optional<std::string> SkillRegistry::LoadBodyFor(const std::filesystem::path& project_root,
                                                       std::string_view name) const {
     const SkillMeta* meta = FindFor(project_root, name);
-    if (meta == nullptr || !meta->loaded) return std::nullopt;
-
-    // Read failure must not fall through as an empty body: that would hand the
-    // model a successful-looking skill with no instructions in it.
-    const std::optional<std::string> contents = ReadFile(meta->body_path);
-    if (!contents) return std::nullopt;
-
-    ParsedFrontmatter parsed;
-    try {
-        parsed = parse_frontmatter_markdown(*contents);
-    } catch (const std::exception&) {
-        return std::nullopt;
-    }
-    return parsed.body;
+    return ReadSkillBody(meta);
 }
 
 }  // namespace minimal::config

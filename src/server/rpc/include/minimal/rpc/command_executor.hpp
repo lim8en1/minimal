@@ -11,8 +11,9 @@
 //     borrowed raw pointers point into registries that are destroyed around it
 //     -- a use-after-free window at shutdown. The pool is owned by the service
 //     and joined in its destructor, which runs before those registries die.
-//   - Its worker could park forever in the session queue's blocking Push. The
-//     command path now uses TryPush, so a task can always finish.
+//   - Its worker could once park forever in a session queue push. The sink
+//     never blocks now (a full subscriber drops its own oldest), so a task
+//     can always finish.
 //
 // Read-only commands must still never run on the gRPC reader thread itself --
 // this pool exists so they can run somewhere that is allowed to take a moment

@@ -157,7 +157,8 @@ struct LoopConfig {
     //   1. the test/direct-API injection seam (AgentLoop's `compactor` ctor
     //      argument -- AgentLoop consults it BEFORE this, see Compact());
     //   2. preset.compaction_strategy naming a REGISTERED kind -- an unknown
-    //      name (typo, or the providing plugin is disabled) warns once and
+    //      name (typo, or the providing plugin is disabled) warns once (in
+    //      Compact(), which owns the per-loop once-flag) and
     //      falls through: a typo'd agent file must not brick compaction for
     //      every session running it;
     //   3. the settings-level strategy's summarize half;

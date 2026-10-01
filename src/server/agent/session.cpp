@@ -463,10 +463,7 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
         // must learn it was not accepted. The sink never blocks (this runs on
         // the reader, which must never block even on its own error path), and
         // it only refuses a closed broadcaster.
-        if (!EmitEvent(SessionEvent{SessionError{*refusal}})) {
-            logger_.warn("session {}: turn refused and the queue refused the error too; client will not see it",
-                         params_.session_id);
-        }
+        EmitOrWarn(SessionEvent{SessionError{*refusal}}, "turn refusal");
         return false;
     }
     // Announce the acceptance with its id: a mid-turn submit is QUEUED (it
@@ -517,16 +514,20 @@ bool Session::SubmitCommand(QueuedCommand command) {
     return true;
 }
 
+void Session::EmitOrWarn(const SessionEvent& event, std::string_view what) {
+    if (!EmitEvent(event)) {
+        logger_.warn("session {}: {} dropped (queue full or closed); the client will not see it",
+                     params_.session_id, what);
+    }
+}
+
 void Session::RejectCommand(const QueuedCommand& command, const std::string& reason) {
     // Refusals surface on the notice line like any other error --
     // CommandResult::Error's default display (kStatus) is already what the
     // wire wants here.
-    if (!EmitEvent(SessionEvent{SessionCommandResult{command.request_id,
-                                                     commands::CommandResult::Error(reason)}})) {
-        logger_.warn("session {}: command '{}' refused and the queue is full; client will not "
-                     "see it",
-                     params_.session_id, command.name);
-    }
+    EmitOrWarn(SessionEvent{SessionCommandResult{command.request_id,
+                                                 commands::CommandResult::Error(reason)}},
+               "command refusal");
 }
 
 AgentPreset Session::preset_snapshot() const {
@@ -652,10 +653,8 @@ void Session::EmitCommandResult(commands::CommandResult result, const QueuedComm
     // layer's command pool. A refusal means the broadcaster is closed
     // (termination); capacity never refuses -- a stalled subscriber drops its
     // own oldest instead.
-    if (!EmitEvent(SessionEvent{SessionCommandResult{command.request_id, std::move(result)}})) {
-        logger_.warn("session {}: broadcaster closed; CommandResult for '{}' dropped",
-                     params_.session_id, command.name);
-    }
+    EmitOrWarn(SessionEvent{SessionCommandResult{command.request_id, std::move(result)}},
+               "command result");
 }
 
 void Session::RunOneCommand(const QueuedCommand& command) {
@@ -669,20 +668,15 @@ bool Session::SubmitRewind(QueuedRewind request) {
     // Malformed before queued: neither action named. The queue would only
     // defer the same answer, and nothing about it depends on the worker.
     if (!request.redo && request.target_seq < 0) {
-        if (!EmitEvent(SessionEvent{
-                SessionError{"rewind request names neither a target seq nor a redo"}})) {
-            logger_.warn("session {}: malformed rewind refused and the queue is full",
-                         params_.session_id);
-        }
+        EmitOrWarn(SessionEvent{SessionError{"rewind request names neither a target seq nor a redo"}},
+                   "malformed rewind refusal");
         return false;
     }
     // Subagent refusal is reader-side: it is a property of params alone, no
     // worker pass could change it, and a child has no user to edit its prompt.
     if (!params_.parent_session_id.empty()) {
-        if (!EmitEvent(SessionEvent{SessionError{"subagent sessions cannot be rewound"}})) {
-            logger_.warn("session {}: subagent rewind refused and the queue is full",
-                         params_.session_id);
-        }
+        EmitOrWarn(SessionEvent{SessionError{"subagent sessions cannot be rewound"}},
+                   "subagent rewind refusal");
         return false;
     }
 
@@ -703,11 +697,7 @@ bool Session::SubmitRewind(QueuedRewind request) {
     if (refusal) {
         // Same contract as SubmitTurn: refusal answered on the wire, never
         // dropped. The sink never blocks on the reader thread.
-        if (!EmitEvent(SessionEvent{SessionError{*refusal}})) {
-            logger_.warn("session {}: rewind refused and the queue is full; client will not "
-                         "see it",
-                         params_.session_id);
-        }
+        EmitOrWarn(SessionEvent{SessionError{*refusal}}, "rewind refusal");
         return false;
     }
     turn_cv_.notify_one();
@@ -790,10 +780,7 @@ void Session::EmitMetadataChanged() {
     metadata.permission_mode = config::ToString(executor_.run_mode());
     metadata.context_window_tokens = preset.context_window_tokens.value_or(0);
     metadata.paused = paused();
-    if (!EmitEvent(SessionEvent{std::move(metadata)})) {
-        logger_.warn("session {}: metadata event dropped (broadcaster closed)",
-                     params_.session_id);
-    }
+    EmitOrWarn(SessionEvent{std::move(metadata)}, "metadata event");
 }
 
 void Session::RunRewind(std::int64_t target_seq) {
@@ -912,8 +899,7 @@ bool Session::QueueInjectedMessage(llm::Message message) {
     // and cannot miss the notify because it must acquire mutex_ to park.
     const bool staged = channels_->injections.Push(std::move(message));
     if (staged) {
-        { std::lock_guard<std::mutex> lock(mutex_); }
-        turn_cv_.notify_all();
+        WakeWorker();
     }
     return staged;
 }
@@ -1024,10 +1010,7 @@ void Session::CancelQueuedTurn(std::uint64_t turn_id) {
     }
     // Always answered: the caller must learn removed=false (already popped --
     // it must run, and the pending echo stays) just as surely as removed=true.
-    if (!EmitEvent(SessionEvent{TurnCanceled{turn_id, removed}})) {
-        logger_.warn("session {}: turn_canceled event dropped by the queue",
-                     params_.session_id);
-    }
+    EmitOrWarn(SessionEvent{TurnCanceled{turn_id, removed}}, "turn_canceled event");
 }
 
 void Session::CancelAllQueuedTurns() {
@@ -1048,10 +1031,7 @@ void Session::CancelAllQueuedTurns() {
         }
     }
     for (const auto turn_id : dropped) {
-        if (!EmitEvent(SessionEvent{TurnCanceled{turn_id, true}})) {
-            logger_.warn("session {}: turn_canceled event dropped by the queue",
-                         params_.session_id);
-        }
+        EmitOrWarn(SessionEvent{TurnCanceled{turn_id, true}}, "turn_canceled event");
     }
 }
 
@@ -1133,8 +1113,7 @@ void Session::Terminate() {
     // and this notify, park on the condition variable having already missed
     // it, and never wake -- the same lost-wakeup shape QueueInjectedMessage
     // already guards against with an identical empty critical section.
-    { std::lock_guard<std::mutex> lock(mutex_); }
-    turn_cv_.notify_all();
+    WakeWorker();
 
     // THE TERMINAL WIRE EVENT, published to every subscriber before closing
     // the transport so each writer drains it. A session terminated under
@@ -1157,10 +1136,7 @@ void Session::Terminate() {
     // joined and this object is unsafe to destroy. Guarding each step lets an
     // earlier failure skip only its own work, never the later steps'.
     try {
-        if (!EmitEvent(SessionEvent{SessionEnded{}})) {
-            logger_.warn("session {}: SessionEnded dropped (queue full or closed)",
-                         params_.session_id);
-        }
+        EmitOrWarn(SessionEvent{SessionEnded{}}, "SessionEnded");
     } catch (...) {
         logger_.warn("session {}: emitting SessionEnded threw during teardown",
                      params_.session_id);

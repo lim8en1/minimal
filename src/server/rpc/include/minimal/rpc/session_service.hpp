@@ -43,6 +43,7 @@
 #include "minimal/rpc/auth_interceptor.hpp"
 #include "minimal/rpc/command_executor.hpp"
 #include "minimal/rpc/event_broadcaster.hpp"
+#include "minimal/rpc/pending_requests.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
@@ -162,6 +163,9 @@ private:
     // once Resolve() reports THIS answer as the winner -- called from
     // Dispatch, reader thread, so this must not block (Publish never does).
     void PublishPromptResolved(agent::Session& session, const std::string& request_id);
+    // Resolves the slot and, only if this call took it, broadcasts the dismissal.
+    void ResolvePrompt(agent::Session& session, const std::string& request_id,
+                       PendingAnswer answer);
 
     // What agent::Launch/Fork borrow from this service.
     agent::LaunchContext MakeLaunchContext();
