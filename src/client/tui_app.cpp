@@ -248,12 +248,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     Theme& theme = *env.theme;
     plugins::MarkdownEngine& engine = *env.engine;
     plugins::ChatSurface* chat_surface = env.chat_surface;
-    auto& view_registry = env.view_registry;
-    auto& start_view_registry = env.start_view_registry;
-    auto& renderer_registry = env.renderer_registry;
-    auto& display_registry = env.display_registry;
-    auto& message_registry = env.message_registry;
-    auto& status_registry = env.status_registry;
+    auto& view_registry = env.registries.views;
+    auto& start_view_registry = env.registries.start_views;
+    auto& renderer_registry = env.registries.tool_renderers;
+    auto& display_registry = env.registries.display_renderers;
+    auto& message_registry = env.registries.message_renderers;
+    auto& status_registry = env.registries.status_segments;
     const auto& status_format = env.status_format;
     const auto& keymap = env.keymap;
     auto& plugin_views = env.plugin_views;
@@ -733,7 +733,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // client's own: a name the table already holds stays the client's. A
     // plugin command needing a session is refused visibly on a sessionless
     // tab, the same rule the server's catalog gets below.
-    for (const auto& plugin_command : env.client_command_registry.commands()) {
+    for (const auto& plugin_command : env.registries.client_commands.All()) {
         const std::string name(plugin_command->name());
         if (command_router.Has(name)) {
             minimal::common::DefaultLogger().warn(
@@ -1125,7 +1125,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
         },
         tab_ui, theme,
-        message_registry, renderer_registry, display_registry, env.prompt_registry,
+        message_registry, renderer_registry, display_registry, env.registries.prompt_renderers,
         permission_child, show_permission,
         confirmation_child, show_confirmation, prompt_child, show_prompt,
         // The chat views this builds name these keys in their own text; the

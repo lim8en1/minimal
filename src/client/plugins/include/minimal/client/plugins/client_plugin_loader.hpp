@@ -1,18 +1,19 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/client/plugins/registries.hpp"
+#include "minimal/plugins/name_registry.hpp"
 
 namespace minimal::client::plugins {
-
-class ClientApi;          // declared in client_plugin_abi.h; host-implemented
-class FocusProvider;      // declared in registries.hpp; host-implemented
 
 // "Came out of this build" vs. "someone dropped this in" -- the same trust
 // distinction the server loader encodes, driving default enablement and the
@@ -48,24 +49,44 @@ struct PluginRecord {
     LoadStatus status = LoadStatus::OpenFailed;
     std::string error;  // human-readable; empty when Loaded or Disabled
 
-    // ORIGINAL keys, as the plugin declared them -- collision detection and
-    // diagnostics are computed from "who provided what".
-    std::vector<std::string> registered_views;
-    std::vector<std::string> registered_start_views;
-    std::vector<std::string> registered_renderers;    // tool names
-    std::vector<std::string> registered_display_kinds;
-    std::vector<std::string> registered_prompt_kinds;
-    std::vector<std::string> registered_status_segments;
-    std::vector<std::string> registered_grammars;     // language keys
-    std::vector<std::string> registered_message_kinds;
-    std::vector<std::string> registered_client_commands;
-    bool registered_chat_surface = false;
-    bool registered_markdown_engine = false;
+    // ORIGINAL keys, as the plugin declared them, by RegistryHook::label
+    // ("views", "tool_renderers", ...) -- collision detection and diagnostics
+    // are computed from "who provided what". An exclusive slot is listed
+    // only when this plugin holds it.
+    std::map<std::string, std::vector<std::string>> registered;
 
     bool ok() const { return status == LoadStatus::Loaded; }
 };
 
 std::string_view ToString(LoadStatus status);
+
+// The host implementations a plugin's registration context carries.
+struct PluginHostSeams {
+    AttentionSink* attention = nullptr;
+    ClientApi* client_api = nullptr;
+    FocusProvider* focus = nullptr;
+    HostUi* ui = nullptr;
+};
+
+// One row per registry, the single table both the loader (hook lookup,
+// attribution window, rollback, PluginRecord::registered) and the bootstrap
+// (collision feed, alias targets, seal) walk. A new registry is one row in
+// RegistryHooks. Rows are in hook-call order.
+struct RegistryHook {
+    std::string_view label;   // PluginRecord::registered's key
+    const char* symbol;       // the optional minimal_client_plugin_register_* export
+    RegistryBase* registry;
+    // The NameRegistry kind its keys collide under; nullopt for an exclusive
+    // slot, whose rule is its own (first wins, the rest warn).
+    std::optional<minimal::plugins::NameKind> name_kind;
+    // A client-plugins.json alias may rename its entries.
+    bool aliasable = false;
+    // Calls the looked-up hook with the registry at its real type.
+    void (*invoke)(void* hook, RegistryBase& registry,
+                   const ClientPluginRegistrationContext& context) = nullptr;
+};
+
+std::vector<RegistryHook> RegistryHooks(ClientRegistries& registries);
 
 // Opens client plugins and invokes whichever registration seams they export.
 // Mirrors the server loader exactly (RTLD_NOW | RTLD_LOCAL, required tag/name/
@@ -79,21 +100,11 @@ std::string_view ToString(LoadStatus status);
 // unrelated crash much later. Do not "clean this up".
 class ClientPluginLoader {
 public:
-    // Registries are references -- the host owns them and outlives the loader.
-    // `attention`, `client_api` and `focus` are the host implementations handed
-    // to plugins in the context; null is allowed (a test exercising only
-    // registration) and means the seam is simply not offered.
-    ClientPluginLoader(ViewRegistry& views, ToolResultRendererRegistry& renderers,
-                       DisplayRendererRegistry& display_renderers,
-                       MessageRendererRegistry& message_renderers,
-                       StatusSegmentRegistry& status_segments,
-                       SyntaxGrammarRegistry& grammars, ChatSurfaceRegistry& chat_surface,
-                       MarkdownEngineRegistry& markdown_engine,
-                       StartViewRegistry& start_views, AttentionSink* attention,
-                       ClientApi* client_api, FocusProvider* focus,
-                       PromptRendererRegistry* prompt_renderers = nullptr,
-                       HostUi* ui = nullptr,
-                       ClientCommandRegistry* client_commands = nullptr);
+    // The host owns `registries` and outlives the loader. `seams` are the
+    // host implementations handed to plugins in the context; any may be
+    // null (a test exercising only registration), meaning the seam is simply
+    // not offered.
+    ClientPluginLoader(ClientRegistries& registries, PluginHostSeams seams = {});
     ~ClientPluginLoader();
 
     ClientPluginLoader(const ClientPluginLoader&) = delete;
@@ -113,23 +124,8 @@ private:
     // registrations when its own hook threw. Refused before any hook runs.
     std::set<std::string> loaded_names_;
 
-    ViewRegistry& views_;
-    ToolResultRendererRegistry& renderers_;
-    DisplayRendererRegistry& display_renderers_;
-    MessageRendererRegistry& message_renderers_;
-    StatusSegmentRegistry& status_segments_;
-    SyntaxGrammarRegistry& grammars_;
-    ChatSurfaceRegistry& chat_surface_;
-    MarkdownEngineRegistry& markdown_engine_;
-    StartViewRegistry& start_views_;
-    // Null when the host offers no prompt slot (a test exercising other
-    // registries): a plugin's prompt renderers are then simply not loaded.
-    PromptRendererRegistry* prompt_renderers_ = nullptr;
-    AttentionSink* attention_ = nullptr;
-    ClientApi* client_api_ = nullptr;
-    FocusProvider* focus_ = nullptr;
-    HostUi* ui_ = nullptr;
-    ClientCommandRegistry* client_commands_ = nullptr;
+    std::vector<RegistryHook> hooks_;
+    PluginHostSeams seams_;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

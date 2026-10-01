@@ -61,7 +61,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         plugins::MakeHostAttentionSink(&out.attention_state, out.host_focus_provider.get());
     out.host_client_api = plugins::MakeHostClientApi(&client);
 
-    plugins::RegisterCoreSyntaxGrammars(out.grammar_registry);
+    plugins::RegisterCoreSyntaxGrammars(out.registries.grammars);
 
     // Discovery + load. The config file is the client's own (client-plugins.json);
     // the server owns plugins.json, so neither writer can stomp the other's
@@ -121,15 +121,11 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             }
         }
 
-        plugins::ClientPluginLoader loader(out.view_registry, out.renderer_registry,
-                                           out.display_registry, out.message_registry,
-                                           out.status_registry,
-                                           out.grammar_registry, out.surface_registry,
-                                           out.engine_registry, out.start_view_registry,
-                                           out.attention_sink.get(), out.host_client_api.get(),
-                                           out.host_focus_provider.get(),
-                                           &out.prompt_registry, out.host_focus_provider.get(),
-                                           &out.client_command_registry);
+        plugins::ClientPluginLoader loader(
+            out.registries, {.attention = out.attention_sink.get(),
+                             .client_api = out.host_client_api.get(),
+                             .focus = out.host_focus_provider.get(),
+                             .ui = out.host_focus_provider.get()});
         const auto records = loader.LoadAll(candidates);
         for (const auto& record : records) {
             if (record.ok()) out.loaded_plugins.push_back(record.name);
@@ -164,46 +160,28 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         // Registration keys are original names; a duplicate surface key is
         // fatal and names both claimants.
         minimal::plugins::NameRegistry names;
-        const auto feed = [&names](minimal::plugins::NameKind kind,
-                                   const std::vector<plugins::Attribution>& attributions) {
-            for (const auto& attribution : attributions) {
-                names.Register(kind, attribution.plugin_name, attribution.original_name);
+        const auto hooks = plugins::RegistryHooks(out.registries);
+        std::vector<AliasCandidate> alias_candidates;
+        for (const auto& hook : hooks) {
+            if (!hook.name_kind) continue;   // exclusive slots: first wins, no collision
+            for (const auto& attribution : hook.registry->attributions()) {
+                names.Register(*hook.name_kind, attribution.plugin_name,
+                               attribution.original_name);
             }
-        };
-        feed(minimal::plugins::NameKind::ViewId, out.view_registry.attributions());
-        feed(minimal::plugins::NameKind::ViewId, out.start_view_registry.attributions());
-        feed(minimal::plugins::NameKind::Command, out.client_command_registry.attributions());
-        feed(minimal::plugins::NameKind::ToolResultRenderer, out.renderer_registry.attributions());
-        feed(minimal::plugins::NameKind::DisplayRenderer, out.display_registry.attributions());
-        feed(minimal::plugins::NameKind::PromptRenderer, out.prompt_registry.attributions());
-        for (const auto& [kind, attribution] : out.message_registry.claims()) {
-            names.Register(minimal::plugins::NameKind::MessageRenderer,
-                           attribution.plugin_name, attribution.original_name);
+            if (hook.aliasable) {
+                alias_candidates.push_back({*hook.name_kind, &hook.registry->attributions()});
+            }
         }
-        feed(minimal::plugins::NameKind::StatusSegment, out.status_registry.attributions());
-        feed(minimal::plugins::NameKind::SyntaxGrammar, out.grammar_registry.attributions());
         // Client aliases resolve collisions (the ARCHITECTURE.md rule: a
-        // duplicate view id / tool name is "fatal and alias-resolvable"). They
-        // were parsed, serialized and documented while never reaching the
-        // NameRegistry -- so the alias key did nothing and the dangling-alias
-        // diagnostic below was unreachable. Like the server's resolver: the
-        // alias lands on the ONE kind whose stable identity it names (so a
-        // resolved alias renames that entry's surface and dedupes the
-        // collision), and an identity no kind claims is dangling on a single
-        // kind -- reported once, not four times. Addressing stays CANONICAL
-        // (keybindings.json addresses ids, never aliases).
-        const std::vector<AliasCandidate> alias_candidates = {
-            {minimal::plugins::NameKind::ViewId, &out.view_registry.attributions()},
-            {minimal::plugins::NameKind::ViewId, &out.start_view_registry.attributions()},
-            {minimal::plugins::NameKind::ToolResultRenderer, &out.renderer_registry.attributions()},
-            {minimal::plugins::NameKind::DisplayRenderer, &out.display_registry.attributions()},
-            {minimal::plugins::NameKind::PromptRenderer, &out.prompt_registry.attributions()},
-            {minimal::plugins::NameKind::StatusSegment, &out.status_registry.attributions()},
-            {minimal::plugins::NameKind::SyntaxGrammar, &out.grammar_registry.attributions()},
-        };
+        // duplicate view id / tool name is "fatal and alias-resolvable"). Like
+        // the server's resolver: the alias lands on the ONE kind whose stable
+        // identity it names (so a resolved alias renames that entry's surface
+        // and dedupes the collision), and an identity no kind claims is
+        // dangling on a single kind -- reported once, not four times.
+        // Addressing stays CANONICAL (keybindings.json addresses ids, never
+        // aliases).
         for (const auto& [alias_key, alias_target] : plugin_config.aliases) {
-            const auto kind = MatchAliasKind(alias_candidates, out.message_registry.claims(), alias_key);
-            names.SetAlias(kind, alias_key, alias_target);
+            names.SetAlias(MatchAliasKind(alias_candidates, alias_key), alias_key, alias_target);
         }
         const auto resolved = names.Resolve();
         for (const auto& collision : resolved.fatal_collisions) {
@@ -259,10 +237,10 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     std::map<std::string, std::string> core_keys;   // normalized key -> core action
     for (const auto& [action, key] : keys.all()) {
         // Plugin view ids the user bound in keybindings.json are not core.
-        if (key.empty() || out.view_registry.Find(action) != nullptr) continue;
+        if (key.empty() || out.registries.views.Find(action) != nullptr) continue;
         core_keys.emplace(NormalizeKeySpec(key), action);
     }
-    for (const auto& view : out.view_registry.views()) {
+    for (const auto& view : out.registries.views.All()) {
         // A command's view_hint resolves the core overlays first
         // (TabMaintenance::HandleNotice), so a plugin view with one of their
         // names can never be opened by a hint.
@@ -334,13 +312,13 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         !out.ui.status_format.empty() ? out.ui.status_format : std::string(kDefaultStatusFormat);
     out.status_format = minimal::client::ParseStatusFormat(status_format_string);
     for (const auto& id : minimal::client::UnknownStatusSegments(status_format_string)) {
-        if (out.status_registry.Find(id) == nullptr) {
+        if (out.registries.status_segments.Find(id) == nullptr) {
             std::fprintf(stderr, "minimal: unknown status segment '{%s}'\n", id.c_str());
         }
     }
     // Core segment ids are reserved: a plugin segment reusing one is ignored
     // (the frame skips it) -- it used to overwrite the core value silently.
-    for (const auto& segment : out.status_registry.segments()) {
+    for (const auto& segment : out.registries.status_segments.All()) {
         if (minimal::client::IsKnownStatusSegment(segment->id())) {
             std::fprintf(stderr,
                          "minimal: warning: a plugin status segment reuses the core id "
@@ -356,7 +334,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // pointer to this vector (see the address-stability contract in the
     // header), so its storage must outlive the highlighter, not just this
     // function call.
-    for (const auto& grammar : out.grammar_registry.grammars()) {
+    for (const auto& grammar : out.registries.grammars.All()) {
         out.languages.push_back(minimal::client::LanguageDefinition{
             grammar->Language(), grammar->LanguageFn(), grammar->Rules()});
     }
@@ -378,16 +356,16 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // "a refactor that introduced a second variable would dangle the engine
     // silently".
     out.renderer.emplace(&*out.theme, &*out.highlighter);
-    plugins::RegisterDefaultMarkdownEngine(out.engine_registry, *out.renderer);
+    plugins::RegisterDefaultMarkdownEngine(out.registries.markdown_engine, *out.renderer);
     // Non-null by construction: RegisterDefaultMarkdownEngine registers the
     // md4c adapter when no plugin claimed the slot.
-    out.engine = out.engine_registry.engine.get();
-    plugins::RegisterCoreMessageRenderers(out.message_registry);
-    plugins::RegisterCoreAgentMarkdownRenderer(out.message_registry, *out.engine);
-    plugins::RegisterCoreDisplayRenderers(out.display_registry, *out.engine, *out.highlighter);
+    out.engine = out.registries.markdown_engine.get();
+    plugins::RegisterCoreMessageRenderers(out.registries.message_renderers);
+    plugins::RegisterCoreAgentMarkdownRenderer(out.registries.message_renderers, *out.engine);
+    plugins::RegisterCoreDisplayRenderers(out.registries.display_renderers, *out.engine, *out.highlighter);
 
     // The exclusive chat surface, when a plugin claimed it.
-    out.chat_surface = out.surface_registry.surface.get();
+    out.chat_surface = out.registries.chat_surface.get();
 
     // Both pushes below (chat surface + views) live in PushThemeToPlugins so
     // RunTui's /theme swap can re-run the identical sequence after replacing
@@ -398,17 +376,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // core's own registrations) has run. A stashed registry reference that
     // registers after this point warns and is ignored instead of silently
     // bypassing the collision and attribution rules.
-    out.view_registry.Seal();
-    out.start_view_registry.Seal();
-    out.client_command_registry.Seal();
-    out.renderer_registry.Seal();
-    out.display_registry.Seal();
-    out.prompt_registry.Seal();
-    out.message_registry.Seal();
-    out.status_registry.Seal();
-    out.grammar_registry.Seal();
-    out.surface_registry.Seal();
-    out.engine_registry.Seal();
+    for (const auto& hook : plugins::RegistryHooks(out.registries)) hook.registry->Seal();
 
     return true;
 }
@@ -446,7 +414,7 @@ void PushThemeToPlugins(TuiEnvironment& out) {
     // no-op; a view that threw is logged, not disabled -- its component may
     // still be harmless, and panels are contained at render time anyway).
     // StartView needs no push: its Render() takes the theme as a parameter.
-    for (const auto& view : out.view_registry.views()) {
+    for (const auto& view : out.registries.views.All()) {
         try {
             view->OnTheme(*out.theme);
         } catch (const std::exception& error) {
@@ -459,26 +427,11 @@ void PushThemeToPlugins(TuiEnvironment& out) {
     }
 }
 
-minimal::plugins::NameKind MatchAliasKind(
-    const std::vector<AliasCandidate>& candidates,
-    const std::vector<std::pair<ChatRowKind, plugins::Attribution>>& message_claims,
-    const std::string& key) {
-    const auto matches = [](const std::vector<plugins::Attribution>& attributions,
-                            const std::string& qualified) {
-        for (const auto& a : attributions) {
-            if (a.plugin_name + "." + a.original_name == qualified) return true;
-        }
-        return false;
-    };
+minimal::plugins::NameKind MatchAliasKind(const std::vector<AliasCandidate>& candidates,
+                                          const std::string& key) {
     for (const auto& candidate : candidates) {
-        if (matches(*candidate.attributions, key)) return candidate.kind;
-    }
-    // message_claims is (kind, attribution) pairs, a different shape from
-    // the others' plain attributions() -- stays its own check.
-    for (const auto& [kind, attribution] : message_claims) {
-        (void)kind;
-        if (attribution.plugin_name + "." + attribution.original_name == key) {
-            return minimal::plugins::NameKind::MessageRenderer;
+        for (const auto& a : *candidate.attributions) {
+            if (a.plugin_name + "." + a.original_name == key) return candidate.kind;
         }
     }
     return minimal::plugins::NameKind::ViewId;   // dangling

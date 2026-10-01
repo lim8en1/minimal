@@ -87,7 +87,7 @@ bool FrameRenderer::GuardPluginCall(const std::string& key, const std::string& w
 ftxui::Elements FrameRenderer::RenderStartViews(const std::string& session_id) {
     using namespace ftxui;
     Elements out;
-    for (const auto& view : deps_.start_view_registry.views()) {
+    for (const auto& view : deps_.start_view_registry.All()) {
         const std::string id(view->spec().id);
         GuardPluginCall("start:" + id, "start view '" + id + "'", [&] {
             out.push_back(view->Render(session_id, deps_.theme) | center);
@@ -557,7 +557,7 @@ ftxui::Element FrameRenderer::Render() {
     // render thread at ~20 Hz -- the provider contract (cheap, never
     // blocking) is stated on the interface; a THROW is contained (that
     // segment renders nothing for this frame), never fatal.
-    for (const auto& segment : deps_.status_registry.segments()) {
+    for (const auto& segment : deps_.status_registry.All()) {
         // Segments are SESSION-keyed (cost-view caches per focused session);
         // the frame's focused handle is a TAB id, so the snapshot's session
         // id goes out (empty = no tab / sessionless).

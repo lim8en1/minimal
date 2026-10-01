@@ -16,28 +16,22 @@ namespace {
 using AbiTagFn = const char* (*)();
 using NameFn = const char* (*)();
 using VersionFn = const char* (*)();
-using RegisterViewsFn =
-    void (*)(ViewRegistry&, const ClientPluginRegistrationContext&);
-using RegisterStartViewsFn =
-    void (*)(StartViewRegistry&, const ClientPluginRegistrationContext&);
-using RegisterClientCommandsFn =
-    void (*)(ClientCommandRegistry&, const ClientPluginRegistrationContext&);
-using RegisterRenderersFn =
-    void (*)(ToolResultRendererRegistry&, const ClientPluginRegistrationContext&);
-using RegisterDisplayRenderersFn =
-    void (*)(DisplayRendererRegistry&, const ClientPluginRegistrationContext&);
-using RegisterPromptRenderersFn =
-    void (*)(PromptRendererRegistry&, const ClientPluginRegistrationContext&);
-using RegisterMessageRenderersFn =
-    void (*)(MessageRendererRegistry&, const ClientPluginRegistrationContext&);
-using RegisterStatusSegmentsFn =
-    void (*)(StatusSegmentRegistry&, const ClientPluginRegistrationContext&);
-using RegisterSyntaxGrammarsFn =
-    void (*)(SyntaxGrammarRegistry&, const ClientPluginRegistrationContext&);
-using RegisterChatSurfaceFn =
-    void (*)(ChatSurfaceRegistry&, const ClientPluginRegistrationContext&);
-using RegisterMarkdownEngineFn =
-    void (*)(MarkdownEngineRegistry&, const ClientPluginRegistrationContext&);
+// A hook's call, with the registry at its real type. The dlsym address is
+// converted the way Lookup does (see there).
+template <typename Registry>
+void InvokeHook(void* hook, RegistryBase& registry, const ClientPluginRegistrationContext& context) {
+    using Fn = void (*)(Registry&, const ClientPluginRegistrationContext&);
+    Fn fn = nullptr;
+    static_assert(sizeof(fn) == sizeof(hook), "function/object pointer size mismatch");
+    std::memcpy(&fn, &hook, sizeof(fn));
+    fn(static_cast<Registry&>(registry), context);
+}
+
+template <typename Registry>
+RegistryHook Hook(std::string_view label, const char* symbol, Registry& registry,
+                  std::optional<minimal::plugins::NameKind> name_kind, bool aliasable) {
+    return {label, symbol, &registry, name_kind, aliasable, &InvokeHook<Registry>};
+}
 
 template <typename Fn>
 Fn Lookup(void* handle, const char* symbol) {
@@ -104,33 +98,39 @@ std::string_view ToString(LoadStatus status) {
     return "unknown";
 }
 
-ClientPluginLoader::ClientPluginLoader(ViewRegistry& views,
-                                       ToolResultRendererRegistry& renderers,
-                                       DisplayRendererRegistry& display_renderers,
-                                       MessageRendererRegistry& message_renderers,
-                                       StatusSegmentRegistry& status_segments,
-                                       SyntaxGrammarRegistry& grammars,
-                                       ChatSurfaceRegistry& chat_surface,
-                                       MarkdownEngineRegistry& markdown_engine,
-                                       StartViewRegistry& start_views, AttentionSink* attention,
-                                       ClientApi* client_api, FocusProvider* focus,
-                                       PromptRendererRegistry* prompt_renderers, HostUi* ui,
-                                       ClientCommandRegistry* client_commands)
-    : views_(views),
-      renderers_(renderers),
-      display_renderers_(display_renderers),
-      message_renderers_(message_renderers),
-      status_segments_(status_segments),
-      grammars_(grammars),
-      chat_surface_(chat_surface),
-      markdown_engine_(markdown_engine),
-      start_views_(start_views),
-      prompt_renderers_(prompt_renderers),
-      attention_(attention),
-      client_api_(client_api),
-      focus_(focus),
-      ui_(ui),
-      client_commands_(client_commands) {}
+std::vector<RegistryHook> RegistryHooks(ClientRegistries& r) {
+    using minimal::plugins::NameKind;
+    constexpr bool kAliasable = true;
+    // Start views share the view-id namespace: both are addressed the same way.
+    return {
+        Hook("views", "minimal_client_plugin_register_views", r.views, NameKind::ViewId,
+             kAliasable),
+        Hook("start_views", "minimal_client_plugin_register_start_views", r.start_views,
+             NameKind::ViewId, kAliasable),
+        // Not aliasable: the command router dispatches by the original name.
+        Hook("client_commands", "minimal_client_plugin_register_client_commands",
+             r.client_commands, NameKind::Command, !kAliasable),
+        Hook("tool_renderers", "minimal_client_plugin_register_renderers", r.tool_renderers,
+             NameKind::ToolResultRenderer, kAliasable),
+        Hook("display_renderers", "minimal_client_plugin_register_display_renderers",
+             r.display_renderers, NameKind::DisplayRenderer, kAliasable),
+        Hook("prompt_renderers", "minimal_client_plugin_register_prompt_renderers",
+             r.prompt_renderers, NameKind::PromptRenderer, kAliasable),
+        Hook("message_renderers", "minimal_client_plugin_register_message_renderers",
+             r.message_renderers, NameKind::MessageRenderer, kAliasable),
+        Hook("status_segments", "minimal_client_plugin_register_status_segments",
+             r.status_segments, NameKind::StatusSegment, kAliasable),
+        Hook("grammars", "minimal_client_plugin_register_syntax_grammars", r.grammars,
+             NameKind::SyntaxGrammar, kAliasable),
+        Hook("chat_surface", "minimal_client_plugin_register_chat_surface", r.chat_surface,
+             std::nullopt, !kAliasable),
+        Hook("markdown_engine", "minimal_client_plugin_register_markdown_engine",
+             r.markdown_engine, std::nullopt, !kAliasable),
+    };
+}
+
+ClientPluginLoader::ClientPluginLoader(ClientRegistries& registries, PluginHostSeams seams)
+    : hooks_(RegistryHooks(registries)), seams_(seams) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 ClientPluginLoader::~ClientPluginLoader() = default;
@@ -212,188 +212,39 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     // before any hook runs.
     ClientPluginRegistrationContext context;
     context.config = candidate.config;
-    context.attention = attention_;
-    context.client_api = client_api_;
-    context.focus = focus_;
-    context.ui = ui_;
+    context.attention = seams_.attention;
+    context.client_api = seams_.client_api;
+    context.focus = seams_.focus;
+    context.ui = seams_.ui;
 
     // Partial-registration rollback, captured BEFORE the first hook runs
     // (ported from the server loader, plugin_loader.cpp:233-260). Every
     // client registry has a removal seam -- unlike the server's partial
     // coverage, there is no "stays live" caveat to log here.
     auto rollback = [this, &record] {
-        views_.RemoveByAttribution(record.name);
-        start_views_.RemoveByAttribution(record.name);
-        if (client_commands_ != nullptr) client_commands_->RemoveByAttribution(record.name);
-        renderers_.RemoveByAttribution(record.name);
-        display_renderers_.RemoveByAttribution(record.name);
-        if (prompt_renderers_ != nullptr) prompt_renderers_->RemoveByAttribution(record.name);
-        message_renderers_.RemoveByAttribution(record.name);
-        status_segments_.RemoveByAttribution(record.name);
-        grammars_.RemoveByAttribution(record.name);
-        chat_surface_.RemoveByAttribution(record.name);
-        markdown_engine_.RemoveByAttribution(record.name);
+        for (const RegistryHook& hook : hooks_) hook.registry->RemoveByAttribution(record.name);
+        record.registered.clear();
         common::DefaultLogger().warn(
             "client plugin '{}': registration threw; rolled back -- nothing it registered "
             "stayed live",
             record.name);
     };
 
-    if (auto register_views = Lookup<RegisterViewsFn>(handle, "minimal_client_plugin_register_views")) {
-        const std::size_t before = views_.attributions().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_views",
-                [&] { views_.SetAttribution(record.name); },
-                [&] { register_views(views_, context); },
-                [&] { views_.ClearAttribution(); }, rollback)) {
-            return record;
-        }
-        for (std::size_t i = before; i < views_.attributions().size(); ++i) {
-            record.registered_views.push_back(views_.attributions()[i].original_name);
-        }
-    }
-
-    if (auto register_start_views = Lookup<RegisterStartViewsFn>(
-            handle, "minimal_client_plugin_register_start_views")) {
-        const std::size_t before = start_views_.attributions().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_start_views",
-                [&] { start_views_.SetAttribution(record.name); },
-                [&] { register_start_views(start_views_, context); },
-                [&] { start_views_.ClearAttribution(); }, rollback)) {
-            return record;
-        }
-        for (std::size_t i = before; i < start_views_.attributions().size(); ++i) {
-            record.registered_start_views.push_back(
-                start_views_.attributions()[i].original_name);
-        }
-    }
-
-    if (client_commands_ != nullptr) {
-        if (auto register_client_commands = Lookup<RegisterClientCommandsFn>(
-                handle, "minimal_client_plugin_register_client_commands")) {
-            const std::size_t before = client_commands_->attributions().size();
-            if (!GuardedRegistration(record, "minimal_client_plugin_register_client_commands",
-                    [&] { client_commands_->SetAttribution(record.name); },
-                    [&] { register_client_commands(*client_commands_, context); },
-                    [&] { client_commands_->ClearAttribution(); }, rollback)) {
-                return record;
-            }
-            for (std::size_t i = before; i < client_commands_->attributions().size(); ++i) {
-                record.registered_client_commands.push_back(
-                    client_commands_->attributions()[i].original_name);
-            }
-        }
-    }
-
-    if (auto register_renderers =
-            Lookup<RegisterRenderersFn>(handle, "minimal_client_plugin_register_renderers")) {
-        const std::size_t before = renderers_.attributions().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_renderers",
-                [&] { renderers_.SetAttribution(record.name); },
-                [&] { register_renderers(renderers_, context); },
-                [&] { renderers_.ClearAttribution(); }, rollback)) {
-            return record;
-        }
-        for (std::size_t i = before; i < renderers_.attributions().size(); ++i) {
-            record.registered_renderers.push_back(renderers_.attributions()[i].original_name);
-        }
-    }
-
-    if (auto register_display_renderers = Lookup<RegisterDisplayRenderersFn>(
-            handle, "minimal_client_plugin_register_display_renderers")) {
-        const std::size_t before = display_renderers_.attributions().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_display_renderers",
-                [&] { display_renderers_.SetAttribution(record.name); },
-                [&] { register_display_renderers(display_renderers_, context); },
-                [&] { display_renderers_.ClearAttribution(); }, rollback)) {
-            return record;
-        }
-        for (std::size_t i = before; i < display_renderers_.attributions().size(); ++i) {
-            record.registered_display_kinds.push_back(
-                display_renderers_.attributions()[i].original_name);
-        }
-    }
-
-    if (auto register_prompt_renderers = Lookup<RegisterPromptRenderersFn>(
-            handle, "minimal_client_plugin_register_prompt_renderers");
-        register_prompt_renderers != nullptr && prompt_renderers_ != nullptr) {
-        auto& registry = *prompt_renderers_;
+    for (const RegistryHook& hook : hooks_) {
+        void* fn = dlsym(handle, hook.symbol);
+        if (fn == nullptr) continue;   // every register_* hook is optional
+        RegistryBase& registry = *hook.registry;
         const std::size_t before = registry.attributions().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_prompt_renderers",
+        if (!GuardedRegistration(record, hook.symbol,
                 [&] { registry.SetAttribution(record.name); },
-                [&] { register_prompt_renderers(registry, context); },
+                [&] { hook.invoke(fn, registry, context); },
                 [&] { registry.ClearAttribution(); }, rollback)) {
             return record;
         }
         for (std::size_t i = before; i < registry.attributions().size(); ++i) {
-            record.registered_prompt_kinds.push_back(registry.attributions()[i].original_name);
+            record.registered[std::string(hook.label)].push_back(
+                registry.attributions()[i].original_name);
         }
-    }
-
-    if (auto register_message_renderers = Lookup<RegisterMessageRenderersFn>(
-            handle, "minimal_client_plugin_register_message_renderers")) {
-        const std::size_t before = message_renderers_.claims().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_message_renderers",
-                [&] { message_renderers_.SetAttribution(record.name); },
-                [&] { register_message_renderers(message_renderers_, context); },
-                [&] { message_renderers_.ClearAttribution(); }, rollback)) {
-            return record;
-        }
-        for (std::size_t i = before; i < message_renderers_.claims().size(); ++i) {
-            record.registered_message_kinds.push_back(message_renderers_.claims()[i].second.original_name);
-        }
-    }
-
-    if (auto register_status_segments = Lookup<RegisterStatusSegmentsFn>(
-            handle, "minimal_client_plugin_register_status_segments")) {
-        const std::size_t before = status_segments_.attributions().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_status_segments",
-                [&] { status_segments_.SetAttribution(record.name); },
-                [&] { register_status_segments(status_segments_, context); },
-                [&] { status_segments_.ClearAttribution(); }, rollback)) {
-            return record;
-        }
-        for (std::size_t i = before; i < status_segments_.attributions().size(); ++i) {
-            record.registered_status_segments.push_back(
-                status_segments_.attributions()[i].original_name);
-        }
-    }
-
-    if (auto register_grammars = Lookup<RegisterSyntaxGrammarsFn>(
-            handle, "minimal_client_plugin_register_syntax_grammars")) {
-        const std::size_t before = grammars_.attributions().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_syntax_grammars",
-                [&] { grammars_.SetAttribution(record.name); },
-                [&] { register_grammars(grammars_, context); },
-                [&] { grammars_.ClearAttribution(); }, rollback)) {
-            return record;
-        }
-        for (std::size_t i = before; i < grammars_.attributions().size(); ++i) {
-            record.registered_grammars.push_back(grammars_.attributions()[i].original_name);
-        }
-    }
-
-    if (auto register_chat_surface = Lookup<RegisterChatSurfaceFn>(
-            handle, "minimal_client_plugin_register_chat_surface")) {
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_chat_surface",
-                [&] { chat_surface_.SetAttribution(record.name); },
-                [&] { register_chat_surface(chat_surface_, context); },
-                [&] { chat_surface_.ClearAttribution(); }, rollback)) {
-            return record;
-        }
-        record.registered_chat_surface = chat_surface_.record.registered &&
-                                         chat_surface_.record.plugin_name == record.name;
-    }
-
-    if (auto register_markdown_engine = Lookup<RegisterMarkdownEngineFn>(
-            handle, "minimal_client_plugin_register_markdown_engine")) {
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_markdown_engine",
-                [&] { markdown_engine_.SetAttribution(record.name); },
-                [&] { register_markdown_engine(markdown_engine_, context); },
-                [&] { markdown_engine_.ClearAttribution(); }, rollback)) {
-            return record;
-        }
-        record.registered_markdown_engine = markdown_engine_.record.registered &&
-                                            markdown_engine_.record.plugin_name == record.name;
     }
 
     record.status = LoadStatus::Loaded;

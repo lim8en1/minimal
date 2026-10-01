@@ -51,238 +51,35 @@ std::vector<std::string> AttentionState::RaisedTabs() const {
     return out;
 }
 
-// --- ExclusiveRecord ----------------------------------------------------------
+// --- Registry mechanics -------------------------------------------------------
 
-bool ExclusiveRecord::Claim(std::string_view claimant) {
-    if (registered) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': {} slot already claimed by '{}' -- registration ignored "
-            "(the exclusive-slot rule: first registration wins)",
-            claimant, plugin_name.empty() ? "the core default" : "the exclusive", plugin_name);
-        return false;
-    }
-    registered = true;
-    plugin_name = std::string(claimant);
-    return true;
+bool RegistryBase::Admit() const {
+    if (!sealed_) return true;
+    common::DefaultLogger().warn(
+        "client plugin '{}': registration ignored -- the registries were sealed after "
+        "startup (registration-time-only contract)",
+        attribution_.empty() ? "<core>" : attribution_);
+    return false;
 }
 
-// --- Additive registries ------------------------------------------------------
-
-void ViewRegistry::Register(std::unique_ptr<View> view) {
-    if (sealed_) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': registration ignored -- the registries were sealed after "
-            "startup (registration-time-only contract)",
-            attribution_.empty() ? "<core>" : attribution_);
-        return;
-    }
-    // Same null guard the exclusive registries have: Register(nullptr)
-    // compiles at every plugin call site and dereferencing spec() segfaults.
-    if (view == nullptr) return;
-    attributions_.push_back({attribution_, view->spec().id});
-    views_.push_back(std::move(view));
+void WarnTaken(const std::string& holder, const std::string& claimant) {
+    common::DefaultLogger().warn(
+        "client plugin '{}': exclusive slot already claimed by '{}' -- registration ignored "
+        "(the exclusive-slot rule: first registration wins)",
+        claimant, holder.empty() ? "the core default" : holder);
 }
 
-View* ViewRegistry::Find(std::string_view id) const {
-    for (const auto& view : views_) {
-        if (view->spec().id == id) return view.get();
-    }
-    return nullptr;
-}
-
-void ViewRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    // views_ and attributions_ are index-aligned (Register pushes to both in
-    // lockstep) -- compact both together rather than via std::remove_if on
-    // either alone, which would desync them.
-    std::size_t write = 0;
-    for (std::size_t read = 0; read < attributions_.size(); ++read) {
-        if (attributions_[read].plugin_name == plugin_name) continue;
-        if (write != read) {
-            attributions_[write] = std::move(attributions_[read]);
-            views_[write] = std::move(views_[read]);
-        }
-        ++write;
-    }
-    attributions_.resize(write);
-    views_.resize(write);
-}
-
-void ClientCommandRegistry::Register(std::unique_ptr<ClientCommand> command) {
-    if (sealed_) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': registration ignored -- the registries were sealed after "
-            "startup (registration-time-only contract)",
-            attribution_.empty() ? "<core>" : attribution_);
-        return;
-    }
-    if (command == nullptr || command->name().empty()) return;
-    attributions_.push_back({attribution_, std::string(command->name())});
-    commands_.push_back(std::move(command));
-}
-
-void ClientCommandRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    std::size_t write = 0;
-    for (std::size_t read = 0; read < attributions_.size(); ++read) {
-        if (attributions_[read].plugin_name == plugin_name) continue;
-        if (write != read) {
-            attributions_[write] = std::move(attributions_[read]);
-            commands_[write] = std::move(commands_[read]);
-        }
-        ++write;
-    }
-    attributions_.resize(write);
-    commands_.resize(write);
-}
-
-void StartViewRegistry::Register(std::unique_ptr<StartView> view) {
-    if (sealed_) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': registration ignored -- the registries were sealed after "
-            "startup (registration-time-only contract)",
-            attribution_.empty() ? "<core>" : attribution_);
-        return;
-    }
-    if (view == nullptr) return;
-    attributions_.push_back({attribution_, view->spec().id});
-    views_.push_back(std::move(view));
-}
-
-StartView* StartViewRegistry::Find(std::string_view id) const {
-    for (const auto& view : views_) {
-        if (view->spec().id == id) return view.get();
-    }
-    return nullptr;
-}
-
-void StartViewRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    std::size_t write = 0;
-    for (std::size_t read = 0; read < attributions_.size(); ++read) {
-        if (attributions_[read].plugin_name == plugin_name) continue;
-        if (write != read) {
-            attributions_[write] = std::move(attributions_[read]);
-            views_[write] = std::move(views_[read]);
-        }
-        ++write;
-    }
-    attributions_.resize(write);
-    views_.resize(write);
-}
-
-void ToolResultRendererRegistry::Register(std::unique_ptr<ToolResultRenderer> renderer) {
-    if (sealed_) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': registration ignored -- the registries were sealed after "
-            "startup (registration-time-only contract)",
-            attribution_.empty() ? "<core>" : attribution_);
-        return;
-    }
-    if (renderer == nullptr) return;
-    attributions_.push_back({attribution_, std::string(renderer->tool_name())});
-    renderers_.push_back(std::move(renderer));
-}
-
-const ToolResultRenderer* ToolResultRendererRegistry::Find(std::string_view tool_name) const {
-    for (const auto& renderer : renderers_) {
-        if (renderer->tool_name() == tool_name) return renderer.get();
-    }
-    return nullptr;
-}
-
-void ToolResultRendererRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    std::size_t write = 0;
-    for (std::size_t read = 0; read < attributions_.size(); ++read) {
-        if (attributions_[read].plugin_name == plugin_name) continue;
-        if (write != read) {
-            attributions_[write] = std::move(attributions_[read]);
-            renderers_[write] = std::move(renderers_[read]);
-        }
-        ++write;
-    }
-    attributions_.resize(write);
-    renderers_.resize(write);
-}
-
-void DisplayRendererRegistry::Register(std::unique_ptr<DisplayRenderer> renderer) {
-    if (sealed_) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': registration ignored -- the registries were sealed after "
-            "startup (registration-time-only contract)",
-            attribution_.empty() ? "<core>" : attribution_);
-        return;
-    }
-    if (renderer == nullptr) return;
-    attributions_.push_back({attribution_, std::string(renderer->kind())});
-    renderers_.push_back(std::move(renderer));
-}
-
-const DisplayRenderer* DisplayRendererRegistry::Find(std::string_view kind) const {
-    for (const auto& renderer : renderers_) {
-        if (renderer->kind() == kind) return renderer.get();
-    }
-    return nullptr;
-}
-
-void DisplayRendererRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    std::size_t write = 0;
-    for (std::size_t read = 0; read < attributions_.size(); ++read) {
-        if (attributions_[read].plugin_name == plugin_name) continue;
-        if (write != read) {
-            attributions_[write] = std::move(attributions_[read]);
-            renderers_[write] = std::move(renderers_[read]);
-        }
-        ++write;
-    }
-    attributions_.resize(write);
-    renderers_.resize(write);
-}
-
-void PromptRendererRegistry::Register(std::unique_ptr<PromptRenderer> renderer) {
-    if (sealed_) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': registration ignored -- the registries were sealed after "
-            "startup (registration-time-only contract)",
-            attribution_.empty() ? "<core>" : attribution_);
-        return;
-    }
-    if (renderer == nullptr) return;
-    attributions_.push_back({attribution_, std::string(renderer->kind())});
-    renderers_.push_back(std::move(renderer));
-}
-
-const PromptRenderer* PromptRendererRegistry::Find(std::string_view kind) const {
-    for (const auto& renderer : renderers_) {
-        if (renderer->kind() == kind) return renderer.get();
-    }
-    return nullptr;
-}
-
-void PromptRendererRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    std::size_t write = 0;
-    for (std::size_t read = 0; read < attributions_.size(); ++read) {
-        if (attributions_[read].plugin_name == plugin_name) continue;
-        if (write != read) {
-            attributions_[write] = std::move(attributions_[read]);
-            renderers_[write] = std::move(renderers_[read]);
-        }
-        ++write;
-    }
-    attributions_.resize(write);
-    renderers_.resize(write);
-}
+// --- MessageRendererRegistry --------------------------------------------------
 
 void MessageRendererRegistry::Register(ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer) {
-    if (sealed_) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': registration ignored -- the registries were sealed after "
-            "startup (registration-time-only contract)",
-            attribution_.empty() ? "<core>" : attribution_);
-        return;
-    }
+    if (!Admit()) return;
     if (renderer == nullptr) return;   // a stored null would Find() as null and silently disable the kind
-    claims_.emplace_back(kind, Attribution{attribution_, std::string(ToString(kind))});
-    // First claimant stays active; the duplicate is visible in claims() and the
-    // loader turns it fatal. Silently replacing would make presentation depend
-    // on plugin load order -- exactly what the collision rule exists to prevent.
+    attributions_.push_back({attribution_, std::string(ToString(kind))});
+    kinds_.push_back(kind);
+    // First claimant stays active; the duplicate is visible in attributions()
+    // and the loader turns it fatal. Silently replacing would make
+    // presentation depend on plugin load order -- exactly what the collision
+    // rule exists to prevent.
     if (renderers_.find(kind) == renderers_.end()) {
         renderers_.emplace(kind, std::move(renderer));
     } else {
@@ -298,147 +95,35 @@ const MessageRenderer* MessageRendererRegistry::Find(ChatRowKind kind) const {
     return it == renderers_.end() ? nullptr : it->second.get();
 }
 
+bool MessageRendererRegistry::PluginClaimed(ChatRowKind kind) const {
+    for (std::size_t i = 0; i < kinds_.size(); ++i) {
+        if (kinds_[i] == kind) return !attributions_[i].plugin_name.empty();
+    }
+    return false;
+}
+
 void MessageRendererRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    // claims_ records EVERY claim attempt in order, but only the FIRST claim
-    // for a given kind actually won the registry slot (Register(): first
-    // claimant stays, a later duplicate is recorded here but never reaches
-    // renderers_) -- erase renderers_[kind] only when THIS plugin is that
-    // first claimant, never for a losing duplicate that happens to name a
-    // kind some earlier plugin still owns.
+    // Only the FIRST claim for a kind won the slot (a later duplicate is
+    // recorded but never reaches renderers_): erase renderers_[kind] only
+    // when THIS plugin is that first claimant, never for a losing duplicate
+    // naming a kind an earlier plugin still owns.
     std::map<ChatRowKind, bool> owner_decided;
-    for (const auto& [kind, attribution] : claims_) {
-        if (owner_decided[kind]) continue;
-        owner_decided[kind] = true;
-        if (attribution.plugin_name == plugin_name) renderers_.erase(kind);
+    for (std::size_t i = 0; i < kinds_.size(); ++i) {
+        if (owner_decided[kinds_[i]]) continue;
+        owner_decided[kinds_[i]] = true;
+        if (attributions_[i].plugin_name == plugin_name) renderers_.erase(kinds_[i]);
     }
-    claims_.erase(std::remove_if(claims_.begin(), claims_.end(),
-                                 [&](const auto& claim) {
-                                     return claim.second.plugin_name == plugin_name;
-                                 }),
-                  claims_.end());
-}
-
-void StatusSegmentRegistry::Register(std::unique_ptr<StatusSegment> segment) {
-    if (sealed_) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': registration ignored -- the registries were sealed after "
-            "startup (registration-time-only contract)",
-            attribution_.empty() ? "<core>" : attribution_);
-        return;
-    }
-    if (segment == nullptr) return;
-    attributions_.push_back({attribution_, std::string(segment->id())});
-    segments_.push_back(std::move(segment));
-}
-
-const StatusSegment* StatusSegmentRegistry::Find(std::string_view id) const {
-    for (const auto& segment : segments_) {
-        if (segment->id() == id) return segment.get();
-    }
-    return nullptr;
-}
-
-void StatusSegmentRegistry::RemoveByAttribution(const std::string& plugin_name) {
     std::size_t write = 0;
     for (std::size_t read = 0; read < attributions_.size(); ++read) {
         if (attributions_[read].plugin_name == plugin_name) continue;
         if (write != read) {
             attributions_[write] = std::move(attributions_[read]);
-            segments_[write] = std::move(segments_[read]);
+            kinds_[write] = kinds_[read];
         }
         ++write;
     }
     attributions_.resize(write);
-    segments_.resize(write);
-}
-
-void SyntaxGrammarRegistry::Register(std::unique_ptr<SyntaxGrammar> grammar) {
-    if (sealed_) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': registration ignored -- the registries were sealed after "
-            "startup (registration-time-only contract)",
-            attribution_.empty() ? "<core>" : attribution_);
-        return;
-    }
-    if (grammar == nullptr) return;
-    attributions_.push_back({attribution_, std::string(grammar->Language())});
-    grammars_.push_back(std::move(grammar));
-}
-
-void SyntaxGrammarRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    std::size_t write = 0;
-    for (std::size_t read = 0; read < attributions_.size(); ++read) {
-        if (attributions_[read].plugin_name == plugin_name) continue;
-        if (write != read) {
-            attributions_[write] = std::move(attributions_[read]);
-            grammars_[write] = std::move(grammars_[read]);
-        }
-        ++write;
-    }
-    attributions_.resize(write);
-    grammars_.resize(write);
-}
-
-// --- Exclusive registries -----------------------------------------------------
-
-void ChatSurfaceRegistry::Register(std::unique_ptr<ChatSurface> candidate) {
-    if (sealed_) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': registration ignored -- the registries were sealed after "
-            "startup (registration-time-only contract)",
-            attribution_.empty() ? "<core>" : attribution_);
-        return;
-    }
-    if (candidate == nullptr) return;  // a plugin passing nothing claims nothing
-    attributions_.push_back({attribution_, candidate->spec().id});
-    if (!record.Claim(attribution_)) return;
-    surface = std::move(candidate);
-}
-
-void ChatSurfaceRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    // Register() records every claim attempt in attributions_ before checking
-    // Claim() -- a LOSING claimant still gets an attributions_ entry even
-    // though it never became the holder. Erase that entry unconditionally;
-    // only reset the slot itself (surface/record) when this plugin actually
-    // holds it, mirroring MessageRendererRegistry::RemoveByAttribution.
-    if (record.registered && record.plugin_name == plugin_name) {
-        surface.reset();
-        record = ExclusiveRecord{};
-    }
-    attributions_.erase(std::remove_if(attributions_.begin(), attributions_.end(),
-                                       [&](const Attribution& a) {
-                                           return a.plugin_name == plugin_name;
-                                       }),
-                        attributions_.end());
-}
-
-void MarkdownEngineRegistry::Register(std::unique_ptr<MarkdownEngine> candidate) {
-    if (sealed_) {
-        common::DefaultLogger().warn(
-            "client plugin '{}': registration ignored -- the registries were sealed after "
-            "startup (registration-time-only contract)",
-            attribution_.empty() ? "<core>" : attribution_);
-        return;
-    }
-    if (candidate == nullptr) return;
-    attributions_.push_back({attribution_, "markdown_engine"});
-    if (!record.Claim(attribution_)) return;
-    engine = std::move(candidate);
-}
-
-void MarkdownEngineRegistry::RemoveByAttribution(const std::string& plugin_name) {
-    // See ChatSurfaceRegistry::RemoveByAttribution: a losing claimant's
-    // attributions_ entry must be erased unconditionally, not only when it
-    // holds the slot.
-    if (record.registered && record.plugin_name == plugin_name) {
-        engine.reset();
-        record = ExclusiveRecord{};
-    }
-    attributions_.erase(std::remove_if(attributions_.begin(), attributions_.end(),
-                                       [&](const Attribution& a) {
-                                           return a.plugin_name == plugin_name;
-                                       }),
-                        attributions_.end());
+    kinds_.resize(write);
 }
 
 }  // namespace minimal::client::plugins

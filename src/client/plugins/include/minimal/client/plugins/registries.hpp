@@ -553,55 +553,6 @@ public:
     virtual std::vector<TabInfo> Tabs() const = 0;
 };
 
-// --- Registries -------------------------------------------------------------
-
-// Registration-time-only enforcement, the server's Seal ported: after the
-// loader has run every plugin's register_* hook, the host seals each
-// registry. A plugin that stashed its registry reference and registered
-// LATER used to bypass the collision rule, the attribution windows and (for
-// exclusive slots) the core default entirely, silently; a sealed Register
-// warns and is ignored instead.
-class RegistrationWindow {
-public:
-    void Seal() { sealed_ = true; }
-
-protected:
-    bool sealed_ = false;
-};
-
-// Common attribution mechanics, identical to the server's registries: the
-// loader opens a window around each plugin's registration callback and
-// everything arriving inside it is attributed to that plugin.
-struct Attribution {
-    std::string plugin_name;    // empty for what core registers itself
-    std::string original_name;  // the key as registered
-};
-
-class ViewRegistry : public RegistrationWindow {
-public:
-    // Registry owns the view. Returns the attribution recorded; a duplicate id
-    // is NOT silently replaced -- it is recorded for the fatal-collision scan
-    // and the first registration stays active.
-    void Register(std::unique_ptr<View> view);
-    const std::vector<std::unique_ptr<View>>& views() const { return views_; }
-    View* Find(std::string_view id) const;
-
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-    const std::vector<Attribution>& attributions() const { return attributions_; }
-
-    // Partial-registration rollback (ClientPluginLoader::LoadOne): strips
-    // everything `plugin_name` registered here, so a plugin whose LATER hook
-    // throws does not leave an earlier hook's registrations live to collide
-    // with a later, healthy plugin.
-    void RemoveByAttribution(const std::string& plugin_name);
-
-private:
-    std::vector<std::unique_ptr<View>> views_;
-    std::string attribution_;
-    std::vector<Attribution> attributions_;
-};
-
 // A client-side /-command a plugin contributes: it runs in the TUI and never
 // reaches the server (compare a server plugin's command, which runs on the
 // session worker). Listed in /-autocomplete and the /help overlay beside the
@@ -620,194 +571,221 @@ public:
     virtual void Run(const std::vector<std::string>& positional, const std::string& raw) = 0;
 };
 
-class ClientCommandRegistry : public RegistrationWindow {
-public:
-    void Register(std::unique_ptr<ClientCommand> command);
-    const std::vector<std::unique_ptr<ClientCommand>>& commands() const { return commands_; }
+// --- Registries -------------------------------------------------------------
 
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-    const std::vector<Attribution>& attributions() const { return attributions_; }
-    void RemoveByAttribution(const std::string& plugin_name);
-
-private:
-    std::vector<std::unique_ptr<ClientCommand>> commands_;
-    std::string attribution_;
-    std::vector<Attribution> attributions_;
+// Common attribution mechanics, identical to the server's registries: the
+// loader opens a window around each plugin's registration callback and
+// everything arriving inside it is attributed to that plugin.
+struct Attribution {
+    std::string plugin_name;    // empty for what core registers itself
+    std::string original_name;  // the key as registered
 };
 
-class StartViewRegistry : public RegistrationWindow {
+// What every registry shares: the attribution window, the record of who
+// registered what, rollback, and the seal.
+//
+// Registration-time-only enforcement, the server's Seal ported: after the
+// loader has run every plugin's register_* hook, the host seals each
+// registry. A plugin that stashed its registry reference and registered
+// LATER used to bypass the collision rule, the attribution windows and (for
+// exclusive slots) the core default entirely, silently; a sealed Register
+// warns and is ignored instead.
+class RegistryBase {
 public:
-    void Register(std::unique_ptr<StartView> view);
-    const std::vector<std::unique_ptr<StartView>>& views() const { return views_; }
-    StartView* Find(std::string_view id) const;
+    virtual ~RegistryBase() = default;
 
+    void Seal() { sealed_ = true; }
     void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
     void ClearAttribution() { attribution_.clear(); }
-    const std::vector<Attribution>& attributions() const { return attributions_; }
-    void RemoveByAttribution(const std::string& plugin_name);
-
-private:
-    std::vector<std::unique_ptr<StartView>> views_;
-    std::string attribution_;
-    std::vector<Attribution> attributions_;
-};
-
-class ToolResultRendererRegistry : public RegistrationWindow {
-public:
-    void Register(std::unique_ptr<ToolResultRenderer> renderer);
-    const ToolResultRenderer* Find(std::string_view tool_name) const;
+    // Every accepted registration, in order: (plugin, key). An additive
+    // registry keeps a duplicate here (the collision scan's input); an
+    // exclusive slot records only its holder.
     const std::vector<Attribution>& attributions() const { return attributions_; }
 
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-    void RemoveByAttribution(const std::string& plugin_name);
+    // Partial-registration rollback (ClientPluginLoader::LoadOne): strips
+    // everything `plugin_name` registered here, so a plugin whose LATER hook
+    // throws does not leave an earlier hook's registrations live to collide
+    // with a later, healthy plugin.
+    virtual void RemoveByAttribution(const std::string& plugin_name) = 0;
 
-private:
-    std::vector<std::unique_ptr<ToolResultRenderer>> renderers_;
+protected:
+    // False, with a warning, once sealed.
+    bool Admit() const;
+
     std::string attribution_;
     std::vector<Attribution> attributions_;
+    bool sealed_ = false;
 };
 
-class DisplayRendererRegistry : public RegistrationWindow {
+// Many plugins, one entry per key. `KeyOf` maps an entry to its key (a view
+// id, a tool name, ...). A duplicate key is NOT replaced: it is kept and
+// recorded, Find() answers with the first, and the startup collision scan
+// (NameRegistry) turns the duplicate fatal, naming both claimants.
+template <typename T, typename KeyOf>
+class AdditiveRegistry : public RegistryBase {
 public:
-    void Register(std::unique_ptr<DisplayRenderer> renderer);
-    const DisplayRenderer* Find(std::string_view kind) const;
-    const std::vector<Attribution>& attributions() const { return attributions_; }
+    // Takes ownership. Null, or an empty key, registers nothing.
+    void Register(std::unique_ptr<T> entry) {
+        if (!Admit() || entry == nullptr) return;
+        std::string key(KeyOf{}(*entry));
+        if (key.empty()) return;
+        attributions_.push_back({attribution_, std::move(key)});
+        entries_.push_back(std::move(entry));
+    }
 
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-    void RemoveByAttribution(const std::string& plugin_name);
+    // In registration order.
+    const std::vector<std::unique_ptr<T>>& All() const { return entries_; }
+
+    T* Find(std::string_view key) const {
+        for (const auto& entry : entries_) {
+            if (KeyOf{}(*entry) == key) return entry.get();
+        }
+        return nullptr;
+    }
+
+    void RemoveByAttribution(const std::string& plugin_name) override {
+        // entries_ and attributions_ are index-aligned: compact both together.
+        std::size_t write = 0;
+        for (std::size_t read = 0; read < attributions_.size(); ++read) {
+            if (attributions_[read].plugin_name == plugin_name) continue;
+            if (write != read) {
+                attributions_[write] = std::move(attributions_[read]);
+                entries_[write] = std::move(entries_[read]);
+            }
+            ++write;
+        }
+        attributions_.resize(write);
+        entries_.resize(write);
+    }
 
 private:
-    std::vector<std::unique_ptr<DisplayRenderer>> renderers_;
-    std::string attribution_;
-    std::vector<Attribution> attributions_;
+    std::vector<std::unique_ptr<T>> entries_;
 };
 
-class PromptRendererRegistry : public RegistrationWindow {
-public:
-    void Register(std::unique_ptr<PromptRenderer> renderer);
-    const PromptRenderer* Find(std::string_view kind) const;
-    const std::vector<Attribution>& attributions() const { return attributions_; }
+// Warns that `claimant` lost the exclusive slot to `holder`.
+void WarnTaken(const std::string& holder, const std::string& claimant);
 
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-    void RemoveByAttribution(const std::string& plugin_name);
+// One holder: the first registration wins, a later one warns and is ignored
+// -- the MentionResolver/AuthProvider pattern. The core default registers
+// only when no plugin claimed the slot, which is what "exclusive" protects.
+template <typename T, typename KeyOf>
+class ExclusiveSlot : public RegistryBase {
+public:
+    void Register(std::unique_ptr<T> candidate) {
+        if (!Admit() || candidate == nullptr) return;
+        if (held_) {
+            WarnTaken(holder_, attribution_);
+            return;
+        }
+        attributions_.push_back({attribution_, std::string(KeyOf{}(*candidate))});
+        held_ = true;
+        holder_ = attribution_;
+        entry_ = std::move(candidate);
+    }
+
+    T* get() const { return entry_.get(); }
+    bool held() const { return held_; }
+    // Who holds the slot: a plugin's name, or "" for core.
+    const std::string& holder() const { return holder_; }
+
+    // Releases the slot IF `plugin_name` holds it -- a plugin that failed a
+    // LATER hook without ever claiming this slot must not release another's.
+    void RemoveByAttribution(const std::string& plugin_name) override {
+        if (!held_ || holder_ != plugin_name) return;
+        entry_.reset();
+        held_ = false;
+        holder_.clear();
+        attributions_.clear();
+    }
 
 private:
-    std::vector<std::unique_ptr<PromptRenderer>> renderers_;
-    std::string attribution_;
-    std::vector<Attribution> attributions_;
+    std::unique_ptr<T> entry_;
+    bool held_ = false;
+    std::string holder_;
 };
 
-class MessageRendererRegistry : public RegistrationWindow {
+struct ViewKey {
+    std::string_view operator()(const View& view) const { return view.spec().id; }
+};
+struct StartViewKey {
+    std::string_view operator()(const StartView& view) const { return view.spec().id; }
+};
+struct ClientCommandKey {
+    std::string_view operator()(const ClientCommand& command) const { return command.name(); }
+};
+struct ToolRendererKey {
+    std::string_view operator()(const ToolResultRenderer& r) const { return r.tool_name(); }
+};
+struct DisplayRendererKey {
+    std::string_view operator()(const DisplayRenderer& r) const { return r.kind(); }
+};
+struct PromptRendererKey {
+    std::string_view operator()(const PromptRenderer& r) const { return r.kind(); }
+};
+struct StatusSegmentKey {
+    std::string_view operator()(const StatusSegment& segment) const { return segment.id(); }
+};
+struct SyntaxGrammarKey {
+    std::string_view operator()(const SyntaxGrammar& grammar) const { return grammar.Language(); }
+};
+struct ChatSurfaceKey {
+    std::string_view operator()(const ChatSurface& surface) const { return surface.spec().id; }
+};
+struct MarkdownEngineKey {
+    std::string_view operator()(const MarkdownEngine&) const { return "markdown_engine"; }
+};
+
+using ViewRegistry = AdditiveRegistry<View, ViewKey>;
+using StartViewRegistry = AdditiveRegistry<StartView, StartViewKey>;
+using ClientCommandRegistry = AdditiveRegistry<ClientCommand, ClientCommandKey>;
+using ToolResultRendererRegistry = AdditiveRegistry<ToolResultRenderer, ToolRendererKey>;
+using DisplayRendererRegistry = AdditiveRegistry<DisplayRenderer, DisplayRendererKey>;
+using PromptRendererRegistry = AdditiveRegistry<PromptRenderer, PromptRendererKey>;
+using StatusSegmentRegistry = AdditiveRegistry<StatusSegment, StatusSegmentKey>;
+// The language table the highlighter consults, in registration order.
+using SyntaxGrammarRegistry = AdditiveRegistry<SyntaxGrammar, SyntaxGrammarKey>;
+// Null get(): core's chat view stands.
+using ChatSurfaceRegistry = ExclusiveSlot<ChatSurface, ChatSurfaceKey>;
+// Null get(): the host registers the core md4c default.
+using MarkdownEngineRegistry = ExclusiveSlot<MarkdownEngine, MarkdownEngineKey>;
+
+// Keyed by the ChatRowKind a plugin claims, not by the renderer, so it keeps
+// its own Register. First claimant stays active; a second claim is recorded
+// (attributions(), keyed by ToString(kind)) and the collision scan turns it
+// fatal, like every additive key.
+class MessageRendererRegistry : public RegistryBase {
 public:
-    // Claims `kind`. The FIRST claimant for a kind stays; a second claim (from
-    // another plugin) is recorded -- the loader turns it into the same fatal
-    // outcome a name collision gets.
     void Register(ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer);
     // The renderer for a kind, or null -- the caller falls back to the core
     // default (which is itself registered here once core fills it).
     const MessageRenderer* Find(ChatRowKind kind) const;
-    // (kind, plugin) pairs, for the collision scan.
-    const std::vector<std::pair<ChatRowKind, Attribution>>& claims() const { return claims_; }
     // Whether the ACTIVE renderer for `kind` is a plugin's (the first claim),
     // not core's default fill.
-    bool PluginClaimed(ChatRowKind kind) const {
-        for (const auto& [claimed, attribution] : claims_) {
-            if (claimed == kind) return !attribution.plugin_name.empty();
-        }
-        return false;
-    }
+    bool PluginClaimed(ChatRowKind kind) const;
 
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-    void RemoveByAttribution(const std::string& plugin_name);
+    void RemoveByAttribution(const std::string& plugin_name) override;
 
 private:
     std::map<ChatRowKind, std::unique_ptr<MessageRenderer>> renderers_;
-    std::string attribution_;
-    std::vector<std::pair<ChatRowKind, Attribution>> claims_;
+    // Index-aligned with attributions_: the kind each claim named.
+    std::vector<ChatRowKind> kinds_;
 };
 
-class StatusSegmentRegistry : public RegistrationWindow {
-public:
-    void Register(std::unique_ptr<StatusSegment> segment);
-    const std::vector<std::unique_ptr<StatusSegment>>& segments() const { return segments_; }
-    const StatusSegment* Find(std::string_view id) const;
-    const std::vector<Attribution>& attributions() const { return attributions_; }
-
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-    void RemoveByAttribution(const std::string& plugin_name);
-
-private:
-    std::vector<std::unique_ptr<StatusSegment>> segments_;
-    std::string attribution_;
-    std::vector<Attribution> attributions_;
-};
-
-class SyntaxGrammarRegistry : public RegistrationWindow {
-public:
-    void Register(std::unique_ptr<SyntaxGrammar> grammar);
-    // The language table the highlighter consults, in registration order.
-    const std::vector<std::unique_ptr<SyntaxGrammar>>& grammars() const { return grammars_; }
-    const std::vector<Attribution>& attributions() const { return attributions_; }
-
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-    void RemoveByAttribution(const std::string& plugin_name);
-
-private:
-    std::vector<std::unique_ptr<SyntaxGrammar>> grammars_;
-    std::string attribution_;
-    std::vector<Attribution> attributions_;
-};
-
-// Exclusive registries: first registration wins, the second warns and is
-// ignored. Kept as records rather than lookup tables -- there is exactly one
-// active registrant, or none.
-struct ExclusiveRecord {
-    bool registered = false;
-    std::string plugin_name;  // who holds the slot; empty for the core default
-
-    // False (and warns) when the slot was already taken. Never overwrites.
-    bool Claim(std::string_view claimant);
-};
-
-class ChatSurfaceRegistry : public RegistrationWindow {
-public:
-    std::unique_ptr<ChatSurface> surface;  // null when core's chat view stands
-    ExclusiveRecord record;
-    const std::vector<Attribution>& attributions() const { return attributions_; }
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-    // Takes ownership; warns and ignores when the slot is already claimed.
-    void Register(std::unique_ptr<ChatSurface> surface);
-    // Releases the slot IF `plugin_name` holds it (a no-op otherwise -- a
-    // plugin that failed a LATER hook without ever claiming this slot must
-    // not release someone else's).
-    void RemoveByAttribution(const std::string& plugin_name);
-
-private:
-    std::string attribution_;
-    std::vector<Attribution> attributions_;
-};
-
-class MarkdownEngineRegistry : public RegistrationWindow {
-public:
-    std::unique_ptr<MarkdownEngine> engine;  // null: host uses the core default
-    ExclusiveRecord record;
-    const std::vector<Attribution>& attributions() const { return attributions_; }
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-    void Register(std::unique_ptr<MarkdownEngine> engine);
-    void RemoveByAttribution(const std::string& plugin_name);
-
-private:
-    std::string attribution_;
-    std::vector<Attribution> attributions_;
+// Every registry the client offers plugins. The host owns one; the loader
+// fills it (RegistryHooks in client_plugin_loader.hpp maps each to its
+// register_* hook).
+struct ClientRegistries {
+    ViewRegistry views;
+    StartViewRegistry start_views;
+    ClientCommandRegistry client_commands;
+    ToolResultRendererRegistry tool_renderers;
+    DisplayRendererRegistry display_renderers;
+    PromptRendererRegistry prompt_renderers;
+    MessageRendererRegistry message_renderers;
+    StatusSegmentRegistry status_segments;
+    SyntaxGrammarRegistry grammars;
+    ChatSurfaceRegistry chat_surface;
+    MarkdownEngineRegistry markdown_engine;
 };
 
 }  // namespace minimal::client::plugins

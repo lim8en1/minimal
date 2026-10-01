@@ -11,10 +11,6 @@ using namespace minimal::client;
 using minimal::plugins::NameKind;
 
 namespace {
-std::vector<std::pair<ChatRowKind, plugins::Attribution>> NoMessageClaims() {
-    return {};
-}
-
 // RAII env var override, same pattern as config_paths_test.cpp.
 class ScopedEnv {
 public:
@@ -78,7 +74,7 @@ TEST_CASE("MatchAliasKind matches a view_registry attribution", "[tui_bootstrap]
     std::vector<AliasCandidate> candidates = {
         {NameKind::ViewId, &views},
     };
-    CHECK(MatchAliasKind(candidates, NoMessageClaims(), "fixture.main") == NameKind::ViewId);
+    CHECK(MatchAliasKind(candidates, "fixture.main") == NameKind::ViewId);
 }
 
 TEST_CASE("MatchAliasKind matches a start_view_registry-only attribution as ViewId",
@@ -95,15 +91,15 @@ TEST_CASE("MatchAliasKind matches a start_view_registry-only attribution as View
         {NameKind::ViewId, &views},
         {NameKind::ViewId, &start_views},
     };
-    CHECK(MatchAliasKind(candidates, NoMessageClaims(), "fixture.start") == NameKind::ViewId);
+    CHECK(MatchAliasKind(candidates, "fixture.start") == NameKind::ViewId);
 }
 
-TEST_CASE("MatchAliasKind matches a message_registry claim", "[tui_bootstrap]") {
-    std::vector<AliasCandidate> candidates;
-    std::vector<std::pair<ChatRowKind, plugins::Attribution>> claims = {
-        {ChatRowKind::AgentMarkdown, {"fixture", "markdown"}},
+TEST_CASE("MatchAliasKind matches a message renderer claim", "[tui_bootstrap]") {
+    std::vector<plugins::Attribution> claims = {{"fixture", "markdown"}};
+    std::vector<AliasCandidate> candidates = {
+        {NameKind::MessageRenderer, &claims},
     };
-    CHECK(MatchAliasKind(candidates, claims, "fixture.markdown") == NameKind::MessageRenderer);
+    CHECK(MatchAliasKind(candidates, "fixture.markdown") == NameKind::MessageRenderer);
 }
 
 TEST_CASE("MatchAliasKind falls back to ViewId for an unmatched key", "[tui_bootstrap]") {
@@ -111,5 +107,5 @@ TEST_CASE("MatchAliasKind falls back to ViewId for an unmatched key", "[tui_boot
     std::vector<AliasCandidate> candidates = {
         {NameKind::ViewId, &views},
     };
-    CHECK(MatchAliasKind(candidates, NoMessageClaims(), "fixture.nonexistent") == NameKind::ViewId);
+    CHECK(MatchAliasKind(candidates, "fixture.nonexistent") == NameKind::ViewId);
 }

@@ -15,7 +15,7 @@
 // (SyntaxHighlighter stores `const Theme&` and, in the grammar-table
 // constructor, a `const std::vector<LanguageDefinition>*`), `renderer`
 // captures `&*theme` and `&*highlighter` (MarkdownRenderer stores raw
-// pointers), and `engine` is a reference into `engine_registry`'s own
+// pointers), and `engine` is a reference into `registries.markdown_engine`'s own
 // heap-owned MarkdownEngine. None of this is safe under a MOVE: if the whole
 // struct were ever returned by value or otherwise relocated, every one of
 // those captured addresses would go stale -- the exact "closures/pointers
@@ -91,17 +91,7 @@ struct TuiEnvironment {
     std::unique_ptr<plugins::AttentionSink> attention_sink;
     std::unique_ptr<plugins::ClientApi> host_client_api;
 
-    plugins::ViewRegistry view_registry;
-    plugins::StartViewRegistry start_view_registry;
-    plugins::ClientCommandRegistry client_command_registry;
-    plugins::ToolResultRendererRegistry renderer_registry;
-    plugins::DisplayRendererRegistry display_registry;
-    plugins::PromptRendererRegistry prompt_registry;
-    plugins::MessageRendererRegistry message_registry;
-    plugins::StatusSegmentRegistry status_registry;
-    plugins::SyntaxGrammarRegistry grammar_registry;
-    plugins::ChatSurfaceRegistry surface_registry;
-    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::ClientRegistries registries;
 
     // The raw action->key-STRING table (core defaults + the user's file +
     // every plugin view's EnsureDefault), kept alongside `keymap` below for
@@ -125,8 +115,8 @@ struct TuiEnvironment {
     std::optional<SyntaxHighlighter> highlighter;
     std::optional<MarkdownRenderer> renderer;
 
-    // Non-owning: `engine` points at engine_registry's own heap-owned
-    // default/plugin engine; `chat_surface` at surface_registry's exclusive
+    // Non-owning: `engine` points at registries.markdown_engine's own heap-owned
+    // default/plugin engine; `chat_surface` at registries.chat_surface's exclusive
     // surface (null if none claimed the slot, or if one threw on OnTheme).
     plugins::MarkdownEngine* engine = nullptr;
     plugins::ChatSurface* chat_surface = nullptr;
@@ -166,22 +156,15 @@ struct AliasCandidate {
 
 // The alias-resolution matching decision BuildTuiEnvironment applies to
 // every entry in client-plugins.json's "aliases" map: which NameKind a
-// qualified "plugin.original_name" alias key belongs to. Checks `candidates`
-// first (view/tool-renderer/status-segment/syntax-grammar registries, in
-// whatever order the caller supplies -- BuildTuiEnvironment includes BOTH
-// view_registry and start_view_registry under NameKind::ViewId, since both
-// register views addressable the same way), then `message_claims`
-// separately (MessageRendererRegistry::claims() is (ChatRowKind,
-// Attribution) pairs, a different shape from the others' plain
-// attributions()). Falls back to NameKind::ViewId -- the "dangling" case,
+// qualified "plugin.original_name" alias key belongs to -- the first of
+// `candidates` (the aliasable RegistryHooks rows, in table order) holding
+// that attribution. Falls back to NameKind::ViewId -- the "dangling" case,
 // since ViewId is the canonical kind keybindings.json addresses -- when no
 // candidate matches at all.
 //
-// Pure and independently testable: takes only Attribution/ChatRowKind data,
-// no registries, no plugin loading required to exercise it.
-minimal::plugins::NameKind MatchAliasKind(
-    const std::vector<AliasCandidate>& candidates,
-    const std::vector<std::pair<ChatRowKind, plugins::Attribution>>& message_claims,
-    const std::string& key);
+// Pure and independently testable: takes only Attribution data, no
+// registries, no plugin loading required to exercise it.
+minimal::plugins::NameKind MatchAliasKind(const std::vector<AliasCandidate>& candidates,
+                                          const std::string& key);
 
 }  // namespace minimal::client

@@ -61,16 +61,7 @@ std::string FixturePath(const std::string& name) {
 }
 
 struct LoadedFixtures {
-    ViewRegistry views;
-    StartViewRegistry start_views;
-    ClientCommandRegistry client_commands;
-    ToolResultRendererRegistry renderers;
-    DisplayRendererRegistry display_renderers;
-    MessageRendererRegistry message_renderers;
-    StatusSegmentRegistry status_segments;
-    SyntaxGrammarRegistry grammars;
-    ChatSurfaceRegistry chat_surface;
-    MarkdownEngineRegistry markdown_engine;
+    ClientRegistries registries;
     AttentionState attention;
     std::vector<PluginRecord> records;
 
@@ -92,13 +83,9 @@ struct LoadedFixtures {
         f->attention_sink = MakeHostAttentionSink(&f->attention);
         f->client_api = MakeHostClientApi(nullptr);
         f->focus_provider = MakeHostFocusProvider();
-        ClientPluginLoader loader(f->views, f->renderers, f->display_renderers,
-                                  f->message_renderers, f->status_segments, f->grammars,
-                                  f->chat_surface,
-                                  f->markdown_engine, f->start_views, f->attention_sink.get(),
-                                  f->client_api.get(), f->focus_provider.get(),
-                                  /*prompt_renderers=*/nullptr, /*ui=*/nullptr,
-                                  &f->client_commands);
+        ClientPluginLoader loader(f->registries, {.attention = f->attention_sink.get(),
+                                                  .client_api = f->client_api.get(),
+                                                  .focus = f->focus_provider.get()});
         f->records = loader.LoadAll(candidates);
         return f;
     }
@@ -163,9 +150,10 @@ TEST_CASE("registries: first claimant wins, duplicates are recorded not applied"
     registry.SetAttribution("plugin-b");
     registry.Register(ChatRowKind::Thinking, std::make_unique<StubMessageRenderer>());
 
-    REQUIRE(registry.claims().size() == 2);
-    CHECK(registry.claims()[0].second.plugin_name == "plugin-a");
-    CHECK(registry.claims()[1].second.plugin_name == "plugin-b");
+    REQUIRE(registry.attributions().size() == 2);
+    CHECK(registry.attributions()[0].plugin_name == "plugin-a");
+    CHECK(registry.attributions()[1].plugin_name == "plugin-b");
+    CHECK(registry.PluginClaimed(ChatRowKind::Thinking));
     // The active renderer is still the FIRST claimant's: presentation must not
     // depend on plugin load order (the collision rule's whole point).
     CHECK(registry.Find(ChatRowKind::Thinking) != nullptr);
@@ -179,7 +167,7 @@ TEST_CASE("start view registry: additive, attributed, id-addressable", "[client_
     registry.Register(std::make_unique<StubStartView>("stub.start.two"));
 
     // Additive: BOTH render (registration order), unlike the exclusive slots.
-    REQUIRE(registry.views().size() == 2);
+    REQUIRE(registry.All().size() == 2);
     REQUIRE(registry.attributions().size() == 2);
     CHECK(registry.attributions()[0].plugin_name == "plugin-a");
     CHECK(registry.attributions()[0].original_name == "stub.start");
@@ -198,22 +186,86 @@ TEST_CASE("start view registry: additive, attributed, id-addressable", "[client_
           "stub start:(empty)");
 }
 
+TEST_CASE("AdditiveRegistry: attribution, first-wins Find, rollback, seal",
+          "[client_plugins][registries]") {
+    StartViewRegistry registry;
+    registry.Register(std::make_unique<StubStartView>("core.start"));   // no window: core
+    registry.SetAttribution("a");
+    registry.Register(std::make_unique<StubStartView>("dup"));
+    registry.Register(nullptr);                                         // ignored
+    registry.Register(std::make_unique<StubStartView>(""));             // empty key: ignored
+    registry.SetAttribution("b");
+    registry.Register(std::make_unique<StubStartView>("dup"));
+    registry.Register(std::make_unique<StubStartView>("b.only"));
+    registry.ClearAttribution();
+
+    REQUIRE(registry.attributions().size() == 4);
+    CHECK(registry.attributions()[0].plugin_name.empty());
+    CHECK(registry.attributions()[1].plugin_name == "a");
+    CHECK(registry.attributions()[2].plugin_name == "b");
+    // A duplicate key is kept (the collision scan's input); Find answers
+    // with the first registration.
+    CHECK(registry.Find("dup") == registry.All()[1].get());
+
+    // Rollback strips only b's entries, keeping the rest index-aligned.
+    registry.RemoveByAttribution("b");
+    REQUIRE(registry.All().size() == 2);
+    REQUIRE(registry.attributions().size() == 2);
+    CHECK(registry.Find("b.only") == nullptr);
+    CHECK(registry.All()[1]->spec().id == "dup");
+    CHECK(registry.attributions()[1].plugin_name == "a");
+
+    registry.Seal();
+    registry.SetAttribution("late");
+    registry.Register(std::make_unique<StubStartView>("late.start"));
+    CHECK(registry.Find("late.start") == nullptr);
+    CHECK(registry.attributions().size() == 2);
+}
+
+TEST_CASE("ExclusiveSlot: holder only, rollback releases only the holder, seal",
+          "[client_plugins][registries]") {
+    MarkdownEngineRegistry slot;
+    CHECK_FALSE(slot.held());
+    slot.SetAttribution("first");
+    slot.Register(std::make_unique<StubEngine>());
+    slot.SetAttribution("second");
+    slot.Register(std::make_unique<StubEngine>());   // warns, ignored
+    REQUIRE(slot.held());
+    CHECK(slot.holder() == "first");
+    REQUIRE(slot.attributions().size() == 1);
+    CHECK(slot.attributions()[0].original_name == "markdown_engine");
+
+    slot.RemoveByAttribution("second");   // never held it: no-op
+    CHECK(slot.held());
+    slot.RemoveByAttribution("first");
+    CHECK_FALSE(slot.held());
+    CHECK(slot.get() == nullptr);
+    CHECK(slot.attributions().empty());
+
+    slot.Seal();
+    slot.SetAttribution("late");
+    slot.Register(std::make_unique<StubEngine>());
+    CHECK_FALSE(slot.held());
+}
+
 TEST_CASE("exclusive registries: second registration warns and is ignored",
           "[client_plugins]") {
     ChatSurfaceRegistry surfaces;
     surfaces.SetAttribution("first");
     surfaces.Register(std::make_unique<StubSurface>());
-    REQUIRE(surfaces.record.registered);
+    REQUIRE(surfaces.held());
 
     MarkdownEngineRegistry engines;
     engines.SetAttribution("first");
     engines.Register(std::make_unique<StubEngine>());
-    CHECK(engines.record.registered);
+    CHECK(engines.held());
     engines.SetAttribution("second");
     engines.Register(std::make_unique<StubEngine>());
-    CHECK(engines.record.plugin_name == "first");
+    CHECK(engines.holder() == "first");
+    // Only the holder is recorded.
+    CHECK(engines.attributions().size() == 1);
     // The FIRST engine is still the active one (the second was discarded).
-    CHECK(ToText(engines.engine->Render("x", Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor))) == "stub engine");
+    CHECK(ToText(engines.get()->Render("x", Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor))) == "stub engine");
 }
 
 TEST_CASE("attention state: plugin raise wins until cleared", "[client_plugins]") {
@@ -262,48 +314,49 @@ TEST_CASE("the client loader loads a real plugin through a real dlopen",
     CHECK(record.abi_tag == std::string(minimal::common::AbiTag()));
 
     // Every additive slot the fixture registered is visible, attributed.
-    REQUIRE(fixtures->status_segments.segments().size() == 1);
+    REQUIRE(fixtures->registries.status_segments.All().size() == 1);
     // Config echo: the segment renders THIS plugin's own config slice, through
     // a real dlopen.
-    CHECK(fixtures->status_segments.segments().front()->Render("") == "hello");
-    CHECK(fixtures->status_segments.Find("fixture_seg") != nullptr);
+    CHECK(fixtures->registries.status_segments.All().front()->Render("") == "hello");
+    CHECK(fixtures->registries.status_segments.Find("fixture_seg") != nullptr);
 
-    REQUIRE(fixtures->renderers.Find("fixture_tool") != nullptr);
-    REQUIRE(fixtures->display_renderers.Find("fixture_kind") != nullptr);
+    REQUIRE(fixtures->registries.tool_renderers.Find("fixture_tool") != nullptr);
+    REQUIRE(fixtures->registries.display_renderers.Find("fixture_kind") != nullptr);
 
     // A client-side /-command, attributed and runnable.
-    REQUIRE(fixtures->client_commands.commands().size() == 1);
-    CHECK(fixtures->client_commands.commands().front()->name() == "fixture-cmd");
-    CHECK(record.registered_client_commands == std::vector<std::string>{"fixture-cmd"});
-    fixtures->client_commands.commands().front()->Run({"a"}, "a b");
-    CHECK(record.registered_display_kinds == std::vector<std::string>{"fixture_kind"});
+    REQUIRE(fixtures->registries.client_commands.All().size() == 1);
+    CHECK(fixtures->registries.client_commands.All().front()->name() == "fixture-cmd");
+    CHECK(record.registered.at("client_commands") == std::vector<std::string>{"fixture-cmd"});
+    fixtures->registries.client_commands.All().front()->Run({"a"}, "a b");
+    CHECK(record.registered.at("display_renderers") == std::vector<std::string>{"fixture_kind"});
 
     bool has_minilang = false;
-    for (const auto& grammar : fixtures->grammars.grammars()) {
+    for (const auto& grammar : fixtures->registries.grammars.All()) {
         if (grammar->Language() == "minilang") has_minilang = true;
     }
     CHECK(has_minilang);
 
-    REQUIRE(fixtures->views.Find("fixture.panel") != nullptr);
-    REQUIRE(fixtures->views.Find("fixture.modal") != nullptr);
+    REQUIRE(fixtures->registries.views.Find("fixture.panel") != nullptr);
+    REQUIRE(fixtures->registries.views.Find("fixture.modal") != nullptr);
     // The views are live components (panel render is assertable text).
-    CHECK(ToText(fixtures->views.Find("fixture.panel")->component()->Render()) ==
+    CHECK(ToText(fixtures->registries.views.Find("fixture.panel")->component()->Render()) ==
           "fixture panel");
 
     // The start view landed through a real dlopen too, and the per-render
     // session context reaches it (empty string = the app-level empty state).
-    REQUIRE(fixtures->records.front().registered_start_views.size() == 1);
-    REQUIRE(fixtures->start_views.Find("fixture.start") != nullptr);
-    CHECK(ToText(fixtures->start_views.Find("fixture.start")->Render("", Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor))) ==
+    REQUIRE(fixtures->records.front().registered.at("start_views").size() == 1);
+    REQUIRE(fixtures->registries.start_views.Find("fixture.start") != nullptr);
+    CHECK(ToText(fixtures->registries.start_views.Find("fixture.start")->Render("", Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor))) ==
           "fixture start:");
-    CHECK(ToText(fixtures->start_views.Find("fixture.start")->Render("sess-1",
+    CHECK(ToText(fixtures->registries.start_views.Find("fixture.start")->Render("sess-1",
                                                                     Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor))) ==
           "fixture start:sess-1");
 
     // Message-kind claim recorded (first-claimant semantics tested above).
     bool claimed_thinking = false;
-    for (const auto& [kind, attribution] : fixtures->message_renderers.claims()) {
-        if (kind == ChatRowKind::Thinking && attribution.plugin_name == "fixture-client") {
+    for (const auto& attribution : fixtures->registries.message_renderers.attributions()) {
+        if (attribution.original_name == ToString(ChatRowKind::Thinking) &&
+            attribution.plugin_name == "fixture-client") {
             claimed_thinking = true;
         }
     }
@@ -311,8 +364,8 @@ TEST_CASE("the client loader loads a real plugin through a real dlopen",
 
     // The exclusive slots were NOT touched by this fixture: the core defaults
     // still stand.
-    CHECK_FALSE(fixtures->chat_surface.record.registered);
-    CHECK_FALSE(fixtures->markdown_engine.record.registered);
+    CHECK_FALSE(fixtures->registries.chat_surface.held());
+    CHECK_FALSE(fixtures->registries.markdown_engine.held());
 }
 
 TEST_CASE("a second plugin with a loaded plugin's name is refused before any hook runs",
@@ -327,11 +380,11 @@ TEST_CASE("a second plugin with a loaded plugin's name is refused before any hoo
     REQUIRE(fixtures->records.size() == 2);
     CHECK(fixtures->records[0].ok());
     CHECK(fixtures->records[1].status == LoadStatus::DuplicateName);
-    CHECK(fixtures->chat_surface.record.registered);
-    CHECK(fixtures->chat_surface.record.plugin_name == "fixture-client-exclusive");
-    CHECK(fixtures->markdown_engine.record.registered);
-    CHECK(fixtures->markdown_engine.record.plugin_name == "fixture-client-exclusive");
-    REQUIRE(fixtures->chat_surface.surface != nullptr);
+    CHECK(fixtures->registries.chat_surface.held());
+    CHECK(fixtures->registries.chat_surface.holder() == "fixture-client-exclusive");
+    CHECK(fixtures->registries.markdown_engine.held());
+    CHECK(fixtures->registries.markdown_engine.holder() == "fixture-client-exclusive");
+    REQUIRE(fixtures->registries.chat_surface.get() != nullptr);
 
     // The surface receives what the host pushes (the OnEvent contract): a
     // push must be accepted without blocking or crashing; per-surface state
@@ -339,7 +392,7 @@ TEST_CASE("a second plugin with a loaded plugin's name is refused before any hoo
     v1::ServerEvent event;
     event.set_session_id("s-1");
     event.mutable_session_metadata()->set_session_id("s-1");
-    fixtures->chat_surface.surface->OnEvent(event);
+    fixtures->registries.chat_surface.get()->OnEvent(event);
 }
 
 TEST_CASE("a partial registration is rolled back, and a later plugin reusing "
@@ -364,7 +417,7 @@ TEST_CASE("a partial registration is rolled back, and a later plugin reusing "
     // stripped, not left to collide.
     int panel_attributions = 0;
     std::string owner;
-    for (const auto& attribution : fixtures->views.attributions()) {
+    for (const auto& attribution : fixtures->registries.views.attributions()) {
         if (attribution.original_name == "fixture.panel") {
             ++panel_attributions;
             owner = attribution.plugin_name;
@@ -375,8 +428,8 @@ TEST_CASE("a partial registration is rolled back, and a later plugin reusing "
 
     // Find() resolves to the healthy plugin's component, not a dangling
     // pointer into whatever the failed plugin registered.
-    REQUIRE(fixtures->views.Find("fixture.panel") != nullptr);
-    CHECK(ToText(fixtures->views.Find("fixture.panel")->component()->Render()) ==
+    REQUIRE(fixtures->registries.views.Find("fixture.panel") != nullptr);
+    CHECK(ToText(fixtures->registries.views.Find("fixture.panel")->component()->Render()) ==
           "fixture panel");
 }
 
@@ -385,20 +438,20 @@ TEST_CASE("the md4c default engine carries the streaming contract", "[client_plu
     MarkdownRenderer renderer(&theme, nullptr);
     MarkdownEngineRegistry engines;
     RegisterDefaultMarkdownEngine(engines, renderer);
-    REQUIRE(engines.engine != nullptr);
-    CHECK(engines.record.registered);
+    REQUIRE(engines.get() != nullptr);
+    CHECK(engines.held());
     // Core, not a plugin: the claimant name is cleared.
-    CHECK(engines.record.plugin_name.empty());
+    CHECK(engines.holder().empty());
 
     // Complete-text render.
-    const auto rendered = ToText(engines.engine->Render("hello **world**", theme));
+    const auto rendered = ToText(engines.get()->Render("hello **world**", theme));
     CHECK(rendered.find("hello") != std::string::npos);
     CHECK(rendered.find("world") != std::string::npos);
 
     // Streaming: deltas append, Finalize reparses authoritatively. Partial
     // input may be rendered unsoundly by an engine that reparses early -- the
     // contract only fixes the FINALIZED output.
-    auto stream = engines.engine->MakeStream();
+    auto stream = engines.get()->MakeStream();
     stream->AppendDelta("part one, ");
     stream->AppendDelta("part two");
     stream->Finalize();
@@ -690,7 +743,7 @@ TEST_CASE("host seams survive the load: a plugin raises attention AFTER LoadAll"
     REQUIRE(fixtures->records.size() == 1);
     REQUIRE(fixtures->records[0].ok());
 
-    const auto* segment = fixtures->status_segments.Find("fixture_seg");
+    const auto* segment = fixtures->registries.status_segments.Find("fixture_seg");
     REQUIRE(segment != nullptr);
 
     // Post-load use: the load is long over; the sink must still be alive.
@@ -715,9 +768,9 @@ TEST_CASE("the bundled logo plugin loads through the real loader and renders art
     const auto& record = fixtures->records.front();
     REQUIRE(record.ok());
     CHECK(record.name == "logo");
-    REQUIRE(record.registered_start_views.size() == 1);
+    REQUIRE(record.registered.at("start_views").size() == 1);
 
-    const auto* view = fixtures->start_views.Find("logo.banner");
+    const auto* view = fixtures->registries.start_views.Find("logo.banner");
     REQUIRE(view != nullptr);
     const Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
 
@@ -746,7 +799,7 @@ TEST_CASE("the bundled logo plugin shares one banner when regenerate_per_session
     REQUIRE(fixtures->records.size() == 1);
     REQUIRE(fixtures->records.front().ok());
 
-    const auto* view = fixtures->start_views.Find("logo.banner");
+    const auto* view = fixtures->registries.start_views.Find("logo.banner");
     REQUIRE(view != nullptr);
     const Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
 

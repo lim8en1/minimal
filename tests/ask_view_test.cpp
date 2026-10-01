@@ -402,7 +402,7 @@ TEST_CASE("chat view: an ask row starts expanded by its display kind, whatever t
     plugins::ToolResultRendererRegistry tool_renderers;
     plugins::DisplayRendererRegistry display_renderers;
     plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.get());
     display_renderers.Register(std::make_unique<minimal::ask_view::AskDisplayRenderer>());
 
     v1::StoredMessage call;

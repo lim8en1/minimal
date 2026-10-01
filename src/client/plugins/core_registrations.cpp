@@ -645,9 +645,8 @@ void RegisterCoreSyntaxGrammars(SyntaxGrammarRegistry& registry) {
 
 void RegisterDefaultMarkdownEngine(MarkdownEngineRegistry& registry,
                                    const MarkdownRenderer& renderer) {
-    if (registry.record.registered) return;  // a plugin owns the slot
-    registry.Register(std::make_unique<Md4cEngine>(renderer));
-    registry.record.plugin_name.clear();  // core, not a plugin
+    if (registry.held()) return;  // a plugin owns the slot
+    registry.Register(std::make_unique<Md4cEngine>(renderer));  // outside any window: core's
 }
 
 }  // namespace minimal::client::plugins

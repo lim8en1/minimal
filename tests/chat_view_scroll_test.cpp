@@ -127,7 +127,7 @@ struct ChatViewFixture {
         : renderer(&theme, nullptr) {
         plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
         plugins::RegisterCoreMessageRenderers(messages);
-        plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+        plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.get());
     }
 
     Theme theme{TestTheme()};
