@@ -12,6 +12,7 @@
 #include "minimal/agent/mention_expansion.hpp"
 #include "minimal/agent/session_naming.hpp"
 #include "minimal/config/permission_codec.hpp"
+#include "minimal/common/utf8.hpp"
 
 namespace minimal::agent {
 namespace {
@@ -151,7 +152,13 @@ Session::Session(SessionParams params, AgentPreset preset,
         // The sink never blocks (event_broadcaster.hpp): a slow or absent
         // subscriber drops its oldest and resyncs, and no subscriber at all
         // buffers in the backlog. The turn never waits on a client.
-        sink(SessionEvent{ToolOutputDelta{std::string(tool_use_id), std::string(chunk)}});
+        //
+        // ToolOutputDeltaEvent.chunk is a proto3 string: raw process output
+        // that is not UTF-8 (a binary `cat`, Latin-1) made the CLIENT's parse
+        // of the whole event fail. Scrubbed here, the one door every tool's
+        // live output passes; a character split between two reads is held
+        // back upstream (AgentLoop's emit_output) so it is not scrubbed.
+        sink(SessionEvent{ToolOutputDelta{std::string(tool_use_id), common::ScrubUtf8(chunk)}});
     };
 
     context.task_event_sink = [channels, sink = event_sink_,

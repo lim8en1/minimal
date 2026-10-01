@@ -152,6 +152,7 @@ add_executable(minimal_tests
     config_file_io_test.cpp
     streaming_markdown_view_test.cpp
     syntax_highlighter_test.cpp
+    common_utf8_test.cpp
     session_state_test.cpp
     session_state_invariants_test.cpp
     app_state_test.cpp

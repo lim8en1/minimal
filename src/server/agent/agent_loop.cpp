@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <mutex>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -11,6 +12,7 @@
 #include "minimal/agent/compaction_trigger.hpp"
 #include "minimal/agent/structured_compaction.hpp"
 #include "minimal/agent/transcript_repair.hpp"
+#include "minimal/common/utf8.hpp"
 
 namespace minimal::agent {
 namespace {
@@ -1368,8 +1370,34 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                                  ctx.history = session_.history;
                                   if (session_.tool_output_sink) {
                                       const std::string tool_use_id = use->id;
-                                      ctx.emit_output = [this, tool_use_id](std::string_view chunk) {
-                                          session_.tool_output_sink(tool_use_id, chunk);
+                                      // A process's reads split anywhere -- also inside
+                                      // a multi-byte character. The incomplete tail is
+                                      // held back and prepended to the next chunk, so
+                                      // the sink's UTF-8 scrub (session.cpp) does not
+                                      // turn it into U+FFFD. Locked: stdout and stderr
+                                      // readers may emit concurrently.
+                                      struct Carry {
+                                          std::mutex mu;
+                                          std::string pending;
+                                      };
+                                      ctx.emit_output = [this, tool_use_id,
+                                                         carry = std::make_shared<Carry>()](
+                                                            std::string_view chunk) {
+                                          std::string text;
+                                          {
+                                              std::lock_guard lock(carry->mu);
+                                              text = std::move(carry->pending);
+                                              carry->pending.clear();
+                                              text.append(chunk);
+                                              const std::size_t tail =
+                                                  common::IncompleteUtf8Tail(text);
+                                              carry->pending.assign(text, text.size() - tail,
+                                                                    tail);
+                                              text.resize(text.size() - tail);
+                                          }
+                                          if (!text.empty()) {
+                                              session_.tool_output_sink(tool_use_id, text);
+                                          }
                                       };
                                   }
                                   // Deferred-completion surface, copied verbatim from the session's
