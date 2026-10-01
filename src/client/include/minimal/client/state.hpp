@@ -430,9 +430,7 @@ public:
     // bumps themselves run under mtx_ on the reader threads); a raced read
     // is harmless -- the key only gates a cache, and a missed bump means
     // the next bump's rebuild picks the change up.
-    uint64_t ToolsVersion() const {
-        return tools_version_.load(std::memory_order_acquire);
-    }
+    uint64_t ToolsVersion() const { return tools_.Version(); }
 
     // The user asked to interrupt the in-flight turn. A no-op unless the tab
     // is actually mid-turn (Thinking / Working / Waiting -- Waiting counts:
@@ -653,17 +651,6 @@ private:
     // caller.
     void ClearStreamingLocked();
 
-    // Shared by TakeSnapshot/TakeLightSnapshot: the single place a tool row
-    // is copied out to a snapshot. The working stdout buffer (up to
-    // tool_output_buffer_bytes_ (64 KiB default) per tool) never leaves
-    // SessionState; include_output=true publishes the copy-on-write view
-    // (see ToolExecutionState::buffered_output), false carries no view.
-    // ChatView::RenderLiveToolRow -- the deep snapshot's only tool consumer
-    // -- reads name/started/is_error/summary, never the buffer (the
-    // running-tools panel is what renders it, off the LIGHT snapshot with
-    // include_tool_output=true). mtx_ held by caller.
-    std::vector<ToolExecutionState> CopyToolsLocked(bool include_output) const;
-
     // TakeSnapshot's live_segments copy: field-copy of every segment with
     // each text-bearing segment's copy-on-publish view (see LiveTurnSegment)
     // republished only when the segment changed since the last deep
@@ -716,7 +703,6 @@ private:
     bool scrollback_trimmed_ = false;
     bool scrollback_gap_ = false;   // see Snapshot::scrollback_gap
     int scrollback_max_messages_ = kDefaultScrollbackWindowMaxMessages;
-    int tool_output_buffer_bytes_ = kDefaultToolOutputBufferBytes;
 
     // The optimistic user-turn echoes (see Snapshot::pending_user_messages).
     // FIFO, paired with their persisted rows in order on page applies.
@@ -793,11 +779,10 @@ private:
     // Pending modals (mutually exclusive).
     PendingPrompts prompts_;
 
-    // Tool executions (parallel dispatch; keyed by tool_use_id, not position)
-    std::vector<ToolExecutionState> tools_;
-    // See ToolsVersion(). atomic: the render thread polls it lock-free while
-    // the reader threads bump it under mtx_.
-    std::atomic<uint64_t> tools_version_{0};
+    // Tool executions (parallel dispatch; keyed by tool_use_id, not
+    // position). Its version (ToolsVersion) is atomic: the render thread
+    // polls it lock-free while the reader threads bump it under mtx_.
+    ToolRunTracker tools_;
 
     int64_t input_tokens_ = 0;   // last turn occupancy
     int64_t output_tokens_ = 0;

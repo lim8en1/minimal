@@ -46,43 +46,6 @@ std::string PermissionModeName(v1::PermissionRunMode mode) {
 SessionState::SessionState(std::string session_id, std::string name)
     : session_id_(std::move(session_id)), display_name_(std::move(name)) {}
 
-std::vector<ToolExecutionState> SessionState::CopyToolsLocked(bool include_output) const {
-    // Field-by-field, ALWAYS: the working buffer (buffered_output_working, up
-    // to 64 KiB per tool) must never leave SessionState. With include_output,
-    // the snapshot carries `buffered_output` -- a shared, immutable view
-    // republished (one copy) only when the working buffer changed since the
-    // last publish, so repeated include-output fetches between deltas (the
-    // panel-cache-miss case) cost a refcount bump per tool, not a buffer
-    // copy. Without it, the pointer stays null -- the deep snapshot's only
-    // tool consumer (ChatView::RenderLiveToolRow) never reads the buffer
-    // (the running-tools panel is what renders it, off TakeLightSnapshot(true)).
-    // Every other field is cheap (small strings, a timestamp, two bools).
-    std::vector<ToolExecutionState> out;
-    out.reserve(tools_.size());
-    for (const auto& tool : tools_) {
-        ToolExecutionState t;
-        t.tool_use_id = tool.tool_use_id;
-        t.tool_name = tool.tool_name;
-        t.summary = tool.summary;
-        t.input = tool.input;
-        t.started_at_unix_ms = tool.started_at_unix_ms;
-        t.duration = tool.duration;
-        t.started = tool.started;
-        t.is_error = tool.is_error;
-        t.is_background = tool.is_background;
-        if (include_output) {
-            if (tool.buffered_output == nullptr || tool.output_dirty) {
-                tool.buffered_output =
-                    std::make_shared<const std::string>(tool.buffered_output_working);
-                tool.output_dirty = false;
-            }
-            t.buffered_output = tool.buffered_output;
-        }
-        out.push_back(std::move(t));
-    }
-    return out;
-}
-
 // The fields BOTH snapshots carry: identity, derived state, usage, turn
 // flags and the status-bar metadata. One list, so a field added for the tab
 // bar cannot reach one snapshot and not the other.
@@ -114,7 +77,7 @@ SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output)
     std::lock_guard lk(mtx_);
     Snapshot s;
     FillCommonLocked(s);
-    s.tools = CopyToolsLocked(include_tool_output);
+    s.tools = tools_.Copy(include_tool_output);
     // Deliberately NOT copied (heavy, and only the focused tab renders them):
     // scrollback_page, the streaming accumulations (has_streaming_text +
     // live_segments' copy-on-publish views instead), pending_permission/
@@ -166,7 +129,7 @@ std::string SessionState::FlatThinkingText() const {
 void SessionState::SetBounds(int scrollback_max_messages, int tool_output_buffer_bytes) {
     std::lock_guard lk(mtx_);
     scrollback_max_messages_ = scrollback_max_messages;
-    tool_output_buffer_bytes_ = tool_output_buffer_bytes;
+    tools_.SetOutputCap(tool_output_buffer_bytes);
 }
 
 SessionState::Snapshot SessionState::TakeSnapshot() {
@@ -197,7 +160,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     // renders that, off TakeLightSnapshot(true) instead. This used to copy
     // every tool's full (up to 64 KiB) live buffer on every focused-tab deep
     // snapshot for a consumer that ignores it.
-    s.tools = CopyToolsLocked(/*include_output=*/false);
+    s.tools = tools_.Copy(/*include_output=*/false);
     s.transcript_version = transcript_version_;
     s.fetch_generation = fetch_generation_;
     s.rewind_epoch = rewind_epoch_;
@@ -223,7 +186,7 @@ void SessionState::SeedDisplayNameIfUnset(std::string name) {
     if (name.empty() || !display_name_.empty()) return;
     display_name_ = std::move(name);
     // The tools panel shows each row's session name (see OnSessionMetadata).
-    tools_version_.fetch_add(1, std::memory_order_release);
+    tools_.BumpVersion();
 }
 
 void SessionState::OnSessionMetadata(const v1::SessionMetadataEvent& metadata) {
@@ -232,7 +195,7 @@ void SessionState::OnSessionMetadata(const v1::SessionMetadataEvent& metadata) {
         if (display_name_ != metadata.name()) {
             // The tools panel shows each row's session name -- a rename must
             // invalidate its cache too (see ToolsVersion).
-            tools_version_.fetch_add(1, std::memory_order_release);
+            tools_.BumpVersion();
         }
         display_name_ = metadata.name();
     }
@@ -561,10 +524,7 @@ void SessionState::MaybeGoIdleLocked() {
     // here as "still active" made a backgrounded `npm run dev` pin this
     // whole branch off forever -- state_ simply stopped being re-derived by
     // this function for as long as that background task ran.
-    const bool tool_active =
-        std::any_of(tools_.begin(), tools_.end(), [](const ToolExecutionState& t) {
-            return t.started && !t.is_background;
-        });
+    const bool tool_active = tools_.AnyForegroundRunning();
     if (!tool_active && !prompts_.Any()) {
         state_ = turn_in_flight_ ? SessionStateKind::Working : SessionStateKind::Idle;
     }
@@ -639,8 +599,8 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
         // renders them), so it renders the same until it retires.
         for (auto& segment : live_segments_) {
             if (segment.kind != LiveTurnSegment::Kind::Tool || segment.final_tool) continue;
-            for (const auto& t : tools_) {
-                if (t.tool_use_id != segment.tool_use_id || (t.is_background && t.started)) continue;
+            for (const auto& t : tools_.rows()) {
+                if (t.tool_use_id != segment.tool_use_id || ToolRunTracker::IsLiveBackground(t)) continue;
                 auto copy = std::make_shared<ToolExecutionState>();
                 copy->tool_use_id = t.tool_use_id;
                 copy->tool_name = t.tool_name;
@@ -655,16 +615,7 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
                 break;
             }
         }
-        const std::size_t before = tools_.size();
-        tools_.erase(std::remove_if(tools_.begin(), tools_.end(),
-                                    [](const ToolExecutionState& t) {
-                                        return !(t.is_background && t.started);
-                                    }),
-                    tools_.end());
-        // Rows swept the panel showed (see ToolsVersion).
-        if (tools_.size() != before) {
-            tools_version_.fetch_add(1, std::memory_order_release);
-        }
+        tools_.SweepForTurnEnd();   // bumps ToolsVersion when it swept rows
     }
     // A CANCELLED turn (or one that died at a prompt) ends WITHOUT a message
     // stop: the server denied the parked prompt on our behalf
@@ -735,25 +686,12 @@ void SessionState::TickNotice(std::chrono::steady_clock::time_point now) {
 
 bool SessionState::HasRunningTool() const {
     std::lock_guard lk(mtx_);
-    for (const auto& tool : tools_) {
-        if (tool.started) return true;
-    }
-    return false;
+    return tools_.AnyRunning();
 }
 
 std::optional<std::chrono::milliseconds> SessionState::FastestRunningToolElapsedMs() const {
     std::lock_guard lk(mtx_);
-    std::optional<std::chrono::milliseconds> newest_start;
-    for (const auto& tool : tools_) {
-        if (!tool.started || tool.started_at_unix_ms.count() < 0) continue;
-        if (!newest_start.has_value() || tool.started_at_unix_ms > *newest_start) {
-            newest_start = tool.started_at_unix_ms;
-        }
-    }
-    if (!newest_start.has_value()) return std::nullopt;
-    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch());
-    return std::max(std::chrono::milliseconds(0), now_ms - *newest_start);
+    return tools_.FastestRunningElapsed();
 }
 
 void SessionState::RequestCancel() {
@@ -858,12 +796,7 @@ void SessionState::RetireCoveredLiveSegments(const std::set<std::string>& answer
             // output (ARCHITECTURE.md "Background bash rows"), and a
             // foreground row still on the pool has not emitted its finish
             // event yet. Swept rows (no state left) are by definition done.
-            for (const auto& tool : tools_) {
-                if (tool.tool_use_id == segment.tool_use_id) {
-                    return !tool.started;
-                }
-            }
-            return true;
+            return tools_.Done(segment.tool_use_id);
         }
         if (segment.kind == LiveTurnSegment::Kind::Text) {
             return text_matches(segment, assistant_text);
@@ -1022,16 +955,7 @@ void SessionState::OnResyncRequired(const std::string& reason) {
     // their terminal BackgroundTaskEvent is a real, separate signal this
     // resync does not touch.
     {
-        const std::size_t before = tools_.size();
-        tools_.erase(std::remove_if(tools_.begin(), tools_.end(),
-                                    [](const ToolExecutionState& t) {
-                                        return t.started && !t.is_background;
-                                    }),
-                    tools_.end());
-        // Foreground rows swept the panel showed (see ToolsVersion).
-        if (tools_.size() != before) {
-            tools_version_.fetch_add(1, std::memory_order_release);
-        }
+        tools_.SweepForResync();   // bumps ToolsVersion when it swept rows
     }
     // Nothing else re-derives state_ after a resync otherwise -- a resync
     // that arrived while the tab looked idle-but-actually-Working (or vice
@@ -1161,36 +1085,23 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     // second row and a second live segment: the reverse-scan finisher would
     // resolve only the copy, stranding the original in "running" forever --
     // and MaybeGoIdleLocked would wait on it. Ignore the redelivery whether
-    // the existing row is still running OR already finished (started ==
-    // false, OnToolFinished's mark) -- a late-arriving started replay for a
-    // tool_use_id that already opened a row this turn is a duplicate either
-    // way; this handler never legitimately reopens one (background rows
-    // reopen through OnBackgroundTask, not here).
-    for (const auto& existing : tools_) {
-        if (existing.tool_use_id == evt.tool_use_id()) return;
-    }
+    // the existing row is still running OR already finished; this handler
+    // never legitimately reopens one (background rows reopen through
+    // OnBackgroundTask, not here).
+    if (tools_.Has(evt.tool_use_id())) return;
     // A NEW TURN can open on a tool call with no preceding text or thinking
     // delta -- a tool-first turn, or an injected turn (a subagent completion
     // triggers one with no OnChatSubmitted at all, same as the delta paths'
-    // "seedless turn" case, state.cpp's AppendStreamingText/
-    // AppendStreamingThinking). Without this arming, the tool's live segment
+    // "seedless turn" case). Without this arming, the tool's live segment
     // kept the PREVIOUS turn's turn_seq_, so that turn's later
     // ClearStreamingIfCurrentTurn retired this turn's own tool marker along
     // with it, and turn_in_flight_ was never armed -- the tab dropped to
-    // Idle between tool cycles (ESC did nothing; ctrl+c took the idle-quit
-    // path). Mirrors the delta paths' identical arming, including clearing
-    // BOTH flat buffers: consuming turn_ended_ here means whichever delta
-    // path (if either) sees the next event for this turn no longer finds
-    // turn_ended_ set, so it takes the same-turn "new block" branch instead
-    // and never gets to clear its own buffer's previous-turn leftover.
+    // Idle between tool cycles. Mirrors the delta paths' identical arming,
+    // including clearing BOTH flat buffers: consuming turn_ended_ here means
+    // whichever delta path sees the next event for this turn no longer finds
+    // turn_ended_ set, and never gets to clear its own buffer's leftover.
     const bool starting_new_turn = ArmNewTurnLocked();
-    ToolExecutionState tool;
-    tool.tool_use_id = evt.tool_use_id();
-    tool.tool_name = evt.tool_name();
-    tool.summary = evt.summary();
-    tool.input = StructToJson(evt.input());
-    tool.started_at_unix_ms = std::chrono::milliseconds(evt.started_at_unix_ms());
-    tools_.push_back(std::move(tool));
+    tools_.Start(evt);
     // Track C4: a marker in the SAME arrival-order timeline text segments
     // use, so the live view can render this tool call between the text
     // that preceded and followed it instead of after everything.
@@ -1199,13 +1110,9 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
                                              .segment_id = next_segment_id_++,
                                              .tool_use_id = evt.tool_use_id()});
     // Same count cap the text/thinking delta paths enforce right after their
-    // own push_back -- without it, a tool-only run (no text/thinking deltas
-    // ever call AppendStreamingText/AppendStreamingThinking) grows
-    // live_segments_ by one Tool entry per call with no upper bound.
+    // own push_back -- without it, a tool-only run grows live_segments_ by
+    // one Tool entry per call with no upper bound.
     TrimLiveSegmentsLocked();
-
-    auto& live = tools_.back();   // the row just pushed, regardless of how many precede it
-    live.started = true;
     // Same Error-stickiness guard as the delta paths: Error stays sticky
     // within a turn, but must not outlive it -- including when a tool call,
     // not a delta, is what opens the new turn.
@@ -1213,160 +1120,41 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
         (state_ == SessionStateKind::Error && starting_new_turn)) {
         state_ = SessionStateKind::Working;
     }
-    // New row the panel must show (see ToolsVersion).
-    tools_version_.fetch_add(1, std::memory_order_release);
 }
 
 void SessionState::OnToolOutputDelta(const std::string& tool_use_id, const std::string& chunk) {
     if (chunk.empty()) return;   // ignore empty writes to avoid a spurious space
     std::lock_guard lk(mtx_);
-    for (auto it = tools_.rbegin(); it != tools_.rend(); ++it) {
-        if (it->tool_use_id == tool_use_id && it->started) {   // the active execution, if any
-            it->buffered_output_working.append(chunk);
-            // Cap AT APPEND (track R2): the "ring buffer" the header promised.
-            // Render-time truncation alone let a chatty tool (a build, a
-            // `tail -f`) grow client memory for the whole turn. Head ¼ +
-            // marker + tail ¾, mirroring the server's persisted-result cap.
-            //
-            // Kept as an EXACT per-delta bound (not amortized/hysteresis): an
-            // earlier attempt at this review only rebuilt once the buffer
-            // reached double the cap, which broke the documented invariant
-            // (session_state_test.cpp, "tool output deltas stay bounded") that
-            // buffered_output stays within cap + a small marker slack at
-            // every snapshot, not just eventually -- the running-tools panel
-            // renders mid-stream, so a transient 2x overshoot is visible, not
-            // theoretical. The real fix for the many-small-chunks cost (a
-            // proper ring buffer, or an "already truncated" fast path that
-            // erases only the newly-stale tail instead of rebuilding head+
-            // marker+tail from three fresh strings) needs a shape change to
-            // ToolExecutionState and is left as follow-up rather than risked
-            // here against a passing invariant test.
-            if (it->buffered_output_working.size() >
-                static_cast<std::size_t>(tool_output_buffer_bytes_)) {
-                static const std::string kMarker =
-                    "\n··· live output trimmed -- the full result is in the transcript ···\n";
-                const std::size_t head_bytes = static_cast<std::size_t>(tool_output_buffer_bytes_) / 4;
-                // Defensive floor: ui_config.cpp now rejects a configured
-                // bound below the marker's own size, but this is the site
-                // that would actually underflow (head_bytes + marker could
-                // still exceed a bound set some other way -- direct
-                // construction, a future caller) -- size_t wraparound turned
-                // `size() - tail_budget` into an out-of-range substr() thrown
-                // on the gRPC reader thread. Falling back to a plain
-                // keep-the-tail truncation is always safe.
-                // Utf8CeilToBoundary on both tail-start cuts below: a raw
-                // byte offset here can land inside a multi-byte sequence,
-                // which would otherwise keep an invalid leading fragment at
-                // the very front of the tail. TruncateUtf8 already handles
-                // the symmetric case for a kept HEAD (the boundary search
-                // runs backward instead of forward).
-                if (head_bytes + kMarker.size() >= static_cast<std::size_t>(tool_output_buffer_bytes_)) {
-                    const std::size_t keep = static_cast<std::size_t>(tool_output_buffer_bytes_);
-                    const std::size_t start =
-                        it->buffered_output_working.size() > keep
-                            ? it->buffered_output_working.size() - keep
-                            : 0;
-                    it->buffered_output_working = it->buffered_output_working.substr(
-                        Utf8CeilToBoundary(it->buffered_output_working, start));
-                } else {
-                    const std::size_t tail_budget = static_cast<std::size_t>(tool_output_buffer_bytes_) -
-                                                    head_bytes - kMarker.size();
-                    const std::size_t tail_start = Utf8CeilToBoundary(
-                        it->buffered_output_working, it->buffered_output_working.size() - tail_budget);
-                    it->buffered_output_working =
-                        TruncateUtf8(it->buffered_output_working, head_bytes) + kMarker +
-                        it->buffered_output_working.substr(tail_start);
-                }
-            }
-            // The panel's live-tail rows changed (see ToolsVersion).
-            it->output_dirty = true;
-            tools_version_.fetch_add(1, std::memory_order_release);
-            return;
-        }
-    }
+    tools_.OutputDelta(tool_use_id, chunk);
 }
 
 void SessionState::OnToolFinished(const std::string& tool_use_id, const v1::ToolExecutionEvent& final_evt) {
     std::lock_guard lk(mtx_);
-    for (auto it = tools_.rbegin(); it != tools_.rend(); ++it) {
-        if (it->tool_use_id == tool_use_id && it->started) {   // finish the matching active tool
-            it->is_error = final_evt.has_is_error() ? final_evt.is_error() : false;
-            it->duration = std::chrono::milliseconds(final_evt.duration_ms());
-            // A BACKGROUND row's launching call finishing does NOT mean the
-            // task itself is done -- it means the SYNCHRONOUS half (the gate
-            // + the call that kicked the detached process off) returned; the
-            // process keeps running (ARCHITECTURE.md "Background bash
-            // rows"). Only OnBackgroundTask's own terminal event ends its
-            // liveness -- flipping `started` here would drop live deltas
-            // (OnToolOutputDelta requires `started`) and read the row as
-            // done while the task is still running.
-            if (!it->is_background) {
-                it->started = false;   // no longer current
-                // A finished foreground tool round is exactly when the server
-                // has the round's rows persisted (the assistant message at
-                // response completion, the results after the pool drains) --
-                // bump the version so the frame pump fetches and the
-                // content-matched retirement in ApplyScrollbackPage swaps
-                // the finished live rows for the real persisted ones
-                // MID-TURN, instead of holding everything live until the
-                // turn ends. Background rows stay out of it: their result
-                // row retires nothing (the live row outlives the ack).
-                ++transcript_version_;
-                ++fetch_generation_;
-            }
-            // Row status/duration the panel shows changed (see ToolsVersion).
-            tools_version_.fetch_add(1, std::memory_order_release);
-            return;
-        }
+    if (tools_.Finish(tool_use_id, final_evt) == ToolRunTracker::Finished::Foreground) {
+        // A finished foreground tool round is exactly when the server has the
+        // round's rows persisted (the assistant message at response
+        // completion, the results after the pool drains) -- bump the version
+        // so the frame pump fetches and the content-matched retirement in
+        // ApplyScrollbackPage swaps the finished live rows for the real
+        // persisted ones MID-TURN, instead of holding everything live until
+        // the turn ends. Background rows stay out of it: their result row
+        // retires nothing (the live row outlives the ack).
+        ++transcript_version_;
+        ++fetch_generation_;
     }
 }
 
-// ARCHITECTURE.md "Background bash rows". `tool_use_id` rides the SAME id as
-// the ToolExecutionEvent that acked the launching (synchronous) call, so
-// STARTED here typically finds a row OnToolStarted already opened -- it is
-// promoted to a live background row rather than a second one being pushed.
-// A row that OnToolFinished already closed, or a turn boundary already swept
-// (before this event existed, or in the odd case the STARTED notice never
-// arrived), REOPENS: "a client keyed by tool_use_id alone must tolerate a
-// row reopening after its finish event" is the doc's own words for this.
 void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
     std::lock_guard lk(mtx_);
-    const bool is_terminal = evt.state() != v1::BackgroundTaskEvent::STARTED;
-    const bool is_error = evt.state() == v1::BackgroundTaskEvent::FAILED ||
-                          evt.state() == v1::BackgroundTaskEvent::TIMED_OUT ||
-                          evt.state() == v1::BackgroundTaskEvent::KILLED;
-
-    for (auto& tool : tools_) {
-        if (tool.tool_use_id != evt.tool_use_id()) continue;
-        tool.is_background = true;
-        tool.started = !is_terminal;
-        if (is_terminal) tool.is_error = is_error;
-        if (!evt.command().empty()) tool.summary = evt.command();
-        // Promoted/updated row the panel shows (see ToolsVersion).
-        tools_version_.fetch_add(1, std::memory_order_release);
-        return;
-    }
-
-    // Reopen: no existing row (already finished-and-swept, or STARTED never
-    // reached us before this terminal event did).
-    ToolExecutionState tool;
-    tool.tool_use_id = evt.tool_use_id();
-    tool.tool_name = "bash";   // background tasks are bash's own extension
-    tool.summary = evt.command();
-    tool.is_background = true;
-    tool.started = !is_terminal;
-    tool.is_error = is_terminal && is_error;
-    tools_.push_back(std::move(tool));
-    // Reopened row the panel must show (see ToolsVersion).
-    tools_version_.fetch_add(1, std::memory_order_release);
-    // Same C4 marker OnToolStarted pushes -- a reopened background row (its
-    // own STARTED never reached this client, or the row already finished
-    // and was swept) is still live content for whatever turn is current now.
+    if (!tools_.BackgroundTask(evt)) return;
+    // Reopened: the same C4 marker OnToolStarted pushes -- a reopened
+    // background row (its own STARTED never reached this client, or the row
+    // already finished and was swept) is still live content for whatever
+    // turn is current now.
     live_segments_.push_back(LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool,
                                              .turn_seq = turn_seq_,
                                              .segment_id = next_segment_id_++,
                                              .tool_use_id = evt.tool_use_id()});
-    // Same count cap OnToolStarted enforces -- see its comment.
     TrimLiveSegmentsLocked();
 }
 
