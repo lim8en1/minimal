@@ -170,11 +170,12 @@ struct ServiceFixture {
                                                  .services = &services};
         sessions = std::make_unique<agent::SessionRegistry>(
             *presets, rpc::FinishSessionWiring, registries, *db, agent::LoopConfig{}, common::DefaultLogger(), attach_guard);
+        rpc::SessionServiceImpl::Options service_options;
+        service_options.presets = presets.get();
+        service_options.signal_router = &signal_router;
         service = std::make_unique<rpc::SessionServiceImpl>(
             *sessions, *db, config::SettingsConfig{}, service_permissions,
-            common::DefaultLogger(), registries);
-        service->set_presets(presets.get());
-        service->set_signal_router(&signal_router);
+            common::DefaultLogger(), registries, std::move(service_options));
         service->set_on_last_client_detached([this] { last_detach.store(true); });
 
         socket = dir / "test.sock";

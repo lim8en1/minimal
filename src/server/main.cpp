@@ -733,18 +733,26 @@ static int RunServer(int argc, char** argv) {
     // Contributors are configured before the registry exists, so no session
     // can render against unconfigured settings.
     context_contributors.Configure(settings.context_contributors);
-    minimal::agent::SessionRegistry sessions(*presets, minimal::rpc::FinishSessionWiring,
-                                             registries, *session_db, loop_config,
-                                             minimal::common::DefaultLogger());
-    sessions.set_project_commands(&project_commands);
-    sessions.set_signal_router(&signal_router);
+    minimal::agent::SessionRegistry::Options session_options;
+    // The session reaper: never-attached sessions after the attach guard,
+    // detached-quiescent ones after the idle TTL.
+    session_options.reaper.initial_attach_guard =
+        std::chrono::seconds(settings.sessions.initial_attach_guard_seconds);
+    session_options.reaper.detached_idle_ttl =
+        std::chrono::seconds(settings.sessions.detached_idle_ttl_seconds);
+    session_options.project_commands = &project_commands;
+    session_options.signal_router = &signal_router;
     // Project context (AGENTS.md/CLAUDE.md): each session loads its own, from
     // its own project_root, at creation/resume/spawn -- never at startup, since
     // the server serves many project roots and no file belongs to all of them.
-    sessions.set_project_context(settings.project_context);
-    if (!settings.small_model.empty()) sessions.set_small_model(settings.small_model);
-    sessions.set_prompt_timeout(
-        std::chrono::seconds(settings.sessions.unattended_prompt_timeout_seconds));
+    session_options.project_context = settings.project_context;
+    session_options.small_model = settings.small_model;
+    session_options.prompt_timeout =
+        std::chrono::seconds(settings.sessions.unattended_prompt_timeout_seconds);
+    minimal::agent::SessionRegistry sessions(*presets, minimal::rpc::FinishSessionWiring,
+                                             registries, *session_db, loop_config,
+                                             minimal::common::DefaultLogger(),
+                                             std::move(session_options));
 
     // Stage-4 wiring for the core support service Provided above (see the
     // comment there): the dependencies only exist now. Serving has not
@@ -780,11 +788,13 @@ static int RunServer(int argc, char** argv) {
             return subagents->Spawn(request, ctx);
         }));
 
+    minimal::rpc::SessionServiceImpl::Options service_options;
+    service_options.project_commands = &project_commands;
+    service_options.presets = presets.get();
+    service_options.signal_router = &signal_router;
     minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings, permissions,
-                                             minimal::common::DefaultLogger(), registries);
-    service.set_project_commands(&project_commands);
-    service.set_presets(presets.get());
-    service.set_signal_router(&signal_router);
+                                             minimal::common::DefaultLogger(), registries,
+                                             std::move(service_options));
 
     minimal::rpc::Server server(service, socket_path);
 
@@ -807,13 +817,6 @@ static int RunServer(int argc, char** argv) {
     if (cloexec_marked != 0) {
         std::printf("  fd hygiene: %zu descriptor(s) marked close-on-exec\n", cloexec_marked);
     }
-
-    // The session reaper: never-attached sessions after the attach guard,
-    // detached-quiescent ones after the idle TTL.
-    minimal::agent::SessionRegistry::ReaperConfig reaper_config;
-    reaper_config.initial_attach_guard = std::chrono::seconds(settings.sessions.initial_attach_guard_seconds);
-    reaper_config.detached_idle_ttl = std::chrono::seconds(settings.sessions.detached_idle_ttl_seconds);
-    sessions.set_reaper_config(std::move(reaper_config));
 
     // The process's own periodic duties. S5: a session outlives the client
     // that opened it, so "last client detached" does not mean "safe to exit"

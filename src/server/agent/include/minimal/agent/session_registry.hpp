@@ -81,6 +81,53 @@ public:
     // Production passes rpc::FinishSessionWiring; agent/ never names rpc/.
     using SessionWiring = std::function<void(SessionParams&)>;
 
+    // Everything the process wires once at startup, injected at construction so a
+    // registry is complete (and its configuration immutable) from the moment it
+    // exists -- these used to be six post-construction setters that main called
+    // one by one, in an order nothing enforced, while tests flipped them mid-life.
+    struct Options {
+        // S5 lifetime policy (sessions.* / server.* settings; nothing at the use
+        // site is hardcoded).
+        ReaperConfig reaper;
+        // The project-scoped half of the command catalog. Optional: unset means
+        // every session's project_commands is null, and Dispatch never sees a
+        // project registry -- global commands work exactly as before.
+        const commands::ProjectCommandSource* project_commands = nullptr;
+        // The process-wide signal router, so every path that removes a session
+        // from the map -- Terminate, TerminateAll, the reaper's sweeps -- can also
+        // erase its subscription entry (otherwise a normally-terminated session
+        // left its entry behind for the life of the process). Optional: unset
+        // (tests) means no signal cleanup runs.
+        SignalRouter* signal_router = nullptr;
+        // Project context (AGENTS.md/CLAUDE.md) settings. DEFAULTS TO DISABLED:
+        // until the producer wires parsed settings in, no session reads anything
+        // from its project_root -- a missing producer is a feature that is off,
+        // not one running on guessed defaults. Loaded per session in
+        // CreateResolved (the funnel creation, resume and subagent spawns share),
+        // because the file lives in the SESSION's project_root, not in any preset.
+        config::ProjectContextSettings project_context = [] {
+            config::ProjectContextSettings disabled;
+            disabled.enabled = false;
+            return disabled;
+        }();
+        // small_model (settings.json): a <provider>/<model> reference resolved
+        // ONCE against providers.json and the shared provider cache and stamped
+        // into the loop config, so every session compacts on it. Empty or
+        // unresolvable = compact on each session's own model (a failure is a
+        // warning, never fatal: losing the cheap summarizer is a cost regression,
+        // not a broken harness).
+        std::string small_model;
+        // sessions.unattended_prompt_timeout_seconds, applied through the same
+        // CreateResolved funnel. Zero means every prompt waits forever.
+        std::chrono::milliseconds prompt_timeout{0};
+    };
+
+    static Options GuardOnly(std::chrono::milliseconds initial_attach_guard) {
+        Options options;
+        options.reaper.initial_attach_guard = initial_attach_guard;
+        return options;
+    }
+
     // `registries`: tools, providers and observers are required (throws
     // std::invalid_argument when null). commands, compaction_strategies,
     // context_contributors and hooks are optional: null means sessions get no
@@ -88,79 +135,25 @@ public:
     // sections, and no hook dispatch. `wire_session` is required.
     SessionRegistry(const AgentPresetRegistry& presets, SessionWiring wire_session,
                     const plugins::HostRegistries& registries, session::SessionDatabase& db,
+                    LoopConfig loop_config, common::Logger& logger, Options options);
+    // Default options (a nested type's default member initializers cannot appear
+    // in a default argument of its enclosing class's constructor).
+    SessionRegistry(const AgentPresetRegistry& presets, SessionWiring wire_session,
+                    const plugins::HostRegistries& registries, session::SessionDatabase& db,
+                    LoopConfig loop_config, common::Logger& logger)
+        : SessionRegistry(presets, std::move(wire_session), registries, db,
+                          std::move(loop_config), logger, Options{}) {}
+    // For callers that vary only the never-attach guard (tests mostly).
+    SessionRegistry(const AgentPresetRegistry& presets, SessionWiring wire_session,
+                    const plugins::HostRegistries& registries, session::SessionDatabase& db,
                     LoopConfig loop_config, common::Logger& logger,
-                    std::chrono::milliseconds initial_attach_guard = std::chrono::seconds(10));
+                    std::chrono::milliseconds initial_attach_guard)
+        : SessionRegistry(presets, std::move(wire_session), registries, db,
+                          std::move(loop_config), logger, GuardOnly(initial_attach_guard)) {}
     ~SessionRegistry();
-
-    // Replaces the lifetime policy before any session exists (or after -- the
-    // reaper reads it under the mutex each tick). The constructor's
-    // initial_attach_guard parameter stays for call sites that never touch
-    // this; setting it overrides the guard too.
-    void set_reaper_config(ReaperConfig config);
 
     SessionRegistry(const SessionRegistry&) = delete;
     SessionRegistry& operator=(const SessionRegistry&) = delete;
-
-    // The project-scoped half of the catalog (ProjectCommandSource). Optional:
-    // unset means every session's
-    // project_commands is null, and Dispatch simply never sees a project
-    // registry to consult -- global commands work exactly as before.
-    void set_project_commands(const commands::ProjectCommandSource* project_commands) {
-        project_commands_ = project_commands;
-    }
-
-    // The process-wide signal router (one instance, wired from main.cpp),
-    // so every path that removes a session from sessions_ -- Terminate,
-    // TerminateAll, and the reaper's two sweeps -- can also erase its
-    // subscription entry. Without this, subs_ only ever shrank on a RESUME
-    // (SignalRouter::Unsubscribe was called from PublishSession alone); a
-    // session that terminates normally (the common case, especially for
-    // short-lived subagents) left its subs_ entry behind for the life of
-    // the process. Optional: unset (tests) means no signal cleanup runs.
-    void set_signal_router(SignalRouter* signal_router) { signal_router_ = signal_router; }
-
-    // Project context (AGENTS.md/CLAUDE.md) settings, read once at startup.
-    // Optional but DEFAULTS TO DISABLED: until main wires the parsed settings
-    // in, no session reads anything from its project_root -- a missing
-    // producer is a feature that is off, not one running on guessed defaults. Loading happens per session in
-    // CreateResolved -- the one funnel top-level creation, resume, and
-    // SubagentManager spawns share -- because the file lives in the SESSION's
-    // project_root, not in any preset.
-    void set_project_context(config::ProjectContextSettings settings) {
-        project_context_ = settings;
-    }
-
-    // small_model (settings.json): resolves the <provider>/<model> reference
-    // ONCE against providers.json and the shared provider cache, and stamps
-    // the result into loop_config_ so every session compacts on it. Unset or
-    // unresolvable = compact on each session's own model (a failure here is a
-    // warning, never fatal: losing the cheap summarizer is a cost regression,
-    // not a broken harness).
-    void set_small_model(const std::string& provider_model) {
-        std::string error;
-        auto resolved = resolver_.ResolveLlm(provider_model, error);
-        if (!resolved) {
-            common::DefaultLogger().warn(
-                "settings.small_model {}; compaction uses each session's own model", error);
-            return;
-        }
-        const config::ResolvedModel& model = *resolved->model;
-        LoopConfig::SmallModel small;
-        small.provider = std::move(resolved->provider);
-        small.model_name = model.provider.model_name;
-        small.parameters = model.parameters;
-        small.max_tokens = model.max_tokens;
-        small.context_window_tokens = model.context_window_tokens;
-        loop_config_.small_model = std::move(small);
-    }
-
-    // sessions.unattended_prompt_timeout_seconds, read once at startup like
-    // project_context above and applied through the same CreateResolved
-    // funnel. Zero (the default) means every prompt waits forever, unchanged
-    // from before S5.
-    void set_prompt_timeout(std::chrono::milliseconds timeout) {
-        prompt_timeout_ = timeout;
-    }
 
     // The session row must already exist in the database -- params.session_id
     // names it -- because the database is what mints session ids. See
@@ -297,15 +290,12 @@ private:
     // a fresh one per session plus a second stack-local one for resume.
     std::shared_ptr<session::SessionReader> history_reader_;
     LoopConfig loop_config_;
-    config::ProjectContextSettings project_context_ = [] {
-        config::ProjectContextSettings disabled;
-        disabled.enabled = false;
-        return disabled;
-    }();
+    config::ProjectContextSettings project_context_;
     std::chrono::milliseconds prompt_timeout_{0};
     common::Logger& logger_;
     std::chrono::milliseconds initial_attach_guard_;
     ReaperConfig reaper_config_;
+    void ApplySmallModel(const std::string& provider_model);
     // When each session was FIRST observed detached-and-quiescent (the
     // reaper-local half of the idle-TTL rule; the session itself carries no
     // timestamps for it). Erased whenever a session is active or attached.

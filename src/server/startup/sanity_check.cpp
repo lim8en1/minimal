@@ -870,7 +870,7 @@ std::vector<CheckResult> StartupSanityCheck::check_small_model() {
     const std::string& ref_text = bundle_.settings.small_model;
     if (ref_text.empty()) return results;  // compact on the session's own model: normal
 
-    // Same shape check SessionRegistry::set_small_model applies at session
+    // Same shape check SessionRegistry::ApplySmallModel applies at session
     // creation (SplitModelRef, so a discovered catalog's slash-bearing model
     // id is accepted here too) -- run here so the misconfiguration surfaces at
     // startup with the rest, not on the first compaction of the first long

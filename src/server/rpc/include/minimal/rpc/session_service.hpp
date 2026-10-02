@@ -70,9 +70,34 @@ public:
     //   services            -- the sealed PluginCall/PluginSubscribe dispatch
     //                          target; null: both RPCs answer UNAVAILABLE.
     //   permission_advisors -- null: permissions.json's advisor never applies.
+    // The process-wide wiring that arrives after the registries exist, injected at
+    // construction (it used to be four setters main called one by one before
+    // serving). All optional: unset degrades the feature, never the RPC.
+    struct Options {
+        // The project-scoped half of the catalog (ProjectCommandSource), consulted
+        // BEFORE commands_ by both DispatchCommand's reader-thread pre-check and
+        // ListCommands -- see FindEffective's own doc for why both must agree. Null
+        // means every project-command lookup degrades to global-only.
+        const commands::ProjectCommandSource* project_commands = nullptr;
+        // Null means ListAgentPresets answers with an empty list rather than
+        // dropping the RPC -- a picker that gets nothing back reads as "no presets
+        // configured", which is at least honest, versus a hang.
+        const agent::AgentPresetRegistry* presets = nullptr;
+        // Null means signals are not offered -- a CreateSessionRequest naming any
+        // signal answers INVALID_ARGUMENT rather than silently subscribing to
+        // nothing. The router is also how signal channels reach their sessions.
+        agent::SignalRouter* signal_router = nullptr;
+    };
+
     SessionServiceImpl(agent::SessionRegistry& sessions, session::SessionDatabase& db,
                        config::SettingsConfig settings, config::PermissionsConfig permissions,
-                       common::Logger& logger, const plugins::HostRegistries& registries = {});
+                       common::Logger& logger, const plugins::HostRegistries& registries,
+                       Options options);
+    SessionServiceImpl(agent::SessionRegistry& sessions, session::SessionDatabase& db,
+                       config::SettingsConfig settings, config::PermissionsConfig permissions,
+                       common::Logger& logger, const plugins::HostRegistries& registries = {})
+        : SessionServiceImpl(sessions, db, std::move(settings), std::move(permissions), logger,
+                             registries, Options{}) {}
 
     grpc::Status CreateSession(grpc::ServerContext* context,
                                const v1::CreateSessionRequest* request,
@@ -115,28 +140,11 @@ public:
     // Invoked once the attached-client count returns to zero after having been
     // non-zero. THE SERVER IS REFCOUNTED BY ATTACHED CLIENTS AND EXITS WHEN THE
     // LAST ONE LEAVES -- that is what removes the daemon requirement, and what a
-    // later auto-spawning client will rely on.
+    // later auto-spawning client relies on. A setter, not an Option, because the
+    // callback typically needs the rpc::Server (to RequestShutdown), which is
+    // constructed AFTER the service. (main wires the same decision through
+    // ServerHousekeeping instead.)
     void set_on_last_client_detached(std::function<void()> callback);
-
-    // Optional: the project-scoped half of the catalog (ProjectCommandSource),
-    // consulted BEFORE commands_ by both DispatchCommand's reader-thread
-    // pre-check and ListCommands -- see FindEffective's own doc for why both
-    // must agree. Null means every project-command lookup degrades to
-    // global-only, exactly the pre-existing behavior.
-    void set_project_commands(const commands::ProjectCommandSource* project_commands) {
-        project_commands_ = project_commands;
-    }
-
-    // Optional: null means ListAgentPresets answers with an empty list rather
-    // than dropping the RPC -- a picker that gets nothing back reads as "no
-    // presets configured", which is at least honest, versus a hang.
-    void set_presets(const agent::AgentPresetRegistry* presets) { presets_ = presets; }
-
-    // Optional: null means signals are not offered -- a CreateSessionRequest
-    // naming any signal answers INVALID_ARGUMENT rather than silently
-    // subscribing to nothing. Set before serving (main.cpp, after the router
-    // exists). The router is also how signal channels reach their sessions.
-    void set_signal_router(agent::SignalRouter* router) { signal_router_ = router; }
 
     std::size_t attached_clients() const;
 
@@ -168,7 +176,9 @@ private:
                        PendingAnswer answer);
 
     // What agent::Launch/Fork borrow from this service.
-    agent::LaunchContext MakeLaunchContext();
+    // What agent::Launch / Fork borrow from this service: built once, after the
+    // options are known, instead of re-assembled from six members on every RPC.
+    std::optional<agent::LaunchContext> launch_context_;
 
     // The one decrement of attached_, shared by every exit -- the successful
     // detach, the attach-refused exits (which counted themselves first, see

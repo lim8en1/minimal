@@ -72,7 +72,12 @@ struct TempConfigDir {
 // Everything SessionRegistry borrows, in one place and destroyed after it.
 struct RegistryFixture {
     explicit RegistryFixture(std::chrono::milliseconds guard = std::chrono::seconds(10))
-        : skills(config::SkillRegistry::Load(config.dir)), guard_(guard) {}
+        : skills(config::SkillRegistry::Load(config.dir)), guard_(guard) {
+        options.reaper.initial_attach_guard = guard;
+    }
+
+    // The registry's startup wiring; set before Build() (it is constructor-injected).
+    agent::SessionRegistry::Options options;
 
     void Build(bool register_provider_kind = true) {
         presets = std::make_unique<agent::AgentPresetRegistry>(
@@ -92,7 +97,7 @@ struct RegistryFixture {
                                     .providers = &providers,
                                     .observers = observers.get(),
                                     .context_contributors = context_contributors},
-            *db, agent::LoopConfig{}, common::DefaultLogger(), guard_);
+            *db, agent::LoopConfig{}, common::DefaultLogger(), options);
     }
 
     // Optional; set before Build().
@@ -340,12 +345,9 @@ TEST_CASE("two detached quiescent sessions are both reaped by the idle TTL, on s
     // ~1.1s" (fixed) from "one needs a second full TTL, ~2s" (buggy).
     RegistryFixture fixture(200ms);
     fixture.config.WriteDefaults();
+    fixture.options.reaper.initial_attach_guard = 200ms;
+    fixture.options.reaper.detached_idle_ttl = std::chrono::seconds(1);
     fixture.Build();
-
-    agent::SessionRegistry::ReaperConfig config;
-    config.initial_attach_guard = 200ms;
-    config.detached_idle_ttl = std::chrono::seconds(1);
-    fixture.registry->set_reaper_config(config);
 
     auto first = fixture.registry->Create(Params("s1"));
     auto second = fixture.registry->Create(Params("s2"));
@@ -453,9 +455,9 @@ TEST_CASE("Terminate erases the session's signal-router subscription entry",
     // TerminateAll/the reaper ever called Unsubscribe.
     RegistryFixture fixture;
     fixture.config.WriteDefaults();
-    fixture.Build();
     agent::SignalRouter router;
-    fixture.registry->set_signal_router(&router);
+    fixture.options.signal_router = &router;
+    fixture.Build();
 
     auto params = Params("s1");
     params.signal_router = &router;
@@ -472,9 +474,9 @@ TEST_CASE(
     "[session_registry][regression]") {
     RegistryFixture fixture;
     fixture.config.WriteDefaults();
-    fixture.Build();
     agent::SignalRouter router;
-    fixture.registry->set_signal_router(&router);
+    fixture.options.signal_router = &router;
+    fixture.Build();
 
     for (const std::string& id : {"s1", "s2", "s3"}) {
         auto params = Params(id);
@@ -752,10 +754,10 @@ TEST_CASE("project context is loaded from the session's project_root into the sy
           "[session_registry][project_context]") {
     RegistryFixture fixture;
     fixture.config.WriteDefaults();
-    fixture.Build();
     // Explicit wiring turns the feature on; the registry defaults to disabled
     // so unwired tests never scan the filesystem.
-    fixture.registry->set_project_context(config::ProjectContextSettings{});
+    fixture.options.project_context = config::ProjectContextSettings{};
+    fixture.Build();
 
     testing::TempDir project;
     { std::ofstream(project.path() / "AGENTS.md") << "Always run the tests.\n"; }
@@ -778,8 +780,8 @@ TEST_CASE("project context falls back to CLAUDE.md and skips empty files",
           "[session_registry][project_context]") {
     RegistryFixture fixture;
     fixture.config.WriteDefaults();
+    fixture.options.project_context = config::ProjectContextSettings{};
     fixture.Build();
-    fixture.registry->set_project_context(config::ProjectContextSettings{});
 
     testing::TempDir project;
     { std::ofstream(project.path() / "AGENTS.md") << ""; }
@@ -800,16 +802,17 @@ TEST_CASE("project context is absent when disabled or when no candidate file exi
           "[session_registry][project_context]") {
     RegistryFixture fixture;
     fixture.config.WriteDefaults();
-    fixture.Build();
 
     SECTION("registry defaults: the feature is off until wired") {
+        fixture.Build();
         auto session = fixture.registry->Create(Params("s1"));
         const auto request = session->loop().BuildChatRequest();
         REQUIRE(request.system.has_value());
         CHECK(request.system->find("## Project context") == std::string::npos);
     }
     SECTION("enabled, but the project has neither file") {
-        fixture.registry->set_project_context(config::ProjectContextSettings{});
+        fixture.options.project_context = config::ProjectContextSettings{};
+        fixture.Build();
         auto session = fixture.registry->Create(Params("s1"));
         const auto request = session->loop().BuildChatRequest();
         REQUIRE(request.system.has_value());

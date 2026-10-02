@@ -286,8 +286,8 @@ struct SessionParams {
 
 
     // S5.3: sessions.unattended_prompt_timeout_seconds, set by the registry
-    // funnel (SessionRegistry::set_prompt_timeout, mirroring
-    // set_project_context). Zero -- the default -- means wait forever, the
+    // funnel (SessionRegistry::Options::prompt_timeout, mirroring
+    // Options::project_context). Zero -- the default -- means wait forever, the
     // behaviour every prompt had before detach existed. Applied to the
     // default WirePermissionChecker/WireConfirmationBroker this constructor
     // builds; a producer that supplies its own permission_checker owns its

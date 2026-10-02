@@ -68,7 +68,7 @@ SessionServiceImpl::SessionServiceImpl(agent::SessionRegistry& sessions,
                                        config::SettingsConfig settings,
                                        config::PermissionsConfig permissions,
                                        common::Logger& logger,
-                                       const plugins::HostRegistries& registries)
+                                       const plugins::HostRegistries& registries, Options options)
     : sessions_(sessions),
       db_(db),
       reader_(db),
@@ -80,6 +80,11 @@ SessionServiceImpl::SessionServiceImpl(agent::SessionRegistry& sessions,
     auth_providers_ = registries.auth_providers;
     mention_resolvers_ = registries.mention_resolvers;
     services_ = registries.services;
+    project_commands_ = options.project_commands;
+    presets_ = options.presets;
+    signal_router_ = options.signal_router;
+    launch_context_.emplace(agent::LaunchContext{sessions_, db_, settings_, permissions_, logger_,
+                                                 permission_advisors_, signal_router_});
 }
 
 
@@ -142,11 +147,6 @@ grpc::Status ToStatus(const agent::LaunchError& error) {
 
 }  // namespace
 
-agent::LaunchContext SessionServiceImpl::MakeLaunchContext() {
-    return agent::LaunchContext{sessions_,       db_,          settings_,    permissions_,
-                                logger_,         permission_advisors_,       signal_router_};
-}
-
 // An exception leaving an RPC handler is UB, so every throw below the launch
 // functions is mapped here; LaunchError already carries the status it means.
 grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
@@ -162,7 +162,7 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     launch.model = request->model();
     launch.signals.assign(request->signals().begin(), request->signals().end());
     try {
-        *response->mutable_session() = ToProto(agent::Launch(MakeLaunchContext(), launch));
+        *response->mutable_session() = ToProto(agent::Launch(*launch_context_, launch));
     } catch (const agent::LaunchError& error) {
         return ToStatus(error);
     } catch (const std::exception& error) {
@@ -183,7 +183,7 @@ grpc::Status SessionServiceImpl::ForkSession(grpc::ServerContext* context,
     fork.agent_preset = request->agent_preset();
     fork.run_mode = FromProto(request->run_mode());
     try {
-        *response->mutable_session() = ToProto(agent::Fork(MakeLaunchContext(), fork));
+        *response->mutable_session() = ToProto(agent::Fork(*launch_context_, fork));
     } catch (const agent::LaunchError& error) {
         return ToStatus(error);
     } catch (const std::exception& error) {

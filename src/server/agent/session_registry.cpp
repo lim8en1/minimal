@@ -28,8 +28,7 @@ T& Required(T* registry, const char* name) {
 SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, SessionWiring wire_session,
                                  const plugins::HostRegistries& registries,
                                  session::SessionDatabase& db, LoopConfig loop_config,
-                                 common::Logger& logger,
-                                 std::chrono::milliseconds initial_attach_guard)
+                                 common::Logger& logger, Options options)
     : presets_(presets),
       wire_session_(wire_session ? std::move(wire_session)
                                  : throw std::invalid_argument(
@@ -41,11 +40,36 @@ SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, SessionWiri
       db_(db),
       history_reader_(std::make_shared<session::SessionReader>(db_)),
       loop_config_(loop_config),
+      project_context_(std::move(options.project_context)),
+      prompt_timeout_(options.prompt_timeout),
       logger_(logger),
-      initial_attach_guard_(initial_attach_guard) {
+      initial_attach_guard_(std::chrono::duration_cast<std::chrono::milliseconds>(
+          options.reaper.initial_attach_guard)),
+      reaper_config_(options.reaper) {
+    project_commands_ = options.project_commands;
+    signal_router_ = options.signal_router;
+    if (!options.small_model.empty()) ApplySmallModel(options.small_model);
     // Started last, once every member it reads exists.
     reaper_ = std::make_unique<common::PeriodicTask>([this] { return ReapInterval(); },
                                                      [this] { ReapOnce(); });
+}
+
+void SessionRegistry::ApplySmallModel(const std::string& provider_model) {
+    std::string error;
+    auto resolved = resolver_.ResolveLlm(provider_model, error);
+    if (!resolved) {
+        common::DefaultLogger().warn(
+            "settings.small_model {}; compaction uses each session's own model", error);
+        return;
+    }
+    const config::ResolvedModel& model = *resolved->model;
+    LoopConfig::SmallModel small;
+    small.provider = std::move(resolved->provider);
+    small.model_name = model.provider.model_name;
+    small.parameters = model.parameters;
+    small.max_tokens = model.max_tokens;
+    small.context_window_tokens = model.context_window_tokens;
+    loop_config_.small_model = std::move(small);
 }
 
 SessionRegistry::~SessionRegistry() {
@@ -517,15 +541,6 @@ void SessionRegistry::TerminateAll() {
         quiescent_since_.clear();
     }
     for (auto& session : doomed) session->Terminate();
-}
-
-void SessionRegistry::set_reaper_config(ReaperConfig config) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    reaper_config_ = std::move(config);
-    // A shorter guard takes effect on the next tick (ReapInterval is asked
-    // before every wait).
-    initial_attach_guard_ = std::chrono::duration_cast<std::chrono::milliseconds>(
-        reaper_config_.initial_attach_guard);
 }
 
 std::unordered_map<std::string, std::size_t> SessionRegistry::LiveChildCountsLocked() const {

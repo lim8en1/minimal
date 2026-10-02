@@ -139,10 +139,11 @@ struct ClientFixture {
                                                  .observers = observers.get()};
         sessions = std::make_unique<agent::SessionRegistry>(
             *presets, rpc::FinishSessionWiring, registries, *db, agent::LoopConfig{}, common::DefaultLogger(), attach_guard);
+        rpc::SessionServiceImpl::Options service_options;
+        service_options.presets = presets.get();  // RunSessionlessCommand dispatches against these
         service = std::make_unique<rpc::SessionServiceImpl>(
             *sessions, *db, config::SettingsConfig{}, config::PermissionsConfig{},
-            common::DefaultLogger(), registries);
-        service->set_presets(presets.get());   // RunSessionlessCommand dispatches against these
+            common::DefaultLogger(), registries, std::move(service_options));
 
         socket = dir / "test.sock";
         server = std::make_unique<rpc::Server>(*service, socket);
