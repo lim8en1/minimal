@@ -8,7 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <functional>
-#include <random>
+
 #include <span>
 #include <string>
 #include <string_view>
@@ -18,6 +18,7 @@
 #include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/agent/context_compactor.hpp"
 #include "minimal/agent/injection_queue.hpp"
+#include "minimal/agent/retry_policy.hpp"
 #include "minimal/agent/session_observer.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
@@ -604,14 +605,6 @@ private:
     // The pause probe. Same call-shape as Cancelled(): an injected predicate,
     // nullopt-safe. Checked at the loop top only.
     bool Paused() const;
-    // Waits before retry `attempt`, polling cancellation. False means "give up"
-    // -- cancelled during the wait -- so the caller stops retrying. The
-    // server's own hint (a parsed Retry-After) outranks the computed backoff:
-    // retrying a 429 sooner than it permitted converts one rate-limit event
-    // into max_retries more.
-    bool SleepForBackoff(int attempt,
-                         std::optional<std::chrono::milliseconds> retry_after = std::nullopt);
-
     // Rebindable for /model across providers, hence the wrapper rather than a
     // plain reference member.
     std::reference_wrapper<llm::LlmProvider> provider_;
@@ -659,9 +652,7 @@ private:
     // own mutex.
     std::shared_ptr<InjectionQueue> injections_;
     llm::TokenAccumulator tokens_;
-    // Backoff jitter only. Loop-owned rather than shared, so two sessions
-    // retrying the same failing backend do not draw the same delays.
-    std::mt19937 jitter_{std::random_device{}()};
+    RetryPolicy retry_;
 
     // Parallel tool dispatch (ARCHITECTURE.md "Tool dispatch"). Width from
     // LoopConfig; width 1 never starts threads. Lives on the loop rather than

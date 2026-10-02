@@ -13,33 +13,13 @@
 #include "minimal/agent/compaction_trigger.hpp"
 #include "minimal/agent/structured_compaction.hpp"
 #include "minimal/agent/transcript_repair.hpp"
+#include "minimal/agent/retry_policy.hpp"
 #include "tool_result_caps.hpp"
 #include "minimal/common/utf8.hpp"
 
 namespace minimal::agent {
 namespace {
 
-// A provider's "this request does not fit the model's window" refusal. There
-// is no portable error code -- Anthropic, OpenAI and the local servers each
-// phrase it differently -- so this is a message heuristic over a non-retryable
-// 400/413. A false positive costs one compaction attempt; a false negative is
-// the old behaviour (the turn fails).
-bool IsContextOverflow(const llm::LlmError& error) {
-    if (error.category() != llm::LlmErrorCategory::RequestError) return false;
-    if (error.http_status() && *error.http_status() != 400 && *error.http_status() != 413) {
-        return false;
-    }
-    std::string message = error.what();
-    std::transform(message.begin(), message.end(), message.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    for (const char* needle :
-         {"context length", "context_length", "context window", "maximum context",
-          "prompt is too long", "input is too long", "too many tokens", "exceeds the limit",
-          "reduce the length", "request too large", "tokens exceed"}) {
-        if (message.find(needle) != std::string::npos) return true;
-    }
-    return false;
-}
 
 }  // namespace
 
@@ -66,6 +46,7 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       history_(std::move(seed.history)),
       first_persisted_seq_(seed.first_persisted_seq),
       head_is_summary_(seed.head_is_summary),
+      retry_(config.retry_base_delay, config.retry_max_delay, is_cancelled_),
       pool_(config.max_parallel_tool_calls) {
     // The injection queue is shared with the session's channels block when
     // there is one (the producers are foreign threads and must see the same
@@ -119,42 +100,6 @@ bool AgentLoop::HistoryEndsWithUnansweredUserText() const {
     // when the wake setting is off. Only TEXT is a human prompt awaiting a
     // reply.
     return IsUserTextMessage(history_.back());
-}
-
-bool AgentLoop::SleepForBackoff(int attempt,
-                                std::optional<std::chrono::milliseconds> retry_after) {
-    if (config_.retry_base_delay.count() <= 0 && !retry_after) return !Cancelled();
-
-    // Exponential with EQUAL jitter: half the ceiling fixed, half random.
-    // Jitter matters even for one local user -- several sessions that failed
-    // against the same backend would otherwise retry in lockstep forever -- but
-    // full jitter (drawing from [0, ceiling]) can legally return zero, which
-    // makes "the retry waited" unassertable in a single run and leaves a real
-    // 429 answered immediately every so often. Half the ceiling is the floor.
-    // `attempt` tracks retries for a configured max_retries that could exceed
-    // 31; shifting that far is UB. Anything past 2^30 ms is already far beyond
-    // retry_max_delay, so the min() below clamps it regardless.
-    const auto ceiling =
-        std::min(config_.retry_base_delay * (1 << std::min(attempt, 30)), config_.retry_max_delay);
-    const std::int64_t half = ceiling.count() / 2;
-    std::uniform_int_distribution<std::int64_t> pick(0, ceiling.count() - half);
-    std::chrono::milliseconds delay{half + pick(jitter_)};
-
-    // The server's own hint outranks the computed backoff: retrying a 429
-    // sooner than its Retry-After converts one rate-limit event into
-    // max_retries more. The hint was parsed, carried and tested end to end --
-    // and then ignored here, the only consumer there ever was.
-    if (retry_after && *retry_after > delay) delay = *retry_after;
-
-    // Slept in slices, polling cancellation. Sleeping the whole delay would
-    // make CancelTurn wait out a backoff the user just asked to abandon --
-    // the same argument that put a cancel-polling sink in the compactor.
-    constexpr std::chrono::milliseconds kSlice{25};
-    for (std::chrono::milliseconds slept{0}; slept < delay; slept += kSlice) {
-        if (Cancelled()) return false;
-        std::this_thread::sleep_for(std::min(kSlice, delay - slept));
-    }
-    return !Cancelled();
 }
 
 session::MessageAttribution AgentLoop::AssistantAttribution() const {
@@ -1135,7 +1080,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                 // The request did not fit the window (the estimate undercounted,
                 // or the window is smaller than declared): compact once and
                 // resend, instead of failing this turn and every later one.
-                if (!overflow_recovered && config_.auto_compact && IsContextOverflow(error)) {
+                if (!overflow_recovered && config_.auto_compact && RetryPolicy::IsContextOverflow(error)) {
                     overflow_recovered = true;
                     session_.logger.warn(
                         "session {}: provider rejected the request as too large ({}); "
@@ -1155,7 +1100,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                 // Backoff, not a bare retry. Without it the four attempts land
                 // inside a few milliseconds, which turns a 429 into four 429s
                 // and is worse for the backend than not retrying at all.
-                if (!SleepForBackoff(attempt, error.retry_after())) {
+                if (!retry_.SleepForBackoff(attempt, error.retry_after())) {
                     // CancelTurn landed inside the backoff sleep. That is a
                     // cancellation, not a mysterious failure: report it as the
                     // Cancelled it is rather than letting the turn fall out with
