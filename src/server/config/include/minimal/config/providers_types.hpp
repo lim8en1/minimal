@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -255,6 +256,15 @@ struct DiscoveryRefreshOutcome {
     bool ok = false;
     std::string error;  // empty when ok
     std::size_t model_count = 0;
+};
+
+// Immutable once parsed: written only at insertion (ProvidersConfig::Add /
+// AddProvider, parse-time), never mutated in place, no lock needed. Ordered, so
+// ModelRefs() is sorted without a second pass and two runs list providers
+// identically.
+struct ImmutableCatalog {
+    std::map<std::string, std::shared_ptr<const ResolvedModel>> models_;  // "<provider>/<model>"
+    std::map<std::string, ProviderEntry> providers_;                      // never mutated after parse
 };
 
 }  // namespace minimal::config

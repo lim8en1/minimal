@@ -25,6 +25,7 @@ add_library(minimal_server_core SHARED
     llm/token_accounting.cpp
     config/frontmatter.cpp
     config/permission_codec.cpp
+    config/model_catalog_service.cpp
     config/providers_config.cpp
     config/settings_config.cpp
     config/permissions_config.cpp
