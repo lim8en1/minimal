@@ -288,11 +288,11 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
                 steered = channels_->injections.Push(
                     llm::Message{llm::Role::User, {llm::TextBlock{turn.text}}});
                 if (!steered) refusal = "session backlog is full; turn refused";
-            } else if (work_.size() >= kMaxWorkItems) {
+            } else if (work_.full()) {
                 refusal = "session backlog is full; turn refused";
             } else {
                 turn.turn_id = next_turn_id_++;
-                work_.push_back(turn);  // copied: turn_id and text are announced below
+                work_.TryPush(turn);  // copied: turn_id and text are announced below
             }
         }
     }
@@ -334,13 +334,11 @@ bool Session::SubmitCommand(QueuedCommand command) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminated_.load(std::memory_order_acquire)) {
             refusal = "session already terminated";
-        } else if (work_.size() >= kMaxWorkItems) {
-            // The SAME queue as turns, deliberately. Two queues would have no
-            // order between them, so `/model x` typed before a turn could
-            // apply after it.
+        } else if (work_.full()) {
+            // The SAME queue as turns, deliberately (see WorkQueue).
             refusal = "session backlog is full";
         } else {
-            work_.push_back(std::move(command));
+            work_.TryPush(std::move(command));
         }
     }
     if (refusal) {
@@ -524,13 +522,13 @@ bool Session::SubmitRewind(QueuedRewind request) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminated_.load(std::memory_order_acquire)) {
             refusal = "session already terminated";
-        } else if (work_.size() >= kMaxWorkItems) {
+        } else if (work_.full()) {
             // The SAME queue as turns and commands, deliberately: a rewind runs
             // at a turn boundary, and a turn queued behind it forks the
             // rewound branch -- queue order IS the semantics.
             refusal = "session backlog is full; rewind refused";
         } else {
-            work_.push_back(std::move(request));
+            work_.TryPush(std::move(request));
         }
     }
     if (refusal) {
@@ -631,7 +629,7 @@ void Session::EmitSessionRewound(std::int64_t truncated_to_seq, std::int64_t act
 bool Session::QueueInjectedMessage(llm::Message message) {
     if (terminated_.load(std::memory_order_acquire)) return false;
     // The wake decision is the worker's, not ours: its wait predicate sees the
-    // pending message (ShouldWakeForInjections) and runs a seedless turn when
+    // pending message (WorkerShouldProceed) and runs a seedless turn when
     // params_.wake_on_injection says so. But a predicate change WAKES NOBODY
     // by itself -- the parked worker must be notified, or it sleeps with its
     // predicate already true until some unrelated event lands. The empty
@@ -712,10 +710,7 @@ void Session::SetPaused(bool paused) {
         if (!paused && worker_activity_ == WorkerActivity::kIdle &&
             pause_.continuation_pending() && work_.empty() &&
             !subagent_finished_.load(std::memory_order_acquire)) {
-            if (work_.size() < kMaxWorkItems) {
-                work_.push_back(QueuedResume{});
-                pause_.ClearContinuation();
-            }
+            if (work_.TryPush(QueuedResume{})) pause_.ClearContinuation();
             // Over the bound: drop the kick silently -- the session was
             // idle (the checks above), so the bound cannot be hit here;
             // the guard is structural, not operational.
@@ -733,13 +728,7 @@ void Session::CancelQueuedTurn(std::uint64_t turn_id) {
     bool removed = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (auto it = work_.begin(); it != work_.end(); ++it) {
-            auto* turn = std::get_if<QueuedTurn>(&*it);
-            if (turn == nullptr || turn->turn_id != turn_id) continue;
-            work_.erase(it);
-            removed = true;
-            break;
-        }
+        removed = work_.RemoveTurn(turn_id);
     }
     // Always answered: the caller must learn removed=false (already popped --
     // it must run, and the pending echo stays) just as surely as removed=true.
@@ -750,18 +739,7 @@ void Session::CancelAllQueuedTurns() {
     std::vector<std::uint64_t> dropped;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (auto it = work_.begin(); it != work_.end();) {
-            if (auto* turn = std::get_if<QueuedTurn>(&*it)) {
-                dropped.push_back(turn->turn_id);
-                it = work_.erase(it);
-            } else {
-                // Commands, rewinds: the flush is about PENDING MESSAGES, and
-                // the current turn is untouched either way. A queued /model
-                // the user asked for one submission ago is not silently undone
-                // by cancelling the queue's messages.
-                ++it;
-            }
-        }
+        dropped = work_.RemoveAllTurns();
     }
     for (const auto turn_id : dropped) {
         EmitOrWarn(SessionEvent{TurnCanceled{turn_id, true}}, "turn_canceled event");
@@ -971,54 +949,7 @@ void Session::WorkerMain() {
         bool wake_turn = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            turn_cv_.wait(lock, [this] {
-                if (terminated_.load(std::memory_order_acquire)) return true;
-                if (!work_.empty()) {
-                    // PAUSE HOLD: while paused, only non-turn work may run --
-                    // commands, rewinds, the resume kick. This is the "pause
-                    // to reconfigure" affordance: /agent, /model and a rewind
-                    // all execute against a paused session, while its held
-                    // turns wait for unpause (auto-resume via a new
-                    // submission, or SetPaused(false)). Turns are LEFT IN
-                    // PLACE, not reordered around. (A run-mode change is not
-                    // here by design: it applies on the reader, immediately --
-                    // see SetRunMode.)
-                    if (!pause_.paused()) return true;
-                    for (const auto& candidate : work_) {
-                        if (!std::holds_alternative<QueuedTurn>(candidate)) {
-                            return true;
-                        }
-                    }
-                    return false;
-                }
-                // Idle: the wake paths. All of them hold while paused --
-                // a paused session makes no provider call nobody asked for.
-                if (pause_.paused()) return false;
-                // A finished subagent runs nothing more (the worker drops every
-                // wake silently); without this, steered text left in the queue
-                // keeps the predicate true and the worker spins at full speed.
-                if (subagent_finished_.load(std::memory_order_acquire)) return false;
-                if (ShouldWakeForInjections()) return true;
-                // Real-time steering sweep: a steering message that missed
-                // its turn's flush (the model had already returned EndTurn)
-                // is a human prompt sitting unanswered. It wakes the worker
-                // for a seedless continuation turn REGARDLESS of
-                // wake_on_injection -- a user message is explicit intent,
-                // which a background result is not. Keyed on the HISTORY
-                // (the durable record), not the injection queue: the turn's
-                // final flush may already have drained the queue and
-                // appended the message unanswered.
-                if (channels_->injections.HasUserText() ||
-                    (HistoryEndsWithUnansweredUserText() && last_turn_natural_)) {
-                    return true;
-                }
-                // The explicit-resume kick raced a still-running final round:
-                // SetPaused(false) found the worker still busy and skipped
-                // enqueueing; the turn then ended Paused. The continuation
-                // survives (kContinuationPending), and this predicate is what
-                // turns it into the actual continuation.
-                return pause_.continuation_pending();
-            });
+            turn_cv_.wait(lock, [this] { return WorkerShouldProceed(WakeSnapshot()); });
             if (terminated_.load(std::memory_order_acquire)) return;
             // Record the cancel generation THIS turn must be measured against,
             // under the same lock as the pop. A Cancel before this point
@@ -1045,21 +976,12 @@ void Session::WorkerMain() {
             // turn starts clean.
             loop_->SetCancelToken(cancel_source_.Mint());
             if (!work_.empty()) {
-                if (!pause_.paused()) {
-                    item = std::move(work_.front());
-                    work_.pop_front();
-                } else {
-                    // The predicate guaranteed a non-turn item exists; find
-                    // it and leave any held turns in place.
-                    for (auto it = work_.begin(); it != work_.end(); ++it) {
-                        if (std::holds_alternative<QueuedTurn>(*it)) {
-                            continue;
-                        }
-                        item = std::move(*it);
-                        work_.erase(it);
-                        break;
-                    }
-                }
+                // The predicate guaranteed a runnable item exists. While
+                // paused that is the first non-turn item; held turns stay in
+                // place.
+                auto popped = work_.PopRunnable(pause_.paused());
+                if (!popped) continue;
+                item = std::move(*popped);
                 // A real turn (seeded or the resume kick) starting means the
                 // "last turn ended paused" record is consumed: leaving it set
                 // would let a LATER unpause spuriously re-run a continuation
@@ -1070,7 +992,7 @@ void Session::WorkerMain() {
                 }
             } else {
                 // Only reachable when a wake condition fired: an out-of-band
-                // message (ShouldWakeForInjections, with the wake setting on)
+                // message (WorkerShouldProceed, with the wake setting on)
                 // -- or a steering message that missed its flush, or a resume
                 // kick whose enqueue lost its race -- needs a SEEDLESS turn
                 // whose user content is the injected messages / the persisted
@@ -1136,15 +1058,23 @@ void Session::WorkerMain() {
     }
 }
 
-bool Session::ShouldWakeForInjections() const {
+WakeInputs Session::WakeSnapshot() const {
     // Called from the wait predicate, under mutex_. Lock order is one-way:
     // mutex_ -> the queue's own mutex; producers (subagent completion hooks,
     // background watchers) hold only the queue's mutex, so no cycle exists.
-    if (!params_.wake_on_injection) return false;
-    if (worker_activity_ != WorkerActivity::kIdle || !work_.empty()) return false;
-    // A finished subagent's life is over regardless of what is staged.
-    if (subagent_finished_.load(std::memory_order_acquire)) return false;
-    return !channels_->injections.empty();
+    WakeInputs in;
+    in.terminated = terminated_.load(std::memory_order_acquire);
+    in.paused = pause_.paused();
+    in.queue_empty = work_.empty();
+    in.queue_has_runnable = work_.HasRunnable(in.paused);
+    in.subagent_finished = subagent_finished_.load(std::memory_order_acquire);
+    in.wake_on_injection = params_.wake_on_injection;
+    in.worker_idle = worker_activity_ == WorkerActivity::kIdle;
+    in.injections_pending = !channels_->injections.empty();
+    in.injections_have_user_text = channels_->injections.HasUserText();
+    in.unanswered_after_natural_turn = last_turn_natural_ && HistoryEndsWithUnansweredUserText();
+    in.continuation_pending = pause_.continuation_pending();
+    return in;
 }
 
 bool Session::HistoryEndsWithUnansweredUserText() const {

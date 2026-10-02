@@ -107,6 +107,7 @@ add_executable(minimal_tests
     session_test.cpp
     tool_source_activation_test.cpp
     pause_gate_test.cpp
+    wake_policy_test.cpp
     attributed_registry_test.cpp
     serial_executor_test.cpp
     server_housekeeping_test.cpp

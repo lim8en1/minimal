@@ -43,6 +43,8 @@
 #include "minimal/agent/injection_queue.hpp"
 #include "minimal/agent/pause_gate.hpp"
 #include "minimal/agent/session_channels.hpp"
+#include "minimal/agent/work_queue.hpp"
+#include "minimal/agent/wake_policy.hpp"
 #include "minimal/agent/session_event.hpp"
 #include "minimal/agent/session_transport.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
@@ -263,59 +265,6 @@ struct SessionParams {
     // Process-wide services, filled by SessionRegistry for every session.
     SessionEnvironment environment;
 };
-
-// One item of work for the session worker. A variant rather than two queues,
-// because the ORDER between a turn and a command matters and two queues have no
-// order between them -- `/model x` typed before a turn must apply before it.
-struct QueuedCommand {
-    std::string request_id;  // echoed on CommandResult
-    std::string name;
-    commands::CommandArgs args;
-};
-
-// One traversal request for the session worker. A rewind cuts the ACTIVE
-// transcript before target_seq (the target must be an active, text-bearing
-// user message); a redo restores the tail the most recent rewind discarded.
-// See ARCHITECTURE.md "Session traversal" and the RewindRequest proto comment
-// for the mark/fork/reclaim model.
-struct QueuedRewind {
-    std::int64_t target_seq = -1;  // meaningful only when redo == false
-    bool redo = false;
-};
-
-// One client-driven run-mode change (shift+tab) is NOT a work item: like
-// pause (SetPausedEvent), it is applied on the reader thread by flipping the
-// executor's atomic. It was queued to the worker once, on the theory that
-// SetRunMode was worker-thread-only -- but the state is a single atomic enum
-// whose reads are lock-free from any thread, so the queue bought a
-// turn-boundary delay and no safety. See Session::SetRunMode.
-
-// The explicit-resume kick (SetPausedEvent{paused=false} with a turn that
-// ended STOP_REASON_PAUSED and nothing else queued). Runs the seedless wake
-// turn: the model continues from the persisted tool results the paused turn
-// left behind -- possibly answering a steered message that flushed after it.
-// Enqueued only when no turn is running or queued, so it can never double-run
-// behind a real turn; a turn that was merely requeued by auto-resume clears
-// the pending continuation at pop instead.
-struct QueuedResume {};
-
-// A user turn carrying PER-TURN model/agent overrides. Applied for this turn
-// only, on the worker at turn pop -- the sticky session preset, the session's
-// model_override_, and every metadata event are untouched. The model rides as
-// its RAW "<provider>/<model>" string and is split and resolved at pop: an
-// unknown or malformed ref fails the turn with a named error, never a silent
-// fall-back, and the reader never blocks on resolution.
-struct QueuedTurn {
-    std::string text;
-    std::string model;         // raw "<provider>/<model>"; empty = keep the session's
-    std::string agent_preset;  // empty = keep the session's own
-    // Server-assigned at submit (per-session monotonic), announced to every
-    // subscriber by TurnQueuedEvent: what lets a client cancel THIS queued
-    // turn before it runs, and correlate a cancel with its optimistic echo.
-    std::uint64_t turn_id = 0;
-};
-
-using WorkItem = std::variant<QueuedTurn, QueuedCommand, QueuedRewind, QueuedResume>;
 
 class Session : public commands::SessionControl {
 public:
@@ -702,9 +651,9 @@ private:
     // refreshes from. Worker thread only.
     void EmitDefaultNameIfComputed(const std::string& candidate);
     bool IsCancelled() const;
-    // The worker's wait predicate extension: should an out-of-band message
-    // wake this parked worker and drive a seedless turn? Called under mutex_.
-    bool ShouldWakeForInjections() const;
+    // The state the worker's wait predicate decides on (see WorkerShouldProceed).
+    // Called under mutex_.
+    WakeInputs WakeSnapshot() const;
     // Worker-only (the working history mutates on the worker): does the
     // history end in an unanswered user-text message? Forwarded to the loop;
     // combined with last_turn_failed_ it distinguishes "steering flushed
@@ -840,7 +789,7 @@ private:
 
     mutable std::mutex mutex_;
     std::condition_variable turn_cv_;
-    std::deque<WorkItem> work_;
+    WorkQueue work_;  // guarded by mutex_
     // Replaces what used to be two independent mutex_-guarded bools:
     // running_turn_ (set for every work item, including commands/rewinds)
     // and in_turn_ (true only while the worker is literally inside
@@ -861,14 +810,6 @@ private:
     // announced by TurnQueuedEvent at submit time and addressed by
     // CancelQueuedTurn / TurnCanceledEvent. Guarded by mutex_ with the queue.
     std::uint64_t next_turn_id_ = 1;
-
-    // The work queue is BOUNDED, unlike the outbound EventQueue's backpressure
-    // there is nothing pulling from here at a predictable rate: one turn can run
-    // for minutes, so a client streaming turns could otherwise enqueue them
-    // faster than they are consumed and grow memory without limit. The bound is
-    // a ceiling against a runaway producer, not a tuning knob; beyond it the
-    // submit is refused with an error event rather than dropped silently.
-    static constexpr std::size_t kMaxWorkItems = 32;
 
     std::thread worker_;
     std::once_flag join_once_;
