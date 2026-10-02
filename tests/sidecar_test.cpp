@@ -426,14 +426,13 @@ struct CapturingHandles {
         handles.logger = nullptr;
         handles.schedule_injection = [this](llm::Message message) {
             std::lock_guard<std::mutex> lock(mu);
-            // The result rides the ToolResultBlock; dig out its text.
+            // The result rides a task-result notification (never a second
+            // tool_result for the already-answered spawn call).
             for (const auto& block : message.content) {
-                if (const auto* result = std::get_if<llm::ToolResultBlock>(&block)) {
-                    std::string text;
-                    for (const auto& part : result->content) {
-                        text += std::get<llm::TextBlock>(part).text;
-                    }
-                    injected.emplace_back(std::move(text), result->is_error);
+                if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
+                    injected.emplace_back(
+                        text->text,
+                        text->text.find("status=\"error\"") != std::string::npos);
                 }
             }
             return true;

@@ -1,5 +1,6 @@
 #include "minimal/rpc/pending_requests.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace minimal::rpc {
@@ -62,14 +63,34 @@ std::optional<PendingAnswer> PendingRequests::Registration::AwaitResponse(
     return it->second.answer;
 }
 
-PendingRequests::Registration PendingRequests::Register(std::string request_id) {
+PendingRequests::Registration PendingRequests::Register(std::string request_id,
+                                                         std::optional<v1::ServerEvent> prompt) {
     std::uint64_t epoch = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        slots_[request_id];  // default-constructs an empty slot
+        Slot& slot = slots_[request_id];  // default-constructs an empty slot
+        slot.prompt = std::move(prompt);
+        slot.order = next_order_++;
         epoch = epoch_;
     }
     return Registration(this, std::move(request_id), epoch);
+}
+
+std::vector<v1::ServerEvent> PendingRequests::OpenPrompts() const {
+    std::vector<std::pair<std::uint64_t, v1::ServerEvent>> open;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (shutdown_) return {};
+        for (const auto& [id, slot] : slots_) {
+            if (slot.prompt && !slot.answer) open.emplace_back(slot.order, *slot.prompt);
+        }
+    }
+    std::sort(open.begin(), open.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<v1::ServerEvent> events;
+    events.reserve(open.size());
+    for (auto& entry : open) events.push_back(std::move(entry.second));
+    return events;
 }
 
 bool PendingRequests::Resolve(const std::string& request_id, PendingAnswer answer) {

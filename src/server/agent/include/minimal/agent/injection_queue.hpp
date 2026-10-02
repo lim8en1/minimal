@@ -30,18 +30,13 @@
 
 namespace minimal::agent {
 
-// A real human prompt (a steering submission, a rewind target, a turn ending
-// with something still awaiting a reply) vs. a User-role message that only
-// carries the model's own tool answers arriving late (a non-blocking
-// subagent's completion, a background task's result). Role alone cannot
-// distinguish the two -- both are role User -- so every caller that cares
-// about "did a human actually say something here" shares this one check
-// rather than reimplementing the role+non-empty-TextBlock scan.
 inline bool IsUserTextMessage(const llm::Message& message) {
     if (message.role != llm::Role::User) return false;
     for (const auto& block : message.content) {
         if (const auto* text = std::get_if<llm::TextBlock>(&block);
             text != nullptr && !text->text.empty()) {
+            // A task-result notification is machine-written, not a prompt.
+            if (text->text.starts_with(llm::kTaskResultTag)) return false;
             return true;
         }
     }

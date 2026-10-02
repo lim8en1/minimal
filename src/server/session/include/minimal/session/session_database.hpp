@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -210,6 +211,19 @@ public:
     // attribution's empty fields are stored as NULL (unknown), never as ''.
     std::int64_t AppendMessage(const std::string& session_id, const llm::Message& message,
                                int token_count = 0, const MessageAttribution& attribution = {});
+
+    // One entry of an atomic multi-message append. The message is borrowed and
+    // must outlive the call.
+    struct AppendEntry {
+        const llm::Message* message;
+        int token_count = 0;
+        MessageAttribution attribution;
+    };
+
+    // Appends every entry, in order, inside ONE transaction (a tool round's
+    // assistant message + its results). Returns the last assigned seq. Throws
+    // with nothing written if any entry fails.
+    std::int64_t AppendMessages(const std::string& session_id, std::span<const AppendEntry> entries);
 
     // Phase 5: the free-default-naming rule (first user text, made
     // label-shaped) moved to agent::Session, which computes the candidate and

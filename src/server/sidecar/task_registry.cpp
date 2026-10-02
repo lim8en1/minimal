@@ -46,11 +46,8 @@ void TaskRegistry::Finish(TaskState& task, const WatchHandles& handles,
     // session will refuse (Push would return false -- skipping is equivalent,
     // just quieter).
     if (final_state != BackgroundTaskEvent::State::kKilled && handles.schedule_injection) {
-        llm::ToolResultBlock block;
-        block.tool_use_id = handles.tool_use_id;
-        block.is_error = is_error;
-        block.content.push_back(llm::TextBlock{result_text});
-        if (!handles.schedule_injection(llm::Message{llm::Role::User, {std::move(block)}})) {
+        if (!handles.schedule_injection(
+                llm::MakeTaskResultMessage(handles.tool_use_id, is_error, result_text))) {
             if (handles.logger) {
                 handles.logger->warn("{}[{}] task {}: result dropped; session already terminating",
                                      "task", task.session_id, task.id);

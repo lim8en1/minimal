@@ -223,6 +223,29 @@ TEST_CASE("a slot is released even when the waiter unwinds", "[pending_requests]
     CHECK(pending.pending_count() == 0);
 }
 
+TEST_CASE("open prompts are replayable until answered, in registration order",
+          "[pending_requests]") {
+    PendingRequests pending;
+    minimal::v1::ServerEvent first;
+    first.mutable_confirmation_request()->set_request_id("req-1");
+    minimal::v1::ServerEvent second;
+    second.mutable_confirmation_request()->set_request_id("req-2");
+
+    auto one = pending.Register("req-1", first);
+    auto two = pending.Register("req-2", second);
+    auto bare = pending.Register("req-3");  // no prompt event: never replayed
+
+    auto open = pending.OpenPrompts();
+    REQUIRE(open.size() == 2);
+    CHECK(open[0].confirmation_request().request_id() == "req-1");
+    CHECK(open[1].confirmation_request().request_id() == "req-2");
+
+    REQUIRE(pending.Resolve("req-1", ConfirmationAnswer{"yes"}));
+    open = pending.OpenPrompts();
+    REQUIRE(open.size() == 1);
+    CHECK(open[0].confirmation_request().request_id() == "req-2");
+}
+
 TEST_CASE("the first answer wins over a retransmission", "[pending_requests]") {
     // A duplicate is a client retransmitting, not changing its mind. Overwriting
     // an answer the worker may already have acted on would be worse than

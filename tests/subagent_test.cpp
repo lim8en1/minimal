@@ -627,13 +627,19 @@ TEST_CASE("a non-blocking subagent's completion is injected at a turn boundary",
         const auto& message = history[i];
         if (message.role != llm::Role::User) continue;
         for (const auto& content : message.content) {
-            const auto* result = std::get_if<llm::ToolResultBlock>(&content);
-            if (result == nullptr || result->tool_use_id != "call-spawn") continue;
-            // The ack already used this tool_use_id; the injection is the one
-            // carrying the child's actual text.
-            if (TextOf(*result) == "background result") {
+            // The ack already answered "call-spawn"; the child's actual text
+            // arrives as a task-result notification, never a second tool_result.
+            if (const auto* second = std::get_if<llm::ToolResultBlock>(&content)) {
+                if (second->tool_use_id == "call-spawn") {
+                    CHECK(TextOf(*second).find("started") != std::string::npos);
+                }
+            }
+            const auto* text = std::get_if<llm::TextBlock>(&content);
+            if (text == nullptr || !text->text.starts_with(llm::kTaskResultTag)) continue;
+            if (text->text.find("tool_use_id=\"call-spawn\"") != std::string::npos &&
+                text->text.find("background result") != std::string::npos) {
                 saw_injection = true;
-                CHECK_FALSE(result->is_error);
+                CHECK(text->text.find("status=\"ok\"") != std::string::npos);
             }
         }
         // Boundary invariant, checked at every assistant tool call: the message

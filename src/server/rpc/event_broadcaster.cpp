@@ -138,6 +138,18 @@ bool EventBroadcaster::PublishTo(const Handle& handle, v1::ServerEvent event) {
     return Deliver(*handle, std::move(event));
 }
 
+bool EventBroadcaster::PublishToIfAbsent(const Handle& handle, v1::ServerEvent event) {
+    if (handle == nullptr) return false;
+    {
+        const std::string wanted = event.SerializeAsString();
+        std::lock_guard<std::mutex> lock(handle->mutex);
+        for (const auto& item : handle->events) {
+            if (item.event.SerializeAsString() == wanted) return true;  // already queued
+        }
+    }
+    return Deliver(*handle, std::move(event));
+}
+
 std::optional<v1::ServerEvent> EventBroadcaster::Pop(const Handle& handle) {
     if (handle == nullptr) return std::nullopt;
     std::unique_lock<std::mutex> lock(handle->mutex);

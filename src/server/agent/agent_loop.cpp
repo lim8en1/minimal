@@ -280,19 +280,24 @@ bool AgentLoop::SleepForBackoff(int attempt,
     return !Cancelled();
 }
 
+session::MessageAttribution AgentLoop::AssistantAttribution() const {
+    session::MessageAttribution attribution;
+    attribution.agent_preset = preset_.name;
+    // str() of an unset ref is "/", which would persist as a bogus model
+    // rather than as unknown.
+    if (!preset_.model_ref.provider.empty() && !preset_.model_ref.model.empty()) {
+        attribution.model = preset_.model_ref.str();
+    }
+    return attribution;
+}
+
 void AgentLoop::AppendAndPersist(llm::Message message, std::optional<int> output_tokens) {
     // Assistant rows carry who produced them: preset_ is the EFFECTIVE preset
     // for this turn (Session swaps in a per-turn borrow before RunTurn and
     // restores it after), so a one-turn override is recorded as exactly that.
-    session::MessageAttribution attribution;
-    if (message.role == llm::Role::Assistant) {
-        attribution.agent_preset = preset_.name;
-        // str() of an unset ref is "/", which would persist as a bogus model
-        // rather than as unknown.
-        if (!preset_.model_ref.provider.empty() && !preset_.model_ref.model.empty()) {
-            attribution.model = preset_.model_ref.str();
-        }
-    }
+    const session::MessageAttribution attribution =
+        message.role == llm::Role::Assistant ? AssistantAttribution()
+                                             : session::MessageAttribution{};
     store_.Append(message, output_tokens, attribution);
     // The persisted suffix gains its first member. Appends land at the END of
     // both history_ and the store, so this is the only place the boundary can
@@ -309,25 +314,6 @@ void AgentLoop::AppendAndPersist(llm::Message message, std::optional<int> output
 // by tests that construct a bare AgentLoop with no Session wrapper.
 bool AgentLoop::PushInjectedMessage(llm::Message message) {
     return injections_->Push(std::move(message));
-}
-
-void AgentLoop::RepairOrphanedToolUses(
-    const std::vector<const llm::ToolUseBlock*>& tool_uses) {
-    if (tool_uses.empty()) return;
-    // The assistant message was appended (and persisted) BEFORE the
-    // stop-reason checks, so a turn that ends here -- a cancel landing after
-    // the model finished streaming tool calls (the most natural cancel
-    // moment), a MaxTokens cut with complete tool_calls, a refusal -- leaves
-    // history ending in unanswered tool_use: a hard 400 on both wire formats,
-    // on EVERY later turn. The live repair is the resume path's
-    // (synthesize_missing_tool_results): one error ToolResultBlock per
-    // unanswered call, appended and persisted as one real message. Cancellation
-    // is ordinary, not exceptional -- the same every-exit-path rule that makes
-    // a THROWING tool survivable (§12.2) and fires the completion hook on
-    // teardown applies to the transcript itself.
-    if (auto repair = synthesize_missing_tool_results(history_)) {
-        AppendAndPersist(std::move(*repair));
-    }
 }
 
 void AgentLoop::FlushInjectedMessages() {
@@ -1354,12 +1340,33 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         llm::Message assistant{llm::Role::Assistant, std::move(response.content)};
         result.final_text = llm::TextOf(assistant);
         const auto tool_uses = ToolUsesOf(assistant);
+        // THE ROUND IS ONE UNIT. A tool round's assistant message is NOT
+        // appended here: it is held until every call is answered and then
+        // persisted TOGETHER with the results (AppendRound, one transaction),
+        // so history_ and the store can never hold a tool_use without its
+        // results -- not across a cancel, a throw, a store fault or a crash --
+        // and nothing (a steer, a rewind, a resume) can ever land between them.
+        // There is nothing to repair afterwards because nothing is ever torn.
+        const bool tool_round =
+            response.stop_reason == llm::StopReason::ToolUse && !tool_uses.empty();
         // The only per-message token count that exists: this response's output.
-        AppendAndPersist(std::move(assistant), response.usage.output_tokens);
+        const std::optional<int> assistant_output_tokens = response.usage.output_tokens;
+        if (!tool_round) {
+            // The turn ends on this message, so tool_use blocks it carries (a
+            // cancel or MaxTokens cut mid-stream, a refusal) are calls that
+            // never ran: dropped rather than persisted as an unanswerable
+            // orphan. An assistant message left empty by that is not stored.
+            std::erase_if(assistant.content, [](const llm::ContentBlock& block) {
+                return std::holds_alternative<llm::ToolUseBlock>(block);
+            });
+            if (!assistant.content.empty()) {
+                AppendAndPersist(std::move(assistant), assistant_output_tokens);
+            }
+        }
 
         if (result.usage_estimated) {
             // Zero-usage proxy gap: the request is fully assembled now
-            // (history_ carries this round's assistant message), so the same
+            // (history_ plus this round's assistant message), so the same
             // bytes/4 estimate resume and the compactor use describes the
             // context honestly enough to arm the trigger. SeedOccupancy
             // deliberately touches no cumulative totals, and the estimate is
@@ -1373,28 +1380,20 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             // DefinitionsFor/DefinitionsForGroups materialization and sort
             // on every zero-usage round, which is every round against any
             // OpenAI-compatible proxy that does not report usage.
-            const std::int64_t estimate =
+            std::int64_t estimate =
                 EstimateContextTokens(chat_request.system, chat_request.tools);
+            // A tool round's assistant message is not in history_ yet.
+            if (tool_round) estimate += estimate_tokens(std::span(&assistant, 1));
             tokens_.SeedOccupancy(estimate);
             result.last_usage.input_tokens =
                 static_cast<int>(std::min<std::int64_t>(std::max<std::int64_t>(estimate, 0),
                                                         std::numeric_limits<int>::max()));
         }
 
-        if (response.stop_reason == llm::StopReason::Cancelled) {
-            RepairOrphanedToolUses(tool_uses);
-            break;
-        }
-
-        // Anything other than ToolUse ends the turn. MaxTokens in particular is
+        // Anything but a tool round ends the turn. MaxTokens in particular is
         // reported as itself rather than collapsed into EndTurn -- otherwise
         // output is truncated mid-sentence and the turn looks successful.
-        if (response.stop_reason != llm::StopReason::ToolUse) {
-            RepairOrphanedToolUses(tool_uses);
-            break;
-        }
-
-        if (tool_uses.empty()) break;  // ToolUse with no blocks: nothing to do
+        if (!tool_round) break;
 
         // Parallel dispatch (ARCHITECTURE.md "Tool dispatch"), in two phases.
         //
@@ -1412,27 +1411,6 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             tools::ToolContext ctx;
             bool to_pool = false;
         };
-        // The assistant message carrying these tool_use blocks is already
-        // appended and persisted. A throw anywhere from the gate through the
-        // run (Prepare, input.dump(), a pool Submit) would leave history_ and
-        // the store ending in unanswered tool_use -- a 400 on every later
-        // turn. Unwinding therefore answers them with synthesized errors;
-        // disarmed once the results append below, which repairs for itself.
-        // Declared before the pool guard so it runs after the pool has joined.
-        struct RoundRepairGuard {
-            AgentLoop& loop;
-            const std::vector<const llm::ToolUseBlock*>& tool_uses;
-            const int uncaught = std::uncaught_exceptions();
-            bool armed = true;
-            ~RoundRepairGuard() {
-                if (!armed || std::uncaught_exceptions() <= uncaught) return;
-                try {
-                    loop.RepairOrphanedToolUses(tool_uses);
-                } catch (...) {
-                    // The store is what is failing; the original exception wins.
-                }
-            }
-        } round_repair{*this, tool_uses};
         std::vector<PendingCall> calls;
         calls.reserve(tool_uses.size());
         // "Deny and stop" (PreparedInvocation::stop_turn): once any call of the
@@ -1718,36 +1696,20 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         }
         pool_.Wait();
 
-        round_repair.armed = false;
-        try {
-            AppendAndPersist(llm::Message{llm::Role::User, std::move(results)});
-        } catch (...) {
-            // The assistant message carrying these tool_use blocks was
-            // already appended (and persisted) above. If persisting the
-            // paired results now fails (a store fault -- locked/full/corrupt
-            // database), history_ is left ending in unanswered tool_use: a
-            // hard 400 on both wire formats, on EVERY later turn, forever --
-            // this exception propagates past RunTurnLoop uncaught, and
-            // nothing else repairs the in-memory working set (only resume's
-            // LoadResumeSeed does, which requires a process restart).
-            //
-            // Best-effort in-memory repair, mirroring what the resume path
-            // already does for the identical shape (synthesize_missing_
-            // tool_results): synthesize error results so a live session
-            // survives to its NEXT turn instead of being poisoned by this
-            // one's store failure for the rest of its life. Guarded
-            // separately: RepairOrphanedToolUses itself calls
-            // AppendAndPersist, which can throw again if the store is still
-            // down -- that must not replace the ORIGINAL exception (the
-            // caller needs to know the store failed, not that the repair
-            // attempt also failed), and if the store call happens to
-            // succeed this time, the repair genuinely lands.
-            try {
-                RepairOrphanedToolUses(tool_uses);
-            } catch (...) {
-                // The store is what's failing; nothing more to do in memory.
+        // The round commits as one unit: the held assistant message and every
+        // result, in a single store transaction (see tool_round above). A store
+        // failure throws with NOTHING written and history_ untouched, so the
+        // session survives to its next turn.
+        {
+            llm::Message results_message{llm::Role::User, std::move(results)};
+            store_.AppendRound(assistant, assistant_output_tokens, AssistantAttribution(),
+                               results_message);
+            if (!first_persisted_seq_.has_value()) {
+                // The pair is two rows; the first of them opens the suffix.
+                first_persisted_seq_ = store_.last_appended_seq() - 1;
             }
-            throw;
+            history_.push_back(std::move(assistant));
+            history_.push_back(std::move(results_message));
         }
 
         // "Deny and stop": the round is answered and persisted; no provider

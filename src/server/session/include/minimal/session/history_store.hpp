@@ -40,6 +40,19 @@ public:
     virtual void Append(const llm::Message& message, std::optional<int> output_tokens,
                         const MessageAttribution& attribution) = 0;
 
+    // A tool round's assistant message (carrying tool_use blocks) and the user
+    // message answering every one of them, persisted as ONE unit. The pairing
+    // invariant -- no tool_use without its results directly behind it -- is
+    // enforced by construction: a store that can fail between the two writes
+    // must override this to be atomic. The default (two Appends) is for
+    // in-memory fakes that cannot fail midway.
+    virtual void AppendRound(const llm::Message& assistant, std::optional<int> output_tokens,
+                             const MessageAttribution& attribution,
+                             const llm::Message& results) {
+        Append(assistant, output_tokens, attribution);
+        Append(results, std::nullopt, MessageAttribution{});
+    }
+
     // The seq the last Append was assigned, or -1 if nothing has been appended.
     // Read, not counted: seq is assigned by the store, so a caller that tracked
     // its own count would be right only for a session that started empty. It is

@@ -578,11 +578,8 @@ private:
                                        const std::vector<llm::ToolDefinition>& tools) const;
 
     void AppendAndPersist(llm::Message message, std::optional<int> output_tokens = std::nullopt);
-    // Break-path repair: a turn that ends on Cancelled/MaxTokens/ContentFilter/
-    // Refusal/StopSequence with the response's tool_use blocks already appended
-    // would otherwise orphan them (hard 400 on every later turn). Synthesizes
-    // error results for any unanswered calls, exactly as the resume path does.
-    void RepairOrphanedToolUses(const std::vector<const llm::ToolUseBlock*>& tool_uses);
+    // Who produced an assistant row: the EFFECTIVE preset and model for this turn.
+    session::MessageAttribution AssistantAttribution() const;
     void MaybeCompact();
     // The shared body: every guard except the occupancy trigger, which is what
     // MaybeCompact adds and CompactNow deliberately skips. `trigger` names who

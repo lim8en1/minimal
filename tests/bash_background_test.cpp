@@ -25,6 +25,7 @@
 #include <thread>
 #include <vector>
 
+#include "minimal/agent/injection_queue.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/tools/tool.hpp"
 
@@ -185,14 +186,15 @@ Completion SingleCompletion(Harness& h) {
     if (messages.size() != 1) return out;
     REQUIRE(messages[0].role == llm::Role::User);
     REQUIRE(messages[0].content.size() == 1);
-    const auto* block = std::get_if<llm::ToolResultBlock>(&messages[0].content.front());
-    if (block == nullptr) return out;
-    CHECK(block->tool_use_id == "tu-bg");  // keyed to the ORIGINAL invocation
+    // A task-result notification, never a tool_result: the spawn call was
+    // already answered, and a second result for its id would be rejected.
+    const auto* block = std::get_if<llm::TextBlock>(&messages[0].content.front());
+    if (block == nullptr || !block->text.starts_with(llm::kTaskResultTag)) return out;
+    CHECK(block->text.find("tool_use_id=\"tu-bg\"") != std::string::npos);  // the ORIGINAL invocation
+    CHECK_FALSE(agent::IsUserTextMessage(messages[0]));
     out.present = true;
-    out.is_error = block->is_error;
-    if (!block->content.empty()) {
-        out.text = std::get<llm::TextBlock>(block->content.front()).text;
-    }
+    out.is_error = block->text.find("status=\"error\"") != std::string::npos;
+    out.text = block->text;
     return out;
 }
 
@@ -207,9 +209,8 @@ TEST_CASE("a background task acks immediately and injects its result at completi
     Harness h;
     const auto ack = h.Start("echo hello-background");
 
-    // The result lands as a tool-result user message keyed to the original
-    // tool_use_id -- the shape the session-naming rule already skips, and the
-    // shape a non-blocking subagent's completion uses.
+    // The result lands as a task-result notification naming the original
+    // tool_use_id -- the shape a non-blocking subagent's completion uses.
     REQUIRE(WaitFor([&] { return SingleCompletion(h).present; }));
     const auto completion = SingleCompletion(h);
     CHECK_FALSE(completion.is_error);

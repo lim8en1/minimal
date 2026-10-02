@@ -6,11 +6,11 @@ namespace minimal::agent {
 
 std::optional<llm::Message> synthesize_missing_tool_results(
     const std::vector<llm::Message>& messages) {
-    // The torn tail, when there is one, is always the LAST assistant message:
-    // appends are an exact prefix of the turn's writes, so nothing can follow an
-    // orphaned tool_use except silence. Searching from the back also means a
-    // later, fully-paired tool cycle never masks an earlier problem -- nothing
-    // past the trailing assistant message can answer its tool calls.
+    // RESUME ONLY, for transcripts written before a tool round was committed
+    // as one atomic unit (HistoryStore::AppendRound): the live loop can no
+    // longer produce a torn tail. The tail, when torn, is the LAST assistant
+    // message, so searching from the back means a later, fully-paired tool
+    // cycle never masks an earlier problem.
     std::size_t last_assistant = messages.size();
     for (std::size_t i = messages.size(); i-- > 0;) {
         if (messages[i].role == llm::Role::Assistant) {

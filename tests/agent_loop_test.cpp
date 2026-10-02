@@ -350,19 +350,14 @@ TEST_CASE("tool results are persisted before the next provider call", "[agent_lo
     CHECK(found);
 }
 
-TEST_CASE("a store failure appending tool results repairs history_ before rethrowing",
+TEST_CASE("a store failure committing a tool round leaves history_ without an orphan",
           "[agent_loop][invariant]") {
-    // THE BUG: AppendAndPersist appends the assistant message (carrying
-    // tool_use blocks) BEFORE the tools run, then appends the paired
-    // results message AFTER. If the store fails on THAT second append,
-    // history_ was left ending in unanswered tool_use -- a hard 400 on both
-    // wire formats -- and the exception propagated past RunTurnLoop
-    // uncaught. Session::RunOneTurn catches it and keeps the session alive,
-    // but nothing repaired the in-memory working set, so every later turn
-    // 400'd on the orphaned call for the rest of the session's life (only a
-    // process restart's resume path repairs the identical shape). The fix
-    // repairs history_ the same way resume does (synthesize_missing_
-    // tool_results) before rethrowing the ORIGINAL exception.
+    // A tool round's assistant message (carrying tool_use) is held until its
+    // results exist and then committed WITH them (HistoryStore::AppendRound).
+    // If that commit throws, nothing of the round reaches history_, so there is
+    // no orphaned tool_use to 400 every later turn and nothing to repair. The
+    // ORIGINAL exception still propagates (Session::RunOneTurn catches it and
+    // keeps the session alive).
     testing::FakeLlmProvider provider;
     provider.PushResponse(testing::ToolUseResponse("tu1", "read"));
     tools::ToolRegistry registry;
@@ -371,10 +366,10 @@ TEST_CASE("a store failure appending tool results repairs history_ before rethro
     tools::ToolExecutor executor(registry, checker, testing::AllowAllPolicy(),
                                  tools::PermissionModels{}, PermissionRunMode::Normal);
 
-    // Append #1 is the seed user message ("go"); #2 is the assistant
-    // message carrying tool_use (both succeed); #3 is the results message
-    // this test targets (throws); #4, if reached, is the repair's own
-    // append (succeeds, proving the repair landed).
+    // Append #1 is the seed user message ("go"); the round commit then goes
+    // through HistoryStore::AppendRound, whose default (this fake is not a
+    // transactional store) is two Appends: #2 the assistant message, #3 the
+    // results message -- which throws.
     ThrowsOnAppendN store(/*throw_on_call=*/3);
 
     agent::AgentPreset preset;
@@ -401,18 +396,11 @@ TEST_CASE("a store failure appending tool results repairs history_ before rethro
     }
     REQUIRE(threw);
 
-    // history_ ends with the repair message, not the orphaned assistant
-    // turn: a User message carrying an error ToolResultBlock for "tu1" --
-    // exactly synthesize_missing_tool_results' shape, the same repair resume
-    // already applies to a torn transcript.
+    // history_ holds only the seed: the round was never added, so no tool_use
+    // is left unanswered.
     const auto& history = loop.history();
-    REQUIRE(history.size() == 3);  // seed, assistant (with tool_use), repair
-    const auto& repair = history.back();
-    CHECK(repair.role == llm::Role::User);
-    REQUIRE(repair.content.size() == 1);
-    const auto& result = std::get<llm::ToolResultBlock>(repair.content[0]);
-    CHECK(result.tool_use_id == "tu1");
-    CHECK(result.is_error);
+    REQUIRE(history.size() == 1);
+    CHECK(history.front().role == llm::Role::User);
 }
 
 TEST_CASE("a result over max_tool_result_bytes is truncated with a visible marker",
@@ -2212,13 +2200,11 @@ void AssertAllToolUsesAnswered(std::span<const llm::Message> messages,
 TEST_CASE("a cancel landing after tool blocks streamed still yields a provider-valid "
           "transcript",
           "[agent_loop][invariant][cancel]") {
-    // The assistant message is appended and persisted BEFORE the stop-reason
-    // checks. A response that carries COMPLETE tool_use blocks but stops on
-    // Cancelled -- the sink aborting after the model finished streaming its
-    // calls, the most natural cancel moment -- used to break without answering
-    // them: an orphaned tool_use, a hard 400 on EVERY later turn, with the
-    // repair existing only on the resume path. The live loop repairs the same
-    // way now.
+    // A response that carries COMPLETE tool_use blocks but stops on Cancelled
+    // -- the sink aborting after the model finished streaming its calls, the
+    // most natural cancel moment -- must not leave an orphaned tool_use (a hard
+    // 400 on EVERY later turn). Calls that never ran are dropped from the
+    // stored message; the turn ends and the next request serializes.
     Harness h;
     h.AddTool("probe");
     h.Build();
@@ -2243,22 +2229,17 @@ TEST_CASE("a cancel landing after tool blocks streamed still yields a provider-v
     REQUIRE(h.provider.requests().size() == 3);
     AssertAllToolUsesAnswered(h.provider.requests()[2].messages, "post-cancel request");
 
-    // The repair is a real appended message the model can adapt to: error
-    // blocks naming the interruption, keyed to the orphaned calls.
-    bool saw_repair = false;
+    // u2 never ran, so nothing of it is stored -- no tool_use, no result.
     for (const auto& message : h.store.messages) {
-        if (message.role != llm::Role::User) continue;
         for (const auto& block : message.content) {
-            const auto* result = std::get_if<llm::ToolResultBlock>(&block);
-            if (result == nullptr || result->tool_use_id != "u2") continue;
-            saw_repair = true;
-            CHECK(result->is_error);
-            const auto* text = std::get_if<llm::TextBlock>(&result->content.front());
-            REQUIRE(text != nullptr);
-            CHECK(text->text.find("interrupted") != std::string::npos);
+            if (const auto* use = std::get_if<llm::ToolUseBlock>(&block)) {
+                CHECK(use->id != "u2");
+            }
+            if (const auto* result = std::get_if<llm::ToolResultBlock>(&block)) {
+                CHECK(result->tool_use_id != "u2");
+            }
         }
     }
-    CHECK(saw_repair);
 }
 
 TEST_CASE("a max_tokens cut with complete tool calls repairs the same way",

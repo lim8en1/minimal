@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <chrono>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -630,6 +631,13 @@ SessionSummary SessionDatabase::CreateSession(std::string name,
 std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
                                             const llm::Message& message, int token_count,
                                             const MessageAttribution& attribution) {
+    const AppendEntry entry{&message, token_count, attribution};
+    return AppendMessages(session_id, std::span<const AppendEntry>(&entry, 1));
+}
+
+std::int64_t SessionDatabase::AppendMessages(const std::string& session_id,
+                                             std::span<const AppendEntry> entries) {
+    if (entries.empty()) throw std::logic_error("AppendMessages: no entries");
     // Encode OUTSIDE the mutex. mu_ is the one lock every session's appends and
     // reads serialize on, and the JSON encode -- the DOM plus the dump -- is the
     // expensive half of an append. Holding the lock through it stalled every
@@ -648,12 +656,14 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
     // the orphaned call. Substituting U+FFFD keeps a byte of noise from
     // destroying a conversation; the transcript is a record of what was said,
     // not a binary-faithful channel.
-    const std::string content_json =
-        MessageToJson(message).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
-    const char* role = message.role == llm::Role::User ? "user" : "assistant";
+    std::vector<std::string> content_jsons;
+    content_jsons.reserve(entries.size());
+    for (const AppendEntry& entry : entries) {
+        content_jsons.push_back(MessageToJson(*entry.message)
+                                    .dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+    }
 
     std::lock_guard lock(mu_);
-    const std::int64_t now = NextTimestamp();
 
     std::int64_t assigned_seq = 0;
     ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin append");
@@ -685,6 +695,16 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
             ThrowSqliteError(db_, "failed to reclaim discarded compactions");
         }
 
+        // ALL entries land in this one transaction: a tool round's assistant
+        // message and its results commit together or not at all, so no reader
+        // or resume ever sees a tool_use without its results.
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+        const AppendEntry& entry = entries[i];
+        const std::string& content_json = content_jsons[i];
+        const char* role = entry.message->role == llm::Role::User ? "user" : "assistant";
+        const MessageAttribution& attribution = entry.attribution;
+        const int token_count = entry.token_count;
+        const std::int64_t now = NextTimestamp();
         // Validate the session and touch last-activity first: appending to a
         // session that does not exist is a wiring bug and must be loud, not a
         // silently dropped row. The message_count bump rides the same
@@ -749,6 +769,7 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
             ThrowSqliteError(db_, "failed to read back seq");
         }
         assigned_seq = sqlite3_column_int64(read_seq.stmt, 0);
+        }
 
         ExecChecked(db_, "COMMIT;", "failed to commit append");
     } catch (...) {
@@ -760,7 +781,8 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
     }
     // The reaper's threshold, not the transaction's: a committed append counts
     // even though the counter is checked without mu_ (see the member comment).
-    appends_since_checkpoint_.fetch_add(1, std::memory_order_release);
+    appends_since_checkpoint_.fetch_add(static_cast<int>(entries.size()),
+                                        std::memory_order_release);
     return assigned_seq;
 }
 

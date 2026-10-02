@@ -172,6 +172,19 @@ TEST_CASE("a latched backlog resyncs the first subscriber instead of a partial r
     CHECK(seeded == 4);
 }
 
+TEST_CASE("PublishToIfAbsent skips an event the subscriber already holds", "[broadcaster]") {
+    EventBroadcaster broadcaster{"s1"};
+    auto sub = Subscribe(broadcaster);
+
+    CHECK(broadcaster.PublishToIfAbsent(sub, Text("s1", "prompt")));
+    CHECK(broadcaster.PublishToIfAbsent(sub, Text("s1", "prompt")));  // identical: not queued twice
+    CHECK(broadcaster.PublishToIfAbsent(sub, Text("s1", "other")));
+
+    std::size_t queued = 0;
+    while (broadcaster.TryPop(sub).has_value()) ++queued;
+    CHECK(queued == 2);
+}
+
 TEST_CASE("unsubscribed and closed broadcasters refuse and wake their writers",
           "[broadcaster]") {
     EventBroadcaster broadcaster{"s1"};

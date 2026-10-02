@@ -63,11 +63,12 @@ public:
     Detailed<Answer> AskDetailed(Build&& build) {
         const std::string request_id =
             id_prefix_ + std::to_string(next_id_.fetch_add(1, std::memory_order_relaxed));
-        auto registration = pending_.Register(request_id);
-
         v1::ServerEvent event;
         event.set_session_id(session_id_);
         std::forward<Build>(build)(event, request_id);
+        // Registered WITH the event: the slot keeps it for replay to a stream
+        // that attaches while the worker is still parked here.
+        auto registration = pending_.Register(request_id, event);
         // Never blocks: a full subscriber drops its own oldest. Every attached
         // subscriber gets the prompt; the first answer wins.
         queue_.Publish(std::move(event));
@@ -77,6 +78,16 @@ public:
         const std::optional<PendingAnswer> answer = registration.AwaitResponse(
             bounded ? std::optional(unattended_timeout_) : std::nullopt);
         if (!answer) {
+            // The waiter gave up (timeout, cancel): dismiss the modal on every
+            // attached client, which would otherwise keep offering a question
+            // nobody is waiting on. Skipped at shutdown, when the streams are
+            // closing anyway.
+            if (!pending_.shut_down()) {
+                v1::ServerEvent resolved;
+                resolved.set_session_id(session_id_);
+                resolved.mutable_prompt_resolved()->set_request_id(request_id);
+                queue_.Publish(std::move(resolved));
+            }
             return {std::nullopt,
                     bounded && !pending_.shut_down() &&
                         std::chrono::steady_clock::now() - started >= unattended_timeout_};

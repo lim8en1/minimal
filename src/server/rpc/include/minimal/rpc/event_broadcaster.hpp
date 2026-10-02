@@ -104,6 +104,11 @@ public:
     // contract as Publish, plus false when the handle is unknown or closed.
     bool PublishTo(const Handle& handle, v1::ServerEvent event);
 
+    // PublishTo, unless an identical event is already queued for this
+    // subscriber -- prompt replay on attach: the first subscriber's backlog may
+    // already carry the prompt, and showing it twice is worse than once.
+    bool PublishToIfAbsent(const Handle& handle, v1::ServerEvent event);
+
     // The writer thread's drain. Blocks until an event is available or this
     // subscriber's queue is closed AND drained (nullopt = no more, ever).
     std::optional<v1::ServerEvent> Pop(const Handle& handle);

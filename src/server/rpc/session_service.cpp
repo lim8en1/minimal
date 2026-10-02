@@ -610,6 +610,14 @@ grpc::Status SessionServiceImpl::OpenSession(
         // thread: PublishTo never blocks.
         EmitSessionMetadata(*session, subscriber);
 
+        // A prompt the worker is still parked on may have been published before
+        // this stream existed (the earlier client crashed or detached): replay
+        // it so SOMEONE can answer. Before the writer starts, so a duplicate of
+        // what the subscriber's backlog already holds is detected, not raced.
+        for (auto& prompt : Transport(*session).pending().OpenPrompts()) {
+            Transport(*session).queue().PublishToIfAbsent(subscriber, std::move(prompt));
+        }
+
         writer = std::thread([stream, session, subscriber] {
             while (auto event = Transport(*session).queue().Pop(subscriber)) {
                 if (!stream->Write(*event)) break;  // client went away

@@ -22,6 +22,9 @@ public:
     void Append(const llm::Message& message, std::optional<int> output_tokens,
                 const MessageAttribution& attribution) override;
 
+    void AppendRound(const llm::Message& assistant, std::optional<int> output_tokens,
+                     const MessageAttribution& attribution, const llm::Message& results) override;
+
     // Cached from the database's own answer rather than counted locally, so it
     // stays correct for a session that did not start empty. Atomic because the
     // session worker writes it while the observer path reads it.

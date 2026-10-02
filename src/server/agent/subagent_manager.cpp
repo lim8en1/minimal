@@ -356,15 +356,12 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
         }
         if (blocking) return;  // the waiter translates the result itself
 
-        // Non-blocking: the result arrives at the parent's next turn boundary,
-        // as a tool-result-only user message keyed to the spawn call -- the
-        // shape the session-naming rule already knows not to title.
+        // Non-blocking: the spawn call already got its "started" ack, so the
+        // result arrives at the parent's next turn boundary as a task-result
+        // notification (see MakeTaskResultMessage), never a second tool_result.
         const ChildResult child_result = ResultOf(result);
-        llm::ToolResultBlock block;
-        block.tool_use_id = tool_use_id;
-        block.is_error = child_result.is_error;
-        block.content.push_back(llm::TextBlock{child_result.text});
-        if (parent_ref->QueueInjectedMessage(llm::Message{llm::Role::User, {std::move(block)}})) {
+        if (parent_ref->QueueInjectedMessage(
+                llm::MakeTaskResultMessage(tool_use_id, child_result.is_error, child_result.text))) {
             logger.info("subagent {} finished ({}); result queued for its parent", child_id,
                         child_result.is_error ? "error" : "ok");
         } else {

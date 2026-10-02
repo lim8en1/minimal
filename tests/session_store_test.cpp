@@ -2313,3 +2313,30 @@ TEST_CASE("the SQLite store persists a rename and both model overrides on the se
     REQUIRE(stored.has_value());
     CHECK_FALSE(stored->model.has_value());
 }
+
+TEST_CASE("AppendRound commits a tool round's assistant and results together or not at all",
+          "[session][store][invariant]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "round.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    SqliteHistoryStore store(db, id);
+    store.Append(UserMsg("go"), std::nullopt, MessageAttribution{});
+
+    llm::Message assistant{llm::Role::Assistant,
+                           {llm::ToolUseBlock{"tu1", "read", nlohmann::json::object()}}};
+    llm::Message results{llm::Role::User,
+                         {llm::ToolResultBlock{"tu1", {llm::TextBlock{"ok"}}, false}}};
+
+    SECTION("both rows land, in order, with contiguous seqs") {
+        store.AppendRound(assistant, 7, MessageAttribution{"build", "p/m"}, results);
+        CHECK(store.last_appended_seq() == 2);
+        CHECK(db.LastMessageSeq(id) == 2);
+    }
+
+    SECTION("a failure writes neither row") {
+        // An unknown session fails the touch statement mid-transaction.
+        SqliteHistoryStore bogus(db, "no-such-session");
+        CHECK_THROWS(bogus.AppendRound(assistant, 7, MessageAttribution{}, results));
+        CHECK(db.LastMessageSeq(id) == 0);
+    }
+}

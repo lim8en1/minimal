@@ -28,6 +28,7 @@
 
 #include "minimal/tools/permission_checker.hpp"
 #include "minimal/tools/prompt.hpp"
+#include "minimal/v1/session_service.pb.h"
 
 namespace minimal::rpc {
 
@@ -116,7 +117,17 @@ public:
         std::uint64_t epoch_ = 0;
     };
 
-    [[nodiscard]] Registration Register(std::string request_id);
+    //
+    // `prompt` is the wire event that asked the question, kept while the slot is
+    // open so a stream that attaches AFTER it was published (the first client
+    // crashed, a second one joins) can be shown the prompt too -- see
+    // OpenPrompts(). Without it the worker waits for an answer nobody can see.
+    [[nodiscard]] Registration Register(std::string request_id,
+                                        std::optional<v1::ServerEvent> prompt = std::nullopt);
+
+    // The prompt events whose slots are still unanswered, in registration order.
+    // Any thread.
+    std::vector<v1::ServerEvent> OpenPrompts() const;
 
     // Reader thread. Returns false if no slot is registered under this id, which
     // is not an error: a client may answer a request whose session has already
@@ -156,12 +167,15 @@ private:
 
     struct Slot {
         std::optional<PendingAnswer> answer;
+        std::optional<v1::ServerEvent> prompt;
+        std::uint64_t order = 0;  // registration order, for OpenPrompts()
     };
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::unordered_map<std::string, Slot> slots_;
     std::uint64_t epoch_ = 0;
+    std::uint64_t next_order_ = 0;
     bool shutdown_ = false;
 };
 

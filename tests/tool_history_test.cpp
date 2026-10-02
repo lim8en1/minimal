@@ -217,15 +217,14 @@ TEST_CASE("a tool reads the transcript through ctx.history during a live turn",
     CHECK(seen[0].session_id == row.session_id);
 
     // The tool result reached the model, and the tool saw what a live turn
-    // looks like mid-flight: the user turn is persisted before dispatch (each
-    // message is appended as it happens), so the newest window holds exactly
-    // the user turn and the assistant tool_use that dispatched the probe --
-    // descending by seq, nothing more.
+    // looks like mid-flight: the user turn is persisted before dispatch, but
+    // the round's assistant tool_use is committed WITH its results afterwards
+    // (one atomic unit), so the newest window holds exactly the user turn.
     const auto& requests = fixture.script->requests;
     REQUIRE(requests.size() == 2);
     const std::string second = TextOf(requests[1]);
-    CHECK(second.find("history=ok; saw=2") != std::string::npos);
-    CHECK(second.find("roles=A,U") != std::string::npos);
+    CHECK(second.find("history=ok; saw=1") != std::string::npos);
+    CHECK(second.find("roles=U") != std::string::npos);
     CHECK(second.find("lastuser=hello there") != std::string::npos);
     session->Terminate();
 }
@@ -312,9 +311,10 @@ TEST_CASE("a subagent's tool sees the child's transcript only, never the parent'
     // final text. The tool result reaching the model is the SECOND child call.
     REQUIRE(requests.size() == 3);
     const std::string second = TextOf(requests[2]);
-    // M = the child's own user turn + its assistant tool_use. The parent's N
+    // M = the child's own user turn (the in-flight round's assistant message
+    // is committed with its results, after the tool runs). The parent's N
     // messages (its user turn included) are nowhere in the child's window.
-    CHECK(second.find("history=ok; saw=2") != std::string::npos);
+    CHECK(second.find("history=ok; saw=1") != std::string::npos);
     CHECK(second.find("lastuser=child task") != std::string::npos);
     CHECK(second.find("parent business only") == std::string::npos);
     child->Terminate();

@@ -73,4 +73,29 @@ inline std::string TextOf(const std::vector<ContentBlock>& content) {
 
 inline std::string TextOf(const Message& message) { return TextOf(message.content); }
 
+// Late results of non-blocking subagents and background tasks. The spawn call
+// was already answered (with its "started" ack), so the finished result can NOT
+// ride a second tool_result for the same tool_use_id: the APIs require every
+// tool_result to answer a tool_use in the immediately preceding assistant
+// message, and reject the request otherwise. It arrives as a plain notification
+// instead, tagged so it is never mistaken for something the user typed
+// (agent::IsUserTextMessage ignores it: not a rewind target, not a steer, no wake).
+inline constexpr std::string_view kTaskResultTag = "<task-result";
+
+inline llm::Message MakeTaskResultMessage(const std::string& tool_use_id, bool is_error,
+                                          const std::string& text) {
+    std::string body = std::string(kTaskResultTag) + " tool_use_id=\"" + tool_use_id +
+                       "\" status=\"" + (is_error ? "error" : "ok") + "\">\n" + text +
+                       "\n</task-result>";
+    return llm::Message{llm::Role::User, {llm::TextBlock{std::move(body)}}};
+}
+
+// A real human prompt (a steering submission, a rewind target, a turn ending
+// with something still awaiting a reply) vs. a User-role message that only
+// carries the model's own tool answers arriving late (a non-blocking
+// subagent's completion, a background task's result). Role alone cannot
+// distinguish the two -- both are role User -- so every caller that cares
+// about "did a human actually say something here" shares this one check
+// rather than reimplementing the role+non-empty-TextBlock scan.
+
 }  // namespace minimal::llm

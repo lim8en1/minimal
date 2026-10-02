@@ -20,6 +20,17 @@ void SqliteHistoryStore::Append(const llm::Message& message, std::optional<int> 
     last_seq_.store(seq, std::memory_order_release);
 }
 
+void SqliteHistoryStore::AppendRound(const llm::Message& assistant,
+                                     std::optional<int> output_tokens,
+                                     const MessageAttribution& attribution,
+                                     const llm::Message& results) {
+    const SessionDatabase::AppendEntry entries[] = {
+        {&assistant, output_tokens.value_or(0), attribution},
+        {&results, 0, MessageAttribution{}},
+    };
+    last_seq_.store(db_.AppendMessages(session_id_, entries), std::memory_order_release);
+}
+
 void SqliteHistoryStore::SaveCompactionCheckpoint(std::int64_t boundary_seq,
                                                   const llm::Message& summary,
                                                   const CompactionMeta& meta) {
