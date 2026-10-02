@@ -52,6 +52,7 @@ add_library(minimal_server_core SHARED
     agent/context_compactor.cpp
     agent/structured_compaction.cpp
     agent/agent_loop.cpp
+    agent/compaction_controller.cpp
     agent/request_builder.cpp
     agent/retry_policy.cpp
     agent/tool_result_caps.cpp

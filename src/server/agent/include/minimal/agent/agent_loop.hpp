@@ -35,6 +35,7 @@
 #include "minimal/tools/tool_pool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 #include "minimal/agent/loop_types.hpp"
+#include "minimal/agent/compaction_controller.hpp"
 #include "minimal/agent/request_builder.hpp"
 #include "minimal/agent/working_history.hpp"
 
@@ -225,11 +226,6 @@ private:
     using SystemAndTools = RequestBuilder::SystemAndTools;
     SystemAndTools BuildSystemAndTools() const;
 
-    // Drops ThinkingBlocks from history_[first, last) -- the messages a
-    // compaction kept verbatim -- when the provider rejects replaying
-    // thinking whose prefix changed (LlmProvider::BindsThinkingToPrefix).
-    // Working set only; the transcript keeps them.
-    void DropStaleThinking(std::size_t first, std::size_t last);
 
     // The estimate's real body, taking an already-built system/tools pair
     // instead of calling BuildSystemAndTools() itself. The public
@@ -300,8 +296,6 @@ private:
     // the way it already changes compression_prompt). Both may be null/empty:
     // an injected compactor wins outright (tests), and a null registry just
     // skips the preset-name step of the resolution inside Compact().
-    Compactor compactor_;
-    const CompactionStrategyRegistry* compaction_strategies_ = nullptr;
 
     // The in-memory conversation, its seq mapping into the store, and the token
     // accumulator -- see WorkingHistory. Declared BEFORE request_, which holds
@@ -312,6 +306,7 @@ private:
     // own mutex.
     std::shared_ptr<InjectionQueue> injections_;
     RequestBuilder request_;
+    CompactionController compaction_;
     RetryPolicy retry_;
 
     // Parallel tool dispatch (ARCHITECTURE.md "Tool dispatch"). Width from
@@ -321,36 +316,7 @@ private:
     // destroyed first (Session declares it before its borrowed state).
     tools::ToolPool pool_;
 
-    // Set when a compaction attempt fails, cleared at each RunTurn: without it a
-    // failing summarizer would be re-invoked on every tool cycle of the same turn,
-    // resending half the context to the provider each time. The trigger stays armed
-    // for the next turn, where the flag resets.
-    bool compaction_failed_this_turn_ = false;
 
-    // Warn-once latch for a window-relative trigger that has no window to resolve
-    // against: MaybeCompact runs on every tool cycle, and the situation is one
-    // actionable line per session, not noise per cycle.
-    bool compaction_trigger_warned_ = false;
-
-    // Same latch, same reasoning, for a preset whose `compaction_strategy`
-    // name nothing registered: one actionable line per session, not one per
-    // compaction attempt.
-    bool compaction_strategy_warned_ = false;
-    // Auto-compaction sanity guards (MaybeCompact). `auto_compacted_last_check_`:
-    // the previous trigger check compacted, so a trigger firing again at the
-    // very next check means the fold cannot get the context under the trigger
-    // -- auto-compaction halts (`auto_compaction_halted_`) with a notice
-    // instead of re-summarizing every tool round, until occupancy drops below
-    // the trigger again. `compaction_floor_warned_`: the trigger sits at or
-    // below the context no compaction can remove (system prompt, tools,
-    // project context), noticed once.
-    bool auto_compacted_last_check_ = false;
-    bool auto_compaction_halted_ = false;
-    bool compaction_floor_warned_ = false;
-
-    // A compaction that did NOT fold (a guard stopped it): logged, sent to the
-    // client as a skipped CompactionEvent, and recorded for scrollback.
-    void EmitCompactionNotice(std::string_view trigger, std::string warning);
 };
 
 }  // namespace minimal::agent
