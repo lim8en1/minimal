@@ -41,6 +41,7 @@
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/injection_queue.hpp"
+#include "minimal/agent/pause_gate.hpp"
 #include "minimal/agent/session_event.hpp"
 #include "minimal/agent/session_transport.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
@@ -472,7 +473,7 @@ public:
     // iff the last turn actually ended paused and nothing else is queued --
     // enqueues a seedless continuation turn. See ARCHITECTURE.md "Pause".
     void SetPaused(bool paused);
-    bool paused() const { return IsPaused(pause_state_.load(std::memory_order_acquire)); }
+    bool paused() const { return pause_.paused(); }
 
     // Reader thread. Removes the queued (not yet popped) turn with this id
     // -- the id TurnQueuedEvent announced at submit time. Always answered by
@@ -703,14 +704,6 @@ private:
     // a promise this sets, and setting it twice throws. `context` names the
     // caller in the warn log on a throwing hook, e.g. " during teardown".
     void FireOnTurnFinishedOnce(const TurnResult& result, std::string_view context);
-    // The three pause_state_ transitions that must preserve the OTHER
-    // component while touching only their own -- callers must hold mutex_.
-    // Named like FireOnTurnFinishedOnce: centralizing the read-modify-write
-    // here is what keeps it from being re-scattered across call sites the
-    // way the old two-bool pair was.
-    void ClearPausedLocked();          // clears paused, keeps continuation
-    void ClearContinuationLocked();    // clears continuation, keeps paused
-    void MarkContinuationPendingLocked();  // sets continuation, keeps paused
     void RunOneCommand(const QueuedCommand& command);
     void RunOneRewind(const QueuedRewind& request);
     // The full E-additions metadata set (name, preset, model, run mode,
@@ -864,46 +857,10 @@ private:
     // destroyed. Null without an advisor. See AdvisorCancelSource.
     std::shared_ptr<std::atomic<bool>> advisor_cancel_flag_;
     std::atomic<bool> terminated_{false};
-    // Replaces what used to be two separately-stored bits: paused_ (a free
-    // std::atomic<bool>; SetPausedEvent, reader-thread-written, worker-read --
-    // the loop's pause probe reads it mid-turn, the worker's wait predicate
-    // holds turn work while it's set, Cancel clears it) and
-    // continuation_pending_ (mutex_-guarded bool; set on the worker when a
-    // turn ends STOP_REASON_PAUSED, cleared when any turn starts or a resume
-    // kick is enqueued -- the record that an explicit unpause has something
-    // to continue INTO).
-    //
-    // This is a 4-value PRODUCT state, not a 3-value ladder:
-    // kContinuationPending (not paused, but a continuation is owed) is a
-    // real, separately-reachable state -- SetPaused(false) can clear the
-    // paused bit while a still-finishing final round leaves the continuation
-    // owed (see SetPaused's kick-enqueue comment), and RunOneTurn marks the
-    // continuation unconditionally on a Paused result, including when the
-    // pause was already cleared. Collapsing that combination into
-    // kNotPaused would silently drop the recovery path it exists for.
-    //
-    // Stays ATOMIC, not mutex_-guarded like WorkerActivity above: paused()
-    // is called lock-free from any thread (session_registry.cpp,
-    // session_service.cpp, tests), and AgentLoop's mid-turn pause probe
-    // (paused(), wired in as its is_paused callback) reads it from the
-    // worker thread while RunOneTurn is executing, deliberately without
-    // mutex_. Every WRITE still happens under mutex_ (a strengthening vs.
-    // the old paused_, whose Cancel()-side store raced the lock entirely) --
-    // see IsPaused/HasContinuationPending below and their call sites.
-    enum class PauseState : std::uint8_t {
-        kNotPaused,
-        kPaused,
-        kPausedWithContinuation,
-        kContinuationPending,
-    };
-    static constexpr bool IsPaused(PauseState s) {
-        return s == PauseState::kPaused || s == PauseState::kPausedWithContinuation;
-    }
-    static constexpr bool HasContinuationPending(PauseState s) {
-        return s == PauseState::kPausedWithContinuation ||
-               s == PauseState::kContinuationPending;
-    }
-    std::atomic<PauseState> pause_state_{PauseState::kNotPaused};
+    // Pause + "a continuation is owed" (see PauseGate). Reads are lock-free
+    // (paused() from any thread, AgentLoop's mid-turn probe on the worker);
+    // every WRITE happens under mutex_.
+    PauseGate pause_;
     // The user's runtime run-mode choice (shift+tab), mirrored from the
     // executor's atomic at every write. The executor's value IS the live one;
     // this is the sticky record PresetRestore and /agent re-resolutions need
