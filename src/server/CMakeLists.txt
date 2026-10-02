@@ -55,6 +55,7 @@ add_library(minimal_server_core SHARED
     agent/request_builder.cpp
     agent/retry_policy.cpp
     agent/tool_result_caps.cpp
+    agent/working_history.cpp
     agent/provider_instance_cache.cpp
     agent/provider_resolver.cpp
     commands/command_registry.cpp

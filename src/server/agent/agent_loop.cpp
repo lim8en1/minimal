@@ -14,6 +14,7 @@
 #include "minimal/agent/structured_compaction.hpp"
 #include "minimal/agent/transcript_repair.hpp"
 #include "minimal/agent/request_builder.hpp"
+#include "minimal/agent/working_history.hpp"
 #include "minimal/agent/retry_policy.hpp"
 #include "tool_result_caps.hpp"
 #include "minimal/common/utf8.hpp"
@@ -43,11 +44,9 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       event_sink_(std::move(event_sink)),
       compactor_(std::move(compactor)),
       compaction_strategies_(compaction_strategies),
-      history_(std::move(seed.history)),
-      first_persisted_seq_(seed.first_persisted_seq),
-      head_is_summary_(seed.head_is_summary),
-      request_(preset_, std::move(project_context), registry_, config_, history_, tokens_,
-               is_cancelled_, session_.session_id),
+      working_(store, std::move(seed.history), seed.first_persisted_seq, seed.head_is_summary),
+      request_(preset_, std::move(project_context), registry_, config_, working_.messages(),
+               working_.tokens(), is_cancelled_, session_.session_id),
       retry_(config.retry_base_delay, config.retry_max_delay, is_cancelled_),
       pool_(config.max_parallel_tool_calls) {
     // The injection queue is shared with the session's channels block when
@@ -56,7 +55,7 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
     // gets a private one, which nothing else can observe anyway.
     injections_ =
         session_.injections ? session_.injections : std::make_shared<InjectionQueue>();
-    if (!history_.empty()) {
+    if (!working_.messages().empty()) {
         // A resumed context has no backend usage behind it yet, so give the
         // compaction trigger an estimate to work with. Deliberately the same
         // bytes/4 roughness the compactor's fallback uses -- there is no
@@ -66,28 +65,21 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
         // those ride every request and backend ground truth counts them, so
         // excluding them under-triggered compaction on exactly the sessions
         // this seed exists for.
-        tokens_.SeedOccupancy(EstimateContextTokens());
+        working_.tokens().SeedOccupancy(EstimateContextTokens());
     }
     // A checkpoint resume reproduces the live post-fold working set, which
     // had the kept messages' thinking dropped (see Compact()).
-    if (head_is_summary_ && first_persisted_seq_.has_value() && seed.kept_through_seq >= 0) {
-        const std::int64_t kept = seed.kept_through_seq - *first_persisted_seq_ + 1;
+    if (working_.head_is_summary() && working_.first_persisted_seq().has_value() && seed.kept_through_seq >= 0) {
+        const std::int64_t kept = seed.kept_through_seq - *working_.first_persisted_seq() + 1;
         if (kept > 0) {
-            DropStaleThinking(1, std::min(history_.size(), static_cast<std::size_t>(kept) + 1));
+            DropStaleThinking(1, std::min(working_.messages().size(), static_cast<std::size_t>(kept) + 1));
         }
     }
 }
 
 void AgentLoop::DropStaleThinking(std::size_t first, std::size_t last) {
     if (!provider_.get().BindsThinkingToPrefix()) return;
-    for (std::size_t i = first; i < last && i < history_.size(); ++i) {
-        auto& blocks = history_[i].content;
-        blocks.erase(std::remove_if(blocks.begin(), blocks.end(),
-                                    [](const llm::ContentBlock& block) {
-                                        return std::holds_alternative<llm::ThinkingBlock>(block);
-                                    }),
-                     blocks.end());
-    }
+    working_.DropThinking(first, last);
 }
 
 bool AgentLoop::Cancelled() const { return is_cancelled_ && is_cancelled_(); }
@@ -95,13 +87,7 @@ bool AgentLoop::Cancelled() const { return is_cancelled_ && is_cancelled_(); }
 bool AgentLoop::Paused() const { return is_paused_ && is_paused_(); }
 
 bool AgentLoop::HistoryEndsWithUnansweredUserText() const {
-    if (history_.empty()) return false;
-    // Text, not tool results: an injected subagent completion also ends the
-    // history in a User message, but its blocks are ToolResultBlocks -- the
-    // model's own answers arriving late, which wait for the next real turn
-    // when the wake setting is off. Only TEXT is a human prompt awaiting a
-    // reply.
-    return IsUserTextMessage(history_.back());
+    return working_.EndsWithUnansweredUserText();
 }
 
 session::MessageAttribution AgentLoop::AssistantAttribution() const {
@@ -122,14 +108,7 @@ void AgentLoop::AppendAndPersist(llm::Message message, std::optional<int> output
     const session::MessageAttribution attribution =
         message.role == llm::Role::Assistant ? AssistantAttribution()
                                              : session::MessageAttribution{};
-    store_.Append(message, output_tokens, attribution);
-    // The persisted suffix gains its first member. Appends land at the END of
-    // both history_ and the store, so this is the only place the boundary can
-    // move forward.
-    if (!first_persisted_seq_.has_value()) {
-        first_persisted_seq_ = store_.last_appended_seq();
-    }
-    history_.push_back(std::move(message));
+    working_.Append(std::move(message), output_tokens, attribution);
 }
 
 // Unrelated to Session::QueueInjectedMessage despite the similar shape: that
@@ -218,7 +197,7 @@ void AgentLoop::MaybeCompact() {
     // lags a round: it describes the PREVIOUS request, so a tool result (or
     // mention) appended since is invisible to it, and one huge result would
     // sail past the trigger straight into a window overflow.
-    const std::int64_t occupancy = std::max(tokens_.last_occupancy(), EstimateContextTokens());
+    const std::int64_t occupancy = std::max(working_.tokens().last_occupancy(), EstimateContextTokens());
     if (occupancy < trigger) {
         // Back under the trigger: the "right after a compaction" window is
         // over, and a halted auto-compaction re-arms.
@@ -235,7 +214,7 @@ void AgentLoop::MaybeCompact() {
     const SystemAndTools system_and_tools = BuildSystemAndTools();
     const std::int64_t fixed_tokens =
         EstimateContextTokens(system_and_tools.system, system_and_tools.tools) -
-        estimate_tokens(history_);
+        estimate_tokens(working_.messages());
     if (trigger <= fixed_tokens) {
         if (!compaction_floor_warned_) {
             compaction_floor_warned_ = true;
@@ -274,12 +253,12 @@ void AgentLoop::EmitCompactionNotice(std::string_view trigger, std::string warni
     event.trigger = std::string(trigger);
     event.skipped = true;
     event.warning = std::move(warning);
-    event.tokens_before = tokens_.last_occupancy();
+    event.tokens_before = working_.tokens().last_occupancy();
     event.tokens_after = event.tokens_before;
     event.created_at_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::system_clock::now().time_since_epoch())
                                    .count();
-    if (first_persisted_seq_.has_value()) {
+    if (working_.first_persisted_seq().has_value()) {
         event.at_seq = store_.last_appended_seq();
         try {
             // A notice record: boundary -1, never the checkpoint (skipped rows
@@ -312,7 +291,7 @@ std::optional<std::size_t> AgentLoop::CompactNow(std::string_view prompt_overrid
 }
 
 void AgentLoop::ClearHistory() {
-    history_.clear();
+    working_.Clear();
     // The queue is concurrency-safe by construction (its own mutex), and the
     // two sides are genuinely concurrent: /clear runs on THIS session's worker,
     // while QueueInjectedMessage runs on a NON-BLOCKING SUBAGENT's worker from
@@ -320,11 +299,6 @@ void AgentLoop::ClearHistory() {
     // child finishing while the user types /clear is a data race on a
     // vector<Message> -- the kind that corrupts rather than crashes.
     injections_->Clear();
-    // The occupancy estimate goes with the history it described. It self-heals
-    // on the next RecordTurn, so leaving it stale only cost one no-op Compact()
-    // -- but a token count that outlives its messages is the sort of thing a
-    // later change trips over, and the compaction trigger reads it.
-    tokens_ = llm::TokenAccumulator{};
     // /clear drops the VIEW, and the checkpoint IS a view: leaving it would
     // make a resume load [summary + tail] of a conversation the user wiped
     // from context, when clear's contract is that only the transcript survives
@@ -337,92 +311,60 @@ void AgentLoop::ClearHistory() {
         session_.logger.warn("session {}: failed to clear compaction checkpoint: {}",
                              session_.session_id, error.what());
     }
-    first_persisted_seq_.reset();
-    head_is_summary_ = false;
-    // Not the store. Compaction established that the in-memory working set and
-    // the durable transcript are different things; /clear drops the first and
-    // leaves scrollback whole.
+}
+
+// What a working-set replacement owes afterwards: the token estimate described
+// the old contents, and -- when a tail was DISCARDED (rewind, reseed) -- queued
+// completions answered turns that no longer happened. A redo discards nothing,
+// so it keeps them.
+void AgentLoop::AfterWorkingSetReplaced(bool discarded_tail) {
+    working_.tokens() = llm::TokenAccumulator{};
+    if (!working_.messages().empty()) {
+        working_.tokens().SeedOccupancy(EstimateContextTokens());
+    }
+    if (discarded_tail) {
+        // Same queue ClearHistory clears (its own mutex, so no lock needed here):
+        // a background subagent's worker can be queueing a completion while the
+        // user rewinds.
+        injections_->Clear();
+    }
 }
 
 void AgentLoop::TruncateAfter(std::int64_t target_seq) {
-    // Nothing in memory to truncate. Reachable legitimately: a second rewind
-    // after one to the transcript's start left the working set empty, and the
-    // durable marks are still the Session's to make.
-    if (history_.empty()) return;
-    if (!first_persisted_seq_.has_value() && !head_is_summary_) {
-        // No mapping to seq space. Defensive -- the Session validates the
-        // target against the store before calling, and every path that fills
-        // history_ also establishes the mapping -- but silent corruption
-        // would be worse than an early return.
-        session_.logger.warn("session {}: rewind ignored: no persisted portion to map onto",
-                             session_.session_id);
-        return;
+    switch (working_.TruncateAfter(target_seq)) {
+        case WorkingHistory::TruncateResult::kNothingToTruncate:
+            return;
+        case WorkingHistory::TruncateResult::kUnmapped:
+            // Defensive -- the Session validates the target against the store
+            // before calling, and every path that fills the working set also
+            // establishes the mapping -- but silent corruption would be worse
+            // than an early return.
+            session_.logger.warn("session {}: rewind ignored: no persisted portion to map onto",
+                                 session_.session_id);
+            return;
+        case WorkingHistory::TruncateResult::kTruncated:
+            break;
     }
-    // Index in history_ of the first message that must go. The contiguous-
-    // suffix invariant makes this arithmetic exact: history_'s persisted
-    // portion starts at first_persisted_seq_, and the synthetic summary (when
-    // present) sits one slot above the arithmetic.
-    const std::int64_t base = first_persisted_seq_.value_or(0);
-    const std::int64_t signed_idx = target_seq - base + (head_is_summary_ ? 1 : 0);
-    // A rewind to the transcript's very start leaves the working set empty.
-    const std::size_t idx =
-        static_cast<std::size_t>(std::max<std::int64_t>(signed_idx, 0));
-    history_.erase(history_.begin() + static_cast<long>(idx), history_.end());
-    if (history_.empty()) {
-        // Mirrors ClearHistory: an empty working set has no persisted portion
-        // to be contiguous with, and the next append establishes it. The
-        // summary flag goes with it: an empty set has no synthetic head, and
-        // leaving it set would make the next Compact() subtract a phantom
-        // summary in persisted_removed.
-        first_persisted_seq_.reset();
-        head_is_summary_ = false;
-    }
-
-    // Same reset the constructor and /clear apply: the estimate described the
-    // discarded tail too.
-    tokens_ = llm::TokenAccumulator{};
-    if (!history_.empty()) tokens_.SeedOccupancy(EstimateContextTokens());
-
-    // Same queue ClearHistory clears (its own mutex, so no lock needed here):
-    // a background subagent's worker can be queueing a completion while the
-    // user rewinds. Those completions answer turns that no longer happened.
-    injections_->Clear();
-
+    AfterWorkingSetReplaced(/*discarded_tail=*/true);
     session_.logger.info(
         "session {}: rewound to seq {}; {} messages remain in the working set",
-        session_.session_id, target_seq, history_.size());
+        session_.session_id, target_seq, working_.messages().size());
 }
 
 void AgentLoop::ReseedFromStore(std::vector<llm::Message> rows, std::int64_t first_seq) {
-    history_ = std::move(rows);
-    first_persisted_seq_ = history_.empty() ? std::nullopt
-                                            : std::optional<std::int64_t>(first_seq);
-    head_is_summary_ = false;
-    tokens_ = llm::TokenAccumulator{};
-    if (!history_.empty()) tokens_.SeedOccupancy(EstimateContextTokens());
-    // Same obligation TruncateAfter carries: the discarded tail owned any
-    // completions queued against it.
-    injections_->Clear();
+    working_.Reseed(std::move(rows), first_seq);
+    AfterWorkingSetReplaced(/*discarded_tail=*/true);
     session_.logger.info(
         "session {}: rewound under the compaction boundary to seq {}; working set rebuilt "
         "with {} messages",
-        session_.session_id, first_seq, history_.size());
+        session_.session_id, first_seq, working_.messages().size());
 }
 
 void AgentLoop::RestorePersisted(std::vector<llm::Message> rows, std::int64_t first_seq) {
-    if (rows.empty()) return;
-    if (!first_persisted_seq_.has_value()) {
-        // The working set was empty -- rewound to the transcript's start and
-        // then redone. The restored rows ARE the persisted portion now.
-        first_persisted_seq_ = first_seq;
-        head_is_summary_ = false;
-    }
-    history_.insert(history_.end(), std::make_move_iterator(rows.begin()),
-                    std::make_move_iterator(rows.end()));
-    tokens_ = llm::TokenAccumulator{};
-    tokens_.SeedOccupancy(EstimateContextTokens());
+    if (!working_.Restore(std::move(rows), first_seq)) return;
+    AfterWorkingSetReplaced(/*discarded_tail=*/false);
     session_.logger.info("session {}: redo restored {} messages from seq {}",
-                         session_.session_id, history_.size(), first_seq);
+                         session_.session_id, working_.messages().size(), first_seq);
 }
 
 std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
@@ -463,7 +405,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
         }
     }
     if (!summarizer) return std::nullopt;
-    if (history_.size() < 2) return std::nullopt;
+    if (working_.messages().size() < 2) return std::nullopt;
     if (compaction_failed_this_turn_) return std::nullopt;
 
     // Every exit from here on defaults to "failed this turn" -- only the
@@ -491,7 +433,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // messages carry most of the bytes. An explicit keep_recent_tokens wins.
     std::int64_t keep_recent_tokens = config_.compaction_keep_recent_tokens;
     if (keep_recent_tokens <= 0 && config_.compaction_replace_percent > 0) {
-        const std::int64_t total = estimate_tokens(history_);
+        const std::int64_t total = estimate_tokens(working_.messages());
         keep_recent_tokens =
             std::max<std::int64_t>(1, total * (100 - config_.compaction_replace_percent) / 100);
     }
@@ -501,9 +443,9 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     std::size_t candidate = 0;
     try {
         candidate = config_.compaction_strategy.cut_selector
-                        ? config_.compaction_strategy.cut_selector(history_, keep_recent_tokens)
-                    : keep_recent_tokens > 0 ? ProposeSummarizeCut(history_, keep_recent_tokens)
-                                             : history_.size() / 2;
+                        ? config_.compaction_strategy.cut_selector(working_.messages(), keep_recent_tokens)
+                    : keep_recent_tokens > 0 ? ProposeSummarizeCut(working_.messages(), keep_recent_tokens)
+                                             : working_.messages().size() / 2;
     } catch (const std::exception& error) {
         session_.logger.warn("session {}: compaction cut selector threw: {}", session_.session_id,
                              error.what());
@@ -524,7 +466,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
         session_.logger.info(
             "session {}: compaction_keep_recent_tokens covers the whole working set ({} "
             "messages); nothing to compact",
-            session_.session_id, history_.size());
+            session_.session_id, working_.messages().size());
         if (config_.hooks != nullptr) {
             config_.hooks->EmitAsync(
                 hooks::kPostCompact,
@@ -544,20 +486,20 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // came from -- a strategy's proposed cut is a starting point, never a
     // guarantee, and that invariant is therefore not a contract a strategy
     // author has to remember or can get wrong.
-    const std::size_t cut = snap_compaction_boundary(history_, candidate);
-    if (cut == 0 || cut >= history_.size()) {
+    const std::size_t cut = snap_compaction_boundary(working_.messages(), candidate);
+    if (cut == 0 || cut >= working_.messages().size()) {
         // No safe structural cut. Rather than accept unbounded growth, try to
         // shrink the context directly: elide the largest tool result in
         // place (see ElideLargestToolResult) -- this never disturbs message
         // boundaries, so it cannot make the pairing problem worse, and it
         // addresses the actual harm (context SIZE) even though it does not
         // fold any messages together.
-        if (ElideLargestToolResult(history_)) {
-            tokens_.SeedOccupancy(EstimateContextTokens());
+        if (ElideLargestToolResult(working_.messages())) {
+            working_.tokens().SeedOccupancy(EstimateContextTokens());
             session_.logger.warn(
                 "session {}: no safe compaction boundary in {} messages; elided the largest "
                 "tool result instead",
-                session_.session_id, history_.size());
+                session_.session_id, working_.messages().size());
             if (config_.hooks != nullptr) {
                 config_.hooks->EmitAsync(
                     hooks::kPostCompact,
@@ -578,7 +520,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
         session_.logger.warn(
             "session {}: cannot compact -- no safe boundary in {} messages; context will keep "
             "growing",
-            session_.session_id, history_.size());
+            session_.session_id, working_.messages().size());
         if (config_.hooks != nullptr) {
             config_.hooks->EmitAsync(hooks::kPostCompact,
                                      nlohmann::json{{"session_id", session_.session_id},
@@ -595,9 +537,9 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // request -- the session's own system/tools/history plus one appended
     // instruction -- is a prefix-cache hit on everything the last request
     // sent. A SPAN, not a copy: the compactor only reads, and nothing mutates
-    // history_ while it runs -- compaction is sequential with the turn that
+    // working_.messages() while it runs -- compaction is sequential with the turn that
     // triggered it, on this same worker thread.
-    const std::span<const llm::Message> to_compact(history_);
+    const std::span<const llm::Message> to_compact(working_.messages());
     CompactionRequest params;
     params.model_name = preset_.provider.model_name;
     // A non-empty override (/compact <name>) wins for THIS invocation only --
@@ -619,10 +561,10 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // Whole-context occupancy, not last_input_tokens(): with prompt caching
     // the uncached input is a small fraction of the context, which is how a
     // 700k context used to log as a few thousand tokens.
-    params.last_reported_input_tokens = tokens_.last_occupancy() > 0
-                                            ? tokens_.last_occupancy()
+    params.last_reported_input_tokens = working_.tokens().last_occupancy() > 0
+                                            ? working_.tokens().last_occupancy()
                                             : EstimateContextTokens(params.system, params.tools);
-    params.full_history = &history_;
+    params.full_history = &working_.messages();
     // The session's logger, not DefaultLogger: compaction lines belong beside
     // this loop's own compaction diagnostics, session id and all.
     params.logger = &session_.logger;
@@ -665,8 +607,8 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
                                  nlohmann::json{{"session_id", session_.session_id},
                                                 {"project_root", session_.project_root.string()},
                                                 {"trigger", trigger},
-                                                {"history_messages", history_.size()},
-                                                {"occupancy_tokens", tokens_.last_occupancy()}});
+                                                {"history_messages", working_.messages().size()},
+                                                {"occupancy_tokens", working_.tokens().last_occupancy()}});
     }
 
     std::optional<CompactionResult> result;
@@ -697,7 +639,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // with or without it.
     //
     // boundary_seq arithmetic rests on one invariant: the persisted messages
-    // in history_ are always a contiguous suffix of the stored transcript
+    // in working_.messages() are always a contiguous suffix of the stored transcript
     // (appends continue at MAX(seq)+1; compaction only folds from the head).
     // Persisted messages folded away = `cut` minus the synthetic head, so the
     // new first persisted seq is the boundary, +1.
@@ -705,7 +647,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // -- estimates on both sides (bytes/4), so the comparison is like for like,
     // with the fixed part (system prompt, tools) taken out: it is the same on
     // both sides and would make any fold look ineffective at small sizes.
-    const std::int64_t history_tokens_before = estimate_tokens(history_);
+    const std::int64_t history_tokens_before = estimate_tokens(working_.messages());
     const std::int64_t fixed_tokens =
         EstimateContextTokens(params.system, params.tools) - history_tokens_before;
 
@@ -727,26 +669,26 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // The summary is now the head WHATEVER the persisted bookkeeping did:
     // a loop constructed without a first-persisted seq (the direct-API case;
     // every Session seeding path sets one) still folds the summary into
-    // history_[0], and leaving head_is_summary_ false would make every later
+    // working_.messages()[0], and leaving working_.head_is_summary() false would make every later
     // seq mapping -- and CheckpointBoundary() -- mis-count the synthetic head.
     std::optional<std::int64_t> boundary_seq;
-    if (first_persisted_seq_.has_value()) {
+    if (working_.first_persisted_seq().has_value()) {
         const std::int64_t persisted_removed =
-            static_cast<std::int64_t>(cut) - (head_is_summary_ ? 1 : 0);
-        boundary_seq = *first_persisted_seq_ + persisted_removed - 1;
-        first_persisted_seq_ = *boundary_seq + 1;
+            static_cast<std::int64_t>(cut) - (working_.head_is_summary() ? 1 : 0);
+        boundary_seq = *working_.first_persisted_seq() + persisted_removed - 1;
+        working_.first_persisted_seq() = *boundary_seq + 1;
     }
-    head_is_summary_ = true;
+    working_.head_is_summary() = true;
 
     // Rebuilt with moves, not copies: the kept tail is shifted once (moving
     // strings, which is pointer swaps) rather than duplicated. The summary
     // message lands at the head, replacing everything the cut removed.
     std::vector<llm::Message> rebuilt;
-    rebuilt.reserve(history_.size() - cut + 1);
+    rebuilt.reserve(working_.messages().size() - cut + 1);
     rebuilt.push_back(result->summary_message);
-    std::move(history_.begin() + static_cast<long>(cut), history_.end(),
+    std::move(working_.messages().begin() + static_cast<long>(cut), working_.messages().end(),
               std::back_inserter(rebuilt));
-    history_.swap(rebuilt);
+    working_.messages().swap(rebuilt);
 
     // The kept tail's THINKING goes, on backends that bind it to its prefix
     // (working set only; the transcript keeps it). Its blocks were produced
@@ -754,7 +696,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // replay after that prefix changed ("preserved thinking" -- keep-tail
     // compaction is the documented breaking shape). Text and tool calls stay.
     // Chat-completions backends never replay thinking, so nothing changes.
-    DropStaleThinking(1, history_.size());
+    DropStaleThinking(1, working_.messages().size());
 
     // RE-SEED the occupancy estimate: the one site that never did. The fold
     // just shrank the working set, but the accumulator still described the
@@ -765,7 +707,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
     // touches only the last-turn estimate, so the backend-reported counts the
     // accumulator carries stay intact.
     event.tokens_after = EstimateContextTokens();
-    tokens_.SeedOccupancy(event.tokens_after);
+    working_.tokens().SeedOccupancy(event.tokens_after);
 
     // GUARD 3: a fold that barely shrank the history (the summary is about as
     // large as what it replaced, or the kept tail is most of the history).
@@ -805,7 +747,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
         "session {}: context was ~{} tokens, now ~{}; compacted the oldest {} of {} messages "
         "into one summary",
         session_.session_id, event.tokens_before, event.tokens_after, cut,
-        history_.size() + cut - 1);
+        working_.messages().size() + cut - 1);
 
     if (session_.compaction_sink) {
         try {
@@ -828,7 +770,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
 
     // NO COOLDOWN ON SUCCESS, deliberately. Repeated compaction inside one turn
     // looks unbounded but is not: each pass replaces at least one message (the
-    // cut is >= 1) and the estimate is re-seeded smaller, and `history_.size()
+    // cut is >= 1) and the estimate is re-seeded smaller, and `working_.messages().size()
     // < 2` is the floor. Across turns, compacting
     // again once new messages have pushed occupancy back over the trigger is the
     // intended behaviour, not a runaway.
@@ -997,9 +939,9 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         // Zero-usage turns record nothing here (RecordTurn of an all-zero
         // Usage would only add zeros to the cumulative totals); the
         // occupancy seed below replaces last_turn_ once the assistant
-        // message is actually in history_ and the estimate can cover it.
+        // message is actually in working_.messages() and the estimate can cover it.
         if (!result.usage_estimated) {
-            tokens_.RecordTurn(response.usage);
+            working_.tokens().RecordTurn(response.usage);
             // Turn-cost accounting sums ACROSS rounds -- each round is a
             // separately-billed request, unlike context occupancy where
             // summing would double-count the history (token_accounting.hpp).
@@ -1031,7 +973,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         // -- the next iteration reassigns it -- and content can be the whole
         // assistant turn, so this was a full duplicate of every block and string
         // on the hottest path there is. The tool_uses pointers below stay valid
-        // across the later move into history_: a vector move relocates the
+        // across the later move into working_.messages(): a vector move relocates the
         // heap buffer's ownership, not the elements.
         llm::Message assistant{llm::Role::Assistant, std::move(response.content)};
         result.final_text = llm::TextOf(assistant);
@@ -1039,7 +981,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         // THE ROUND IS ONE UNIT. A tool round's assistant message is NOT
         // appended here: it is held until every call is answered and then
         // persisted TOGETHER with the results (AppendRound, one transaction),
-        // so history_ and the store can never hold a tool_use without its
+        // so working_.messages() and the store can never hold a tool_use without its
         // results -- not across a cancel, a throw, a store fault or a crash --
         // and nothing (a steer, a rewind, a resume) can ever land between them.
         // There is nothing to repair afterwards because nothing is ever torn.
@@ -1062,7 +1004,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
 
         if (result.usage_estimated) {
             // Zero-usage proxy gap: the request is fully assembled now
-            // (history_ plus this round's assistant message), so the same
+            // (working_.messages() plus this round's assistant message), so the same
             // bytes/4 estimate resume and the compactor use describes the
             // context honestly enough to arm the trigger. SeedOccupancy
             // deliberately touches no cumulative totals, and the estimate is
@@ -1078,9 +1020,9 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             // OpenAI-compatible proxy that does not report usage.
             std::int64_t estimate =
                 EstimateContextTokens(chat_request.system, chat_request.tools);
-            // A tool round's assistant message is not in history_ yet.
+            // A tool round's assistant message is not in working_.messages() yet.
             if (tool_round) estimate += estimate_tokens(std::span(&assistant, 1));
-            tokens_.SeedOccupancy(estimate);
+            working_.tokens().SeedOccupancy(estimate);
             result.last_usage.input_tokens =
                 static_cast<int>(std::min<std::int64_t>(std::max<std::int64_t>(estimate, 0),
                                                         std::numeric_limits<int>::max()));
@@ -1394,18 +1336,18 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
 
         // The round commits as one unit: the held assistant message and every
         // result, in a single store transaction (see tool_round above). A store
-        // failure throws with NOTHING written and history_ untouched, so the
+        // failure throws with NOTHING written and working_.messages() untouched, so the
         // session survives to its next turn.
         {
             llm::Message results_message{llm::Role::User, std::move(results)};
             store_.AppendRound(assistant, assistant_output_tokens, AssistantAttribution(),
                                results_message);
-            if (!first_persisted_seq_.has_value()) {
+            if (!working_.first_persisted_seq().has_value()) {
                 // The pair is two rows; the first of them opens the suffix.
-                first_persisted_seq_ = store_.last_appended_seq() - 1;
+                working_.first_persisted_seq() = store_.last_appended_seq() - 1;
             }
-            history_.push_back(std::move(assistant));
-            history_.push_back(std::move(results_message));
+            working_.messages().push_back(std::move(assistant));
+            working_.messages().push_back(std::move(results_message));
         }
 
         // "Deny and stop": the round is answered and persisted; no provider

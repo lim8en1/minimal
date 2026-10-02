@@ -36,6 +36,7 @@
 #include "minimal/tools/tool_registry.hpp"
 #include "minimal/agent/loop_types.hpp"
 #include "minimal/agent/request_builder.hpp"
+#include "minimal/agent/working_history.hpp"
 
 namespace minimal::agent {
 
@@ -89,7 +90,7 @@ public:
     // construct a bare AgentLoop.
     bool PushInjectedMessage(llm::Message message);
 
-    const std::vector<llm::Message>& history() const { return history_; }
+    const std::vector<llm::Message>& history() const { return working_.messages(); }
 
     // True when the working history ends in an UNANSWERED user-text message
     // -- a real-time steering submission that was flushed after the turn's
@@ -162,12 +163,7 @@ public:
     // tell "the summary still describes kept turns" from "the summary
     // describes turns that did not happen". nullopt when history_ has no
     // summary head (never compacted, or the checkpoint was cleared).
-    std::optional<std::int64_t> CheckpointBoundary() const {
-        if (head_is_summary_ && first_persisted_seq_.has_value()) {
-            return *first_persisted_seq_ - 1;
-        }
-        return std::nullopt;
-    }
+    std::optional<std::int64_t> CheckpointBoundary() const { return working_.CheckpointBoundary(); }
 
     // Drops the working set from `target_seq` onward -- the memory half of a
     // rewind whose cut landed ABOVE the checkpoint boundary, so the synthetic
@@ -263,6 +259,10 @@ private:
     // auto-compact and bare /compact never pass one.
     std::optional<std::size_t> Compact(std::string_view trigger,
                                        std::string_view prompt_override = {});
+    // After a rewind / reseed / redo replaced the working set: re-estimate tokens
+    // and, if a tail was discarded, drop queued completions that answered turns
+    // that no longer happened.
+    void AfterWorkingSetReplaced(bool discarded_tail);
     void FlushInjectedMessages();
     // The while(true) body both RunTurn overloads share. Takes `result` by
     // reference so the two entry points can differ only in seeding. The wake
@@ -303,21 +303,14 @@ private:
     Compactor compactor_;
     const CompactionStrategyRegistry* compaction_strategies_ = nullptr;
 
-    std::vector<llm::Message> history_;
-    // Compaction-checkpoint bookkeeping: where the persisted suffix of history_
-    // begins in the store's seq space, and whether the head message is the
-    // synthetic summary (which exists only in history_, never in the store).
-    // Together they yield the boundary_seq a checkpoint is written with:
-    // persisted messages covered by the next summary end just before
-    // first_persisted_seq_ after the fold. Both are worker-thread-only state,
-    // like everything else on the loop except the injection queue.
-    std::optional<std::int64_t> first_persisted_seq_;
-    bool head_is_summary_ = false;
+    // The in-memory conversation, its seq mapping into the store, and the token
+    // accumulator -- see WorkingHistory. Declared BEFORE request_, which holds
+    // references to its messages and tokens.
+    WorkingHistory working_;
     // Shared with the session's channels block (see SessionContext::injections).
     // The one loop member foreign threads touch, and only through the queue's
     // own mutex.
     std::shared_ptr<InjectionQueue> injections_;
-    llm::TokenAccumulator tokens_;
     RequestBuilder request_;
     RetryPolicy retry_;
 
