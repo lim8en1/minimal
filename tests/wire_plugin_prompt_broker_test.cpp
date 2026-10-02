@@ -38,7 +38,13 @@ struct TimeoutHarness {
     rpc::PendingRequests pending;
     rpc::WirePluginPromptBroker broker{"sess-1", broadcaster, pending, 20ms};
 
-    std::optional<v1::ServerEvent> Pop() { return broadcaster.Pop(subscriber); }
+    // Reads the prompt and then DETACHES: the unattended bound only runs while
+    // no client is attached, so the timeout cases model the client going away.
+    std::optional<v1::ServerEvent> Pop() {
+        auto event = broadcaster.Pop(subscriber);
+        broadcaster.Unsubscribe(subscriber);
+        return event;
+    }
 };
 
 tools::PromptRequest Request() {
@@ -142,8 +148,11 @@ TEST_CASE("a cross-delivered answer of another prompt type is not an answer",
     auto answered = RunInBackground([harness] { return harness->broker.Prompt(Request()); });
     const auto event = harness->Pop();
     REQUIRE(event.has_value());
-    harness->pending.Resolve(event->plugin_prompt().request_id(),
-                             rpc::ConfirmationAnswer{"yes"});
+    const auto id = event->plugin_prompt().request_id();
+    // Refused, not consumed: the prompt is still open and the waiter still parked.
+    CHECK_FALSE(harness->pending.Resolve(id, rpc::ConfirmationAnswer{"yes"}));
+    CHECK_FALSE(answered.WaitFor(50ms));
+    harness->pending.Shutdown();
     REQUIRE(answered.Ready());
     CHECK(answered.Get().outcome != tools::PromptOutcome::Answered);
 }

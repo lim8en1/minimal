@@ -212,9 +212,11 @@ public:
 
 Waits indefinitely by default -- no timeout, no fail-closed. A client is normally
 present, so a human may simply be away, and auto-denying their work is worse than
-waiting. `sessions.unattended_prompt_timeout_seconds` opts into a bound intended
-for detached sessions (today it applies to wire prompts whether or not a client is
-attached; a timed-out prompt answers as "no answer").
+waiting. `sessions.unattended_prompt_timeout_seconds` opts into a bound that runs
+only while NO client is attached (the clock resets when one attaches, and an open
+prompt is replayed to it); a timed-out prompt answers as "no answer". A prompt
+slot accepts only the answer kind it asked for: a wrong-kind reply is refused and
+the prompt stays open.
 
 **Cancellation** — `CancelTurn` sets one atomic flag, read in two places:
 

@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -68,15 +69,42 @@ public:
         std::forward<Build>(build)(event, request_id);
         // Registered WITH the event: the slot keeps it for replay to a stream
         // that attaches while the worker is still parked here.
-        auto registration = pending_.Register(request_id, event);
+        auto registration =
+            pending_.Register(request_id, event, PendingAnswer{std::in_place_type<Answer>}.index());
         // Never blocks: a full subscriber drops its own oldest. Every attached
         // subscriber gets the prompt; the first answer wins.
         queue_.Publish(std::move(event));
 
+        // THE UNATTENDED BOUND counts only time with NO client attached: a user
+        // who is attached but away from the keyboard is exactly who the prompt
+        // is waiting for, and auto-denying their work is worse than waiting. The
+        // wait runs in slices so attachment can be re-read; a client attaching
+        // resets the clock (and, via prompt replay, sees the prompt).
         const bool bounded = unattended_timeout_ > std::chrono::milliseconds::zero();
-        const auto started = std::chrono::steady_clock::now();
-        const std::optional<PendingAnswer> answer = registration.AwaitResponse(
-            bounded ? std::optional(unattended_timeout_) : std::nullopt);
+        std::optional<PendingAnswer> answer;
+        bool timed_out = false;
+        if (!bounded) {
+            answer = registration.AwaitResponse(std::nullopt);
+        } else {
+            const auto slice = std::min(unattended_timeout_, std::chrono::milliseconds(200));
+            std::chrono::milliseconds unattended{0};
+            auto last = std::chrono::steady_clock::now();
+            while (true) {
+                answer = registration.AwaitResponse(slice);
+                if (answer || registration.Abandoned()) break;
+                const auto now = std::chrono::steady_clock::now();
+                if (queue_.subscriber_count() > 0) {
+                    unattended = std::chrono::milliseconds::zero();
+                } else {
+                    unattended += std::chrono::duration_cast<std::chrono::milliseconds>(now - last);
+                    if (unattended >= unattended_timeout_) {
+                        timed_out = true;
+                        break;
+                    }
+                }
+                last = now;
+            }
+        }
         if (!answer) {
             // The waiter gave up (timeout, cancel): dismiss the modal on every
             // attached client, which would otherwise keep offering a question
@@ -88,9 +116,7 @@ public:
                 resolved.mutable_prompt_resolved()->set_request_id(request_id);
                 queue_.Publish(std::move(resolved));
             }
-            return {std::nullopt,
-                    bounded && !pending_.shut_down() &&
-                        std::chrono::steady_clock::now() - started >= unattended_timeout_};
+            return {std::nullopt, timed_out};
         }
         const auto* typed = std::get_if<Answer>(&*answer);
         if (typed == nullptr) return {};

@@ -233,7 +233,7 @@ All values must be ≥ 0 (negative → **fatal**); `0` means "never" where noted
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `sessions.detached_idle_ttl_seconds` | int | `1800` | idle reaper collects a fully quiescent detached session after this; `0` = never |
-| `sessions.unattended_prompt_timeout_seconds` | int | `0` | bound on permission/confirmation waits for detached sessions; `0` = wait forever |
+| `sessions.unattended_prompt_timeout_seconds` | int | `0` | bound on permission/confirmation/plugin-prompt waits, counted only while NO client is attached to the session (an attached client is waited for indefinitely); `0` = wait forever |
 | `sessions.initial_attach_guard_seconds` | int | `10` | guard for sessions that never attach a client |
 | `server.idle_shutdown_seconds` | int | `5` | exit after this long with zero attached clients and no live session still doing work (a detached-but-busy session holds the server until it finishes); `0` = never (daemon) |
 | `server.discovery_warmup_timeout_seconds` | int | `15` | wall-clock budget for the background warm-up of `discover: true` providers started right after the server begins listening, so the `/model` picker lists discovered models without a manual ctrl+r; startup never waits on the fetch, and a fetch exceeding the budget keeps running in the background; `0` = disabled (static models only until ctrl+r or first use) |

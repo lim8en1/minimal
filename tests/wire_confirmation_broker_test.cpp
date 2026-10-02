@@ -33,7 +33,13 @@ struct TimeoutHarness {
     rpc::PendingRequests pending;
     rpc::WireConfirmationBroker broker{"sess-1", broadcaster, pending, 20ms};
 
-    std::optional<v1::ServerEvent> Pop() { return broadcaster.Pop(subscriber); }
+    // Reads the prompt and then DETACHES: the unattended bound only runs while
+    // no client is attached, so the timeout cases model the client going away.
+    std::optional<v1::ServerEvent> Pop() {
+        auto event = broadcaster.Pop(subscriber);
+        broadcaster.Unsubscribe(subscriber);
+        return event;
+    }
 };
 
 commands::ConfirmationRequest Question() {
@@ -150,11 +156,15 @@ TEST_CASE("a permission answer delivered against a confirmation id fails structu
 
     const auto event = harness->Pop();
     REQUIRE(event.has_value());
-    harness->pending.Resolve(event->confirmation_request().request_id(),
-                             rpc::PermissionAnswer{tools::PermissionDecision::Allow, {}});
+    const auto id = event->confirmation_request().request_id();
+    // The wrong kind is refused and the prompt stays open for the right answer.
+    CHECK_FALSE(harness->pending.Resolve(
+        id, rpc::PermissionAnswer{tools::PermissionDecision::Allow, {}}));
+    CHECK_FALSE(answered.WaitFor(50ms));
+    CHECK(harness->pending.Resolve(id, rpc::ConfirmationAnswer{"yes"}));
 
     REQUIRE(answered.Ready());
-    CHECK_FALSE(answered.Get().answered());
+    CHECK(answered.Get().answered());
 }
 
 TEST_CASE("each request gets its own correlation id", "[wire_confirmation]") {

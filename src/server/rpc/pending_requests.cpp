@@ -63,13 +63,21 @@ std::optional<PendingAnswer> PendingRequests::Registration::AwaitResponse(
     return it->second.answer;
 }
 
+bool PendingRequests::Registration::Abandoned() const {
+    if (owner_ == nullptr) return true;
+    std::lock_guard<std::mutex> lock(owner_->mutex_);
+    return owner_->AnswerIsUnreachable(epoch_);
+}
+
 PendingRequests::Registration PendingRequests::Register(std::string request_id,
-                                                         std::optional<v1::ServerEvent> prompt) {
+                                                         std::optional<v1::ServerEvent> prompt,
+                                                         std::size_t expected_kind) {
     std::uint64_t epoch = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         Slot& slot = slots_[request_id];  // default-constructs an empty slot
         slot.prompt = std::move(prompt);
+        slot.expected_kind = expected_kind;
         slot.order = next_order_++;
         epoch = epoch_;
     }
@@ -99,6 +107,9 @@ bool PendingRequests::Resolve(const std::string& request_id, PendingAnswer answe
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = slots_.find(request_id);
         if (it == slots_.end()) return false;
+        if (it->second.expected_kind != kAnyKind && answer.index() != it->second.expected_kind) {
+            return false;  // wrong payload kind: the right answer can still arrive
+        }
         // First answer wins. A duplicate is a client retransmitting, not a
         // change of mind, and silently overwriting an answer a worker may
         // already have acted on would be worse than ignoring it. The return

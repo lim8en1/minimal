@@ -105,6 +105,11 @@ public:
 
         const std::string& request_id() const { return request_id_; }
 
+        // True once the turn was cancelled or the session shut down: no answer
+        // can arrive for this registration any more. Lets a caller that waits in
+        // slices tell "slice elapsed" from "gave up".
+        bool Abandoned() const;
+
     private:
         friend class PendingRequests;
         Registration(PendingRequests* owner, std::string request_id, std::uint64_t epoch);
@@ -122,8 +127,16 @@ public:
     // open so a stream that attaches AFTER it was published (the first client
     // crashed, a second one joins) can be shown the prompt too -- see
     // OpenPrompts(). Without it the worker waits for an answer nobody can see.
+    //
+    // `expected_kind` is the PendingAnswer variant index this slot accepts. An
+    // answer of another kind (a buggy client replying to a permission prompt
+    // with a confirmation payload) is refused by Resolve -- false, slot still
+    // open -- so the prompt stays answerable instead of being consumed by a
+    // payload the waiter cannot read and turned into a Deny.
+    static constexpr std::size_t kAnyKind = std::variant_npos;
     [[nodiscard]] Registration Register(std::string request_id,
-                                        std::optional<v1::ServerEvent> prompt = std::nullopt);
+                                        std::optional<v1::ServerEvent> prompt = std::nullopt,
+                                        std::size_t expected_kind = kAnyKind);
 
     // The prompt events whose slots are still unanswered, in registration order.
     // Any thread.
@@ -168,6 +181,7 @@ private:
     struct Slot {
         std::optional<PendingAnswer> answer;
         std::optional<v1::ServerEvent> prompt;
+        std::size_t expected_kind = kAnyKind;
         std::uint64_t order = 0;  // registration order, for OpenPrompts()
     };
 

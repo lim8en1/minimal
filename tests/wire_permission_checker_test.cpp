@@ -37,7 +37,13 @@ struct TimeoutHarness {
     rpc::PendingRequests pending;
     rpc::WirePermissionChecker checker{"sess-1", broadcaster, pending, 20ms};
 
-    std::optional<v1::ServerEvent> Pop() { return broadcaster.Pop(subscriber); }
+    // Reads the prompt and then DETACHES: the unattended bound only runs while
+    // no client is attached, so the timeout cases model the client going away.
+    std::optional<v1::ServerEvent> Pop() {
+        auto event = broadcaster.Pop(subscriber);
+        broadcaster.Unsubscribe(subscriber);
+        return event;
+    }
 };
 
 tools::PermissionRequest BashRequest(bool complete = true) {
@@ -137,6 +143,21 @@ TEST_CASE("an unattended prompt with a configured timeout denies rather than han
     CHECK(answered.Get().decision == tools::PermissionDecision::Deny);
 }
 
+TEST_CASE("an attached client is never timed out", "[wire_permission][S5]") {
+    // The bound is for UNATTENDED prompts: with a client attached (even one
+    // that is away from the keyboard) the prompt waits well past the timeout.
+    auto harness = std::make_shared<TimeoutHarness>();
+    auto answered = RunInBackground(
+        [harness] { return harness->checker.check(BashRequest()); });
+
+    // Read the event WITHOUT detaching (TimeoutHarness::Pop detaches).
+    REQUIRE(harness->broadcaster.Pop(harness->subscriber).has_value());
+    CHECK_FALSE(answered.WaitFor(200ms));  // 10x the 20ms bound, still waiting
+
+    harness->pending.Shutdown();
+    REQUIRE(answered.Ready());
+}
+
 TEST_CASE("an answer arriving before the timeout still wins",
           "[wire_permission][S5]") {
     auto harness = std::make_shared<TimeoutHarness>();
@@ -233,11 +254,14 @@ TEST_CASE("a confirmation answer delivered against a permission id denies struct
 
     const auto event = harness->Pop();
     REQUIRE(event.has_value());
-    harness->pending.Resolve(event->permission_request().request_id(),
-                             rpc::ConfirmationAnswer{"allow"});
+    const auto id = event->permission_request().request_id();
+    // The wrong kind is refused and the prompt stays open for the right answer.
+    CHECK_FALSE(harness->pending.Resolve(id, rpc::ConfirmationAnswer{"allow"}));
+    CHECK_FALSE(answered.WaitFor(50ms));
+    CHECK(harness->pending.Resolve(id, Answer(tools::PermissionDecision::Allow)));
 
     REQUIRE(answered.Ready());
-    CHECK(answered.Get().decision == tools::PermissionDecision::Deny);
+    CHECK(answered.Get().decision == tools::PermissionDecision::Allow);
 }
 
 TEST_CASE("each request gets its own correlation id", "[wire_permission]") {
