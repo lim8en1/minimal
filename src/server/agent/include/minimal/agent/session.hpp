@@ -29,6 +29,7 @@
 #include <deque>
 #include <filesystem>
 #include <memory>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -89,6 +90,25 @@ struct SessionChannels {
     // callables' state) survive past the session and Push refuses after
     // Terminate closes it. See injection_queue.hpp.
     InjectionQueue injections;
+
+    // Wakes the session's worker after an injection landed from a foreign
+    // thread (a background task's watcher): the wait predicate only re-reads the
+    // queue when notified. Set by the Session, cleared before it is destroyed --
+    // the mutex makes "call it" and "clear it" mutually exclusive, so a watcher
+    // outliving the session never calls into a dead object.
+    void SetWake(std::function<void()> wake) {
+        std::lock_guard<std::mutex> lock(wake_mutex_);
+        wake_ = std::move(wake);
+    }
+    void ClearWake() { SetWake({}); }
+    void Wake() {
+        std::lock_guard<std::mutex> lock(wake_mutex_);
+        if (wake_) wake_();
+    }
+
+private:
+    std::mutex wake_mutex_;
+    std::function<void()> wake_;
 };
 
 inline std::shared_ptr<SessionChannels> MakeSessionChannels() {

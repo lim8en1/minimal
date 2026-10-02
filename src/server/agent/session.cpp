@@ -142,6 +142,19 @@ Session::Session(SessionParams params, AgentPreset preset,
 
     context.injections = std::shared_ptr<InjectionQueue>(channels, &channels_->injections);
     context.session_lifetime = channels_;
+    // ToolContext::schedule_injection for every tool (the loop copies this onto
+    // each context): how a background task hands its result back at a turn
+    // boundary. Background bash and python REFUSE to start without it ("no
+    // deferred-completion channel"), so leaving it unset made them unavailable in
+    // every real session. Captures the channels block, not `this`, because the
+    // tool's handle outlives the session; Push refuses after Terminate closes the
+    // queue, and Wake reaches the worker only while the session lives.
+    context.injection_sink = [channels](llm::Message message) {
+        const bool staged = channels->injections.Push(std::move(message));
+        if (staged) channels->Wake();
+        return staged;
+    };
+    channels_->SetWake([this] { WakeWorker(); });
 
     // The plugin prompt: the loop copies this into every ToolContext (see
     // SessionContext::prompt_user). Null broker leaves it null -- the tool
@@ -1147,6 +1160,7 @@ void Session::Terminate() {
     // exiting, and a session nobody is attached to loses its in-flight
     // injections by design.
     channels_->injections.Close();
+    channels_->ClearWake();  // before this object goes away: see SessionChannels::Wake
     // Empty locked section before the notify: the worker's wait predicate
     // reads terminated_ under mutex_ (WorkerMain), and every write to the
     // predicate above this point (terminated_.exchange, the two lines above)

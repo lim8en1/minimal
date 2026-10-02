@@ -247,6 +247,63 @@ TEST_CASE("a session runs a full turn end to end", "[session]") {
     CHECK(CountStreamEvents(events) >= 1);
 }
 
+namespace {
+
+// Records what a tool sees on its ToolContext: the deferred-completion channel a
+// background task (bash run_in_background, python) schedules its result through.
+class InjectionProbeTool : public tools::Tool {
+public:
+    InjectionProbeTool() {
+        spec_.name = "probe";
+        spec_.category = tools::ToolCategory::ReadOnly;
+        spec_.definition.name = "probe";
+        spec_.definition.description = "injection probe";
+        spec_.definition.input_schema = nlohmann::json::object();
+    }
+    const tools::ToolSpec& spec() const override { return spec_; }
+    tools::ToolResult execute(const nlohmann::json&, tools::ToolContext& ctx) override {
+        had_channel = static_cast<bool>(ctx.schedule_injection);
+        if (ctx.schedule_injection) {
+            delivered = ctx.schedule_injection(
+                llm::Message{llm::Role::User, {llm::TextBlock{"background result"}}});
+        }
+        return tools::ToolResult{false, "ok", {}};
+    }
+    bool had_channel = false;
+    bool delivered = false;
+
+private:
+    tools::ToolSpec spec_;
+};
+
+}  // namespace
+
+TEST_CASE("a session gives its tools a working deferred-completion channel", "[session]") {
+    // Background bash / python refuse to start without ToolContext::schedule_injection
+    // ("no deferred-completion channel"), and nothing below the Session wiring tests
+    // it: the loop copies SessionContext::injection_sink onto every context, so the
+    // Session must set it.
+    SessionFixture fixture;
+    auto tool = std::make_unique<InjectionProbeTool>();
+    auto* probe = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+    fixture.Script(testing::ToolUseResponse("call-1", "probe", nlohmann::json::object()));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("probe it");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    REQUIRE(probe->had_channel);
+    CHECK(probe->delivered);
+    // The injected result is flushed into the transcript at a turn boundary.
+    bool found = false;
+    for (const auto& stored : fixture.store->messages) {
+        if (llm::TextOf(stored.content) == "background result") found = true;
+    }
+    CHECK(found);
+}
+
 TEST_CASE("tool execution is bracketed by lifecycle events", "[session]") {
     // A client that showed a tool as started must always see it finish, or its
     // running-tools panel accumulates entries that never clear.
