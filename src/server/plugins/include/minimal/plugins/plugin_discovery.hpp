@@ -26,48 +26,12 @@ namespace minimal::plugins {
 //
 // Each entry may also carry a "config" object -- the plugin's own settings,
 // forwarded to it at registration.
-struct PluginConfig {
-    struct Entry {
-        std::string file;  // basename, resolved against its provenance directory
-        Provenance provenance = Provenance::User;
-        bool enabled = false;
-        // This plugin's own configuration, verbatim. Source: the optional
-        // "config" object on the entry:
-        //   {"plugins": [{"file": "tools-bash.so", "enabled": true,
-        //                 "config": {"timeout_s": 30}}]}
-        // Core imposes no schema -- each plugin owns the shape of its own
-        // slice, the same rule as tools_settings. A non-object value degrades
-        // to an empty object with a startup warning.
-        nlohmann::json config = nlohmann::json::object();
-    };
-    std::vector<Entry> plugins;
-
-    // Fully-qualified "plugin.original_name" -> surface name. Applied at
-    // registration, before collision checking, so aliasing is itself a valid way
-    // to resolve a collision. Key is `aliases` in plugins.json -- the old
-    // `command_aliases` name was a lie, since the one namespace aliases TOOLS
-    // as well as commands (one flat plugin.name-keyed space; a plugin shipping
-    // both a tool and a command under one original name aliases them together
-    // or not at all).
-    std::map<std::string, std::string> aliases;
-
-    // Set when ParsePluginConfig could not parse the file at all (invalid JSON
-    // or a non-object top level). The caller must warn and skip the rewrite --
-    // silently persisting the degraded-to-empty default over the user's actual
-    // bytes would destroy every enablement decision and per-plugin config in a
-    // file they are explicitly invited to edit (a trailing comma would disable
-    // every user plugin on next boot). See tui_bootstrap.cpp's client-side
-    // twin, which this mirrors.
-    bool malformed = false;
-
-    // EVERY OTHER TOP-LEVEL KEY, carried through untouched. This file is
-    // rewritten on every start (discovery persists what it found), and the
-    // serializer reconstructs the document from these fields -- so anything it
-    // did not know about was silently deleted on the next boot, in a file the
-    // user is explicitly invited to edit. Round-tripping is cheaper than a
-    // migration story for keys we have not invented yet.
-    nlohmann::json preserved = nlohmann::json::object();
-};
+// The plugins.json document: entries keyed by (provenance, file), aliases, and
+// every other top-level key carried through untouched. The format and its
+// parse/serialize/discover logic are shared with the client host
+// (minimal/common/plugin_config.hpp); this file only supplies what is
+// server-specific (the file label and which bundled plugins ship disabled).
+using PluginConfig = common::PluginConfigFile;
 
 PluginConfig ParsePluginConfig(const std::string& json_text);
 std::string SerializePluginConfig(const PluginConfig& config);

@@ -24,21 +24,9 @@ namespace minimal::client::plugins {
 //
 // Everything unmodelled round-trips through `preserved`, because this file is
 // rewritten on every start -- the same rule the server file follows.
-struct ClientPluginConfig {
-    struct Entry {
-        std::string file;  // basename, resolved against its provenance directory
-        Provenance provenance = Provenance::User;
-        bool enabled = false;
-        nlohmann::json config = nlohmann::json::object();
-    };
-    std::vector<Entry> plugins;
-    std::map<std::string, std::string> aliases;
-    nlohmann::json preserved = nlohmann::json::object();
-
-    // Set when the file parsed as non-object/discarded JSON: the host warns
-    // and leaves the user's bytes untouched (no rewrite over a parse loss).
-    bool malformed = false;
-};
+// client-plugins.json: the same document shape as the server's plugins.json, and
+// the same implementation (minimal/common/plugin_config.hpp).
+using ClientPluginConfig = common::PluginConfigFile;
 
 ClientPluginConfig ParseClientPluginConfig(const std::string& json_text);
 std::string SerializeClientPluginConfig(const ClientPluginConfig& config);

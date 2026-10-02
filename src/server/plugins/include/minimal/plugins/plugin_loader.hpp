@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/common/plugin_config.hpp"
 #include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/agent/context_contributor.hpp"
 #include "minimal/agent/mention_resolver.hpp"
@@ -41,7 +42,8 @@ struct ProjectCommandsPlugin;
 // catalog (one that answers for kinds nobody named).
 inline constexpr const char* kMetadataFallbackLabel = "(fallback: kinds nobody named)";
 
-enum class Provenance { Bundled, User };
+// Shared with the client host (src/common/plugins/plugin_config.cpp).
+using Provenance = common::PluginProvenance;
 
 enum class LoadStatus {
     Loaded,
@@ -57,15 +59,7 @@ enum class LoadStatus {
     DuplicateName,          // an already-loaded plugin reported the same name
 };
 
-struct PluginCandidate {
-    std::filesystem::path file;
-    Provenance provenance = Provenance::User;
-    bool enabled = false;
-    // The candidate's own config from its plugins.json entry, verbatim
-    // (PluginConfig::Entry::config, propagated by DiscoverPlugins). Forwarded
-    // to the plugin's registration hooks; core imposes no schema on it.
-    nlohmann::json config = nlohmann::json::object();
-};
+using PluginCandidate = common::PluginFileCandidate;
 
 struct PluginRecord {
     std::filesystem::path file;

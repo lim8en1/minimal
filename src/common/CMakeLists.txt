@@ -14,7 +14,10 @@ add_library(minimal_common STATIC
     # (track E5) needed the same collision/alias rule: one rule, two loaders,
     # so the machinery cannot live on either side. name_resolution.cpp stayed
     # behind -- it feeds the registry from SERVER registry attributions.
-    plugins/name_registry.cpp)
+    plugins/name_registry.cpp
+    # The plugins.json / client-plugins.json format and plugin-file discovery,
+    # shared by both hosts (they were drifting structural twins).
+    plugins/plugin_config.cpp)
 add_library(minimal::common ALIAS minimal_common)
 
 target_include_directories(minimal_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -22,7 +25,7 @@ target_include_directories(minimal_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/in
 # PUBLIC, not PRIVATE: the Logger type crosses into server_core's public headers
 # (ToolContext) and from there into plugins via plugin_abi.h, so consumers need
 # spdlog's headers too. The client already links it directly.
-target_link_libraries(minimal_common PUBLIC spdlog::spdlog SQLite3::SQLite3)
+target_link_libraries(minimal_common PUBLIC spdlog::spdlog SQLite3::SQLite3 nlohmann_json::nlohmann_json)
 
 target_compile_definitions(minimal_common
     PUBLIC

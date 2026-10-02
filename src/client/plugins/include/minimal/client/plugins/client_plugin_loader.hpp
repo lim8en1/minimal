@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/common/plugin_config.hpp"
 #include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/plugins/name_registry.hpp"
@@ -20,7 +21,8 @@ namespace minimal::client::plugins {
 // severity of a load failure. The client surfaces it as startup diagnostics:
 // a failed BUNDLED plugin is fatal (the TUI prints and exits -- a silent
 // missing renderer would read as a bug), a failed user plugin is a warning.
-enum class Provenance { Bundled, User };
+// Shared with the server host (src/common/plugins/plugin_config.cpp).
+using Provenance = common::PluginProvenance;
 
 enum class LoadStatus {
     Loaded,
@@ -32,13 +34,7 @@ enum class LoadStatus {
     DuplicateName,          // an already-loaded plugin reported the same name
 };
 
-struct PluginCandidate {
-    std::filesystem::path file;
-    Provenance provenance = Provenance::User;
-    bool enabled = false;
-    // The candidate's own config from its client-plugins.json entry, verbatim.
-    nlohmann::json config = nlohmann::json::object();
-};
+using PluginCandidate = common::PluginFileCandidate;
 
 struct PluginRecord {
     std::filesystem::path file;
