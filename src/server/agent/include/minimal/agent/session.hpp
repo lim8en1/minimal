@@ -921,6 +921,9 @@ private:
     // A subagent's life is one seeded turn; once its completion hook has fired,
     // a stray client-submitted turn would fire it a second time, so SubmitTurn
     // stops accepting. Only ever set when on_turn_finished exists.
+    // Set (under mutex_) once WorkerMain finished its startup, before the first
+    // queued item; read by WaitForIdleForTesting.
+    bool worker_started_ = false;
     std::atomic<bool> subagent_finished_{false};
     std::atomic<bool> ever_attached_{false};
     std::chrono::steady_clock::time_point created_at_ = std::chrono::steady_clock::now();

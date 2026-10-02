@@ -1303,6 +1303,15 @@ void Session::WorkerMain() {
     // Work submitted meanwhile simply waits in the queue, so the loop still
     // carries its final group set before the first provider request.
     RefreshToolSources();
+    {
+        // Startup is over: the loop now carries its final tool-group set.
+        // WaitForIdleForTesting reads this so "idle" cannot mean "the worker has
+        // not started yet" -- a test reading loop state off-thread would race the
+        // startup's writes to it.
+        std::lock_guard<std::mutex> lock(mutex_);
+        worker_started_ = true;
+    }
+    turn_cv_.notify_all();
     while (true) {
         WorkItem item;
         bool wake_turn = false;
@@ -1856,7 +1865,7 @@ bool Session::idle() const {
 bool Session::WaitForIdleForTesting(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
     return turn_cv_.wait_for(lock, timeout, [this] {
-        return (work_.empty() && worker_activity_ == WorkerActivity::kIdle) ||
+        return (worker_started_ && work_.empty() && worker_activity_ == WorkerActivity::kIdle) ||
                terminated_.load(std::memory_order_acquire);
     });
 }

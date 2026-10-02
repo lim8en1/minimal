@@ -767,6 +767,9 @@ TEST_CASE("project context is loaded from the session's project_root into the sy
     auto session = fixture.registry->Create(std::move(params));
     REQUIRE(session != nullptr);
 
+    // Past the worker's startup (its tool-group refresh writes the loop), so
+    // reading the loop from this thread does not race it.
+    REQUIRE(session->WaitForIdleForTesting(5s));
     const auto request = session->loop().BuildChatRequest();
     REQUIRE(request.system.has_value());
     CHECK(request.system->find("Instructions from AGENTS.md in the project root:") !=
@@ -791,6 +794,9 @@ TEST_CASE("project context falls back to CLAUDE.md and skips empty files",
     params.project_root = project.path();
     auto session = fixture.registry->Create(std::move(params));
 
+    // Past the worker's startup (its tool-group refresh writes the loop), so
+    // reading the loop from this thread does not race it.
+    REQUIRE(session->WaitForIdleForTesting(5s));
     const auto request = session->loop().BuildChatRequest();
     REQUIRE(request.system.has_value());
     CHECK(request.system->find("Instructions from CLAUDE.md in the project root:") !=
@@ -806,7 +812,10 @@ TEST_CASE("project context is absent when disabled or when no candidate file exi
     SECTION("registry defaults: the feature is off until wired") {
         fixture.Build();
         auto session = fixture.registry->Create(Params("s1"));
-        const auto request = session->loop().BuildChatRequest();
+        // Past the worker's startup (its tool-group refresh writes the loop), so
+    // reading the loop from this thread does not race it.
+    REQUIRE(session->WaitForIdleForTesting(5s));
+    const auto request = session->loop().BuildChatRequest();
         REQUIRE(request.system.has_value());
         CHECK(request.system->find("## Project context") == std::string::npos);
     }
@@ -814,7 +823,10 @@ TEST_CASE("project context is absent when disabled or when no candidate file exi
         fixture.options.project_context = config::ProjectContextSettings{};
         fixture.Build();
         auto session = fixture.registry->Create(Params("s1"));
-        const auto request = session->loop().BuildChatRequest();
+        // Past the worker's startup (its tool-group refresh writes the loop), so
+    // reading the loop from this thread does not race it.
+    REQUIRE(session->WaitForIdleForTesting(5s));
+    const auto request = session->loop().BuildChatRequest();
         REQUIRE(request.system.has_value());
         CHECK(request.system->find("## Project context") == std::string::npos);
     }

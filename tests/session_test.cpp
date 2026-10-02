@@ -264,6 +264,7 @@ public:
     const tools::ToolSpec& spec() const override { return spec_; }
     tools::ToolResult execute(const nlohmann::json&, tools::ToolContext& ctx) override {
         had_channel = static_cast<bool>(ctx.schedule_injection);
+        channel = ctx.schedule_injection;  // a background task keeps this past the call
         if (ctx.schedule_injection) {
             delivered = ctx.schedule_injection(
                 llm::Message{llm::Role::User, {llm::TextBlock{"background result"}}});
@@ -272,6 +273,7 @@ public:
     }
     bool had_channel = false;
     bool delivered = false;
+    std::function<bool(llm::Message)> channel;
 
 private:
     tools::ToolSpec spec_;
@@ -350,6 +352,42 @@ TEST_CASE("a stream attachment delivers what is published to it", "[session][str
 
     attachment.Detach();
     CHECK_FALSE(attachment.PublishTo(event));  // the stream's queue is closed
+}
+
+TEST_CASE("a background result landing on an idle session wakes it (wake_on_injection)",
+          "[session]") {
+    SessionFixture fixture;
+    fixture.wake_on_injection = true;
+    auto tool = std::make_unique<InjectionProbeTool>();
+    auto* probe = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+    fixture.Script(testing::ToolUseResponse("call-1", "probe", nlohmann::json::object()));
+    fixture.Script(testing::TextResponse("first turn done"));
+    fixture.Script(testing::TextResponse("woken by the background result"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("start a task");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    REQUIRE(probe->channel);
+    const std::size_t calls_before = fixture.provider->call_count();
+
+    // The watcher thread of a background task finishing after the turn ended.
+    llm::ToolResultBlock result;
+    result.tool_use_id = "bg-1";
+    result.content.push_back(llm::TextBlock{"task finished"});
+    std::thread watcher([&] {
+        probe->channel(llm::Message{llm::Role::User, {std::move(result)}});
+    });
+    watcher.join();
+
+    // The sink woke the worker: a seedless turn ran and the provider was asked again.
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (fixture.provider->call_count() == calls_before &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(5ms);
+    }
+    CHECK(fixture.provider->call_count() > calls_before);
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 }
 
 TEST_CASE("tool execution is bracketed by lifecycle events", "[session]") {
