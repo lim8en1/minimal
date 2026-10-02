@@ -90,6 +90,7 @@ add_library(minimal_server_core SHARED
     rpc/wire_confirmation_broker.cpp
     rpc/wire_plugin_prompt_broker.cpp
     rpc/session_wiring.cpp
+    rpc/stream_attachment.cpp
     rpc/session_service.cpp
     rpc/server.cpp
     rpc/server_housekeeping.cpp

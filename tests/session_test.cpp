@@ -16,6 +16,7 @@
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/provider_resolver.hpp"
 #include "minimal/agent/session.hpp"
+#include "minimal/rpc/stream_attachment.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/skill_registry.hpp"
@@ -302,6 +303,53 @@ TEST_CASE("a session gives its tools a working deferred-completion channel", "[s
         if (llm::TextOf(stored.content) == "background result") found = true;
     }
     CHECK(found);
+}
+
+TEST_CASE("a stream attachment pairs subscribe/notify with unsubscribe/notify",
+          "[session][stream_attachment]") {
+    // The fixture already holds one subscriber (its own queue reader), so counts are
+    // relative to that baseline.
+    SessionFixture fixture;
+    fixture.Start();
+    agent::Session& session = *fixture.session;
+
+    rpc::StreamAttachment first(session);
+    const std::size_t baseline = first.SubscriberCount();
+    CHECK(session.ever_attached());
+    {
+        rpc::StreamAttachment second(session);
+        CHECK(first.SubscriberCount() == baseline + 1);
+    }  // destruction detaches exactly this stream
+    CHECK(first.SubscriberCount() == baseline);
+    CHECK(session.has_subscribers());
+
+    first.Detach();
+    first.Detach();  // idempotent: no second Unsubscribe / NotifyDetached to underflow a count
+    rpc::StreamAttachment third(session);
+    CHECK(third.SubscriberCount() == baseline);  // `first` really left, once
+}
+
+TEST_CASE("a stream attachment delivers what is published to it", "[session][stream_attachment]") {
+    SessionFixture fixture;
+    fixture.Start();
+    rpc::StreamAttachment attachment(*fixture.session);
+
+    v1::ServerEvent event;
+    event.set_session_id(fixture.session->info().session_id);
+    event.mutable_session_ended();
+    REQUIRE(attachment.PublishTo(event));
+    // A later subscriber is told it missed earlier events (resync) before anything
+    // targeted at it; skip that notice and find ours.
+    bool found = false;
+    for (int i = 0; i < 4 && !found; ++i) {
+        const auto popped = attachment.Pop();
+        REQUIRE(popped.has_value());
+        found = popped->has_session_ended();
+    }
+    CHECK(found);
+
+    attachment.Detach();
+    CHECK_FALSE(attachment.PublishTo(event));  // the stream's queue is closed
 }
 
 TEST_CASE("tool execution is bracketed by lifecycle events", "[session]") {

@@ -16,6 +16,7 @@
 #include "minimal/plugins/plugin_abi.h"
 #include "minimal/rpc/event_translator.hpp"
 #include "minimal/rpc/proto_convert.hpp"
+#include "minimal/rpc/stream_attachment.hpp"
 
 #include "minimal/plugins/plugin_rpc.hpp"
 
@@ -53,17 +54,11 @@ const agent::MentionResolver& DefaultMentionResolver() {
 }
 
 // Session only knows its transport as an agent::SessionTransport; the
-// subscriber and pending-request operations (Subscribe/Unsubscribe/Pop/
-// PublishTo/Resolve) belong to the concrete rpc type this layer built for it
-// (FinishSessionWiring). Checked: a session wired with anything else is a
-// programming error, not a cast to trust.
+// subscriber and pending-request operations belong to the concrete rpc type this
+// layer built for it (FinishSessionWiring). The checked narrowing lives in one
+// place, StreamAttachment::TransportOf.
 EventTranslator& Transport(agent::Session& session) {
-    auto* translator = dynamic_cast<EventTranslator*>(session.transport().get());
-    if (translator == nullptr) {
-        throw std::logic_error("session " + session.info().session_id +
-                               " has no rpc::EventTranslator transport");
-    }
-    return *translator;
+    return StreamAttachment::TransportOf(session);
 }
 
 }  // namespace
@@ -559,20 +554,14 @@ grpc::Status SessionServiceImpl::OpenSession(
     // has_subscribers() (the reaper's initial-attach guard and detached-idle
     // rule) accurate now that Session itself cannot see subscriber_count().
     //
-    // Declared here (not `const auto` inline) and populated inside the try
-    // below: Subscribe()/EmitSessionMetadata() are not the trivial calls they
-    // look like -- EmitSessionMetadata's preset_snapshot() copies the whole
-    // resolved preset (system prompt, tool_config, permission maps) under the
-    // session lock, and Subscribe() allocates a queue -- so both can throw
-    // (OOM, a lock-order surprise). `attached` records whether NotifyAttached
-    // actually ran, so finish()'s cleanup below never fires NotifyDetached
-    // without a matching attach: that pairing is what keeps
-    // has_subscribers()/the detached-idle reaper accurate, and an unguarded
-    // NotifyDetached on a Subscribe-throws path would leave a session
-    // permanently unreapable (has_subscribers() reads underflowed-nonzero)
-    // instead of merely failing this one RPC.
-    rpc::EventBroadcaster::Handle subscriber;
-    bool attached = false;
+    // The stream's attachment to the session: Subscribe + NotifyAttached on
+    // construction, Unsubscribe + NotifyDetached on Detach()/destruction, paired
+    // by the object's lifetime (see StreamAttachment). Constructed inside the try
+    // below because Subscribe() allocates a queue and can throw; `attachment`
+    // stays empty until both halves succeeded, so finish() never fires a
+    // NotifyDetached without its NotifyAttached -- the pairing that keeps
+    // has_subscribers() and the detached-idle reaper accurate.
+    std::optional<StreamAttachment> attachment;
 
     // The one and only Write() caller for this stream. It drains THIS stream's
     // subscriber queue, not a shared one, so concurrent streams never split
@@ -600,38 +589,38 @@ grpc::Status SessionServiceImpl::OpenSession(
         // connected-but-deaf client, and the queue close above unwinds the
         // writer in every well-behaved case.
         if (terminate) sessions_.Terminate(session->info().session_id);
-        if (attached) {
-            Transport(*session).queue().Unsubscribe(subscriber);
-            session->NotifyDetached();
-        }
+        if (attachment) attachment->Detach();
         if (writer.joinable()) writer.join();
         // The attached_ slot is released by client_slot's destructor, after
         // this lambda returns -- the decrement (and, at zero, the last-client
         // callback) still precede the RPC handler's return.
         return status;
     };
+    // An exception unwinding THIS stream (EmitSessionMetadata, Dispatch, a throw in
+    // a handler) used to terminate the session outright -- for every other client
+    // attached to it too. Terminate only when this stream is the session's only
+    // subscriber (nobody else is affected); otherwise just drop this stream.
+    const auto sole_stream = [&attachment] {
+        return !attachment || attachment->SubscriberCount() <= 1;
+    };
     try {
-        subscriber = Transport(*session).queue().Subscribe();
-        session->NotifyAttached();
-        attached = true;
+        attachment.emplace(*session);
 
         // First on the stream, before anything the client's first event
         // produces: a freshly attached tab has everything its status bar
         // renders from frame one. Targeted at THIS subscriber -- the other
         // streams attached already have their metadata. This is the RPC
         // thread: PublishTo never blocks.
-        EmitSessionMetadata(*session, subscriber);
+        EmitSessionMetadata(*session, attachment->handle());
 
         // A prompt the worker is still parked on may have been published before
         // this stream existed (the earlier client crashed or detached): replay
         // it so SOMEONE can answer. Before the writer starts, so a duplicate of
         // what the subscriber's backlog already holds is detected, not raced.
-        for (auto& prompt : Transport(*session).pending().OpenPrompts()) {
-            Transport(*session).queue().PublishToIfAbsent(subscriber, std::move(prompt));
-        }
+        attachment->ReplayOpenPrompts();
 
-        writer = std::thread([stream, session, subscriber] {
-            while (auto event = Transport(*session).queue().Pop(subscriber)) {
+        writer = std::thread([stream, &attachment_ref = *attachment] {
+            while (auto event = attachment_ref.Pop()) {
                 if (!stream->Write(*event)) break;  // client went away
             }
         });
@@ -698,7 +687,7 @@ grpc::Status SessionServiceImpl::OpenSession(
         // Dispatch branches are non-throwing by contract; this guard exists so
         // that contract can be violated without bricking shutdown.
         logger_.warn("session {}: OpenSession failed: {}", first.session_id(), e.what());
-        return finish(/*terminate=*/true,
+        return finish(/*terminate=*/sole_stream(),
                       grpc::Status(grpc::StatusCode::INTERNAL, e.what()));
     } catch (...) {
         // The SAME containment for an exception of an unknown flavor: the
@@ -706,7 +695,7 @@ grpc::Status SessionServiceImpl::OpenSession(
         // else would have unwound past the refcount restore and bricked
         // shutdown outright.
         logger_.warn("session {}: OpenSession failed (unknown exception)", first.session_id());
-        return finish(/*terminate=*/true,
+        return finish(/*terminate=*/sole_stream(),
                       grpc::Status(grpc::StatusCode::INTERNAL, "unknown exception"));
     }
 
