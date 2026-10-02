@@ -1,14 +1,22 @@
 #include "minimal/rpc/command_executor.hpp"
 
+#include <algorithm>
+#include <vector>
+
 #include "minimal/common/logger.hpp"
 
 namespace minimal::rpc {
 
 CommandExecutor::CommandExecutor(std::size_t threads, std::size_t max_backlog)
-    : max_backlog_(max_backlog) {
-    for (std::size_t i = 0; i < threads; ++i) {
-        workers_.emplace_back([this] { WorkerMain(); });
+    : CommandExecutor(threads, max_backlog, Options{}) {}
+
+CommandExecutor::CommandExecutor(std::size_t threads, std::size_t max_backlog, Options options)
+    : options_(options), max_backlog_(max_backlog) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (std::size_t i = 0; i < threads; ++i) SpawnWorkerLocked();
     }
+    if (options_.deadline.count() > 0) watchdog_ = std::thread([this] { WatchdogMain(); });
 }
 
 CommandExecutor::~CommandExecutor() {
@@ -17,16 +25,43 @@ CommandExecutor::~CommandExecutor() {
         stopping_ = true;
     }
     cv_.notify_all();
-    for (auto& worker : workers_) {
+    watchdog_cv_.notify_all();
+    if (watchdog_.joinable()) watchdog_.join();
+    // The watchdog is gone, so no worker is spawned from here on. A stuck task
+    // still blocks this join -- the pre-existing shutdown contract (see the
+    // header): tasks must be able to finish.
+    std::list<std::thread> workers;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        workers.swap(workers_);
+    }
+    for (auto& worker : workers) {
         if (worker.joinable()) worker.join();
     }
 }
 
-bool CommandExecutor::TryPost(Task task) {
+void CommandExecutor::SpawnWorkerLocked() {
+    workers_.emplace_back([this] { WorkerMain(); });
+}
+
+void CommandExecutor::ReleaseKeyLocked(const std::string& key) {
+    if (key.empty()) return;
+    const auto it = per_key_.find(key);
+    if (it == per_key_.end()) return;
+    if (--it->second == 0) per_key_.erase(it);
+}
+
+bool CommandExecutor::TryPost(Task task, std::string key, Task on_timeout) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (stopping_ || tasks_.size() >= max_backlog_) return false;
-        tasks_.push_back(std::move(task));
+        if (stopping_ || items_.size() >= max_backlog_) return false;
+        if (abandoned_ >= options_.max_abandoned) return false;
+        if (!key.empty()) {
+            std::size_t& held = per_key_[key];
+            if (held >= options_.max_per_key) return false;
+            ++held;
+        }
+        items_.push_back(Item{std::move(task), std::move(key), std::move(on_timeout)});
     }
     cv_.notify_one();
     return true;
@@ -34,25 +69,73 @@ bool CommandExecutor::TryPost(Task task) {
 
 void CommandExecutor::WorkerMain() {
     while (true) {
-        Task task;
+        Item item;
+        std::list<Running>::iterator slot;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
-            if (tasks_.empty()) return;  // stopping_ && drained
-            task = std::move(tasks_.front());
-            tasks_.pop_front();
+            cv_.wait(lock, [this] { return stopping_ || !items_.empty(); });
+            if (items_.empty()) return;  // stopping_ && drained
+            item = std::move(items_.front());
+            items_.pop_front();
+            running_.push_back(Running{std::chrono::steady_clock::now(), item.key,
+                                       std::move(item.on_timeout), false});
+            slot = std::prev(running_.end());
         }
         // Catch-all, not just std::exception: a task that throws a
         // plugin-originated non-standard exception must not terminate the
         // executor's thread -- the pool outlives any single task.
         try {
-            task();
+            item.task();
         } catch (const std::exception& e) {
             // Reaching here means the task's own containment missed something.
             common::DefaultLogger().warn("command pool task threw: {}", e.what());
         } catch (...) {
             common::DefaultLogger().warn("command pool task threw a non-standard exception");
         }
+        bool replaced = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            replaced = slot->timed_out;
+            if (replaced) {
+                // The watchdog already released the key and spawned this
+                // thread's replacement; this one just stops being "stuck".
+                --abandoned_;
+            } else {
+                ReleaseKeyLocked(slot->key);
+            }
+            running_.erase(slot);
+        }
+        if (replaced) return;
+    }
+}
+
+void CommandExecutor::WatchdogMain() {
+    const auto tick = std::min(options_.deadline / 4, std::chrono::milliseconds(250));
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (!stopping_) {
+        watchdog_cv_.wait_for(lock, std::max(tick, std::chrono::milliseconds(10)),
+                              [this] { return stopping_; });
+        if (stopping_) break;
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<Task> notify;
+        for (auto& running : running_) {
+            if (running.timed_out || now - running.started < options_.deadline) continue;
+            running.timed_out = true;
+            ++abandoned_;
+            ReleaseKeyLocked(running.key);
+            SpawnWorkerLocked();  // capacity returns while the stuck thread finishes
+            if (running.on_timeout) notify.push_back(std::move(running.on_timeout));
+        }
+        if (notify.empty()) continue;
+        lock.unlock();
+        for (auto& callback : notify) {
+            try {
+                callback();
+            } catch (...) {
+                common::DefaultLogger().warn("command pool on_timeout callback threw");
+            }
+        }
+        lock.lock();
     }
 }
 

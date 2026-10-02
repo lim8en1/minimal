@@ -442,11 +442,23 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
         // joined in this service's destructor, before those registries die.
         auto shared = sessions_.Find(session.info().session_id);
         if (shared != nullptr) {
-            if (command_executor_.TryPost([shared, queued] { shared->RunCommandNow(queued); })) {
+            // Keyed by session: one session's hung commands cannot occupy
+            // every pool thread. A command still running at the deadline is
+            // answered with a timeout error (its thread is replaced; see
+            // CommandExecutor).
+            if (command_executor_.TryPost(
+                    [shared, queued] { shared->RunCommandNow(queued); },
+                    session.info().session_id,
+                    [shared, queued] {
+                        shared->RejectCommand(queued,
+                                              "the command did not finish in time; it may still "
+                                              "complete in the background");
+                    })) {
                 return;
             }
-            // Saturated: the caller holds a request_id a client waits on, so
-            // refusal must still produce an answer.
+            // Saturated (pool, this session's share, or stuck threads): the
+            // caller holds a request_id a client waits on, so refusal must
+            // still produce an answer.
             shared->RejectCommand(queued, "the command pool is saturated; retry shortly");
             return;
         }
