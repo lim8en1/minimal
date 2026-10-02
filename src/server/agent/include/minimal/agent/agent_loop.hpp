@@ -37,6 +37,7 @@
 #include "minimal/agent/loop_types.hpp"
 #include "minimal/agent/compaction_controller.hpp"
 #include "minimal/agent/request_builder.hpp"
+#include "minimal/agent/tool_round.hpp"
 #include "minimal/agent/working_history.hpp"
 
 namespace minimal::agent {
@@ -208,7 +209,7 @@ public:
     // pops the turn. Handed to every ToolContext so blocking tools can wait
     // on its cv instead of polling. May be null between turns (tools cannot
     // observe that: they only run inside a turn). WORKER THREAD ONLY.
-    void SetCancelToken(tools::CancelTokenPtr token) { cancel_token_ = std::move(token); }
+    void SetCancelToken(tools::CancelTokenPtr token) { tool_round_.SetCancelToken(std::move(token)); }
 
     // /model across providers: the session builds the new provider and rebinds
     // it. A reference, not an owner -- the session owns the object.
@@ -279,7 +280,6 @@ private:
     // The project's instructions (AGENTS.md/CLAUDE.md), rendered. Constant for
     // the session's life -- loaded once at creation/resume -- so it never
     // disturbs the prompt-cache prefix mid-session.
-    tools::CancelTokenPtr cancel_token_;
     // See OpenToSteering(). Raised once the turn's user-visible content is in
     // the history (after the seed append, or after the wake turn's top flush);
     // lowered when the turn loop exits. The reader thread's SubmitTurn polls
@@ -309,12 +309,9 @@ private:
     CompactionController compaction_;
     RetryPolicy retry_;
 
-    // Parallel tool dispatch (ARCHITECTURE.md "Tool dispatch"). Width from
-    // LoopConfig; width 1 never starts threads. Lives on the loop rather than
-    // the Session so a loop-only test exercises the real dispatch path, and so
-    // the pool cannot outlive the executor/registry it borrows -- the loop is
-    // destroyed first (Session declares it before its borrowed state).
-    tools::ToolPool pool_;
+    // Gate + run of each tool round (parallel dispatch; ARCHITECTURE.md "Tool
+    // dispatch"). Owns the ToolPool.
+    ToolRound tool_round_;
 
 
 };
