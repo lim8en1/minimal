@@ -266,6 +266,9 @@ private:
     // path (no seed) does its initial injection flush here; the seeded path
     // flushed BEFORE appending the seed, which is the chronological order.
     void RunTurnLoop(TurnResult& result, bool flush_first);
+    // One provider request with retry, backoff and context-overflow recovery.
+    std::optional<llm::ChatResponse> StreamWithRetry(llm::ChatRequest& chat_request,
+                                                     TurnResult& result);
     bool Cancelled() const;
     // The pause probe. Same call-shape as Cancelled(): an injected predicate,
     // nullopt-safe. Checked at the loop top only.

@@ -293,6 +293,65 @@ TurnResult AgentLoop::RunTurn() {
     return result;
 }
 
+// One provider request with the loop's retry policy: a context-overflow refusal
+// compacts and resends once (without spending a retry); other retryable errors back
+// off and retry up to max_retries; anything else rethrows. nullopt means the turn
+// must stop WITHOUT a response -- today only a cancel landing inside the backoff
+// sleep, which is reported as Cancelled rather than as a model failure.
+std::optional<llm::ChatResponse> AgentLoop::StreamWithRetry(llm::ChatRequest& chat_request,
+                                                            TurnResult& result) {
+    llm::ChatResponse response;
+    bool got_response = false;
+    bool cancelled_in_backoff = false;
+    bool overflow_recovered = false;
+    for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
+        try {
+            response = provider_.get().StreamComplete(chat_request, event_sink_);
+            got_response = true;
+            break;
+        } catch (const llm::LlmError& error) {
+            // The request did not fit the window (the estimate undercounted,
+            // or the window is smaller than declared): compact once and
+            // resend, instead of failing this turn and every later one.
+            if (!overflow_recovered && config_.auto_compact && RetryPolicy::IsContextOverflow(error)) {
+                overflow_recovered = true;
+                session_.logger.warn(
+                    "session {}: provider rejected the request as too large ({}); "
+                    "compacting and retrying once",
+                    session_.session_id, error.what());
+                if (Compact("overflow").has_value()) {
+                    chat_request = BuildChatRequest();
+                    --attempt;  // the recovery does not spend a retry
+                    continue;
+                }
+            }
+            // Retry policy lives here, not in the provider: only the loop
+            // knows whether another attempt is still wanted.
+            if (!error.is_retryable() || attempt == config_.max_retries) {
+                throw;
+            }
+            // Backoff, not a bare retry. Without it the four attempts land
+            // inside a few milliseconds, which turns a 429 into four 429s
+            // and is worse for the backend than not retrying at all.
+            if (!retry_.SleepForBackoff(attempt, error.retry_after())) {
+                // CancelTurn landed inside the backoff sleep. That is a
+                // cancellation, not a mysterious failure: report it as the
+                // Cancelled it is rather than letting the turn fall out with
+                // StopReason::Unknown -- the headless exit code derives from
+                // this value, and exit 3 ("model error") for a user cancel
+                // is simply the wrong answer.
+                cancelled_in_backoff = true;
+                break;
+            }
+        }
+    }
+    if (!got_response) {
+        if (cancelled_in_backoff) result.stop_reason = llm::StopReason::Cancelled;
+        return std::nullopt;
+    }
+    return response;
+}
+
 void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
     if (flush_first) {
         FlushInjectedMessages();
@@ -338,55 +397,9 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         // cancelled before any response still reports the model it was aimed
         // at, and TurnSummary::model is populated on every exit path.
         result.model = chat_request.model;
-        llm::ChatResponse response;
-        bool got_response = false;
-        bool cancelled_in_backoff = false;
-        bool overflow_recovered = false;
-        for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
-            try {
-                response = provider_.get().StreamComplete(chat_request, event_sink_);
-                got_response = true;
-                break;
-            } catch (const llm::LlmError& error) {
-                // The request did not fit the window (the estimate undercounted,
-                // or the window is smaller than declared): compact once and
-                // resend, instead of failing this turn and every later one.
-                if (!overflow_recovered && config_.auto_compact && RetryPolicy::IsContextOverflow(error)) {
-                    overflow_recovered = true;
-                    session_.logger.warn(
-                        "session {}: provider rejected the request as too large ({}); "
-                        "compacting and retrying once",
-                        session_.session_id, error.what());
-                    if (Compact("overflow").has_value()) {
-                        chat_request = BuildChatRequest();
-                        --attempt;  // the recovery does not spend a retry
-                        continue;
-                    }
-                }
-                // Retry policy lives here, not in the provider: only the loop
-                // knows whether another attempt is still wanted.
-                if (!error.is_retryable() || attempt == config_.max_retries) {
-                    throw;
-                }
-                // Backoff, not a bare retry. Without it the four attempts land
-                // inside a few milliseconds, which turns a 429 into four 429s
-                // and is worse for the backend than not retrying at all.
-                if (!retry_.SleepForBackoff(attempt, error.retry_after())) {
-                    // CancelTurn landed inside the backoff sleep. That is a
-                    // cancellation, not a mysterious failure: report it as the
-                    // Cancelled it is rather than letting the turn fall out with
-                    // StopReason::Unknown -- the headless exit code derives from
-                    // this value, and exit 3 ("model error") for a user cancel
-                    // is simply the wrong answer.
-                    cancelled_in_backoff = true;
-                    break;
-                }
-            }
-        }
-        if (!got_response) {
-            if (cancelled_in_backoff) result.stop_reason = llm::StopReason::Cancelled;
-            break;
-        }
+        std::optional<llm::ChatResponse> streamed = StreamWithRetry(chat_request, result);
+        if (!streamed) break;
+        llm::ChatResponse response = std::move(*streamed);
 
         ++result.provider_calls;
         result.last_usage = response.usage;
