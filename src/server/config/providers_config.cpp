@@ -566,9 +566,9 @@ namespace {
 
 // The overlay ResolvedModel for one discovered model: the entry's connection
 // and provider-level defaults, the backend's id, window, and output cap.
-// Touches neither ImmutableCatalog nor DiscoveryCacheState directly -- a pure
+// Touches neither ImmutableCatalog nor CatalogRuntime directly -- a pure
 // function of its two parameters despite living beside methods that hold
-// cache_.mutex_ -- so it needs no ProvidersConfig membership at all.
+// runtime_.mutex_ -- so it needs no ProvidersConfig membership at all.
 ResolvedModel BuildDiscoveredLocked(const ProviderEntry& entry,
                                     const llm::DiscoveredModel& discovered) {
     // The backend knows the model id it serves; the entry supplies the
@@ -626,20 +626,10 @@ void ApplyAppAttribution(const nlohmann::json& provider, llm::ProviderConfig& co
 }  // namespace
 
 ProvidersConfig& ProvidersConfig::operator=(ProvidersConfig&& other) noexcept {
-    if (this == &other) return *this;  // would lock the same mutex twice
-    std::lock_guard<std::mutex> a(cache_.mutex_);
-    std::lock_guard<std::mutex> b(other.cache_.mutex_);
+    if (this == &other) return *this;  // MoveFrom would lock the same mutex twice
     catalog_.models_ = std::move(other.catalog_.models_);
     catalog_.providers_ = std::move(other.catalog_.providers_);
-    cache_.gates_ = std::move(other.cache_.gates_);
-    cache_.hook_ = std::move(other.cache_.hook_);
-    cache_.metadata_hook_ = std::move(other.cache_.metadata_hook_);
-    cache_.variant_params_hook_ = std::move(other.cache_.variant_params_hook_);
-    cache_.metadata_variants_ = std::move(other.cache_.metadata_variants_);
-    cache_.metadata_tombstones_ = std::move(other.cache_.metadata_tombstones_);
-    cache_.generation_ = other.cache_.generation_;
-    cache_.discovery_ = std::move(other.cache_.discovery_);
-    cache_.overlay_ = std::move(other.cache_.overlay_);
+    runtime_.MoveFrom(std::move(other.runtime_));
     return *this;
 }
 
@@ -658,11 +648,11 @@ std::vector<std::string> ProvidersConfig::VariantsOf(const ModelRef& ref) const 
     // have declared.
     const auto [base_id, variant_name] = SplitVariantSuffix(ref.model);
     if (!variant_name.empty()) return {};
-    std::lock_guard<std::mutex> lock(cache_.mutex_);
+    std::lock_guard<std::mutex> lock(runtime_.mutex_);
     return VariantsOfLocked(ref.provider, base_id);
 }
 
-// The variant recipe lookup under cache_.mutex_ -- the body of VariantsOf,
+// The variant recipe lookup under runtime_.mutex_ -- the body of VariantsOf,
 // shared with ModelRefs' variant-refs union (which needs the same
 // static-catalog-beats-discovery-cache precedence while already holding the
 // mutex). See VariantsOf's public contract for the rules.
@@ -698,8 +688,8 @@ std::vector<std::string> ProvidersConfig::VariantsOfLocked(const std::string& pr
     // listing, and triggering enrichment I/O from a listing would make the
     // picker latency-bound. The ladder lands here the first time the base (or
     // one of its variants) actually resolves.
-    if (const auto cache_it = cache_.discovery_.find(provider_name);
-        cache_it != cache_.discovery_.end() && cache_it->second.ok) {
+    if (const auto cache_it = runtime_.discovery_.find(provider_name);
+        cache_it != runtime_.discovery_.end() && cache_it->second.ok) {
         const auto variants_it = cache_it->second.variants_by_model.find(base_id);
         if (variants_it != cache_it->second.variants_by_model.end()) {
             for (const auto& variant : variants_it->second) out.push_back(variant.name);
@@ -711,8 +701,8 @@ std::vector<std::string> ProvidersConfig::VariantsOfLocked(const std::string& pr
     }
     // The metadata-enrichment recipe, when the base has been enriched
     // already. Not a consultation trigger -- see the NB above.
-    if (const auto metadata_it = cache_.metadata_variants_.find(key);
-        metadata_it != cache_.metadata_variants_.end()) {
+    if (const auto metadata_it = runtime_.metadata_variants_.find(key);
+        metadata_it != runtime_.metadata_variants_.end()) {
         for (const auto& variant : metadata_it->second) out.push_back(variant.name);
     }
     return out;
@@ -724,33 +714,33 @@ const ProviderEntry* ProvidersConfig::FindProviderLocked(const std::string& name
 }
 
 void ProvidersConfig::SetDiscoveryHook(DiscoveryHook hook) {
-    std::lock_guard<std::mutex> lock(cache_.mutex_);
-    cache_.hook_ = std::move(hook);
+    std::lock_guard<std::mutex> lock(runtime_.mutex_);
+    runtime_.hook_ = std::move(hook);
     // A discovery attempted under the previous hook -- typically none at all,
     // when the startup sanity check resolved against this catalog before
     // plugins' catalogs were wired in -- is stale: refetch it at next resolve
     // rather than serving its negative-cached "no discovery hook set".
-    ++cache_.generation_;
+    ++runtime_.generation_;
 }
 
 void ProvidersConfig::SetDiscoveryRetryBackoff(std::chrono::milliseconds backoff) {
-    std::lock_guard<std::mutex> lock(cache_.mutex_);
-    cache_.discovery_retry_backoff_ = backoff;
+    std::lock_guard<std::mutex> lock(runtime_.mutex_);
+    runtime_.discovery_retry_backoff_ = backoff;
 }
 
 void ProvidersConfig::SetMetadataHook(MetadataHook hook) {
-    std::lock_guard<std::mutex> lock(cache_.mutex_);
-    cache_.metadata_hook_ = std::move(hook);
+    std::lock_guard<std::mutex> lock(runtime_.mutex_);
+    runtime_.metadata_hook_ = std::move(hook);
 }
 
 void ProvidersConfig::SetVariantParamsHook(VariantParamsHook hook) {
-    std::lock_guard<std::mutex> lock(cache_.mutex_);
-    cache_.variant_params_hook_ = std::move(hook);
+    std::lock_guard<std::mutex> lock(runtime_.mutex_);
+    runtime_.variant_params_hook_ = std::move(hook);
 }
 
 std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& ref) const {
     const std::string key = ref.str();
-    std::unique_lock<std::mutex> lock(cache_.mutex_);
+    std::unique_lock<std::mutex> lock(runtime_.mutex_);
 
     // A `@variant` suffix is checked FIRST: the ref does not exist as a static
     // or discovered id, and the suffix must be validated against the base
@@ -786,7 +776,7 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& re
         // be enriched from the catalog -- but only by handing back an overlay
         // COPY: the parsed node must never be mutated after a snapshot of it
         // has escaped.
-        if (const auto enriched = cache_.overlay_.find(key); enriched != cache_.overlay_.end()) {
+        if (const auto enriched = runtime_.overlay_.find(key); enriched != runtime_.overlay_.end()) {
             return enriched->second;
         }
         if (const ProviderEntry* entry = FindProviderLocked(ref.provider);
@@ -806,8 +796,8 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& re
             // gets its turn before the parsed self is handed back.
             if (entry->metadata) {
                 EnrichFromMetadata(*entry, ref.model, key, lock);
-                if (const auto enriched = cache_.overlay_.find(key);
-                    enriched != cache_.overlay_.end()) {
+                if (const auto enriched = runtime_.overlay_.find(key);
+                    enriched != runtime_.overlay_.end()) {
                     return enriched->second;
                 }
             }
@@ -820,7 +810,7 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& re
         if (const ProviderEntry* entry = FindProviderLocked(ref.provider);
             entry != nullptr && entry->metadata) {
             EnrichFromMetadata(*entry, ref.model, key, lock);
-            if (const auto enriched = cache_.overlay_.find(key); enriched != cache_.overlay_.end()) {
+            if (const auto enriched = runtime_.overlay_.find(key); enriched != runtime_.overlay_.end()) {
                 return enriched->second;
             }
         }
@@ -841,34 +831,34 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveDiscovered(
     std::unique_lock<std::mutex>& lock) const {
     // The fetch runs holding ONLY this provider's gate: a slow catalog must
     // not stall other config reads -- session creation, listings -- which take
-    // cache_.mutex_ alone. Lock order is always gate -> cache_.mutex_, never
-    // the reverse: cache_.gates_ is only ever touched for insertion here
-    // (under cache_.mutex_) or locked before it.
+    // runtime_.mutex_ alone. Lock order is always gate -> runtime_.mutex_, never
+    // the reverse: runtime_.gates_ is only ever touched for insertion here
+    // (under runtime_.mutex_) or locked before it.
     lock.unlock();
-    DiscoveryCacheState::FetchGate& gate = [&] () -> DiscoveryCacheState::FetchGate& {
-        std::lock_guard<std::mutex> l(cache_.mutex_);
-        return cache_.gates_.try_emplace(entry.name).first->second;
+    CatalogRuntime::FetchGate& gate = [&] () -> CatalogRuntime::FetchGate& {
+        std::lock_guard<std::mutex> l(runtime_.mutex_);
+        return runtime_.gates_.try_emplace(entry.name).first->second;
     }();
     std::lock_guard<std::mutex> gate_lock(gate.mtx);
     lock.lock();
 
     // Double-check under the gate: another resolver may have fetched while we
     // waited, and its publish may already serve this model.
-    if (const auto it = cache_.overlay_.find(ref_key); it != cache_.overlay_.end()) return it->second;
+    if (const auto it = runtime_.overlay_.find(ref_key); it != runtime_.overlay_.end()) return it->second;
 
-    DiscoveryCacheState::DiscoveryCache& cache = cache_.discovery_[entry.name];
+    CatalogRuntime::DiscoveryCache& cache = runtime_.discovery_[entry.name];
     // A failed attempt is retried once its backoff elapsed: the negative cache
     // protects against a fetch per resolve, not against a backend that came up
     // after the first look.
     const bool failed_and_due =
         cache.attempted && !cache.ok &&
-        std::chrono::steady_clock::now() - cache.attempted_at >= cache_.discovery_retry_backoff_;
-    if (!cache.attempted || cache.generation != cache_.generation_ || failed_and_due) {
+        std::chrono::steady_clock::now() - cache.attempted_at >= runtime_.discovery_retry_backoff_;
+    if (!cache.attempted || cache.generation != runtime_.generation_ || failed_and_due) {
         lock.unlock();  // the hook does network I/O -- no config lock held
         const DiscoveryOutcome outcome = FetchOutcome(entry);
         lock.lock();
         // A refresh may have published while we fetched; prefer its result.
-        if (const auto it = cache_.overlay_.find(ref_key); it != cache_.overlay_.end()) return it->second;
+        if (const auto it = runtime_.overlay_.find(ref_key); it != runtime_.overlay_.end()) return it->second;
         PublishLocked(entry, outcome, cache);
     }
 
@@ -881,14 +871,14 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveDiscovered(
         // a model with a window but no cap reaches here too.
         const auto discovered = cache.models.find(model_id);
         if (discovered != cache.models.end()) {
-            return cache_.overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(
+            return runtime_.overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(
                                                         EnrichFromDiscovery(*static_it->second,
                                                                             discovered->second)))
                 .first->second;
         }
         return static_it->second;  // nothing to enrich
     }
-    if (const auto it = cache_.overlay_.find(ref_key); it != cache_.overlay_.end()) return it->second;
+    if (const auto it = runtime_.overlay_.find(ref_key); it != runtime_.overlay_.end()) return it->second;
     return nullptr;  // discovery succeeded; the backend does not serve this id
 }
 
@@ -898,7 +888,7 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
     // Served-from-overlay first: the sibling is built at most once per ref per
     // process, exactly like every other overlay value (RefreshDiscovery evicts
     // wholesale, so a rebuild after a refresh picks up a changed recipe).
-    if (const auto it = cache_.overlay_.find(ref_key); it != cache_.overlay_.end()) {
+    if (const auto it = runtime_.overlay_.find(ref_key); it != runtime_.overlay_.end()) {
         return it->second;
     }
 
@@ -923,8 +913,8 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
         // carry the same window/cap a session on the base would get, or a
         // /think switch silently drops compaction.
         if (entry.discover) {
-            if (const auto cache_it = cache_.discovery_.find(entry.name);
-                cache_it != cache_.discovery_.end() && cache_it->second.ok) {
+            if (const auto cache_it = runtime_.discovery_.find(entry.name);
+                cache_it != runtime_.discovery_.end() && cache_it->second.ok) {
                 const auto discovered = cache_it->second.models.find(base_id);
                 if (discovered != cache_it->second.models.end()) {
                     base = std::make_shared<const ResolvedModel>(
@@ -965,21 +955,21 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
         // parsed node the overlay also holds -- the sibling carries what a
         // session on the base would get, exactly as ResolveDiscovered's static
         // branch does for the discovery twin.
-        if (const auto enriched_it = cache_.overlay_.find(base_key);
-            enriched_it != cache_.overlay_.end()) {
+        if (const auto enriched_it = runtime_.overlay_.find(base_key);
+            enriched_it != runtime_.overlay_.end()) {
             base = enriched_it->second;
         }
-        const auto metadata_it = cache_.metadata_variants_.find(base_key);
-        if (metadata_it == cache_.metadata_variants_.end()) return nullptr;
+        const auto metadata_it = runtime_.metadata_variants_.find(base_key);
+        if (metadata_it == runtime_.metadata_variants_.end()) return nullptr;
         const auto name_it = std::find_if(metadata_it->second.begin(),
                                           metadata_it->second.end(),
                                           [&](const ModelVariant& v) {
                                               return v.name == variant_name;
                                           });
         if (name_it == metadata_it->second.end()) return nullptr;
-        return cache_
+        return runtime_
             .overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(MakeVariantResolved(
-                                           *base, *name_it, cache_.variant_params_hook_)))
+                                           *base, *name_it, runtime_.variant_params_hook_)))
             .first->second;
     }
     // A static twin's explicit `variants: []` opt-out (see VariantsOf's
@@ -987,8 +977,8 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
     // static sibling matched `variant_name`, so an opted-out base must answer
     // "undeclared" rather than falling through to the autodetected ladder.
     if (base->variants_declared) return nullptr;
-    if (const auto cache_it = cache_.discovery_.find(entry.name);
-        cache_it != cache_.discovery_.end() && cache_it->second.ok) {
+    if (const auto cache_it = runtime_.discovery_.find(entry.name);
+        cache_it != runtime_.discovery_.end() && cache_it->second.ok) {
         const auto variants_it = cache_it->second.variants_by_model.find(base_id);
         if (variants_it != cache_it->second.variants_by_model.end()) {
             const auto name_it = std::find_if(variants_it->second.begin(),
@@ -1001,24 +991,24 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
     }
     if (!declared) return nullptr;  // undeclared (or the model advertises no efforts)
 
-    return cache_
+    return runtime_
         .overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(MakeVariantResolved(
-                                       *base, *declared, cache_.variant_params_hook_)))
+                                       *base, *declared, runtime_.variant_params_hook_)))
         .first->second;
 }
 
 void ProvidersConfig::EnrichFromMetadata(const ProviderEntry& entry, const std::string& model_id,
                                          const std::string& ref_key,
                                          std::unique_lock<std::mutex>& lock) const {
-    // cache_.mutex_ is HELD on entry (via `lock`): the hook snapshot and the
+    // runtime_.mutex_ is HELD on entry (via `lock`): the hook snapshot and the
     // already-enriched checks below read mutex-guarded state directly, never
     // re-locking -- a second acquisition of a non-recursive mutex this caller
     // already holds is a deadlock, not a scope.
-    MetadataHook hook = cache_.metadata_hook_;
+    MetadataHook hook = runtime_.metadata_hook_;
     // Already enriched (or already answered "no answer"): the overlay or
     // tombstone IS the result; a second consult would repeat the Lookup on
     // every resolve of the same model.
-    if (cache_.overlay_.count(ref_key) != 0 || cache_.metadata_tombstones_.count(ref_key) != 0) {
+    if (runtime_.overlay_.count(ref_key) != 0 || runtime_.metadata_tombstones_.count(ref_key) != 0) {
         return;
     }
     if (!hook) return;
@@ -1027,26 +1017,26 @@ void ProvidersConfig::EnrichFromMetadata(const ProviderEntry& entry, const std::
     // may hit the network). Hold ONLY this provider's gate across it -- the
     // same discipline ResolveDiscovered uses, for the same reason: a slow
     // catalog must not stall session creation or listings, which take
-    // cache_.mutex_ alone. Lock order is always gate -> mutex_, never the
+    // runtime_.mutex_ alone. Lock order is always gate -> mutex_, never the
     // reverse.
     lock.unlock();
-    DiscoveryCacheState::FetchGate& gate = [&] () -> DiscoveryCacheState::FetchGate& {
-        std::lock_guard<std::mutex> held(cache_.mutex_);
-        return cache_.gates_.try_emplace(entry.name).first->second;
+    CatalogRuntime::FetchGate& gate = [&] () -> CatalogRuntime::FetchGate& {
+        std::lock_guard<std::mutex> held(runtime_.mutex_);
+        return runtime_.gates_.try_emplace(entry.name).first->second;
     }();
     std::lock_guard<std::mutex> gate_lock(gate.mtx);
     // Deadlock note, learned the hard way: the gate lambda above MUST be the
-    // only place this function touches cache_.mutex_ while `lock` is
+    // only place this function touches runtime_.mutex_ while `lock` is
     // unlocked -- it is fine here because `lock` is NOT holding the mutex at
     // that moment, and the re-lock below happens after the lambda's guard has
-    // released. Never take cache_.mutex_ again while `lock` holds it.
+    // released. Never take runtime_.mutex_ again while `lock` holds it.
 
     // Double-check UNDER the gate (ResolveDiscovered does the same): resolvers
     // that all passed the unlocked check above queue on the gate, and without
     // this each of them re-consulted the catalog after the first one had
     // already answered -- N concurrent resolves of one model meant N Lookups.
     lock.lock();
-    if (cache_.overlay_.count(ref_key) != 0 || cache_.metadata_tombstones_.count(ref_key) != 0) {
+    if (runtime_.overlay_.count(ref_key) != 0 || runtime_.metadata_tombstones_.count(ref_key) != 0) {
         return;  // `lock` is held, as on every return
     }
     lock.unlock();
@@ -1068,15 +1058,15 @@ void ProvidersConfig::EnrichFromMetadata(const ProviderEntry& entry, const std::
 
     lock.lock();
     // A refresh may have published while we consulted; prefer its result.
-    if (const auto it = cache_.overlay_.find(ref_key); it != cache_.overlay_.end()) return;
+    if (const auto it = runtime_.overlay_.find(ref_key); it != runtime_.overlay_.end()) return;
     // The model was parsed away? It cannot be -- catalog_ is parse-time only
     // and ProvidersConfig has no removal path. The double-check under the gate
     // still re-verifies the tombstone in case a concurrent resolver enriched
     // terminal, so re-consulting never happens either way.
-    if (cache_.metadata_tombstones_.count(ref_key) != 0) return;
+    if (runtime_.metadata_tombstones_.count(ref_key) != 0) return;
 
     if (!answer.has_value()) {
-        cache_.metadata_tombstones_.emplace(ref_key, true);
+        runtime_.metadata_tombstones_.emplace(ref_key, true);
         return;
     }
 
@@ -1084,7 +1074,7 @@ void ProvidersConfig::EnrichFromMetadata(const ProviderEntry& entry, const std::
     if (static_it == catalog_.models_.end()) {
         // Unreachable by construction (Lookup is keyed by an existing id) --
         // recorded as a miss rather than trusted.
-        cache_.metadata_tombstones_.emplace(ref_key, true);
+        runtime_.metadata_tombstones_.emplace(ref_key, true);
         return;
     }
     // Gap-fill only: user-declared fields always win (EnrichFromDiscovery's
@@ -1109,23 +1099,23 @@ void ProvidersConfig::EnrichFromMetadata(const ProviderEntry& entry, const std::
             ladder.push_back(ModelVariant{effort, {}, std::nullopt, std::nullopt});
         }
     }
-    cache_.metadata_variants_.emplace(ref_key, std::move(ladder));
-    cache_.overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(std::move(enriched)));
+    runtime_.metadata_variants_.emplace(ref_key, std::move(ladder));
+    runtime_.overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(std::move(enriched)));
 }
 
 DiscoveryOutcome ProvidersConfig::FetchOutcome(const ProviderEntry& entry) const {
     DiscoveryOutcome outcome;
-    // Snapshot the hook under cache_.mutex_ (lock order gate -> mutex_, per
-    // DiscoveryCacheState) rather than reading it bare: SetDiscoveryHook
+    // Snapshot the hook under runtime_.mutex_ (lock order gate -> mutex_, per
+    // CatalogRuntime) rather than reading it bare: SetDiscoveryHook
     // writes it under that mutex, and a bare read of a std::function mid-assign
     // is UB, however unlikely the overlap. The copy is released before the
     // hook runs -- the network I/O must not hold any config lock.
     DiscoveryHook hook;
     MetadataHook metadata_hook;
     {
-        std::lock_guard<std::mutex> lock(cache_.mutex_);
-        hook = cache_.hook_;
-        metadata_hook = cache_.metadata_hook_;
+        std::lock_guard<std::mutex> lock(runtime_.mutex_);
+        hook = runtime_.hook_;
+        metadata_hook = runtime_.metadata_hook_;
     }
     if (!hook) {
         // Uninjected (a test or an unhosted config): report rather than treat
@@ -1185,10 +1175,10 @@ DiscoveryOutcome ProvidersConfig::FetchOutcome(const ProviderEntry& entry) const
 }
 
 void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryOutcome& outcome,
-                                    DiscoveryCacheState::DiscoveryCache& cache) const {
+                                    CatalogRuntime::DiscoveryCache& cache) const {
     cache.attempted = true;
     cache.attempted_at = std::chrono::steady_clock::now();
-    cache.generation = cache_.generation_;
+    cache.generation = runtime_.generation_;
     if (!outcome.catalog_present) {
         cache.ok = false;
         cache.error = "no model catalog registered for backend '" + entry.backend + "'";
@@ -1257,8 +1247,8 @@ void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryO
     for (const auto& [id, discovered] : cache.models) {
         const ModelRef ref{entry.name, id};
         const std::string key = ref.str();
-        if (catalog_.models_.count(key) || cache_.overlay_.count(key)) continue;
-        cache_.overlay_.emplace(
+        if (catalog_.models_.count(key) || runtime_.overlay_.count(key)) continue;
+        runtime_.overlay_.emplace(
             key, std::make_shared<const ResolvedModel>(BuildDiscoveredLocked(entry, discovered)));
         // Variant siblings materialize lazily (ResolveVariant serves them from
         // overlay_ on first resolve) -- NOT here: a discover-entry lists
@@ -1269,7 +1259,7 @@ void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryO
 }
 
 std::vector<std::string> ProvidersConfig::ModelRefs() const {
-    std::lock_guard<std::mutex> lock(cache_.mutex_);
+    std::lock_guard<std::mutex> lock(runtime_.mutex_);
     // Static ∪ cached-discovered ∪ cached-discovered variant siblings. All
     // three sources are individually sorted, but a concatenation interleaves
     // wrongly ("local/zdisc" sorts before "mixed/static1" yet lives in the
@@ -1278,9 +1268,9 @@ std::vector<std::string> ProvidersConfig::ModelRefs() const {
     // in the catalog), and sort once at the end. A cold cache contributes
     // nothing: this is a listing, never a discovery trigger.
     std::vector<std::string> out;
-    out.reserve(catalog_.models_.size() + cache_.overlay_.size());
+    out.reserve(catalog_.models_.size() + runtime_.overlay_.size());
     for (const auto& [key, unused] : catalog_.models_) out.push_back(key);
-    for (const auto& [key, unused] : cache_.overlay_) {
+    for (const auto& [key, unused] : runtime_.overlay_) {
         if (!catalog_.models_.count(key)) out.push_back(key);
     }
     // The variant siblings each materialized discovery-cache model carries.
@@ -1291,14 +1281,14 @@ std::vector<std::string> ProvidersConfig::ModelRefs() const {
     // enriched static twins (their siblings come from the catalog) and a
     // variant sibling already materialized into the overlay re-derives its
     // base, which keeps a later /think switch from changing the listing.
-    for (const auto& [key, unused] : cache_.overlay_) {
+    for (const auto& [key, unused] : runtime_.overlay_) {
         (void)unused;
         const auto slash = key.find('/');
         if (slash == std::string::npos) continue;
         const std::string provider = key.substr(0, slash);
         const std::string model_id = SplitVariantSuffix(key.substr(slash + 1)).first;
-        const auto cache_it = cache_.discovery_.find(provider);
-        if (cache_it == cache_.discovery_.end() || !cache_it->second.ok) continue;
+        const auto cache_it = runtime_.discovery_.find(provider);
+        if (cache_it == runtime_.discovery_.end() || !cache_it->second.ok) continue;
         if (!cache_it->second.models.count(model_id)) continue;  // an enriched static twin
         for (const auto& name : VariantsOfLocked(provider, model_id)) {
             out.push_back(provider + "/" + model_id + "@" + name);
@@ -1345,19 +1335,19 @@ std::vector<std::string> ProvidersConfig::ModelRefs() const {
 }
 
 DiscoveryStatus ProvidersConfig::discovery_status(const std::string& provider_name) const {
-    std::lock_guard<std::mutex> lock(cache_.mutex_);
-    const auto it = cache_.discovery_.find(provider_name);
-    if (it == cache_.discovery_.end()) return {};
+    std::lock_guard<std::mutex> lock(runtime_.mutex_);
+    const auto it = runtime_.discovery_.find(provider_name);
+    if (it == runtime_.discovery_.end()) return {};
     return DiscoveryStatus{it->second.attempted, it->second.ok, it->second.error};
 }
 
 std::vector<DiscoveryRefreshOutcome> ProvidersConfig::RefreshDiscovery() const {
     // Create every discover-entry's gate up front, under the mutex, so the
-    // fetch loop never acquires a gate and cache_.mutex_ in the wrong order.
+    // fetch loop never acquires a gate and runtime_.mutex_ in the wrong order.
     {
-        std::lock_guard<std::mutex> lock(cache_.mutex_);
+        std::lock_guard<std::mutex> lock(runtime_.mutex_);
         for (const auto& [name, entry] : catalog_.providers_) {
-            if (entry.discover) cache_.gates_.try_emplace(name);
+            if (entry.discover) runtime_.gates_.try_emplace(name);
         }
     }
 
@@ -1367,17 +1357,17 @@ std::vector<DiscoveryRefreshOutcome> ProvidersConfig::RefreshDiscovery() const {
         // Fetch holding only this provider's gate: refreshing a hung catalog
         // costs this provider its 10 s, never the process its config reads,
         // and distinct providers refresh in parallel.
-        std::lock_guard<std::mutex> gate_lock(cache_.gates_.at(name).mtx);
+        std::lock_guard<std::mutex> gate_lock(runtime_.gates_.at(name).mtx);
         const DiscoveryOutcome outcome = FetchOutcome(entry);
 
-        std::lock_guard<std::mutex> lock(cache_.mutex_);
+        std::lock_guard<std::mutex> lock(runtime_.mutex_);
         // A FAILED refresh over a previously good fetch keeps the good data:
         // the backend being down for this Ctrl+R must not empty the picker or
         // make models that resolved a minute ago "unknown". The failure is
         // reported in the outcome (and logged), not stored over the cache.
         if (!outcome.ok) {
-            const auto previous = cache_.discovery_.find(name);
-            if (previous != cache_.discovery_.end() && previous->second.ok) {
+            const auto previous = runtime_.discovery_.find(name);
+            if (previous != runtime_.discovery_.end() && previous->second.ok) {
                 const std::string error =
                     outcome.error.empty() ? "catalog request failed" : outcome.error;
                 common::DefaultLogger().warn(
@@ -1393,15 +1383,15 @@ std::vector<DiscoveryRefreshOutcome> ProvidersConfig::RefreshDiscovery() const {
         // listing switches to the fresh data the moment the lock is released,
         // and readers holding snapshots of the old overlays keep those objects
         // alive -- replacing an entry never pulls it out from under a holder.
-        cache_.discovery_[name] = DiscoveryCacheState::DiscoveryCache{};
-        for (auto it = cache_.overlay_.begin(); it != cache_.overlay_.end();) {
+        runtime_.discovery_[name] = CatalogRuntime::DiscoveryCache{};
+        for (auto it = runtime_.overlay_.begin(); it != runtime_.overlay_.end();) {
             if (it->second->ref.provider == name) {
-                it = cache_.overlay_.erase(it);
+                it = runtime_.overlay_.erase(it);
             } else {
                 ++it;
             }
         }
-        DiscoveryCacheState::DiscoveryCache& cache = cache_.discovery_.at(name);
+        CatalogRuntime::DiscoveryCache& cache = runtime_.discovery_.at(name);
         PublishLocked(entry, outcome, cache);
         outcomes.push_back(DiscoveryRefreshOutcome{name, cache.ok, cache.error, cache.models.size()});
     }
