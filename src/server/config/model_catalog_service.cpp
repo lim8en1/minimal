@@ -204,11 +204,7 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::ResolveDiscovered(
     // the reverse: runtime_.gates_ is only ever touched for insertion here
     // (under runtime_.mutex_) or locked before it.
     lock.unlock();
-    CatalogRuntime::FetchGate& gate = [&] () -> CatalogRuntime::FetchGate& {
-        std::lock_guard<std::mutex> l(runtime_.mutex_);
-        return runtime_.gates_.try_emplace(entry.name).first->second;
-    }();
-    std::lock_guard<std::mutex> gate_lock(gate.mtx);
+    std::lock_guard<std::mutex> gate_lock(runtime_.gate_for(entry.name).mtx);
     lock.lock();
 
     // Double-check under the gate: another resolver may have fetched while we
@@ -391,11 +387,7 @@ void ModelCatalogService::EnrichFromMetadata(const ProviderEntry& entry, const s
     // runtime_.mutex_ alone. Lock order is always gate -> mutex_, never the
     // reverse.
     lock.unlock();
-    CatalogRuntime::FetchGate& gate = [&] () -> CatalogRuntime::FetchGate& {
-        std::lock_guard<std::mutex> held(runtime_.mutex_);
-        return runtime_.gates_.try_emplace(entry.name).first->second;
-    }();
-    std::lock_guard<std::mutex> gate_lock(gate.mtx);
+    std::lock_guard<std::mutex> gate_lock(runtime_.gate_for(entry.name).mtx);
     // Deadlock note, learned the hard way: the gate lambda above MUST be the
     // only place this function touches runtime_.mutex_ while `lock` is
     // unlocked -- it is fine here because `lock` is NOT holding the mutex at

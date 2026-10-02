@@ -34,6 +34,14 @@ struct CatalogRuntime {
     // and never erased, so a gate reference held across an unlock stays
     // valid.
     mutable std::map<std::string, FetchGate> gates_;  // by provider name
+    // The provider's gate, created on first use. Takes mutex_ itself, so the
+    // caller must NOT hold it (the fetch paths unlock first -- gate -> mutex_ is
+    // the only legal order); the reference stays valid because gates are never
+    // erased.
+    FetchGate& gate_for(const std::string& provider) const {
+        std::lock_guard<std::mutex> held(mutex_);
+        return gates_.try_emplace(provider).first->second;
+    }
 
     struct ProviderDiscovery {
         std::uint64_t generation = 0;  // future config reload; always 0 today
