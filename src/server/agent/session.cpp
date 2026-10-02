@@ -12,6 +12,7 @@
 
 #include "minimal/agent/mention_expansion.hpp"
 #include "minimal/agent/session_naming.hpp"
+#include "minimal/agent/session_sinks.hpp"
 #include "minimal/agent/tool_source_activation.hpp"
 #include "minimal/agent/transcript_rewinder.hpp"
 #include "minimal/config/permission_codec.hpp"
@@ -123,175 +124,26 @@ Session::Session(SessionParams params, AgentPreset preset,
     info_.agent_preset = params_.agent_preset;
     info_.project_root = params_.project_root;
 
-    SessionContext context{logger_};
-    context.session_id = params_.session_id;
-    context.project_root = params_.project_root;
-    // ToolContext::history for every tool this session runs; null when there
-    // is no SQLite-backed reader behind it.
-    context.history = history_window_.get();
-
-    const std::string session_id = params_.session_id;
-    // The domain channels block (background task bookkeeping, injections)
-    // still needs sharing with sinks that OUTLIVE their invocation --
-    // background bash's watcher captures it past the tool call, the turn,
-    // and this worker's lifetime. event_sink_ needs no such care: every copy
-    // of it is independently self-sufficient (it is backed by an
-    // rpc::EventTranslator, whose own copy of the transport shared_ptr keeps
-    // the broadcaster alive on its own), so any sink below may capture it by
-    // value regardless of which thread ends up calling it.
-    const auto channels = channels_;
-
-    context.injections = std::shared_ptr<InjectionQueue>(channels, &channels_->injections);
-    context.session_lifetime = channels_;
-    // ToolContext::schedule_injection for every tool (the loop copies this onto
-    // each context): how a background task hands its result back at a turn
-    // boundary. Background bash and python REFUSE to start without it ("no
-    // deferred-completion channel"), so leaving it unset made them unavailable in
-    // every real session. Captures the channels block, not `this`, because the
-    // tool's handle outlives the session; Push refuses after Terminate closes the
-    // queue, and Wake reaches the worker only while the session lives.
-    context.injection_sink = [channels](llm::Message message) {
-        const bool staged = channels->injections.Push(std::move(message));
-        if (staged) channels->Wake();
-        return staged;
-    };
-    channels_->SetWake([this] { WakeWorker(); });
-
-    // The plugin prompt: the loop copies this into every ToolContext (see
-    // SessionContext::prompt_user). Null broker leaves it null -- the tool
-    // degrades -- rather than wiring a call that would dereference nothing.
-    if (prompt_broker_) {
-        tools::PromptBroker& broker = *prompt_broker_;
-        context.prompt_user = [&broker](const tools::PromptRequest& request) {
-            return broker.Prompt(request);
-        };
-    }
-
-    context.tool_output_sink = [sink = event_sink_](std::string_view tool_use_id,
-                                                    std::string_view chunk) {
-        // The sink never blocks (event_broadcaster.hpp): a slow or absent
-        // subscriber drops its oldest and resyncs, and no subscriber at all
-        // buffers in the backlog. The turn never waits on a client.
-        //
-        // ToolOutputDeltaEvent.chunk is a proto3 string: raw process output
-        // that is not UTF-8 (a binary `cat`, Latin-1) made the CLIENT's parse
-        // of the whole event fail. Scrubbed here, the one door every tool's
-        // live output passes; a character split between two reads is held
-        // back upstream (AgentLoop's emit_output) so it is not scrubbed.
-        sink(SessionEvent{ToolOutputDelta{std::string(tool_use_id), common::ScrubUtf8(chunk)}});
-    };
-
-    context.task_event_sink = [channels, sink = event_sink_,
-                               session_id](const tools::BackgroundTaskEvent& task) {
-        auto& live_tasks = channels->background_tasks_live;
-        // Quiescence bookkeeping for the reaper (see background_tasks_live).
-        // STARTED increments; every terminal state decrements -- floored at
-        // zero, so a duplicated terminal event cannot wrap the count downward.
-        if (task.state == tools::BackgroundTaskEvent::State::kStarted) {
-            live_tasks.fetch_add(1, std::memory_order_acq_rel);
-        } else {
-            std::size_t current = live_tasks.load(std::memory_order_acquire);
-            while (current > 0 &&
-                   !live_tasks.compare_exchange_weak(current, current - 1,
-                                                     std::memory_order_acq_rel,
-                                                     std::memory_order_acquire)) {
-            }
-        }
-        // The caller may be the watcher thread, never the worker. The sink
-        // never blocks and refuses only a closed broadcaster (termination):
-        // that is the one case worth a warning, because "dropped" events
-        // during normal operation are the designed degradation for a stalled
-        // subscriber -- the transcript, not this status channel, is the
-        // authoritative record.
-        if (!sink(SessionEvent{task})) {
-            // DefaultLogger is process-lifetime; the session logger is the
-            // same object. This lambda can outlive `logger_`'s session, but
-            // not the logger itself.
-            common::DefaultLogger().warn("session {}: background task event for '{}' dropped "
-                                         "(session terminated)",
-                                         session_id, task.task_id);
-        }
-    };
-
-    // A compaction rewrites only the working set, never a transcript row, so
-    // this event is the client's one live signal that it happened (the same
-    // record rides scrollback pages via the compactions table).
-    context.compaction_sink = [sink = event_sink_](const CompactionEvent& compaction) {
-        sink(SessionEvent{compaction});
-    };
-
-    context.tool_lifecycle_sink = [this, sink = event_sink_](const ToolLifecycleEvent& lifecycle) {
-        sink(SessionEvent{lifecycle});
-
-        // AND THE OBSERVER SIDE, which had no producer at all. ARCHITECTURE.md
-        // documents OnToolExecuted as one of the four SessionObserver hooks, and
-        // NotifyToolExecuted's only caller in the whole tree was its own unit
-        // test -- so a plugin implementing the documented hook got silence,
-        // which is worse than the hook not existing.
-        //
-        // On the FINISH event only: a started/finished pair is the wire's
-        // concern (a client has a panel to clear), whereas an observer wants one
-        // record of a completed call. Fired for a FAILED tool too, for the same
-        // reason the wire event is.
-        if (lifecycle.started) return;
-        ToolInvocation invocation;
-        invocation.tool_use_id = lifecycle.tool_use_id;
-        invocation.tool_name = lifecycle.tool_name;
-        invocation.is_error = lifecycle.is_error;
-        invocation.duration = lifecycle.duration;
-        auto labels = executor_.hook_labels(lifecycle.tool_name, lifecycle.input);
-        invocation.permission_key = std::move(labels.permission_key);
-        invocation.category = std::move(labels.category);
-        // `summary` stays empty deliberately: the only honest summary is the
-        // tool's own disclosure, which is built for a permission prompt and is
-        // not reached when the call is pre-approved. An observer that wants
-        // detail has SessionReader and the tool_use_id.
-        observers_.NotifyToolExecuted(InfoSnapshot(), std::move(invocation));
-    };
-
-    // Returning false aborts the provider request. This is the cancellation path
-    // that termination reuses -- there is no second mechanism, and adding one is
-    // how a session ends up with two half-working ways to stop.
-    //
-    // The sink's IsCancelled check is the cancel half (a full queue can no
-    // longer refuse anything -- the sink is drop-oldest, never blocking). The
-    // refusal false is now purely Terminate: closed means the session is
-    // ending, and the request must stop.
-    llm::StreamEventSink stream_event_sink = [this, sink = event_sink_](const llm::StreamEvent& stream) {
-        if (IsCancelled()) return false;
-        return sink(SessionEvent{stream});
-    };
-
-    // The real-time steering gate. Runs on the WORKER (the loop's flush is
-    // worker-only), which is what makes the hook subprocess safe here -- the
-    // same thread contract as the turn-pop veto in RunOneTurn. A user-text
-    // injection that the core.user_prompt_submit hook blocks is dropped
-    // before it is persisted, with the reason on the wire -- identical
-    // observable semantics to a vetoed turn-pop. A subagent never steers (its
-    // seeded task is not a user prompt; its sessions receive no user turns),
-    // mirroring the turn-pop seam's top-level-only rule. hooks_ is read at
-    // call time -- it is assigned below, before the worker starts.
-    context.steer_gate = [this, sink = event_sink_](const llm::Message& message) {
-        if (hooks_ == nullptr || !params_.parent_session_id.empty()) return true;
-        std::string prompt;
-        for (const auto& block : message.content) {
-            if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
-                if (!prompt.empty()) prompt += "\n";
-                prompt += text->text;
-            }
-        }
-        nlohmann::json payload{{"session_id", params_.session_id},
-                               {"project_root", params_.project_root.string()},
-                               {"prompt", prompt}};
-        if (auto blocked = hooks_->Emit(hooks::kUserPromptSubmit, std::move(payload),
-                                        [this] { return IsCancelled(); })) {
-            logger_.warn("session {}: user_prompt_submit hook blocked a steered message: {}",
-                         params_.session_id, *blocked);
-            sink(SessionEvent{SessionError{"steered message rejected by hook: " + *blocked}});
-            return false;
-        }
-        return true;
-    };
+    SessionSinkDeps sink_deps{logger_,
+                              params_.session_id,
+                              params_.parent_session_id,
+                              params_.project_root,
+                              channels_,
+                              event_sink_,
+                              observers_,
+                              loop_config.hooks,
+                              history_window_.get(),
+                              prompt_broker_.get(),
+                              [this] { return IsCancelled(); },
+                              [this] { WakeWorker(); },
+                              [this] { return InfoSnapshot(); },
+                              [this](const std::string& tool_name, const nlohmann::json& input) {
+                                  return executor_.hook_labels(tool_name, input);
+                              }};
+    SessionSinks sinks = BuildSessionSinks(sink_deps);
+    SessionContext& context = sinks.context;
+    llm::StreamEventSink& stream_event_sink = sinks.stream_event_sink;
+    channels_->SetWake(sink_deps.wake_worker);
 
     // The real summarizer. Resolved by the loop PER COMPACTION ATTEMPT -- see
     // AgentLoop::Compact: a mid-session /agent switch must change the summary
