@@ -1041,6 +1041,16 @@ void ProvidersConfig::EnrichFromMetadata(const ProviderEntry& entry, const std::
     // that moment, and the re-lock below happens after the lambda's guard has
     // released. Never take cache_.mutex_ again while `lock` holds it.
 
+    // Double-check UNDER the gate (ResolveDiscovered does the same): resolvers
+    // that all passed the unlocked check above queue on the gate, and without
+    // this each of them re-consulted the catalog after the first one had
+    // already answered -- N concurrent resolves of one model meant N Lookups.
+    lock.lock();
+    if (cache_.overlay_.count(ref_key) != 0 || cache_.metadata_tombstones_.count(ref_key) != 0) {
+        return;  // `lock` is held, as on every return
+    }
+    lock.unlock();
+
     llm::MetadataQuery query;
     query.model_id = model_id;
     query.base_url = entry.connection.base_url;

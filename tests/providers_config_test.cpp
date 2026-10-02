@@ -1,9 +1,15 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <cstdlib>
 #include <fstream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -2211,4 +2217,230 @@ TEST_CASE("malformed metadata knobs are named parse errors", "[providers][metada
          }) {
         CHECK_THROWS_AS(ParseProvidersConfig(nlohmann::json::parse(body)), std::runtime_error);
     }
+}
+
+// --- runtime concurrency characterization (extraction safety net) ------------------
+//
+// The runtime half of ProvidersConfig is called from RPC threads (ListModels),
+// session workers, the command pool and the discovery warm-up thread at once.
+// These pin the externally visible behaviour under that load BEFORE the runtime
+// state is restructured: timing-independent assertions only, no sleeps for
+// correctness. Hooks here are thread-safe (the older CountingHook relies on the
+// per-provider gate to serialize its own bookkeeping).
+
+namespace {
+
+struct ThreadSafeDiscoveryHook {
+    std::atomic<int> calls{0};
+    std::mutex mutex;
+    std::vector<llm::DiscoveredModel> models;
+    bool ok = true;
+    std::string error = "boom";
+    std::chrono::milliseconds delay{0};
+
+    DiscoveryOutcome AsHook(const std::string&, const llm::ProviderConfig&) {
+        ++calls;
+        if (delay.count() > 0) std::this_thread::sleep_for(delay);
+        DiscoveryOutcome outcome;
+        outcome.catalog_present = true;
+        std::lock_guard<std::mutex> lock(mutex);
+        outcome.ok = ok;
+        outcome.error = ok ? "" : error;
+        outcome.models = models;
+        return outcome;
+    }
+};
+
+struct ThreadSafeMetadataHook {
+    std::atomic<int> calls{0};
+    std::map<std::string, llm::DiscoveredModel> answers;
+    std::chrono::milliseconds delay{0};
+
+    std::optional<llm::DiscoveredModel> AsHook(const llm::MetadataQuery& query,
+                                               llm::MetadataMatch) {
+        ++calls;
+        if (delay.count() > 0) std::this_thread::sleep_for(delay);
+        const auto it = answers.find(query.model_id);
+        if (it == answers.end()) return std::nullopt;
+        return it->second;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("RefreshDiscovery racing Resolve: every resolve succeeds, the end state is fresh",
+          "[providers][discover][concurrency]") {
+    ThreadSafeDiscoveryHook hook;
+    hook.models = {{"big", 131072, nlohmann::json::object(), std::nullopt}};
+    hook.delay = std::chrono::milliseconds(2);  // widen the race window
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& k, const llm::ProviderConfig& c) {
+        return hook.AsHook(k, c);
+    });
+
+    std::atomic<int> null_resolves{0};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 4; ++i) {
+        threads.emplace_back([&] {
+            for (int n = 0; n < 20; ++n) {
+                if (config.Resolve(ModelRef{"local", "big"}) == nullptr) ++null_resolves;
+            }
+        });
+    }
+    threads.emplace_back([&] {
+        for (int n = 0; n < 5; ++n) (void)config.RefreshDiscovery();
+    });
+    for (auto& t : threads) t.join();
+
+    CHECK(null_resolves.load() == 0);
+    CHECK(hook.calls.load() >= 1);
+    CHECK(config.discovery_status("local").ok);
+    const auto refs = config.ModelRefs();
+    CHECK(std::count(refs.begin(), refs.end(), "local/big") == 1);
+}
+
+TEST_CASE("listings stay sorted and unique while discovery refreshes underneath",
+          "[providers][discover][concurrency]") {
+    ThreadSafeDiscoveryHook hook;
+    hook.models = {{"a", 4096, nlohmann::json::object(), std::nullopt},
+                   {"b", 4096, nlohmann::json::object(), std::nullopt}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& k, const llm::ProviderConfig& c) {
+        return hook.AsHook(k, c);
+    });
+    REQUIRE(config.Resolve(ModelRef{"local", "a"}) != nullptr);  // warm
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> violations{0};
+    std::thread lister([&] {
+        while (!stop.load()) {
+            const auto refs = config.ModelRefs();
+            if (!std::is_sorted(refs.begin(), refs.end())) ++violations;
+            if (std::adjacent_find(refs.begin(), refs.end()) != refs.end()) ++violations;
+            (void)config.discovery_status("local");
+            (void)config.VariantsOf(ModelRef{"local", "a"});
+        }
+    });
+    std::thread resolver([&] {
+        for (int n = 0; n < 200; ++n) {
+            (void)config.Resolve(ModelRef{"local", n % 2 ? "a" : "b"});
+        }
+    });
+    for (int n = 0; n < 10; ++n) (void)config.RefreshDiscovery();
+    resolver.join();
+    stop = true;
+    lister.join();
+
+    CHECK(violations.load() == 0);
+}
+
+TEST_CASE("warm-up refresh and a first resolve of an unseen model both get an answer",
+          "[providers][discover][concurrency]") {
+    // The shape of main.cpp's discovery warm-up (RefreshDiscovery on its own
+    // thread) racing the first /model switch to a not-yet-listed model.
+    for (int round = 0; round < 10; ++round) {
+        ThreadSafeDiscoveryHook hook;
+        hook.models = {{"newmodel", 8192, nlohmann::json::object(), std::nullopt}};
+        hook.delay = std::chrono::milliseconds(1);
+        auto config = DiscoverConfig();
+        config.SetDiscoveryHook([&hook](const std::string& k, const llm::ProviderConfig& c) {
+            return hook.AsHook(k, c);
+        });
+
+        std::shared_ptr<const ResolvedModel> resolved;
+        std::thread warmup([&] { (void)config.RefreshDiscovery(); });
+        std::thread switcher([&] { resolved = config.Resolve(ModelRef{"local", "newmodel"}); });
+        warmup.join();
+        switcher.join();
+
+        REQUIRE(resolved != nullptr);
+        CHECK(*resolved->context_window_tokens == 8192);
+        CHECK(config.discovery_status("local").ok);
+    }
+}
+
+TEST_CASE("concurrent resolves of one static model consult metadata once",
+          "[providers][metadata][concurrency]") {
+    auto config = StaticConfig();
+    ThreadSafeMetadataHook hook;
+    hook.answers["m"] = llm::DiscoveredModel{"m", 32768, nlohmann::json::object(), 4096};
+    hook.delay = std::chrono::milliseconds(5);  // keep the first consult in flight
+    config.SetMetadataHook([&hook](const llm::MetadataQuery& q, llm::MetadataMatch m) {
+        return hook.AsHook(q, m);
+    });
+
+    std::atomic<int> enriched{0};
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 8; ++i) {
+        threads.emplace_back([&] {
+            const auto resolved = config.Resolve(ModelRef{"p", "m"});
+            if (resolved && resolved->context_window_tokens == 32768) ++enriched;
+        });
+    }
+    for (auto& t : threads) t.join();
+
+    // Every resolver sees the enriched model, and the catalog is asked once:
+    // the others find the answer (or the tombstone) after waiting on the gate.
+    CHECK(enriched.load() == 8);
+    CHECK(hook.calls.load() == 1);
+}
+
+TEST_CASE("move-assign carries the runtime state: hooks, backoff, tombstones, ladders",
+          "[providers][discover][move]") {
+    ThreadSafeDiscoveryHook discovery;
+    discovery.models = {{"big", 131072, nlohmann::json::object(), std::nullopt}};
+    ThreadSafeMetadataHook metadata;  // no answers: the static model gets tombstoned
+
+    ProvidersConfig source = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {
+        "local": {"backend": "openai", "url": "http://localhost:8000/v1", "discover": true,
+                  "max_tokens": 4096},
+        "p": {"backend": "openai", "url": "http://x/v1", "models": {"m": {}}}
+      }
+    })"));
+    source.SetDiscoveryHook([&](const std::string& k, const llm::ProviderConfig& c) {
+        return discovery.AsHook(k, c);
+    });
+    source.SetMetadataHook([&](const llm::MetadataQuery& q, llm::MetadataMatch m) {
+        return metadata.AsHook(q, m);
+    });
+    source.SetDiscoveryRetryBackoff(std::chrono::milliseconds(12345));
+    REQUIRE(source.Resolve(ModelRef{"p", "m"}) != nullptr);      // tombstones "p/m"
+    REQUIRE(metadata.calls.load() == 1);
+
+    ProvidersConfig moved;
+    moved = std::move(source);
+
+    // The tombstone survived: no second consult.
+    REQUIRE(moved.Resolve(ModelRef{"p", "m"}) != nullptr);
+    CHECK(metadata.calls.load() == 1);
+    // The discovery hook survived: a lazy fetch works on the moved-to object.
+    const auto big = moved.Resolve(ModelRef{"local", "big"});
+    REQUIRE(big != nullptr);
+    CHECK(discovery.calls.load() == 1);
+}
+
+TEST_CASE("a discovered variant is derived through the injected variant-params hook",
+          "[providers][variants][discover]") {
+    ThreadSafeDiscoveryHook hook;
+    hook.models = {{"thinker", 65536,
+                    nlohmann::json::parse(R"({"reasoning": {"supported_efforts": ["high"]}})"),
+                    std::nullopt}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& k, const llm::ProviderConfig& c) {
+        return hook.AsHook(k, c);
+    });
+    std::atomic<int> hook_calls{0};
+    config.SetVariantParamsHook([&hook_calls](const std::string& backend,
+                                              const std::string& effort,
+                                              std::optional<int>)
+                                    -> std::optional<std::pair<nlohmann::json, bool>> {
+        ++hook_calls;
+        return std::make_pair(nlohmann::json{{"custom_effort", backend + ":" + effort}}, false);
+    });
+
+    const auto high = config.Resolve(ModelRef{"local", "thinker@high"});
+    REQUIRE(high != nullptr);
+    CHECK(hook_calls.load() >= 1);
+    CHECK(high->parameters.at("custom_effort") == "openai:high");
 }
