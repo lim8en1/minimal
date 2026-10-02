@@ -688,10 +688,9 @@ std::vector<std::string> ProvidersConfig::VariantsOfLocked(const std::string& pr
     // listing, and triggering enrichment I/O from a listing would make the
     // picker latency-bound. The ladder lands here the first time the base (or
     // one of its variants) actually resolves.
-    if (const auto cache_it = runtime_.discovery_.find(provider_name);
-        cache_it != runtime_.discovery_.end() && cache_it->second.ok) {
-        const auto variants_it = cache_it->second.variants_by_model.find(base_id);
-        if (variants_it != cache_it->second.variants_by_model.end()) {
+    if (const auto record = runtime_.discovery_record(provider_name); record && record->ok) {
+        const auto variants_it = record->variants_by_model.find(base_id);
+        if (variants_it != record->variants_by_model.end()) {
             for (const auto& variant : variants_it->second) out.push_back(variant.name);
             return out;
         }
@@ -846,31 +845,34 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveDiscovered(
     // waited, and its publish may already serve this model.
     if (const auto it = runtime_.overlay_.find(ref_key); it != runtime_.overlay_.end()) return it->second;
 
-    CatalogRuntime::DiscoveryCache& cache = runtime_.discovery_[entry.name];
+    std::shared_ptr<const CatalogRuntime::ProviderDiscovery> record =
+        runtime_.discovery_record(entry.name);
     // A failed attempt is retried once its backoff elapsed: the negative cache
     // protects against a fetch per resolve, not against a backend that came up
     // after the first look.
     const bool failed_and_due =
-        cache.attempted && !cache.ok &&
-        std::chrono::steady_clock::now() - cache.attempted_at >= runtime_.discovery_retry_backoff_;
-    if (!cache.attempted || cache.generation != runtime_.generation_ || failed_and_due) {
+        record && record->attempted && !record->ok &&
+        std::chrono::steady_clock::now() - record->attempted_at >=
+            runtime_.discovery_retry_backoff_;
+    if (!record || !record->attempted || record->generation != runtime_.generation_ ||
+        failed_and_due) {
         lock.unlock();  // the hook does network I/O -- no config lock held
         const DiscoveryOutcome outcome = FetchOutcome(entry);
         lock.lock();
         // A refresh may have published while we fetched; prefer its result.
         if (const auto it = runtime_.overlay_.find(ref_key); it != runtime_.overlay_.end()) return it->second;
-        PublishLocked(entry, outcome, cache);
+        record = PublishLocked(entry, outcome);
     }
 
-    if (!cache.ok) return nullptr;
+    if (!record->ok) return nullptr;
 
     if (const auto static_it = catalog_.models_.find(ref_key); static_it != catalog_.models_.end()) {
         // A STATIC model under a discover-entry: its own inheritance stands,
         // and the discovered window / output cap fill only the gaps that made
         // Resolve consult discovery at all -- each field independently, since
         // a model with a window but no cap reaches here too.
-        const auto discovered = cache.models.find(model_id);
-        if (discovered != cache.models.end()) {
+        const auto discovered = record->models.find(model_id);
+        if (discovered != record->models.end()) {
             return runtime_.overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(
                                                         EnrichFromDiscovery(*static_it->second,
                                                                             discovered->second)))
@@ -913,10 +915,10 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
         // carry the same window/cap a session on the base would get, or a
         // /think switch silently drops compaction.
         if (entry.discover) {
-            if (const auto cache_it = runtime_.discovery_.find(entry.name);
-                cache_it != runtime_.discovery_.end() && cache_it->second.ok) {
-                const auto discovered = cache_it->second.models.find(base_id);
-                if (discovered != cache_it->second.models.end()) {
+            if (const auto record = runtime_.discovery_record(entry.name);
+                record && record->ok) {
+                const auto discovered = record->models.find(base_id);
+                if (discovered != record->models.end()) {
                     base = std::make_shared<const ResolvedModel>(
                         EnrichFromDiscovery(*base_it->second, discovered->second));
                 }
@@ -977,10 +979,9 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveVariant(
     // static sibling matched `variant_name`, so an opted-out base must answer
     // "undeclared" rather than falling through to the autodetected ladder.
     if (base->variants_declared) return nullptr;
-    if (const auto cache_it = runtime_.discovery_.find(entry.name);
-        cache_it != runtime_.discovery_.end() && cache_it->second.ok) {
-        const auto variants_it = cache_it->second.variants_by_model.find(base_id);
-        if (variants_it != cache_it->second.variants_by_model.end()) {
+    if (const auto record = runtime_.discovery_record(entry.name); record && record->ok) {
+        const auto variants_it = record->variants_by_model.find(base_id);
+        if (variants_it != record->variants_by_model.end()) {
             const auto name_it = std::find_if(variants_it->second.begin(),
                                               variants_it->second.end(),
                                               [&](const ModelVariant& v) {
@@ -1174,20 +1175,30 @@ DiscoveryOutcome ProvidersConfig::FetchOutcome(const ProviderEntry& entry) const
     return outcome;
 }
 
-void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryOutcome& outcome,
-                                    CatalogRuntime::DiscoveryCache& cache) const {
+std::shared_ptr<const CatalogRuntime::ProviderDiscovery> ProvidersConfig::PublishLocked(
+    const ProviderEntry& entry, const DiscoveryOutcome& outcome) const {
+    // Built privately and published last, as an immutable record: readers that
+    // copied the previous record's pointer keep a consistent view, and a
+    // failure partway never leaves a half-filled record visible.
+    auto built = std::make_shared<CatalogRuntime::ProviderDiscovery>();
+    CatalogRuntime::ProviderDiscovery& cache = *built;
+    const auto publish = [&]() -> std::shared_ptr<const CatalogRuntime::ProviderDiscovery> {
+        std::shared_ptr<const CatalogRuntime::ProviderDiscovery> record = std::move(built);
+        runtime_.discovery_[entry.name] = record;
+        return record;
+    };
     cache.attempted = true;
     cache.attempted_at = std::chrono::steady_clock::now();
     cache.generation = runtime_.generation_;
     if (!outcome.catalog_present) {
         cache.ok = false;
         cache.error = "no model catalog registered for backend '" + entry.backend + "'";
-        return;
+        return publish();
     }
     if (!outcome.ok) {
         cache.ok = false;
         cache.error = outcome.error.empty() ? "catalog request failed" : outcome.error;
-        return;
+        return publish();
     }
     cache.ok = true;
     cache.error.clear();
@@ -1256,6 +1267,7 @@ void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryO
         // the lazy-fetch design for an eager one. The ref-keyed lookup in
         // ResolveVariant makes the cost pay-per-use.
     }
+    return publish();
 }
 
 std::vector<std::string> ProvidersConfig::ModelRefs() const {
@@ -1287,9 +1299,9 @@ std::vector<std::string> ProvidersConfig::ModelRefs() const {
         if (slash == std::string::npos) continue;
         const std::string provider = key.substr(0, slash);
         const std::string model_id = SplitVariantSuffix(key.substr(slash + 1)).first;
-        const auto cache_it = runtime_.discovery_.find(provider);
-        if (cache_it == runtime_.discovery_.end() || !cache_it->second.ok) continue;
-        if (!cache_it->second.models.count(model_id)) continue;  // an enriched static twin
+        const auto record = runtime_.discovery_record(provider);
+        if (!record || !record->ok) continue;
+        if (!record->models.count(model_id)) continue;  // an enriched static twin
         for (const auto& name : VariantsOfLocked(provider, model_id)) {
             out.push_back(provider + "/" + model_id + "@" + name);
         }
@@ -1336,9 +1348,9 @@ std::vector<std::string> ProvidersConfig::ModelRefs() const {
 
 DiscoveryStatus ProvidersConfig::discovery_status(const std::string& provider_name) const {
     std::lock_guard<std::mutex> lock(runtime_.mutex_);
-    const auto it = runtime_.discovery_.find(provider_name);
-    if (it == runtime_.discovery_.end()) return {};
-    return DiscoveryStatus{it->second.attempted, it->second.ok, it->second.error};
+    const auto record = runtime_.discovery_record(provider_name);
+    if (!record) return {};
+    return DiscoveryStatus{record->attempted, record->ok, record->error};
 }
 
 std::vector<DiscoveryRefreshOutcome> ProvidersConfig::RefreshDiscovery() const {
@@ -1366,16 +1378,16 @@ std::vector<DiscoveryRefreshOutcome> ProvidersConfig::RefreshDiscovery() const {
         // make models that resolved a minute ago "unknown". The failure is
         // reported in the outcome (and logged), not stored over the cache.
         if (!outcome.ok) {
-            const auto previous = runtime_.discovery_.find(name);
-            if (previous != runtime_.discovery_.end() && previous->second.ok) {
+            const auto previous = runtime_.discovery_record(name);
+            if (previous && previous->ok) {
                 const std::string error =
                     outcome.error.empty() ? "catalog request failed" : outcome.error;
                 common::DefaultLogger().warn(
                     "providers.json: discovery refresh for '{}' failed ({}); keeping the "
                     "previous {} models",
-                    name, error, previous->second.models.size());
+                    name, error, previous->models.size());
                 outcomes.push_back(
-                    DiscoveryRefreshOutcome{name, false, error, previous->second.models.size()});
+                    DiscoveryRefreshOutcome{name, false, error, previous->models.size()});
                 continue;
             }
         }
@@ -1383,7 +1395,6 @@ std::vector<DiscoveryRefreshOutcome> ProvidersConfig::RefreshDiscovery() const {
         // listing switches to the fresh data the moment the lock is released,
         // and readers holding snapshots of the old overlays keep those objects
         // alive -- replacing an entry never pulls it out from under a holder.
-        runtime_.discovery_[name] = CatalogRuntime::DiscoveryCache{};
         for (auto it = runtime_.overlay_.begin(); it != runtime_.overlay_.end();) {
             if (it->second->ref.provider == name) {
                 it = runtime_.overlay_.erase(it);
@@ -1391,9 +1402,9 @@ std::vector<DiscoveryRefreshOutcome> ProvidersConfig::RefreshDiscovery() const {
                 ++it;
             }
         }
-        CatalogRuntime::DiscoveryCache& cache = runtime_.discovery_.at(name);
-        PublishLocked(entry, outcome, cache);
-        outcomes.push_back(DiscoveryRefreshOutcome{name, cache.ok, cache.error, cache.models.size()});
+        const auto record = PublishLocked(entry, outcome);
+        outcomes.push_back(
+            DiscoveryRefreshOutcome{name, record->ok, record->error, record->models.size()});
     }
     return outcomes;
 }

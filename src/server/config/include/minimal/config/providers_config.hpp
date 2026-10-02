@@ -180,11 +180,11 @@ private:
     // Calls the hook -- the network I/O. Requires NO lock held; `entry` points
     // into catalog_.providers_, which is parse-time only and never mutated after.
     DiscoveryOutcome FetchOutcome(const ProviderEntry& entry) const;
-    // Writes one outcome into the cache and materializes every discovered
+    // Builds the provider's new immutable discovery record from one outcome, swaps it in, and materializes every discovered
     // model into the overlay, so a later Resolve of any of them is a lookup,
     // never a rebuild. runtime_.mutex_ held.
-    void PublishLocked(const ProviderEntry& entry, const DiscoveryOutcome& outcome,
-                       CatalogRuntime::DiscoveryCache& cache) const;
+    std::shared_ptr<const CatalogRuntime::ProviderDiscovery> PublishLocked(
+        const ProviderEntry& entry, const DiscoveryOutcome& outcome) const;
     // The discover-entry half of Resolve: ensures the provider's catalog has
     // been consulted this generation (fetching under the per-provider gate
     // with no config lock held, double-checking after the wait), then returns

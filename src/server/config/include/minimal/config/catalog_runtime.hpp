@@ -35,7 +35,7 @@ struct CatalogRuntime {
     // valid.
     mutable std::map<std::string, FetchGate> gates_;  // by provider name
 
-    struct DiscoveryCache {
+    struct ProviderDiscovery {
         std::uint64_t generation = 0;  // future config reload; always 0 today
         // When the last attempt finished; a failed one is retried once
         // discovery_retry_backoff_ has elapsed.
@@ -63,13 +63,22 @@ struct CatalogRuntime {
     VariantParamsHook variant_params_hook_;
     std::uint64_t generation_ = 0;
     std::chrono::milliseconds discovery_retry_backoff_{30000};
-    mutable std::map<std::string, DiscoveryCache> discovery_;  // by provider name
+    // One IMMUTABLE record per provider, published by swapping the pointer: a
+    // reader copies the shared_ptr under mutex_ and then reads it freely, and a
+    // refresh builds a new record instead of mutating the one readers hold.
+    // Absent until the provider's first attempt.
+    mutable std::map<std::string, std::shared_ptr<const ProviderDiscovery>> discovery_;
+    // mutex_ held.
+    std::shared_ptr<const ProviderDiscovery> discovery_record(const std::string& provider) const {
+        const auto it = discovery_.find(provider);
+        return it == discovery_.end() ? nullptr : it->second;
+    }
     // Discovered models, and overlay copies of static models enriched with
     // a discovered context window. Keyed "<provider>/<model>".
     mutable std::map<std::string, std::shared_ptr<const ResolvedModel>> overlay_;
     // The variant recipes metadata enrichment contributed, per
     // "<provider>/<model>" base key -- the static-side twin of
-    // DiscoveryCache::variants_by_model. Written by the lazy metadata
+    // ProviderDiscovery::variants_by_model. Written by the lazy metadata
     // enrichment in Resolve/ResolveVariant, read by VariantsOfLocked and
     // ResolveVariant. Precedence makes this safe to fill eagerly or
     // lazily: a parse-time declared sibling lives in the catalog and wins
