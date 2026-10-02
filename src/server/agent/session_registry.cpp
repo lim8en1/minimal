@@ -245,30 +245,33 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     ResumeSeed seed = resume ? LoadResumeSeed(session_id, pending_repair) : ResumeSeed{};
 
     auto store = std::make_unique<session::SqliteHistoryStore>(db_, session_id);
+    session::SqliteHistoryStore* const store_handle = store.get();  // owned by the Session below
     // loop_config, not loop_config_: CreateResolved may have overridden max_turns
     // for a subagent, whose whole life is one bounded turn.
     auto session = std::make_shared<Session>(std::move(params), std::move(preset),
                                              std::move(provider), std::move(store), tools_,
                                              loop_config, observers_, logger_, std::move(seed));
+    // The synthesized resume repair (answers for tool_use blocks the crashed
+    // run left unpaired) is persisted HERE: after the Session exists, so a
+    // construction failure (unresolvable preset/model) leaves nothing
+    // committed to a transcript for a session that was never created -- and
+    // BEFORE it is published. Published first, an incoming turn, signal wake
+    // or second client could persist ahead of the repair row, leaving
+    // [assistant(tool_use), user(turn), user(results)] -- a permanent 400 on
+    // every later request. Nothing can address the session until
+    // PublishSession, and going through the store keeps its seq accounting
+    // (last_appended_seq) in step with the row. A failure here unwinds: the unpublished
+    // Session is destroyed (its worker joined) and `guard` releases the id.
+    if (pending_repair) {
+        store_handle->Append(*pending_repair, 0, session::MessageAttribution{});
+    }
+
     // Made findable last: the session is fully wired (constructor-injected)
     // and constructed before PublishSession's locked block registers signal
     // subscriptions and inserts it into sessions_ -- an internal signal or
     // command addressed to this session_id must never be able to observe it
     // before that.
     PublishSession(session_id, session, signal_router, signal_selectors, resume);
-
-    // Persisted only now that the session it belongs to exists and is
-    // published: LoadResumeSeed used to append this before Session
-    // construction, so a construction failure (unresolvable preset/model)
-    // left the synthesized repair permanently committed to a transcript for
-    // a session that was never actually created, with nothing to undo it
-    // (there is no message-delete API, unlike ForkSession's whole-row
-    // DeleteSession rollback, which would be far too destructive here --
-    // this is a resume of a session with real prior history, not a fresh row
-    // a failed fork can just drop).
-    if (pending_repair) {
-        db_.AppendMessage(session_id, *pending_repair, 0);
-    }
 
     guard.committed = true;
     return session;
@@ -598,9 +601,21 @@ void SessionRegistry::ReapOnce() {
         };
         for (auto it = sessions_.begin(); it != sessions_.end();) {
             const auto& session = it->second;
-            if (!session->ever_attached() && (now - session->created_at()) > initial_attach_guard_) {
+            // The attach guard exists for TOP-LEVEL sessions: a client that
+            // created one and never opened a stream. A subagent is owned by
+            // its parent, not by a client -- a blocking spawn waits on it with
+            // nobody attached, and killing it mid-turn at the guard deadline
+            // fails the parent's tool call ("subagent was terminated") or
+            // silently loses a non-blocking child's result. A child is
+            // collected once it has FINISHED (its result is delivered by then).
+            const bool is_child = !session->info().parent_session_id.empty();
+            const bool guard_applies = !is_child || session->subagent_finished();
+            if (guard_applies && !session->ever_attached() &&
+                (now - session->created_at()) > initial_attach_guard_) {
                 reap(it, "session " + it->first +
-                             ": no client attached within the guard period; terminating");
+                             (is_child ? ": finished subagent was never attached; collecting"
+                                       : ": no client attached within the guard period; "
+                                         "terminating"));
                 continue;
             }
             if (!DetachedQuiescentLocked(it->first, *session, live_child_counts)) {

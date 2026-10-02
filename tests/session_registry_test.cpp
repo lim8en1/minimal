@@ -295,6 +295,25 @@ TEST_CASE("a never-attached session is reaped by the initial-attach guard",
     CHECK(session->terminated());
 }
 
+TEST_CASE("a running, never-attached subagent is not killed by the attach guard",
+          "[session_registry][subagent]") {
+    // A blocking spawn waits on its child with nobody attached; the guard is
+    // for top-level sessions whose client never opened a stream.
+    RegistryFixture fixture(200ms);
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    auto parent = fixture.registry->Create(Params("p"));
+    const auto subscriber = Subscribe(*parent);
+    agent::SessionParams child_params = Params("c");
+    child_params.parent_session_id = "p";
+    auto child = fixture.registry->Create(std::move(child_params));
+
+    std::this_thread::sleep_for(700ms);  // several guard periods
+    CHECK(fixture.registry->Find("c") != nullptr);
+    CHECK_FALSE(child->terminated());
+}
+
 TEST_CASE("an attached session outlives the guard", "[session_registry]") {
     // The rule is not "unattached => terminate". A subagent emits events before
     // its tab attaches, and an attached session must never be reaped for being
