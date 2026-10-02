@@ -301,6 +301,26 @@ TEST_CASE("ParseSettingsConfig: project_context rejects malformed shapes", "[set
     }
 }
 
+TEST_CASE("ParseSettingsConfig: a wrong-typed value names its key", "[settings_config]") {
+    const auto message = [](const nlohmann::json& doc) {
+        try {
+            ParseSettingsConfig(doc);
+        } catch (const std::runtime_error& error) {
+            return std::string(error.what());
+        }
+        return std::string();
+    };
+    CHECK(message({{"default_model", 5}}).find("default_model must be a string") !=
+          std::string::npos);
+    CHECK(message({{"memory", {{"auto_compact", "yes"}}}}).find("memory.auto_compact") !=
+          std::string::npos);
+    CHECK(message({{"tools", {{"max_input_bytes", 1.5}}}}).find("tools.max_input_bytes") !=
+          std::string::npos);
+    // An integer that does not fit its field is an error, not a silent wrap.
+    CHECK(message({{"tools", {{"max_parallel_tool_calls", 4294967296LL}}}}).find("out of range") !=
+          std::string::npos);
+}
+
 TEST_CASE("ParseSettingsConfig: server settings overridable, warm-up budget validated",
           "[settings_config]") {
     SECTION("defaults") {

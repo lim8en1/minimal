@@ -1,5 +1,6 @@
 #include "minimal/config/hooks_config.hpp"
 
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -34,6 +35,10 @@ HooksConfig ParseHooksConfig(const nlohmann::json& doc) {
         if (!value.is_number_integer()) {
             Reject("hooks.json: default_timeout_ms must be an integer");
         }
+        if (value.get<std::int64_t>() > std::numeric_limits<int>::max() ||
+            value.get<std::int64_t>() < std::numeric_limits<int>::min()) {
+            Reject("hooks.json: default_timeout_ms is out of range: " + value.dump());
+        }
         config.default_timeout_ms = value.get<int>();
         if (config.default_timeout_ms < 0) {
             // Silently disabling a safety budget is never the intent; 0 is the
@@ -67,6 +72,11 @@ HooksConfig ParseHooksConfig(const nlohmann::json& doc) {
                 if (!timeout.is_number_integer()) {
                     Reject("hooks.json: hook on '" + action.on +
                            "': timeout_ms must be an integer");
+                }
+                if (timeout.get<std::int64_t>() > std::numeric_limits<int>::max() ||
+                    timeout.get<std::int64_t>() < std::numeric_limits<int>::min()) {
+                    Reject("hooks.json: hook on '" + action.on +
+                           "': timeout_ms is out of range: " + timeout.dump());
                 }
                 action.timeout_ms = timeout.get<int>();
                 if (*action.timeout_ms < 0) {

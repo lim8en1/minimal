@@ -1,12 +1,56 @@
 #include "minimal/config/settings_config.hpp"
 
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
+#include <string_view>
+#include <type_traits>
 
 #include "minimal/config/json_config_loader.hpp"
 
 namespace minimal::config {
 
 namespace {
+
+// A settings value with a type check that NAMES the key. nlohmann's value()
+// throws "[json.exception.type_error.302] type must be string, but is number"
+// -- no key, no file section -- and silently wraps an out-of-range integer into
+// a narrower type. An absent key is the fallback; a present key of the wrong
+// type, or an integer that does not fit, is a named error.
+template <typename T>
+T GetField(const nlohmann::json& object, std::string_view section, std::string_view key,
+           const T& fallback) {
+    const auto it = object.find(std::string(key));
+    if (it == object.end()) return fallback;
+    const std::string where =
+        "settings.json: " + (section.empty() ? std::string() : std::string(section) + ".") +
+        std::string(key);
+    if constexpr (std::is_same_v<T, bool>) {
+        if (!it->is_boolean()) {
+            throw std::runtime_error(where + " must be true or false, got " + it->dump());
+        }
+        return it->get<bool>();
+    } else if constexpr (std::is_integral_v<T>) {
+        if (!it->is_number_integer()) {
+            throw std::runtime_error(where + " must be an integer, got " + it->dump());
+        }
+        const auto wide = it->get<std::int64_t>();
+        if (wide < static_cast<std::int64_t>(std::numeric_limits<T>::min()) ||
+            (wide > 0 && static_cast<std::uint64_t>(wide) >
+                             static_cast<std::uint64_t>(std::numeric_limits<T>::max()))) {
+            throw std::runtime_error(where + " is out of range: " + it->dump());
+        }
+        return static_cast<T>(wide);
+    } else if constexpr (std::is_same_v<T, std::string>) {
+        if (!it->is_string()) {
+            throw std::runtime_error(where + " must be a string, got " + it->dump());
+        }
+        return it->get<std::string>();
+    } else {
+        return it->get<T>();
+    }
+}
+
 
 std::int64_t RequirePositiveInt(const nlohmann::json& value, const std::string& what) {
     if (!value.is_number_integer()) {
@@ -84,10 +128,10 @@ MemorySettings ParseMemory(const nlohmann::json& doc) {
     MemorySettings result;
     if (!doc.contains("memory")) return result;
     const auto& memory = doc.at("memory");
-    result.auto_compact = memory.value("auto_compact", result.auto_compact);
+    result.auto_compact = GetField(memory, "memory", "auto_compact", result.auto_compact);
     result.context_compaction_trigger = ParseCompactionTrigger(memory);
     result.compaction_keep_recent_tokens =
-        memory.value("compaction_keep_recent_tokens", result.compaction_keep_recent_tokens);
+        GetField(memory, "memory", "compaction_keep_recent_tokens", result.compaction_keep_recent_tokens);
     if (memory.contains("compaction_replace_percent")) {
         const auto& value = memory.at("compaction_replace_percent");
         const std::int64_t percent = value.is_number_integer() ? value.get<std::int64_t>() : 0;
@@ -97,9 +141,9 @@ MemorySettings ParseMemory(const nlohmann::json& doc) {
         }
         result.compaction_replace_percent = static_cast<int>(percent);
     }
-    result.scrollback_page_size = memory.value("scrollback_page_size", result.scrollback_page_size);
-    result.compaction_strategy = memory.value("compaction_strategy", result.compaction_strategy);
-    result.estimate_zero_usage = memory.value("estimate_zero_usage", result.estimate_zero_usage);
+    result.scrollback_page_size = GetField(memory, "memory", "scrollback_page_size", result.scrollback_page_size);
+    result.compaction_strategy = GetField(memory, "memory", "compaction_strategy", result.compaction_strategy);
+    result.estimate_zero_usage = GetField(memory, "memory", "estimate_zero_usage", result.estimate_zero_usage);
     return result;
 }
 
@@ -109,24 +153,24 @@ ToolsSettings ParseTools(const nlohmann::json& doc) {
     const auto& tools = doc.at("tools");
     result.raw = tools;
     result.max_parallel_tool_calls =
-        tools.value("max_parallel_tool_calls", result.max_parallel_tool_calls);
+        GetField(tools, "tools", "max_parallel_tool_calls", result.max_parallel_tool_calls);
     // The pool starts one thread per slot, per session: an absurd value is a
     // resource-exhaustion typo, not a tuning choice.
     if (result.max_parallel_tool_calls < 1 || result.max_parallel_tool_calls > 64) {
         throw std::runtime_error(
             "settings.json: tools.max_parallel_tool_calls must be between 1 and 64");
     }
-    result.max_input_bytes = tools.value("max_input_bytes", result.max_input_bytes);
+    result.max_input_bytes = GetField(tools, "tools", "max_input_bytes", result.max_input_bytes);
     if (result.max_input_bytes < 0) {
         throw std::runtime_error(
             "settings.json: tools.max_input_bytes must not be negative");
     }
-    result.max_result_bytes = tools.value("max_result_bytes", result.max_result_bytes);
+    result.max_result_bytes = GetField(tools, "tools", "max_result_bytes", result.max_result_bytes);
     if (result.max_result_bytes < 0) {
         throw std::runtime_error(
             "settings.json: tools.max_result_bytes must not be negative");
     }
-    result.max_display_bytes = tools.value("max_display_bytes", result.max_display_bytes);
+    result.max_display_bytes = GetField(tools, "tools", "max_display_bytes", result.max_display_bytes);
     if (result.max_display_bytes < 0) {
         throw std::runtime_error(
             "settings.json: tools.max_display_bytes must not be negative");
@@ -137,7 +181,7 @@ ToolsSettings ParseTools(const nlohmann::json& doc) {
 ToolsViewSettings ParseToolsView(const nlohmann::json& doc) {
     ToolsViewSettings result;
     if (!doc.contains("tools_view")) return result;
-    result.stdout_buffer_lines = doc.at("tools_view").value("stdout_buffer_lines", result.stdout_buffer_lines);
+    result.stdout_buffer_lines = GetField(doc.at("tools_view"), "tools_view", "stdout_buffer_lines", result.stdout_buffer_lines);
     return result;
 }
 
@@ -148,9 +192,9 @@ ProjectContextSettings ParseProjectContext(const nlohmann::json& doc) {
     if (!pc.is_object()) {
         throw std::runtime_error("settings.json: project_context must be an object");
     }
-    result.enabled = pc.value("enabled", result.enabled);
-    result.search_ancestors = pc.value("search_ancestors", result.search_ancestors);
-    result.max_bytes = pc.value("max_bytes", result.max_bytes);
+    result.enabled = GetField(pc, "project_context", "enabled", result.enabled);
+    result.search_ancestors = GetField(pc, "project_context", "search_ancestors", result.search_ancestors);
+    result.max_bytes = GetField(pc, "project_context", "max_bytes", result.max_bytes);
     if (result.max_bytes < 0) {
         throw std::runtime_error("settings.json: project_context.max_bytes must not be negative");
     }
@@ -190,7 +234,7 @@ ContextContributorSettings ParseContextContributors(const nlohmann::json& doc) {
     if (!cc.is_object()) {
         throw std::runtime_error("settings.json: context_contributors must be an object");
     }
-    result.max_bytes_per_section = cc.value("max_bytes_per_section", result.max_bytes_per_section);
+    result.max_bytes_per_section = GetField(cc, "context_contributors", "max_bytes_per_section", result.max_bytes_per_section);
     if (result.max_bytes_per_section < 0) {
         throw std::runtime_error(
             "settings.json: context_contributors.max_bytes_per_section must not be negative");
@@ -216,10 +260,10 @@ LoggingSettings ParseLogging(const nlohmann::json& doc) {
     LoggingSettings result;
     if (!doc.contains("logging")) return result;
     const auto& logging = doc.at("logging");
-    result.level = logging.value("level", result.level);
-    result.path = logging.value("path", result.path);
-    result.max_size_mb = logging.value("max_size_mb", result.max_size_mb);
-    result.max_files = logging.value("max_files", result.max_files);
+    result.level = GetField(logging, "logging", "level", result.level);
+    result.path = GetField(logging, "logging", "path", result.path);
+    result.max_size_mb = GetField(logging, "logging", "max_size_mb", result.max_size_mb);
+    result.max_files = GetField(logging, "logging", "max_files", result.max_files);
     return result;
 }
 
@@ -237,13 +281,13 @@ SessionSettings ParseSessions(const nlohmann::json& doc) {
     if (!doc.contains("sessions")) return result;
     const auto& sessions = doc.at("sessions");
     result.detached_idle_ttl_seconds =
-        sessions.value("detached_idle_ttl_seconds", result.detached_idle_ttl_seconds);
-    result.unattended_prompt_timeout_seconds = sessions.value(
+        GetField(sessions, "sessions", "detached_idle_ttl_seconds", result.detached_idle_ttl_seconds);
+    result.unattended_prompt_timeout_seconds = GetField(sessions, "sessions", 
         "unattended_prompt_timeout_seconds", result.unattended_prompt_timeout_seconds);
     result.initial_attach_guard_seconds =
-        sessions.value("initial_attach_guard_seconds", result.initial_attach_guard_seconds);
+        GetField(sessions, "sessions", "initial_attach_guard_seconds", result.initial_attach_guard_seconds);
     for (const auto* key : {"detached_idle_ttl_seconds", "unattended_prompt_timeout_seconds"}) {
-        if (sessions.value(key, std::int64_t{0}) < 0) {
+        if (GetField(sessions, "sessions", key, std::int64_t{0}) < 0) {
             throw std::runtime_error(
                 std::string("settings.json: sessions.") + key + " must not be negative (0 = never)");
         }
@@ -261,12 +305,12 @@ ServerSettings ParseServer(const nlohmann::json& doc) {
     if (!doc.contains("server")) return result;
     const auto& server = doc.at("server");
     result.idle_shutdown_seconds =
-        server.value("idle_shutdown_seconds", result.idle_shutdown_seconds);
+        GetField(server, "server", "idle_shutdown_seconds", result.idle_shutdown_seconds);
     if (result.idle_shutdown_seconds < 0) {
         throw std::runtime_error(
             "settings.json: server.idle_shutdown_seconds must not be negative (0 = never)");
     }
-    result.discovery_warmup_timeout_seconds = server.value(
+    result.discovery_warmup_timeout_seconds = GetField(server, "server", 
         "discovery_warmup_timeout_seconds", result.discovery_warmup_timeout_seconds);
     if (result.discovery_warmup_timeout_seconds < 0) {
         throw std::runtime_error("settings.json: server.discovery_warmup_timeout_seconds must not "
@@ -280,16 +324,16 @@ ServerSettings ParseServer(const nlohmann::json& doc) {
 SettingsConfig ParseSettingsConfig(const nlohmann::json& doc) {
     SettingsConfig config;
     try {
-        config.default_agent_preset = doc.value("default_agent_preset", config.default_agent_preset);
-        config.default_model = doc.value("default_model", config.default_model);
-        config.small_model = doc.value("small_model", config.small_model);
+        config.default_agent_preset = GetField(doc, "", "default_agent_preset", config.default_agent_preset);
+        config.default_model = GetField(doc, "", "default_model", config.default_model);
+        config.small_model = GetField(doc, "", "small_model", config.small_model);
         config.default_subagent_model =
-            doc.value("default_subagent_model", config.default_subagent_model);
-        config.default_theme = doc.value("default_theme", config.default_theme);
-        config.max_concurrent_subagents = doc.value("max_concurrent_subagents", config.max_concurrent_subagents);
-        config.background_wake = doc.value("background_wake", config.background_wake);
+            GetField(doc, "", "default_subagent_model", config.default_subagent_model);
+        config.default_theme = GetField(doc, "", "default_theme", config.default_theme);
+        config.max_concurrent_subagents = GetField(doc, "", "max_concurrent_subagents", config.max_concurrent_subagents);
+        config.background_wake = GetField(doc, "", "background_wake", config.background_wake);
         config.pause_auto_resume_on_submit =
-            doc.value("pause_auto_resume_on_submit", config.pause_auto_resume_on_submit);
+            GetField(doc, "", "pause_auto_resume_on_submit", config.pause_auto_resume_on_submit);
         config.memory = ParseMemory(doc);
         config.tools = ParseTools(doc);
         config.tools_view = ParseToolsView(doc);
@@ -297,7 +341,7 @@ SettingsConfig ParseSettingsConfig(const nlohmann::json& doc) {
         config.context_contributors = ParseContextContributors(doc);
         config.sessions = ParseSessions(doc);
         config.server = ParseServer(doc);
-        config.session_db_path = doc.value("session_db_path", config.session_db_path);
+        config.session_db_path = GetField(doc, "", "session_db_path", config.session_db_path);
         config.logging = ParseLogging(doc);
     } catch (const nlohmann::json::exception& error) {
         throw std::runtime_error(std::string("settings.json: ") + error.what());
