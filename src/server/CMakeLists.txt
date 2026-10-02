@@ -98,6 +98,7 @@ add_library(minimal_server_core SHARED
     agent/context_contributor.cpp
     agent/session.cpp
     agent/tool_source_activation.cpp
+    agent/transcript_rewinder.cpp
     agent/session_launch.cpp
     agent/session_registry.cpp
     agent/session_support.cpp

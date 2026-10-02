@@ -2194,7 +2194,7 @@ std::optional<int64_t> AppState::FindRewindTargetSeq(const std::string& session_
     // GetMessages returns -- see ApplyScrollbackPage), so a forward scan
     // already walks from the newest message backward.
     //
-    // The predicate is the SERVER's IsRewindTarget (agent/session.cpp),
+    // The predicate is the SERVER's IsRewindTarget (agent/transcript_rewinder.cpp),
     // mirrored here field-for-field: role User carrying ANY non-empty
     // TextBlock. Counting bare User rows as well would let /rewind N target
     // an injected subagent completion (User role, tool-result blocks only) --

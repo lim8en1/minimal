@@ -719,8 +719,6 @@ private:
     // run_mode leaves the executor's mode as it is.
     void ApplyEffective(const AgentPreset& preset, llm::LlmProvider& provider,
                         std::optional<tools::PermissionRunMode> run_mode);
-    void RunRewind(std::int64_t target_seq);
-    void RunRedo();
     // Answers a rewind with an ErrorEvent. Publish never blocks on any path;
     // the only refusal is a broadcaster closed by termination.
     void EmitRewindRefusal(const std::string& reason);

@@ -13,6 +13,7 @@
 #include "minimal/agent/mention_expansion.hpp"
 #include "minimal/agent/session_naming.hpp"
 #include "minimal/agent/tool_source_activation.hpp"
+#include "minimal/agent/transcript_rewinder.hpp"
 #include "minimal/config/permission_codec.hpp"
 #include "minimal/common/utf8.hpp"
 
@@ -724,14 +725,6 @@ tools::PermissionRunMode Session::desired_run_mode() const {
     return desired_run_mode_;
 }
 
-// A rewind target must be a REAL user turn: role User carrying text. This
-// excludes injected subagent completions (User role, tool-result blocks only)
-// and anything else a human never typed -- rewinding "to" one would cut the
-// transcript at a position the user cannot re-enter as a prompt.
-bool IsRewindTarget(const session::StoredMessage& stored) {
-    return IsUserTextMessage(stored.message);
-}
-
 void Session::RunOneRewind(const QueuedRewind& request) {
     // The traversal machinery lives behind the SQLite-backed store and reader.
     // A plain test session on a fake store has neither, and refuses with the
@@ -741,11 +734,15 @@ void Session::RunOneRewind(const QueuedRewind& request) {
         return;
     }
     try {
-        if (request.redo) {
-            RunRedo();
-        } else {
-            RunRewind(request.target_seq);
+        TranscriptRewinder rewinder(params_.session_id, *store_, *history_reader_, *loop_, logger_);
+        const RewindOutcome outcome =
+            request.redo ? rewinder.Redo() : rewinder.Rewind(request.target_seq);
+        if (outcome.refusal) {
+            EmitRewindRefusal(*outcome.refusal);
+            return;
         }
+        observers_.NotifySessionRewound(InfoSnapshot(), outcome.truncated_to_seq);
+        EmitSessionRewound(outcome.truncated_to_seq, outcome.active_last_seq);
     } catch (const std::exception& e) {
         logger_.warn("session {}: rewind failed: {}", params_.session_id, e.what());
         EmitRewindRefusal(e.what());
@@ -767,100 +764,6 @@ void Session::EmitMetadataChanged() {
     metadata.context_window_tokens = preset.context_window_tokens.value_or(0);
     metadata.paused = paused();
     EmitOrWarn(SessionEvent{std::move(metadata)}, "metadata event");
-}
-
-void Session::RunRewind(std::int64_t target_seq) {
-    // Validation reads through the reader, which already filters discarded
-    // rows: a rewound-away position comes back as absent and is refused --
-    // there is no rewinding into a discarded branch.
-    const auto target = history_reader_->LoadMessage(params_.session_id, target_seq);
-    if (!target || !IsRewindTarget(*target)) {
-        EmitRewindRefusal("rewind target " + std::to_string(target_seq) +
-                          " is not an active user message");
-        return;
-    }
-
-    // Store first, then memory. A crash between the two leaves the durable
-    // active set ahead of the working set -- the resume path loads the
-    // truncated transcript, which is the state the user asked for. The reverse
-    // order would leave memory describing turns the store still counts, and
-    // the next append would land on top of rows the user rewound away.
-    //
-    // Everything that can fail on a READ happens before the cut: the rebuilt
-    // working set is loaded (and trimmed to the kept prefix) first, so a
-    // failed load refuses the rewind with the durable transcript untouched
-    // instead of reporting "refused" for a cut that already happened. Rows
-    // are moved out, never copied -- a long transcript is the case here.
-    const auto boundary = loop_->CheckpointBoundary();
-    const bool rebuild = boundary.has_value() && target_seq <= *boundary;
-    std::vector<session::StoredMessage> kept_rows;
-    if (rebuild) {
-        kept_rows = history_reader_->LoadAll(params_.session_id);
-        std::erase_if(kept_rows, [target_seq](const session::StoredMessage& row) {
-            return row.seq >= target_seq;
-        });
-    }
-    store_->SetDiscardedAfter(target_seq);
-
-    // TWO memory halves, decided by the checkpoint boundary. Above it, the
-    // summary still describes only kept turns and the working set is truncated
-    // in place. At or below it, the summary over-covers turns that did not
-    // happen -- and dropping it wholesale would also lose the still-active
-    // turns BELOW the cut that it summarized, so the working set is rebuilt
-    // from the store's active prefix and the checkpoint (the cached view being
-    // discarded) is cleared with it. Best-effort, like every checkpoint write:
-    // a failed clear degrades to a resume restoring a stale summary, never to
-    // a lost transcript.
-    if (rebuild) {
-        const std::int64_t first_seq = kept_rows.empty() ? 0 : kept_rows.front().seq;
-        std::vector<llm::Message> messages;
-        messages.reserve(kept_rows.size());
-        for (auto& stored : kept_rows) messages.push_back(std::move(stored.message));
-        try {
-            store_->ClearCompactionCheckpoint();
-        } catch (const std::exception& error) {
-            logger_.warn("session {}: failed to clear compaction checkpoint: {}",
-                         params_.session_id, error.what());
-        }
-        loop_->ReseedFromStore(std::move(messages), first_seq);
-    } else {
-        loop_->TruncateAfter(target_seq);
-    }
-
-    observers_.NotifySessionRewound(InfoSnapshot(), target_seq);
-    // The active transcript now ends just before the target; -1 when the
-    // target was seq 0.
-    EmitSessionRewound(target_seq, target_seq - 1);
-}
-
-void Session::RunRedo() {
-    // The range to restore is computed BEFORE the unmark: it is the active
-    // rows above the current tail, and after the unmark they are active rows
-    // too -- indistinguishable from what was never discarded.
-    const std::int64_t pre_active_last = history_reader_->ActiveLastSeq(params_.session_id);
-    const std::int64_t restored = store_->UnmarkDiscarded();
-    if (restored == 0) {
-        // Either nothing was ever discarded or the fork already reclaimed it.
-        // Both mean the same thing to the user: there is no branch to go back
-        // to.
-        EmitRewindRefusal("nothing to redo");
-        return;
-    }
-
-    // The restored rows join the working set WITHOUT being re-appended -- the
-    // resume seed's shape, applied to a live loop. LoadAfter reads the
-    // just-restored rows; they are active again.
-    auto rows = history_reader_->LoadAfter(params_.session_id, pre_active_last);
-    if (!rows.empty()) {
-        const std::int64_t first_seq = rows.front().seq;
-        std::vector<llm::Message> messages;
-        messages.reserve(rows.size());
-        for (auto& stored : rows) messages.push_back(std::move(stored.message));
-        loop_->RestorePersisted(std::move(messages), first_seq);
-    }
-
-    observers_.NotifySessionRewound(InfoSnapshot(), -1);
-    EmitSessionRewound(-1, history_reader_->ActiveLastSeq(params_.session_id));
 }
 
 void Session::EmitRewindRefusal(const std::string& reason) {
