@@ -179,6 +179,7 @@ public:
     // subagent's ceiling is its parent's and a preset switch never lifts it.
     void SetPolicies(PermissionPolicy policy, PermissionModels models) {
         policy_ = std::move(policy);
+        policy_snapshot_.reset();  // rebuilt on next use; see PathPermittedFor
         models_ = std::move(models);
     }
 
@@ -247,6 +248,13 @@ private:
     ToolRegistry& registry_;
     PermissionChecker& checker_;
     PermissionPolicy policy_;
+    // Immutable shared copies of policy_ / policy_ceiling_ for the per-file
+    // permission predicate (it outlives the call, possibly on a pool thread).
+    // Built lazily and shared by every call until the policy changes -- the
+    // predicate used to deep-copy the whole policy (nested maps of vectors) per
+    // path-tool call. Worker-thread state, like policy_ itself.
+    mutable std::shared_ptr<const PermissionPolicy> policy_snapshot_;
+    mutable std::shared_ptr<const PermissionPolicy> ceiling_snapshot_;
     PermissionModels models_;
     std::atomic<PermissionRunMode> run_mode_;  // atomic: see SetRunMode's comment
     std::optional<PermissionPolicy> policy_ceiling_;

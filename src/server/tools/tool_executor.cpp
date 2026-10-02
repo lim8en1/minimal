@@ -572,9 +572,12 @@ std::function<bool(const std::filesystem::path&)> ToolExecutor::PathPermittedFor
     // A snapshot, not a reference: the predicate runs inside execute(),
     // possibly on a pool thread, while the worker may swap policies
     // (SetPolicies) for the next turn.
-    const auto own = std::make_shared<const PermissionPolicy>(policy_);
-    const auto ceiling = policy_ceiling_ ? std::make_shared<const PermissionPolicy>(*policy_ceiling_)
-                                         : std::shared_ptr<const PermissionPolicy>();
+    if (!policy_snapshot_) policy_snapshot_ = std::make_shared<const PermissionPolicy>(policy_);
+    if (policy_ceiling_ && !ceiling_snapshot_) {
+        ceiling_snapshot_ = std::make_shared<const PermissionPolicy>(*policy_ceiling_);
+    }
+    const std::shared_ptr<const PermissionPolicy> own = policy_snapshot_;
+    const std::shared_ptr<const PermissionPolicy> ceiling = ceiling_snapshot_;
     const ToolCategory category = tool.category_for(input).value_or(tool.spec().category);
     // The run mode wraps both sides like it wraps the call: under bypass an
     // `ask` file is approved exactly as a direct call to it would be, and

@@ -5,6 +5,10 @@
 namespace minimal::tools {
 
 bool GlobMatch(std::string_view pattern, std::string_view text, bool slash_terminates) {
+    // A pattern with no metacharacter is plain equality: skip the table. Most
+    // permission rules are literals, and this runs per rule per walked file.
+    if (pattern.find_first_of("*?\\") == std::string_view::npos) return pattern == text;
+
     const std::size_t plen = pattern.size();
     const std::size_t tlen = text.size();
 
