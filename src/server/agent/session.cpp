@@ -14,6 +14,7 @@
 #include "minimal/agent/session_naming.hpp"
 #include "minimal/agent/session_sinks.hpp"
 #include "minimal/agent/tool_source_activation.hpp"
+#include "minimal/agent/turn_borrow.hpp"
 #include "minimal/agent/transcript_rewinder.hpp"
 #include "minimal/config/permission_codec.hpp"
 #include "minimal/common/utf8.hpp"
@@ -1154,109 +1155,22 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
     }
 
     // --- per-turn model/agent overrides ---------------------------------------
-    //
-    // Applied on the WORKER at turn pop -- the same boundary invariant that
-    // makes /model and /agent safe (the loop is provably not inside a
-    // provider call). The sticky state (preset_, model_override_, the
-    // metadata stream) is untouched: the turn borrows, the session keeps.
-    //
-    // Precedence: the turn's explicit model wins over the session's pinned
-    // model_override_, which wins over the (possibly overridden) preset's own
-    // model. The borrowed preset's run mode can only NARROW the sticky one
-    // (clamp_run_mode) -- a per-turn switch is a borrow, never an escalation.
-    // Restore is a scope guard so EVERY exit path -- LlmError, cancellation,
-    // a non-standard exception out of RunTurn -- puts back exactly what the
-    // session holds; a leaked borrow would silently run every later turn
-    // on the wrong model. (A local class inside a member function sees the
-    // member's access.)
-    struct PresetRestore {
-        Session* session = nullptr;
-        bool active = false;
-        // The restore target is desired_run_mode_, read AT RESTORE TIME, not
-        // a snapshot of the executor taken at pop. A snapshot races the
-        // reader-side switch in both directions: the queued shift+tab of the
-        // original bug wrote the executor behind the snapshot's back and the
-        // restore silently reverted the user's mode -- and a reader-side
-        // SetRunMode landing DURING a borrowed turn (the mode can now change
-        // mid-turn) would be reverted by a pop-time snapshot the same way.
-        // The user's latest word outranks the borrow.
-        ~PresetRestore() {
-            if (!active || session == nullptr) return;
-            // Unconditional, provider included, so a borrow can never leak
-            // into the next turn.
-            session->ApplyEffective(session->preset_, *session->provider_,
-                                    session->desired_run_mode());
-        }
-    } preset_restore;
-    preset_restore.session = this;
-
-    // Holds the per-turn borrowed provider for the rest of this function:
-    // loop_->SetProvider stores a reference, which must stay valid through
-    // RunTurn and past preset_restore's rebind back to provider_.
-    std::shared_ptr<llm::LlmProvider> borrowed_provider;
-
-    if (overrides && (!overrides->model.empty() || !overrides->agent_preset.empty())) {
-        try {
-            // active before ANY mutation, and kept set through the catch
-            // below: a borrow that throws mid-way (after SetRunMode/
-            // SetPreset, during provider construction) must still unwind to
-            // the pre-borrow state, not leave a half-applied borrow behind.
-            // On a fully-failed borrow the restore is a harmless no-op rebind.
-            preset_restore.active = true;
-            AgentPreset transient = preset_;
-            if (!overrides->agent_preset.empty()) {
-                if (presets_ == nullptr) {
-                    throw std::runtime_error("no preset registry wired; cannot resolve agent '" +
-                                             overrides->agent_preset + "'");
-                }
-                transient = presets_->Resolve(overrides->agent_preset, params_.project_root);
-            }
-            // Model precedence: the turn's explicit ref wins over the session's
-            // pinned model_override_, which wins over the preset's own model.
-            // The ref is split here (pop time), so a malformed one fails the
-            // turn by name instead of being dropped reader-side.
-            std::optional<common::ModelRef> model;
-            if (!overrides->model.empty()) {
-                model = common::SplitModelRef(overrides->model);
-                if (!model) {
-                    throw std::runtime_error("malformed model '" + overrides->model +
-                                             "'; expected \"<provider>/<model>\"");
-                }
-            } else {
-                model = model_override_;
-            }
-            if (model) {
-                if (provider_resolver_ == nullptr) {
-                    throw std::runtime_error("no provider resolver wired; cannot resolve model '" +
-                                             model->str() + "'");
-                }
-                transient = provider_resolver_->ResolveModel(std::move(transient), model);
-            }
-            // A different instance only when the borrowed preset is served by
-            // a different connection; the cache makes a known entry a hit.
-            if (!ProviderResolver::SameConnection(transient, preset_)) {
-                if (provider_resolver_ == nullptr) {
-                    throw std::runtime_error("no provider resolver wired; cannot switch provider "
-                                             "for the per-turn override");
-                }
-                borrowed_provider = provider_resolver_->Acquire(transient);
-            }
-            // The borrowed preset's gates govern the borrowed turn. Its run
-            // mode can only narrow the session's CURRENT posture
-            // (desired_run_mode_, which every writer keeps in sync), never the
-            // default from params_/preset_.
-            ApplyEffective(transient, borrowed_provider ? *borrowed_provider : *provider_,
-                           tools::clamp_run_mode(desired_run_mode(), transient.run_mode));
-        } catch (const std::exception& error) {
-            // A resolution failure fails the TURN with a named error -- nothing
-            // persisted, the session keeps its sticky choices -- the same
-            // fall-through shape the prompt veto uses below. active stays set:
-            // the destructor unwinds whatever the borrow already mutated back
-            // to the snapshot.
-            logger_.warn("session {}: per-turn override failed: {}", params_.session_id,
-                         error.what());
-            EmitEvent(
-                SessionEvent{SessionError{std::string("per-turn override failed: ") + error.what()}});
+    // The turn borrows; the session keeps (see TurnBorrow). Restored by the
+    // destructor on EVERY exit path.
+    TurnBorrow borrow(TurnBorrowDeps{
+        preset_, provider_, presets_, provider_resolver_, params_.project_root, model_override_,
+        [this] { return desired_run_mode(); },
+        [this](const AgentPreset& preset, llm::LlmProvider& provider,
+               std::optional<tools::PermissionRunMode> run_mode) {
+            ApplyEffective(preset, provider, run_mode);
+        }});
+    if (overrides != nullptr) {
+        // A resolution failure fails the TURN with a named error -- nothing
+        // persisted, the session keeps its sticky choices -- the same
+        // fall-through shape the prompt veto uses.
+        if (auto error = borrow.Begin(overrides)) {
+            logger_.warn("session {}: per-turn override failed: {}", params_.session_id, *error);
+            EmitEvent(SessionEvent{SessionError{"per-turn override failed: " + *error}});
             vetoed = true;
         }
     }
