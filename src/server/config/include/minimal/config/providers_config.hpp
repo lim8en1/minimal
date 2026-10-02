@@ -55,6 +55,7 @@
 // borrows into node storage that is never mutated after insertion -- copy out
 // what you need (ApplyModel does) rather than holding the pointer across calls.
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -349,6 +350,14 @@ public:
     // at its next resolve.
     void SetDiscoveryHook(DiscoveryHook hook);
 
+    // How long a FAILED discovery stays negative-cached before the next
+    // resolve of that provider retries it. A backend that was down (or simply
+    // started after the server) used to stay "unknown model" until a manual
+    // ctrl+r; a success is kept until a refresh. Default 30 s. A retry runs
+    // under the per-provider gate like any fetch, so a dead catalog costs one
+    // transport timeout per interval, not one per resolve.
+    void SetDiscoveryRetryBackoff(std::chrono::milliseconds backoff);
+
     // Injects the metadata-enrichment hook (docs/EXTENSIBILITY.md §2.13).
     // Consulted lazily: when a static model lacking a window/cap resolves, or
     // a discover-entry's listing leaves fields unset -- never at startup, and
@@ -427,6 +436,9 @@ private:
 
         struct DiscoveryCache {
             std::uint64_t generation = 0;  // future config reload; always 0 today
+            // When the last attempt finished; a failed one is retried once
+            // discovery_retry_backoff_ has elapsed.
+            std::chrono::steady_clock::time_point attempted_at;
             bool attempted = false;
             bool ok = false;
             std::string error;
@@ -449,6 +461,7 @@ private:
         // instead (see VariantParametersFor/ParseProvidersConfig).
         VariantParamsHook variant_params_hook_;
         std::uint64_t generation_ = 0;
+        std::chrono::milliseconds discovery_retry_backoff_{30000};
         mutable std::map<std::string, DiscoveryCache> discovery_;  // by provider name
         // Discovered models, and overlay copies of static models enriched with
         // a discovered context window. Keyed "<provider>/<model>".

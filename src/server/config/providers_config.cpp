@@ -733,6 +733,11 @@ void ProvidersConfig::SetDiscoveryHook(DiscoveryHook hook) {
     ++cache_.generation_;
 }
 
+void ProvidersConfig::SetDiscoveryRetryBackoff(std::chrono::milliseconds backoff) {
+    std::lock_guard<std::mutex> lock(cache_.mutex_);
+    cache_.discovery_retry_backoff_ = backoff;
+}
+
 void ProvidersConfig::SetMetadataHook(MetadataHook hook) {
     std::lock_guard<std::mutex> lock(cache_.mutex_);
     cache_.metadata_hook_ = std::move(hook);
@@ -852,7 +857,13 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveDiscovered(
     if (const auto it = cache_.overlay_.find(ref_key); it != cache_.overlay_.end()) return it->second;
 
     DiscoveryCacheState::DiscoveryCache& cache = cache_.discovery_[entry.name];
-    if (!cache.attempted || cache.generation != cache_.generation_) {
+    // A failed attempt is retried once its backoff elapsed: the negative cache
+    // protects against a fetch per resolve, not against a backend that came up
+    // after the first look.
+    const bool failed_and_due =
+        cache.attempted && !cache.ok &&
+        std::chrono::steady_clock::now() - cache.attempted_at >= cache_.discovery_retry_backoff_;
+    if (!cache.attempted || cache.generation != cache_.generation_ || failed_and_due) {
         lock.unlock();  // the hook does network I/O -- no config lock held
         const DiscoveryOutcome outcome = FetchOutcome(entry);
         lock.lock();
@@ -1166,6 +1177,7 @@ DiscoveryOutcome ProvidersConfig::FetchOutcome(const ProviderEntry& entry) const
 void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryOutcome& outcome,
                                     DiscoveryCacheState::DiscoveryCache& cache) const {
     cache.attempted = true;
+    cache.attempted_at = std::chrono::steady_clock::now();
     cache.generation = cache_.generation_;
     if (!outcome.catalog_present) {
         cache.ok = false;

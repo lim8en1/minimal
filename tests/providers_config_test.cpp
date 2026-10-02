@@ -930,6 +930,34 @@ TEST_CASE("RefreshDiscovery reports a dead catalog instead of throwing",
     CHECK(outcomes[0].error.find("timed out") != std::string::npos);
 }
 
+TEST_CASE("a failed discovery is retried after its backoff, not on every resolve",
+          "[providers][discover]") {
+    // The backend started AFTER the server's first look: the negative cache
+    // must expire on its own instead of waiting for a manual refresh.
+    CountingHook hook;
+    hook.ok = false;
+    hook.error = "connection refused";
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+    config.SetDiscoveryRetryBackoff(std::chrono::milliseconds(50));
+
+    CHECK(config.Resolve(ModelRef{"local", "up-later"}) == nullptr);
+    const int after_first = hook.calls;
+    CHECK(config.Resolve(ModelRef{"local", "up-later"}) == nullptr);
+    CHECK(hook.calls == after_first);  // inside the backoff: no refetch
+
+    hook.ok = true;
+    hook.models = {{"up-later", 8192, nlohmann::json::object(), std::nullopt}};
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    const auto resolved = config.Resolve(ModelRef{"local", "up-later"});
+    REQUIRE(resolved != nullptr);
+    CHECK(*resolved->context_window_tokens == 8192);
+    CHECK(hook.calls > after_first);
+    CHECK(config.discovery_status("local").ok);
+}
+
 TEST_CASE("a failed refresh keeps the last good discovery", "[providers][discover]") {
     CountingHook hook;
     hook.models = {{"old", 4096, nlohmann::json::object(), std::nullopt}};
