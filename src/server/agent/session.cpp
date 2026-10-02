@@ -7,12 +7,12 @@
 
 #include <chrono>
 #include <exception>
-#include <future>
 #include <stdexcept>
 #include <utility>
 
 #include "minimal/agent/mention_expansion.hpp"
 #include "minimal/agent/session_naming.hpp"
+#include "minimal/agent/tool_source_activation.hpp"
 #include "minimal/config/permission_codec.hpp"
 #include "minimal/common/utf8.hpp"
 
@@ -333,86 +333,18 @@ Session::Session(SessionParams params, AgentPreset preset,
 }
 
 void Session::RefreshToolSources() {
-    // A fresh reappraisal every call, not a sticky per-session blocklist: a
-    // member that failed once used to stay disabled for the rest of the
-    // session's life, and an /agent switch was the only way back. The
-    // source's own cooldown is what keeps a genuinely-still-down member from
-    // being re-attempted on every call here.
-    //
-    // Members activate in PARALLEL under one shared deadline, so one hung
-    // server costs at most kToolSourceStartupBudget, not its full connect +
-    // tools/list timeouts. A member that misses the deadline is left out --
-    // its tools do NOT appear later on their own (a silent tool-set change
-    // would invalidate the provider's cached prefix); the user adds them with
-    // an explicit /mcp enable or reconnect, or the next /agent refresh.
-    struct Outcome {
-        std::optional<std::string> group;
-        std::string error;
-    };
-    struct Pending {
-        std::string source_name;
-        std::string member;
-        std::shared_future<Outcome> result;
-    };
-    std::vector<Pending> pending;
-    const tools::ToolSourceRegistry* sources = params_.environment.tool_sources;
-    for (const auto& [source_name, members] : preset_.tool_sources) {
-        const std::shared_ptr<tools::ToolSource> source =
-            sources != nullptr ? sources->Find(source_name) : nullptr;
-        for (const auto& member : members) {
-            auto promise = std::make_shared<std::promise<Outcome>>();
-            pending.push_back({source_name, member, promise->get_future().share()});
-            if (source == nullptr) {
-                Outcome outcome;
-                outcome.error = "tool source '" + source_name +
-                                "' is not available (no loaded plugin provides it)";
-                promise->set_value(std::move(outcome));
-                continue;
-            }
-            // Detached: a member past the deadline must not block the session,
-            // and the thread owns everything it touches (source + promise).
-            std::thread([source, member, source_name, promise] {
-                Outcome outcome;
-                try {
-                    outcome.group = source->Activate(member, outcome.error);
-                } catch (const std::exception& e) {
-                    outcome.group.reset();
-                    outcome.error = e.what();
-                } catch (...) {
-                    outcome.group.reset();
-                    outcome.error = "tool source '" + source_name + "' threw";
-                }
-                promise->set_value(std::move(outcome));
-            }).detach();
-        }
-    }
-
-    const auto deadline = std::chrono::steady_clock::now() + kToolSourceStartupBudget;
-    std::vector<std::string> groups;
-    for (auto& entry : pending) {
-        std::string error;
-        if (entry.result.wait_until(deadline) == std::future_status::ready) {
-            const Outcome& outcome = entry.result.get();
-            if (outcome.group) {
-                groups.push_back(*outcome.group);
-                continue;
-            }
-            error = outcome.error;
-        } else {
-            error = "did not become ready within " +
-                    std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
-                                       kToolSourceStartupBudget)
-                                       .count()) +
-                    "s; its tools are not loaded (reconnect it with /mcp to add them)";
-        }
+    // See ActivateToolSources for the parallel-with-deadline contract.
+    auto activation = ActivateToolSources(preset_.tool_sources, params_.environment.tool_sources,
+                                          kToolSourceStartupBudget);
+    for (const auto& failure : activation.failures) {
         // Surfaced, not swallowed: an error on the outbound stream is the
         // same channel a failed turn uses, so the client sees WHY the
         // member's tools never appeared.
-        EmitEvent(SessionEvent{SessionError{error}});
+        EmitEvent(SessionEvent{SessionError{failure.message}});
         logger_.warn("session {}: tool source '{}' member '{}' unavailable: {}",
-                     params_.session_id, entry.source_name, entry.member, error);
+                     params_.session_id, failure.source_name, failure.member, failure.message);
     }
-    loop_->SetToolGroups(std::move(groups));
+    loop_->SetToolGroups(std::move(activation.groups));
 }
 
 Session::~Session() { Terminate(); }
