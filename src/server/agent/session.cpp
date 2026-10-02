@@ -1175,45 +1175,55 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
         }
     }
 
-    TurnResult result;
     std::int64_t first_seq = 0;
-    if (!vetoed) {
-        try {
-            first_seq = store_->last_appended_seq() + 1;
-            if (text) {
-                // @-mention expansion is for the HUMAN's typed turns only: a subagent's
-                // task arrives from the model, and expanding '@' in model-generated prose
-                // would misfire on emails and ordinary sentences. No mentions -> a message
-                // byte-identical to the plain wrap (mention_expansion.hpp), so the
-                // unconditional-looking ternary changes nothing for anyone else.
-                llm::Message seed = params_.parent_session_id.empty()
-                                        ? ExpandMentions(*text, params_.project_root, logger_)
-                                        : llm::Message{llm::Role::User, {llm::TextBlock{std::move(*text)}}};
-                result = loop_->RunTurn(std::move(seed));
-            } else {
-                // The wake path: no seed. The turn's user content is whatever the
-                // loop flushes at turn start -- the injected messages themselves.
-                result = loop_->RunTurn();
-            }
-        } catch (const llm::LlmError& error) {
-            // The loop rethrows once retries are exhausted. The session survives:
-            // one failed turn is not a reason to tear down a conversation the user
-            // can retry.
-            EmitEvent(SessionEvent{error});
-            logger_.warn("session {}: turn failed: {}", params_.session_id, error.what());
-        } catch (const std::exception& e) {
-            EmitEvent(SessionEvent{SessionError{e.what()}});
-            logger_.warn("session {}: turn threw: {}", params_.session_id, e.what());
-        } catch (...) {
-            // Neither an LlmError nor a std::exception. The catches above existed to
-            // keep one failed turn from taking down the worker -- and with it the
-            // process -- but anything else escaping here would still have reached
-            // std::terminate through WorkerMain. Same treatment: one degraded turn,
-            // a live session.
-            EmitEvent(SessionEvent{SessionError{"the turn threw an unrecognized exception"}});
-            logger_.warn("session {}: turn threw a non-standard exception", params_.session_id);
+    TurnResult result;
+    if (!vetoed) result = ExecuteTurn(std::move(text), first_seq);
+    FinishTurn(std::move(result), vetoed, first_seq, default_name_candidate, started);
+}
+
+TurnResult Session::ExecuteTurn(std::optional<std::string> text, std::int64_t& first_seq) {
+    TurnResult result;
+    try {
+        first_seq = store_->last_appended_seq() + 1;
+        if (text) {
+            // @-mention expansion is for the HUMAN's typed turns only: a subagent's
+            // task arrives from the model, and expanding '@' in model-generated prose
+            // would misfire on emails and ordinary sentences. No mentions -> a message
+            // byte-identical to the plain wrap (mention_expansion.hpp), so the
+            // unconditional-looking ternary changes nothing for anyone else.
+            llm::Message seed = params_.parent_session_id.empty()
+                                    ? ExpandMentions(*text, params_.project_root, logger_)
+                                    : llm::Message{llm::Role::User, {llm::TextBlock{std::move(*text)}}};
+            result = loop_->RunTurn(std::move(seed));
+        } else {
+            // The wake path: no seed. The turn's user content is whatever the
+            // loop flushes at turn start -- the injected messages themselves.
+            result = loop_->RunTurn();
         }
+    } catch (const llm::LlmError& error) {
+        // The loop rethrows once retries are exhausted. The session survives:
+        // one failed turn is not a reason to tear down a conversation the user
+        // can retry.
+        EmitEvent(SessionEvent{error});
+        logger_.warn("session {}: turn failed: {}", params_.session_id, error.what());
+    } catch (const std::exception& e) {
+        EmitEvent(SessionEvent{SessionError{e.what()}});
+        logger_.warn("session {}: turn threw: {}", params_.session_id, e.what());
+    } catch (...) {
+        // Neither an LlmError nor a std::exception. The catches above existed to
+        // keep one failed turn from taking down the worker -- and with it the
+        // process -- but anything else escaping here would still have reached
+        // std::terminate through WorkerMain. Same treatment: one degraded turn,
+        // a live session.
+        EmitEvent(SessionEvent{SessionError{"the turn threw an unrecognized exception"}});
+        logger_.warn("session {}: turn threw a non-standard exception", params_.session_id);
     }
+    return result;
+}
+
+void Session::FinishTurn(TurnResult result, bool vetoed, std::int64_t first_seq,
+                         const std::string& default_name_candidate,
+                         std::chrono::steady_clock::time_point started) {
     // THE STEERING SWEEP'S GATE, recorded where `result` is final. True only
     // for a NATURAL model stop -- the model received the conversation and
     // finished replying, so user text appearing AFTER it (the final flush's

@@ -602,6 +602,18 @@ private:
     // nullopt = the wake path: a turn whose user content is the injected
     // messages themselves (see SessionParams::wake_on_injection).
     void RunOneTurn(std::optional<std::string> text, const QueuedTurn* overrides = nullptr);
+    // Runs the loop for one turn and contains every way it can fail: a failed
+    // turn is an event on the wire plus a default-constructed result, never an
+    // exception out of the worker. `first_seq` is the transcript seq the turn
+    // would start at.
+    TurnResult ExecuteTurn(std::optional<std::string> text, std::int64_t& first_seq);
+    // The every-exit-path obligations after a turn (vetoed, failed or complete):
+    // name refresh, the wire terminator, the observer summary, the subagent
+    // completion hook, the continuation record -- in that order, each guarded
+    // separately so one failing stage cannot skip the later ones.
+    void FinishTurn(TurnResult result, bool vetoed, std::int64_t first_seq,
+                    const std::string& default_name_candidate,
+                    std::chrono::steady_clock::time_point started);
     // Fires params_.on_turn_finished EXACTLY ONCE across every exit path
     // (a completed turn in RunOneTurn, a terminate that lands before any turn
     // ever ran) by exchanging subagent_finished_ -- a blocking parent waits on
