@@ -327,7 +327,11 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
     // and pgid, the shell setsid()s -- cannot have been recycled. killpg
     // reaps-first would race pid reuse and could SIGKILL an unrelated,
     // recycled process group.
-    if (!reaped || outcome.detached_grandchild) KillProcessGroup(proc.pid);
+    // Not after a reap_error (ECHILD): the child is already gone, so the pid may
+    // have been recycled and killpg could hit an unrelated process group.
+    if ((!reaped && !outcome.reap_error) || outcome.detached_grandchild) {
+        KillProcessGroup(proc.pid);
+    }
     if (!reaped && !outcome.reap_error) {
         const auto kill_deadline = std::chrono::steady_clock::now() +
                                    std::chrono::milliseconds(options.post_kill_reap_ms);

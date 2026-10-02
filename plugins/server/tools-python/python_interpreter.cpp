@@ -881,11 +881,10 @@ void Interpreter::HardKill(const std::string& reason) {
     // ReapAfterKill includes the group kill (plus the fork-to-setsid window
     // via the plain kill). An unreaped child (D state) is logged, never
     // waited on forever.
-    if (!ReapAfterKill(pid_)) {
+    if (!minimal::sidecar::TerminateGroup(pid_)) {
         logger_.warn("python[{}]: child not reaped within the post-kill budget ({})",
                      pid_, reason);
     }
-    ForgetPgid(pid_);
     // The reader exits on its next wakeup (dead_ is set, Wake() fired). It
     // holds NO shared_ptr -- it captures raw `this` (StartReader) -- so it is
     // safe only because ~Interpreter joins it before any member is torn down.

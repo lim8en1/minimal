@@ -323,8 +323,7 @@ void ReapChildWithGrace(int pid, std::chrono::milliseconds grace) {
         sidecar::ForgetPgid(pid);
         return;  // no longer ours
     }
-    sidecar::ReapAfterKill(pid);  // SIGKILL the group, bounded reap
-    sidecar::ForgetPgid(pid);
+    sidecar::TerminateGroup(pid);  // SIGKILL the group, bounded reap, forget the pgid
 }
 
 class StdioTransport final : public JsonRpcTransport {
@@ -348,8 +347,11 @@ public:
         const int pid = pid_.exchange(0);
         if (pid > 0) {
             int status = 0;
-            if (waitpid(pid, &status, WNOHANG) == 0) sidecar::ReapAfterKill(pid);
-            sidecar::ForgetPgid(pid);
+            if (waitpid(pid, &status, WNOHANG) == 0) {
+                sidecar::TerminateGroup(pid);
+            } else {
+                sidecar::ForgetPgid(pid);
+            }
         }
     }
 

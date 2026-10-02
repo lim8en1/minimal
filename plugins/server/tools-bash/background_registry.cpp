@@ -18,32 +18,6 @@ using minimal::sidecar::PipeSink;
 using minimal::sidecar::TaskRegistry;
 using tools::BackgroundTaskEvent;
 
-// Kills the group, then reaps with a BOUND. "Bounded by SIGKILL" does not
-// hold for a process stuck in uninterruptible disk sleep (D state): SIGKILL
-// stays pending indefinitely and a blocking call would park the caller
-// forever. Poll WNOHANG with a generous ceiling instead; past it, `reaped`
-// stays false and the caller reports the status as undetermined rather than
-// hanging. Used by the containment paths (an abnormal watcher exit, a
-// watcher thread that never came into existence), where there is no drain
-// loop to bound the wait anymore.
-constexpr int kPostKillReapMs = 5000;
-void BoundedReapAfterKill(pid_t pid, bool& reaped) {
-    KillProcessGroup(pid);
-    int status = 0;
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(kPostKillReapMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        const pid_t rc = waitpid(pid, &status, WNOHANG);
-        if (rc == pid) {
-            reaped = true;
-            break;
-        }
-        if (rc < 0 && errno == EINTR) continue;
-        if (rc < 0) break;  // ECHILD: nothing to reap; caller flags it
-        poll(nullptr, 0, 25);
-    }
-}
-
 // The watcher body. Runs detached under the shared registry's containment
 // wrapper; owns its state through the registry's shared TaskState and owned
 // copies of the launch handles, so a session dying underneath it is a handled
@@ -247,12 +221,7 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
     // best-effort, idempotent cleanup covers both.
     args.cleanup = [pid] {
         try {
-            bool reaped = false;
-            BoundedReapAfterKill(pid, reaped);
-        } catch (...) {
-        }
-        try {
-            ForgetPgid(pid);
+            sidecar::TerminateGroup(pid);  // kill, bounded reap, forget the pgid
         } catch (...) {
         }
     };

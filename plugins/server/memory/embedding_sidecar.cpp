@@ -332,8 +332,7 @@ private:
         out_fd_.reset();
         diag_fd_.reset();
         if (pid_ > 0) {
-            sidecar::ReapAfterKill(pid_);
-            sidecar::ForgetPgid(pid_);
+            sidecar::TerminateGroup(pid_);
         }
         pid_ = -1;
         alive_ = false;

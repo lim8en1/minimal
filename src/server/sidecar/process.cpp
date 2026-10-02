@@ -163,6 +163,12 @@ bool ReapAfterKill(pid_t pid) {
     return false;
 }
 
+bool TerminateGroup(pid_t pid) {
+    const bool reaped = ReapAfterKill(pid);
+    ForgetPgid(pid);
+    return reaped;
+}
+
 std::string ResolveOnPath(const std::string& name) {
     const char* path_env = ::getenv("PATH");
     return ResolveOnPath(name, path_env != nullptr ? std::string_view(path_env)
@@ -383,17 +389,9 @@ Launched Launch(const LaunchSpec& spec) {
     } catch (...) {
         // Syscalls, not the RAII helpers: nothing here may throw from inside
         // a catch that is already cleaning up after a throw.
-        ::killpg(pid, SIGKILL);
-        ::kill(pid, SIGKILL);
-        int status = 0;
-        const auto deadline = std::chrono::steady_clock::now() +
-                              std::chrono::milliseconds(kPostKillReapMs);
-        while (std::chrono::steady_clock::now() < deadline) {
-            const pid_t rc = waitpid(pid, &status, WNOHANG);
-            if (rc != 0) break;  // reaped, or ECHILD
-            poll(nullptr, 0, 25);
-        }
-        ForgetPgid(pid);
+        // Nothing here may throw from inside a catch that is already cleaning
+        // up after a throw: TerminateGroup is syscalls and a set erase.
+        TerminateGroup(pid);
         throw;
     }
     return proc;

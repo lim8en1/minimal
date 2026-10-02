@@ -769,3 +769,40 @@ TEST_CASE("ReapAfterKill reports an already-reaped child as reaped, not lost",
                             // dead pid: SIGKILL to a reaped pid is a no-op
     CHECK(ReapAfterKill(pid));
 }
+TEST_CASE("Child terminates its group on destruction", "[sidecar][process][child]") {
+    Launched launched = Launch(SimpleSpec("sleep 30"));
+    REQUIRE(launched.ok);
+    TrackPgid(launched.pid);
+    const pid_t pid = launched.pid;
+    {
+        Child child(pid);
+        REQUIRE(child.valid());
+    }  // dtor: SIGKILL the group, reap, forget
+    // Reaped by the destructor: the pid is no longer our child.
+    int status = 0;
+    CHECK(waitpid(pid, &status, WNOHANG) == -1);
+    CHECK(errno == ECHILD);
+}
+
+TEST_CASE("Child::Terminate is idempotent and MarkReaped never signals", "[sidecar][process][child]") {
+    Launched launched = Launch(SimpleSpec("exit 0"));
+    REQUIRE(launched.ok);
+    TrackPgid(launched.pid);
+    Child child(launched.pid);
+
+    int status = 0;
+    REQUIRE(waitpid(launched.pid, &status, 0) == launched.pid);  // the owner reaped it itself
+    child.MarkReaped();                                          // no kill of a possibly recycled pid
+    CHECK_FALSE(child.valid());
+    CHECK(child.Terminate());                                    // nothing left to do
+    CHECK(child.Terminate());
+}
+
+TEST_CASE("TerminateGroup reports an already-reaped child as done", "[sidecar][process][child]") {
+    Launched launched = Launch(SimpleSpec("exit 0"));
+    REQUIRE(launched.ok);
+    TrackPgid(launched.pid);
+    int status = 0;
+    REQUIRE(waitpid(launched.pid, &status, 0) == launched.pid);
+    CHECK(TerminateGroup(launched.pid));  // ECHILD counts as success
+}

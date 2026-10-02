@@ -138,6 +138,56 @@ bool ReapAfterKill(pid_t pid);
 void TrackPgid(pid_t pid);
 void ForgetPgid(pid_t pid);
 
+// The whole end-of-life for a child that is still ours: SIGKILL its group,
+// bounded reap, and unregister its pgid -- the pair every owner used to spell
+// out by hand (and which, split, leaves a stale pgid that pid reuse turns into
+// a wrong-target kill at process exit). True when the child was reaped (or was
+// already gone); false when it outlived the post-kill budget (a D-state child).
+// The pgid is forgotten either way. Call only while the pid is still ours --
+// never after an external waitpid reaped it, when the number may be recycled.
+bool TerminateGroup(pid_t pid);
+
+// RAII owner of one launched child. Destruction terminates the group unless the
+// child was already reaped or released, so no early return or exception between
+// Launch and the owner's own teardown can orphan a process group.
+class Child {
+public:
+    Child() = default;
+    explicit Child(pid_t pid) : pid_(pid) {}
+    ~Child() { Terminate(); }
+    Child(Child&& other) noexcept : pid_(std::exchange(other.pid_, -1)) {}
+    Child& operator=(Child&& other) noexcept {
+        if (this != &other) {
+            Terminate();
+            pid_ = std::exchange(other.pid_, -1);
+        }
+        return *this;
+    }
+    Child(const Child&) = delete;
+    Child& operator=(const Child&) = delete;
+
+    pid_t pid() const { return pid_; }
+    bool valid() const { return pid_ > 0; }
+
+    // Idempotent: terminates and forgets once, later calls do nothing (so a
+    // recycled pid is never signalled twice). Returns TerminateGroup's result;
+    // true when there was nothing to do.
+    bool Terminate() {
+        const pid_t pid = std::exchange(pid_, -1);
+        return pid > 0 ? TerminateGroup(pid) : true;
+    }
+
+    // The owner reaped the child itself (a waitpid it already did): stop
+    // tracking without signalling, and unregister the pgid.
+    void MarkReaped() {
+        const pid_t pid = std::exchange(pid_, -1);
+        if (pid > 0) ForgetPgid(pid);
+    }
+
+private:
+    pid_t pid_ = -1;
+};
+
 // This process's own environment as a LaunchSpec::env map -- for a child that
 // should inherit everything (operator-configured commands such as hook
 // actions), not an allowlisted subset.
