@@ -13,29 +13,12 @@
 #include "minimal/agent/compaction_trigger.hpp"
 #include "minimal/agent/structured_compaction.hpp"
 #include "minimal/agent/transcript_repair.hpp"
+#include "tool_result_caps.hpp"
 #include "minimal/common/utf8.hpp"
 
 namespace minimal::agent {
 namespace {
 
-std::vector<const llm::ToolUseBlock*> ToolUsesOf(const llm::Message& message) {
-    std::vector<const llm::ToolUseBlock*> out;
-    for (const auto& block : message.content) {
-        if (const auto* use = std::get_if<llm::ToolUseBlock>(&block)) {
-            out.push_back(use);
-        }
-    }
-    return out;
-}
-
-// THE global tool-RESULT ceiling (settings.json tools.max_result_bytes), the
-// output-side mirror of the input ceiling checked before Prepare. Applied
-// here, once, after Execute() returns, so it covers every tool uniformly --
-// a core tool's own cap (bash.max_output_bytes) is the plugin's choice, not
-// a harness guarantee, and an MCP tool or third-party plugin tool has no cap
-// at all short of this one. Truncation, not an error: a large result is not
-// a refusal the model needs to adapt its call to, just content it should
-// know was cut.
 // A provider's "this request does not fit the model's window" refusal. There
 // is no portable error code -- Anthropic, OpenAI and the local servers each
 // phrase it differently -- so this is a message heuristic over a non-retryable
@@ -56,112 +39,6 @@ bool IsContextOverflow(const llm::LlmError& error) {
         if (message.find(needle) != std::string::npos) return true;
     }
     return false;
-}
-
-void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes) {
-    if (max_bytes <= 0) return;
-    const auto cap = static_cast<std::size_t>(max_bytes);
-
-    std::size_t total = 0;
-    for (const auto& item : block.content) {
-        if (const auto* text = std::get_if<llm::TextBlock>(&item)) total += text->text.size();
-    }
-    if (total <= cap) return;
-
-    std::string kept;
-    kept.reserve(cap);
-    for (auto& item : block.content) {
-        if (kept.size() >= cap) break;
-        if (auto* text = std::get_if<llm::TextBlock>(&item)) {
-            const auto take = std::min(cap - kept.size(), text->text.size());
-            kept.append(text->text, 0, take);
-        }
-    }
-    kept += "\n... [" + std::to_string(total - cap) +
-            " bytes omitted; result exceeds the configured max_result_bytes (" +
-            std::to_string(cap) + ")]";
-    block.content.clear();
-    block.content.push_back(llm::TextBlock{std::move(kept)});
-}
-
-// The display payload's ceiling (settings.json tools.max_display_bytes).
-// DROPPED whole over the cap, never truncated: a cut diff or file excerpt
-// misrepresents what happened, while the text fallback stays truthful.
-// Returns the serialized size when it dropped the payload, 0 otherwise.
-std::size_t CapToolDisplay(llm::ToolResultBlock& block, std::int64_t max_bytes) {
-    if (max_bytes <= 0 || block.display.is_null()) return 0;
-    const std::size_t size =
-        block.display.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace).size();
-    if (size <= static_cast<std::size_t>(max_bytes)) return 0;
-    block.display = nullptr;
-    return size;
-}
-
-// S4's no-boundary fallback: when snap_compaction_boundary finds no safe cut
-// anywhere (every candidate lands inside an open tool-call cycle), context
-// would otherwise grow forever -- but the actual harm that trips the trigger
-// is usually SIZE, not message count, and a single oversized tool result is
-// the common cause. Eliding one IN PLACE, reusing CapToolResult's own
-// truncation shape, shrinks the context without removing any message, so it
-// can never disturb tool_use/tool_result pairing -- the very thing that made
-// a structural cut impossible in the first place. Returns false when nothing
-// large enough to be worth eliding remains (every result is already small),
-// which is the caller's signal to fall back to the genuine last resort.
-//
-// DIVERGENCE NOTE: unlike the structural path, elision mutates only the
-// working history_ -- the persisted transcript keeps the full bytes (there is
-// no message-rewrite API, and no summary to anchor a checkpoint to). A resume
-// therefore regrows the elided content. That self-heals: the resume re-seeds
-// occupancy from the regrown context, the trigger re-fires, and this path
-// runs again -- the cost is one oversized request between resume and the next
-// compaction cycle, not unbounded growth.
-// The output cap a request can actually carry. Backends validate
-// input + max_tokens <= context window, and a catalog-reported cap
-// (OpenRouter's top_provider.max_completion_tokens) can be 90% of the window
-// -- sent verbatim, every turn past ~10% occupancy was a hard 400 that no
-// retry or compaction could clear. Clamped to the room left after the input
-// estimate and a margin for the bytes/4 roughness; floored so a near-full
-// context still sends a usable request rather than a non-positive cap. No
-// window or no cap: nothing to clamp against, the cap passes through.
-constexpr std::int64_t kOutputCapMinMarginTokens = 4096;
-constexpr std::int64_t kOutputCapMarginPercent = 2;
-constexpr std::int64_t kOutputCapFloorTokens = 1024;
-
-std::optional<int> FitOutputCap(std::optional<int> cap, std::optional<std::int64_t> window,
-                                std::int64_t input_tokens) {
-    if (!cap || !window || *window <= 0) return cap;
-    const std::int64_t margin =
-        std::max(kOutputCapMinMarginTokens, *window * kOutputCapMarginPercent / 100);
-    const std::int64_t room = std::max(kOutputCapFloorTokens, *window - input_tokens - margin);
-    return static_cast<int>(std::min<std::int64_t>(*cap, room));
-}
-
-constexpr std::int64_t kElisionMinSizeToBother = 1000;  // below this, eliding buys nothing
-constexpr std::int64_t kElisionTargetBytes = 500;
-
-bool ElideLargestToolResult(std::vector<llm::Message>& history) {
-    llm::ToolResultBlock* largest = nullptr;
-    std::size_t largest_size = 0;
-    for (auto& message : history) {
-        for (auto& block : message.content) {
-            auto* result = std::get_if<llm::ToolResultBlock>(&block);
-            if (result == nullptr) continue;
-            std::size_t size = 0;
-            for (const auto& item : result->content) {
-                if (const auto* text = std::get_if<llm::TextBlock>(&item)) size += text->text.size();
-            }
-            if (size > largest_size) {
-                largest_size = size;
-                largest = result;
-            }
-        }
-    }
-    if (largest == nullptr || static_cast<std::int64_t>(largest_size) <= kElisionMinSizeToBother) {
-        return false;
-    }
-    CapToolResult(*largest, kElisionTargetBytes);
-    largest->display = nullptr;   // it described the full result, not the stub
-    return true;
 }
 
 }  // namespace

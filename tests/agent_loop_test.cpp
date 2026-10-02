@@ -171,6 +171,9 @@ struct Harness {
     // Atomic because the backoff test flips it from the main thread while the
     // loop polls it mid-sleep; every other test sets it from the same thread.
     std::atomic<bool> cancel_flag{false};
+    // The pause probe the loop polls at its top; tests raise it to model
+    // Session::SetPaused.
+    std::atomic<bool> pause_flag{false};
 
     FakeTool& AddTool(std::string name, ToolCategory category = ToolCategory::ReadOnly) {
         auto owned = std::make_unique<FakeTool>(std::move(name), category);
@@ -231,7 +234,7 @@ struct Harness {
         loop = std::make_unique<agent::AgentLoop>(
             provider, *executor, registry, store, std::move(preset), config, std::move(session),
             [this] { return cancel_flag.load(); },
-            [] { return false; },  // never paused
+            [this] { return pause_flag.load(); },
             [this](const llm::StreamEvent& e) {
                 seen_events.push_back(e);
                 return !cancel_flag.load();
@@ -255,6 +258,77 @@ TEST_CASE("a single turn ends and persists user + assistant", "[agent_loop]") {
     REQUIRE(h.store.messages.size() == 2);
     CHECK(h.store.messages[0].role == llm::Role::User);
     CHECK(h.store.messages[1].role == llm::Role::Assistant);
+}
+
+TEST_CASE("a pause raised before the turn stops it at the loop top, seed persisted",
+          "[agent_loop][pause]") {
+    Harness h;
+    h.provider.PushResponse(TextResponse("never requested"));
+    h.Build();
+    h.pause_flag = true;
+
+    const auto result = h.loop->RunTurn(UserText("hi"));
+
+    CHECK(result.stop_reason == llm::StopReason::Paused);
+    CHECK(h.provider.call_count() == 0);       // no provider call while paused
+    REQUIRE(h.store.messages.size() == 1);     // the user's seed is not lost
+    CHECK(h.store.messages[0].role == llm::Role::User);
+}
+
+TEST_CASE("a pause landing mid-round lets the round finish, then stops before the next call",
+          "[agent_loop][pause]") {
+    Harness h;
+    auto counter = std::make_shared<ConcurrencyCounter>();
+    h.AddProbe("probe", counter, [&h] { h.pause_flag = true; });
+    h.provider.PushResponse(ToolUseResponse("tu1", "probe"));
+    h.provider.PushResponse(TextResponse("must not be requested yet"));
+    h.Build();
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::Paused);
+    CHECK(h.provider.call_count() == 1);
+    // The in-flight round is paired and persisted: seed, tool_use, tool_result.
+    REQUIRE(h.store.messages.size() == 3);
+    CHECK(h.store.messages[2].role == llm::Role::User);
+}
+
+TEST_CASE("steering is open only while a turn runs, closed again on every exit",
+          "[agent_loop][steering]") {
+    Harness h;
+    auto counter = std::make_shared<ConcurrencyCounter>();
+    std::atomic<bool> open_mid_round{false};
+    h.AddProbe("probe", counter, [&] { open_mid_round = h.loop->OpenToSteering(); });
+    h.provider.PushResponse(ToolUseResponse("tu1", "probe"));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build();
+
+    CHECK_FALSE(h.loop->OpenToSteering());
+    h.loop->RunTurn(UserText("go"));
+    CHECK(open_mid_round.load());                 // open once the seed is in the history
+    CHECK_FALSE(h.loop->OpenToSteering());        // closed after a normal exit
+
+    // ...and after an exit by exception (a non-retryable provider error).
+    h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::AuthError, "denied", 401));
+    CHECK_THROWS_AS(h.loop->RunTurn(UserText("again")), llm::LlmError);
+    CHECK_FALSE(h.loop->OpenToSteering());
+}
+
+TEST_CASE("HistoryEndsWithUnansweredUserText tracks who owes a reply", "[agent_loop]") {
+    Harness h;
+    h.provider.PushResponse(TextResponse("answered"));
+    h.Build();
+
+    CHECK_FALSE(h.loop->HistoryEndsWithUnansweredUserText());  // empty history
+    h.loop->RunTurn(UserText("hi"));
+    CHECK_FALSE(h.loop->HistoryEndsWithUnansweredUserText());  // the model had the last word
+    h.loop->PushInjectedMessage(UserText("steered too late"));
+    // The wake path flushes the injection into the history and then asks the
+    // provider, which has no reply scripted and throws -- leaving the user
+    // message unanswered, exactly the state being probed.
+    CHECK_THROWS(h.loop->RunTurn());
+    // The unanswered user message is now in the history.
+    CHECK(h.loop->HistoryEndsWithUnansweredUserText());
 }
 
 TEST_CASE("every request the loop builds carries the harness session id",
