@@ -45,7 +45,7 @@
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/skill_registry.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
-#include "minimal/hooks/hook_observer_bridge.hpp"
+#include "minimal/agent/hook_observer_bridge.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/plugins/name_resolution.hpp"

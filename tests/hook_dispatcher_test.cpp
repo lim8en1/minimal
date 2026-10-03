@@ -17,7 +17,7 @@
 #include <thread>
 
 #include "minimal/hooks/hook_dispatcher.hpp"
-#include "minimal/hooks/hook_observer_bridge.hpp"
+#include "minimal/agent/hook_observer_bridge.hpp"
 #include "minimal/hooks/hook_shell.hpp"
 
 using minimal::hooks::HookDispatcher;

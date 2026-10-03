@@ -1,4 +1,4 @@
-#include "minimal/hooks/hook_observer_bridge.hpp"
+#include "minimal/agent/hook_observer_bridge.hpp"
 
 namespace minimal::hooks {
 namespace {

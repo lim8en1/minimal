@@ -38,7 +38,7 @@ add_library(minimal_server_core SHARED
     startup/sanity_check.cpp
     hooks/hook_dispatcher.cpp
     hooks/hook_shell.cpp
-    hooks/hook_observer_bridge.cpp
+    agent/hook_observer_bridge.cpp
     agent/agent_preset_frontmatter.cpp
     agent/permission_resolution.cpp
     agent/agent_preset_registry.cpp
