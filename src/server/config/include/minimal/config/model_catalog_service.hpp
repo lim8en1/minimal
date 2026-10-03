@@ -70,40 +70,13 @@ private:
     // never a rebuild. runtime_.mutex_ held.
     std::shared_ptr<const CatalogRuntime::ProviderDiscovery> PublishLocked(
         const ProviderEntry& entry, const DiscoveryOutcome& outcome) const;
-    // The discover-entry half of Resolve: ensures the provider's catalog has
-    // been consulted this generation (fetching under the per-provider gate
-    // with no config lock held, double-checking after the wait), then returns
-    // the model -- from the overlay when it is already there, else built from
-    // the entry and the discovery cache. Null on a dead catalog or a model it
-    // does not serve. `lock` holds mutex_ on entry and on every return.
-    std::shared_ptr<const ResolvedModel> ResolveDiscovered(const ProviderEntry& entry,
-                                                           const std::string& model_id,
-                                                           const std::string& ref_key,
-                                                           std::unique_lock<std::mutex>& lock) const;
-    // Resolves `<base>@<variant>` -- strips the suffix, resolves the base (any
-    // path: static, enriched, or discovered), rebuilds the sibling via
-    // MakeVariantResolved, and serves it from overlay_ so the rebuild happens
-    // at most once per ref per process. `lock` holds mutex_ on entry; released
-    // only inside ResolveDiscovered's fetch, as today. Null when the base is
-    // unknown or the variant name was never declared for it (an unknown variant
-    // is a MISS -- the caller reports "unknown model", the honest outcome for a
-    // typo -- never a synthesized guess).
-    std::shared_ptr<const ResolvedModel> ResolveVariant(const ProviderEntry& entry,
-                                                        const std::string& base_id,
-                                                        const std::string& variant_name,
-                                                        const std::string& ref_key,
-                                                        std::unique_lock<std::mutex>& lock) const;
-    // The metadata-enrichment half of a resolve: the static model at `ref_key`
-    // is missing window/cap (or has no autodetected ladder recorded), the
-    // entry has not declined enrichment, and a metadata hook is injected.
-    // Unlocks, consults the hook under the per-provider gate (the same
-    // discipline ResolveDiscovered uses -- a slow catalog must not stall
-    // other config reads), re-locks, and writes the gap-filled overlay copy
-    // plus the autodetected variant recipe into metadata_variants_.
-    // Cache_.mutex_ held on entry and on return; dropped across the hook.
-    void EnrichFromMetadata(const ProviderEntry& entry, const std::string& model_id,
-                            const std::string& ref_key,
-                            std::unique_lock<std::mutex>& lock) const;
+    // One Resolve call's working state: owns the unique_lock on runtime_.mutex_
+    // for the call and the only code that releases it (around the per-provider
+    // gate and around hook I/O), so the lock never appears in a signature and a
+    // release is a lexical scope that re-locks on every exit path. Defined in
+    // the .cpp; holds the discover / variant / metadata-enrichment halves of a
+    // resolve.
+    class Resolution;
 };
 
 }  // namespace minimal::config

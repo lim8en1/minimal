@@ -107,9 +107,86 @@ void ModelCatalogService::SetVariantParamsHook(VariantParamsHook hook) {
     runtime_.variant_params_hook_ = std::move(hook);
 }
 
+// One Resolve call's working state. Owns the unique_lock on runtime_.mutex_ for
+// the call; the only places it is released are Unlocked scopes, which re-lock on
+// every exit path (a throwing hook included), so "the config lock is held
+// unless this block says otherwise" is something the compiler checks rather than
+// a convention each function repeats.
+class ModelCatalogService::Resolution {
+public:
+    explicit Resolution(const ModelCatalogService& service)
+        : svc_(service),
+          catalog_(service.catalog_),
+          runtime_(service.runtime_),
+          lock_(service.runtime_.mutex_) {}
+
+    std::shared_ptr<const ResolvedModel> Resolve(const ModelRef& ref);
+
+private:
+    // Releases the config lock for a scope (hook I/O, waiting on a gate).
+    class Unlocked {
+    public:
+        explicit Unlocked(std::unique_lock<std::mutex>& lock) : lock_(lock) { lock_.unlock(); }
+        ~Unlocked() { lock_.lock(); }
+        Unlocked(const Unlocked&) = delete;
+        Unlocked& operator=(const Unlocked&) = delete;
+
+    private:
+        std::unique_lock<std::mutex>& lock_;
+    };
+
+    // Takes the provider's fetch gate, returning with BOTH the gate held and the
+    // config lock re-held. Lock order is always gate -> runtime_.mutex_, never
+    // the reverse (runtime_.gates_ is only ever touched for insertion, under
+    // mutex_, or locked before it) -- and this is the one place it is spelled.
+    std::unique_lock<std::mutex> AcquireGate(const std::string& provider) {
+        std::unique_lock<std::mutex> gate;
+        const Unlocked released(lock_);
+        gate = std::unique_lock<std::mutex>(runtime_.gate_for(provider).mtx);
+        return gate;
+    }
+
+    // The discover-entry half of Resolve: ensures the provider's catalog has
+    // been consulted this generation (fetching under the per-provider gate
+    // with no config lock held, double-checking after the wait), then returns
+    // the model -- from the overlay when it is already there, else built from
+    // the entry and the discovery cache. Null on a dead catalog or a model it
+    // does not serve.
+    std::shared_ptr<const ResolvedModel> ResolveDiscovered(const ProviderEntry& entry,
+                                                           const std::string& model_id,
+                                                           const std::string& ref_key);
+    // Resolves `<base>@<variant>` -- strips the suffix, resolves the base (any
+    // path: static, enriched, or discovered), rebuilds the sibling via
+    // MakeVariantResolved, and serves it from overlay_ so the rebuild happens
+    // at most once per ref per process. Null when the base is unknown or the
+    // variant name was never declared for it (an unknown variant is a MISS --
+    // the caller reports "unknown model", never a synthesized guess).
+    std::shared_ptr<const ResolvedModel> ResolveVariant(const ProviderEntry& entry,
+                                                        const std::string& base_id,
+                                                        const std::string& variant_name,
+                                                        const std::string& ref_key);
+    // The metadata-enrichment half of a resolve: the static model at `ref_key`
+    // is missing window/cap (or has no autodetected ladder recorded), the
+    // entry has not declined enrichment, and a metadata hook is injected.
+    // Consults the hook under the per-provider gate with the config lock
+    // released, then writes the gap-filled overlay copy plus the autodetected
+    // variant recipe into metadata_variants_.
+    void EnrichFromMetadata(const ProviderEntry& entry, const std::string& model_id,
+                            const std::string& ref_key);
+
+    const ModelCatalogService& svc_;
+    const ImmutableCatalog& catalog_;
+    const CatalogRuntime& runtime_;
+    std::unique_lock<std::mutex> lock_;
+};
+
 std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolve(const ModelRef& ref) const {
+    Resolution resolution(*this);
+    return resolution.Resolve(ref);
+}
+
+std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolution::Resolve(const ModelRef& ref) {
     const std::string key = ref.str();
-    std::unique_lock<std::mutex> lock(runtime_.mutex_);
 
     // A `@variant` suffix is checked FIRST: the ref does not exist as a static
     // or discovered id, and the suffix must be validated against the base
@@ -120,9 +197,9 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolve(const ModelRef
         // The base may be a static entry or a discovered one; Resolve of the
         // stripped ref answers that (and triggers the lazy fetch, which is
         // what makes a discovered base's variants resolvable on first use).
-        if (const ProviderEntry* entry = FindProviderLocked(ref.provider);
+        if (const ProviderEntry* entry = svc_.FindProviderLocked(ref.provider);
             entry != nullptr) {
-            if (auto resolved = ResolveVariant(*entry, base_id, variant_name, key, lock)) {
+            if (auto resolved = ResolveVariant(*entry, base_id, variant_name, key)) {
                 return resolved;
             }
         }
@@ -148,7 +225,7 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolve(const ModelRef
         if (const auto enriched = runtime_.overlay_.find(key); enriched != runtime_.overlay_.end()) {
             return enriched->second;
         }
-        if (const ProviderEntry* entry = FindProviderLocked(ref.provider);
+        if (const ProviderEntry* entry = svc_.FindProviderLocked(ref.provider);
              entry != nullptr && entry->discover) {
             // The catalog's answer for a model it lists, or nothing when the
             // fetch failed. A STATIC hit degrades to its parsed self either
@@ -157,14 +234,14 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolve(const ModelRef
             // static models" rule; before the output cap, a windowed static
             // model never reached discovery at all, so the degradation was
             // only ever observable for window-less ones).
-            if (auto resolved = ResolveDiscovered(*entry, ref.model, key, lock)) {
+            if (auto resolved = ResolveDiscovered(*entry, ref.model, key)) {
                 return resolved;
             }
             // Discovery could not fill the gaps (failed fetch, or the model is
             // a static twin its listing does not name): the metadata layer
             // gets its turn before the parsed self is handed back.
             if (entry->metadata) {
-                EnrichFromMetadata(*entry, ref.model, key, lock);
+                EnrichFromMetadata(*entry, ref.model, key);
                 if (const auto enriched = runtime_.overlay_.find(key);
                     enriched != runtime_.overlay_.end()) {
                     return enriched->second;
@@ -176,9 +253,9 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolve(const ModelRef
         // entry's static model missing its window/cap consults the metadata
         // registry -- the auto default, declined per entry with
         // "metadata": false. Same overlay-copy rule as above.
-        if (const ProviderEntry* entry = FindProviderLocked(ref.provider);
+        if (const ProviderEntry* entry = svc_.FindProviderLocked(ref.provider);
             entry != nullptr && entry->metadata) {
-            EnrichFromMetadata(*entry, ref.model, key, lock);
+            EnrichFromMetadata(*entry, ref.model, key);
             if (const auto enriched = runtime_.overlay_.find(key); enriched != runtime_.overlay_.end()) {
                 return enriched->second;
             }
@@ -188,24 +265,19 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolve(const ModelRef
 
     // A static miss under a discover-entry may still be a model the backend
     // serves. Static entries elsewhere miss as today -- null, caller reports.
-    if (const ProviderEntry* entry = FindProviderLocked(ref.provider);
+    if (const ProviderEntry* entry = svc_.FindProviderLocked(ref.provider);
         entry != nullptr && entry->discover) {
-        return ResolveDiscovered(*entry, ref.model, key, lock);
+        return ResolveDiscovered(*entry, ref.model, key);
     }
     return nullptr;
 }
 
-std::shared_ptr<const ResolvedModel> ModelCatalogService::ResolveDiscovered(
-    const ProviderEntry& entry, const std::string& model_id, const std::string& ref_key,
-    std::unique_lock<std::mutex>& lock) const {
-    // The fetch runs holding ONLY this provider's gate: a slow catalog must
-    // not stall other config reads -- session creation, listings -- which take
-    // runtime_.mutex_ alone. Lock order is always gate -> runtime_.mutex_, never
-    // the reverse: runtime_.gates_ is only ever touched for insertion here
-    // (under runtime_.mutex_) or locked before it.
-    lock.unlock();
-    std::lock_guard<std::mutex> gate_lock(runtime_.gate_for(entry.name).mtx);
-    lock.lock();
+std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolution::ResolveDiscovered(
+    const ProviderEntry& entry, const std::string& model_id, const std::string& ref_key) {
+    // The fetch runs holding ONLY this provider's gate (see AcquireGate): a slow
+    // catalog must not stall other config reads -- session creation, listings --
+    // which take runtime_.mutex_ alone.
+    const std::unique_lock<std::mutex> gate = AcquireGate(entry.name);
 
     // Double-check under the gate: another resolver may have fetched while we
     // waited, and its publish may already serve this model.
@@ -222,12 +294,14 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::ResolveDiscovered(
             runtime_.discovery_retry_backoff_;
     if (!record || !record->attempted || record->generation != runtime_.generation_ ||
         failed_and_due) {
-        lock.unlock();  // the hook does network I/O -- no config lock held
-        const DiscoveryOutcome outcome = FetchOutcome(entry);
-        lock.lock();
+        // The hook does network I/O -- no config lock held across it.
+        const DiscoveryOutcome outcome = [&] {
+            const Unlocked released(lock_);
+            return svc_.FetchOutcome(entry);
+        }();
         // A refresh may have published while we fetched; prefer its result.
         if (const auto it = runtime_.overlay_.find(ref_key); it != runtime_.overlay_.end()) return it->second;
-        record = PublishLocked(entry, outcome);
+        record = svc_.PublishLocked(entry, outcome);
     }
 
     if (!record->ok) return nullptr;
@@ -250,9 +324,9 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::ResolveDiscovered(
     return nullptr;  // discovery succeeded; the backend does not serve this id
 }
 
-std::shared_ptr<const ResolvedModel> ModelCatalogService::ResolveVariant(
+std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolution::ResolveVariant(
     const ProviderEntry& entry, const std::string& base_id, const std::string& variant_name,
-    const std::string& ref_key, std::unique_lock<std::mutex>& lock) const {
+    const std::string& ref_key) {
     // Served-from-overlay first: the sibling is built at most once per ref per
     // process, exactly like every other overlay value (RefreshDiscovery evicts
     // wholesale, so a rebuild after a refresh picks up a changed recipe).
@@ -292,7 +366,7 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::ResolveVariant(
         }
         if (!base) base = base_it->second;
     } else if (entry.discover) {
-        base = ResolveDiscovered(entry, base_id, base_key, lock);
+        base = ResolveDiscovered(entry, base_id, base_key);
     }
     if (base == nullptr) return nullptr;  // unknown base; caller reports the miss
 
@@ -318,7 +392,7 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::ResolveVariant(
         // A `...@high` ref can arrive before the base itself was ever
         // resolved -- pull the metadata recipe in (no-op when it already
         // exists; the same per-provider-gate consult EnrichFromMetadata owns).
-        if (entry.metadata) EnrichFromMetadata(entry, base_id, base_key, lock);
+        if (entry.metadata) EnrichFromMetadata(entry, base_id, base_key);
         // The base must be the ENRICHED copy (window/cap/parameters), not the
         // parsed node the overlay also holds -- the sibling carries what a
         // session on the base would get, exactly as ResolveDiscovered's static
@@ -364,13 +438,11 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::ResolveVariant(
         .first->second;
 }
 
-void ModelCatalogService::EnrichFromMetadata(const ProviderEntry& entry, const std::string& model_id,
-                                         const std::string& ref_key,
-                                         std::unique_lock<std::mutex>& lock) const {
-    // runtime_.mutex_ is HELD on entry (via `lock`): the hook snapshot and the
-    // already-enriched checks below read mutex-guarded state directly, never
-    // re-locking -- a second acquisition of a non-recursive mutex this caller
-    // already holds is a deadlock, not a scope.
+void ModelCatalogService::Resolution::EnrichFromMetadata(const ProviderEntry& entry,
+                                                         const std::string& model_id,
+                                                         const std::string& ref_key) {
+    // The config lock is held on entry: the hook snapshot and the
+    // already-enriched checks below read mutex-guarded state directly.
     MetadataHook hook = runtime_.metadata_hook_;
     // Already enriched (or already answered "no answer"): the overlay or
     // tombstone IS the result; a second consult would repeat the Lookup on
@@ -382,27 +454,16 @@ void ModelCatalogService::EnrichFromMetadata(const ProviderEntry& entry, const s
 
     // The hook may do I/O (the modelsdev plugin reads its cache; a refresh
     // may hit the network). Hold ONLY this provider's gate across it -- the
-    // same discipline ResolveDiscovered uses, for the same reason: a slow
-    // catalog must not stall session creation or listings, which take
-    // runtime_.mutex_ alone. Lock order is always gate -> mutex_, never the
-    // reverse.
-    lock.unlock();
-    std::lock_guard<std::mutex> gate_lock(runtime_.gate_for(entry.name).mtx);
-    // Deadlock note, learned the hard way: the gate lambda above MUST be the
-    // only place this function touches runtime_.mutex_ while `lock` is
-    // unlocked -- it is fine here because `lock` is NOT holding the mutex at
-    // that moment, and the re-lock below happens after the lambda's guard has
-    // released. Never take runtime_.mutex_ again while `lock` holds it.
+    // same discipline ResolveDiscovered uses, for the same reason.
+    const std::unique_lock<std::mutex> gate = AcquireGate(entry.name);
 
     // Double-check UNDER the gate (ResolveDiscovered does the same): resolvers
     // that all passed the unlocked check above queue on the gate, and without
     // this each of them re-consulted the catalog after the first one had
     // already answered -- N concurrent resolves of one model meant N Lookups.
-    lock.lock();
     if (runtime_.overlay_.count(ref_key) != 0 || runtime_.metadata_tombstones_.count(ref_key) != 0) {
-        return;  // `lock` is held, as on every return
+        return;
     }
-    lock.unlock();
 
     llm::MetadataQuery query;
     query.model_id = model_id;
@@ -411,15 +472,16 @@ void ModelCatalogService::EnrichFromMetadata(const ProviderEntry& entry, const s
     query.provider_name = entry.name;
     query.metadata_provider = entry.metadata_provider;
     std::optional<llm::DiscoveredModel> answer;
-    try {
-        answer = hook(query, entry.metadata_match);
-    } catch (...) {
-        // The hook's own contract is to degrade, not throw; this is
-        // defense-in-depth, and it degrades the same way a nullopt would.
-        answer = std::nullopt;
+    {
+        const Unlocked released(lock_);  // the hook may do I/O
+        try {
+            answer = hook(query, entry.metadata_match);
+        } catch (...) {
+            // The hook's own contract is to degrade, not throw; this is
+            // defense-in-depth, and it degrades the same way a nullopt would.
+            answer = std::nullopt;
+        }
     }
-
-    lock.lock();
     // A refresh may have published while we consulted; prefer its result.
     if (const auto it = runtime_.overlay_.find(ref_key); it != runtime_.overlay_.end()) return;
     // The model was parsed away? It cannot be -- catalog_ is parse-time only

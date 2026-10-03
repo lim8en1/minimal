@@ -2444,3 +2444,17 @@ TEST_CASE("a discovered variant is derived through the injected variant-params h
     CHECK(hook_calls.load() >= 1);
     CHECK(high->parameters.at("custom_effort") == "openai:high");
 }
+
+TEST_CASE("a throwing discovery hook leaves the catalog usable", "[providers][discover]") {
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([](const std::string&, const llm::ProviderConfig&) -> DiscoveryOutcome {
+        throw std::runtime_error("hook exploded");
+    });
+    // The exception reaches the caller...
+    CHECK_THROWS_AS(config.Resolve(ModelRef{"local", "anything"}), std::runtime_error);
+    // ...but neither the config lock nor the provider's gate stays held: every
+    // other read still answers instead of deadlocking.
+    CHECK_NOTHROW(config.ModelRefs());
+    CHECK_NOTHROW(config.discovery_status("local"));
+    CHECK_THROWS_AS(config.Resolve(ModelRef{"local", "anything"}), std::runtime_error);
+}
