@@ -806,3 +806,74 @@ TEST_CASE("TerminateGroup reports an already-reaped child as done", "[sidecar][p
     REQUIRE(waitpid(launched.pid, &status, 0) == launched.pid);
     CHECK(TerminateGroup(launched.pid));  // ECHILD counts as success
 }
+
+TEST_CASE("Child::Terminate from two threads kills and reaps once", "[sidecar][process][child]") {
+    Launched launched = Launch(SimpleSpec("sleep 30"));
+    REQUIRE(launched.ok);
+    TrackPgid(launched.pid);
+    const pid_t pid = launched.pid;
+    Child child(pid);
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 4; ++i) threads.emplace_back([&] { child.Terminate(); });
+    for (auto& thread : threads) thread.join();
+    CHECK_FALSE(child.valid());
+    int status = 0;
+    CHECK(waitpid(pid, &status, WNOHANG) == -1);  // reaped exactly by the winner
+    CHECK(errno == ECHILD);
+}
+
+TEST_CASE("Child::Signal reaches a live child and releases an exited one", "[sidecar][process][child]") {
+    SECTION("live child gets the signal") {
+        Launched launched = Launch(SimpleSpec("sleep 30"));
+        REQUIRE(launched.ok);
+        TrackPgid(launched.pid);
+        Child child(launched.pid);
+        CHECK(child.Signal(SIGTERM));
+        int status = 0;
+        pid_t reaped = 0;
+        for (int i = 0; i < 100 && reaped == 0; ++i) {
+            reaped = waitpid(launched.pid, &status, WNOHANG);
+            if (reaped == 0) usleep(20000);
+        }
+        CHECK(reaped == launched.pid);
+        CHECK(WIFSIGNALED(status));
+        child.MarkReaped();
+    }
+    SECTION("an exited child is released, never signalled") {
+        Launched launched = Launch(SimpleSpec("exit 0"));
+        REQUIRE(launched.ok);
+        TrackPgid(launched.pid);
+        Child child(launched.pid);
+        for (int i = 0; i < 100 && child.valid(); ++i) {
+            if (!child.Signal(SIGTERM)) break;
+            usleep(20000);
+        }
+        CHECK_FALSE(child.valid());
+        CHECK_FALSE(child.Signal(SIGTERM));
+    }
+}
+
+TEST_CASE("Child::TerminateAfter waits for a graceful exit, then escalates", "[sidecar][process][child]") {
+    SECTION("exits within the grace: no kill needed") {
+        Launched launched = Launch(SimpleSpec("sleep 0.2"));
+        REQUIRE(launched.ok);
+        TrackPgid(launched.pid);
+        Child child(launched.pid);
+        const auto started = std::chrono::steady_clock::now();
+        CHECK(child.TerminateAfter(std::chrono::seconds(5)));
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(3));
+        CHECK_FALSE(child.valid());
+    }
+    SECTION("ignores the grace: SIGKILLed after it") {
+        Launched launched = Launch(SimpleSpec("trap '' TERM; sleep 30"));
+        REQUIRE(launched.ok);
+        TrackPgid(launched.pid);
+        const pid_t pid = launched.pid;
+        Child child(pid);
+        child.Signal(SIGTERM);
+        CHECK(child.TerminateAfter(std::chrono::milliseconds(300)));
+        int status = 0;
+        CHECK(waitpid(pid, &status, WNOHANG) == -1);
+        CHECK(errno == ECHILD);
+    }
+}

@@ -169,6 +169,40 @@ bool TerminateGroup(pid_t pid) {
     return reaped;
 }
 
+bool Child::Signal(int sig) {
+    const pid_t pid = pid_.load();
+    if (pid <= 0) return false;
+    int status = 0;
+    if (waitpid(pid, &status, WNOHANG) != 0) {
+        // Exited (reaped just now) or no longer our child: release it so a
+        // recycled pid is never signalled, and unregister the pgid.
+        pid_t expected = pid;
+        if (pid_.compare_exchange_strong(expected, -1)) ForgetPgid(pid);
+        return false;
+    }
+    killpg(pid, sig);
+    kill(pid, sig);  // the fork-to-setsid window, where the group does not exist yet
+    return true;
+}
+
+bool Child::TerminateAfter(std::chrono::milliseconds grace) {
+    const auto deadline = std::chrono::steady_clock::now() + grace;
+    while (true) {
+        const pid_t pid = pid_.load();
+        if (pid <= 0) return true;
+        int status = 0;
+        const pid_t result = waitpid(pid, &status, WNOHANG);
+        if (result != 0) {  // gone: reaped here or elsewhere
+            pid_t expected = pid;
+            if (pid_.compare_exchange_strong(expected, -1)) ForgetPgid(pid);
+            return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) break;
+        poll(nullptr, 0, 25);
+    }
+    return Terminate();  // SIGKILL the group, bounded reap, forget the pgid
+}
+
 std::string ResolveOnPath(const std::string& name) {
     const char* path_env = ::getenv("PATH");
     return ResolveOnPath(name, path_env != nullptr ? std::string_view(path_env)

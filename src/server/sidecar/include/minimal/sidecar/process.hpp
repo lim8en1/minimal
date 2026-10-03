@@ -20,6 +20,8 @@
 // See ARCHITECTURE.md "Core tools" for the security rationale (no allowlist;
 // the permission gate is the boundary).
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -150,42 +152,61 @@ bool TerminateGroup(pid_t pid);
 // RAII owner of one launched child. Destruction terminates the group unless the
 // child was already reaped or released, so no early return or exception between
 // Launch and the owner's own teardown can orphan a process group.
+//
+// Safe to share between threads: the pid is claimed by an atomic exchange, so
+// however many threads reach Terminate()/TerminateAfter()/MarkReaped() for one
+// child, exactly one of them kills and reaps it and a recycled pid is never
+// signalled twice. (Signal() is best-effort against a concurrent teardown; see
+// its comment.)
 class Child {
 public:
     Child() = default;
     explicit Child(pid_t pid) : pid_(pid) {}
     ~Child() { Terminate(); }
-    Child(Child&& other) noexcept : pid_(std::exchange(other.pid_, -1)) {}
+    Child(Child&& other) noexcept : pid_(other.pid_.exchange(-1)) {}
     Child& operator=(Child&& other) noexcept {
         if (this != &other) {
             Terminate();
-            pid_ = std::exchange(other.pid_, -1);
+            pid_.store(other.pid_.exchange(-1));
         }
         return *this;
     }
     Child(const Child&) = delete;
     Child& operator=(const Child&) = delete;
 
-    pid_t pid() const { return pid_; }
-    bool valid() const { return pid_ > 0; }
+    pid_t pid() const { return pid_.load(); }
+    bool valid() const { return pid_.load() > 0; }
 
     // Idempotent: terminates and forgets once, later calls do nothing (so a
     // recycled pid is never signalled twice). Returns TerminateGroup's result;
     // true when there was nothing to do.
     bool Terminate() {
-        const pid_t pid = std::exchange(pid_, -1);
+        const pid_t pid = pid_.exchange(-1);
         return pid > 0 ? TerminateGroup(pid) : true;
     }
 
     // The owner reaped the child itself (a waitpid it already did): stop
     // tracking without signalling, and unregister the pgid.
     void MarkReaped() {
-        const pid_t pid = std::exchange(pid_, -1);
+        const pid_t pid = pid_.exchange(-1);
         if (pid > 0) ForgetPgid(pid);
     }
 
+    // Sends `sig` to the child's process group (and the pid itself, which covers
+    // the fork-to-setsid window when the group does not exist yet) -- but only
+    // while the child is still ours: a waitpid(WNOHANG) recheck first, so a child
+    // that already exited is reaped and released here instead of signalled.
+    // False when there was nothing to signal. Best-effort against a CONCURRENT
+    // Terminate: the pid is not held across the recheck and the kill.
+    bool Signal(int sig);
+
+    // Waits up to `grace` for the child to exit on its own (after a Signal), then
+    // Terminate()s whatever is left. Never signals a pid that is no longer our
+    // child. True when the child is gone (exited within the grace, or reaped).
+    bool TerminateAfter(std::chrono::milliseconds grace);
+
 private:
-    pid_t pid_ = -1;
+    std::atomic<pid_t> pid_{-1};
 };
 
 // This process's own environment as a LaunchSpec::env map -- for a child that
