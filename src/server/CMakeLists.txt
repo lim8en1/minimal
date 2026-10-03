@@ -14,10 +14,10 @@ add_library(minimal_server_core SHARED
     sidecar/drain.cpp
     sidecar/task_registry.cpp
     sidecar/lifetime_watch.cpp
-    tools/permission.cpp
+    policy/permission.cpp
     tools/permission_advisor.cpp
     tools/path_confinement.cpp
-    tools/pattern_match.cpp
+    policy/pattern_match.cpp
     tools/file_access.cpp
     tools/atomic_write.cpp
     net/sse_parser.cpp
@@ -114,6 +114,7 @@ add_library(minimal_server_core SHARED
 add_library(minimal::server_core ALIAS minimal_server_core)
 
 target_include_directories(minimal_server_core PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/policy/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/sidecar/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/llm/include"

@@ -36,7 +36,6 @@ ALLOWED = {
 }
 
 KNOWN_VIOLATIONS = {
-    ("config", "tools"),
     ("sidecar", "tools"),
     ("hooks", "agent"),
     ("commands", "agent"),
