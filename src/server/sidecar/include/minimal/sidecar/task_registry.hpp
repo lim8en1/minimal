@@ -47,7 +47,7 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/message.hpp"
-#include "minimal/tools/tool.hpp"
+#include "minimal/tools/background_task_event.hpp"
 
 namespace minimal::sidecar {
 
