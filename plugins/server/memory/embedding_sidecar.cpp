@@ -187,7 +187,7 @@ private:
     }
 
     // Called under mu_. Kills whatever this instance currently owns (a no-op
-    // the first time, pid_ < 0), launches a fresh process, and blocks for the
+    // the first time, no child yet), launches a fresh process, and blocks for the
     // ready/error handshake. Throws std::runtime_error on any failure.
     void Spawn() {
         Shutdown();
@@ -218,7 +218,7 @@ private:
             throw std::runtime_error("memory: cannot start sidecar " + python_path_ + ": " +
                                      launched.spawn_error);
         }
-        pid_ = launched.pid;
+        child_ = sidecar::Child(launched.pid);
         in_fd_ = std::move(launched.parent_fds[0]);
         diag_fd_ = std::move(launched.parent_fds[1]);
         out_fd_ = std::move(launched.parent_fds[2]);
@@ -331,10 +331,7 @@ private:
         in_fd_.reset();
         out_fd_.reset();
         diag_fd_.reset();
-        if (pid_ > 0) {
-            sidecar::TerminateGroup(pid_);
-        }
-        pid_ = -1;
+        child_.Terminate();
         alive_ = false;
     }
 
@@ -344,7 +341,7 @@ private:
 
     mutable std::mutex mu_;
     sidecar::ScopedFd in_fd_, out_fd_, diag_fd_;
-    pid_t pid_ = -1;
+    sidecar::Child child_;  // kills and reaps the driver on destruction and on Shutdown
     bool alive_ = false;
     std::string line_buffer_, diag_tail_, death_reason_;
     int dim_hint_ = 0;
