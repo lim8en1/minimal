@@ -15,14 +15,14 @@
 #include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/commands/project_command_source.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
-#include "minimal/plugins/host_registries.hpp"
+#include "minimal/agent/host_registries.hpp"
 #include "minimal/llm/metadata_catalog.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/llm/variant_params.hpp"
 #include "minimal/plugins/service_registry.hpp"
-#include "minimal/rpc/auth_provider.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -102,7 +102,7 @@ std::string_view ToString(LoadStatus status);
 // dlclose'd. A registered Tool's vtable lives inside its .so, so unloading a
 // plugin while the registry still holds its objects is a use-after-free that
 // surfaces as an unrelated crash much later. Do not "clean this up".
-class PluginLoader {
+class PluginLoader : public commands::ProjectCommandProvider {
 public:
     // `registries`: every seam a plugin may register into; a null member is
     // simply not offered (plugins treat every registration hook as optional).
@@ -139,13 +139,14 @@ public:
     // was never given to the constructor (no CommandRegistry* means no plugin
     // could have exported the symbol in the first place -- see LoadOne).
     void RegisterProjectCommands(commands::CommandRegistry& registry,
-                                 const std::filesystem::path& project_root) const;
+                                 const std::filesystem::path& project_root) const override;
 
     // Every project-commands plugin's OPTIONAL
     // minimal_plugin_project_commands_fingerprint for `project_root`, joined
     // with the plugin names. ProjectCommandSource rebuilds a root's registry
     // when this changes. Empty when no plugin exports the hook.
-    std::string ProjectCommandsFingerprint(const std::filesystem::path& project_root) const;
+    std::string ProjectCommandsFingerprint(
+        const std::filesystem::path& project_root) const override;
 
     // One registry the loader drives; defined in plugin_loader.cpp.
     struct Target;

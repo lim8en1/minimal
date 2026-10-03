@@ -1,5 +1,7 @@
 #include "minimal/plugins/plugin_loader.hpp"
 
+#include "minimal/rpc/auth_provider.hpp"
+
 #include <dlfcn.h>
 
 #include <algorithm>

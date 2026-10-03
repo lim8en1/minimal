@@ -19,6 +19,7 @@ ALLOWED = {
     "net": set(),
     "session": {"llm"},
     "policy": set(),
+    "auth": set(),
     "config": {"llm", "policy"},
     "sidecar": {"llm", "policy"},
     "hooks": {"config", "sidecar", "llm"},
@@ -27,19 +28,15 @@ ALLOWED = {
     "commands": {"preset", "config", "tools", "llm", "policy"},
     "agent": {"preset", "commands", "config", "hooks", "llm", "policy", "session", "sidecar",
               "tools"},
-    "plugins": {"agent", "commands", "config", "hooks", "llm", "net", "policy", "preset",
+    "plugins": {"auth", "agent", "commands", "config", "hooks", "llm", "net", "policy", "preset",
                 "session", "sidecar", "tools"},
-    "rpc": {"agent", "commands", "config", "hooks", "llm", "net", "plugins", "policy", "preset",
+    "rpc": {"auth", "agent", "commands", "config", "hooks", "llm", "net", "plugins", "policy", "preset",
             "session", "sidecar", "tools"},
-    "startup": {"agent", "commands", "config", "hooks", "llm", "net", "plugins", "policy",
+    "startup": {"auth", "agent", "commands", "config", "hooks", "llm", "net", "plugins", "policy",
                 "preset", "rpc", "session", "sidecar", "tools"},
 }
 
-KNOWN_VIOLATIONS = {
-    ("commands", "plugins"),
-    ("agent", "plugins"),
-    ("plugins", "rpc"),
-}
+KNOWN_VIOLATIONS = set()
 
 INCLUDE = re.compile(r'#include\s+"(minimal/[^"]+)"')
 

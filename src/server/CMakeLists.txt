@@ -84,7 +84,7 @@ add_library(minimal_server_core SHARED
     rpc/pending_requests.cpp
     rpc/event_broadcaster.cpp
     rpc/command_executor.cpp
-    rpc/auth_provider.cpp
+    auth/auth_provider.cpp
     rpc/auth_interceptor.cpp
     rpc/wire_permission_checker.cpp
     rpc/wire_confirmation_broker.cpp
@@ -125,6 +125,7 @@ target_include_directories(minimal_server_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/preset/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/agent/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/commands/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/auth/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/rpc/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/session/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/startup/include")

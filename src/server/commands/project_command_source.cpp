@@ -1,7 +1,5 @@
 #include "minimal/commands/project_command_source.hpp"
 
-#include "minimal/plugins/plugin_loader.hpp"
-
 namespace minimal::commands {
 
 std::shared_ptr<const CommandRegistry> ProjectCommandSource::For(

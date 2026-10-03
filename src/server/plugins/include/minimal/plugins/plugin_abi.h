@@ -47,7 +47,6 @@
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
-#include "minimal/rpc/auth_provider.hpp"
 #include "minimal/llm/metadata_catalog.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider.hpp"
@@ -68,6 +67,12 @@
 #include "minimal/tools/tool_registry.hpp"
 #include "minimal/tools/tool_source.hpp"
 #include "minimal/plugins/service_registry.hpp"
+
+// Defined in minimal/rpc/auth_provider.hpp, which pulls gRPC in; only the one
+// plugin that registers an auth provider includes that header.
+namespace minimal::rpc {
+class AuthProviderRegistry;
+}
 
 // --- Half 1: extension points plugins implement -----------------------------
 

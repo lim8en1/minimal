@@ -50,7 +50,7 @@
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
-#include "minimal/plugins/host_registries.hpp"
+#include "minimal/agent/host_registries.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/plugins/plugin_rpc.hpp"
 #include "minimal/plugins/plugin_storage.hpp"

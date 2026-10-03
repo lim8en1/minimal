@@ -39,7 +39,7 @@
 #include "minimal/config/settings_config.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
-#include "minimal/plugins/host_registries.hpp"
+#include "minimal/agent/host_registries.hpp"
 #include "minimal/session/session_database.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/tools/tool_registry.hpp"

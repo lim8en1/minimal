@@ -26,15 +26,26 @@
 
 #include "minimal/commands/command_registry.hpp"
 
-namespace minimal::plugins {
-class PluginLoader;
-}
-
 namespace minimal::commands {
+
+// What ProjectCommandSource needs from whoever owns the project-command
+// contributors (the plugin loader implements it): keeps this module free of
+// any dependency on the plugin host above it.
+class ProjectCommandProvider {
+public:
+    virtual ~ProjectCommandProvider() = default;
+    // Fills `registry` with the commands project_root contributes.
+    virtual void RegisterProjectCommands(CommandRegistry& registry,
+                                         const std::filesystem::path& project_root) const = 0;
+    // Changes whenever what RegisterProjectCommands would produce changes;
+    // empty when nothing contributes.
+    virtual std::string ProjectCommandsFingerprint(
+        const std::filesystem::path& project_root) const = 0;
+};
 
 class ProjectCommandSource {
 public:
-    explicit ProjectCommandSource(const plugins::PluginLoader& loader) : loader_(loader) {}
+    explicit ProjectCommandSource(const ProjectCommandProvider& loader) : loader_(loader) {}
 
     // Never null. An empty project_root (a session with none) resolves to a
     // permanently-empty registry -- there is nothing to discover for it, and
@@ -55,7 +66,7 @@ private:
         std::shared_ptr<const CommandRegistry> registry;
         std::string fingerprint;
     };
-    const plugins::PluginLoader& loader_;
+    const ProjectCommandProvider& loader_;
     mutable std::mutex mutex_;
     // GUARDED by mutex_: built lazily, on whichever thread asks first (a
     // gRPC handler resolving ListCommands, a session worker dispatching a

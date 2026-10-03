@@ -9,7 +9,7 @@
 #include "minimal/agent/agent_preset_frontmatter.hpp"
 #include "minimal/config/config_bundle.hpp"
 #include "minimal/config/skill_registry.hpp"
-#include "minimal/plugins/host_registries.hpp"
+#include "minimal/agent/host_registries.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
