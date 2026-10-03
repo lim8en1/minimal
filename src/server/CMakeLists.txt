@@ -1,116 +1,62 @@
-# Core server library. Modules are folded into one target for now; they are split
-# by directory rather than by CMake target because their headers are already
-# namespaced and the dependency direction is enforced by include paths, not linkage.
+# Core server library, built from one OBJECT library per module (minimal_mod_<name>,
+# declared in <name>/CMakeLists.txt) and linked into ONE shared library.
 #
-# SHARED, not STATIC, and that matters for plugins. An archive member is linked
-# into an executable only if something references it, so with a static core a
-# plugin calling e.g. ToolRegistry::Register would find that symbol absent from
-# the host image and fail at dlopen(RTLD_NOW). A shared library gives one copy in
-# memory, one set of globals, and ordinary symbol resolution -- which is what
+# The per-module targets are what enforce the layering: a module's include
+# directory reaches only the modules that list it in DEPS, so an include from a
+# module that may not depend on it fails to compile. (scripts/check_module_deps.py
+# checks the same DEPS lists at the include level, including headers that sneak
+# in through a shared include path.)
+#
+# The result is SHARED, not STATIC, and that matters for plugins. An archive member
+# is linked into an executable only if something references it, so with a static
+# core a plugin calling e.g. ToolRegistry::Register would find that symbol absent
+# from the host image and fail at dlopen(RTLD_NOW). A shared library gives one copy
+# in memory, one set of globals, and ordinary symbol resolution -- which is what
 # lets plugins link core directly instead of relying on export tricks.
-add_library(minimal_server_core SHARED
-    sidecar/process.cpp
-    sidecar/capped_buffer.cpp
-    sidecar/drain.cpp
-    sidecar/task_registry.cpp
-    sidecar/lifetime_watch.cpp
-    policy/permission.cpp
-    tools/permission_advisor.cpp
-    tools/path_confinement.cpp
-    policy/pattern_match.cpp
-    tools/file_access.cpp
-    tools/atomic_write.cpp
-    net/sse_parser.cpp
-    net/http_client.cpp
-    llm/token_accounting.cpp
-    config/frontmatter.cpp
-    config/permission_codec.cpp
-    config/model_catalog_service.cpp
-    config/providers_config.cpp
-    config/settings_config.cpp
-    config/permissions_config.cpp
-    config/hooks_config.cpp
-    config/parse_util.cpp
-    config/config_bundle.cpp
-    config/skill_registry.cpp
-    config/project_dirs.cpp
-    config/project_context.cpp
-    startup/sanity_check.cpp
-    hooks/hook_dispatcher.cpp
-    hooks/hook_shell.cpp
-    agent/hook_observer_bridge.cpp
-    preset/agent_preset_frontmatter.cpp
-    preset/permission_resolution.cpp
-    preset/agent_preset_registry.cpp
-    agent/mention_resolver.cpp
-    agent/mention_expansion.cpp
-    plugins/name_resolution.cpp
-    agent/compaction_boundary.cpp
-    agent/transcript_repair.cpp
-    agent/compaction_strategy.cpp
-    agent/compaction_trigger.cpp
-    agent/context_compactor.cpp
-    agent/structured_compaction.cpp
-    agent/agent_loop.cpp
-    agent/compaction_controller.cpp
-    agent/request_builder.cpp
-    agent/retry_policy.cpp
-    agent/tool_result_caps.cpp
-    agent/tool_round.cpp
-    agent/working_history.cpp
-    agent/provider_instance_cache.cpp
-    agent/provider_resolver.cpp
-    commands/command_registry.cpp
-    commands/command_dispatcher.cpp
-    commands/project_command_source.cpp
-    agent/subagent_spawn.cpp
-    agent/subagent_manager.cpp
-    agent/spawn_subagent_tool.cpp
-    tools/tool_registry.cpp
-    tools/aliased_tool.cpp
-    tools/tool_executor.cpp
-    tools/permission_model.cpp
-    tools/tool_pool.cpp
-    tools/skill_tool.cpp
-    llm/provider_factory_registry.cpp
-    llm/model_catalog.cpp
-    llm/metadata_catalog.cpp
-    llm/variant_params.cpp
-    plugins/plugin_loader.cpp
-    plugins/plugin_rpc.cpp
-    plugins/plugin_storage.cpp
-    plugins/plugin_discovery.cpp
-    rpc/proto_convert.cpp
-    rpc/pending_requests.cpp
-    rpc/event_broadcaster.cpp
-    rpc/command_executor.cpp
-    auth/auth_provider.cpp
-    rpc/auth_interceptor.cpp
-    rpc/wire_permission_checker.cpp
-    rpc/wire_confirmation_broker.cpp
-    rpc/wire_plugin_prompt_broker.cpp
-    rpc/session_wiring.cpp
-    rpc/stream_attachment.cpp
-    rpc/session_service.cpp
-    rpc/server.cpp
-    rpc/server_housekeeping.cpp
-    agent/session_observer_registry.cpp
-    agent/context_contributor.cpp
-    agent/session.cpp
-    agent/session_sinks.cpp
-    agent/tool_source_activation.cpp
-    agent/transcript_rewinder.cpp
-    agent/turn_borrow.cpp
-    agent/session_launch.cpp
-    agent/session_registry.cpp
-    agent/session_support.cpp
-    agent/session_naming.cpp
-    agent/signal_router.cpp
-    session/ulid.cpp
-    session/message_codec.cpp
-    session/session_database.cpp
-    session/sqlite_history_store.cpp
-    session/session_reader.cpp)
+function(minimal_server_module name)
+    cmake_parse_arguments(PARSE_ARGV 1 MODULE "" "" "DEPS;SOURCES")
+    set(target minimal_mod_${name})
+    add_library(${target} OBJECT ${MODULE_SOURCES})
+    target_include_directories(${target} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(${target}
+        PUBLIC
+            minimal::common
+            minimal::proto
+            nlohmann_json::nlohmann_json
+            yaml-cpp::yaml-cpp
+        PRIVATE
+            spdlog::spdlog
+            CURL::libcurl
+            SQLite3::SQLite3)
+    foreach(dep IN LISTS MODULE_DEPS)
+        target_link_libraries(${target} PUBLIC minimal_mod_${dep})
+    endforeach()
+    target_compile_options(${target} PRIVATE ${MINIMAL_WARNING_FLAGS})
+    set_property(GLOBAL APPEND PROPERTY MINIMAL_SERVER_MODULES ${target})
+endfunction()
+
+add_subdirectory(llm)
+add_subdirectory(net)
+add_subdirectory(session)
+add_subdirectory(policy)
+add_subdirectory(auth)
+add_subdirectory(config)
+add_subdirectory(sidecar)
+add_subdirectory(hooks)
+add_subdirectory(tools)
+add_subdirectory(preset)
+add_subdirectory(commands)
+add_subdirectory(agent)
+add_subdirectory(plugins)
+add_subdirectory(rpc)
+add_subdirectory(startup)
+
+get_property(MINIMAL_SERVER_MODULE_TARGETS GLOBAL PROPERTY MINIMAL_SERVER_MODULES)
+set(MINIMAL_SERVER_CORE_OBJECTS "")
+foreach(module IN LISTS MINIMAL_SERVER_MODULE_TARGETS)
+    list(APPEND MINIMAL_SERVER_CORE_OBJECTS $<TARGET_OBJECTS:${module}>)
+endforeach()
+add_library(minimal_server_core SHARED ${MINIMAL_SERVER_CORE_OBJECTS})
 add_library(minimal::server_core ALIAS minimal_server_core)
 
 target_include_directories(minimal_server_core PUBLIC

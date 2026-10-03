@@ -1,0 +1,37 @@
+minimal_server_module(agent
+    DEPS llm session policy config hooks tools preset commands
+    SOURCES
+        hook_observer_bridge.cpp
+        mention_resolver.cpp
+        mention_expansion.cpp
+        compaction_boundary.cpp
+        transcript_repair.cpp
+        compaction_strategy.cpp
+        compaction_trigger.cpp
+        context_compactor.cpp
+        structured_compaction.cpp
+        agent_loop.cpp
+        compaction_controller.cpp
+        request_builder.cpp
+        retry_policy.cpp
+        tool_result_caps.cpp
+        tool_round.cpp
+        working_history.cpp
+        provider_instance_cache.cpp
+        provider_resolver.cpp
+        subagent_spawn.cpp
+        subagent_manager.cpp
+        spawn_subagent_tool.cpp
+        session_observer_registry.cpp
+        context_contributor.cpp
+        session.cpp
+        session_sinks.cpp
+        tool_source_activation.cpp
+        transcript_rewinder.cpp
+        turn_borrow.cpp
+        session_launch.cpp
+        session_registry.cpp
+        session_support.cpp
+        session_naming.cpp
+        signal_router.cpp
+)
