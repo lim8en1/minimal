@@ -505,3 +505,12 @@ add_test(NAME deploy_user_plugin
                  -DDEPLOY_SCRIPT=${CMAKE_SOURCE_DIR}/cmake/DeployUserPlugin.cmake
                  -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/deploy_user_plugin_work
                  -P "${CMAKE_CURRENT_SOURCE_DIR}/deploy_user_plugin_test.cmake")
+
+# Layering of src/server/<module>: an include from a module that may not depend
+# on its target fails here (scripts/check_module_deps.py has the layer table).
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME module_deps
+             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/check_module_deps.py"
+                     "${CMAKE_SOURCE_DIR}")
+endif()
