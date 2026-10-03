@@ -159,9 +159,10 @@ struct McpConnection::Transport {
     virtual std::string Instructions() const { return {}; }
     // Teardown support, called from the DESTROYING thread while the worker may
     // be inside a blocking call: ask the stdio child to exit, which ends that
-    // call. A no-op for transports without a process. Returns the pid the
-    // caller must reap (ReapChild/WatchChildDetached), 0 for none.
-    virtual int Abort() { return 0; }
+    // call. A no-op for transports without a process. Returns the child, whose
+    // ownership passes to the caller: it ends the child's life (TerminateAfter),
+    // on whatever thread suits it -- the child outlives this transport.
+    virtual std::shared_ptr<sidecar::Child> Abort() { return nullptr; }
 };
 
 namespace {
@@ -303,29 +304,6 @@ constexpr std::size_t kMaxLineBytes = 16 * 1024 * 1024;
 // The reader's poll slice: how long ~StdioTransport can wait for its join.
 constexpr int kReaderSliceMs = 100;
 
-// Waits for a signalled child to exit, escalating to SIGKILL of its process
-// group after `grace`. Never signals a pid that is no longer our child (the
-// waitpid(WNOHANG) recheck), so a recycled pid is never hit.
-void ReapChildWithGrace(int pid, std::chrono::milliseconds grace) {
-    if (pid <= 0) return;
-    const auto deadline = std::chrono::steady_clock::now() + grace;
-    while (std::chrono::steady_clock::now() < deadline) {
-        int status = 0;
-        const pid_t result = waitpid(pid, &status, WNOHANG);
-        if (result == pid || result == -1) {  // gone (reaped here or elsewhere)
-            sidecar::ForgetPgid(pid);
-            return;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    int status = 0;
-    if (waitpid(pid, &status, WNOHANG) != 0) {
-        sidecar::ForgetPgid(pid);
-        return;  // no longer ours
-    }
-    sidecar::TerminateGroup(pid);  // SIGKILL the group, bounded reap, forget the pgid
-}
-
 class StdioTransport final : public JsonRpcTransport {
 public:
     StdioTransport(const McpEndpoint& endpoint, std::string client_name,
@@ -342,17 +320,11 @@ public:
     ~StdioTransport() override {
         stopping_.store(true, std::memory_order_release);
         if (reader_.joinable()) reader_.join();
-        // A child still running here was never aborted -- the connection
-        // failed before teardown could see its pid. It must not outlive us.
-        const int pid = pid_.exchange(0);
-        if (pid > 0) {
-            int status = 0;
-            if (waitpid(pid, &status, WNOHANG) == 0) {
-                sidecar::TerminateGroup(pid);
-            } else {
-                sidecar::ForgetPgid(pid);
-            }
-        }
+        // A child still held here was never aborted -- the connection failed
+        // before teardown could take it. It must not outlive us (Child's
+        // destructor kills and reaps the group).
+        std::lock_guard<std::mutex> lock(child_mu_);
+        child_.reset();
     }
 
     void Initialize(Slot<bool>& slot) override {
@@ -389,20 +361,18 @@ public:
     std::string ServerCapabilitiesJson() const override { return capabilities_; }
     std::string Instructions() const override { return instructions_; }
 
-    // Asks the child's whole process group to exit. The reader then sees EOF,
-    // every pending request fails at once, and the worker unwinds. Only a
-    // live process that is still OUR child is signalled.
-    int Abort() override {
-        const int pid = pid_.exchange(0);
-        if (pid <= 0) return 0;
-        int status = 0;
-        if (waitpid(pid, &status, WNOHANG) != 0) {
-            sidecar::ForgetPgid(pid);
-            return 0;
+    // Asks the child's whole process group to exit and hands the child to the
+    // caller (who gives it its grace period and, past that, kills it). The
+    // reader then sees EOF, every pending request fails at once, and the worker
+    // unwinds. Only a live process that is still OUR child is signalled.
+    std::shared_ptr<sidecar::Child> Abort() override {
+        std::shared_ptr<sidecar::Child> child;
+        {
+            std::lock_guard<std::mutex> lock(child_mu_);
+            child = std::move(child_);
         }
-        ::kill(-pid, SIGTERM);
-        ::kill(pid, SIGTERM);  // the fork-to-setsid window, where the group does not exist yet
-        return pid;
+        if (child) child->Signal(SIGTERM);
+        return child;
     }
 
 protected:
@@ -487,7 +457,10 @@ private:
 #ifdef F_SETNOSIGPIPE
         fcntl(stdin_.get(), F_SETNOSIGPIPE, 1);
 #endif
-        pid_.store(launched.pid, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(child_mu_);
+            child_ = std::make_shared<sidecar::Child>(launched.pid);
+        }
         reader_ = std::thread([this] { ReadLoop(); });
         return true;
     }
@@ -589,7 +562,10 @@ private:
 
     sidecar::ScopedFd stdin_;
     sidecar::ScopedFd stdout_;
-    std::atomic<int> pid_{0};
+    // The stdio server process. Held until Abort() hands it to the teardown;
+    // see ~StdioTransport for the never-aborted case.
+    std::mutex child_mu_;
+    std::shared_ptr<sidecar::Child> child_;
     std::int64_t next_id_ = 1;  // worker thread only
     std::string capabilities_ = "{}";
     std::string instructions_;
@@ -908,7 +884,7 @@ void McpConnection::Teardown() {
     // Abort the transport BEFORE stopping the worker: killing the stdio child
     // is what lets a wedged blocking call end, so the worker and the child it
     // holds unwind instead of lingering.
-    const int child_pid = transport_->Abort();
+    std::shared_ptr<sidecar::Child> child = transport_->Abort();
     bool joined = false;
     {
         std::lock_guard<std::mutex> lock(worker_->mu);
@@ -938,16 +914,14 @@ void McpConnection::Teardown() {
             loop_.join();
             // The child is ours to reap NOW, on this thread: nothing else
             // waits for it, and nothing outlives this call.
-            ReapChildWithGrace(child_pid, std::chrono::seconds(5));
+            if (child) child->TerminateAfter(std::chrono::seconds(5));
         } else {
             // Wedged past the grace: detach, never join. The thread references
             // only shared_ptr-held state, so it exits safely whenever its
             // call returns. The child gets a detached escalation watcher,
             // since this thread is done waiting.
-            if (child_pid > 0) {
-                std::thread([child_pid] {
-                    ReapChildWithGrace(child_pid, std::chrono::seconds(5));
-                }).detach();
+            if (child) {
+                std::thread([child] { child->TerminateAfter(std::chrono::seconds(5)); }).detach();
             }
             loop_.detach();
         }
