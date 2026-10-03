@@ -19,6 +19,7 @@
 
 #include "../../plugins/server/commands-core/core_commands.hpp"
 #include "fakes.hpp"
+#include "minimal/agent/agent_loop.hpp"
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/commands/command_registry.hpp"

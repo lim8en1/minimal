@@ -36,7 +36,6 @@ ALLOWED = {
 }
 
 KNOWN_VIOLATIONS = {
-    ("commands", "agent"),
     ("commands", "plugins"),
     ("agent", "plugins"),
     ("plugins", "rpc"),

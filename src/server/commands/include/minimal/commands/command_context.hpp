@@ -26,7 +26,6 @@
 #include <optional>
 #include <string>
 
-#include "minimal/agent/agent_loop.hpp"
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/commands/confirmation_broker.hpp"
@@ -34,6 +33,10 @@
 #include "minimal/common/model_ref.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/tools/tool_executor.hpp"
+
+namespace minimal::agent {
+class AgentLoop;  // only a reference crosses this interface; users include agent_loop.hpp
+}
 
 namespace minimal::commands {
 

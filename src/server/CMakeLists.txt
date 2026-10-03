@@ -39,9 +39,9 @@ add_library(minimal_server_core SHARED
     hooks/hook_dispatcher.cpp
     hooks/hook_shell.cpp
     agent/hook_observer_bridge.cpp
-    agent/agent_preset_frontmatter.cpp
-    agent/permission_resolution.cpp
-    agent/agent_preset_registry.cpp
+    preset/agent_preset_frontmatter.cpp
+    preset/permission_resolution.cpp
+    preset/agent_preset_registry.cpp
     agent/mention_resolver.cpp
     agent/mention_expansion.cpp
     plugins/name_resolution.cpp
@@ -122,6 +122,7 @@ target_include_directories(minimal_server_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/config/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/hooks/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/preset/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/agent/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/commands/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/rpc/include"

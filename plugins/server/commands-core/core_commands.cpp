@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "minimal/agent/agent_loop.hpp"
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/common/config_paths.hpp"
