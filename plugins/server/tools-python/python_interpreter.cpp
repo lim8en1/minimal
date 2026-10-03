@@ -77,6 +77,7 @@ Interpreter::Interpreter(LaunchedInterpreter proc, InterpreterConfig config,
       settings_(settings),
       logger_(logger),
       pid_(proc.pid),
+      child_(proc.pid),
       in_fd_(proc.in_fd),
       out_fd_(proc.out_fd),
       diag_fd_(proc.diag_fd),
@@ -669,7 +670,7 @@ Interpreter::WaitOutcome Interpreter::WaitSync(const std::string& id,
     }
 }
 
-void Interpreter::SoftInterrupt() { killpg(pid_, SIGINT); }
+void Interpreter::SoftInterrupt() { child_.Signal(SIGINT); }
 
 std::shared_ptr<Interpreter::Pending> Interpreter::RunningPendingLocked() {
     // The not-done pending with the smallest submission seq: the driver is
@@ -873,15 +874,12 @@ void Interpreter::MarkDead(std::string reason, bool session_dead) {
 
 void Interpreter::HardKill(const std::string& reason) {
     MarkDead(reason, config_.session_lifetime.expired());
-    // Idempotent the same way MarkDead is: a second HardKill (session
-    // teardown racing an explicit kill, ~Interpreter after an earlier death)
-    // must not re-kill/re-reap a pid the OS may have recycled since.
-    bool expected = false;
-    if (!reaped_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
-    // ReapAfterKill includes the group kill (plus the fork-to-setsid window
-    // via the plain kill). An unreaped child (D state) is logged, never
-    // waited on forever.
-    if (!minimal::sidecar::TerminateGroup(pid_)) {
+    // Idempotent the same way MarkDead is: Child::Terminate claims the pid
+    // atomically, so a second HardKill (session teardown racing an explicit
+    // kill, ~Interpreter after an earlier death) finds nothing to do instead of
+    // re-killing a pid the OS may have recycled since. An unreaped child
+    // (D state) is logged, never waited on forever.
+    if (!child_.Terminate()) {
         logger_.warn("python[{}]: child not reaped within the post-kill budget ({})",
                      pid_, reason);
     }

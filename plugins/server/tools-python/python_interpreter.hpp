@@ -315,7 +315,16 @@ private:
     PythonSettings settings_;
     common::Logger& logger_;
 
+    // The pid for display (logs, events) only: it stays readable after the child
+    // is gone. Everything that signals, kills or reaps goes through `child_`.
     pid_t pid_ = -1;
+    // Owns the process group's end of life. HardKill can run more than once for
+    // one interpreter (a reader-thread death detection, an explicit /python
+    // restart, ~Interpreter's own teardown), and Child::Terminate claims the pid
+    // with an atomic exchange, so exactly one call kills and reaps it -- a pid
+    // the OS is free to have recycled by the time a second call arrives is never
+    // signalled.
+    minimal::sidecar::Child child_;
     ScopedFd in_fd_;      // parent -> child (requests)
     ScopedFd out_fd_;     // child -> parent (responses)
     ScopedFd diag_fd_;    // child's real stdout/stderr, drained + kept for the death report
@@ -353,14 +362,6 @@ private:
     std::string version_;
     std::string diag_tail_;  // last diagnostics seen, reported on death
     std::atomic<bool> dead_{false};
-    // Guards HardKill's kill+reap+forget the same way `dead_` guards
-    // MarkDead's body: HardKill can run more than once for one interpreter
-    // (a reader-thread death detection, an explicit /python restart, and
-    // ~Interpreter's own teardown call can each reach it), and without this,
-    // every call after the first repeats waitpid()+killpg() on a pid the
-    // first call already reaped -- a pid the OS is free to have recycled for
-    // an unrelated process by then.
-    std::atomic<bool> reaped_{false};
     // JOINED in the destructor; holds no reference to the interpreter.
     std::thread reader_;
 };
