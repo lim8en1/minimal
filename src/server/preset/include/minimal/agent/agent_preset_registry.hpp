@@ -10,6 +10,7 @@
 
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/config/permissions_config.hpp"
+#include "minimal/config/project_trust.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/skill_registry.hpp"
@@ -208,6 +209,15 @@ public:
     // override -- so all builders MUST be set before the first Resolve().
     // Overwriting a name replaces the builder; there is deliberately no
     // unregister (config is read once at startup).
+    // Project-local agents are only discovered for roots `trust` allows; for the
+    // others a session resolves exactly as if it had no project root (global and
+    // bundled presets only). Null (the default) applies no gate. Startup only:
+    // call before the registry is shared; `trust` must outlive it. No cache
+    // invalidation is needed on a trust change -- the root is reduced to "no
+    // project" BEFORE every cache lookup, so a revoked root never reads an entry
+    // built while it was trusted.
+    void SetProjectTrust(const config::ProjectTrust* trust) { trust_ = trust; }
+
     void SetDefinitionBuilder(std::string tool_name, PresetToolDefinitionBuilder builder);
 
     // The plugin permission models every resolved preset binds its slices to
@@ -316,6 +326,13 @@ private:
     // different roots resolve the same name independently. std::map over
     // unordered_map because the pair key needs a hash otherwise, and preset
     // counts are small.
+    // `project_root`, or empty when its project-local content may not load.
+    std::filesystem::path EffectiveRoot(const std::filesystem::path& project_root) const {
+        return trust_ == nullptr || trust_->Allows(project_root) ? project_root
+                                                                 : std::filesystem::path{};
+    }
+    const config::ProjectTrust* trust_ = nullptr;
+
     mutable std::mutex cache_mu_;
     mutable std::map<std::pair<std::string, std::filesystem::path>, AgentPreset> cache_;
 };

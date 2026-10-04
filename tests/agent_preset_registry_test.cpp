@@ -1461,3 +1461,69 @@ TEST_CASE("AgentPresetRegistry: an explicit deny resolves out; specific beats th
           (std::map<std::string, SkillMode>{{"other", SkillMode::Ask},
                                             {"style", SkillMode::Allow}}));
 }
+
+// --- the project trust gate ---------------------------------------------------
+
+TEST_CASE("AgentPresetRegistry: an untrusted project's presets are invisible until trusted",
+          "[agent_preset_registry][project][trust]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/agents/local.md",
+                 "---\nname: local\nmodel: openai-main/gpt-4o-mini\n---\nLOCAL.\n");
+    config.Write("proj/agents/build.md",
+                 "---\nname: build\nmodel: openai-main/gpt-4.1\n---\nPROJECT BUILD.\n");
+    const auto project_root = config.dir / "proj";
+
+    config::ProjectTrust trust(config.dir / "trusted_projects.json",
+                               config::ProjectLocalMode::kTrusted);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    skills.SetProjectTrust(&trust);
+    AgentPresetRegistry registry(config.dir, skills,
+                                 config::LoadSettingsConfig(config.dir / "settings.json"));
+    registry.SetProjectTrust(&trust);
+
+    // Untrusted: the project-only preset is unknown, the shadowing one is the
+    // GLOBAL build, and the picker lists neither project entry.
+    CHECK_THROWS_AS(registry.Resolve("local", project_root), std::runtime_error);
+    CHECK(registry.Resolve("build", project_root).system_prompt == "You are a build agent.\n");
+    for (const auto& summary : registry.ListAvailable(project_root)) {
+        CHECK(summary.name != "local");
+    }
+    CHECK(registry.Resolve("build", project_root).model_ref.str() != "openai-main/gpt-4.1");
+
+    // Trusting takes effect on the next call, with no restart -- and the earlier
+    // (untrusted) resolve did not poison the cache.
+    std::string error;
+    REQUIRE(trust.Trust(project_root, error));
+    CHECK(registry.Resolve("local", project_root).system_prompt == "LOCAL.\n");
+    CHECK(registry.Resolve("build", project_root).system_prompt == "PROJECT BUILD.\n");
+
+    // Revoking hides them again even though they were cached while trusted.
+    REQUIRE(trust.Revoke(project_root, error));
+    CHECK_THROWS_AS(registry.Resolve("local", project_root), std::runtime_error);
+    CHECK(registry.Resolve("build", project_root).system_prompt == "You are a build agent.\n");
+}
+
+TEST_CASE("AgentPresetRegistry: mode all loads project presets without a grant; none never does",
+          "[agent_preset_registry][project][trust]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/agents/local.md",
+                 "---\nname: local\nmodel: openai-main/gpt-4o-mini\n---\nLOCAL.\n");
+    const auto project_root = config.dir / "proj";
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                 config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    config::ProjectTrust all(config.dir / "a.json", config::ProjectLocalMode::kAll);
+    registry.SetProjectTrust(&all);
+    CHECK(registry.Resolve("local", project_root).system_prompt == "LOCAL.\n");
+
+    config::ProjectTrust none(config.dir / "b.json", config::ProjectLocalMode::kNone);
+    std::string error;
+    REQUIRE(none.Trust(project_root, error));  // a grant does not beat "none"
+    registry.SetProjectTrust(&none);
+    CHECK_THROWS_AS(registry.Resolve("local", project_root), std::runtime_error);
+}

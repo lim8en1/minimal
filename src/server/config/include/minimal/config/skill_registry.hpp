@@ -11,6 +11,8 @@
 
 namespace minimal::config {
 
+class ProjectTrust;
+
 // One candidate under skills/. EVERY entry directly under the directory gets a
 // record -- including ones that failed to load. `loaded` plus `load_error` are
 // the diagnostics; consumers (the system-prompt listing, SkillTool) filter on
@@ -55,6 +57,12 @@ public:
     // broken skill. Entries come back sorted by name, so any consumer that
     // iterates All() is deterministic without re-sorting.
     static SkillRegistry Load(std::filesystem::path config_dir);
+
+    // The project-local overlay is only consulted for roots `trust` allows; the
+    // others see the global view, exactly as an empty project_root would. Null
+    // (the default) applies no gate. Startup only: call before the registry is
+    // shared; `trust` must outlive it.
+    void SetProjectTrust(const ProjectTrust* trust) { trust_ = trust; }
 
     const std::vector<SkillMeta>& All() const { return skills_; }
 
@@ -104,6 +112,10 @@ private:
     };
     const std::vector<SkillMeta>& MergedFor(const std::filesystem::path& project_root) const;
 
+    // True when `project_root` has a project scope AND it may be loaded.
+    bool ProjectScoped(const std::filesystem::path& project_root) const;
+
+    const ProjectTrust* trust_ = nullptr;
     std::vector<SkillMeta> skills_;
     std::string scan_error_;
     mutable std::unique_ptr<OverlayCache> cache_ = std::make_unique<OverlayCache>();

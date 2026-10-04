@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 
+#include "minimal/commands/project_command_source.hpp"
 #include "minimal/config/project_trust.hpp"
 #include "minimal/config/settings_config.hpp"
 
@@ -163,4 +164,45 @@ TEST_CASE("project_local.mode parses and rejects unknown values", "[project_trus
           ProjectLocalMode::kNone);
     CHECK_THROWS(ParseSettingsConfig({{"project_local", {{"mode", "sometimes"}}}}));
     CHECK_THROWS(ParseSettingsConfig({{"project_local", "all"}}));
+}
+
+namespace {
+struct CountingProvider : minimal::commands::ProjectCommandProvider {
+    mutable int registered = 0;
+    void RegisterProjectCommands(minimal::commands::CommandRegistry&,
+                                 const std::filesystem::path&) const override {
+        ++registered;
+    }
+    std::string ProjectCommandsFingerprint(const std::filesystem::path&) const override {
+        return "fp";
+    }
+};
+}  // namespace
+
+TEST_CASE("ProjectCommandSource asks plugins only for trusted roots", "[project_trust][commands]") {
+    TempDir tmp;
+    const fs::path repo = MakeRepo(tmp.path, "repo");
+    ProjectTrust trust(tmp.path / "t.json", ProjectLocalMode::kTrusted);
+    CountingProvider provider;
+    minimal::commands::ProjectCommandSource source(provider, &trust);
+
+    auto untrusted = source.For(repo);
+    REQUIRE(untrusted != nullptr);
+    CHECK(provider.registered == 0);  // the plugin never saw the directory
+
+    std::string error;
+    REQUIRE(trust.Trust(repo, error));
+    CHECK(source.For(repo) != nullptr);
+    CHECK(provider.registered == 1);
+
+    REQUIRE(trust.Revoke(repo, error));
+    const int before = provider.registered;
+    CHECK(source.For(repo) == untrusted);  // the shared empty registry again
+    CHECK(provider.registered == before);
+
+    // No trust object: no gate (the pre-existing behaviour tests rely on).
+    CountingProvider open_provider;
+    minimal::commands::ProjectCommandSource open_source(open_provider);
+    open_source.For(repo);
+    CHECK(open_provider.registered == 1);
 }

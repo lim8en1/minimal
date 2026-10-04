@@ -4,6 +4,7 @@ namespace minimal::commands {
 
 std::shared_ptr<const CommandRegistry> ProjectCommandSource::For(
     const std::filesystem::path& project_root) const {
+    if (trust_ != nullptr && !trust_->Allows(project_root)) return empty_;
     // Outside the lock: stat-level work per plugin, and a lookup for one
     // root must not wait on another root's fingerprint. An empty root has
     // nothing to discover and so nothing to fingerprint.

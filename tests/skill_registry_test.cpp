@@ -6,6 +6,7 @@
 
 #include <unistd.h>
 
+#include "minimal/config/project_trust.hpp"
 #include "minimal/config/skill_registry.hpp"
 #include "temp_dir.hpp"
 
@@ -478,4 +479,24 @@ TEST_CASE("a broken project skill surfaces its reason like a global one", "[skil
     CHECK_FALSE(meta->loaded);
     CHECK(meta->load_error == "no SKILL.md in directory");
     CHECK_FALSE(registry.LoadBodyFor(project_root, "broken").has_value());
+}
+
+TEST_CASE("an untrusted project's skills are not visible until trusted",
+          "[skill_registry][trust]") {
+    TempConfigDir config;
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/skills/local/SKILL.md", "---\ndescription: project.\n---\nBody.\n");
+    SkillRegistry registry = SkillRegistry::Load(config.dir);
+    ProjectTrust trust(config.dir / "trusted.json", ProjectLocalMode::kTrusted);
+    registry.SetProjectTrust(&trust);
+    const auto root = std::filesystem::weakly_canonical(config.dir / "proj");
+
+    CHECK(registry.FindFor(root, "local") == nullptr);
+    CHECK(registry.AllFor(root).empty());
+    std::string error;
+    REQUIRE(trust.Trust(root, error));
+    REQUIRE(registry.FindFor(root, "local") != nullptr);
+    REQUIRE(trust.Revoke(root, error));
+    CHECK(registry.FindFor(root, "local") == nullptr);
+    CHECK_FALSE(registry.LoadBodyFor(root, "local").has_value());
 }

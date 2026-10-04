@@ -10,6 +10,7 @@
 #include "minimal/common/read_file.hpp"
 #include "minimal/config/frontmatter.hpp"
 #include "minimal/config/project_dirs.hpp"
+#include "minimal/config/project_trust.hpp"
 
 namespace minimal::config {
 namespace {
@@ -314,14 +315,18 @@ const std::vector<SkillMeta>& SkillRegistry::MergedFor(
     return it->second;
 }
 
+bool SkillRegistry::ProjectScoped(const std::filesystem::path& project_root) const {
+    return !project_root.empty() && (trust_ == nullptr || trust_->Allows(project_root));
+}
+
 std::vector<SkillMeta> SkillRegistry::AllFor(const std::filesystem::path& project_root) const {
-    if (project_root.empty()) return skills_;
+    if (!ProjectScoped(project_root)) return skills_;
     return MergedFor(project_root);
 }
 
 const SkillMeta* SkillRegistry::FindFor(const std::filesystem::path& project_root,
                                         std::string_view name) const {
-    if (project_root.empty()) return Find(name);
+    if (!ProjectScoped(project_root)) return Find(name);
     const std::vector<SkillMeta>& merged = MergedFor(project_root);
     for (const auto& meta : merged) {
         if (meta.name == name) return &meta;

@@ -25,6 +25,7 @@
 #include <string>
 
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/config/project_trust.hpp"
 
 namespace minimal::commands {
 
@@ -45,7 +46,13 @@ public:
 
 class ProjectCommandSource {
 public:
-    explicit ProjectCommandSource(const ProjectCommandProvider& loader) : loader_(loader) {}
+    // `trust` (null = no gate) decides whether a root's project-local commands
+    // load at all; an untrusted root gets a permanently empty registry. The
+    // decision is made per call, ahead of the cache, so a trust change takes
+    // effect on the next lookup. Must outlive this source.
+    explicit ProjectCommandSource(const ProjectCommandProvider& loader,
+                                  const config::ProjectTrust* trust = nullptr)
+        : loader_(loader), trust_(trust) {}
 
     // Never null. An empty project_root (a session with none) resolves to a
     // permanently-empty registry -- there is nothing to discover for it, and
@@ -67,6 +74,8 @@ private:
         std::string fingerprint;
     };
     const ProjectCommandProvider& loader_;
+    const config::ProjectTrust* trust_;
+    std::shared_ptr<const CommandRegistry> empty_ = std::make_shared<const CommandRegistry>();
     mutable std::mutex mutex_;
     // GUARDED by mutex_: built lazily, on whichever thread asks first (a
     // gRPC handler resolving ListCommands, a session worker dispatching a

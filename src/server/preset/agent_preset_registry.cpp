@@ -183,9 +183,10 @@ AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
 }
 
 AgentPreset AgentPresetRegistry::Resolve(
-    const std::string& preset_name, const std::filesystem::path& project_root,
+    const std::string& preset_name, const std::filesystem::path& requested_root,
     const std::optional<std::map<std::string, SkillMode>>& parent_skills,
     const std::optional<config::ModelRef>& model_override) const {
+    const std::filesystem::path project_root = EffectiveRoot(requested_root);
     if (parent_skills.has_value() || model_override.has_value()) {
         // The clamp input varies per parent, so no cache: resolve fresh every
         // time (spawn is rare; a resolve is frontmatter reads plus a model
@@ -301,7 +302,7 @@ std::vector<AgentPresetSummary> AgentPresetRegistry::ListPresets(
 
 std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable(
     const std::filesystem::path& project_root) const {
-    return ListPresets(project_root, /*picker_visibility=*/true);
+    return ListPresets(EffectiveRoot(project_root), /*picker_visibility=*/true);
 }
 
 void AgentPresetRegistry::SetDefinitionBuilder(std::string tool_name,
@@ -386,9 +387,10 @@ std::filesystem::path AgentPresetRegistry::FindPresetPath(
 }
 
 bool AgentPresetRegistry::PresetDeclaresModel(const std::string& preset_name,
-                                              const std::filesystem::path& project_root) const {
+                                              const std::filesystem::path& requested_root) const {
     bool from_project = false;
-    const std::filesystem::path preset_path = FindPresetPath(preset_name, project_root, from_project);
+    const std::filesystem::path preset_path =
+        FindPresetPath(preset_name, EffectiveRoot(requested_root), from_project);
     return !LoadAgentPresetFrontmatter(preset_path, tool_permission_keys_.all).model.empty();
 }
 

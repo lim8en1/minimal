@@ -43,6 +43,7 @@
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/config_bundle.hpp"
 #include "minimal/config/settings_config.hpp"
+#include "minimal/config/project_trust.hpp"
 #include "minimal/config/skill_registry.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/agent/hook_observer_bridge.hpp"
@@ -270,7 +271,16 @@ static int RunServer(int argc, char** argv) {
     }
 
     // Frontmatter-only scan; bodies stay on disk until a skill is invoked.
-    const auto skills = minimal::config::SkillRegistry::Load(config_dir);
+    auto skills = minimal::config::SkillRegistry::Load(config_dir);
+
+    // Which project directories may supply their own agents, skills and commands
+    // (settings.json project_local.mode; `/trust-directory` grants). Built before
+    // anything consults a project root, and handed to every consumer below.
+    minimal::config::ProjectTrust project_trust(
+        config_dir / "trusted_projects.json",
+        settings_preload ? settings_preload->project_local.mode
+                         : minimal::config::ProjectLocalMode::kTrusted);
+    skills.SetProjectTrust(&project_trust);
 
     // --- Stage 2: plugins ----------------------------------------------------
     const auto bundled_dir = minimal::plugins::BundledPluginDir();
@@ -498,7 +508,7 @@ static int RunServer(int argc, char** argv) {
     // no project root at startup -- only handed the now-fully-loaded `loader`
     // so it can ask each plugin's optional per-root hook later, lazily, once
     // a session names a real one.
-    minimal::commands::ProjectCommandSource project_commands(loader);
+    minimal::commands::ProjectCommandSource project_commands(loader, &project_trust);
 
     std::printf("plugins (%zu discovered):\n", records.size());
     for (const auto& record : records) {
@@ -605,6 +615,7 @@ static int RunServer(int argc, char** argv) {
     try {
         presets = std::make_unique<minimal::agent::AgentPresetRegistry>(
             config_dir, skills, settings, permissions, model_catalog, tool_permission_keys);
+        presets->SetProjectTrust(&project_trust);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "\nconfiguration error (%s): %s\n", config_dir.c_str(), e.what());
         return 1;
