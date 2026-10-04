@@ -216,7 +216,10 @@ public:
     // invalidation is needed on a trust change -- the root is reduced to "no
     // project" BEFORE every cache lookup, so a revoked root never reads an entry
     // built while it was trusted.
-    void SetProjectTrust(const config::ProjectTrust* trust) { trust_ = trust; }
+    void SetProjectTrust(config::ProjectTrust* trust) { trust_ = trust; }
+    // The same object, for the /trust-directory commands (which grant and
+    // revoke). Null when no gate is configured.
+    config::ProjectTrust* project_trust() const { return trust_; }
 
     void SetDefinitionBuilder(std::string tool_name, PresetToolDefinitionBuilder builder);
 
@@ -331,7 +334,7 @@ private:
         return trust_ == nullptr || trust_->Allows(project_root) ? project_root
                                                                  : std::filesystem::path{};
     }
-    const config::ProjectTrust* trust_ = nullptr;
+    config::ProjectTrust* trust_ = nullptr;
 
     mutable std::mutex cache_mu_;
     mutable std::map<std::pair<std::string, std::filesystem::path>, AgentPreset> cache_;

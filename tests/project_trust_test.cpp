@@ -206,3 +206,27 @@ TEST_CASE("ProjectCommandSource asks plugins only for trusted roots", "[project_
     open_source.For(repo);
     CHECK(open_provider.registered == 1);
 }
+
+TEST_CASE("InspectProjectLocal counts what a project would contribute", "[project_trust]") {
+    TempDir tmp;
+    const fs::path repo = MakeRepo(tmp.path, "repo");
+    CHECK(minimal::config::InspectProjectLocal(repo).empty());
+    CHECK(minimal::config::InspectProjectLocal(repo).Describe() == "nothing");
+
+    auto touch = [](const fs::path& path) {
+        fs::create_directories(path.parent_path());
+        std::ofstream(path) << "x";
+    };
+    touch(repo / "agents" / "a.md");
+    touch(repo / "agents" / "b.md");
+    touch(repo / "agents" / "notes.txt");  // not an agent
+    touch(repo / "skills" / "one" / "SKILL.md");
+    touch(repo / ".claude" / "skills" / "two" / "SKILL.md");
+    touch(repo / "commands" / "c.md");
+
+    const auto inventory = minimal::config::InspectProjectLocal(repo / "src");  // from a subdir
+    CHECK(inventory.agents == 2);
+    CHECK(inventory.skills == 2);
+    CHECK(inventory.commands == 1);
+    CHECK(inventory.Describe() == "2 agents, 2 skills, 1 command");
+}

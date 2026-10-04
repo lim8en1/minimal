@@ -1,6 +1,7 @@
 #include "minimal/config/project_trust.hpp"
 
 #include <stdexcept>
+#include <string_view>
 #include <system_error>
 
 #include <nlohmann/json.hpp>
@@ -32,6 +33,68 @@ ProjectTrust::ProjectTrust(std::filesystem::path state_file, ProjectLocalMode mo
 std::filesystem::path ProjectTrust::RootFor(const std::filesystem::path& project_root) {
     const ProjectDirs dirs(project_root);
     return dirs.dirs().empty() ? std::filesystem::path{} : dirs.dirs().back();
+}
+
+namespace {
+
+std::size_t CountFiles(const std::filesystem::path& dir, std::string_view extension) {
+    std::error_code ec;
+    std::size_t count = 0;
+    for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        std::error_code type_ec;
+        if (it->is_regular_file(type_ec) && it->path().extension() == extension &&
+            it->path().filename().string().front() != '.') {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// <dir>/<name>/SKILL.md for each immediate subdirectory.
+std::size_t CountSkills(const std::filesystem::path& dir) {
+    std::error_code ec;
+    std::size_t count = 0;
+    for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        std::error_code exists_ec;
+        if (it->is_directory(exists_ec) &&
+            std::filesystem::exists(it->path() / "SKILL.md", exists_ec)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+std::string Plural(std::size_t n, const char* singular, const char* plural) {
+    return std::to_string(n) + " " + (n == 1 ? singular : plural);
+}
+
+}  // namespace
+
+ProjectLocalInventory InspectProjectLocal(const std::filesystem::path& project_root) {
+    ProjectLocalInventory out;
+    const ProjectDirs dirs(project_root);
+    for (const auto& dir : dirs.dirs()) {
+        out.agents += CountFiles(dir / "agents", ".md");
+        for (const char* skills : {"skills", ".claude/skills", ".agents/skills"}) {
+            out.skills += CountSkills(dir / skills);
+        }
+        out.commands += CountFiles(dir / "commands", ".md");
+        out.commands += CountFiles(dir / ".opencode" / "commands", ".md");
+    }
+    return out;
+}
+
+std::string ProjectLocalInventory::Describe() const {
+    std::vector<std::string> parts;
+    if (agents != 0) parts.push_back(Plural(agents, "agent", "agents"));
+    if (skills != 0) parts.push_back(Plural(skills, "skill", "skills"));
+    if (commands != 0) parts.push_back(Plural(commands, "command", "commands"));
+    if (parts.empty()) return "nothing";
+    std::string joined = parts.front();
+    for (std::size_t i = 1; i < parts.size(); ++i) joined += ", " + parts[i];
+    return joined;
 }
 
 bool ProjectTrust::IsTrusted(const std::filesystem::path& project_root) const {

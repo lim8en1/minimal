@@ -1044,3 +1044,55 @@ TEST_CASE("picker commands answer their bare form beside a live turn; the argume
     REQUIRE(clear != nullptr);
     CHECK_FALSE(clear->ReadOnlyFor(bare));
 }
+
+// --- /trust-directory ----------------------------------------------------------
+
+TEST_CASE("/trust-directory asks, then trusts the project and /untrust-directory revokes it",
+          "[commands][trust]") {
+    CommandFixture fixture;
+    auto& trust = fixture.UseProjectTrust(config::ProjectLocalMode::kTrusted);
+    const auto root = fixture.project_root();
+    REQUIRE_FALSE(trust.IsTrusted(root));
+
+    fixture.confirmations.answer = "Cancel";
+    CHECK(fixture.Run("trust-directory").status == Status::kOk);
+    CHECK_FALSE(trust.IsTrusted(root));  // declined: nothing recorded
+
+    fixture.confirmations.answer = "";   // no answer is not consent
+    CHECK(fixture.Run("trust-directory").status == Status::kError);
+    CHECK_FALSE(trust.IsTrusted(root));
+
+    fixture.confirmations.answer = "Trust";
+    const auto granted = fixture.Run("trust-directory");
+    CHECK(granted.status == Status::kOk);
+    CHECK(trust.IsTrusted(root));
+    // The prompt named the directory and what would be enabled.
+    CHECK(fixture.confirmations.last.title.find(root.string()) != std::string::npos);
+    CHECK(fixture.confirmations.last.detail.find("found now") != std::string::npos);
+
+    const int asked = fixture.confirmations.calls;
+    CHECK(fixture.Run("trust-directory").status == Status::kOk);  // already trusted
+    CHECK(fixture.confirmations.calls == asked);                   // and not asked again
+
+    CHECK(fixture.Run("untrust-directory").status == Status::kOk);
+    CHECK_FALSE(trust.IsTrusted(root));
+}
+
+TEST_CASE("/trust-directory explains modes where there is nothing to grant", "[commands][trust]") {
+    SECTION("all") {
+        CommandFixture fixture;
+        fixture.UseProjectTrust(config::ProjectLocalMode::kAll);
+        CHECK(fixture.Run("trust-directory").status == Status::kOk);
+        CHECK(fixture.confirmations.calls == 0);
+    }
+    SECTION("none") {
+        CommandFixture fixture;
+        auto& trust = fixture.UseProjectTrust(config::ProjectLocalMode::kNone);
+        CHECK(fixture.Run("trust-directory").status == Status::kError);
+        CHECK_FALSE(trust.IsTrusted(fixture.project_root()));
+    }
+    SECTION("no gate configured") {
+        CommandFixture fixture;
+        CHECK(fixture.Run("trust-directory").status == Status::kError);
+    }
+}

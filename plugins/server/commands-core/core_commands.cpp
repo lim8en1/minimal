@@ -18,6 +18,7 @@
 #include "minimal/common/model_ref.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/config/permission_codec.hpp"
+#include "minimal/config/project_trust.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/tools/atomic_write.hpp"
 #include "minimal/tools/permission.hpp"
@@ -797,6 +798,86 @@ private:
 
 }  // namespace
 
+// /trust-directory and /untrust-directory: the operator's grant for a project's
+// own agents, skills and commands (settings.json project_local.mode). The grant
+// covers the project's git root, so it holds for every session started anywhere
+// inside the repository. It takes effect for what is resolved from now on
+// (/agent, a new session, the next listing); the session's current preset is not
+// swapped underneath it.
+class TrustDirectoryCommand : public HarnessCommand {
+public:
+    std::string_view Name() const override { return "trust-directory"; }
+    std::string_view Summary() const override {
+        return "Load this project's own agents, skills and commands";
+    }
+    std::string_view Usage() const override { return "/trust-directory"; }
+
+    CommandResult Execute(CommandContext& context, const CommandArgs&) override {
+        minimal::config::ProjectTrust* trust = context.presets().project_trust();
+        if (trust == nullptr) return CommandResult::Error("project trust is not configured");
+        if (trust->mode() == minimal::config::ProjectLocalMode::kAll) {
+            return CommandResult::Ok(
+                "project_local.mode is \"all\": every project's own agents, skills and "
+                "commands already load, nothing to trust");
+        }
+        if (trust->mode() == minimal::config::ProjectLocalMode::kNone) {
+            return CommandResult::Error(
+                "project_local.mode is \"none\": project-local content never loads. Set it to "
+                "\"trusted\" in settings.json to use /trust-directory");
+        }
+        const std::filesystem::path root =
+            minimal::config::ProjectTrust::RootFor(context.session().project_root());
+        if (root.empty()) return CommandResult::Error("this session has no project directory");
+        if (trust->IsTrusted(root)) {
+            return CommandResult::Ok(root.string() + " is already trusted");
+        }
+
+        const auto inventory = minimal::config::InspectProjectLocal(root);
+        minimal::commands::ConfirmationRequest request;
+        request.kind = "command_confirmation";
+        request.title = "Trust " + root.string() + "?";
+        request.detail =
+            "Its own agents, skills and commands will load in every session under this "
+            "directory (found now: " +
+            inventory.Describe() +
+            "). Repository content can steer the model; trust only code you would run.";
+        request.options = {"Trust", "Cancel"};
+        const auto answer = context.confirmations().RequestConfirmation(request);
+        if (!answer.answered()) return CommandResult::Error("/trust-directory was not confirmed");
+        if (answer.chosen_option != "Trust") return CommandResult::Ok("not trusted");
+
+        std::string error;
+        if (!trust->Trust(root, error)) {
+            return CommandResult::Error("could not record the trust: " + error);
+        }
+        return CommandResult::Ok("trusted " + root.string() + " (" + inventory.Describe() +
+                                 " now load; use /agent to pick up its agents)");
+    }
+};
+
+class UntrustDirectoryCommand : public HarnessCommand {
+public:
+    std::string_view Name() const override { return "untrust-directory"; }
+    std::string_view Summary() const override {
+        return "Stop loading this project's own agents, skills and commands";
+    }
+    std::string_view Usage() const override { return "/untrust-directory"; }
+
+    CommandResult Execute(CommandContext& context, const CommandArgs&) override {
+        minimal::config::ProjectTrust* trust = context.presets().project_trust();
+        if (trust == nullptr) return CommandResult::Error("project trust is not configured");
+        const std::filesystem::path root =
+            minimal::config::ProjectTrust::RootFor(context.session().project_root());
+        if (root.empty()) return CommandResult::Error("this session has no project directory");
+        if (!trust->IsTrusted(root)) return CommandResult::Ok(root.string() + " was not trusted");
+        std::string error;
+        if (!trust->Revoke(root, error)) {
+            return CommandResult::Error("could not record the change: " + error);
+        }
+        return CommandResult::Ok("no longer trusting " + root.string());
+    }
+};
+
 std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     // /help needs the registry to list it, but it is being built to go INTO that
     // registry -- so the registry reference is bound at register time by the
@@ -813,6 +894,8 @@ std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     out.push_back(std::make_unique<RenameCommand>());
     out.push_back(std::make_unique<ConnectCommand>());
     out.push_back(std::make_unique<PermissionsCommand>());
+    out.push_back(std::make_unique<TrustDirectoryCommand>());
+    out.push_back(std::make_unique<UntrustDirectoryCommand>());
     return out;
 }
 

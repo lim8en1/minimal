@@ -21,6 +21,7 @@
 #include "fakes.hpp"
 #include "minimal/agent/agent_loop.hpp"
 #include "minimal/commands/command_context.hpp"
+#include "minimal/config/project_trust.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/mcp/mcps_config.hpp"
@@ -130,6 +131,14 @@ public:
         registry.Register(std::make_unique<mcp::McpCommand>(*mcp_manager_));
     }
     mcp::McpClientManager* mcp_manager() { return mcp_manager_.get(); }
+
+    // Installs a project-trust gate (state file in the fixture's dir) on the preset
+    // registry the commands see, the way main() does.
+    config::ProjectTrust& UseProjectTrust(config::ProjectLocalMode mode) {
+        trust_ = std::make_unique<config::ProjectTrust>(dir_.path() / "trusted_projects.json", mode);
+        presets_->SetProjectTrust(trust_.get());
+        return *trust_;
+    }
 
     // What the durable store holds, which /clear must never touch.
     std::size_t stored_messages() const { return store_.messages.size(); }
@@ -261,6 +270,7 @@ private:
     // declared first so it outlives the registry.
     std::unique_ptr<config::ProvidersConfig> catalog_;
     std::unique_ptr<agent::AgentPresetRegistry> presets_;
+    std::unique_ptr<config::ProjectTrust> trust_;
 
     void BuildPresets() {
         presets_.reset();  // it borrows the catalog being replaced

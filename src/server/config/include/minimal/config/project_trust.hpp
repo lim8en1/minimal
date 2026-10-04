@@ -31,6 +31,21 @@
 
 namespace minimal::config {
 
+// What a project directory would contribute if it were loaded: counts of the
+// project-local agents, skills and commands found by the same walk discovery
+// uses (the session's root up to its git root). Read-only; used to show the
+// operator what a /trust-directory grant enables, and to say what is being
+// ignored when nothing is trusted.
+struct ProjectLocalInventory {
+    std::size_t agents = 0;
+    std::size_t skills = 0;
+    std::size_t commands = 0;
+    bool empty() const { return agents + skills + commands == 0; }
+    // "2 agents, 1 skill, 3 commands" (zero counts omitted); "nothing" when empty.
+    std::string Describe() const;
+};
+ProjectLocalInventory InspectProjectLocal(const std::filesystem::path& project_root);
+
 class ProjectTrust {
 public:
     ProjectTrust(std::filesystem::path state_file, ProjectLocalMode mode);
