@@ -69,6 +69,7 @@ Full example (`bundled/settings.json`):
     "max_bytes": 262144,
     "search_ancestors": false
   },
+  "project_local": { "mode": "trusted" },
   "context_contributors": { "disabled": [], "max_bytes_per_section": 16384 },
   "logging": { "level": "info", "max_size_mb": 10, "max_files": 5 }
 }
@@ -205,6 +206,30 @@ requirements paths), delivered to the tools per invocation. See
 | `files` | string array | `["AGENTS.md", "CLAUDE.md"]` | plain file names only — no `/` or `\`, non-empty |
 | `max_bytes` | int | `262144` | `0` = unlimited. A symlinked file resolving outside its directory is ignored |
 | `search_ancestors` | bool | `false` | walk up from the project root |
+
+### `project_local.*`
+
+Whether a repository's own `agents/`, `skills/` and `commands/` directories
+(the project-local discovery below) are loaded. They are content the repository's
+author chose, so by default they are **ignored until you trust the directory**.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `mode` | string | `"trusted"` | `"trusted"`: load only for directories you have trusted with `/trust-directory`. `"all"`: load for every project (the behaviour before this setting existed; use it for CI or a machine where every checkout is yours). `"none"`: never load project-local content |
+
+The unit of trust is the project's **git worktree root**, so one grant covers a
+repository and every directory a session starts in beneath it; a directory with
+no git root is its own root. `/trust-directory` shows the directory and what it
+would enable and asks for confirmation; `/untrust-directory` revokes. Grants live
+in `<config dir>/trusted_projects.json` (operator state — not hand-edited
+settings); an unreadable file trusts nothing. A grant takes effect for what is
+resolved afterwards (`/agent`, a new session, the next listing) — the running
+session's current preset is not swapped. A new session in an untrusted project
+that ships such content gets a one-line notice naming `/trust-directory`.
+`project_context` (AGENTS.md / CLAUDE.md) has its own switch and is not governed
+by this section. Presets in the config dir and bundled presets are always
+trusted; a *trusted* project's presets are still only allowed to narrow, never
+widen, your permissions.
 
 ### `context_contributors.*`
 
@@ -789,7 +814,8 @@ shows through.
   registered tool claims warns at startup (typo, or the providing plugin is
   disabled); two plugins claiming one namespace is fatal. The plugin owns its
   slice's schema — see the tools-python section below for the `python` slice.
-- **Project-local presets** — a session's project root (walked up to the
+- **Project-local presets** (loaded only for trusted directories — see
+  `project_local.*`) — a session's project root (walked up to the
   enclosing git worktree root, `ProjectDirs`) is searched for
   `<dir>/agents/<name>.md` BEFORE the config dir; the nearest declaration wins
   and a project preset shadowing a global one is logged. Project presets are
@@ -797,7 +823,7 @@ shows through.
   root) and resolve with the session's root for `/agent` and subagent spawns.
   Project-local problems surface at resolve time as resolve errors/warnings,
   not at startup.
-- **Project-local skills** — the same walk scans `<dir>/skills/*/SKILL.md` plus
+- **Project-local skills** (same trust rule) — the same walk scans `<dir>/skills/*/SKILL.md` plus
   the Claude-compatible `<dir>/.claude/skills/*/SKILL.md` and
   `<dir>/.agents/skills/*/SKILL.md`; the nearest directory wins on a name
   collision and a project skill shadows a global one. The `skill` tool's

@@ -8,6 +8,7 @@
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/agent/transcript_repair.hpp"
 #include "minimal/config/project_context.hpp"
+#include "minimal/config/project_trust.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/session/sqlite_history_store.hpp"
 
@@ -297,8 +298,28 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // before that.
     PublishSession(session_id, session, signal_router, signal_selectors, resume);
 
+    AnnounceIgnoredProjectContent(*session);
+
     guard.committed = true;
     return session;
+}
+
+void SessionRegistry::AnnounceIgnoredProjectContent(Session& session) const {
+    // A top-level session in a project that ships its own agents/skills/commands
+    // that are being IGNORED (project_local.mode "trusted", directory not
+    // trusted) says so once. Silence would read as "the repo has no agents"; the
+    // notice names the one command that changes it. Subagents never announce.
+    if (!session.info().parent_session_id.empty()) return;
+    const config::ProjectTrust* trust = presets_.project_trust();
+    if (trust == nullptr || trust->mode() != config::ProjectLocalMode::kTrusted) return;
+    const std::filesystem::path& root = session.info().project_root;
+    if (trust->Allows(root)) return;
+    const config::ProjectLocalInventory found = config::InspectProjectLocal(root);
+    if (found.empty()) return;
+    session.EmitOrWarn(
+        SessionEvent{SessionError{"project-local " + found.Describe() +
+                                  " in this directory are ignored until you run /trust-directory"}},
+        "project trust notice");
 }
 
 void SessionRegistry::ApplyProjectContext(SessionParams& params) const {

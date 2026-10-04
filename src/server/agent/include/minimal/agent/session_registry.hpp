@@ -249,6 +249,9 @@ private:
     // sequence that calls these in order. Each keeps the exact behavior (and
     // most of the comments) the inline block it replaced had -- this is a
     // structural split, not a behavior change.
+    // One notice to a new top-level session whose project's own agents, skills
+    // and commands are being ignored for want of /trust-directory.
+    void AnnounceIgnoredProjectContent(Session& session) const;
     void ApplyProjectContext(SessionParams& params) const;
     void AppendSignalContext(SessionParams& params) const;
     void AppendContributedContext(SessionParams& params, const AgentPreset& preset) const;

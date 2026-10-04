@@ -931,3 +931,48 @@ TEST_CASE("plugin context contributors land in the system prompt, after project 
     CHECK(system.rfind("You are a build agent.", 0) == 0);
     CHECK(system.find("## Memory\nremembered fact") != std::string::npos);
 }
+
+// --- Project trust notice ------------------------------------------------------
+
+TEST_CASE("a session in an untrusted project that ships its own content is told once",
+          "[session_registry][trust]") {
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+    config::ProjectTrust trust(fixture.config.dir / "trusted_projects.json",
+                               config::ProjectLocalMode::kTrusted);
+    fixture.presets->SetProjectTrust(&trust);
+
+    testing::TempDir project;
+    std::filesystem::create_directories(project.path() / ".git");
+    std::filesystem::create_directories(project.path() / "agents");
+    { std::ofstream(project.path() / "agents" / "local.md") << "---\nname: local\n---\nbody\n"; }
+
+    auto notified = [](agent::Session& session) {
+        for (const auto& event : testing::DrainEvents(session)) {
+            if (event.has_error() &&
+                event.error().message().find("/trust-directory") != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto params = Params("s1");
+    params.project_root = project.path();
+    auto untrusted = fixture.registry->Create(std::move(params));
+    REQUIRE(untrusted != nullptr);
+    CHECK(notified(*untrusted));
+
+    // Nothing to say when the project ships nothing, or once it is trusted.
+    auto bare = Params("s2");
+    auto bare_session = fixture.registry->Create(std::move(bare));
+    CHECK_FALSE(notified(*bare_session));
+
+    std::string error;
+    REQUIRE(trust.Trust(project.path(), error));
+    auto again = Params("s3");
+    again.project_root = project.path();
+    auto trusted = fixture.registry->Create(std::move(again));
+    CHECK_FALSE(notified(*trusted));
+}
