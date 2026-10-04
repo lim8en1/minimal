@@ -429,6 +429,42 @@ TEST_CASE("chat view: scrolled away, content arriving below does not move the vi
     CHECK_FALSE(view.HasUnseenBelow());
 }
 
+// Regression: the anchor's candidates were the persisted rows only, so a
+// reader parked inside the STREAMING reply (the usual place to stop and read)
+// had no anchor and slid up with every streamed line.
+TEST_CASE("chat view: scrolled away inside the live turn, streaming does not move the view") {
+    ChatViewFixture fx;
+    ChatView view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
+    const auto live_snapshot = [](int count) {
+        auto snap = SnapshotWithNumberedLines("s", 1, 1);
+        std::string text;
+        for (int i = 0; i < count; ++i) {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%sline-%02d", i ? "\n" : "", i + 10);
+            text += buf;
+        }
+        LiveTurnSegment thinking;
+        thinking.kind = LiveTurnSegment::Kind::Thinking;
+        thinking.segment_id = 1;
+        thinking.text_view = std::make_shared<const std::string>(text);
+        snap.live_segments.push_back(thinking);
+        return snap;
+    };
+
+    const auto snap = live_snapshot(60);
+    (void)RenderElement(view.Render(snap), 80, 24);
+    view.ScrollBy(1);
+    const auto parked = RenderElement(view.Render(snap), 80, 24);
+    const int parked_top = LowestVisibleLine(parked);
+    REQUIRE(view.IsScrolledAway());
+    REQUIRE(parked_top >= 10);   // the viewport's top sits inside the live block
+    CHECK(LowestVisibleLine(RenderElement(view.Render(snap), 80, 24)) == parked_top);
+
+    const auto after = RenderElement(view.Render(live_snapshot(85)), 80, 24);
+    CHECK(LowestVisibleLine(after) == parked_top);
+    CHECK(view.HasUnseenBelow());
+}
+
 namespace {
 // Claims Thinking the way a plugin does, and says whether it was asked live.
 class LiveProbeThinking final : public plugins::MessageRenderer {

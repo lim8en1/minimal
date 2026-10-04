@@ -332,12 +332,14 @@ private:
     // content. Ignored while focused_row_ has a value -- the row cursor
     // drives the offset instead (see Render()).
     int scroll_from_bottom_lines_ = 0;
-    // Top anchoring while scrolled away (ScrollState::anchor): the row part
-    // at the viewport's top in the last layout, and how many of its lines
-    // were above that top (negative: the top sat on the gap before it).
-    // Picked each frame from the last layout's boxes; suspended for the one
-    // frame after an explicit scroll, whose offset must apply as asked.
-    std::optional<std::pair<RowKey, std::size_t>> anchor_part_;
+    // Top anchoring while scrolled away (ScrollState::anchor): the persistent
+    // box of the row part -- or live segment -- at the viewport's top in the
+    // last layout, and how many of its lines were above that top (negative:
+    // the top sat on the gap before it). Picked each frame from the last
+    // layout's boxes; suspended for the one frame after an explicit scroll,
+    // whose offset must apply as asked. A box whose row/segment left the
+    // tree is simply not laid out, and the region falls back to the offset.
+    std::shared_ptr<ftxui::Box> anchor_box_;
     int anchor_line_ = 0;
     bool anchor_suspended_ = true;
     // The last layout positioned by the anchor: its offset from the bottom
@@ -461,6 +463,14 @@ private:
     std::vector<std::uint64_t> pending_row_turn_ids_;
     std::vector<std::shared_ptr<ftxui::Box>> pending_box_slots_;
     std::function<void(std::uint64_t turn_id)> cancel_pending_;
+
+    // The live turn's segments (text / thinking / tool), one persistent box
+    // slot each keyed by LiveTurnSegment::segment_id, so the scroll anchor
+    // can hold a reader parked INSIDE the streaming reply: without them the
+    // top line had no anchor candidate and every streamed line slid the
+    // view. live_boxes_ is the set the last frame's tree contained.
+    std::map<uint64_t, std::shared_ptr<ftxui::Box>> live_box_slots_;
+    std::vector<std::shared_ptr<ftxui::Box>> live_boxes_;
 
     // ScrollWheelBy's gate state: when the last wheel step was APPLIED. Epoch
     // (never a real timestamp) so the first event always passes.

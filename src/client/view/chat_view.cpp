@@ -991,6 +991,21 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             }
         }
     }
+    // Each live segment's outermost wrap is a spy on its persistent slot
+    // (live_box_slots_), the scroll anchor's candidates inside the live turn.
+    std::vector<std::shared_ptr<ftxui::Box>> live_boxes;
+    const auto spy_live = [&](uint64_t segment_id, Element element) {
+        auto& slot = live_box_slots_[segment_id];
+        if (!slot) slot = std::make_shared<ftxui::Box>();
+        live_boxes.push_back(slot);
+        return Element(std::make_shared<RowBoxSpy>(slot, std::move(element)));
+    };
+    for (auto it = live_box_slots_.begin(); it != live_box_slots_.end();) {
+        const bool live = std::any_of(
+            snapshot.live_segments.begin(), snapshot.live_segments.end(),
+            [&](const LiveTurnSegment& segment) { return segment.segment_id == it->first; });
+        it = live ? std::next(it) : live_box_slots_.erase(it);
+    }
     for (std::size_t i = 0; i < snapshot.live_segments.size(); ++i) {
         const auto& segment = snapshot.live_segments[i];
         if (segment.kind == LiveTurnSegment::Kind::Text) {
@@ -1037,7 +1052,8 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                     "markdown stream Render threw a non-standard exception");
                 block.push_back(text("(render failed)") | Muted(theme_));
             }
-            column.push_back(WithGutter(vbox(std::move(block)), assistant_gutter));
+            column.push_back(spy_live(segment.segment_id,
+                                      WithGutter(vbox(std::move(block)), assistant_gutter)));
             column.push_back(text(" "));
         } else if (segment.kind == LiveTurnSegment::Kind::Thinking) {
             // Reasoning streams as plain quiet text, same look as the persisted
@@ -1052,14 +1068,17 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             if (segment.Text().empty()) continue;
             ChatRow live_row{.kind = ChatRowKind::Thinking, .text = segment.Text()};
             if (Element plugin_row = RenderLiveWithPlugin(live_row)) {
-                column.push_back(WithGutter(std::move(plugin_row), assistant_gutter));
+                column.push_back(spy_live(segment.segment_id,
+                                          WithGutter(std::move(plugin_row), assistant_gutter)));
                 column.push_back(text(" "));
                 continue;
             }
             ftxui::Element thinking_body = RenderLiveThinking(segment);
-            column.push_back(WithGutter(
-                vbox({text("thinking") | color(theme_.ColorFor("thinking")), thinking_body}),
-                assistant_gutter));
+            column.push_back(spy_live(
+                segment.segment_id,
+                WithGutter(
+                    vbox({text("thinking") | color(theme_.ColorFor("thinking")), thinking_body}),
+                    assistant_gutter)));
             column.push_back(text(" "));
         } else if (segment.kind == LiveTurnSegment::Kind::Tool) {
             const ToolExecutionState* tool = nullptr;
@@ -1081,9 +1100,10 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                                  .tool_is_error = tool->is_error,
                                  .tool_pending = tool->started};
                 Element plugin_row = RenderLiveWithPlugin(live_row);
-                column.push_back(WithGutter(plugin_row ? std::move(plugin_row)
-                                                       : RenderLiveToolRow(*tool),
-                                            assistant_gutter));
+                column.push_back(spy_live(segment.segment_id,
+                                          WithGutter(plugin_row ? std::move(plugin_row)
+                                                                : RenderLiveToolRow(*tool),
+                                                     assistant_gutter)));
                 // Consecutive calls stack as a list, like the settled rows.
                 const bool next_is_tool = i + 1 < snapshot.live_segments.size() &&
                                           snapshot.live_segments[i + 1].kind ==
@@ -1135,22 +1155,17 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         if (signature != bottom_signature_ && IsScrolledAway()) unseen_below_ = true;
         bottom_signature_ = signature;
     }
-    // Hand the anchor's persistent part box to the region (null: pinned,
-    // cursor-driven, just scrolled, or the part left the transcript).
-    scroll_state_->anchor.reset();
-    if (anchor_part_.has_value()) {
-        const auto slots = row_box_slots_.find(anchor_part_->first);
-        if (slots != row_box_slots_.end() && anchor_part_->second < slots->second.size() &&
-            slots->second[anchor_part_->second] != nullptr) {
-            scroll_state_->anchor = slots->second[anchor_part_->second];
-            scroll_state_->anchor_line = anchor_line_;
-        }
-    }
+    live_boxes_ = std::move(live_boxes);
+    // Hand the anchor's persistent box to the region (null: pinned,
+    // cursor-driven, or just scrolled; a box whose row/segment left the
+    // transcript is not laid out, and the region ignores it).
+    scroll_state_->anchor = anchor_box_;
+    scroll_state_->anchor_line = anchor_line_;
     return ScrollRegion(vscroll_indicator(vbox(std::move(column))), scroll_state_);
 }
 
 void ChatView::PickScrollAnchor() {
-    anchor_part_.reset();
+    anchor_box_.reset();
     if (scroll_from_bottom_lines_ <= 0 && !focused_row_.has_value()) unseen_below_ = false;
     const bool suspended = anchor_suspended_;
     anchor_suspended_ = false;
@@ -1167,21 +1182,30 @@ void ChatView::PickScrollAnchor() {
     }
     const int top = scroll_state_->viewport_top_screen;
     std::optional<int> best_below;   // nearest part starting below the top line
-    for (std::size_t i = first; i <= last && i < row_keys_.size() && i < row_boxes_.size(); ++i) {
-        for (std::size_t p = 0; p < row_boxes_[i].size(); ++p) {
-            const auto& box = row_boxes_[i][p];
-            if (box == nullptr || box->y_max < box->y_min) continue;
-            if (box->y_min <= top && top <= box->y_max) {
-                anchor_part_ = std::make_pair(row_keys_[i], p);
-                anchor_line_ = top - box->y_min;
-                return;
-            }
-            if (box->y_min > top && (!best_below || box->y_min < *best_below)) {
-                best_below = box->y_min;
-                anchor_part_ = std::make_pair(row_keys_[i], p);
-                anchor_line_ = top - box->y_min;   // negative: the top sits on a gap
-            }
+    // True once the part containing the top line is found.
+    const auto consider = [&](const std::shared_ptr<ftxui::Box>& box) {
+        if (box == nullptr || box->y_max < box->y_min) return false;
+        if (box->y_min <= top && top <= box->y_max) {
+            anchor_box_ = box;
+            anchor_line_ = top - box->y_min;
+            return true;
         }
+        if (box->y_min > top && (!best_below || box->y_min < *best_below)) {
+            best_below = box->y_min;
+            anchor_box_ = box;
+            anchor_line_ = top - box->y_min;   // negative: the top sits on a gap
+        }
+        return false;
+    };
+    for (std::size_t i = first; i <= last && i < row_keys_.size() && i < row_boxes_.size(); ++i) {
+        for (const auto& box : row_boxes_[i]) {
+            if (consider(box)) return;
+        }
+    }
+    // The live turn renders below every row: a reader parked inside the
+    // streaming reply anchors on its segment.
+    for (const auto& box : live_boxes_) {
+        if (consider(box)) return;
     }
 }
 
