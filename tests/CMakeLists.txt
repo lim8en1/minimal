@@ -24,6 +24,7 @@ add_executable(minimal_tests
     bundled_assets_test.cpp
     examples_parse_test.cpp
     chat_request_bench.cpp
+    permission_bench.cpp
     client_args_test.cpp
     client_plugins_test.cpp
     commands_test.cpp

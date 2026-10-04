@@ -1,10 +1,12 @@
 #include "minimal/tools/pattern_match.hpp"
 
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace minimal::tools {
 
-bool GlobMatch(std::string_view pattern, std::string_view text, bool slash_terminates) {
+bool GlobMatchReference(std::string_view pattern, std::string_view text, bool slash_terminates) {
     // A pattern with no metacharacter is plain equality: skip the table. Most
     // permission rules are literals, and this runs per rule per walked file.
     if (pattern.find_first_of("*?\\") == std::string_view::npos) return pattern == text;
@@ -88,6 +90,116 @@ bool GlobMatch(std::string_view pattern, std::string_view text, bool slash_termi
     }
 
     return ok[0][0];
+}
+
+CompiledGlob::CompiledGlob(std::string_view pattern) {
+    for (std::size_t i = 0; i < pattern.size();) {
+        const char c = pattern[i];
+        if (c == '*') {
+            std::size_t stars = 0;
+            while (i + stars < pattern.size() && pattern[i + stars] == '*') ++stars;
+            // A run of stars is one wildcard; two or more cross '/' in the path
+            // flavor ("***/" can never sneak past the slash rule).
+            tokens_.push_back({stars >= 2 ? Kind::kStarStar : Kind::kStar, '*'});
+            i += stars;
+        } else if (c == '?') {
+            tokens_.push_back({Kind::kAnyOne, '?'});
+            ++i;
+        } else if (c == '\\') {
+            if (i + 1 >= pattern.size()) {  // trailing escape: fail closed
+                never_ = true;
+                return;
+            }
+            tokens_.push_back({Kind::kLiteral, pattern[i + 1]});
+            i += 2;
+        } else {
+            tokens_.push_back({Kind::kLiteral, c});
+            ++i;
+        }
+    }
+
+    all_literal_ = true;
+    for (const Token& token : tokens_) all_literal_ = all_literal_ && token.kind == Kind::kLiteral;
+    if (all_literal_) {
+        for (const Token& token : tokens_) literal_.push_back(token.c);
+        return;
+    }
+    // Necessary conditions for a match, from the fixed parts of the pattern.
+    std::size_t first = 0;
+    while (first < tokens_.size() && tokens_[first].kind == Kind::kLiteral) {
+        prefix_.push_back(tokens_[first++].c);
+    }
+    std::size_t last = tokens_.size();
+    while (last > first && tokens_[last - 1].kind == Kind::kLiteral) --last;
+    for (std::size_t i = last; i < tokens_.size(); ++i) suffix_.push_back(tokens_[i].c);
+    std::string run;
+    for (const Token& token : tokens_) {
+        if (token.kind == Kind::kLiteral) {
+            run.push_back(token.c);
+            if (run.size() > required_.size()) required_ = run;
+        } else {
+            run.clear();
+        }
+    }
+}
+
+bool CompiledGlob::Match(std::string_view text, bool slash_terminates) const {
+    if (never_) return false;
+    if (all_literal_) return text == literal_;
+    if (text.size() < prefix_.size() + suffix_.size()) return false;
+    if (text.substr(0, prefix_.size()) != prefix_) return false;
+    if (text.substr(text.size() - suffix_.size()) != suffix_) return false;
+    if (!required_.empty() && text.find(required_) == std::string_view::npos) return false;
+
+    // Rolling form of the reference's table: row `next` is "does tokens[i+1:]
+    // match text[ti:]", for every ti. Scratch rows are reused per thread, so a
+    // survivor of the filters above costs no allocation either.
+    const std::size_t n = text.size();
+    thread_local std::vector<unsigned char> row_a;
+    thread_local std::vector<unsigned char> row_b;
+    row_a.assign(n + 1, 0);
+    row_b.assign(n + 1, 0);
+    unsigned char* next = row_a.data();
+    unsigned char* cur = row_b.data();
+    next[n] = 1;  // no tokens left matches only the empty remainder
+
+    for (std::size_t pi = tokens_.size(); pi-- > 0;) {
+        const Token& token = tokens_[pi];
+        if (token.kind == Kind::kStar || token.kind == Kind::kStarStar) {
+            const bool crosses = !slash_terminates || token.kind == Kind::kStarStar;
+            bool running = next[n] != 0;
+            cur[n] = running;
+            for (std::size_t ti = n; ti-- > 0;) {
+                running = (!crosses && text[ti] == '/') ? next[ti] != 0 : (next[ti] != 0 || running);
+                cur[ti] = running;
+            }
+        } else {
+            for (std::size_t ti = 0; ti < n; ++ti) {
+                const bool char_ok = token.kind == Kind::kAnyOne
+                                         ? !(slash_terminates && text[ti] == '/')
+                                         : text[ti] == token.c;
+                cur[ti] = char_ok && next[ti + 1];
+            }
+            cur[n] = 0;  // no character left to consume
+        }
+        std::swap(cur, next);
+    }
+    return next[0] != 0;
+}
+
+bool GlobMatch(std::string_view pattern, std::string_view text, bool slash_terminates) {
+    // Per-thread cache of compiled patterns, keyed by the pattern text: no lock on
+    // the hot path, and a changed rule is simply a different key. Bounded -- a
+    // process that matches an unbounded stream of distinct patterns starts over
+    // rather than growing.
+    constexpr std::size_t kMaxCached = 2048;
+    thread_local std::unordered_map<std::string, CompiledGlob> cache;
+    auto it = cache.find(std::string(pattern));
+    if (it == cache.end()) {
+        if (cache.size() >= kMaxCached) cache.clear();
+        it = cache.emplace(std::string(pattern), CompiledGlob(pattern)).first;
+    }
+    return it->second.Match(text, slash_terminates);
 }
 
 bool GlobShaped(std::string_view pattern) {

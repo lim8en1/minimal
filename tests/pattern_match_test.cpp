@@ -98,3 +98,32 @@ TEST_CASE("GlobShaped: wildcard-shaped vs literal", "[pattern_match]") {
     CHECK_FALSE(GlobShaped("git status"));
     CHECK_FALSE(GlobShaped("/tmp/builds"));
 }
+
+// The optimized matcher against the specification, over generated input. The
+// alphabet is small on purpose: it makes wildcards, slashes, escapes and
+// near-misses collide constantly, which is where a shortcut would be wrong.
+TEST_CASE("GlobMatch agrees with the reference matcher on generated patterns",
+          "[pattern_match][property]") {
+    std::uint64_t state = 0x9e3779b97f4a7c15ULL;
+    const auto next = [&state](std::size_t bound) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return static_cast<std::size_t>((state >> 33) % bound);
+    };
+    const std::string pattern_alphabet = "aab//**?\\";
+    const std::string text_alphabet = "aab//";
+    for (int iteration = 0; iteration < 20000; ++iteration) {
+        std::string pattern;
+        for (std::size_t i = next(9); i > 0; --i) {
+            pattern.push_back(pattern_alphabet[next(pattern_alphabet.size())]);
+        }
+        std::string text;
+        for (std::size_t i = next(10); i > 0; --i) {
+            text.push_back(text_alphabet[next(text_alphabet.size())]);
+        }
+        for (const bool slash_terminates : {true, false}) {
+            INFO("pattern=[" << pattern << "] text=[" << text << "] path=" << slash_terminates);
+            REQUIRE(minimal::tools::GlobMatch(pattern, text, slash_terminates) ==
+                    minimal::tools::GlobMatchReference(pattern, text, slash_terminates));
+        }
+    }
+}
