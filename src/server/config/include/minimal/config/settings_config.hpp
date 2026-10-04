@@ -119,6 +119,21 @@ struct ProjectContextSettings {
     bool search_ancestors = false;
 };
 
+// Whether the project's own agents/, skills/ and commands/ directories (found by
+// walking up from the session's project root to its git root) are loaded. They
+// are content a cloned repository ships, so by default they load only for
+// directories the operator has trusted (`/trust-directory`). `project_context`
+// (AGENTS.md / CLAUDE.md) has its own switch and is not governed by this.
+enum class ProjectLocalMode {
+    kTrusted,  // load for trusted directories only (the default)
+    kAll,      // load for every project (the behaviour before the trust gate)
+    kNone,     // never load project-local content
+};
+
+struct ProjectLocalSettings {
+    ProjectLocalMode mode = ProjectLocalMode::kTrusted;
+};
+
 // Plugin context contributors (agent/context_contributor.hpp).
 struct ContextContributorSettings {
     // Plugin names whose contributed sections are skipped -- the operator's off
@@ -202,6 +217,7 @@ struct SettingsConfig {
     ToolsSettings tools;
     ToolsViewSettings tools_view;
     ProjectContextSettings project_context;
+    ProjectLocalSettings project_local;
     ContextContributorSettings context_contributors;
     SessionSettings sessions;
     ServerSettings server;

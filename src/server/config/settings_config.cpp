@@ -227,6 +227,27 @@ ProjectContextSettings ParseProjectContext(const nlohmann::json& doc) {
     return result;
 }
 
+ProjectLocalSettings ParseProjectLocal(const nlohmann::json& doc) {
+    ProjectLocalSettings result;
+    if (!doc.contains("project_local")) return result;
+    const auto& section = doc.at("project_local");
+    if (!section.is_object()) {
+        throw std::runtime_error("settings.json: project_local must be an object");
+    }
+    const std::string mode = GetField(section, "project_local", "mode", std::string("trusted"));
+    if (mode == "trusted") {
+        result.mode = ProjectLocalMode::kTrusted;
+    } else if (mode == "all") {
+        result.mode = ProjectLocalMode::kAll;
+    } else if (mode == "none") {
+        result.mode = ProjectLocalMode::kNone;
+    } else {
+        throw std::runtime_error("settings.json: project_local.mode must be \"trusted\", "
+                                 "\"all\" or \"none\" (got \"" + mode + "\")");
+    }
+    return result;
+}
+
 ContextContributorSettings ParseContextContributors(const nlohmann::json& doc) {
     ContextContributorSettings result;
     if (!doc.contains("context_contributors")) return result;
@@ -338,6 +359,7 @@ SettingsConfig ParseSettingsConfig(const nlohmann::json& doc) {
         config.tools = ParseTools(doc);
         config.tools_view = ParseToolsView(doc);
         config.project_context = ParseProjectContext(doc);
+        config.project_local = ParseProjectLocal(doc);
         config.context_contributors = ParseContextContributors(doc);
         config.sessions = ParseSessions(doc);
         config.server = ParseServer(doc);

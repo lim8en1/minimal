@@ -12,5 +12,6 @@ minimal_server_module(config
         config_bundle.cpp
         skill_registry.cpp
         project_dirs.cpp
+        project_trust.cpp
         project_context.cpp
 )

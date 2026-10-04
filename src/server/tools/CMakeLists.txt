@@ -4,7 +4,6 @@ minimal_server_module(tools
         permission_advisor.cpp
         path_confinement.cpp
         file_access.cpp
-        atomic_write.cpp
         tool_registry.cpp
         aliased_tool.cpp
         tool_executor.cpp
