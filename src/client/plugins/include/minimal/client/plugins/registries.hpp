@@ -5,7 +5,7 @@
 //
 //   - ADDITIVE registries (views, tool-result renderers, message renderers,
 //     status segments, syntax grammars) take many plugins; a duplicate key is
-//     recorded through the shared NameRegistry and is FATAL at startup, naming
+//     recorded through the shared name resolution and is FATAL at startup, naming
 //     both claimants.
 //
 //   - EXCLUSIVE registries (chat surface, markdown engine) take one; a second
@@ -239,7 +239,7 @@ public:
 // message-kind table specifies. The DATA PLANE (event demux, virtualization,
 // streaming buffer) stays core regardless of who renders a row. A plugin
 // claiming a kind replaces the core default for that kind only; a second
-// plugin claiming the same kind is a fatal collision (a new NameRegistry kind
+// plugin claiming the same kind is a fatal collision (a new name resolution kind
 // is overkill for an enum key -- the registry tracks (kind, plugin) pairs and
 // the loader surfaces duplicates through the same fatal path).
 class MessageRenderer {
@@ -297,7 +297,7 @@ public:
 // One language grammar: the vendored set registers as the defaults, and a
 // plugin may add a language (a grammar ships its own TSLanguage* -- the
 // vendored symbols are not exported). Two plugins claiming the same language
-// is a fatal collision (a NameRegistry kind). The rule type is the
+// is a fatal collision (a name resolution kind). The rule type is the
 // highlighter's own `client::SyntaxRule`; no translation between ABI and core.
 class SyntaxGrammar {
 public:
@@ -457,7 +457,7 @@ struct PluginViewEntry {
 // app-level empty state (no tab open) and a freshly opened session before its
 // first message arrives. Additive -- every registered start view renders,
 // stacked in registration order; a duplicate id is fatal through the shared
-// NameRegistry like every other view id.
+// name resolution like every other view id.
 //
 // Element, not Component: a start view is non-interactive decoration, which
 // keeps the 20 Hz render contract trivially cheap. The per-render session id
@@ -671,7 +671,7 @@ protected:
 // Many plugins, one entry per key. `KeyOf` maps an entry to its key (a view
 // id, a tool name, ...). A duplicate key is NOT replaced: it is kept and
 // recorded, Find() answers with the first, and the startup collision scan
-// (NameRegistry) turns the duplicate fatal, naming both claimants.
+// (name resolution) turns the duplicate fatal, naming both claimants.
 template <typename T, typename KeyOf>
 class AdditiveRegistry : public RegistryBase {
 public:

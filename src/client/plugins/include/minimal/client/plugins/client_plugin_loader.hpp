@@ -12,7 +12,7 @@
 #include "minimal/common/plugin_config.hpp"
 #include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/client/plugins/registries.hpp"
-#include "minimal/plugins/name_registry.hpp"
+#include "minimal/plugins/name_table.hpp"
 
 namespace minimal::client::plugins {
 
@@ -72,11 +72,15 @@ struct RegistryHook {
     std::string_view label;   // PluginRecord::registered's key
     const char* symbol;       // the optional minimal_client_plugin_register_* export
     RegistryBase* registry;
-    // The NameRegistry kind its keys collide under; nullopt where keys never
-    // collide (an exclusive slot's rule is its own: first wins, the rest warn).
-    std::optional<minimal::plugins::NameKind> name_kind;
-    // A client-plugins.json alias may rename its entries.
-    bool aliasable = false;
+    // The namespace its keys collide in; empty where keys never collide (an
+    // exclusive slot's rule is its own: first wins, the rest warn). Registries
+    // sharing a namespace (views and start views) collide with each other.
+    std::string_view name_space;
+    // kName: a name users address (a view id, a status segment id); a
+    // client-plugins.json alias renames the entry. kSlot: a key that is a
+    // contract with outside data (a payload kind, a tool name, a language);
+    // never aliased, and a collision is resolved by disabling a plugin.
+    minimal::plugins::NameTable::Policy policy = minimal::plugins::NameTable::Policy::kSlot;
     // Calls the looked-up hook with the registry at its real type.
     void (*invoke)(void* hook, RegistryBase& registry,
                    const ClientPluginRegistrationContext& context) = nullptr;
@@ -87,8 +91,7 @@ std::vector<RegistryHook> RegistryHooks(ClientRegistries& registries);
 // Opens client plugins and invokes whichever registration seams they export.
 // Mirrors the server loader exactly (RTLD_NOW | RTLD_LOCAL, required tag/name/
 // version trio checked BEFORE any callback, guarded registration, attribution
-// windows) -- one rule, two loaders, which is why NameRegistry itself moved to
-// common.
+// windows) -- one rule, two loaders, which is why NameTable lives in common.
 //
 // LIFETIME: handles are held until the process exits and are deliberately
 // never dlclose'd. A registered View's vtable lives inside its .so; unloading

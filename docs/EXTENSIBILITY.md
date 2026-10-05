@@ -104,13 +104,13 @@ void minimal_plugin_register_services(minimal::plugins::ServiceRegistry&);
 Rules that keep it from becoming an event bus or a hidden dependency:
 
 - **Typed at the edges, named in the middle.** The provider plugin declares its interface header (e.g. `bash_state.hpp` shipping with `tools-bash`); a consumer `static_cast`s the result of `Find` to it. The name is the only coupling; the header is the contract, under the same source-compatibility model as everything else.
-- **Additive, like tools.** Many plugins may each provide services. Name collisions resolve through the existing `NameRegistry` (a new kind), so they are fatal, not shadowed.
+- **Additive, like tools.** Many plugins may each provide services. Name collisions resolve through name resolution (services are a slot namespace), so they are fatal, not shadowed.
 - **Registration-time only.** The registry is sealed after plugin load (`main.cpp`, right after `LoadAll`); from then on the map is read-only, which is what makes unguarded `Find` from session workers and the command pool safe without a lock. A runtime `Provide` — a plugin holding its registration context and calling in later — is logged and ignored, not raced.
 - **No bus, no subscribe.** Push already exists (`SessionObserver`); this is pull, deliberately. An event bus would put the ordering/concurrency burden back on plugin authors — exactly what the serialized observer dispatch was designed to remove.
 
 The first consumer justifies the pattern: `/restart-shell` lives in `tools-bash` because bash state is unreachable; a service lets others build on that state without `tools-bash` exposing its internals. It is also the dispatch target the server half of 2.5 needs.
 
-**Cost.** Moderate — small code, one new design rule (`NameRegistry` kind, sanity-check wiring).
+**Cost.** Moderate — small code, one new design rule (a name-resolution namespace, sanity-check wiring).
 
 ### 2.3 No per-plugin config beyond one verbatim blob
 
@@ -366,7 +366,7 @@ The format string (`"{version} | {tokens} | {git_branch}"`) is the ordering/sele
 
 **Markdown engine.** The md4c adapter becomes the default registrant of an exclusive slot. The contract carries the streaming semantics explicitly — complete-text render *and* the `AppendDelta`/`Finalize` lifecycle, whose debounce-and-finalize property ("partial input cannot soundly parse"; `Finalize()` always reparses authoritatively) is the **implementer's** obligation, not the host's.
 
-**Syntax grammars.** The highlighter takes additive, language-keyed registrations; the vendored set registers as the defaults; two plugins claiming `python` is fatal (a `NameRegistry` kind).
+**Syntax grammars.** The highlighter takes additive, language-keyed registrations; the vendored set registers as the defaults; two plugins claiming `python` is fatal (a slot namespace in the client's name resolution).
 
 **Observers.** `minimal_client_plugin_register_observers(ObserverRegistry&, ...)` registers an `Observer`: typed host events pushed instead of polled -- `OnTabOpened` / `OnTabClosed`, `OnFocusChanged` (the focused tab, or its session, changed), `OnTurnStarted` / `OnTurnCompleted(tab, completed)`, `OnSessionMetadata` (merged name/model/agent/permission mode). Every call arrives on the UI thread between frames, in the order the host observed the changes; the host derives them from its tab table, so nothing is missed between frames (turns are counted, not sampled). Keep them cheap; a throw is contained, and an observer that keeps throwing is disabled. cost-view and checklist-view use it to follow focus without a status segment being rendered.
 
@@ -474,7 +474,7 @@ Command (the abstract -- already named Command; no rename)
 1. Hooks only narrow: `AllowOnly` short-circuits before the hook seam; no hook can raise what the substrate denied.
 2. Fail-open on every action failure mode; the permission substrate is untouched and remains the boundary.
 3. Filters are exact equality on declared string fields; model-controlled input is never filterable; a pinning test freezes each point's field list. The ENVELOPE fields every payload carries (`hook_point`, `timestamp_unix_ms`) are deliberately **not** filterable: the `on:` key already selects the point, and time is not a behavioral selector — filtering on either produces the "will never match" warning.
-4. Duplicate point names are fatal via `NameKind::HookPoint` — the attribution feed is `ResolveRegistrationNames`'s `hook_points` parameter.
+4. Duplicate point names are fatal via the hook-point namespace — the attribution feed is `ResolveRegistrationNames`'s `hook_points` parameter.
 5. A disabled plugin's points degrade to startup warnings on their actions; core points are unaffected.
 
 **Deliberately deferred:** `pre_compact` veto (bricks the session as occupancy climbs), pre/post LLM-call points (payload = the whole request, prompt-cache-hostile), prompt rewriting and stdout-context injection, per-preset hook scoping.
@@ -509,7 +509,7 @@ Carried over from the completed opencode-compatibility effort's deferral table; 
 | TUI diff rendering | the renderer *slot* exists (§4.2), no implementation ships |
 | `@`-mention subagent invocation | prompt-editor autocomplete listing agent presets → `spawn_subagent` shorthand |
 | `.rpc`-addressable computed templates | md placeholders calling any plugin's `.rpc` op (`{{checklist list}}`) — makes `.rpc` payloads a de-facto cross-plugin API; needs a stability note first |
-| Typed `TemplateDataSource` registry | new ABI symbol + `NameRegistry` kind; only if computed templates become an ecosystem pattern |
+| Typed `TemplateDataSource` registry | new ABI symbol + a name-resolution namespace; only if computed templates become an ecosystem pattern |
 | Models.dev-style catalog plugin | fits `ModelCatalogRegistry` (§2.6); a local-first design may prefer `discover: true` |
 | Provider breadth & OAuth | beyond the two bundled chat providers; the `auth.json` credential chain covers static keys only |
 | ACP/IDE/SDK surfaces | an editor-protocol endpoint over the same gRPC core; not planned |

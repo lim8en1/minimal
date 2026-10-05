@@ -14,7 +14,8 @@ add_executable(minimal_tests
     json_depth_test.cpp
     sse_parser_test.cpp
     frontmatter_test.cpp
-    name_registry_test.cpp
+    name_table_test.cpp
+    name_resolution_test.cpp
     compaction_boundary_test.cpp
     transcript_repair_test.cpp
     compaction_strategy_test.cpp

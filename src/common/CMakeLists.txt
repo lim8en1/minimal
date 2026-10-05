@@ -9,13 +9,10 @@ add_library(minimal_common STATIC
     serial_executor.cpp
     logger.cpp
     logging_setup.cpp
-    # The NameRegistry moved here from src/server/plugins when the client host
-    # (track E5) needed the same collision/alias rule: one rule, two loaders,
-    # so the machinery cannot live on either side. name_resolution.cpp stayed
-    # behind -- it feeds the registry from SERVER registry attributions.
-    plugins/name_registry.cpp
-    # The plugins.json / client-plugins.json format and plugin-file discovery,
-    # shared by both hosts (they were drifting structural twins).
+    # The collision/alias mechanism (one namespace per NameTable) and the
+    # plugins.json / client-plugins.json format: shared by both plugin hosts,
+    # which each own their namespaces and policy.
+    plugins/name_table.cpp
     plugins/plugin_config.cpp)
 add_library(minimal::common ALIAS minimal_common)
 

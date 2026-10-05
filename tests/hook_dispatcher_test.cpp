@@ -291,7 +291,7 @@ TEST_CASE("a duplicate point name is recorded twice for the collision check", "[
     REQUIRE(attributions.size() == core_attributions + 2);
     CHECK(attributions[core_attributions].plugin_name == "plugin-a");
     CHECK(attributions[core_attributions + 1].plugin_name == "plugin-b");
-    // Both are fed to NameRegistry (NameKind::HookPoint) by main; the FIRST
+    // Both are fed to name resolution (the hook-point namespace) by main; the FIRST
     // registration stays bound, so nothing silently depends on load order.
 }
 

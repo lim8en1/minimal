@@ -106,8 +106,8 @@ TEST_CASE("two plugins providing one service name collide, and the resolution na
 
     const auto resolution = plugins::ResolveRegistrationNames(tools::ToolRegistry{}, {}, nullptr,
                                                               {}, &services);
-    REQUIRE(resolution.result.fatal_collisions.size() == 1);
-    CHECK(resolution.result.fatal_collisions[0] == "a.service");
+    REQUIRE(resolution.collisions.size() == 1);
+    CHECK(resolution.collisions[0].surface == "a.service");
 
     // Both claimants survive in the attributions -- the fatal startup diagnostic
     // is built from exactly these pairs, so it can name both plugins.
@@ -133,13 +133,12 @@ TEST_CASE("a service name may repeat a tool or command name without colliding",
 
     const auto resolution =
         plugins::ResolveRegistrationNames(tools, {}, nullptr, {}, &services);
-    CHECK(resolution.result.fatal_collisions.empty());
+    CHECK(resolution.collisions.empty());
 }
 
 TEST_CASE("a service never gains a permission key", "[service_registry]") {
-    // Resolve() merges kinds into `entries` without a kind tag; the
-    // permission-key pass filters by tool identity. A service landing in that
-    // map would answer a permission question nobody asked.
+    // Permission keys come from the tool namespace only; a service landing in
+    // that map would answer a permission question nobody asked.
     plugins::ServiceRegistry services;
     services.SetAttribution("tools-bash");
     RecordingService service;
@@ -150,7 +149,7 @@ TEST_CASE("a service never gains a permission key", "[service_registry]") {
         plugins::ResolveRegistrationNames(tools::ToolRegistry{}, {}, nullptr, {}, &services);
     CHECK(resolution.permission_keys.empty());
     // And it is not a dangling-alias false positive either.
-    CHECK(resolution.result.dangling_aliases.empty());
+    CHECK(resolution.dangling_aliases.empty());
 }
 
 TEST_CASE("/restart-shell resets through the service path", "[service_registry][commands]") {

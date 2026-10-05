@@ -29,8 +29,9 @@ void InvokeHook(void* hook, RegistryBase& registry, const ClientPluginRegistrati
 
 template <typename Registry>
 RegistryHook Hook(std::string_view label, const char* symbol, Registry& registry,
-                  std::optional<minimal::plugins::NameKind> name_kind, bool aliasable) {
-    return {label, symbol, &registry, name_kind, aliasable, &InvokeHook<Registry>};
+                  std::string_view name_space = {},
+                  minimal::plugins::NameTable::Policy policy = minimal::plugins::NameTable::Policy::kSlot) {
+    return {label, symbol, &registry, name_space, policy, &InvokeHook<Registry>};
 }
 
 template <typename Fn>
@@ -99,36 +100,34 @@ std::string_view ToString(LoadStatus status) {
 }
 
 std::vector<RegistryHook> RegistryHooks(ClientRegistries& r) {
-    using minimal::plugins::NameKind;
-    constexpr bool kAliasable = true;
-    // Start views share the view-id namespace: both are addressed the same way.
+    using Policy = minimal::plugins::NameTable::Policy;
     return {
-        Hook("views", "minimal_client_plugin_register_views", r.views, NameKind::ViewId,
-             kAliasable),
+        // kName: user-addressed names (keybindings.json, ui.json status_format).
+        // kSlot: the key is a contract with something outside the plugin (a
+        // payload kind, a tool name, a language; client commands dispatch by
+        // their original name). Start views share the view-id namespace.
+        Hook("views", "minimal_client_plugin_register_views", r.views, "view id", Policy::kName),
         Hook("start_views", "minimal_client_plugin_register_start_views", r.start_views,
-             NameKind::ViewId, kAliasable),
-        // Not aliasable: the command router dispatches by the original name.
+             "view id", Policy::kName),
         Hook("client_commands", "minimal_client_plugin_register_client_commands",
-             r.client_commands, NameKind::Command, !kAliasable),
+             r.client_commands, "client command", Policy::kSlot),
         Hook("tool_renderers", "minimal_client_plugin_register_renderers", r.tool_renderers,
-             NameKind::ToolResultRenderer, kAliasable),
+             "tool result renderer", Policy::kSlot),
         Hook("display_renderers", "minimal_client_plugin_register_display_renderers",
-             r.display_renderers, NameKind::DisplayRenderer, kAliasable),
+             r.display_renderers, "display renderer", Policy::kSlot),
         Hook("prompt_renderers", "minimal_client_plugin_register_prompt_renderers",
-             r.prompt_renderers, NameKind::PromptRenderer, kAliasable),
+             r.prompt_renderers, "prompt renderer", Policy::kSlot),
         Hook("message_renderers", "minimal_client_plugin_register_message_renderers",
-             r.message_renderers, NameKind::MessageRenderer, kAliasable),
+             r.message_renderers, "message renderer", Policy::kSlot),
         Hook("status_segments", "minimal_client_plugin_register_status_segments",
-             r.status_segments, NameKind::StatusSegment, kAliasable),
+             r.status_segments, "status segment", Policy::kName),
         Hook("grammars", "minimal_client_plugin_register_syntax_grammars", r.grammars,
-             NameKind::SyntaxGrammar, kAliasable),
-        // No key to collide on (one constant per observer).
-        Hook("observers", "minimal_client_plugin_register_observers", r.observers,
-             std::nullopt, !kAliasable),
-        Hook("chat_surface", "minimal_client_plugin_register_chat_surface", r.chat_surface,
-             std::nullopt, !kAliasable),
+             "syntax grammar", Policy::kSlot),
+        // No key to collide on (one constant per observer; exclusive slots).
+        Hook("observers", "minimal_client_plugin_register_observers", r.observers),
+        Hook("chat_surface", "minimal_client_plugin_register_chat_surface", r.chat_surface),
         Hook("markdown_engine", "minimal_client_plugin_register_markdown_engine",
-             r.markdown_engine, std::nullopt, !kAliasable),
+             r.markdown_engine),
     };
 }
 

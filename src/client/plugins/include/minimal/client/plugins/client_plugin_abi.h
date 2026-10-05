@@ -97,7 +97,7 @@ void minimal_client_plugin_register_views(
 
 // OPTIONAL, additive: the initial view (the empty state and a fresh session
 // before its first message). Many plugins may contribute; all render, stacked
-// in registration order. A duplicate id is fatal through the NameRegistry,
+// in registration order. A duplicate id is fatal through the name resolution,
 // like every other view id.
 void minimal_client_plugin_register_start_views(
     minimal::client::plugins::StartViewRegistry&,

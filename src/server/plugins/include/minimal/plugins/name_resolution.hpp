@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "minimal/hooks/hook_dispatcher.hpp"
-#include "minimal/plugins/name_registry.hpp"
+#include "minimal/plugins/name_table.hpp"
 #include "minimal/plugins/service_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -14,52 +14,43 @@
 namespace minimal::plugins {
 
 // The three-naming-levels rule (ARCHITECTURE.md, "Name collisions and aliases")
-// applied to everything registered so far: one feed of NameRegistry from the
-// tool AND command attributions plus the plugins.json aliases, resolved.
-//
-// One function over both kinds rather than one per registry, because the rule is
-// one rule -- and because a second copy is exactly the drift the fatal-collision
-// rule exists to prevent. NameRegistry keeps the two namespaces separate
-// internally, so a tool and a command may share a surface name without colliding.
-struct RegistrationNames {
-    NameRegistry::Result result;  // entries, fatal_collisions, dangling_aliases
+// applied to everything registered so far. The server's namespaces and their
+// policy (common's NameTable is kind-agnostic):
+//   tools, commands  -- names: aliasable via plugins.json `aliases`
+//   services, hook points -- slots: addressed by code/config, never aliased
+// Separate namespaces, so a tool and a command may share a surface name.
+enum class NameSpace { kTool, kCommand, kService, kHookPoint };
 
-    // surface_name -> permission_key for every resolved TOOL -- commands have no
-    // permission keys, so they are excluded even though they share the pass. The
-    // executor and
-    // the allowed-tools filter use this so per_tool_overrides / allowed_tools
-    // reference the non-alias key (bare when unambiguous, qualified when two
-    // plugins provide the original name) rather than what the model sees.
+struct NameCollision {
+    NameSpace space;
+    std::string surface;
+    std::vector<std::string> claimants;  // plugin names, "" for core
+};
+
+struct RegistrationNames {
+    std::vector<NameCollision> collisions;          // fatal; sorted by (space, surface)
+    std::vector<std::string> dangling_aliases;      // alias keys nothing claims; sorted
+    std::vector<std::string> slot_aliases;          // alias keys only a service/hook point claims
+    std::vector<std::string> ambiguous_identities;  // fatal; sorted
+
+    // surface_name -> permission_key for every resolved TOOL. The permission key
+    // is the non-alias: the bare original name when no other registration
+    // contests it, the stable identity ("plugin.name") otherwise -- so
+    // per_tool_overrides / allowed_tools never reference what the model sees.
     std::unordered_map<std::string, std::string> permission_keys;
 };
 
-// Feeds NameRegistry from `registry.attributions()` and, when given, the command
-// registry's -- one entry per logical registration, always carrying the ORIGINAL
-// name: core built-ins under an empty plugin name, plugin registrations under
-// their plugin's name, aliased ones still under the name they registered with.
+// One entry per logical registration, always under its ORIGINAL name: core
+// built-ins under an empty plugin name, plugin registrations under their
+// plugin's name, aliased ones still under the name they registered with.
 //
 // `core_tool_names` reserves names the harness itself registers LATER, at serve
-// stage, after this check has run -- `spawn_subagent` is the one. Without the
-// reservation the name was invisible to the fatal-collision scan, and a plugin
-// tool claiming it was silently replaced (or silently replaced it) via
-// insert_or_assign: the exact shadowing failure mode the collision rule exists
-// to prevent, reopened through registration order alone.
+// stage, after this check has run -- `spawn_subagent` is the one -- so a plugin
+// claiming one is a diagnosed collision rather than a silent shadow.
 //
-// Each key in `aliases` is routed to the kind that actually claims it, so a
-// command alias is not reported dangling merely because no tool answers to it.
-// A key claimed by BOTH a tool and a command is recorded in both namespaces --
-// ToolRegistry::ApplyAliases renames the tool onto the surface regardless of
-// the command's claim, so the tool's side of the surface must be visible to
-// the collision scan too. A key no registration of either kind claims lands in
-// dangling_aliases once.
-//
-// Collision and dangling lists are sorted: NameRegistry iterates unordered
-// maps, and startup diagnostics must be stable run to run.
-//
-// `services` feeds NameKind::Service attributions when given. Aliases never
-// route to a service: a service name is addressed by code, not by user config,
-// so an alias key claimed only by a service lands in dangling_aliases -- which
-// is the honest report, since nothing user-visible answers to it.
+// Each alias applies to every name namespace claiming its key (a plugin
+// shipping a tool and a command under one name aliases both, matching what
+// ToolRegistry::ApplyAliases and CommandRegistry each do).
 RegistrationNames ResolveRegistrationNames(const tools::ToolRegistry& registry,
                                            const std::map<std::string, std::string>& aliases,
                                            const commands::CommandRegistry* commands = nullptr,

@@ -471,11 +471,8 @@ TEST_CASE(
 
 TEST_CASE("duplicate surface names are fatal, naming both plugins",
           "[commands][plugins][invariant]") {
-    // NameRegistry has existed and been unit-tested since the plugin work
-    // landed, but nothing outside its own tests ever CONSTRUCTED one -- so the
-    // rule ARCHITECTURE.md calls fatal was never enforced, and both registries
-    // shadowed duplicates silently via insert_or_assign. Which plugin won
-    // depended on directory iteration order.
+    // Silent shadowing would make which plugin wins depend on directory
+    // iteration order.
     tools::ToolRegistry tools;
     commands::CommandRegistry commands;
 
@@ -487,16 +484,13 @@ TEST_CASE("duplicate surface names are fatal, naming both plugins",
     commands.ClearAttribution();
 
     const auto names = plugins::ResolveRegistrationNames(tools, {}, &commands);
-    REQUIRE(names.result.fatal_collisions.size() == 1);
-    CHECK(names.result.fatal_collisions[0] == "boom");
+    REQUIRE(names.collisions.size() == 1);
+    CHECK(names.collisions[0].surface == "boom");
 
-    // Both claimants are in the entries, which is what lets the sanity check
-    // name them -- the surface name alone does not say which plugin to disable.
-    int claimants = 0;
-    for (const auto& entry : names.result.entries) {
-        if (entry.surface_name == "boom") ++claimants;
-    }
-    CHECK(claimants == 2);
+    // The collision names both claimants -- the surface name alone does not
+    // say which plugin to disable.
+    CHECK(names.collisions[0].space == plugins::NameSpace::kCommand);
+    CHECK(names.collisions[0].claimants == std::vector<std::string>{"plugin-a", "plugin-b"});
 }
 
 TEST_CASE("an alias resolves a collision rather than merely avoiding one",
@@ -517,8 +511,8 @@ TEST_CASE("an alias resolves a collision rather than merely avoiding one",
 
     const auto names =
         plugins::ResolveRegistrationNames(tools, {{"plugin-b.boom", "boom2"}}, &commands);
-    CHECK(names.result.fatal_collisions.empty());
-    CHECK(names.result.dangling_aliases.empty());
+    CHECK(names.collisions.empty());
+    CHECK(names.dangling_aliases.empty());
     // Both are reachable, under different names.
     CHECK(commands.Find("boom") != nullptr);
     CHECK(commands.Find("boom2") != nullptr);
@@ -535,8 +529,8 @@ TEST_CASE("an alias naming nothing registered is reported", "[commands][plugins]
 
     const auto names =
         plugins::ResolveRegistrationNames(tools, {{"plugin-a.nonexistent", "x"}}, &commands);
-    REQUIRE(names.result.dangling_aliases.size() == 1);
-    CHECK(names.result.dangling_aliases[0] == "plugin-a.nonexistent");
+    REQUIRE(names.dangling_aliases.size() == 1);
+    CHECK(names.dangling_aliases[0] == "plugin-a.nonexistent");
 }
 
 TEST_CASE("/compact works when the automatic trigger is Never", "[commands][invariant]") {

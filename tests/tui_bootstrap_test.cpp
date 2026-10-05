@@ -8,7 +8,6 @@
 #include "temp_dir.hpp"
 
 using namespace minimal::client;
-using minimal::plugins::NameKind;
 
 namespace {
 // RAII env var override, same pattern as config_paths_test.cpp.
@@ -69,43 +68,52 @@ TEST_CASE("BuildTuiEnvironment's highlighter outlives the call and highlights co
     CHECK_FALSE(spans.empty());
 }
 
-TEST_CASE("MatchAliasKind matches a view_registry attribution", "[tui_bootstrap]") {
+namespace {
+using Policy = minimal::plugins::NameTable::Policy;
+bool AnyContains(const std::vector<std::string>& messages, const std::string& needle) {
+    for (const auto& m : messages) {
+        if (m.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+}  // namespace
+
+TEST_CASE("ResolveClientNames: a duplicate view id is fatal and names both plugins",
+          "[tui_bootstrap][names]") {
+    // Views and start views share one namespace: a start view colliding with a
+    // view is a collision too.
+    std::vector<plugins::Attribution> views = {{"a", "files"}};
+    std::vector<plugins::Attribution> start_views = {{"b", "files"}};
+    const auto names = ResolveClientNames(
+        {{"view id", Policy::kName, &views}, {"view id", Policy::kName, &start_views}}, {});
+    REQUIRE(names.fatal.size() == 1);
+    CHECK(AnyContains(names.fatal, "view id 'files'"));
+    CHECK(AnyContains(names.fatal, "'a', 'b'"));
+}
+
+TEST_CASE("ResolveClientNames: aliasing one view resolves the collision", "[tui_bootstrap][names]") {
+    std::vector<plugins::Attribution> views = {{"a", "files"}, {"b", "files"}};
+    const auto names =
+        ResolveClientNames({{"view id", Policy::kName, &views}}, {{"b.files", "files2"}});
+    CHECK(names.fatal.empty());
+    CHECK(names.warnings.empty());
+}
+
+TEST_CASE("ResolveClientNames: a slot is never aliased -- the collision stays fatal",
+          "[tui_bootstrap][names][invariant]") {
+    // Renaming a display renderer's payload kind would only detach it from
+    // the payloads it exists to draw; the alias is refused with a warning.
+    std::vector<plugins::Attribution> renderers = {{"a", "diff"}, {"b", "diff"}};
+    const auto names = ResolveClientNames({{"display renderer", Policy::kSlot, &renderers}},
+                                          {{"b.diff", "diff2"}});
+    CHECK(AnyContains(names.fatal, "display renderer 'diff'"));
+    CHECK(AnyContains(names.warnings, "'b.diff' names a renderer"));
+}
+
+TEST_CASE("ResolveClientNames: an alias naming nothing is a warning", "[tui_bootstrap][names]") {
     std::vector<plugins::Attribution> views = {{"fixture", "main"}};
-    std::vector<AliasCandidate> candidates = {
-        {NameKind::ViewId, &views},
-    };
-    CHECK(MatchAliasKind(candidates, "fixture.main") == NameKind::ViewId);
-}
-
-TEST_CASE("MatchAliasKind matches a start_view_registry-only attribution as ViewId",
-          "[tui_bootstrap]") {
-    // Regression: alias_on_kind used to only check view_registry, so a
-    // plugin's *start view* alias (registered only in start_view_registry,
-    // never view_registry) fell through to the dangling ViewId fallback --
-    // which happened to also be ViewId, silently masking the bug. Assert the
-    // match comes from the start_view_registry candidate itself, not the
-    // fallback, by also asserting a genuinely unmatched key stays dangling.
-    std::vector<plugins::Attribution> views;
-    std::vector<plugins::Attribution> start_views = {{"fixture", "start"}};
-    std::vector<AliasCandidate> candidates = {
-        {NameKind::ViewId, &views},
-        {NameKind::ViewId, &start_views},
-    };
-    CHECK(MatchAliasKind(candidates, "fixture.start") == NameKind::ViewId);
-}
-
-TEST_CASE("MatchAliasKind matches a message renderer claim", "[tui_bootstrap]") {
-    std::vector<plugins::Attribution> claims = {{"fixture", "markdown"}};
-    std::vector<AliasCandidate> candidates = {
-        {NameKind::MessageRenderer, &claims},
-    };
-    CHECK(MatchAliasKind(candidates, "fixture.markdown") == NameKind::MessageRenderer);
-}
-
-TEST_CASE("MatchAliasKind falls back to ViewId for an unmatched key", "[tui_bootstrap]") {
-    std::vector<plugins::Attribution> views = {{"fixture", "main"}};
-    std::vector<AliasCandidate> candidates = {
-        {NameKind::ViewId, &views},
-    };
-    CHECK(MatchAliasKind(candidates, "fixture.nonexistent") == NameKind::ViewId);
+    const auto names = ResolveClientNames({{"view id", Policy::kName, &views}},
+                                          {{"fixture.nonexistent", "x"}});
+    CHECK(names.fatal.empty());
+    CHECK(AnyContains(names.warnings, "'fixture.nonexistent' names nothing"));
 }

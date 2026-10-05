@@ -121,7 +121,7 @@ bool GuardedRegistration(PluginRecord& record, const char* what, Open&& open, Bo
 // absolute name, or anything carrying a separator would place the provisioned
 // directory outside plugin_data_root (or replace it outright). A name is one
 // plain directory component, nothing more. No other validation exists for
-// record.name -- the NameRegistry checks collisions and dangling aliases,
+// record.name -- the name resolution checks collisions and dangling aliases,
 // not name shape.
 bool IsSafeDataDirName(const std::string& name) {
     return !name.empty() && name != "." && name != ".." &&
