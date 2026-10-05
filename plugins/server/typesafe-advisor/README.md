@@ -60,7 +60,8 @@ reports the versioned id that actually answered, which lands in the log line.
 ## Configuration
 
 The plugin's own `config` object in its `plugins.json` entry. Every field is
-optional; wrong-typed values degrade to the default.
+optional; wrong-typed values degrade to the default, but an unknown field
+(top level or `retry`) keeps the plugin from loading, naming the field.
 
 ```json
 {

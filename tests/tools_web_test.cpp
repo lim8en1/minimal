@@ -4,6 +4,7 @@
 // exactly the layer a fake would paper over.
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -712,6 +713,15 @@ TEST_CASE("ParseWebSettings: defaults with an empty config", "[tools_web][settin
     CHECK(settings.fetch_default_max_bytes == 262144);
     CHECK(settings.fetch_max_bytes == 2097152);
     CHECK(settings.search_api_url.empty());
+}
+
+TEST_CASE("ParseWebSettings: an unknown field is a named error at either level",
+          "[tools_web][settings]") {
+    CHECK_THROWS_WITH(ParseWebSettings({{"serch", nlohmann::json::object()}}),
+                      Catch::Matchers::ContainsSubstring("tools-web: config has unknown field \"serch\""));
+    CHECK_THROWS_WITH(ParseWebSettings({{"search", {{"api_key_env", "K"}}}}),
+                      Catch::Matchers::ContainsSubstring(
+                          "tools-web: config.search has unknown field \"api_key_env\""));
 }
 
 TEST_CASE("ParseWebSettings: a fetch.max_bytes below the default is raised, not honoured",

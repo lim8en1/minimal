@@ -271,7 +271,9 @@ All values must be ≥ 0 (negative → **fatal**); `0` means "never" where noted
 Top level is exactly `{"providers": { "<name>": {...} }}` — the key is the
 provider name (no `/` allowed, in provider or model names). Provider and model
 names are addressed everywhere as `"<provider>/<model>"`. `{}` is valid (but
-then no model is usable). Unknown fields ignored. `bundled/providers.example.json`
+then no model is usable). The schema is strict: an unknown field at any level
+(top, provider, model, `timeouts`) is a named startup error; keys starting
+with `//` are comments and allowed anywhere. `bundled/providers.example.json`
 is a commented starting point.
 
 ### Per provider
@@ -375,6 +377,7 @@ plugin settings that send one (`memory`'s `api_key`, `tools-web`'s
 | `"secret:NAME"` | `NAME` in the data dir's `secrets.json` | at every use: `/secret set` reaches the next request, no restart |
 | `"secret:<plugin>:NAME"` | `NAME` from that plugin's secret source (e.g. `secret:opencode-compat:anthropic` = opencode's `auth.json`) | at every use |
 | `"env:NAME"` | the environment variable | once, at startup; unset → error |
+| `"word:..."` (any other letters-only scheme) | refused at startup — a typo'd scheme like `secrets:` is never sent as the key; store a literal of that shape with `/secret set` | — |
 | anything else | the literal key | — |
 
 A stored secret is reached only by naming it: nothing is picked up

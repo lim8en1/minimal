@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <string>
 
+#include "minimal/config/parse_util.hpp"
+
 namespace minimal::memory {
 namespace {
 
@@ -43,6 +45,15 @@ int Clamp(int value, int lo, int hi) { return std::min(std::max(value, lo), hi);
 MemorySettings ParseMemorySettings(const nlohmann::json& config) {
     MemorySettings out;
     if (!config.is_object()) return out;
+    config::RejectUnknownKeys(
+        config,
+        {"strategy", "api_base", "api_key", "model", "timeout_ms", "sidecar_python_path",
+         "sidecar_model", "sidecar_startup_timeout_ms", "sidecar_request_timeout_ms",
+         "tagger_model", "tagger_max_tokens", "tagger_timeout_ms", "max_tags",
+         "max_tags_per_entry", "tag_merge_similarity", "allow_inline", "max_text_bytes",
+         "batch_size", "default_limit", "writes_prompt", "index_enabled", "index_budget_bytes",
+         "index_in_subagents"},
+        "memory: config");
 
     const auto strategy = StringOr(config, "strategy", "auto");
     if (strategy == "http") out.strategy = StrategyKind::kHttp;

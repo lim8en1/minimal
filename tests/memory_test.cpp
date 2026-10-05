@@ -183,6 +183,12 @@ TEST_CASE("memory settings: defaults and clamps", "[memory]") {
     CHECK(ParseMemorySettings({{"strategy", "bogus"}}).strategy == StrategyKind::kAuto);
 }
 
+TEST_CASE("memory settings: an unknown field is a named error", "[memory][settings]") {
+    CHECK_THROWS_WITH(ParseMemorySettings({{"api_key_env", "K"}}),
+                      ContainsSubstring("memory: config has unknown field \"api_key_env\""));
+    CHECK_NOTHROW(ParseMemorySettings({{"//", "comment"}, {"api_key", "secret:embeddings"}}));
+}
+
 // ---------------------------------------------------------------------- tags
 
 TEST_CASE("memory tags: normalization and match keys", "[memory]") {

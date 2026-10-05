@@ -54,6 +54,19 @@ WebSettings ParseWebSettings(const nlohmann::json& config,
                              const config::SecretResolver* secrets) {
     WebSettings settings;
     if (!config.is_object()) return settings;
+    config::RejectUnknownKeys(config, {"fetch", "search"}, "tools-web: config");
+    if (const auto it = config.find("fetch"); it != config.end()) {
+        config::RejectUnknownKeys(*it,
+                                  {"timeout_ms", "max_redirects", "default_max_bytes", "max_bytes",
+                                   "allow_private_hosts"},
+                                  "tools-web: config.fetch");
+    }
+    if (const auto it = config.find("search"); it != config.end()) {
+        config::RejectUnknownKeys(*it,
+                                  {"api_url", "api_key", "default_max_results", "max_results",
+                                   "timeout_ms"},
+                                  "tools-web: config.search");
+    }
 
     settings.fetch_timeout_ms = PositiveOr(config, "fetch", "timeout_ms", settings.fetch_timeout_ms);
     settings.fetch_max_redirects =

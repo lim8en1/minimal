@@ -2,12 +2,15 @@
 #include "minimal/config/providers_internal.hpp"
 
 #include <algorithm>
+#include <initializer_list>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 #include "minimal/common/logger.hpp"
 #include "minimal/common/secret_handle.hpp"
 #include "minimal/config/json_config_loader.hpp"
+#include "minimal/config/parse_util.hpp"
 #include "minimal/config/provider_config_extensions.hpp"
 #include "minimal/config/secrets.hpp"
 
@@ -22,6 +25,24 @@ std::string RequireString(const nlohmann::json& node, const std::string& key,
                                  "'");
     }
     return node.at(key).get<std::string>();
+}
+
+// Comment keys ("//", "//2", ...) are the file's annotation convention.
+bool IsCommentKey(const std::string& key) { return key.rfind("//", 0) == 0; }
+
+// Strict schema (config::RejectUnknownKeys), with the two fields the secrets
+// rework removed named outright: they are what an older file still carries.
+void RejectUnknownFields(const nlohmann::json& node, std::initializer_list<std::string_view> known,
+                         const std::string& where) {
+    for (const char* removed : {"api_key_env", "credentials"}) {
+        if (node.contains(removed)) {
+            throw std::runtime_error("providers.json: " + where + " field \"" + removed +
+                                     "\" was removed; name the key with \"api_key\": "
+                                     "\"env:NAME\" or \"secret:NAME\" (docs/CONFIGURATION.md, "
+                                     "Secrets)");
+        }
+    }
+    RejectUnknownKeys(node, known, "providers.json: " + where);
 }
 
 // The entry's `api_key`, bound to a handle that reads it per request (a
@@ -506,6 +527,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
         }
         return config;
     }
+    RejectUnknownFields(doc, {"providers"}, "the top level");
     const auto& providers = doc.at("providers");
     if (!providers.is_object()) {
         throw std::runtime_error("providers.json: \"providers\" must be an object keyed by name");
@@ -520,6 +542,15 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
         nlohmann::json translated = provider;
         if (extensions != nullptr) extensions->Translate(translated, where);
         const nlohmann::json provider_normalized = NormalizeHeaders(translated);
+        // After translation: a plugin translator consumes its own tool's
+        // fields, so whatever is left must be core's.
+        RejectUnknownFields(provider_normalized,
+                            {"backend", "url", "api_key", "discover", "metadata",
+                             "metadata_match", "metadata_provider", "models", "parameters",
+                             "max_tokens", "context_window_tokens", "variants",
+                             "max_tokens_field", "timeouts", "headers", "openrouter_app_id",
+                             "whitelist", "blacklist"},
+                            where);
 
         const std::string backend = RequireString(provider_normalized, "backend", where);
         const std::string url = RequireString(provider_normalized, "url", where);
@@ -667,6 +698,9 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
                 throw std::runtime_error("providers.json: " + where +
                                          " field \"timeouts\" must be an object");
             }
+            RejectUnknownFields(timeouts,
+                                {"connect_ms", "request_ms", "stream_idle_ms", "first_byte_ms"},
+                                where + " timeouts");
             const auto read_ms = [&](const char* key, std::chrono::milliseconds& target) {
                 if (!timeouts.contains(key)) return;
                 const auto& value = timeouts.at(key);
@@ -714,10 +748,14 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
         if (!has_models) continue;  // discover-only entry: nothing static to resolve
 
         for (const auto& [model_name, model] : provider_normalized.at("models").items()) {
+            if (IsCommentKey(model_name)) continue;
             const std::string model_where = "model '" + provider_name + "/" + model_name + "'";
             if (!model.is_object()) {
                 throw std::runtime_error("providers.json: " + model_where + " must be an object");
             }
+            RejectUnknownFields(model,
+                                {"parameters", "max_tokens", "context_window_tokens", "variants"},
+                                model_where);
             // A model KEY may contain '/', split at the FIRST one -- the same
             // rule SplitModelRef applies to interactive refs and the
             // ModelRefs() picker filter applies to catalog keys. This is what

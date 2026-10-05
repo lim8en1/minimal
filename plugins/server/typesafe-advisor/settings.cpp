@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <stdexcept>
 
+#include "minimal/config/parse_util.hpp"
+
 namespace minimal::typesafe_advisor {
 namespace {
 
@@ -64,6 +66,18 @@ std::string Settings::EffectiveModel() const {
 Settings ParseSettings(const nlohmann::json& config) {
     Settings settings;
     if (!config.is_object()) return settings;
+    config::RejectUnknownKeys(
+        config,
+        {"backend", "api_key", "endpoint", "model", "request_timeout_ms", "budget_ms", "retry",
+         "min_probability_allow", "min_probability_deny", "min_margin", "questions",
+         "extra_questions"},
+        "typesafe-advisor: config");
+    if (const auto it = config.find("retry"); it != config.end()) {
+        config::RejectUnknownKeys(*it,
+                                  {"max_retries", "backoff_initial_ms", "backoff_max_ms", "jitter",
+                                   "retry_after_cap_ms"},
+                                  "typesafe-advisor: config.retry");
+    }
 
     const std::string backend_name = ValueOr(config, "backend", std::string("typesafe"));
     settings.backend = backend_name == "openrouter" ? Backend::OpenRouter : Backend::Typesafe;

@@ -141,7 +141,22 @@ common::SecretHandle SecretResolver::Bind(const std::string& ref,
         return common::SecretHandle(ref, "env " + name, [fixed] { return fixed; });
     }
 
-    if (ref.rfind(kSecretPrefix, 0) != 0) return common::SecretHandle::Literal(ref);
+    if (ref.rfind(kSecretPrefix, 0) != 0) {
+        // "word:..." reads as a reference, not a key: a typo'd scheme
+        // ("secrets:openai") would otherwise go out verbatim as the key and
+        // come back as a 401. A real key shaped like that is stored with
+        // /secret set and named as secret:NAME.
+        const auto colon = ref.find(':');
+        if (colon != std::string::npos && colon > 0 &&
+            std::all_of(ref.begin(), ref.begin() + static_cast<std::ptrdiff_t>(colon),
+                        [](unsigned char c) { return std::isalpha(c) != 0; })) {
+            // The scheme only, never the whole value: it may be a real key.
+            throw std::runtime_error("unknown key reference scheme '" + ref.substr(0, colon) +
+                                     ":' (expected env:NAME or secret:NAME; store a literal of "
+                                     "this shape with /secret set)");
+        }
+        return common::SecretHandle::Literal(ref);
+    }
 
     const std::string rest = ref.substr(kSecretPrefix.size());
     const auto colon = rest.find(':');

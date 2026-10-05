@@ -19,7 +19,8 @@ client, settings parsing, URL policy, and truncation path.
 ## Configuration
 
 The plugin's own `config` object in its `plugins.json` entry, one sub-object
-per tool. Every field is optional.
+per tool. Every field is optional; an unknown field (top level, `fetch` or
+`search`) keeps the plugin from loading, naming the field.
 
 ```json
 {
