@@ -2258,6 +2258,48 @@ TEST_CASE("RefreshDiscovery racing Resolve: every resolve succeeds, the end stat
     CHECK(std::count(refs.begin(), refs.end(), "local/big") == 1);
 }
 
+TEST_CASE("RefreshDiscovery racing first-use gates of other providers",
+          "[providers][discover][metadata][concurrency]") {
+    // Metadata enrichment creates a provider's fetch gate on first use while a
+    // refresh walks the discover entries' gates. The refresh used to look its
+    // gates up in the shared map without the lock; this exercises the overlap
+    // for TSan builds, though the window is too narrow to fail reliably.
+    constexpr int kProviders = 512;
+    nlohmann::json doc = nlohmann::json::parse(R"({"providers": {
+        "local": {"backend": "openai", "url": "http://localhost:8000/v1", "discover": true,
+                  "max_tokens": 4096}}})");
+    for (int i = 0; i < kProviders; ++i) {
+        doc["providers"]["s" + std::to_string(i)] =
+            nlohmann::json{{"backend", "openai"}, {"url", "http://x/v1"},
+                           {"models", {{"m", nlohmann::json::object()}}}};
+    }
+    auto config = ParseProvidersConfig(doc);
+    ThreadSafeDiscoveryHook discovery;
+    discovery.models = {{"big", 131072, nlohmann::json::object(), std::nullopt}};
+    config.SetDiscoveryHook([&discovery](const std::string& k, const llm::ProviderConfig& c) {
+        return discovery.AsHook(k, c);
+    });
+    ThreadSafeMetadataHook metadata;
+    metadata.answers["m"] = llm::DiscoveredModel{"m", 8192, nlohmann::json::object(), 1024};
+    config.SetMetadataHook([&metadata](const llm::MetadataQuery& q, llm::MetadataMatch m) {
+        return metadata.AsHook(q, m);
+    });
+
+    std::atomic<bool> done{false};
+    std::thread refresher([&] {
+        while (!done.load()) (void)config.RefreshDiscovery();
+    });
+    std::thread resolver([&] {
+        for (int i = 0; i < kProviders; ++i) {
+            CHECK(config.Resolve(ModelRef{"s" + std::to_string(i), "m"}) != nullptr);
+        }
+    });
+    resolver.join();
+    done.store(true);
+    refresher.join();
+    CHECK(config.Resolve(ModelRef{"local", "big"}) != nullptr);
+}
+
 TEST_CASE("listings stay sorted and unique while discovery refreshes underneath",
           "[providers][discover][concurrency]") {
     ThreadSafeDiscoveryHook hook;

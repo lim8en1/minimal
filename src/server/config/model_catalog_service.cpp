@@ -1,5 +1,4 @@
 #include "minimal/config/model_catalog_service.hpp"
-#include "minimal/config/providers_internal.hpp"
 
 #include "minimal/config/providers_internal.hpp"
 #include <algorithm>
@@ -137,7 +136,7 @@ private:
 
     // Takes the provider's fetch gate, returning with BOTH the gate held and the
     // config lock re-held. Lock order is always gate -> runtime_.mutex_, never
-    // the reverse (runtime_.gates_ is only ever touched for insertion, under
+    // the reverse (runtime_.gates_ is only ever touched through gate_for, under
     // mutex_, or locked before it) -- and this is the one place it is spelled.
     std::unique_lock<std::mutex> AcquireGate(const std::string& provider) {
         std::unique_lock<std::mutex> gate;
@@ -778,22 +777,16 @@ DiscoveryStatus ModelCatalogService::discovery_status(const std::string& provide
 }
 
 std::vector<DiscoveryRefreshOutcome> ModelCatalogService::RefreshDiscovery() const {
-    // Create every discover-entry's gate up front, under the mutex, so the
-    // fetch loop never acquires a gate and runtime_.mutex_ in the wrong order.
-    {
-        std::lock_guard<std::mutex> lock(runtime_.mutex_);
-        for (const auto& [name, entry] : catalog_.providers_) {
-            if (entry.discover) runtime_.gates_.try_emplace(name);
-        }
-    }
-
     std::vector<DiscoveryRefreshOutcome> outcomes;
     for (const auto& [name, entry] : catalog_.providers_) {
         if (!entry.discover) continue;
         // Fetch holding only this provider's gate: refreshing a hung catalog
         // costs this provider its 10 s, never the process its config reads,
-        // and distinct providers refresh in parallel.
-        std::lock_guard<std::mutex> gate_lock(runtime_.gates_.at(name).mtx);
+        // and distinct providers refresh in parallel. gate_for looks the gate
+        // up under runtime_.mutex_ and releases it before the gate is taken
+        // (lock order gate -> mutex_): a bare gates_ lookup here raced a
+        // concurrent resolver inserting another provider's gate.
+        std::lock_guard<std::mutex> gate_lock(runtime_.gate_for(name).mtx);
         const DiscoveryOutcome outcome = FetchOutcome(entry);
 
         std::lock_guard<std::mutex> lock(runtime_.mutex_);

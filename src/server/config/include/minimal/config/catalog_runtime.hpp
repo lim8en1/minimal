@@ -30,9 +30,8 @@ struct CatalogRuntime {
     struct FetchGate {
         std::mutex mtx;
     };
-    // Entries are created lazily (Resolve) or up front (RefreshDiscovery)
-    // and never erased, so a gate reference held across an unlock stays
-    // valid.
+    // Entries are created lazily, only through gate_for, and never erased,
+    // so a gate reference held across an unlock stays valid.
     mutable std::map<std::string, FetchGate> gates_;  // by provider name
     // The provider's gate, created on first use. Takes mutex_ itself, so the
     // caller must NOT hold it (the fetch paths unlock first -- gate -> mutex_ is
