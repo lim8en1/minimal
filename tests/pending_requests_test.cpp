@@ -343,3 +343,33 @@ TEST_CASE("a cross-delivered answer keeps its type", "[pending_requests]") {
     REQUIRE(answer.has_value());
     CHECK(std::holds_alternative<minimal::rpc::PermissionAnswer>(*answer));
 }
+
+TEST_CASE("a withdrawn prompt is no longer replayed and is announced once",
+          "[pending_requests]") {
+    PendingRequests pending;
+    minimal::v1::ServerEvent prompt;
+    prompt.mutable_confirmation_request()->set_request_id("req-1");
+    auto registration = pending.Register("req-1", prompt);
+
+    int announced = 0;
+    registration.Withdraw([&] { ++announced; });
+    CHECK(announced == 1);
+    CHECK(pending.OpenPrompts().empty());
+    CHECK(pending.pending_count() == 0);
+    CHECK_FALSE(pending.Resolve("req-1", ConfirmationAnswer{"late"}));
+
+    // After shutdown the streams are closing: no announcement.
+    auto other = pending.Register("req-2", prompt);
+    pending.Shutdown();
+    other.Withdraw([&] { ++announced; });
+    CHECK(announced == 1);
+}
+
+TEST_CASE("only the winning answer runs on_won", "[pending_requests]") {
+    PendingRequests pending;
+    auto registration = pending.Register("req-1");
+    int won = 0;
+    CHECK(pending.Resolve("req-1", ConfirmationAnswer{"a"}, [&] { ++won; }));
+    CHECK_FALSE(pending.Resolve("req-1", ConfirmationAnswer{"b"}, [&] { ++won; }));
+    CHECK(won == 1);
+}

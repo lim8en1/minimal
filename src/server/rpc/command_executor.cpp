@@ -34,9 +34,22 @@ CommandExecutor::~CommandExecutor() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         workers.swap(workers_);
+        workers.splice(workers.end(), finished_);
     }
     for (auto& worker : workers) {
         if (worker.joinable()) worker.join();
+    }
+}
+
+void CommandExecutor::JoinFinished() {
+    std::list<std::thread> finished;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        finished.swap(finished_);
+    }
+    // Each has left its loop and is only returning: the join is immediate.
+    for (auto& thread : finished) {
+        if (thread.joinable()) thread.join();
     }
 }
 
@@ -104,6 +117,18 @@ void CommandExecutor::WorkerMain() {
                 ReleaseKeyLocked(slot->key);
             }
             running_.erase(slot);
+            if (replaced) {
+                // Its replacement already runs; hand this thread's handle to
+                // the watchdog to join, or every timeout would leave one
+                // unjoined (stack and all) until shutdown.
+                const auto self = std::this_thread::get_id();
+                for (auto it = workers_.begin(); it != workers_.end(); ++it) {
+                    if (it->get_id() == self) {
+                        finished_.splice(finished_.end(), workers_, it);
+                        break;
+                    }
+                }
+            }
         }
         if (replaced) return;
     }
@@ -116,6 +141,12 @@ void CommandExecutor::WatchdogMain() {
         watchdog_cv_.wait_for(lock, std::max(tick, std::chrono::milliseconds(10)),
                               [this] { return stopping_; });
         if (stopping_) break;
+        if (!finished_.empty()) {
+            lock.unlock();
+            JoinFinished();
+            lock.lock();
+            if (stopping_) break;
+        }
         const auto now = std::chrono::steady_clock::now();
         std::vector<Task> notify;
         for (auto& running : running_) {

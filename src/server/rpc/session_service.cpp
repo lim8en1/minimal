@@ -204,9 +204,10 @@ void SessionServiceImpl::ResolvePrompt(agent::Session& session, const std::strin
                                        PendingAnswer answer) {
     // Only the call that actually took the slot broadcasts: a duplicate or a
     // late answer must not dismiss modals twice, and an unknown id is dropped.
-    if (Transport(session).pending().Resolve(request_id, std::move(answer))) {
-        PublishPromptResolved(session, request_id);
-    }
+    // Published inside Resolve, under the lock prompt replay holds: a stream
+    // attaching now gets the prompt before its dismissal, never after.
+    Transport(session).pending().Resolve(request_id, std::move(answer),
+                                         [&] { PublishPromptResolved(session, request_id); });
 }
 
 void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& session) {

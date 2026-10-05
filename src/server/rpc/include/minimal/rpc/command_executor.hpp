@@ -86,6 +86,7 @@ private:
     void WatchdogMain();
     void SpawnWorkerLocked();
     void ReleaseKeyLocked(const std::string& key);
+    void JoinFinished();
 
     Options options_;
     std::mutex mutex_;
@@ -97,6 +98,8 @@ private:
     bool stopping_ = false;
     std::list<Running> running_;  // stable addresses for the workers' handles
     std::list<std::thread> workers_;
+    // Timed-out workers that have since finished: joined by the watchdog.
+    std::list<std::thread> finished_;
     std::thread watchdog_;
     std::condition_variable watchdog_cv_;
 };

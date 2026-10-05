@@ -108,14 +108,14 @@ public:
         if (!answer) {
             // The waiter gave up (timeout, cancel): dismiss the modal on every
             // attached client, which would otherwise keep offering a question
-            // nobody is waiting on. Skipped at shutdown, when the streams are
-            // closing anyway.
-            if (!pending_.shut_down()) {
+            // nobody is waiting on. Withdraw closes the slot first, so no later
+            // attach replays it.
+            registration.Withdraw([&] {
                 v1::ServerEvent resolved;
                 resolved.set_session_id(session_id_);
                 resolved.mutable_prompt_resolved()->set_request_id(request_id);
                 queue_.Publish(std::move(resolved));
-            }
+            });
             return {std::nullopt, timed_out};
         }
         const auto* typed = std::get_if<Answer>(&*answer);

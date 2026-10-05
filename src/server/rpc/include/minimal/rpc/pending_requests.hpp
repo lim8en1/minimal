@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -110,6 +111,14 @@ public:
         // slices tell "slice elapsed" from "gave up".
         bool Abandoned() const;
 
+        // The waiter gives up (no answer: timeout, cancel): closes the slot so
+        // no later attach replays it, then runs `announce` (the PromptResolved
+        // broadcast) -- both under the lock DeliverOpenPrompts holds, so a
+        // stream attaching concurrently sees either the prompt followed by its
+        // dismissal, or neither. `announce` is skipped after Shutdown(), when
+        // the streams are closing anyway. Must not call back into this object.
+        void Withdraw(const std::function<void()>& announce);
+
     private:
         friend class PendingRequests;
         Registration(PendingRequests* owner, std::string request_id, std::uint64_t epoch);
@@ -141,6 +150,11 @@ public:
     // The prompt events whose slots are still unanswered, in registration order.
     // Any thread.
     std::vector<v1::ServerEvent> OpenPrompts() const;
+    // OpenPrompts, handed to `deliver` one by one WHILE the lock is held: an
+    // answer (Resolve's on_won) or a withdrawal cannot slip between reading a
+    // prompt and delivering it, so its dismissal always lands after the
+    // replayed prompt. `deliver` must not call back into this object.
+    void DeliverOpenPrompts(const std::function<void(v1::ServerEvent)>& deliver) const;
 
     // Reader thread. Returns false if no slot is registered under this id, which
     // is not an error: a client may answer a request whose session has already
@@ -149,7 +163,11 @@ public:
     // without bound by answering requests that were never asked. The reader
     // constructs the answer variant from the ClientEvent's own payload case, so
     // it never parses anything and the type travels with the value.
-    bool Resolve(const std::string& request_id, PendingAnswer answer);
+    // `on_won` runs, under the lock, only when THIS call took the slot (the
+    // PromptResolved broadcast; see DeliverOpenPrompts). It must not call back
+    // into this object.
+    bool Resolve(const std::string& request_id, PendingAnswer answer,
+                 const std::function<void()>& on_won = {});
 
     // TWO CANCELLATIONS, because the session has two of them and they mean
     // different things (Session::Cancel ends the TURN, Session::Terminate ends

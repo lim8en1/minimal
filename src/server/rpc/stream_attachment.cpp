@@ -34,9 +34,9 @@ bool StreamAttachment::PublishTo(v1::ServerEvent event) const {
 }
 
 void StreamAttachment::ReplayOpenPrompts() const {
-    for (auto& prompt : transport_.pending().OpenPrompts()) {
+    transport_.pending().DeliverOpenPrompts([this](v1::ServerEvent prompt) {
         transport_.queue().PublishToIfAbsent(handle_, std::move(prompt));
-    }
+    });
 }
 
 std::optional<v1::ServerEvent> StreamAttachment::Pop() const {

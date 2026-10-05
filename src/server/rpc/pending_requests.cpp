@@ -85,23 +85,36 @@ PendingRequests::Registration PendingRequests::Register(std::string request_id,
 }
 
 std::vector<v1::ServerEvent> PendingRequests::OpenPrompts() const {
-    std::vector<std::pair<std::uint64_t, v1::ServerEvent>> open;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (shutdown_) return {};
-        for (const auto& [id, slot] : slots_) {
-            if (slot.prompt && !slot.answer) open.emplace_back(slot.order, *slot.prompt);
-        }
-    }
-    std::sort(open.begin(), open.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
     std::vector<v1::ServerEvent> events;
-    events.reserve(open.size());
-    for (auto& entry : open) events.push_back(std::move(entry.second));
+    DeliverOpenPrompts([&](v1::ServerEvent event) { events.push_back(std::move(event)); });
     return events;
 }
 
-bool PendingRequests::Resolve(const std::string& request_id, PendingAnswer answer) {
+void PendingRequests::DeliverOpenPrompts(
+    const std::function<void(v1::ServerEvent)>& deliver) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (shutdown_) return;
+    std::vector<const Slot*> open;
+    for (const auto& [id, slot] : slots_) {
+        if (slot.prompt && !slot.answer) open.push_back(&slot);
+    }
+    std::sort(open.begin(), open.end(),
+              [](const Slot* a, const Slot* b) { return a->order < b->order; });
+    for (const Slot* slot : open) deliver(*slot->prompt);
+}
+
+void PendingRequests::Registration::Withdraw(const std::function<void()>& announce) {
+    if (owner_ == nullptr) return;
+    {
+        std::lock_guard<std::mutex> lock(owner_->mutex_);
+        owner_->slots_.erase(request_id_);
+        if (!owner_->shutdown_ && announce) announce();
+    }
+    owner_ = nullptr;  // nothing left to unregister
+}
+
+bool PendingRequests::Resolve(const std::string& request_id, PendingAnswer answer,
+                              const std::function<void()>& on_won) {
     bool won = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -120,6 +133,7 @@ bool PendingRequests::Resolve(const std::string& request_id, PendingAnswer answe
         if (!it->second.answer.has_value()) {
             it->second.answer = std::move(answer);
             won = true;
+            if (on_won) on_won();
         }
     }
     cv_.notify_all();
