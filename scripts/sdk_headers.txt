@@ -58,11 +58,10 @@ minimal/tools/cancel_token.hpp
 minimal/tools/permission.hpp
 
 # Shared utilities (no policy; safe for any plugin to build on).
+minimal/common/clock.hpp
 minimal/common/event_queue.hpp
-minimal/common/file_lock.hpp
 minimal/common/model_ref.hpp
 minimal/common/read_file.hpp
-minimal/common/sqlite_util.hpp
 minimal/common/utf8.hpp
 minimal/config/frontmatter.hpp
 minimal/config/json_config_loader.hpp
@@ -75,4 +74,6 @@ minimal/sidecar/capped_buffer.hpp
 minimal/sidecar/drain.hpp
 minimal/sidecar/process.hpp
 minimal/sidecar/task_registry.hpp
+minimal/store/file_lock.hpp
+minimal/store/sqlite_util.hpp
 minimal/tools/pattern_match.hpp

@@ -1,13 +1,10 @@
 #pragma once
 
-#include <cstdint>
 #include <sqlite3.h>
 
 #include <string>
 
-namespace minimal::common {
-
-std::int64_t NowMillis();
+namespace minimal::store {
 
 [[noreturn]] void ThrowSqliteError(sqlite3* db, const std::string& context);
 
@@ -35,4 +32,4 @@ struct Stmt {
 // the rollback succeeds.
 void BestEffortRollback(sqlite3* db);
 
-}  // namespace minimal::common
+}  // namespace minimal::store

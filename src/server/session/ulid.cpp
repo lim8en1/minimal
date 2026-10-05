@@ -1,27 +1,21 @@
 #include "minimal/session/ulid.hpp"
 
-#include <chrono>
 #include <cstdint>
 #include <random>
+
+#include "minimal/common/clock.hpp"
 
 namespace minimal::session {
 namespace {
 
 constexpr char kAlphabet[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";  // Crockford base32
 
-std::uint64_t NowMillis() {
-    return static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch())
-            .count());
-}
-
 }  // namespace
 
 std::string GenerateUlid() {
     std::uint8_t buf[16];
 
-    std::uint64_t ts = NowMillis();
+    auto ts = static_cast<std::uint64_t>(common::NowMillis());
     for (int i = 5; i >= 0; --i) {  // big-endian, first six bytes
         buf[i] = static_cast<std::uint8_t>(ts & 0xFF);
         ts >>= 8;

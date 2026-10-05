@@ -3,11 +3,9 @@ add_library(minimal_common STATIC
     bundled_assets.cpp
     config_paths.cpp
     fd_hygiene.cpp
-    file_lock.cpp
     model_ref.cpp
     read_file.cpp
     serial_executor.cpp
-    sqlite_util.cpp
     logger.cpp
     logging_setup.cpp
     # The NameRegistry moved here from src/server/plugins when the client host
@@ -25,7 +23,7 @@ target_include_directories(minimal_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/in
 # PUBLIC, not PRIVATE: the Logger type crosses into server_core's public headers
 # (ToolContext) and from there into plugins via plugin_abi.h, so consumers need
 # spdlog's headers too. The client already links it directly.
-target_link_libraries(minimal_common PUBLIC spdlog::spdlog SQLite3::SQLite3 nlohmann_json::nlohmann_json)
+target_link_libraries(minimal_common PUBLIC spdlog::spdlog nlohmann_json::nlohmann_json)
 
 target_compile_definitions(minimal_common
     PUBLIC

@@ -412,8 +412,8 @@ target_compile_definitions(minimal_tests PRIVATE
 # The headless client is exercised as a real client here, so the test binary
 # links it -- the E2E tier is the whole point of building -p first.
 #
-# SQLite3 comes in transitively via minimal::common (it links it PUBLIC --
-# sqlite_util lives there), so it must NOT be named here as well: that puts
+# SQLite3 comes in transitively via minimal::server_core (it links it PUBLIC --
+# store's sqlite_util.hpp includes <sqlite3.h>), so it must NOT be named here as well: that puts
 # libsqlite3.a on the link line twice and ld notes the duplicate. The
 # session-store tests still see <sqlite3.h> and can build fixtures
 # (a hand-crafted newer-version database) and assert on internals

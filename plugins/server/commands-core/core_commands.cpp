@@ -12,7 +12,7 @@
 
 #include "minimal/commands/command_context.hpp"
 #include "minimal/common/config_paths.hpp"
-#include "minimal/common/file_lock.hpp"
+#include "minimal/store/file_lock.hpp"
 #include "minimal/common/model_ref.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/config/permission_codec.hpp"
@@ -724,7 +724,7 @@ public:
         // save are caught separately: a failure writing the file (a key that
         // is not valid UTF-8 cannot be dumped as JSON; the data dir cannot be
         // created) is not a lock problem and must not be reported as one.
-        std::optional<common::ExclusiveFileLock> lock;
+        std::optional<store::ExclusiveFileLock> lock;
         try {
             lock.emplace(path);
         } catch (const std::exception& e) {

@@ -37,6 +37,7 @@ endfunction()
 
 add_subdirectory(llm)
 add_subdirectory(net)
+add_subdirectory(store)
 add_subdirectory(session)
 add_subdirectory(policy)
 add_subdirectory(auth)
@@ -74,18 +75,21 @@ target_include_directories(minimal_server_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/auth/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/rpc/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/session/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/store/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/startup/include")
 
+# SQLite3 is PUBLIC because store's public headers (sqlite_util.hpp) include
+# <sqlite3.h>, and plugins with their own database (memory) build on them.
 target_link_libraries(minimal_server_core
     PUBLIC
         minimal::common
         minimal::proto
         nlohmann_json::nlohmann_json
         yaml-cpp::yaml-cpp
+        SQLite3::SQLite3
     PRIVATE
         spdlog::spdlog
-        CURL::libcurl
-        SQLite3::SQLite3)
+        CURL::libcurl)
 
 set_target_properties(minimal_server_core PROPERTIES
     VERSION "${PROJECT_VERSION}"

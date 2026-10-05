@@ -1,5 +1,5 @@
 minimal_server_module(plugins
-    DEPS llm net session policy auth config hooks tools preset commands agent
+    DEPS llm net session store policy auth config hooks tools preset commands agent
     SOURCES
         name_resolution.cpp
         plugin_loader.cpp

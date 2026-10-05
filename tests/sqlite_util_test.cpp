@@ -3,8 +3,7 @@
 // NowMillis and Stmt's success path are tested directly here. ExecChecked,
 // ThrowSqliteError, BestEffortRollback, and Stmt's OWN failure path are NOT:
 // all four are (or call into) functions defined out-of-line in
-// sqlite_util.cpp, compiled once into minimal_common, and that static archive
-// is absorbed into the SHARED minimal_server_core -- so calling them from
+// sqlite_util.cpp, compiled into the SHARED minimal_server_core -- so calling them from
 // THIS executable resolves to the dylib's copy of sqlite3's internal state,
 // while a `sqlite3*` opened by a raw sqlite3_open() call made directly in
 // this file (or in any test binary) resolves against SQLite3::SQLite3 linked
@@ -31,10 +30,11 @@
 
 #include <chrono>
 
-#include "minimal/common/sqlite_util.hpp"
+#include "minimal/common/clock.hpp"
+#include "minimal/store/sqlite_util.hpp"
 
 using minimal::common::NowMillis;
-using minimal::common::Stmt;
+using minimal::store::Stmt;
 
 TEST_CASE("NowMillis returns a plausible, monotonically-nondecreasing epoch millis",
           "[sqlite_util]") {

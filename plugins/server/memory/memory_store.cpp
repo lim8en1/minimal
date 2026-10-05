@@ -11,17 +11,18 @@
 
 #include <sqlite3.h>
 
-#include "minimal/common/file_lock.hpp"
-#include "minimal/common/sqlite_util.hpp"
+#include "minimal/store/file_lock.hpp"
+#include "minimal/common/clock.hpp"
+#include "minimal/store/sqlite_util.hpp"
 #include "minimal/common/utf8.hpp"
 #include "minimal/session/ulid.hpp"
 
 namespace minimal::memory {
 namespace {
 
-using common::ExecChecked;
-using common::Stmt;
-using common::ThrowSqliteError;
+using store::ExecChecked;
+using store::Stmt;
+using store::ThrowSqliteError;
 
 // Tables that did not change shape between v1 and v2.
 constexpr const char* kCreateAuxSql = R"sql(
@@ -382,7 +383,7 @@ auto InTransaction(sqlite3* db, const char* what, Fn&& fn) -> decltype(fn()) {
             return result;
         }
     } catch (...) {
-        common::BestEffortRollback(db);
+        store::BestEffortRollback(db);
         throw;
     }
 }
@@ -439,7 +440,7 @@ MemoryStore::MemoryStore(const std::filesystem::path& db_path) : path_(db_path) 
     std::filesystem::create_directories(db_path.parent_path());
     // The lock appends ".lock" itself (like PluginStorage/SessionDatabase);
     // v1 passed "<db>.lock" and so locked "<db>.lock.lock".
-    lock_ = std::make_unique<common::ExclusiveFileLock>(db_path);
+    lock_ = std::make_unique<store::ExclusiveFileLock>(db_path);
     if (sqlite3_open(db_path.string().c_str(), &db_) != SQLITE_OK) {
         const std::string message = db_ != nullptr ? sqlite3_errmsg(db_) : "unknown";
         sqlite3_close(db_);
