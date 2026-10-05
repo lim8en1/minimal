@@ -9,7 +9,8 @@
 
 namespace minimal::typesafe_advisor {
 
-TypesafeAdvisor::TypesafeAdvisor(Settings settings, std::string api_key, net::HttpClient http,
+TypesafeAdvisor::TypesafeAdvisor(Settings settings, common::SecretHandle api_key,
+                                 net::HttpClient http,
                                  common::Logger logger)
     : settings_(std::move(settings)),
       api_key_(std::move(api_key)),
@@ -36,7 +37,15 @@ std::optional<tools::PermissionResponse> TypesafeAdvisor::Advise(
                                                            : [] { return false; };
     if (cancelled()) return std::nullopt;
 
-    const JevOutcome outcome = AskJev(http_, settings_, api_key_, StateOf(request), cancelled);
+    std::string key;
+    try {
+        if (api_key_.configured()) key = api_key_.Get().value;
+    } catch (const std::exception& error) {
+        logger_.warn("typesafe-advisor: abstained for session {} tool '{}' (api key: {})",
+                     request.session_id, request.tool_name, error.what());
+        return std::nullopt;
+    }
+    const JevOutcome outcome = AskJev(http_, settings_, key, StateOf(request), cancelled);
     if (!outcome.ok) {
         logger_.warn("typesafe-advisor: abstained for session {} tool '{}' ({}; {} attempt(s), "
                      "{}ms)",

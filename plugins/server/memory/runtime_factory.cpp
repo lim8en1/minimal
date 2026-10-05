@@ -17,7 +17,12 @@ std::shared_ptr<MemoryRuntime> BuildMemoryRuntime(const nlohmann::json& config,
         runtime->settings = ParseMemorySettings(config);
         runtime->store = std::make_unique<MemoryStore>(data_dir / "memory.sqlite3");
 
-        auto plan = MakeEmbeddingPlan(runtime->settings, data_dir);
+        // core.secrets is core-provided before any plugin loads.
+        const auto* secrets =
+            services != nullptr ? static_cast<const config::SecretResolver*>(
+                                      services->Find(config::kSecretsServiceName))
+                                : nullptr;
+        auto plan = MakeEmbeddingPlan(runtime->settings, data_dir, secrets);
         // The one re-embed trigger: rows embedded by a different backend or
         // model go back to pending. With no backend configured, vectors are
         // left alone -- re-enabling the same backend later finds them intact.

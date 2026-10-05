@@ -5,7 +5,9 @@ add_library(minimal::test_support ALIAS minimal_test_support)
 target_include_directories(minimal_test_support INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/support")
 target_link_libraries(minimal_test_support INTERFACE minimal::server_core)
 
-add_executable(minimal_tests
+# Test binaries are EXCLUDE_FROM_ALL: a plain build (`make build`) skips them.
+# `minimal_test_binaries` (below) builds them; `make test` does so before ctest.
+add_executable(minimal_tests EXCLUDE_FROM_ALL
     permission_test.cpp
     permission_advisor_test.cpp
     permission_chain_test.cpp
@@ -61,6 +63,7 @@ add_executable(minimal_tests
     permission_codec_test.cpp
     providers_config_test.cpp
     opencode_compat_test.cpp
+    secrets_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/skills/skill_registry.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/skills/skill_access.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/skills/skill_tool.cpp"
@@ -392,7 +395,7 @@ target_include_directories(minimal_tests PRIVATE
 # which carries common publicly. Listing those again here is redundant and makes
 # CMake emit libminimal_common.a twice on the link line (harmless, but the linker
 # warns about it). Depend on the bundle.
-add_subdirectory(fixtures)
+add_subdirectory(fixtures EXCLUDE_FROM_ALL)   # built via minimal_tests, not `all`
 add_dependencies(minimal_tests
     fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
     fixture-throws fixture-advisor typesafe-advisor-fixture fixture-service fixture-service-b
@@ -438,7 +441,7 @@ target_link_libraries(minimal_tests PRIVATE
 
 # Scripted stdio MCP server spawned by the MCP tests as a real child process
 # (hand-rolled JSON-RPC, like the signal-channel fixture below).
-add_executable(minimal_mcp_fake_server support/mcp_fake_server.cpp)
+add_executable(minimal_mcp_fake_server EXCLUDE_FROM_ALL support/mcp_fake_server.cpp)
 target_link_libraries(minimal_mcp_fake_server PRIVATE nlohmann_json::nlohmann_json)
 target_compile_options(minimal_mcp_fake_server PRIVATE ${MINIMAL_WARNING_FLAGS})
 add_dependencies(minimal_tests minimal_mcp_fake_server)
@@ -462,7 +465,7 @@ add_dependencies(minimal_tests bundled_plugins)
 
 # Scripted stdio SIGNAL-CHANNEL server, hand-rolled. Deterministic
 # single-threaded emission.
-add_executable(minimal_signal_channel_server support/fake_signal_channel.cpp)
+add_executable(minimal_signal_channel_server EXCLUDE_FROM_ALL support/fake_signal_channel.cpp)
 target_compile_options(minimal_signal_channel_server PRIVATE ${MINIMAL_WARNING_FLAGS})
 add_dependencies(minimal_tests minimal_signal_channel_server)
 target_compile_definitions(minimal_tests PRIVATE
@@ -487,7 +490,7 @@ target_compile_options(minimal_tests PRIVATE ${MINIMAL_WARNING_FLAGS})
 option(MINIMAL_ENABLE_LIVE_MCP_TESTS
        "Build the live MCP smoke test (needs 'gateway' on PATH or MINIMAL_MCP_LIVE_SERVER)" OFF)
 if(MINIMAL_ENABLE_LIVE_MCP_TESTS)
-    add_executable(minimal_mcp_live_test mcp_live_test.cpp)
+    add_executable(minimal_mcp_live_test EXCLUDE_FROM_ALL mcp_live_test.cpp)
     target_sources(minimal_mcp_live_test PRIVATE support/test_main.cpp
         "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_client_manager.cpp"
         "${CMAKE_SOURCE_DIR}/plugins/server/mcp/mcp_connection.cpp"
@@ -504,6 +507,14 @@ if(MINIMAL_ENABLE_LIVE_MCP_TESTS)
         Catch2::Catch2)
     target_compile_options(minimal_mcp_live_test PRIVATE ${MINIMAL_WARNING_FLAGS})
     catch_discover_tests(minimal_mcp_live_test)
+endif()
+
+# The one target that builds every test binary. minimal_tests already depends
+# on its fixtures (fake servers, minimal-server, bundled plugins).
+add_custom_target(minimal_test_binaries)
+add_dependencies(minimal_test_binaries minimal_tests)
+if(MINIMAL_ENABLE_LIVE_MCP_TESTS)
+    add_dependencies(minimal_test_binaries minimal_mcp_live_test)
 endif()
 
 # Config seeding is CMake, so its test is CMake. Reimplementing the copy in C++

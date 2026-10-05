@@ -22,8 +22,10 @@ minimal/common/abi_tag.hpp
 minimal/common/config_paths.hpp
 minimal/common/env.hpp
 minimal/common/logger.hpp
+minimal/common/secret_handle.hpp
 minimal/config/project_trust.hpp
 minimal/config/provider_config_extensions.hpp
+minimal/config/secrets.hpp
 minimal/hooks/hook_dispatcher.hpp
 minimal/llm/metadata_catalog.hpp
 minimal/llm/model_catalog.hpp

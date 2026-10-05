@@ -20,6 +20,7 @@
 // regardless of which tool produced it.
 
 #include "minimal/plugins/plugin_abi.h"
+#include "minimal/plugins/service_registry.hpp"
 
 #include "fetch_tool.hpp"
 #include "host_permission_model.hpp"
@@ -33,7 +34,13 @@ MINIMAL_PLUGIN_ABI_SYMBOLS("tools-web")
 void minimal_plugin_register_tools(
     minimal::tools::ToolRegistry& registry,
     const minimal::plugins::PluginRegistrationContext& context) {
-    const auto settings = minimal::tools_web::ParseWebSettings(context.config);
+    // core.secrets is core-provided before any plugin loads.
+    const auto* secrets =
+        context.services != nullptr
+            ? static_cast<const minimal::config::SecretResolver*>(
+                  context.services->Find(minimal::config::kSecretsServiceName))
+            : nullptr;
+    const auto settings = minimal::tools_web::ParseWebSettings(context.config, secrets);
 
     registry.Register(minimal::tools_web::MakeWebFetchTool(settings, minimal::net::HttpClient{}));
     registry.Register(minimal::tools_web::MakeWebSearchTool(settings, minimal::net::HttpClient{}));

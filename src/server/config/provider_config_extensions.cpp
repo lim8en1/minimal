@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <utility>
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::config {
 
 void ProviderConfigExtensions::AddTranslator(
@@ -10,29 +12,33 @@ void ProviderConfigExtensions::AddTranslator(
     if (translator) translators_.push_back({attribution_, std::move(translator)});
 }
 
-void ProviderConfigExtensions::AddCredentialSource(std::shared_ptr<const CredentialSource> source) {
-    if (source) sources_.push_back({attribution_, std::move(source)});
+void ProviderConfigExtensions::AddSecretSource(std::shared_ptr<const SecretSource> source) {
+    if (!source) return;
+    if (attribution_.empty()) {
+        common::DefaultLogger().warn(
+            "secret source '{}' registered outside a plugin's registration; ignored -- its "
+            "namespace is the plugin's name",
+            source->Describe());
+        return;
+    }
+    if (FindSecretSource(attribution_) != nullptr) {
+        common::DefaultLogger().warn("plugin '{}' registered a second secret source; ignored",
+                                     attribution_);
+        return;
+    }
+    sources_.push_back({attribution_, std::move(source)});
 }
 
 void ProviderConfigExtensions::Translate(nlohmann::json& entry, const std::string& where) const {
     for (const auto& translator : translators_) translator.value->Translate(entry, where);
 }
 
-std::optional<std::string> ProviderConfigExtensions::LookupCredential(
-    const std::string& provider_name, std::string& origin) const {
+const SecretSource* ProviderConfigExtensions::FindSecretSource(
+    const std::string& plugin_name) const {
     for (const auto& source : sources_) {
-        if (auto key = source.value->Lookup(provider_name)) {
-            origin = source.value->Describe();
-            return key;
-        }
+        if (source.plugin == plugin_name) return source.value.get();
     }
-    return std::nullopt;
-}
-
-std::vector<std::string> ProviderConfigExtensions::DescribeCredentialSources() const {
-    std::vector<std::string> out;
-    for (const auto& source : sources_) out.push_back(source.value->Describe());
-    return out;
+    return nullptr;
 }
 
 void ProviderConfigExtensions::RemoveByAttribution(const std::string& plugin_name) {
@@ -48,7 +54,7 @@ std::vector<std::string> ProviderConfigExtensions::OwnedBy(const std::string& pl
         if (entry.plugin == plugin_name) out.push_back("providers.json translator");
     }
     for (const auto& entry : sources_) {
-        if (entry.plugin == plugin_name) out.push_back("credentials: " + entry.value->Describe());
+        if (entry.plugin == plugin_name) out.push_back("secrets: " + entry.value->Describe());
     }
     return out;
 }

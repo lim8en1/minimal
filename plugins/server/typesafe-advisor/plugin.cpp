@@ -18,10 +18,11 @@
 #include <memory>
 #include <utility>
 
-#include "minimal/common/env.hpp"
+#include "minimal/config/secrets.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/net/http_client.hpp"
 #include "minimal/plugins/plugin_abi.h"
+#include "minimal/plugins/service_registry.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 
 #include "advisor.hpp"
@@ -36,21 +37,29 @@ void minimal_plugin_register_permission_advisor(
     const minimal::plugins::PluginRegistrationContext& context) {
     const auto settings = minimal::typesafe_advisor::ParseSettings(context.config);
 
-    // Resolved ONCE, here: an env var that is unset at startup is a loud,
-    // contained registration failure (the plugin loads degraded, the sanity
-    // check warns that the configured advisor resolves to nothing), not a
-    // silent 401 on the first gated tool call hours later.
-    const auto api_key = minimal::common::LookupEnv(settings.api_key_env);
-    if (!api_key) {
+    // Bound ONCE, here: a reference that can never resolve (an unset env
+    // var) is a loud, contained registration failure (the plugin loads
+    // degraded, the sanity check warns that the configured advisor resolves
+    // to nothing), not a silent 401 on the first gated tool call hours later.
+    // core.secrets is core-provided before any plugin loads.
+    static const minimal::config::SecretResolver kDefaultSecrets;
+    const auto* found =
+        context.services != nullptr
+            ? static_cast<const minimal::config::SecretResolver*>(
+                  context.services->Find(minimal::config::kSecretsServiceName))
+            : nullptr;
+    minimal::common::SecretHandle api_key;
+    try {
+        api_key = (found != nullptr ? *found : kDefaultSecrets)
+                      .Bind(settings.api_key, settings.EffectiveEndpoint());
+    } catch (const std::exception& error) {
         minimal::common::DefaultLogger().error(
-            "typesafe-advisor: environment variable {} is not set; the advisor will not register "
-            "(set it, or point api_key_env elsewhere in the plugin's config)",
-            settings.api_key_env);
+            "typesafe-advisor: api_key {}; the advisor will not register", error.what());
         return;
     }
 
     registry.Register(std::make_shared<minimal::typesafe_advisor::TypesafeAdvisor>(
-        settings, *api_key, minimal::net::HttpClient{}));
+        settings, std::move(api_key), minimal::net::HttpClient{}));
 }
 
 }  // extern "C"

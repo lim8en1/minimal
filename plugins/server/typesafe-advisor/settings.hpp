@@ -22,10 +22,11 @@ enum class Backend {
 struct Settings {
     Backend backend = Backend::Typesafe;
 
-    // Resolved from the environment ONCE at registration (the ResolveApiKey
-    // convention): unset is a startup error, not a silent 401 on the first
-    // prompt. Overridden per backend when the entry does not name one.
-    std::string api_key_env = "TYPESAFE_API_KEY";
+    // A key reference (config/secrets.hpp: "env:NAME", "secret:NAME", ...),
+    // bound at registration: an unset env variable is a startup error, not a
+    // silent 401 on the first prompt. The default follows the backend when
+    // the entry names none.
+    std::string api_key = "env:TYPESAFE_API_KEY";
     std::string endpoint;  // empty = the backend's default URL
     std::string model;     // empty = the backend's default model id
 
@@ -74,11 +75,8 @@ struct Settings {
     std::string EffectiveModel() const;
 };
 
-// Throws std::runtime_error when api_key_env names an environment variable
-// that is unset -- the same fail-loud-at-startup posture providers.json's
-// ResolveApiKey takes, and for the same reason: a silently empty key fails
-// later as a cryptic 401 on the first gated tool call instead of a clear
-// startup error. Never throws for merely-unset optional config.
+// Never throws: every field is optional, and the key reference is bound (and
+// refused) at registration, not here.
 Settings ParseSettings(const nlohmann::json& config);
 
 }  // namespace minimal::typesafe_advisor

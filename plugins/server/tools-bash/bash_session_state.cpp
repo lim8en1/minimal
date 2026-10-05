@@ -15,7 +15,7 @@ namespace {
 // The server process's environment, as a sorted map. `environ` is a POSIX
 // global; reading it here (at seed time, under our lock) is the only access.
 // The server's environment carries every credential the process holds --
-// provider API keys resolved from api_key_env, operator exports -- and the
+// provider API keys read through "env:" references, operator exports -- and the
 // default seed USED to be all of it: a model-authored `env` then persisted
 // credentials into the transcript, where any later network-capable command
 // could read them. The allowlist is the intersection of "the model expects

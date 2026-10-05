@@ -1,6 +1,7 @@
 #include "core_commands.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -11,13 +12,14 @@
 #include <vector>
 
 #include "minimal/commands/command_context.hpp"
-#include "minimal/common/config_paths.hpp"
+#include "minimal/common/read_file.hpp"
 #include "minimal/store/file_lock.hpp"
 #include "minimal/common/model_ref.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/config/permission_codec.hpp"
 #include "minimal/config/project_trust.hpp"
 #include "minimal/config/providers_config.hpp"
+#include "minimal/config/secrets.hpp"
 #include "minimal/tools/atomic_write.hpp"
 #include "minimal/tools/permission.hpp"
 
@@ -670,74 +672,135 @@ private:
     }
 };
 
-// /connect <provider> <api-key> -- stores a credential in the data dir's
-// auth.json ({"<provider>": {"key": "..."}}), the same shape (and, for the
-// opencode-compat path, the same file) ResolveApiKey's credentials-file link
-// reads. Core never writes config; a command plugin writing a CREDENTIALS file
-// outside the seeded config dir is the sanctioned /connect shape.
+// /secret set <name> <value> [--host H]... | list | delete <name> -- the
+// operator's named secrets in <data dir>/secrets.json (config/secrets.hpp),
+// referenced from any key field as "secret:<name>". Core never writes config;
+// a command plugin writing the SECRETS file outside the seeded config dir is
+// the sanctioned shape. The resolver reads the file per use, so a change
+// reaches the next request with no restart.
 //
-// Sessionless AND ReadOnly: storing a credential is exactly the thing a user
-// does BEFORE any session exists (its whole purpose is bootstrapping a
-// provider connection), and ReadOnly here means what the dispatcher means by
-// it -- never touches the conversation path -- not "writes no files": the
-// auth.json merge runs inline on the RPC thread under its own cross-process
+// Sessionless AND ReadOnly: storing a key is exactly what a user does BEFORE
+// any session exists, and ReadOnly here means what the dispatcher means by it
+// -- never touches the conversation path -- not "writes no files": the
+// read-modify-write runs inline on the RPC thread under its own cross-process
 // lock, the same shape any read-only catalog fetch on the RPC thread uses.
-// Without the ReadOnly answer, DispatchSessionless refused the command with
-// the session-required wording even though RequiresSession() was false --
-// the command advertised itself in autocomplete and then could not run
-// anywhere but a sessioned tab, backwards for a pre-session command.
-class ConnectCommand : public Sessionless<HarnessCommand> {
+// Without the ReadOnly answer, DispatchSessionless refuses a Sessionless
+// command with the session-required wording.
+class SecretCommand : public Sessionless<HarnessCommand> {
 public:
-    std::string_view Name() const override { return "connect"; }
+    std::string_view Name() const override { return "secret"; }
     std::string_view Summary() const override {
-        return "Store a provider API key (used when providers.json names none)";
+        return "Store, list or delete a named secret (referenced as secret:<name>)";
     }
-    std::string_view Usage() const override { return "/connect <provider> <api-key>"; }
+    std::string_view Usage() const override {
+        return "/secret set <name> <value> [--host <host[:port]>]... | list | delete <name>";
+    }
     bool ReadOnly() const override { return true; }
 
     CommandResult Execute(CommandContext&, const CommandArgs& args) override {
-        if (args.positional.size() != 2) {
-            return CommandResult::Error("usage: /connect <provider> <api-key>");
+        const auto& words = args.positional;
+        const std::string verb = words.empty() ? "" : words[0];
+        if (verb == "list" && words.size() == 1) return List();
+        if (verb == "set" && words.size() >= 3) {
+            std::vector<std::string> hosts;
+            for (std::size_t i = 3; i < words.size(); i += 2) {
+                if (words[i] != "--host" || i + 1 >= words.size() || words[i + 1].empty()) {
+                    return CommandResult::Error("usage: " + std::string(Usage()));
+                }
+                hosts.push_back(words[i + 1]);
+            }
+            if (!ValidName(words[1]) || words[2].empty()) {
+                return CommandResult::Error(
+                    "invalid secret name or value (a name is non-empty, without ':' or spaces)");
+            }
+            return Update(words[1], [&](nlohmann::json& doc) {
+                nlohmann::json entry{{"value", words[2]}};
+                if (!hosts.empty()) entry["hosts"] = hosts;
+                doc[words[1]] = std::move(entry);
+                return std::string("stored secret '") + words[1] + "'" +
+                       (hosts.empty() ? "" : " (bound to its hosts)") +
+                       " -- reference it as secret:" + words[1];
+            });
         }
-        const std::string& provider = args.positional[0];
-        const std::string& key = args.positional[1];
-        // docs/CONFIGURATION.md's actual rule: a provider name is anything
-        // except `/` (it's a JSON object key here, not a path segment). The
-        // old allowlist (alnum, `-`, `.`) was stricter than that contract --
-        // a validly configured `my_provider` (underscore) could never be
-        // connected by name.
-        if (provider.empty() || key.empty() || provider.find('/') != std::string::npos) {
-            return CommandResult::Error("invalid provider name or key");
+        if (verb == "delete" && words.size() == 2) {
+            const std::string& name = words[1];
+            std::optional<std::string> missing;
+            auto result = Update(name, [&](nlohmann::json& doc) {
+                if (doc.erase(name) == 0) missing = "no secret '" + name + "'";
+                return "deleted secret '" + name + "'";
+            });
+            if (missing && result.status == CommandResult::Status::kOk) {
+                return CommandResult::Error(*missing);
+            }
+            return result;
         }
+        return CommandResult::Error("usage: " + std::string(Usage()));
+    }
 
-        const auto path = common::DataDir() / "auth.json";
-        // The whole read-modify-write runs under a cross-process exclusive
-        // lock: two sessions running /connect concurrently would otherwise
-        // race (both read, both merge, last writer wins) and one provider's
-        // entry would silently vanish. ExclusiveFileLock throws when the lock
-        // is held -- the command surface has no exception handler, so the
-        // refusal is converted to a command error below. The lock and the
-        // save are caught separately: a failure writing the file (a key that
-        // is not valid UTF-8 cannot be dumped as JSON; the data dir cannot be
-        // created) is not a lock problem and must not be reported as one.
+private:
+    static bool ValidName(const std::string& name) {
+        return !name.empty() && std::none_of(name.begin(), name.end(), [](unsigned char c) {
+            return c == ':' || std::isspace(c) != 0;
+        });
+    }
+
+    static CommandResult List() {
+        const auto path = config::SecretStorePath();
+        const common::ReadFileResult file = common::ReadFile(path);
+        if (file.status == common::ReadFileResult::Status::kNotFound) {
+            return CommandResult::Ok("no secrets stored (" + path.string() + ")");
+        }
+        if (!file.ok()) return CommandResult::Error(file.error);
+        std::vector<std::pair<std::string, config::SecretEntry>> entries;
+        try {
+            entries = config::ParseSecretStore(file.contents);
+        } catch (const std::exception& e) {
+            return CommandResult::Error(e.what());
+        }
+        if (entries.empty()) return CommandResult::Ok("no secrets stored (" + path.string() + ")");
+        // Names and host bindings only -- never a value.
+        std::string out = path.string() + ":";
+        for (const auto& [name, entry] : entries) {
+            out += "\n  " + name;
+            if (!entry.hosts.empty()) {
+                out += "  hosts:";
+                for (const auto& host : entry.hosts) out += " " + host;
+            }
+        }
+        return CommandResult::Ok(out);
+    }
+
+    // The whole read-modify-write runs under a cross-process exclusive lock:
+    // two sessions storing concurrently would otherwise race (both read, both
+    // merge, last writer wins) and one secret would silently vanish.
+    // ExclusiveFileLock throws when the lock is held -- the command surface
+    // has no exception handler, so the refusal is converted to a command
+    // error. The lock and the save are caught separately: a failure writing
+    // the file (a value that is not valid UTF-8 cannot be dumped as JSON; the
+    // data dir cannot be created) is not a lock problem.
+    template <typename Edit>
+    static CommandResult Update(const std::string& name, Edit edit) {
+        const auto path = config::SecretStorePath();
         std::optional<store::ExclusiveFileLock> lock;
         try {
+            // The lock file lives beside the store: on a fresh install the
+            // data dir does not exist yet.
+            std::filesystem::create_directories(path.parent_path());
             lock.emplace(path);
         } catch (const std::exception& e) {
             return CommandResult::Error("could not lock " + path.string() +
                                         " for update: " + e.what());
         }
         try {
-            return SaveCredential(path, provider, key);
+            return Save(path, edit);
         } catch (const std::exception& e) {
-            return CommandResult::Error("could not store the credential in " + path.string() +
-                                        ": " + e.what());
+            return CommandResult::Error("could not update secret '" + name + "' in " +
+                                        path.string() + ": " + e.what());
         }
     }
 
-private:
-    static CommandResult SaveCredential(const std::filesystem::path& path,
-                                        const std::string& provider, const std::string& key) {
+    template <typename Edit>
+    static CommandResult Save(const std::filesystem::path& path, Edit& edit) {
         nlohmann::json doc = nlohmann::json::object();
         {   // merge into whatever is already stored
             std::ifstream in(path);
@@ -751,15 +814,7 @@ private:
                 }
             }
         }
-        // A whole-object replace would silently discard whatever else lives
-        // under this provider's entry -- opencode's own auth.json uses an
-        // OAuth shape here ({"type":"oauth","refresh":...,"access":...}),
-        // which LookupKeyInAuthJson already tolerates by probing {"key",
-        // "api_key"}. Setting just the one field preserves the rest of
-        // whatever shape was already there.
-        if (!doc[provider].is_object()) doc[provider] = nlohmann::json::object();
-        doc[provider]["key"] = key;
-        std::filesystem::create_directories(path.parent_path());
+        const std::string message = edit(doc);
         const tools::WriteOutcome written = tools::write_file(
             path, doc.dump() + "\n",
             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
@@ -768,22 +823,21 @@ private:
                                         written.error);
         }
         // 0600, enforced EXPLICITLY and only after the write: this file holds
-        // a live API key, but write_file preserves an existing file's mode
-        // (the atomic rename swaps inodes wholesale, so create_perms only
-        // applies to a fresh file) -- a pre-existing auth.json created with
-        // wider permissions would stay wide no matter what was passed above.
+        // live keys, but write_file preserves an existing file's mode (the
+        // atomic rename swaps inodes wholesale, so create_perms only applies
+        // to a fresh file) -- a pre-existing secrets.json created with wider
+        // permissions would stay wide no matter what was passed above.
         // Failing closed: reporting an error is better than silently leaving
-        // a credential group/other-readable.
+        // a secret group/other-readable.
         std::error_code ec;
         std::filesystem::permissions(path, std::filesystem::perms::owner_read |
                                                std::filesystem::perms::owner_write,
                                      std::filesystem::perm_options::replace, ec);
         if (ec) {
-            return CommandResult::Error("stored the credential but could not restrict " +
-                                        path.string() + " to owner-only: " + ec.message());
+            return CommandResult::Error("updated but could not restrict " + path.string() +
+                                        " to owner-only: " + ec.message());
         }
-        return CommandResult::Ok("stored credential for '" + provider + "' in " + path.string() +
-                                 " -- restart the server for it to take effect");
+        return CommandResult::Ok(message);
     }
 };
 
@@ -883,7 +937,7 @@ std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     out.push_back(std::make_unique<SessionsCommand>());
     out.push_back(std::make_unique<SubagentsCommand>());
     out.push_back(std::make_unique<RenameCommand>());
-    out.push_back(std::make_unique<ConnectCommand>());
+    out.push_back(std::make_unique<SecretCommand>());
     out.push_back(std::make_unique<PermissionsCommand>());
     out.push_back(std::make_unique<TrustDirectoryCommand>());
     out.push_back(std::make_unique<UntrustDirectoryCommand>());

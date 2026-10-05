@@ -734,8 +734,8 @@ TEST_CASE("ParseWebSettings: reads fetch.* and search.*", "[tools_web][settings]
     CHECK(settings.search_default_max_results == 3);
 }
 
-TEST_CASE("ParseWebSettings: an unset search.api_key_env throws", "[tools_web][settings]") {
-    const nlohmann::json config = {{"search", {{"api_key_env", "MINIMAL_TEST_UNSET_VAR_XYZ"}}}};
+TEST_CASE("ParseWebSettings: an unset env: search.api_key throws", "[tools_web][settings]") {
+    const nlohmann::json config = {{"search", {{"api_key", "env:MINIMAL_TEST_UNSET_VAR_XYZ"}}}};
     CHECK_THROWS_AS(ParseWebSettings(config), std::runtime_error);
 }
 

@@ -5,6 +5,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/common/secret_handle.hpp"
+#include "minimal/config/secrets.hpp"
+
 namespace minimal::tools_web {
 
 // This plugin's own config, the "config" object on its plugins.json entry --
@@ -36,26 +39,26 @@ struct WebSettings {
     // is discoverable and its absence is not a surprise), but reports that
     // plainly rather than failing as if misconfigured.
     std::string search_api_url;
-    // Same api_key_env convention as providers.json (providers_config.cpp):
-    // the key is resolved from the environment once, at parse time, and sent
-    // as `Authorization: Bearer <key>` when non-empty.
-    std::string search_api_key_env;
+    // A key reference, the same syntax providers.json's api_key takes
+    // ("env:NAME", "secret:NAME", "secret:<plugin>:NAME", or a literal --
+    // config/secrets.hpp). Sent as `Authorization: Bearer <key>`.
+    std::string search_api_key_ref;
     int search_default_max_results = 5;
     int search_max_results = 20;
     int search_timeout_ms = 10000;
 
-    // Resolved from search_api_key_env at parse time -- see ParseWebSettings.
-    // Empty when search_api_key_env is unset; that is not an error (a local
-    // SearXNG instance needs no key, the same "a local server needs none"
-    // case providers.json's ResolveApiKey makes).
-    std::string search_api_key;
+    // search_api_key_ref bound at parse time, read per search (a secret
+    // stored later reaches the next search). Unconfigured when no key is set;
+    // that is not an error (a local SearXNG instance needs none).
+    common::SecretHandle search_api_key;
 };
 
-// Throws std::runtime_error if search_api_key_env names an environment
-// variable that is unset -- the same fail-loud-at-startup posture
-// providers.json's ResolveApiKey takes, and for the same reason: a silently
-// empty key fails later as a cryptic 401 instead of a clear startup error.
-// Never throws for search being simply unconfigured (search_api_url empty).
-WebSettings ParseWebSettings(const nlohmann::json& config);
+// Throws std::runtime_error if search.api_key can never resolve (malformed,
+// an unset "env:" variable) -- a silently empty key fails later as a cryptic
+// 401 instead of a clear startup error. Never throws for search being simply
+// unconfigured (search_api_url empty). `secrets` null = the default resolver
+// (the operator's store, no plugin namespaces).
+WebSettings ParseWebSettings(const nlohmann::json& config,
+                             const config::SecretResolver* secrets = nullptr);
 
 }  // namespace minimal::tools_web

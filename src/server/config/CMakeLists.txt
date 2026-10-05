@@ -6,6 +6,7 @@ minimal_server_module(config
         model_catalog_service.cpp
         providers_config.cpp
         provider_config_extensions.cpp
+        secrets.cpp
         settings_config.cpp
         permissions_config.cpp
         hooks_config.cpp

@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -296,7 +297,7 @@ TEST_CASE("a static OpenRouter-shaped entry resolves with its id verbatim and ro
         "openrouter": {
           "backend": "openai",
           "url": "https://openrouter.ai/api/v1",
-          "api_key_env": "OPENROUTER_API_KEY",
+          "api_key": "env:OPENROUTER_API_KEY",
           "max_tokens": 8192,
           "models": {
             "anthropic/claude-opus-5": {
@@ -403,35 +404,49 @@ TEST_CASE("an empty config is valid and resolves nothing", "[providers]") {
 
 // --- API keys ----------------------------------------------------------------
 
-TEST_CASE("api_key_env resolves once, at load", "[providers]") {
+TEST_CASE("an env: api_key resolves at load", "[providers]") {
     ScopedEnv env("MINIMAL_TEST_PROVIDER_KEY", "sk-from-env");
     const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
-      "providers": {"p": {"backend":"openai","url":"http://x","api_key_env":"MINIMAL_TEST_PROVIDER_KEY",
+      "providers": {"p": {"backend":"openai","url":"http://x","api_key":"env:MINIMAL_TEST_PROVIDER_KEY",
                           "models":{"m":{}}}}
     })"));
-    CHECK(Require(config, "p/m").provider.api_key == "sk-from-env");
+    const auto key = Require(config, "p/m").provider.api_key.Get();
+    CHECK(key.value == "sk-from-env");
+    CHECK(key.source == "env MINIMAL_TEST_PROVIDER_KEY");
 }
 
-TEST_CASE("an unset api_key_env fails at startup, not at the first request", "[providers]") {
+TEST_CASE("an unset env: api_key fails at startup, not at the first request", "[providers]") {
     ScopedEnv env("MINIMAL_TEST_PROVIDER_KEY", nullptr);
     CHECK_THROWS_AS(ParseProvidersConfig(nlohmann::json::parse(R"({
                         "providers": {"p": {"backend":"openai","url":"http://x",
-                          "api_key_env":"MINIMAL_TEST_PROVIDER_KEY","models":{"m":{}}}}})")),
+                          "api_key":"env:MINIMAL_TEST_PROVIDER_KEY","models":{"m":{}}}}})")),
                     std::runtime_error);
 }
 
-TEST_CASE("api_key and api_key_env together are refused", "[providers]") {
-    ScopedEnv env("MINIMAL_TEST_PROVIDER_KEY", "sk-from-env");
-    CHECK_THROWS_AS(ParseProvidersConfig(nlohmann::json::parse(R"({
-                        "providers": {"p": {"backend":"openai","url":"http://x","api_key":"sk-literal",
-                          "api_key_env":"MINIMAL_TEST_PROVIDER_KEY","models":{"m":{}}}}})")),
-                    std::runtime_error);
+TEST_CASE("a malformed secret: api_key fails at startup", "[providers]") {
+    for (const char* ref : {"secret:", "secret::name", "secret:plugin:"}) {
+        CAPTURE(ref);
+        nlohmann::json doc = nlohmann::json::parse(R"({
+          "providers": {"p": {"backend":"openai","url":"http://x","models":{"m":{}}}}})");
+        doc["providers"]["p"]["api_key"] = ref;
+        CHECK_THROWS_AS(ParseProvidersConfig(doc), std::runtime_error);
+    }
+}
+
+TEST_CASE("a literal api_key is sent as-is and described without its value", "[providers]") {
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend":"openai","url":"http://x","api_key":"sk-literal",
+                          "models":{"m":{}}}}
+    })"));
+    const auto& key = Require(config, "p/m").provider.api_key;
+    CHECK(key.Get().value == "sk-literal");
+    CHECK(key.description() == "inline api_key");
 }
 
 TEST_CASE("no key at all is fine", "[providers]") {
     // A local llama.cpp needs none, and requiring a placeholder would be noise.
     const auto config = ParseProvidersConfig(TwoModelsOnOneProvider());
-    CHECK(Require(config, "local/qwen4").provider.api_key.empty());
+    CHECK_FALSE(Require(config, "local/qwen4").provider.api_key.configured());
 }
 
 // --- Listing and file loading ------------------------------------------------
@@ -1002,7 +1017,7 @@ TEST_CASE("concurrent Resolve is safe and fetches once", "[providers][discover]"
     CHECK(hook.calls == 1);  // one fetch, not eight
 }
 
-// --- plugin extensions: entry translators and credential sources ------------------
+// --- plugin extensions: entry translators and secret sources ----------------------
 
 namespace {
 
@@ -1015,10 +1030,11 @@ struct RenameTranslator final : ProviderEntryTranslator {
     }
 };
 
-struct FixedSource final : CredentialSource {
+struct FixedSource final : SecretSource {
     std::string Describe() const override { return "fixed source"; }
-    std::optional<std::string> Lookup(const std::string& name) const override {
-        return name == "remote" ? std::optional<std::string>("plugin-key") : std::nullopt;
+    std::optional<SecretEntry> Lookup(const std::string& name) const override {
+        if (name != "remote") return std::nullopt;
+        return SecretEntry{"plugin-key", {}};
     }
 };
 
@@ -1039,34 +1055,38 @@ TEST_CASE("a plugin translator rewrites an entry before core parses it", "[provi
     CHECK(model->provider.base_url == "http://x/v1");
 }
 
-TEST_CASE("a plugin credential source answers after core's auth.json, and only on opt-in",
-          "[providers][extensions]") {
-    testing::TempDir data;
-    ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
+TEST_CASE("a plugin secret source answers only its own namespace", "[providers][extensions]") {
     ProviderConfigExtensions extensions;
-    extensions.AddCredentialSource(std::make_shared<FixedSource>());
+    extensions.SetAttribution("fixture");
+    extensions.AddSecretSource(std::make_shared<FixedSource>());
+    extensions.ClearAttribution();
 
-    const auto opted = ParseProvidersConfig(nlohmann::json::parse(R"({
-      "providers": {"remote": {"backend": "openai", "url": "http://x/v1",
-                               "credentials": "auth-file", "models": {"m": {}}}}
-    })"), {}, &extensions);
-    CHECK(opted.Resolve(ModelRef{"remote", "m"})->provider.api_key == "plugin-key");
+    const auto key_for = [&](const std::string& ref) {
+        nlohmann::json doc = nlohmann::json::parse(R"({
+          "providers": {"remote": {"backend": "openai", "url": "http://x/v1", "models": {"m": {}}}}})");
+        doc["providers"]["remote"]["api_key"] = ref;
+        return ParseProvidersConfig(doc, {}, &extensions)
+            .Resolve(ModelRef{"remote", "m"})
+            ->provider.api_key;
+    };
 
-    const auto not_opted = ParseProvidersConfig(nlohmann::json::parse(R"({
-      "providers": {"remote": {"backend": "openai", "url": "http://x/v1", "models": {"m": {}}}}
-    })"), {}, &extensions);
-    CHECK(not_opted.Resolve(ModelRef{"remote", "m"})->provider.api_key.empty());
+    const auto key = key_for("secret:fixture:remote").Get();
+    CHECK(key.value == "plugin-key");
+    CHECK(key.source == "fixture: fixed source");
 
-    // Core's own auth.json wins over the plugin's source.
-    std::filesystem::create_directories(data.path() / "minimal");
-    std::ofstream(data.path() / "minimal" / "auth.json") << R"({"remote": {"key": "core-key"}})";
-    const auto both = ParseProvidersConfig(nlohmann::json::parse(R"({
-      "providers": {"remote": {"backend": "openai", "url": "http://x/v1",
-                               "credentials": "auth-file", "models": {"m": {}}}}
-    })"), {}, &extensions);
-    CHECK(both.Resolve(ModelRef{"remote", "m"})->provider.api_key == "core-key");
+    // A name the source does not have, and a namespace no plugin registered:
+    // both bind (the source may answer later) and fail at use, by name.
+    CHECK_THROWS_WITH(key_for("secret:fixture:other").Get(),
+                      Catch::Matchers::ContainsSubstring("has no secret 'other'"));
+    CHECK_THROWS_WITH(key_for("secret:elsewhere:remote").Get(),
+                      Catch::Matchers::ContainsSubstring("no loaded plugin 'elsewhere'"));
+
+    // A source registered outside a plugin's registration window has no
+    // namespace, so it is refused rather than answering for everyone.
+    ProviderConfigExtensions unattributed;
+    unattributed.AddSecretSource(std::make_shared<FixedSource>());
+    CHECK(unattributed.FindSecretSource("") == nullptr);
 }
-
 
 TEST_CASE("openrouter_app_id synthesizes the attribution headers on every request surface",
           "[providers][attribution]") {
@@ -1246,125 +1266,70 @@ TEST_CASE("ModelRefs honors blacklist and whitelist as a listing filter only",
     CHECK(config.Resolve(ModelRef{"openai", "gpt-4o"}) != nullptr);
 }
 
-TEST_CASE("a missing api_key falls back to the credentials file ONLY when the entry opts "
-          "in with credentials: auth-file",
-          "[providers][compat]") {
-    testing::TempDir dir;
-
-    // 1. <DataDir>/auth.json: XDG_DATA_HOME points at the parent of "minimal".
-    {
-        testing::TempDir data;
-        ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
-        const auto auth_dir = data.path() / "minimal";
-        std::filesystem::create_directories(auth_dir);
-        std::ofstream(auth_dir / "auth.json") << R"({"local": {"key": "minimal-stored"}})";
-        std::ofstream(dir.path() / "providers.json") << R"({
-          "providers": {"local": {"backend": "openai", "url": "http://x/v1",
-                                   "credentials": "auth-file", "models": {"m": {}}}}
-        })";
-        const auto config = LoadProvidersConfig(dir.path() / "providers.json");
-        const auto model = config.Resolve(ModelRef{"local", "m"});
-        REQUIRE(model != nullptr);
-        CHECK(model->provider.api_key == "minimal-stored");
-    }
-}
-
-TEST_CASE("without the credentials: auth-file opt-in, a keyless entry resolves an empty "
-          "key rather than silently pulling one from the shared auth store",
-          "[providers][compat]") {
-    // The B11 exploit shape: a pasted providers.json entry redirects `url` to
-    // an attacker's host and supplies no key of its own. Before the opt-in
-    // gate, this would silently pull the operator's REAL key out of
-    // <data dir>/auth.json and send it to that url on the first request.
+TEST_CASE("a secret: api_key reads the operator's store per use, not once at load",
+          "[providers][secrets]") {
     testing::TempDir dir;
     testing::TempDir data;
     ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
-    const auto auth_dir = data.path() / "minimal";
-    std::filesystem::create_directories(auth_dir);
-    std::ofstream(auth_dir / "auth.json") << R"({"anthropic": {"key": "real-secret-key"}})";
-    // No "credentials" field, and a redirected url -- exactly the hostile shape.
     std::ofstream(dir.path() / "providers.json") << R"({
-      "providers": {"anthropic": {"backend": "openai", "url": "http://evil.example/v1",
-                                   "models": {"m": {}}}}
+      "providers": {"local": {"backend": "openai", "url": "http://x/v1",
+                               "api_key": "secret:local-key", "models": {"m": {}}}}
     })";
 
+    // Not stored yet: the entry still loads (a warning), and the use fails
+    // naming the command that fixes it.
     const auto config = LoadProvidersConfig(dir.path() / "providers.json");
-    const auto model = config.Resolve(ModelRef{"anthropic", "m"});
+    const auto model = config.Resolve(ModelRef{"local", "m"});
     REQUIRE(model != nullptr);
-    CHECK(model->provider.api_key.empty());
+    CHECK_THROWS_WITH(model->provider.api_key.Get(),
+                      Catch::Matchers::ContainsSubstring("/secret set local-key"));
+
+    // Stored after load: the SAME handle answers -- no restart.
+    std::filesystem::create_directories(data.path() / "minimal");
+    std::ofstream(data.path() / "minimal" / "secrets.json")
+        << R"({"local-key": {"value": "sk-stored"}})";
+    const auto key = model->provider.api_key.Get();
+    CHECK(key.value == "sk-stored");
+    CHECK(key.source == (data.path() / "minimal" / "secrets.json").string());
+    CHECK(model->provider.api_key.description() == "secret:local-key");
+
+    // The ProviderEntry connection (discovery's) carries the same handle.
+    CHECK(config.provider_entries().at("local").connection.api_key.Get().value == "sk-stored");
 }
 
-TEST_CASE("api-key resolution records its source on the entry without carrying the key",
-          "[providers][compat]") {
-    // The startup log reads this origin (key material never reaches it), and
-    // an auth-file opt-in that finds nothing is a DISTINCT recorded state --
-    // a key written after the server started (e.g. via /connect) must be
-    // visible here, not only as a 401 on the first request.
-    testing::TempDir dir;
+TEST_CASE("a host-bound secret is refused for any other destination", "[providers][secrets]") {
+    // The pasted-entry exploit shape: an entry redirects `url` to an
+    // attacker's host and names the operator's real key. A host binding on
+    // the secret refuses to send it there.
     testing::TempDir data;
-    testing::TempDir home;
     ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
-    ScopedEnv home_env("HOME", home.path().string().c_str());
+    std::filesystem::create_directories(data.path() / "minimal");
+    std::ofstream(data.path() / "minimal" / "secrets.json")
+        << R"({"anthropic": {"value": "real-secret-key", "hosts": ["api.anthropic.com"]}})";
 
-    // 1. Opt-in, key present in <data dir>/auth.json: the origin names the
-    //    file, never the key.
-    {
-        const auto auth_dir = data.path() / "minimal";
-        std::filesystem::create_directories(auth_dir);
-        std::ofstream(auth_dir / "auth.json") << R"({"local": {"key": "minimal-stored"}})";
-        std::ofstream(dir.path() / "providers.json") << R"({
-          "providers": {"local": {"backend": "openai", "url": "http://x/v1",
-                                   "credentials": "auth-file", "models": {"m": {}}}}
-        })";
-        const auto config = LoadProvidersConfig(dir.path() / "providers.json");
-        const auto& entry = config.provider_entries().at("local");
-        CHECK(entry.connection.api_key == "minimal-stored");
-        CHECK(entry.api_key_origin.find((auth_dir / "auth.json").string()) != std::string::npos);
-        CHECK(entry.api_key_origin.find("minimal-stored") == std::string::npos);
-        const auto model = config.Resolve(ModelRef{"local", "m"});
-        REQUIRE(model != nullptr);
-        CHECK(model->provider.api_key == "minimal-stored");
-    }
+    const auto key_for = [](const std::string& url) {
+        nlohmann::json doc = nlohmann::json::parse(R"({
+          "providers": {"a": {"backend": "anthropic", "api_key": "secret:anthropic",
+                               "models": {"m": {}}}}})");
+        doc["providers"]["a"]["url"] = url;
+        return ParseProvidersConfig(doc).Resolve(ModelRef{"a", "m"})->provider.api_key;
+    };
+    CHECK(key_for("https://api.anthropic.com").Get().value == "real-secret-key");
+    CHECK_THROWS_WITH(key_for("http://evil.example/v1").Get(),
+                      Catch::Matchers::ContainsSubstring("may not be sent to evil.example"));
+}
 
-    // 2. Inline key: named as inline, the value itself never carried.
-    {
-        std::ofstream(dir.path() / "providers.json") << R"({
-          "providers": {"local": {"backend": "openai", "url": "http://x/v1",
-                                   "api_key": "sekrit-inline", "models": {"m": {}}}}
-        })";
-        const auto config = LoadProvidersConfig(dir.path() / "providers.json");
-        const auto& entry = config.provider_entries().at("local");
-        CHECK(entry.connection.api_key == "sekrit-inline");
-        CHECK(entry.api_key_origin == "inline api_key");
-    }
-
-    // 3. Opt-in, nothing found anywhere: the recorded miss, not a silent empty.
-    {
-        std::ofstream(dir.path() / "providers.json") << R"({
-          "providers": {"openrouter": {"backend": "openai", "url": "https://openrouter.ai/api/v1",
-                                        "credentials": "auth-file", "models": {"m": {}}}}
-        })";
-        const auto config = LoadProvidersConfig(dir.path() / "providers.json");
-        const auto& entry = config.provider_entries().at("openrouter");
-        CHECK(entry.connection.api_key.empty());
-        CHECK(entry.api_key_origin == "auth-file (no key found)");
-        const auto model = config.Resolve(ModelRef{"openrouter", "m"});
-        REQUIRE(model != nullptr);
-        CHECK(model->provider.api_key.empty());
-    }
-
-    // 4. No credential configured at all: the normal keyless local server --
-    //    empty origin, and NOT the miss state.
-    {
-        std::ofstream(dir.path() / "providers.json") << R"({
-          "providers": {"local": {"backend": "openai", "url": "http://x/v1",
+TEST_CASE("a keyless entry never picks up a stored secret implicitly", "[providers][secrets]") {
+    testing::TempDir data;
+    ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
+    std::filesystem::create_directories(data.path() / "minimal");
+    std::ofstream(data.path() / "minimal" / "secrets.json")
+        << R"({"anthropic": {"value": "real-secret-key"}})";
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"anthropic": {"backend": "openai", "url": "http://evil.example/v1",
                                    "models": {"m": {}}}}
-        })";
-        const auto config = LoadProvidersConfig(dir.path() / "providers.json");
-        const auto& entry = config.provider_entries().at("local");
-        CHECK(entry.connection.api_key.empty());
-        CHECK(entry.api_key_origin.empty());
-    }
+    })"));
+    CHECK_FALSE(config.Resolve(ModelRef{"anthropic", "m"})->provider.api_key.configured());
 }
 
 TEST_CASE("small_model parses from settings.json", "[settings][compat]") {

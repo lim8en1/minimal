@@ -62,7 +62,7 @@ std::optional<ResolvedLlm> ProviderResolver::ResolveLlm(std::string_view provide
 
 bool ProviderResolver::SameConnection(const AgentPreset& a, const AgentPreset& b) {
     return a.model_ref.provider == b.model_ref.provider && a.provider_kind == b.provider_kind &&
-           a.provider.base_url == b.provider.base_url && a.provider.api_key == b.provider.api_key;
+           a.provider.base_url == b.provider.base_url && a.provider.api_key == b.provider.api_key;  // same reference, not same value
 }
 
 }  // namespace minimal::agent

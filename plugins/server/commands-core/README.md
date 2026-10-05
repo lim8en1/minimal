@@ -18,7 +18,7 @@ The built-in `/-commands`, as one plugin.
 | `/rename` | `/rename <name>` | Renames this session (the raw tail, spaces allowed); an explicit name is never overwritten by the titler. |
 | `/mcp` | `/mcp [name enable\|disable]` | Bare form opens the MCP picker; with a name, enables/disables that server live, without a restart. Needs no session. |
 | `/permissions` | `/permissions [revoke <key>\|all] [check <tool> <json-input>]` | Shows this session's effective permission rules and grants; revokes grants; dry-runs a call through the gate. |
-| `/connect` | `/connect <provider> <api-key>` | Stores a credential in the data dir's `auth.json` (mode 0600), used when the provider's providers.json entry names no key. Takes effect after a server restart. |
+| `/secret` | `/secret set <name> <value> [--host <host[:port]>]...` · `list` · `delete <name>` | Manages the named secrets in the data dir's `secrets.json` (mode 0600), referenced from any key field as `secret:<name>` (docs/CONFIGURATION.md § Secrets). `--host` binds where the value may be sent. Takes effect on the next request; `list` never shows values. |
 
 ## Configuration
 

@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "minimal/common/secret_handle.hpp"
 #include "minimal/llm/chat.hpp"
 #include "minimal/llm/stream_event.hpp"
 
@@ -12,7 +13,9 @@ namespace minimal::llm {
 
 struct ProviderConfig {
     std::string base_url;
-    std::string api_key;
+    // Read per request (Get), so a secret stored with /secret set reaches the
+    // next request. Unconfigured for a keyless server.
+    common::SecretHandle api_key;
     std::string model_name;
     // Extra HTTP headers from providers.json ("headers": {"X-Thing": "value"},
     // or the opencode-compat options.headers). The bundled chat providers
@@ -77,6 +80,18 @@ private:
     std::optional<int> http_status_;
     std::optional<std::chrono::milliseconds> retry_after_;
 };
+
+// The connection's key for one request, or nullopt for a keyless connection.
+// A reference that does not resolve right now (a secret not stored yet, a
+// host binding refusing this url) is an AuthError: retrying cannot fix it.
+inline std::optional<std::string> RequestApiKey(const ProviderConfig& config) {
+    if (!config.api_key.configured()) return std::nullopt;
+    try {
+        return config.api_key.Get().value;
+    } catch (const std::exception& error) {
+        throw LlmError(LlmErrorCategory::AuthError, std::string("api key: ") + error.what());
+    }
+}
 
 // Deliberately two methods. An earlier QueryExtension/ProviderExtension
 // capability-query layer was deleted once its only consumer (llama.cpp KV-cache

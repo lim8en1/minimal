@@ -48,7 +48,8 @@ CircuitBreaker::State CircuitBreaker::Snapshot(Clock::time_point now) const {
 // ------------------------------------------------------------------- plan
 
 EmbeddingPlan MakeEmbeddingPlan(const MemorySettings& settings,
-                                const std::filesystem::path& data_dir) {
+                                const std::filesystem::path& data_dir,
+                                const config::SecretResolver* secrets) {
     // "auto" walks sidecar -> http -> none. The winner is what /memory
     // reports, so the resolution is never a silent fallback.
     auto strategy = settings.strategy;
@@ -61,8 +62,12 @@ EmbeddingPlan MakeEmbeddingPlan(const MemorySettings& settings,
     if (strategy == StrategyKind::kHttp && !settings.api_base.empty()) {
         plan.strategy = "http";
         plan.signature = HttpEmbeddingFunction::SignatureFor(settings);
-        plan.factory = [settings] {
-            return std::make_unique<HttpEmbeddingFunction>(settings, net::HttpClient{});
+        plan.factory = [settings, secrets] {
+            static const config::SecretResolver kDefaultSecrets;
+            const auto& resolver = secrets != nullptr ? *secrets : kDefaultSecrets;
+            return std::make_unique<HttpEmbeddingFunction>(
+                settings, resolver.Bind(settings.api_key, settings.api_base + "/embeddings"),
+                net::HttpClient{});
         };
     } else if (strategy == StrategyKind::kSidecar && !settings.sidecar_model.empty()) {
         plan.strategy = "sidecar";

@@ -40,8 +40,8 @@ net::HttpRequest OpenAiProvider::BuildHttpRequest(std::string body, bool streami
     while (!base.empty() && base.back() == '/') base.pop_back();
     request.url = base + "/chat/completions";
     request.headers.push_back({"Content-Type", "application/json"});
-    if (!config_.api_key.empty()) {
-        request.headers.push_back({"Authorization", "Bearer " + config_.api_key});
+    if (const auto key = llm::RequestApiKey(config_)) {
+        request.headers.push_back({"Authorization", "Bearer " + *key});
     }
     for (const auto& [name, value] : config_.headers) {
         request.headers.push_back({name, value});

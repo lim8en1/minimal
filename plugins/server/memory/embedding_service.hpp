@@ -25,6 +25,7 @@
 
 #include "embedding.hpp"
 #include "memory_settings.hpp"
+#include "minimal/config/secrets.hpp"
 
 namespace minimal::common {
 class Logger;
@@ -74,8 +75,13 @@ struct EmbeddingPlan {
     // strategy == "none".
     std::function<std::unique_ptr<EmbeddingFunction>()> factory;
 };
+// `secrets` binds the http backend's `api_key` reference when the backend is
+// created; null = the default resolver (the operator's store, no plugin
+// namespaces). A reference that can never resolve fails that creation, which
+// the breaker reports like any other unavailable backend.
 EmbeddingPlan MakeEmbeddingPlan(const MemorySettings& settings,
-                                const std::filesystem::path& data_dir);
+                                const std::filesystem::path& data_dir,
+                                const config::SecretResolver* secrets = nullptr);
 
 class EmbeddingService {
 public:

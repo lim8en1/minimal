@@ -128,8 +128,13 @@ public:
         net::HttpRequest request;
         request.url = url;
         request.request_timeout = std::chrono::milliseconds(settings_.search_timeout_ms);
-        if (!settings_.search_api_key.empty()) {
-            request.headers.push_back({"Authorization", "Bearer " + settings_.search_api_key});
+        if (settings_.search_api_key.configured()) {
+            try {
+                request.headers.push_back(
+                    {"Authorization", "Bearer " + settings_.search_api_key.Get().value});
+            } catch (const std::exception& error) {
+                return Error(std::string("web_search: api key: ") + error.what());
+            }
         }
 
         net::HttpResponse response;

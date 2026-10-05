@@ -20,7 +20,7 @@ struct MemorySettings {
 
     // --- http backend ---
     std::string api_base;        // e.g. "http://127.0.0.1:8080/v1"; no default
-    std::string api_key_env;     // env var NAME; empty = no auth header
+    std::string api_key;         // key reference ("env:X", "secret:X"); empty = no auth header
     std::string model;           // backend-side model name, e.g. "nomic-embed-text"
     int timeout_ms = 30000;      // whole-transfer cap per embeddings call
 

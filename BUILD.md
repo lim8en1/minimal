@@ -176,15 +176,21 @@ Every preset inherits `default`, so all of them need a vcpkg checkout — via
 | Option | Default | Description |
 |---|---|---|
 | `MINIMAL_BUILD_CLIENT` | `ON` | Build the FTXUI TUI client (`minimal`) |
-| `MINIMAL_BUILD_TESTS` | `ON` | Build the Catch2 test suite |
+| `MINIMAL_BUILD_TESTS` | `ON` | Configure the Catch2 test suite (its binaries are excluded from the default target; build `minimal_test_binaries`) |
 | `MINIMAL_PLUGIN_INSTALL_DIR` | `<libdir>/minimal/plugins/server` | Install location for bundled server plugins |
 | `MINIMAL_CLIENT_PLUGIN_INSTALL_DIR` | `<libdir>/minimal/plugins/client` | Install location for bundled client plugins |
 | `MINIMAL_RUNTIME_DEP_INSTALL_DIR` | `<libdir>/minimal/runtime` | Install location for the gathered vcpkg runtime libraries (never `<libdir>` itself -- see "Dependency linkage") |
 
 ## Tests
 
+Test binaries are not in the default build target, so `make build` skips them.
+
 ```sh
-ctest --preset default   # or: make test
+make test                # builds the test binaries, then runs ctest
+make build-tests         # build everything including tests (= make build TESTS=1)
+# by hand:
+cmake --build --preset default --target all minimal_test_binaries
+ctest --preset default
 ```
 
 Use `ctest --preset asan` / `ctest --preset tsan` with the sanitizer builds.

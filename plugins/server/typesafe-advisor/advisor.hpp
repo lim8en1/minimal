@@ -3,6 +3,7 @@
 #include <memory>
 #include <optional>
 
+#include "minimal/common/secret_handle.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/net/http_client.hpp"
 #include "minimal/tools/permission_advisor.hpp"
@@ -24,7 +25,8 @@ namespace minimal::typesafe_advisor {
 // arrives by value into a thread that may be detached and outlive the session.
 class TypesafeAdvisor : public tools::PermissionAdvisor {
 public:
-    TypesafeAdvisor(Settings settings, std::string api_key, net::HttpClient http,
+    // `api_key` is read per Advise call; one that does not resolve abstains.
+    TypesafeAdvisor(Settings settings, common::SecretHandle api_key, net::HttpClient http,
                     common::Logger logger = common::DefaultLogger());
 
     // nullopt = abstain: the human decides. A decisive Allow carries every key
@@ -38,7 +40,7 @@ private:
     nlohmann::json StateOf(const tools::PermissionRequest& request) const;
 
     Settings settings_;
-    std::string api_key_;
+    common::SecretHandle api_key_;
     net::HttpClient http_;
     common::Logger logger_;
 };

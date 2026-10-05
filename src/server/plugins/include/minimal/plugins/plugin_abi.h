@@ -314,10 +314,10 @@ void minimal_plugin_describe_project_content(
     std::vector<minimal::config::ProjectContentCount>& out);
 
 // OPTIONAL, additive: providers.json extensions -- entry translators that
-// rewrite another tool's provider shape into core's before it is parsed, and
-// credential sources consulted after core's own auth.json
-// (config/provider_config_extensions.hpp). Runs at load, before providers.json
-// is read.
+// rewrite another tool's provider shape into core's before it is parsed, and a
+// secret source answering "secret:<plugin>:NAME" references
+// (config/provider_config_extensions.hpp, config/secrets.hpp). Runs at load,
+// before providers.json is read.
 void minimal_plugin_register_provider_config_extensions(
     minimal::config::ProviderConfigExtensions&, const minimal::plugins::PluginRegistrationContext&);
 

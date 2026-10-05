@@ -5,11 +5,11 @@
 #include <stdexcept>
 #include <utility>
 
-#include "minimal/common/config_paths.hpp"
-#include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"
-#include "minimal/common/read_file.hpp"
+#include "minimal/common/secret_handle.hpp"
 #include "minimal/config/json_config_loader.hpp"
+#include "minimal/config/provider_config_extensions.hpp"
+#include "minimal/config/secrets.hpp"
 
 namespace minimal::config {
 namespace {
@@ -24,130 +24,21 @@ std::string RequireString(const nlohmann::json& node, const std::string& key,
     return node.at(key).get<std::string>();
 }
 
-// api_key or api_key_env, never both. Resolved once here so nothing downstream
-// touches the environment -- and so an unset variable fails at startup rather
-// than on the first request.
-
-// How an entry's api key came to be. Carries where the key came from, never
-// the key itself, so it can be logged verbatim: credentials resolve ONCE at
-// parse time, so a key written after the server started (e.g. via /connect)
-// is invisible to the running process until restart -- the startup line is
-// the only trace of that freeze.
-struct ApiKeyResolution {
-    std::string key;
-    std::string origin;  // "" when no key resolved and none was expected
-    bool auth_file_opt_in = false;  // the entry set "credentials": "auth-file"
-};
-
-std::optional<std::string> LookupCredentialsFile(const std::string& provider_name,
-                                                 std::string& origin,
-                                                 const ProviderConfigExtensions* extensions);
-
-ApiKeyResolution ResolveApiKey(const nlohmann::json& provider, const std::string& where,
-                               const std::string& provider_name,
-                               const ProviderConfigExtensions* extensions) {
-    const bool has_key = provider.contains("api_key") && provider.at("api_key").is_string() &&
-                         !provider.at("api_key").get<std::string>().empty();
-    const bool has_env = provider.contains("api_key_env") &&
-                         provider.at("api_key_env").is_string() &&
-                         !provider.at("api_key_env").get<std::string>().empty();
-    if (has_key && has_env) {
-        throw std::runtime_error("providers.json: " + where + " sets both api_key and api_key_env");
-    }
-    if (has_key) {
-        return {provider.at("api_key").get<std::string>(), "inline api_key"};
-    }
-    if (!has_env) {
-        // No inline key, no env: the credentials file is the last link -- but
-        // ONLY when this entry explicitly opts in with `"credentials":
-        // "auth-file"`. Without that gate, the fallback decouples "who names
-        // the request URL" from "who holds the secret": a providers.json entry
-        // pasted from an untrusted source, redirecting `url`/`options.baseURL`
-        // to an attacker's host and supplying no key of its own, would
-        // otherwise silently pull the operator's REAL key out of the shared
-        // auth store (this file, then any plugin credential source) and send it wherever
-        // `url` points -- on the first request, with nothing in providers.json
-        // that looks like a credential at all. Opt-in makes using the shared
-        // store a deliberate, visible act instead of an implicit default;
-        // without it, an entry with neither an inline key nor api_key_env
-        // resolves empty, same as before this fallback existed.
-        const bool opt_in = provider.contains("credentials") &&
-                            provider.at("credentials").is_string() &&
-                            provider.at("credentials").get<std::string>() == "auth-file";
-        ApiKeyResolution resolved;
-        resolved.auth_file_opt_in = opt_in;
-        if (!opt_in) return resolved;
-        std::string found_in;
-        if (auto key = LookupCredentialsFile(provider_name, found_in, extensions)) {
-            resolved.key = std::move(*key);
-            resolved.origin = "auth-file (" + found_in + ")";
-        } else {
-            // The explicit miss state: distinguishable from "configured no
-            // credential" on the entry, and the input to the startup warning.
-            resolved.origin = "auth-file (no key found)";
-        }
-        return resolved;
-    }
-
-    const std::string name = provider.at("api_key_env").get<std::string>();
-    const auto value = common::LookupEnv(name);
-    if (!value) {
-        throw std::runtime_error("providers.json: " + where + " names api_key_env '" + name +
-                                 "' which is unset");
-    }
-    return {*value, "api_key_env '" + name + "'"};
-}
-
-// Last link of the api-key chain: a credentials file. {"<provider>": {"key":
-// "..."}}, read from <data dir>/auth.json first and then from any plugin
-// CredentialSource (provider_config_extensions.hpp). Missing files are the normal state;
-// malformed ones warn and yield nothing -- a local server needs no key, and a
-// cloud provider fails its own auth with a clear 401 rather than blocking
-// startup over a file that may belong to a different provider.
-std::optional<std::string> LookupKeyInAuthJson(const nlohmann::json& doc,
-                                               const std::string& provider_name) {
-    if (!doc.is_object() || !doc.contains(provider_name)) return std::nullopt;
-    const auto& entry = doc.at(provider_name);
-    if (!entry.is_object()) return std::nullopt;
-    for (const char* key : {"key", "api_key"}) {
-        if (entry.contains(key) && entry.at(key).is_string() &&
-            !entry.at(key).get<std::string>().empty()) {
-            return entry.at(key).get<std::string>();
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<std::string> LookupAuthFile(const std::filesystem::path& path,
-                                          const std::string& provider_name) {
-    std::error_code ec;
-    if (!std::filesystem::is_regular_file(path, ec) || ec) return std::nullopt;
-    common::ReadFileResult file = common::ReadFile(path);
-    if (!file.ok()) {
-        if (file.status != common::ReadFileResult::Status::kNotFound) {
-            common::DefaultLogger().warn("credentials file ignored: {}", file.error);
-        }
-        return std::nullopt;
+// The entry's `api_key`, bound to a handle that reads it per request (a
+// secret stored after startup reaches the next request). A reference that can
+// never resolve -- malformed, an unset "env:" variable -- fails here, at load,
+// rather than as a 401 hours later.
+common::SecretHandle BindApiKey(const nlohmann::json& provider, const std::string& where,
+                                const std::string& url, const SecretResolver& secrets) {
+    if (!provider.contains("api_key")) return {};
+    if (!provider.at("api_key").is_string()) {
+        throw std::runtime_error("providers.json: " + where + " field \"api_key\" must be a string");
     }
     try {
-        return LookupKeyInAuthJson(nlohmann::json::parse(file.contents), provider_name);
+        return secrets.Bind(provider.at("api_key").get<std::string>(), url);
     } catch (const std::exception& error) {
-        common::DefaultLogger().warn("credentials file {} is malformed and was ignored: {}",
-                                     path.string(), error.what());
-        return std::nullopt;
+        throw std::runtime_error("providers.json: " + where + " api_key: " + error.what());
     }
-}
-
-std::optional<std::string> LookupCredentialsFile(const std::string& provider_name,
-                                                 std::string& origin,
-                                                 const ProviderConfigExtensions* extensions) {
-    const auto auth_path = common::DataDir() / "auth.json";
-    if (auto key = LookupAuthFile(auth_path, provider_name)) {
-        origin = auth_path.string();
-        return key;
-    }
-    if (extensions != nullptr) return extensions->LookupCredential(provider_name, origin);
-    return std::nullopt;
 }
 
 // The model's value if it has one, else the provider's. Shallow by design: a
@@ -619,6 +510,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
     if (!providers.is_object()) {
         throw std::runtime_error("providers.json: \"providers\" must be an object keyed by name");
     }
+    const SecretResolver secrets(SecretStorePath(), extensions);
 
     for (const auto& [provider_name, provider] : providers.items()) {
         const std::string where = "provider '" + provider_name + "'";
@@ -631,27 +523,20 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
 
         const std::string backend = RequireString(provider_normalized, "backend", where);
         const std::string url = RequireString(provider_normalized, "url", where);
-        const ApiKeyResolution api_key =
-            ResolveApiKey(provider_normalized, where, provider_name, extensions);
-        // One line per entry, naming the source but never the key: this is
-        // the moment the key is frozen in for the process's lifetime, so an
-        // empty resolution must be visible HERE, not only as a 401 on the
-        // first request.
-        if (!api_key.key.empty()) {
-            common::DefaultLogger().info("providers.json: {} -- api key from {}",
-                                         where, api_key.origin);
-        } else if (api_key.auth_file_opt_in) {
-            std::string searched = (common::DataDir() / "auth.json").string();
-            if (extensions != nullptr) {
-                for (const auto& source : extensions->DescribeCredentialSources()) {
-                    searched += ", " + source;
-                }
+        const common::SecretHandle api_key = BindApiKey(provider_normalized, where, url, secrets);
+        // One line per entry, naming the source but never the key. A stored
+        // secret not set yet is a warning, not an error: /secret set fixes it
+        // for the next request, no restart.
+        if (api_key.configured()) {
+            try {
+                common::DefaultLogger().info("providers.json: {} -- api key from {}", where,
+                                             api_key.Get().source);
+            } catch (const std::exception& error) {
+                common::DefaultLogger().warn(
+                    "providers.json: {} -- api key {} does not resolve yet ({}); requests fail "
+                    "until it does",
+                    where, api_key.description(), error.what());
             }
-            common::DefaultLogger().warn(
-                "providers.json: {} -- opted into \"credentials\": \"auth-file\" but no key was "
-                "found in {}. Credentials resolve once at startup: if the key was written after "
-                "the server started (e.g. via /connect), restart the server.",
-                where, searched);
         }
 
         bool discover = false;
@@ -726,8 +611,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
         entry.name = provider_name;
         entry.backend = backend;
         entry.connection.base_url = url;
-        entry.connection.api_key = api_key.key;
-        entry.api_key_origin = api_key.origin;
+        entry.connection.api_key = api_key;
         entry.discover = discover;
         entry.metadata = metadata;
         entry.metadata_match = metadata_match;
@@ -855,7 +739,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
             resolved.ref = ModelRef{provider_name, model_name};
             resolved.backend = backend;
             resolved.provider.base_url = url;
-            resolved.provider.api_key = api_key.key;
+            resolved.provider.api_key = api_key;
             resolved.provider.model_name = model_name;
             resolved.provider.headers = entry.connection.headers;
             resolved.provider.max_tokens_field = entry.connection.max_tokens_field;

@@ -6,7 +6,7 @@ namespace minimal::opencode_compat {
 
 // opencode's provider block, mapped onto core's:
 //   options.baseURL -> url        (only when url absent)
-//   options.apiKey  -> api_key    (only when neither api_key nor api_key_env)
+//   options.apiKey  -> api_key    (only when api_key is absent)
 //   options.headers -> headers (core then normalizes either header shape)
 //   models.<id>.limit.context  -> context_window_tokens
 //   models.<id>.limit.output   -> max_tokens
@@ -44,7 +44,7 @@ nlohmann::json TranslateOpencodeProvider(const nlohmann::json& provider, const s
             out["url"] = options.at("baseURL");
         }
         if (options.contains("apiKey") && options.at("apiKey").is_string() &&
-            !out.contains("api_key") && !out.contains("api_key_env")) {
+            !out.contains("api_key")) {
             out["api_key"] = options.at("apiKey");
         }
         if (options.contains("headers") && options.at("headers").is_object() &&

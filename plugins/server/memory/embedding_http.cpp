@@ -9,7 +9,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include "minimal/common/env.hpp"
 
 namespace minimal::memory {
 namespace {
@@ -21,8 +20,9 @@ namespace {
 
 }  // namespace
 
-HttpEmbeddingFunction::HttpEmbeddingFunction(MemorySettings settings, net::HttpClient http)
-    : settings_(std::move(settings)), http_(std::move(http)) {}
+HttpEmbeddingFunction::HttpEmbeddingFunction(MemorySettings settings,
+                                             common::SecretHandle api_key, net::HttpClient http)
+    : settings_(std::move(settings)), api_key_(std::move(api_key)), http_(std::move(http)) {}
 
 std::vector<Embedding> HttpEmbeddingFunction::Embed(const std::vector<std::string>& inputs) {
     if (inputs.empty()) return {};
@@ -53,10 +53,10 @@ std::vector<Embedding> HttpEmbeddingFunction::EmbedChunk(const std::vector<std::
     std::vector<net::HttpHeader> request_headers;
     request_headers.push_back({"Content-Type", "application/json"});
     request_headers.push_back({"Accept", "application/json"});
-    if (!settings_.api_key_env.empty()) {
-        if (const auto key = common::LookupEnv(settings_.api_key_env)) {
-            request_headers.push_back({"Authorization", "Bearer " + *key});
-        }
+    // A key that does not resolve throws: the call fails (and trips the
+    // breaker) rather than going out unauthenticated.
+    if (api_key_.configured()) {
+        request_headers.push_back({"Authorization", "Bearer " + api_key_.Get().value});
     }
 
     net::HttpRequest request;

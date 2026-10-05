@@ -80,7 +80,7 @@ TEST_CASE("AgentPresetRegistry: happy path resolves provider fields and system p
     CHECK(preset.name == "build");
     CHECK(preset.provider.base_url == "https://api.openai.com/v1");
     CHECK(preset.provider.model_name == "gpt-4o-mini");
-    CHECK(preset.provider.api_key.empty());
+    CHECK_FALSE(preset.provider.api_key.configured());
     CHECK(preset.parameters == nlohmann::json{{"temperature", 0.5}});
     CHECK_FALSE(preset.context_window_tokens.has_value());
     CHECK(preset.system_prompt == "You are a build agent.\n");

@@ -184,7 +184,7 @@ nlohmann::json BodyOf(const std::string& raw_request) {
 TEST_CASE("typesafe-advisor settings default and degrade", "[typesafe_advisor][settings]") {
     const auto defaults = ParseSettings(nlohmann::json::object());
     CHECK(defaults.backend == minimal::typesafe_advisor::Backend::Typesafe);
-    CHECK(defaults.api_key_env == "TYPESAFE_API_KEY");
+    CHECK(defaults.api_key == "env:TYPESAFE_API_KEY");
     CHECK(defaults.EffectiveEndpoint() == "https://api.typesafe.ai/v1/systemone");
     CHECK(defaults.EffectiveModel() == "jev-latest");
     CHECK(defaults.budget_ms == 2000);
@@ -198,15 +198,15 @@ TEST_CASE("typesafe-advisor settings default and degrade", "[typesafe_advisor][s
 
     // A non-object config degrades to defaults, like every bundled plugin.
     const auto degraded = ParseSettings(nlohmann::json::array());
-    CHECK(degraded.api_key_env == "TYPESAFE_API_KEY");
+    CHECK(degraded.api_key == "env:TYPESAFE_API_KEY");
 
     // Wrong-typed fields keep the default; the struct's own defaults survive.
     const auto wrong_types = ParseSettings(nlohmann::json{
-        {"api_key_env", 42},
+        {"api_key", 42},
         {"budget_ms", "soon"},
         {"min_margin", "wide"},
     });
-    CHECK(wrong_types.api_key_env == "TYPESAFE_API_KEY");
+    CHECK(wrong_types.api_key == "env:TYPESAFE_API_KEY");
     CHECK(wrong_types.budget_ms == 2000);
     CHECK(wrong_types.min_margin == 0.25);
 }
@@ -215,14 +215,14 @@ TEST_CASE("typesafe-advisor openrouter backend swaps endpoint, key env and model
           "[typesafe_advisor][settings]") {
     const auto settings = ParseSettings(nlohmann::json{{"backend", "openrouter"}});
     CHECK(settings.backend == minimal::typesafe_advisor::Backend::OpenRouter);
-    CHECK(settings.api_key_env == "OPENROUTER_API_KEY");
+    CHECK(settings.api_key == "env:OPENROUTER_API_KEY");
     CHECK(settings.EffectiveEndpoint() == "https://openrouter.ai/api/alpha/decisions");
     CHECK(settings.EffectiveModel() == "~typesafe/jev-latest");
 
-    // An explicit api_key_env survives on either backend.
+    // An explicit api_key survives on either backend.
     const auto pinned = ParseSettings(
-        nlohmann::json{{"backend", "openrouter"}, {"api_key_env", "MY_KEY"}});
-    CHECK(pinned.api_key_env == "MY_KEY");
+        nlohmann::json{{"backend", "openrouter"}, {"api_key", "secret:typesafe"}});
+    CHECK(pinned.api_key == "secret:typesafe");
 
     // An unknown backend name degrades to the default, not to a broken URL.
     const auto unknown = ParseSettings(nlohmann::json{{"backend", "anthropic"}});
@@ -609,7 +609,8 @@ TEST_CASE("typesafe-advisor Advise resolves allow/deny/abstain from the live-sha
             {HttpResponseOf(200, "OK", LoadFixture(use.fixture).dump())});
         auto settings = FastSettings();
         settings.endpoint = server.url();
-        minimal::typesafe_advisor::TypesafeAdvisor advisor(settings, "k", net::HttpClient{});
+        minimal::typesafe_advisor::TypesafeAdvisor advisor(settings, minimal::common::SecretHandle::Literal("k"),
+                                                       net::HttpClient{});
 
         const auto response = advisor.Advise(MakeRequest(), tools::AdvisorContext{});
 
@@ -641,7 +642,8 @@ TEST_CASE("typesafe-advisor Advise abstains on transport failure without answeri
     auto settings = FastSettings();
     settings.endpoint = "http://127.0.0.1:1/";  // nothing listening
     settings.backoff_initial_ms = 1;
-    minimal::typesafe_advisor::TypesafeAdvisor advisor(settings, "k", net::HttpClient{});
+    minimal::typesafe_advisor::TypesafeAdvisor advisor(settings, minimal::common::SecretHandle::Literal("k"),
+                                                       net::HttpClient{});
 
     const auto response = advisor.Advise(MakeRequest(), tools::AdvisorContext{});
     CHECK(response == std::nullopt);  // the human decides; the turn is never lost
@@ -652,7 +654,8 @@ TEST_CASE("typesafe-advisor Advise honors cancellation before any network call",
     LoopbackServer server({HttpResponseOf(200, "OK", LoadFixture("allow-response.json").dump())});
     auto settings = FastSettings();
     settings.endpoint = server.url();
-    minimal::typesafe_advisor::TypesafeAdvisor advisor(settings, "k", net::HttpClient{});
+    minimal::typesafe_advisor::TypesafeAdvisor advisor(settings, minimal::common::SecretHandle::Literal("k"),
+                                                       net::HttpClient{});
 
     const auto response = advisor.Advise(
         MakeRequest(), tools::AdvisorContext{[] { return true; }});
@@ -673,7 +676,8 @@ TEST_CASE("typesafe-advisor operator-overridden questions reach the wire verbati
     settings.extra_questions = nlohmann::json{
         {"audit", {{"type", "noul"}, {"instructions", "Does this touch secrets?"}}}};
 
-    minimal::typesafe_advisor::TypesafeAdvisor advisor(settings, "k", net::HttpClient{});
+    minimal::typesafe_advisor::TypesafeAdvisor advisor(settings, minimal::common::SecretHandle::Literal("k"),
+                                                       net::HttpClient{});
     const auto response = advisor.Advise(MakeRequest(), tools::AdvisorContext{});
     REQUIRE(response != std::nullopt);  // the fixture's allow answer still resolves
 

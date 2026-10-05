@@ -6,12 +6,11 @@
 //     - a providers.json entry translator: opencode's provider block
 //       (npm, options.baseURL/apiKey/headers, models.<id>.limit/options/name)
 //       becomes core's shape before core parses it;
-//     - a credential source: opencode's auth.json, asked after core's own
-//       <data dir>/auth.json for entries that opted into
-//       "credentials": "auth-file".
+//     - a secret source: opencode's auth.json, reachable as
+//       "secret:opencode-compat:<provider-id>" from any key field.
 //
 // Disabled, opencode-shaped providers.json entries fail core's parse with a
-// named error, and opencode's auth.json is never read.
+// named error, and "secret:opencode-compat:..." references do not resolve.
 
 #include <filesystem>
 #include <memory>
@@ -38,11 +37,12 @@ public:
 // opencode's own credentials store: Windows uses APPDATA, POSIX the
 // XDG-ish path opencode documents. Missing is the normal state; malformed
 // warns and yields nothing.
-class OpencodeAuthSource final : public minimal::config::CredentialSource {
+class OpencodeAuthSource final : public minimal::config::SecretSource {
 public:
     std::string Describe() const override { return Path().string(); }
 
-    std::optional<std::string> Lookup(const std::string& provider_name) const override {
+    std::optional<minimal::config::SecretEntry> Lookup(
+        const std::string& provider_name) const override {
         const std::filesystem::path path = Path();
         if (path.empty()) return std::nullopt;
         std::error_code ec;
@@ -50,8 +50,10 @@ public:
         const auto file = minimal::common::ReadFile(path);
         if (!file.ok()) return std::nullopt;
         try {
-            return minimal::opencode_compat::LookupOpencodeKey(nlohmann::json::parse(file.contents),
-                                                               provider_name);
+            auto key = minimal::opencode_compat::LookupOpencodeKey(
+                nlohmann::json::parse(file.contents), provider_name);
+            if (!key) return std::nullopt;
+            return minimal::config::SecretEntry{std::move(*key), {}};
         } catch (const std::exception& error) {
             minimal::common::DefaultLogger().warn(
                 "opencode-compat: {} is malformed and was ignored: {}", path.string(),
@@ -78,7 +80,7 @@ void minimal_plugin_register_provider_config_extensions(
     minimal::config::ProviderConfigExtensions& extensions,
     const minimal::plugins::PluginRegistrationContext&) {
     extensions.AddTranslator(std::make_shared<OpencodeProviderTranslator>());
-    extensions.AddCredentialSource(std::make_shared<OpencodeAuthSource>());
+    extensions.AddSecretSource(std::make_shared<OpencodeAuthSource>());
 }
 
 }  // extern "C"

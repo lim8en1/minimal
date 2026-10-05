@@ -30,7 +30,7 @@ permission prompts. Enabling it is two deliberate edits:
 {
   "file": "typesafe-advisor.so",
   "enabled": true,
-  "config": { "api_key_env": "TYPESAFE_API_KEY" }
+  "config": { "api_key": "secret:typesafe" }
 }
 ```
 
@@ -68,7 +68,7 @@ optional; wrong-typed values degrade to the default.
   "enabled": true,
   "config": {
     "backend": "typesafe",
-    "api_key_env": "TYPESAFE_API_KEY",
+    "api_key": "env:TYPESAFE_API_KEY",
     "endpoint": "",
     "model": "",
     "request_timeout_ms": 2000,
@@ -92,7 +92,7 @@ optional; wrong-typed values degrade to the default.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `backend` | `typesafe` | Which endpoint family to call (`typesafe` or `openrouter`). |
-| `api_key_env` | per backend | Env var NAME the key is read from, once, at registration. |
+| `api_key` | per backend (`env:TYPESAFE_API_KEY` / `env:OPENROUTER_API_KEY`) | A key reference (docs/CONFIGURATION.md § Secrets). Bound at registration — an unset `env:` variable keeps the advisor from registering; a `secret:` is read per call, and one not stored yet abstains. |
 | `endpoint` | per backend | Override the URL (a self-hosted System One-compatible endpoint). |
 | `model` | per backend | The model id. Pin the versioned id (`jev-1.13.0` / `typesafe/jev-1.13`) once you tune thresholds — aliases move. |
 | `request_timeout_ms` | `2000` | Per-attempt transfer cap. The healthy call is 0.1–0.5 s. Clamped to `budget_ms`. |

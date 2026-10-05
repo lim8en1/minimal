@@ -35,7 +35,7 @@ per tool. Every field is optional.
     },
     "search": {
       "api_url": "http://localhost:8888/search",
-      "api_key_env": "SEARXNG_API_KEY",
+      "api_key": "secret:searxng",
       "default_max_results": 5,
       "max_results": 20,
       "timeout_ms": 10000
@@ -52,7 +52,7 @@ per tool. Every field is optional.
 | `fetch.max_bytes` | `2097152` (2 MiB) | Absolute ceiling on the model-supplied `max_bytes`; a ceiling below the default is raised, not honoured. |
 | `fetch.allow_private_hosts` | `false` | Loopback/private/link-local hosts (including the cloud-metadata address `169.254.169.254`) are refused by default — the URL comes from the MODEL. Set true only for a trusted internal network. |
 | `search.api_url` | *(empty = unconfigured)* | Queried as `GET <url>?q=<query>&count=<n>`; must return `{"results": [{"title", "url", "snippet"}, ...]}`. SearXNG's JSON API is close to this shape; a vendor whose API differs needs a thin adapter in front of it. |
-| `search.api_key_env` | *(unset)* | Environment variable resolved once at startup and sent as `Authorization: Bearer <key>` when non-empty. Naming an UNSET variable is a fail-loud startup error; a key that resolves to empty is fine (a local SearXNG needs none). |
+| `search.api_key` | *(unset)* | A key reference (docs/CONFIGURATION.md § Secrets: `"secret:NAME"`, `"env:NAME"`, or a literal), sent as `Authorization: Bearer <key>`. A stored secret is read per search; an `"env:"` variable that is UNSET is a fail-loud startup error. Unset = no header (a local SearXNG needs none). |
 | `search.default_max_results` | `5` | Result count when the model supplies none. |
 | `search.max_results` | `20` | Absolute ceiling. |
 | `search.timeout_ms` | `10000` | Hard wall-clock bound. |
