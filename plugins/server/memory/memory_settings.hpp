@@ -32,9 +32,7 @@ struct MemorySettings {
 
     // --- tagging (a cheap model files entries into the tag vocabulary) ---
     // "<provider>/<model>" resolved through SessionSupportService. EMPTY =
-    // tagging off: entries stay untagged and remain fully searchable. The
-    // key is still called summarizer_model in plugins.json for compatibility
-    // with v1 configs; `tagger_model` is accepted and wins when both are set.
+    // tagging off: entries stay untagged and remain fully searchable.
     std::string tagger_model;
     int tagger_max_tokens = 512;             // per tagging call (a batch of entries)
     int tagger_timeout_ms = 60000;           // bounds one provider call
