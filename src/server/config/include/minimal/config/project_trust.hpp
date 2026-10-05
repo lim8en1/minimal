@@ -14,12 +14,12 @@
 //
 // State lives in one operator-owned file (not settings.json, which stays
 // hand-authored). A missing file is "nothing trusted"; so is an unreadable or
-// malformed one -- the fail-closed direction -- and the problem is logged.
+// malformed one -- the fail-closed direction -- and the problem is logged. A
+// grant or revoke re-reads the file under a cross-process lock, so servers
+// sharing a config dir do not overwrite each other's grants.
 //
-// Thread-safe. generation() changes on every grant/revoke, so caches that
-// depend on what is loadable can tell when to rebuild.
+// Thread-safe.
 
-#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -93,8 +93,9 @@ public:
     // An explicit grant covers `project_root` (regardless of mode).
     bool IsTrusted(const std::filesystem::path& project_root) const;
 
-    // False with `error` set when the state file could not be written; the
-    // in-memory set is changed only on success.
+    // False with `error` set when the state file could not be locked or
+    // written; the in-memory set is changed only on success (and then also
+    // picks up grants other processes recorded).
     bool Trust(const std::filesystem::path& project_root, std::string& error);
     // Revoking a directory that was never trusted succeeds (nothing to do).
     bool Revoke(const std::filesystem::path& project_root, std::string& error);
@@ -107,17 +108,15 @@ public:
         return InspectProjectLocal(project_root, content_provider_);
     }
     void SetContentProvider(const ProjectContentProvider* provider) { content_provider_ = provider; }
-    std::uint64_t generation() const { return generation_.load(std::memory_order_acquire); }
 
 private:
-    bool Persist(const std::set<std::string>& roots, std::string& error) const;
+    bool Update(const std::filesystem::path& project_root, bool trust, std::string& error);
 
     std::filesystem::path state_file_;
     ProjectLocalMode mode_;
     const ProjectContentProvider* content_provider_ = nullptr;
     mutable std::mutex mutex_;
     std::set<std::string> roots_;  // canonical git-root paths, guarded by mutex_
-    std::atomic<std::uint64_t> generation_{0};
 };
 
 }  // namespace minimal::config

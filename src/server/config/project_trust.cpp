@@ -1,6 +1,7 @@
 #include "minimal/config/project_trust.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
@@ -10,26 +11,36 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/common/read_file.hpp"
 #include "minimal/config/project_dirs.hpp"
+#include "minimal/store/file_lock.hpp"
 #include "minimal/tools/atomic_write.hpp"
 
 namespace minimal::config {
 
-ProjectTrust::ProjectTrust(std::filesystem::path state_file, ProjectLocalMode mode)
-    : state_file_(std::move(state_file)), mode_(mode) {
+namespace {
+
+// The recorded grants. Missing is "nothing trusted"; so is an unreadable or
+// malformed file -- the fail-closed direction -- and the problem is logged.
+std::set<std::string> ReadRoots(const std::filesystem::path& state_file) {
+    std::set<std::string> roots;
     std::error_code ec;
-    if (!std::filesystem::exists(state_file_, ec) || ec) return;  // nothing trusted yet
+    if (!std::filesystem::exists(state_file, ec) || ec) return roots;
     try {
-        const auto file = common::ReadFile(state_file_, 1u << 20);
+        const auto file = common::ReadFile(state_file, 1u << 20);
         if (!file.ok()) throw std::runtime_error(file.error);
         const auto doc = nlohmann::json::parse(file.contents);
-        for (const auto& entry : doc.at("trusted")) roots_.insert(entry.get<std::string>());
+        for (const auto& entry : doc.at("trusted")) roots.insert(entry.get<std::string>());
     } catch (const std::exception& error) {
-        // Fail closed: an unreadable record trusts nothing.
-        roots_.clear();
+        roots.clear();
         common::DefaultLogger().warn("{}: ignoring unreadable trusted-directories file: {}",
-                                     state_file_.string(), error.what());
+                                     state_file.string(), error.what());
     }
+    return roots;
 }
+
+}  // namespace
+
+ProjectTrust::ProjectTrust(std::filesystem::path state_file, ProjectLocalMode mode)
+    : state_file_(std::move(state_file)), mode_(mode), roots_(ReadRoots(state_file_)) {}
 
 std::filesystem::path ProjectTrust::RootFor(const std::filesystem::path& project_root) {
     const ProjectDirs dirs(project_root);
@@ -114,45 +125,54 @@ bool ProjectTrust::Allows(const std::filesystem::path& project_root) const {
     return false;
 }
 
-bool ProjectTrust::Persist(const std::set<std::string>& roots, std::string& error) const {
-    nlohmann::json doc{{"version", 1}, {"trusted", nlohmann::json::array()}};
-    for (const auto& root : roots) doc["trusted"].push_back(root);
-    std::error_code ec;
-    std::filesystem::create_directories(state_file_.parent_path(), ec);
-    const auto outcome = tools::write_file(
-        state_file_, doc.dump(2) + "\n",
-        std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
-    if (!outcome.ok) error = outcome.error;
-    return outcome.ok;
-}
-
-bool ProjectTrust::Trust(const std::filesystem::path& project_root, std::string& error) {
+bool ProjectTrust::Update(const std::filesystem::path& project_root, bool trust,
+                          std::string& error) {
     const std::filesystem::path root = RootFor(project_root);
     if (root.empty()) {
+        if (!trust) return true;
         error = "no project directory to trust";
         return false;
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    std::set<std::string> next = roots_;
-    next.insert(root.string());
-    if (next == roots_) return true;
-    if (!Persist(next, error)) return false;
+    // Read-modify-write under the cross-process lock, starting from the FILE:
+    // another server sharing this config dir may have recorded grants since
+    // this one loaded, and writing the in-memory set would drop them.
+    std::optional<store::ExclusiveFileLock> file_lock;
+    try {
+        std::filesystem::create_directories(state_file_.parent_path());
+        file_lock.emplace(state_file_);
+    } catch (const std::exception& e) {
+        error = "could not lock " + state_file_.string() + ": " + e.what();
+        return false;
+    }
+    const std::set<std::string> recorded = ReadRoots(state_file_);
+    std::set<std::string> next = recorded;
+    if (trust) {
+        next.insert(root.string());
+    } else {
+        next.erase(root.string());
+    }
+    if (next != recorded) {
+        nlohmann::json doc{{"version", 1}, {"trusted", nlohmann::json::array()}};
+        for (const auto& entry : next) doc["trusted"].push_back(entry);
+        const auto outcome = tools::write_file(
+            state_file_, doc.dump(2) + "\n",
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+        if (!outcome.ok) {
+            error = outcome.error;
+            return false;
+        }
+    }
     roots_ = std::move(next);
-    generation_.fetch_add(1, std::memory_order_acq_rel);
     return true;
 }
 
+bool ProjectTrust::Trust(const std::filesystem::path& project_root, std::string& error) {
+    return Update(project_root, /*trust=*/true, error);
+}
+
 bool ProjectTrust::Revoke(const std::filesystem::path& project_root, std::string& error) {
-    const std::filesystem::path root = RootFor(project_root);
-    if (root.empty()) return true;
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (roots_.count(root.string()) == 0) return true;
-    std::set<std::string> next = roots_;
-    next.erase(root.string());
-    if (!Persist(next, error)) return false;
-    roots_ = std::move(next);
-    generation_.fetch_add(1, std::memory_order_acq_rel);
-    return true;
+    return Update(project_root, /*trust=*/false, error);
 }
 
 std::vector<std::filesystem::path> ProjectTrust::trusted() const {

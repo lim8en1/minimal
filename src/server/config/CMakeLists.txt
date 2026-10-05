@@ -1,5 +1,5 @@
 minimal_server_module(config
-    DEPS llm policy
+    DEPS llm policy store
     SOURCES
         frontmatter.cpp
         permission_codec.cpp

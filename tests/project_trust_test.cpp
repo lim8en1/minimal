@@ -87,26 +87,32 @@ TEST_CASE("grants persist across instances and revoke removes them", "[project_t
     }
     ProjectTrust reloaded(state, ProjectLocalMode::kTrusted);
     CHECK(reloaded.Allows(repo));
-    const auto before = reloaded.generation();
     std::string error;
     REQUIRE(reloaded.Revoke(repo, error));
     CHECK_FALSE(reloaded.Allows(repo));
-    CHECK(reloaded.generation() > before);
     CHECK_FALSE(ProjectTrust(state, ProjectLocalMode::kTrusted).Allows(repo));
 }
 
-TEST_CASE("generation moves only when the trusted set changes", "[project_trust]") {
+TEST_CASE("two instances sharing a state file keep each other's grants", "[project_trust]") {
+    // Two servers over one config dir: each grant starts from the file, not
+    // from what that instance loaded, so neither overwrites the other.
     TempDir tmp;
-    const fs::path repo = MakeRepo(tmp.path, "repo");
-    ProjectTrust trust(tmp.path / "t.json", ProjectLocalMode::kTrusted);
+    const fs::path a = MakeRepo(tmp.path, "a");
+    const fs::path b = MakeRepo(tmp.path, "b");
+    const fs::path state = tmp.path / "t.json";
+    ProjectTrust first(state, ProjectLocalMode::kTrusted);
+    ProjectTrust second(state, ProjectLocalMode::kTrusted);
     std::string error;
-    const auto start = trust.generation();
-    REQUIRE(trust.Trust(repo, error));
-    const auto granted = trust.generation();
-    CHECK(granted > start);
-    REQUIRE(trust.Trust(repo, error));   // already trusted
-    REQUIRE(trust.Revoke(MakeRepo(tmp.path, "never"), error));  // never trusted
-    CHECK(trust.generation() == granted);
+    REQUIRE(first.Trust(a, error));
+    REQUIRE(second.Trust(b, error));
+    CHECK(second.Allows(a));  // picked up while recording its own grant
+    const ProjectTrust reloaded(state, ProjectLocalMode::kTrusted);
+    CHECK(reloaded.Allows(a));
+    CHECK(reloaded.Allows(b));
+
+    REQUIRE(first.Revoke(b, error));  // a revoke likewise starts from the file
+    CHECK(ProjectTrust(state, ProjectLocalMode::kTrusted).Allows(a));
+    CHECK_FALSE(ProjectTrust(state, ProjectLocalMode::kTrusted).Allows(b));
 }
 
 TEST_CASE("a corrupt state file trusts nothing", "[project_trust]") {
