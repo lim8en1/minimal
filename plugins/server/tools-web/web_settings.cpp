@@ -4,7 +4,6 @@
 #include <stdexcept>
 #include <utility>
 
-#include "minimal/common/env.hpp"
 #include "minimal/config/parse_util.hpp"
 
 namespace minimal::tools_web {
@@ -51,7 +50,8 @@ bool BoolOr(const nlohmann::json& parent, const char* section, const char* key, 
 
 }  // namespace
 
-WebSettings ParseWebSettings(const nlohmann::json& config) {
+WebSettings ParseWebSettings(const nlohmann::json& config,
+                             const config::SecretResolver* secrets) {
     WebSettings settings;
     if (!config.is_object()) return settings;
 
@@ -70,8 +70,7 @@ WebSettings ParseWebSettings(const nlohmann::json& config) {
         BoolOr(config, "fetch", "allow_private_hosts", settings.fetch_allow_private_hosts);
 
     settings.search_api_url = StringOr(config, "search", "api_url", settings.search_api_url);
-    settings.search_api_key_env =
-        StringOr(config, "search", "api_key_env", settings.search_api_key_env);
+    settings.search_api_key_ref = StringOr(config, "search", "api_key", settings.search_api_key_ref);
     settings.search_default_max_results =
         PositiveOr(config, "search", "default_max_results", settings.search_default_max_results);
     settings.search_max_results =
@@ -79,13 +78,12 @@ WebSettings ParseWebSettings(const nlohmann::json& config) {
     settings.search_timeout_ms =
         PositiveOr(config, "search", "timeout_ms", settings.search_timeout_ms);
 
-    if (!settings.search_api_key_env.empty()) {
-        auto value = common::LookupEnv(settings.search_api_key_env);
-        if (!value) {
-            throw std::runtime_error("tools-web: search.api_key_env names '" +
-                                     settings.search_api_key_env + "' which is unset");
-        }
-        settings.search_api_key = std::move(*value);
+    static const config::SecretResolver kDefaultSecrets;
+    try {
+        settings.search_api_key = (secrets != nullptr ? *secrets : kDefaultSecrets)
+                                      .Bind(settings.search_api_key_ref, settings.search_api_url);
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string("tools-web: search.api_key: ") + error.what());
     }
 
     return settings;

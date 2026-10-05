@@ -61,6 +61,7 @@ add_executable(minimal_tests
     permission_codec_test.cpp
     providers_config_test.cpp
     opencode_compat_test.cpp
+    secrets_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/skills/skill_registry.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/skills/skill_access.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/skills/skill_tool.cpp"

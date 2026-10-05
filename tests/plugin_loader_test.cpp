@@ -1044,7 +1044,7 @@ TEST_CASE("a project registry entry shadows a global prompt shorthand, never a h
           "from the project registry");
 
     // A global harness command keeps its name: project commands are working-
-    // tree content and must not take over /connect, /clear, ...
+    // tree content and must not take over /secret, /clear, ...
     REQUIRE(project.Find("shared-harness") != nullptr);
     CHECK(commands::FindEffective(h.commands, &project, "shared-harness")->Summary() ==
           "from the global registry");

@@ -44,7 +44,7 @@ std::filesystem::path XdgDirOr(const char* env_name, const std::filesystem::path
 // The MINIMAL_* escape hatches get the same absolute-path rule as XDG, for the
 // same reason: SpawnDetached execl's with the inherited environ after chdir("/")
 // (src/client/server_spawn.cpp), so a relative override resolves under / in the
-// server and under the cwd in the client -- divergent sessions.db, auth.json,
+// server and under the cwd in the client -- divergent sessions.db, secrets.json,
 // plugin storage and logs, with a socket path that still connects (it is
 // anchored with std::filesystem::absolute) so nothing looks wrong.
 constexpr const char* kOverrideMustBeAbsolute =

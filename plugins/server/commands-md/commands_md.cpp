@@ -34,7 +34,7 @@ namespace {
 //
 // A generator runs with a FILTERED environment, never the server's own: the
 // server process's env carries every credential it holds (provider API keys
-// resolved from api_key_env, operator exports), and a command file naming a
+// read through "env:" references, operator exports), and a command file naming a
 // generator that reads $ANTHROPIC_API_KEY must not be handed it silently.
 // Mirrors tools-bash's allowlist (bash_session_state.cpp) -- not shared code
 // (this plugin's own consumer-first rule: promote to a shared header only

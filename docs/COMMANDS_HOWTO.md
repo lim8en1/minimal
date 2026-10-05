@@ -49,7 +49,7 @@ no project root) until one exists:
 
 A project command may shadow a global **markdown** command of the same name
 for sessions rooted there. It never shadows a built-in or plugin command
-(`/connect`, `/clear`, `/model`, ...): the built-in keeps the name, and the
+(`/secret`, `/clear`, `/model`, ...): the built-in keeps the name, and the
 project file with that name is neither listed nor run.
 
 Untrusted means: every invocation discloses each source's literal

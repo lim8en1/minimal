@@ -119,8 +119,8 @@ std::vector<llm::DiscoveredModel> OpenAiModelCatalog::List(const llm::ProviderCo
     request.url = ModelsUrl(config.base_url);
     request.connect_timeout = config.connect_timeout;
     request.request_timeout = kListRequestTimeout;
-    if (!config.api_key.empty()) {
-        request.headers.push_back({"Authorization", "Bearer " + config.api_key});
+    if (const auto key = llm::RequestApiKey(config)) {
+        request.headers.push_back({"Authorization", "Bearer " + *key});
     }
     // Same headers the chat path sends (see OpenAiProvider::BuildHttpRequest):
     // a header-auth gateway (tenant id, routing tags) 401s every discovery

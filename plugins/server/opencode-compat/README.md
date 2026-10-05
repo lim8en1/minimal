@@ -15,15 +15,16 @@ Through `minimal_plugin_register_provider_config_extensions`:
   | --- | --- |
   | `npm: "@ai-sdk/openai-compatible"` | `backend: "openai"` (other packages warn: set `backend`) |
   | `options.baseURL` | `url` (unless set) |
-  | `options.apiKey` | `api_key` (unless `api_key`/`api_key_env` set) |
+  | `options.apiKey` | `api_key` (unless set) |
   | `options.headers` | `headers` (unless set) |
   | `models.<id>.limit.context` / `.output` | `context_window_tokens` / `max_tokens` |
   | `models.<id>.options` | folded into `parameters` (native keys win per key) |
   | `models.<id>.name` | dropped |
 
-- **Credential source.** `~/.local/share/opencode/auth.json` is consulted
-  after core's own `<data dir>/auth.json`, only for entries that opt in with
-  `"credentials": "auth-file"` (the same gate core applies to its own file).
+- **Secret source.** `~/.local/share/opencode/auth.json` is the
+  `opencode-compat` secret namespace: any key field may name
+  `"secret:opencode-compat:<provider-id>"` (read per use, so an opencode
+  login reaches the next request). Nothing reads it implicitly.
 
 ## Configuration
 
@@ -32,5 +33,6 @@ None.
 ## Disabled
 
 opencode-shaped `providers.json` entries fail core's parse with a named error
-(no `url`/`backend`), and opencode's `auth.json` is never read. Command files
+(no `url`/`backend`), and `secret:opencode-compat:...` references fail at use
+(no loaded plugin provides them). Command files
 under `.opencode/commands/` are commands-md's, not this plugin's.

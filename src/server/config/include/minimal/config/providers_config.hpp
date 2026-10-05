@@ -184,9 +184,10 @@ std::string DescribeDiscovery(const ProvidersConfig& providers, const std::strin
 // top-level array (the pre-`models` schema -- refused by name rather than
 // silently misparsed), a provider missing `backend`/`url`, a provider with no
 // `models` UNLESS it sets "discover": true (a discover-entry is addressable
-// through its catalog), both api_key and api_key_env set, or api_key_env
-// naming an unset variable. Neither key set is NOT an error -- local servers
-// routinely need none.
+// through its catalog), or an `api_key` reference that can never resolve
+// (malformed, an unset "env:" variable -- see secrets.hpp). No api_key is NOT
+// an error -- local servers routinely need none -- and neither is a
+// "secret:" reference not stored yet: it is read per request.
 //
 // `variant_params_hook` derives wire parameters for a static
 // `"variants": [<effort names>]` list-form entry -- see VariantParamsHook.
@@ -195,7 +196,7 @@ std::string DescribeDiscovery(const ProvidersConfig& providers, const std::strin
 // compiling.
 //
 // `extensions` (nullable): plugin translators applied to each entry before it
-// is parsed, and plugin credential sources behind core's own auth.json.
+// is parsed, and the plugin secret sources "secret:<plugin>:NAME" reaches.
 ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc,
                                      const VariantParamsHook& variant_params_hook = {},
                                      const ProviderConfigExtensions* extensions = nullptr);

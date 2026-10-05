@@ -51,7 +51,7 @@ MemorySettings ParseMemorySettings(const nlohmann::json& config) {
     else out.strategy = StrategyKind::kAuto;  // unknown value: auto, not a load failure
 
     out.api_base = StringOr(config, "api_base", "");
-    out.api_key_env = StringOr(config, "api_key_env", "");
+    out.api_key = StringOr(config, "api_key", "");
     out.model = StringOr(config, "model", "");
     out.timeout_ms = Clamp(IntOr(config, "timeout_ms", out.timeout_ms), 1, 600000);
 

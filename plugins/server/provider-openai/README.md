@@ -32,7 +32,7 @@ in providers.json (see `bundled/providers.example.json`):
     "hosted": {
       "backend": "openai",
       "url": "https://api.example.com/v1",
-      "api_key_env": "MINIMAL_API_KEY",
+      "api_key": "env:MINIMAL_API_KEY",
       "discover": true
     }
   }
@@ -42,7 +42,7 @@ in providers.json (see `bundled/providers.example.json`):
 | Field | Meaning |
 | --- | --- |
 | `url` | The endpoint, WITH its `/v1` suffix (this backend's convention — provider-anthropic's differs). |
-| `api_key_env` | Environment variable resolved once at startup; preferred over an inline `api_key` (never both). |
+| `api_key` | A key reference: `"secret:NAME"` (stored with `/secret set`, read per request — no restart), `"env:NAME"` (read at startup; unset is an error), or a literal. See docs/CONFIGURATION.md § Secrets. |
 | `discover` | `true` = list the backend's own models; no `models` object needed. Static entries beside it still work, and a model's own window wins over the provider default. |
 | `models.<key>` | The KEY is sent on the wire verbatim as the request's `model` field. |
 

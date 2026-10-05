@@ -36,11 +36,9 @@ void minimal_plugin_register_permission_advisor(
     settings.request_timeout_ms = 1000;
     settings.budget_ms = 1000;
 
-    const char* api_key = std::getenv(settings.api_key_env.c_str());
-    if (api_key == nullptr || *api_key == '\0') api_key = "fixture-key";
-
     registry.Register(std::make_shared<minimal::typesafe_advisor::TypesafeAdvisor>(
-        settings, api_key, minimal::net::HttpClient{}));
+        settings, minimal::common::SecretHandle::Literal("fixture-key"),
+        minimal::net::HttpClient{}));
 }
 
 }  // extern "C"

@@ -8,7 +8,8 @@ this order (both server and client):
 3. `$HOME/.config/minimal` — default (not the macOS `~/Library` path)
 
 Runtime state (SQLite session store, logs, plugin KV storage) lives in a
-separate data dir: `$XDG_DATA_HOME/minimal`, else `$HOME/.local/share/minimal`. The TUI keeps its up-arrow prompt history there too (`prompt_history.json`: the newest 500 submitted lines, at most 1 MiB); delete the file to clear it.
+separate data dir: `$XDG_DATA_HOME/minimal`, else `$HOME/.local/share/minimal`. So do
+stored keys (`secrets.json`, mode 0600 — see [Secrets](#secrets)). The TUI keeps its up-arrow prompt history there too (`prompt_history.json`: the newest 500 submitted lines, at most 1 MiB); delete the file to clear it.
 
 The config dir is seeded from `bundled/` at `cmake --install` time (see
 BUILD.md); existing files are never overwritten. Nothing is seeded at server
@@ -279,8 +280,7 @@ is a commented starting point.
 |---|---|---|---|---|
 | `backend` | **yes** | string | — | a provider *kind*: `"openai"`, `"anthropic"` (bundled) or anything a plugin registered. Unknown kind → warning |
 | `url` | **yes** | string | — | `openai` backend: includes `/v1`. `anthropic` backend: **without** `/v1` — the provider appends `/v1/messages` itself |
-| `api_key` | no | string | — | inline key. Mutually exclusive with `api_key_env`; prefer `api_key_env` |
-| `api_key_env` | no | string | — | name of an env var read at startup; naming an unset var → error. Mutually exclusive with `api_key` |
+| `api_key` | no | string | — | a key reference — see [Secrets](#secrets): `"secret:NAME"`, `"secret:<plugin>:NAME"`, `"env:NAME"` (unset → startup error), or a literal key (keep the file private if you use one). Absent: no auth header, which a local server needs |
 | `discover` | no | bool | `false` | `true`: models are listed lazily from the backend (`GET <url>/models`) instead of a `models` object; never written back; failures fall back to any static entries; the cache is warmed in the background at server start (`server.discovery_warmup_timeout_seconds`), and the `/model` picker's refresh (ctrl+r) re-fetches |
 | `models` | yes (unless `discover`) | object | — | keyed by model name |
 | `parameters` | no | object | `{}` | arbitrary sampling/generation knobs passed through to the backend (e.g. `temperature`, `top_p`, `cache_ttl` for anthropic: `"5m"` or `"1h"`). Model-level `parameters` **replaces** (does not merge) the provider's. Two consumed keys steer routing/caching instead of passing through: `session_id` (below) and, for the `openai` backend, `cache_control: true` (opt-in Anthropic-style content-part caching) with `cache_ttl: "5m"`/`"1h"` |
@@ -361,6 +361,45 @@ same list-or-map convention the skills plugin's slice uses):
   model's variants (`*` marks the current one), `/think <variant>` switches
   (persisted like `/model`, so it survives `/agent` and resume), `/think off`
   returns to the base model.
+
+---
+
+## Secrets
+
+Every config field that carries a key — providers.json `api_key`, and the
+plugin settings that send one (`memory`'s `api_key`, `tools-web`'s
+`search.api_key`, `typesafe-advisor`'s `api_key`) — takes the same reference:
+
+| Reference | Resolves to | When it is read |
+|---|---|---|
+| `"secret:NAME"` | `NAME` in the data dir's `secrets.json` | at every use: `/secret set` reaches the next request, no restart |
+| `"secret:<plugin>:NAME"` | `NAME` from that plugin's secret source (e.g. `secret:opencode-compat:anthropic` = opencode's `auth.json`) | at every use |
+| `"env:NAME"` | the environment variable | once, at startup; unset → error |
+| anything else | the literal key | — |
+
+A stored secret is reached only by naming it: nothing is picked up
+implicitly, so an entry with no `api_key` sends no key. A `secret:` reference
+that is not stored yet is a startup **warning**, and each use fails naming the
+`/secret set` that fixes it.
+
+`secrets.json` is written by `/secret` (or by hand; it is re-read on use):
+
+```json
+{ "anthropic":  { "value": "sk-...", "hosts": ["api.anthropic.com"] },
+  "embeddings": { "value": "..." } }
+```
+
+`hosts` (optional) binds where the secret may be sent: each entry is a host or
+`host:port`, matched against the destination URL (no port = any port). A
+destination that matches none is refused, so an entry redirected elsewhere
+cannot carry the key there. Without `hosts`, the explicit reference is the
+consent.
+
+```
+/secret set <name> <value> [--host <host[:port]>]...   replace the entry
+/secret list                                         names and hosts, never values
+/secret delete <name>
+```
 
 ---
 

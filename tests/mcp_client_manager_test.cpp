@@ -326,7 +326,7 @@ TEST_CASE("McpClientManager: ${ENV_VAR} interpolation reaches the child and unse
 
     SECTION("a set-but-empty variable is treated the same as unset, not resolved to \"\"") {
         // Phase 3: env-lookup semantics unified onto "empty = unset" everywhere
-        // (providers.json's api_key_env and $HOME/$XDG_* already worked this
+        // (providers.json's "env:" keys and $HOME/$XDG_* already worked this
         // way). A set-but-empty MCP env var used to resolve silently; it must
         // now fail the same way an unset one does.
         ::setenv("MINIMAL_TEST_MARKER_VAR", "", 1);

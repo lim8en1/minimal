@@ -45,6 +45,7 @@
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/project_trust.hpp"
 #include "minimal/config/provider_config_extensions.hpp"
+#include "minimal/config/secrets.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/agent/hook_observer_bridge.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
@@ -453,6 +454,13 @@ static int RunServer(int argc, char** argv) {
                      static_cast<minimal::agent::PermissionGateService*>(&permission_gate));
     services.Provide(minimal::config::kProjectTrustServiceName,
                      static_cast<minimal::config::ProjectTrustQuery*>(&project_trust));
+    // core.secrets: binds "env:"/"secret:" key references for plugins that
+    // send a credential (memory embeddings, web search). Plugin secret
+    // namespaces are read at use time, so sources registered later in the
+    // load below are reachable.
+    minimal::config::SecretResolver secret_resolver(minimal::config::SecretStorePath(),
+                                                    &provider_config_extensions);
+    services.Provide(minimal::config::kSecretsServiceName, &secret_resolver);
 
     // The tools slice of settings.json is forwarded verbatim to every plugin;
     // core imposes no schema on it. Falls back to {} exactly as if

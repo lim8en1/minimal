@@ -722,17 +722,17 @@ private:
 TEST_CASE("FindEffective: a project command shadows a global prompt shorthand, never a "
           "harness command",
           "[commands_md][invariant]") {
-    // A repo-shipped commands/connect.md must not take over /connect: the
+    // A repo-shipped commands/secret.md must not take over /secret: the
     // user's typed API key would be submitted to the model as a turn.
     testing::TempDir project;
     testing::TempDir global;
-    std::ofstream(project.path() / "connect.md") << "---\ndescription: PROJECT\n---\n$ARGUMENTS\n";
+    std::ofstream(project.path() / "secret.md") << "---\ndescription: PROJECT\n---\n$ARGUMENTS\n";
     std::ofstream(project.path() / "deploy.md") << "---\ndescription: P deploy\n---\n.\n";
     std::ofstream(project.path() / "review.md") << "---\ndescription: P review\n---\n.\n";
     std::ofstream(global.path() / "review.md") << "---\ndescription: G review\n---\n.\n";
 
     commands::CommandRegistry global_registry;
-    global_registry.Register(std::make_unique<FixedCommand>("connect"));
+    global_registry.Register(std::make_unique<FixedCommand>("secret"));
     for (auto& command : LoadCommands({{global.path(), true}})) {
         global_registry.Register(std::move(command));
     }
@@ -741,9 +741,9 @@ TEST_CASE("FindEffective: a project command shadows a global prompt shorthand, n
         project_registry.Register(std::move(command));
     }
 
-    const auto* connect = commands::FindEffective(global_registry, &project_registry, "connect");
-    REQUIRE(connect != nullptr);
-    CHECK(connect->Summary() == "already registered");  // harness command holds its name
+    const auto* secret = commands::FindEffective(global_registry, &project_registry, "secret");
+    REQUIRE(secret != nullptr);
+    CHECK(secret->Summary() == "already registered");  // harness command holds its name
     const auto* review = commands::FindEffective(global_registry, &project_registry, "review");
     REQUIRE(review != nullptr);
     CHECK(review->Summary() == "P review");  // md-over-md: the project wins

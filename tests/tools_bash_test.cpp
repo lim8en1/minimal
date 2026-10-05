@@ -1384,7 +1384,7 @@ TEST_CASE("a flooded fd-9 payload is discarded wholesale, not truncated into ado
 TEST_CASE("the seeded shell environment is allowlisted; 'all' is an explicit choice",
           "[tools_bash][env][invariant]") {
     // The server process's environment carries every credential the process
-    // holds -- provider API keys resolved from api_key_env -- and the seed
+    // holds -- provider API keys read through "env:" references -- and the seed
     // USED to be all of it: a model-authored `env` persisted those into the
     // transcript, where any later network-capable command could read them.
     // The allowlist is the invariant; "all" is the operator's opt-out.

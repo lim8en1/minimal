@@ -199,7 +199,7 @@ class PromptShorthandCommand : public Command {};
 // Re-parent onto this to declare "Execute must tolerate a NULL session ref in
 // CommandContext". The final keeps the taxonomy honest: a command cannot
 // accidentally override itself back to session-bound. /help, /sessions,
-// /connect and /mcp qualify today -- and ReadOnly() must hold too, which the sessionless
+// /secret and /mcp qualify today -- and ReadOnly() must hold too, which the sessionless
 // dispatch path (DispatchSessionless) enforces rather than trusts.
 template <typename Base>
 class Sessionless : public Base {

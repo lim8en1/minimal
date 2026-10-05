@@ -665,111 +665,115 @@ TEST_CASE("sessionless dispatch refuses session-bound commands with the shared w
     CHECK(commands::SessionRequiredMessage("x") == "/x needs a session; send a message to start one first");
 }
 
-TEST_CASE("sessionless dispatch executes /connect -- a Sessionless command must be "
+TEST_CASE("sessionless dispatch executes /secret -- a Sessionless command must be "
           "ReadOnly too, or the advertised command cannot run anywhere",
-          "[commands][sessionless][connect]") {
-    // THE /connect REGRESSION: ConnectCommand opted into Sessionless<> (the
-    // client catalog then offers it on sessionless tabs) but kept the default
-    // ReadOnly()=false, so DispatchSessionless refused it with the
-    // session-required wording -- the command advertised itself pre-session
-    // and then could only run on a sessioned tab, backwards for the one
-    // command whose whole purpose is bootstrapping a credential BEFORE any
-    // session exists.
+          "[commands][sessionless][secret]") {
+    // THE /connect REGRESSION, kept for its successor: a command that opted
+    // into Sessionless<> (the client catalog then offers it on sessionless
+    // tabs) but kept the default ReadOnly()=false was refused by
+    // DispatchSessionless with the session-required wording -- advertised
+    // pre-session, runnable only on a sessioned tab, backwards for a command
+    // whose purpose is storing a key BEFORE any session exists.
     CommandFixture fixture;
     testing::TempDir data;
     ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
-    const auto auth_path = data.path() / "minimal" / "auth.json";
-    std::filesystem::create_directories(auth_path.parent_path());
+    const auto secrets_path = data.path() / "minimal" / "secrets.json";
 
     minimal::commands::CommandArgs args;
-    args.positional = {"local", "sk-test-123"};
+    args.positional = {"set", "local", "sk-test-123"};
     minimal::commands::CommandContext context(nullptr, fixture.registry_presets_for_test(),
                                               fixture.registry_confirmations_for_test(),
                                               common::DefaultLogger());
 
-    const auto connect = commands::DispatchSessionless(fixture.registry, "connect", args, context);
-    REQUIRE(connect.status == Status::kOk);
-    REQUIRE(std::filesystem::exists(auth_path));
-    const nlohmann::json stored = nlohmann::json::parse(std::ifstream(auth_path));
-    CHECK(stored.at("local").at("key") == "sk-test-123");
+    const auto result = commands::DispatchSessionless(fixture.registry, "secret", args, context);
+    REQUIRE(result.status == Status::kOk);
+    REQUIRE(std::filesystem::exists(secrets_path));
+    const nlohmann::json stored = nlohmann::json::parse(std::ifstream(secrets_path));
+    CHECK(stored.at("local").at("value") == "sk-test-123");
 }
 
-// --- /connect (opencode-compat credentials) ---------------------------------------
+// --- /secret --------------------------------------------------------------------
 
-TEST_CASE("/connect stores a credential in the data dir's auth.json and refuses junk",
-          "[commands][connect]") {
+TEST_CASE("/secret set, list and delete manage secrets.json and refuse junk",
+          "[commands][secret]") {
     CommandFixture fixture;
     testing::TempDir data;
-    ScopedEnv data_env("XDG_DATA_HOME", (data.path().parent_path()).string().c_str());
-    // XDG_DATA_HOME points at the PARENT of "minimal": DataDir() appends the
-    // name itself, so write/inspect under data.path().parent_path()/minimal.
-    const auto auth_path = data.path().parent_path() / "minimal" / "auth.json";
-    std::filesystem::create_directories(auth_path.parent_path());
-
-    const auto result = fixture.Run("connect", {"local", "sk-test-123"});
-    CHECK(result.status == Status::kOk);
-    REQUIRE(std::filesystem::exists(auth_path));
-
-    nlohmann::json stored = nlohmann::json::parse(std::ifstream(auth_path));
-    CHECK(stored.at("local").at("key") == "sk-test-123");
-
-    // Merge, not replace: a second provider keeps the first.
-    CHECK(fixture.Run("connect", {"other", "key-2"}).status == Status::kOk);
-    stored = nlohmann::json::parse(std::ifstream(auth_path));
-    CHECK(stored.at("local").at("key") == "sk-test-123");
-    CHECK(stored.at("other").at("key") == "key-2");
-
-    // Usage and validation: no silent junk in the credentials file.
-    CHECK(fixture.Run("connect", {"local"}).status == Status::kError);
-    // "/" is the ONLY disallowed character (docs/CONFIGURATION.md: provider
-    // names are addressed as "<provider>/<model>"); "../evil" is refused for
-    // its "/", not because "." or "-" are themselves disallowed.
-    CHECK(fixture.Run("connect", {"../evil", "key"}).status == Status::kError);
-
-    // An underscore is a valid provider name per that same contract -- the
-    // old allowlist (alnum, "-", ".") rejected it despite providers.json
-    // itself allowing any non-"/" key.
-    CHECK(fixture.Run("connect", {"my_provider", "sk-u"}).status == Status::kOk);
-    stored = nlohmann::json::parse(std::ifstream(auth_path));
-    CHECK(stored.at("my_provider").at("key") == "sk-u");
-}
-
-TEST_CASE("/connect writes auth.json 0600, never group/other-readable",
-          "[commands][connect]") {
-    CommandFixture fixture;
-    testing::TempDir data;
-    // data.path() itself, NOT its parent: the parent is the shared OS temp
-    // root (see TempDir), so pointing XDG_DATA_HOME there collides with every
-    // other test in this file that does the same -- fine for a test that only
-    // checks a merge across its own two calls, but this test's assertion is
-    // specifically about a FRESH file's mode, so it needs a root no other test
-    // case can have already written into.
     ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
-    const auto auth_path = data.path() / "minimal" / "auth.json";
-    std::filesystem::create_directories(auth_path.parent_path());
+    const auto secrets_path = data.path() / "minimal" / "secrets.json";
 
-    REQUIRE(fixture.Run("connect", {"local", "sk-test-123"}).status == Status::kOk);
-    REQUIRE(std::filesystem::exists(auth_path));
+    CHECK(fixture.Run("secret", {"list"}).message.find("no secrets stored") != std::string::npos);
+
+    REQUIRE(fixture.Run("secret", {"set", "local", "sk-test-123"}).status == Status::kOk);
+    // Merge, not replace: a second secret keeps the first; --host binds.
+    REQUIRE(fixture.Run("secret", {"set", "remote", "key-2", "--host", "api.example.com",
+                                   "--host", "127.0.0.1:8080"})
+                .status == Status::kOk);
+    nlohmann::json stored = nlohmann::json::parse(std::ifstream(secrets_path));
+    CHECK(stored.at("local").at("value") == "sk-test-123");
+    CHECK_FALSE(stored.at("local").contains("hosts"));
+    CHECK(stored.at("remote").at("value") == "key-2");
+    CHECK(stored.at("remote").at("hosts") ==
+          nlohmann::json::array({"api.example.com", "127.0.0.1:8080"}));
+
+    // list shows names and bindings, never a value.
+    const auto listed = fixture.Run("secret", {"list"});
+    CHECK(listed.status == Status::kOk);
+    CHECK(listed.message.find("local") != std::string::npos);
+    CHECK(listed.message.find("api.example.com") != std::string::npos);
+    CHECK(listed.message.find("sk-test-123") == std::string::npos);
+    CHECK(listed.message.find("key-2") == std::string::npos);
+
+    // Set again replaces the entry whole: the binding goes with it.
+    REQUIRE(fixture.Run("secret", {"set", "remote", "key-3"}).status == Status::kOk);
+    stored = nlohmann::json::parse(std::ifstream(secrets_path));
+    CHECK(stored.at("remote").at("value") == "key-3");
+    CHECK_FALSE(stored.at("remote").contains("hosts"));
+
+    REQUIRE(fixture.Run("secret", {"delete", "remote"}).status == Status::kOk);
+    stored = nlohmann::json::parse(std::ifstream(secrets_path));
+    CHECK_FALSE(stored.contains("remote"));
+    CHECK(stored.contains("local"));
+    CHECK(fixture.Run("secret", {"delete", "remote"}).status == Status::kError);
+
+    // Usage and validation: no silent junk in the secrets file. ':' would
+    // read as a plugin namespace ("secret:<plugin>:NAME"), so it is refused.
+    CHECK(fixture.Run("secret", {}).status == Status::kError);
+    CHECK(fixture.Run("secret", {"set", "local"}).status == Status::kError);
+    CHECK(fixture.Run("secret", {"set", "a:b", "key"}).status == Status::kError);
+    CHECK(fixture.Run("secret", {"set", "x", "key", "--host"}).status == Status::kError);
+    CHECK(fixture.Run("secret", {"set", "x", "key", "--hots", "h"}).status == Status::kError);
+}
+
+TEST_CASE("/secret writes secrets.json 0600, never group/other-readable",
+          "[commands][secret]") {
+    CommandFixture fixture;
+    testing::TempDir data;
+    // A root no other test case can have already written into: the assertion
+    // is specifically about a FRESH file's mode.
+    ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
+    const auto secrets_path = data.path() / "minimal" / "secrets.json";
+
+    REQUIRE(fixture.Run("secret", {"set", "local", "sk-test-123"}).status == Status::kOk);
+    REQUIRE(std::filesystem::exists(secrets_path));
 
     struct stat st {};
-    REQUIRE(::stat(auth_path.c_str(), &st) == 0);
+    REQUIRE(::stat(secrets_path.c_str(), &st) == 0);
     CHECK((st.st_mode & 07777) == 0600);
 }
 
-TEST_CASE("/connect reports a failed save as a save failure, not a lock failure",
-          "[commands][connect]") {
+TEST_CASE("/secret reports a failed save as a save failure, not a lock failure",
+          "[commands][secret]") {
     // Regression: one catch around lock AND save labelled every exception
-    // "could not lock ... for update". A key that is not valid UTF-8 cannot
+    // "could not lock ... for update". A value that is not valid UTF-8 cannot
     // be serialized as JSON -- that is a save failure.
     CommandFixture fixture;
     testing::TempDir data;
     ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
-    std::filesystem::create_directories(data.path() / "minimal");
 
-    const auto result = fixture.Run("connect", {"local", "sk-\xff"});
+    const auto result = fixture.Run("secret", {"set", "local", "sk-\xff"});
     CAPTURE(result.message);
     CHECK(result.status == Status::kError);
-    CHECK(result.message.find("could not store") != std::string::npos);
+    CHECK(result.message.find("could not update") != std::string::npos);
     CHECK(result.message.find("could not lock") == std::string::npos);
 }
 
@@ -780,28 +784,6 @@ TEST_CASE("/agent, /model, /subagent-model and /think refuse extra arguments",
     CHECK(fixture.Run("model", {"local/m", "extra"}).status == Status::kError);
     CHECK(fixture.Run("subagent-model", {"inherit", "extra"}).status == Status::kError);
     CHECK(fixture.Run("think", {"high", "extra"}).status == Status::kError);
-}
-
-TEST_CASE("/connect merges into an existing provider entry rather than replacing it -- an "
-          "opencode-shaped OAuth entry survives",
-          "[commands][connect]") {
-    CommandFixture fixture;
-    testing::TempDir data;
-    ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
-    const auto auth_path = data.path() / "minimal" / "auth.json";
-    std::filesystem::create_directories(auth_path.parent_path());
-    // opencode's own OAuth shape for this provider, pre-existing.
-    std::ofstream(auth_path) << nlohmann::json{
-        {"anthropic", {{"type", "oauth"}, {"refresh", "r-token"}, {"access", "a-token"}}}}.dump();
-
-    REQUIRE(fixture.Run("connect", {"anthropic", "sk-new"}).status == Status::kOk);
-
-    const nlohmann::json stored = nlohmann::json::parse(std::ifstream(auth_path));
-    CHECK(stored.at("anthropic").at("key") == "sk-new");
-    // The refresh/access tokens must survive: a whole-object replace would
-    // have silently discarded them.
-    CHECK(stored.at("anthropic").at("refresh") == "r-token");
-    CHECK(stored.at("anthropic").at("access") == "a-token");
 }
 
 // /rename takes the name from the RAW tail (a name may contain spaces), so

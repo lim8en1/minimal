@@ -54,7 +54,7 @@ names. Configured in providers.json, not plugins.json
 
 | Plugin | Adds | README |
 | --- | --- | --- |
-| commands-core | `/help`, `/compact`, `/clear`, `/agent`, `/model`, `/sessions`, `/connect` | [README](server/commands-core/README.md) |
+| commands-core | `/help`, `/compact`, `/clear`, `/agent`, `/model`, `/sessions`, `/secret` | [README](server/commands-core/README.md) |
 | commands-md | One `/command` per markdown file (global + project commands dirs, opencode-compatible) | [README](server/commands-md/README.md) |
 
 ## Observability & services
@@ -69,5 +69,5 @@ names. Configured in providers.json, not plugins.json
 | skills | `skill` tool + per-skill permission model (`plugin_permissions.skills`), per-preset listing and preloads | [README](server/skills/README.md) |
 | project-context | AGENTS.md / CLAUDE.md as the first context section of every session | [README](server/project-context/README.md) |
 | compaction-structured | the `structured` compaction strategy (`record_summary` tool call → typed summary sections) | [README](server/compaction-structured/README.md) |
-| opencode-compat | opencode-shaped `providers.json` entries and opencode's `auth.json`, read through the providers.json extension seam | [README](server/opencode-compat/README.md) |
+| opencode-compat | opencode-shaped `providers.json` entries, and opencode's `auth.json` as the `secret:opencode-compat:` namespace | [README](server/opencode-compat/README.md) |
 | typesafe-advisor | Jev-based permission advisor (auto-allow/auto-deny with abstain-to-human). **Ships disabled** — enable in plugins.json + permissions.json `advisor` | [README](server/typesafe-advisor/README.md) |

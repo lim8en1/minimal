@@ -68,13 +68,12 @@ Settings ParseSettings(const nlohmann::json& config) {
     const std::string backend_name = ValueOr(config, "backend", std::string("typesafe"));
     settings.backend = backend_name == "openrouter" ? Backend::OpenRouter : Backend::Typesafe;
 
-    // The backend default only applies when the entry names NO env var at all;
-    // an explicit api_key_env is honored verbatim on either backend.
-    const bool has_key_env = config.contains("api_key_env") && config.at("api_key_env").is_string();
-    if (has_key_env) {
-        settings.api_key_env = config.at("api_key_env").get<std::string>();
+    // The backend default only applies when the entry names NO key at all;
+    // an explicit api_key is honored verbatim on either backend.
+    if (config.contains("api_key") && config.at("api_key").is_string()) {
+        settings.api_key = config.at("api_key").get<std::string>();
     } else if (settings.backend == Backend::OpenRouter) {
-        settings.api_key_env = "OPENROUTER_API_KEY";
+        settings.api_key = "env:OPENROUTER_API_KEY";
     }
 
     settings.endpoint = ValueOr(config, "endpoint", settings.endpoint);

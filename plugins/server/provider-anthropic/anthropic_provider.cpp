@@ -46,8 +46,8 @@ net::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool stre
     request.headers.push_back({"Content-Type", "application/json"});
     request.headers.push_back({"anthropic-version", kAnthropicVersion});
     // x-api-key, not Authorization: Bearer -- Anthropic's own auth header.
-    if (!config_.api_key.empty()) {
-        request.headers.push_back({"x-api-key", config_.api_key});
+    if (const auto key = llm::RequestApiKey(config_)) {
+        request.headers.push_back({"x-api-key", *key});
     }
     // The session's provider-sticky-routing key, default ON whenever the
     // request carries one (agent loop, compaction summarizer included).

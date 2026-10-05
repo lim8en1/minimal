@@ -24,7 +24,7 @@ Installed to `<libdir>/minimal/plugins/server/`. All enabled by default unless n
 | `mcp` | The MCP client: `mcps.json` servers as tool source `mcp` (`mcp__<server>__<tool>` tools), their per-server permission model, `/mcp`, the `mcp.endpoint` the `mcp-view` picker reads, and `channels.json` channels as external signal channels. Limits in its `config` (`connect_timeout_ms`, `request_timeout_ms`, `max_list_pages`, `restart_cooldown_ms`). Disabled, nothing MCP remains |
 | `provider-openai` | Provider kind `openai` (chat-completions shape) + model catalog for it |
 | `provider-anthropic` | Provider kind `anthropic` (Messages API, prompt caching) |
-| `commands-core` | Commands `/help`, `/clear`, `/compact`, `/agent`, `/model`, `/sessions`, `/connect` (stores a provider credential in `<data dir>/auth.json`) — `/mcp` is the `mcp` plugin's |
+| `commands-core` | Commands `/help`, `/clear`, `/compact`, `/agent`, `/model`, `/sessions`, `/secret` (named secrets in `<data dir>/secrets.json`, referenced as `secret:<name>`) — `/mcp` is the `mcp` plugin's |
 | `commands-md` | Turns `commands/*.md` files into `/`-commands (config dir, project, and `.opencode/commands/`; opencode-syntax desugaring — see CONFIGURATION.md, how-to in COMMANDS_HOWTO.md) |
 | `checklist` | Tool `checklist` + cross-plugin RPC endpoint `checklist.rpc`, and the `checklist.endpoint` whose push stream `checklist-view` subscribes to |
 | `signals-message` | Tool `message_session` (cross-session messaging on the core `signals` service) |
@@ -33,7 +33,7 @@ Installed to `<libdir>/minimal/plugins/server/`. All enabled by default unless n
 | `skills` | `SKILL.md` instruction bundles: the `skill` tool, its per-skill permission model (a preset's `plugin_permissions.skills`), the per-preset listing in the tool description and preloaded bodies in the system prompt, and the project's skill dirs in the trust prompt. Disabled, no skill concept remains |
 | `project-context` | The project's instructions file (`AGENTS.md`, else `CLAUDE.md`) as the first section of every session's context (context contributor, priority 0). Config: `{"files": [...], "max_bytes": 262144, "search_ancestors": false}`. Disabled, no instructions file is read |
 | `compaction-structured` | The `structured` compaction strategy: the summarizer answers through a strict `record_summary` tool call parsed into typed sections (task, done, next steps, topics, important, lessons, future tasks). Its instruction is `prompts/compression-structured.md`. Disabled, a setting or preset naming `structured` warns and falls back to core's `summarize` |
-| `opencode-compat` | Reads opencode's config so an existing setup works zero-copy: opencode-shaped `providers.json` entries (`npm`, `options.baseURL/apiKey/headers`, `models.<id>.limit/options/name`) are translated into core's shape, and opencode's `~/.local/share/opencode/auth.json` is a credential source after core's own `auth.json` (for entries with `"credentials": "auth-file"`). Disabled, core reads only its own shapes |
+| `opencode-compat` | Reads opencode's config so an existing setup works zero-copy: opencode-shaped `providers.json` entries (`npm`, `options.baseURL/apiKey/headers`, `models.<id>.limit/options/name`) are translated into core's shape, and opencode's `~/.local/share/opencode/auth.json` is the `secret:opencode-compat:<provider-id>` secret namespace. Disabled, core reads only its own shapes |
 
 ## Bundled client plugins (`plugins/client/`)
 

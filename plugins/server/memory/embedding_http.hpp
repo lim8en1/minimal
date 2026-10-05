@@ -5,6 +5,7 @@
 
 #include "embedding.hpp"
 #include "memory_settings.hpp"
+#include "minimal/common/secret_handle.hpp"
 #include "minimal/net/http_client.hpp"
 
 namespace minimal::memory {
@@ -13,7 +14,10 @@ namespace minimal::memory {
 // opens its own CURL handle per call, so concurrent Embed() calls are safe.
 class HttpEmbeddingFunction final : public EmbeddingFunction {
 public:
-    HttpEmbeddingFunction(MemorySettings settings, net::HttpClient http);
+    // `api_key` is read per call: a secret stored after the backend was
+    // created reaches the next call.
+    HttpEmbeddingFunction(MemorySettings settings, common::SecretHandle api_key,
+                          net::HttpClient http);
 
     std::vector<Embedding> Embed(const std::vector<std::string>& inputs) override;
     std::string Describe() const override;
@@ -30,6 +34,7 @@ private:
                                       std::size_t end);
 
     MemorySettings settings_;
+    common::SecretHandle api_key_;
     net::HttpClient http_;
 };
 

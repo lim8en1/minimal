@@ -29,10 +29,10 @@
     },
 
     "hosted": {
-      "//": "A hosted OpenAI-compatible endpoint. Use api_key_env, never api_key, unless this file is outside version control and readable only by you.",
+      "//": "A hosted OpenAI-compatible endpoint. api_key is a reference: \"env:NAME\" (read at startup), \"secret:NAME\" (stored with /secret set NAME <key>, read per request -- no restart), or a literal key (only if this file is outside version control and readable only by you). See docs/CONFIGURATION.md, Secrets.",
       "backend": "openai",
       "url": "https://api.example.com/v1",
-      "api_key_env": "MINIMAL_API_KEY",
+      "api_key": "env:MINIMAL_API_KEY",
       "max_tokens": 8192,
 
       "models": {
@@ -53,7 +53,7 @@
       "//": "The Anthropic Messages API. url is WITHOUT a /v1 suffix -- unlike the openai backend's convention, provider-anthropic appends /v1/messages itself. max_tokens is REQUIRED (not optional the way OpenAI treats it): set it here or per-model below, or every request fails.",
       "backend": "anthropic",
       "url": "https://api.anthropic.com",
-      "api_key_env": "ANTHROPIC_API_KEY",
+      "api_key": "secret:anthropic",
       "max_tokens": 16000,
 
       "//2": "cache_ttl is \"5m\" (the default; omit it) or \"1h\" -- see ARCHITECTURE.md's prompt-caching notes on when the 1h write premium pays for itself.",
@@ -74,7 +74,7 @@
       "//app": "Set \"openrouter_app_id\": true to opt this entry's usage into OpenRouter app attribution: every request (chat and model discovery) carries the project's identity (X-Title: minimal, HTTP-Referer: the project's GitHub URL). An explicit \"headers\" entry of the same name wins.",
       "backend": "openai",
       "url": "https://openrouter.ai/api/v1",
-      "api_key_env": "OPENROUTER_API_KEY",
+      "api_key": "env:OPENROUTER_API_KEY",
 
       "//2": "Every request (turns, subagents, compaction) carries the harness session id as a top-level \"session_id\" by default. OpenRouter uses it as its sticky-routing key -- the whole session lands on the provider endpoint whose prompt cache is warm, and the requests group in the Logs \"Sessions\" view. A backend that rejects unknown body fields opts out with \"parameters\": { \"session_id\": false }; a string value passes through verbatim as a static routing key. provider-anthropic sends the same value as the x-session-id header instead.",
 

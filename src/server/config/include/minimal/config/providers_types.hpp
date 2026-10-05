@@ -133,11 +133,6 @@ struct ProviderEntry {
     std::string name;
     std::string backend;           // ProviderFactoryRegistry / ModelCatalogRegistry kind
     llm::ProviderConfig connection;
-    // How connection.api_key came to be. Names the SOURCE -- "inline api_key",
-    // "api_key_env '<NAME>'", "auth-file (<path>)", "auth-file (no key found)"
-    // -- never the key itself, so it is safe to log verbatim. Empty when the
-    // entry configured no credential at all (a keyless local server is normal).
-    std::string api_key_origin;
     bool discover = false;
     // Metadata enrichment knobs (docs/EXTENSIBILITY.md §2.13). `metadata`
     // false declines enrichment for this entry (the auto default is on);

@@ -112,7 +112,11 @@ entries whose text changed.
 - `"auto"` (default): `sidecar` if `sidecar_model` is set, else `http` if
   `api_base` is set, else none.
 - `"http"`: OpenAI-shape `POST {api_base}/embeddings` (llama.cpp server,
-  vLLM, OpenAI...).
+  vLLM, OpenAI...). `api_key` is a key reference (docs/CONFIGURATION.md
+  § Secrets): `"secret:embeddings"` after `/secret set embeddings <key>`
+  (read per call, so setting it later needs no restart), `"env:NAME"`, or a
+  literal. A key that does not resolve fails the call, which trips the
+  breaker below; entries stay pending until it resolves.
 - `"sidecar"`: a long-lived python subprocess running
   [fastembed](https://github.com/qdrant/fastembed). It needs
   `sidecar_python_path` (an interpreter with fastembed installed; empty =
@@ -148,7 +152,7 @@ Full config:
     "sidecar_python_path": "/usr/bin/python3",
     "sidecar_model": "BAAI/bge-small-en-v1.5",
     "api_base": "http://127.0.0.1:8080/v1",
-    "api_key_env": "MEMORY_API_KEY",
+    "api_key": "secret:embeddings",
     "model": "nomic-embed-text",
     "tagger_model": "llamacpp-local/qwen3-4b-instruct",
     "max_tags": 100,

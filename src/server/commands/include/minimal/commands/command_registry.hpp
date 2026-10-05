@@ -97,7 +97,7 @@ private:
 // PROMPT SHORTHAND of the same name (matching how a project's own
 // agents/<name>.md shadows a global preset by name), but never a harness or
 // LLM command: project commands are working-tree content, and a repo-shipped
-// commands/connect.md taking over /connect would ship the API key the user
+// commands/secret.md taking over /secret would ship the API key the user
 // typed to the model as a turn. See ProjectMayShadow.
 //
 // True when a project command may take the surface name `global_command`

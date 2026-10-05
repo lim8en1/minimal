@@ -25,7 +25,7 @@ in providers.json (see `bundled/providers.example.json`):
     "anthropic": {
       "backend": "anthropic",
       "url": "https://api.anthropic.com",
-      "api_key_env": "ANTHROPIC_API_KEY",
+      "api_key": "secret:anthropic",
       "max_tokens": 16000,
       "parameters": { "cache_ttl": "5m" },
       "models": {
@@ -39,7 +39,7 @@ in providers.json (see `bundled/providers.example.json`):
 | Field | Meaning |
 | --- | --- |
 | `url` | WITHOUT a `/v1` suffix (unlike provider-openai's convention): the canonical value is `https://api.anthropic.com`, and the provider appends `/v1/messages` itself. |
-| `api_key_env` | Environment variable resolved once at startup; preferred over an inline `api_key` (never both). |
+| `api_key` | A key reference: `"secret:NAME"` (stored with `/secret set`, read per request — no restart), `"env:NAME"` (read at startup; unset is an error), or a literal. See docs/CONFIGURATION.md § Secrets. |
 | `max_tokens` | REQUIRED (not optional the way OpenAI treats it): set it at provider or model level, or every request fails. |
 | `parameters.cache_ttl` | `"5m"` (the default; omit it) or `"1h"` — see ARCHITECTURE.md's prompt-caching notes on when the 1h write premium pays for itself. |
 | `parameters.session_id` | Default on: the harness session id rides every request as the `x-session-id` header (OpenRouter's sticky-routing key; the real Anthropic API ignores custom headers and rejects unknown body fields, so the header is the only safe channel). `false` opts out; a string value passes through on the body verbatim as a static routing key. |

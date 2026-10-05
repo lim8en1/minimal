@@ -33,9 +33,9 @@ different registries:
    COMMANDS_HOWTO.md §2).
 
 A project command may shadow a global markdown command of the same name for
-sessions rooted there, but never a built-in or plugin command (`/connect`,
+sessions rooted there, but never a built-in or plugin command (`/secret`,
 `/clear`, ...): the dispatcher and the catalog both keep the built-in
-(`commands::ProjectMayShadow`). Otherwise a repo-shipped `commands/connect.md`
+(`commands::ProjectMayShadow`). Otherwise a repo-shipped `commands/secret.md`
 could receive the API key a user types — the same rule a project's own `agents/<name>.md`
 already follows for presets. Nearest directory wins a stem collision within
 the project walk.

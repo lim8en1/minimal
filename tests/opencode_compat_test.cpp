@@ -50,7 +50,7 @@ TEST_CASE("an opencode-shaped provider entry translates onto core's fields", "[o
     REQUIRE(model != nullptr);
     CHECK(model->backend == "openai");  // the one npm package that names a wire shape
     CHECK(model->provider.base_url == "http://127.0.0.1:1234/v1");
-    CHECK(model->provider.api_key == "lmstudio-key");
+    CHECK(model->provider.api_key.Get().value == "lmstudio-key");
     REQUIRE(model->context_window_tokens.has_value());
     CHECK(*model->context_window_tokens == 128000);
     REQUIRE(model->max_tokens.has_value());
