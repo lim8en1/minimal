@@ -186,6 +186,45 @@ TEST_CASE("start view registry: additive, attributed, id-addressable", "[client_
           "stub start:(empty)");
 }
 
+TEST_CASE("AdditiveRegistry: an alias renames the surface Find answers to",
+          "[client_plugins][registries][names]") {
+    StartViewRegistry registry;
+    registry.SetAttribution("a");
+    registry.Register(std::make_unique<StubStartView>("files"));
+    registry.SetAttribution("b");
+    registry.Register(std::make_unique<StubStartView>("files"));
+    registry.Register(std::make_unique<StubStartView>("other"));
+    registry.ClearAttribution();
+
+    registry.ApplyAliases({{"b.files", "files2"}, {"nobody.x", "y"}});
+    CHECK(registry.surfaces() == std::vector<std::string>{"files", "files2", "other"});
+    // Both colliding views are reachable, each under its own surface.
+    CHECK(registry.Find("files") == registry.All()[0].get());
+    CHECK(registry.Find("files2") == registry.All()[1].get());
+    // The canonical id is unchanged: the plugin's own code still names "files".
+    CHECK(registry.All()[1]->spec().id == "files");
+
+    // Rollback keeps surfaces aligned with the entries that remain.
+    registry.RemoveByAttribution("a");
+    CHECK(registry.surfaces() == std::vector<std::string>{"files2", "other"});
+    CHECK(registry.Find("files") == nullptr);
+    CHECK(registry.Find("other") == registry.All()[1].get());
+}
+
+TEST_CASE("a plugin's bound HostUi stamps its name on view requests",
+          "[client_plugins][names]") {
+    auto provider = minimal::client::plugins::MakeHostFocusProvider();
+    HostUi* bound = provider->UiFor("b");
+    CHECK(provider->UiFor("b") == bound);  // one per plugin, stable
+    bound->ShowView("files");
+    provider->ShowView("files2");          // the shared seam: a surface request
+    const auto requests = provider->TakeViewRequests();
+    REQUIRE(requests.size() == 2);
+    CHECK(requests[0].plugin == "b");
+    CHECK(requests[0].view_id == "files");
+    CHECK(requests[1].plugin.empty());
+}
+
 TEST_CASE("AdditiveRegistry: attribution, first-wins Find, rollback, seal",
           "[client_plugins][registries]") {
     StartViewRegistry registry;

@@ -126,7 +126,11 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             out.registries, {.attention = out.attention_sink.get(),
                              .client_api = out.host_client_api.get(),
                              .focus = out.host_focus_provider.get(),
-                             .ui = out.host_focus_provider.get()});
+                             .ui = out.host_focus_provider.get(),
+                             .ui_for_plugin = [provider = out.host_focus_provider.get()](
+                                                  const std::string& plugin_name) {
+                                 return provider->UiFor(plugin_name);
+                             }});
         const auto records = loader.LoadAll(candidates);
         for (const auto& record : records) {
             if (record.ok()) out.loaded_plugins.push_back(record.name);
@@ -172,6 +176,16 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             std::fprintf(stderr, "minimal: warning: %s\n", message.c_str());
         }
         if (fatal) return false;
+
+        // Collisions resolved: rename what the aliases rename. Names only --
+        // a slot registry is never renamed (ResolveClientNames warned).
+        for (const auto& hook : plugins::RegistryHooks(out.registries)) {
+            if (hook.name_space.empty() ||
+                hook.policy != minimal::plugins::NameTable::Policy::kName) {
+                continue;
+            }
+            hook.registry->ApplyAliases(plugin_config.aliases);
+        }
     }
 
     // ui.json's "theme" selects the file (themes/<name>.json); empty means
@@ -218,28 +232,33 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         if (key.empty() || out.registries.views.Find(action) != nullptr) continue;
         core_keys.emplace(NormalizeKeySpec(key), action);
     }
-    for (const auto& view : out.registries.views.All()) {
+    const auto& views = out.registries.views.All();
+    const auto& view_surfaces = out.registries.views.surfaces();
+    for (std::size_t i = 0; i < views.size(); ++i) {
+        const auto& view = views[i];
+        // Users address the SURFACE id (the alias, if one renamed the view).
+        const std::string& surface = view_surfaces[i];
         // A command's view_hint resolves the core overlays first
         // (TabMaintenance::HandleNotice), so a plugin view with one of their
         // names can never be opened by a hint.
         for (const char* core_view : {"sessions", "agents", "models", "subagent-models",
                                       "subagents"}) {
-            if (view->spec().id == core_view) {
+            if (surface == core_view) {
                 std::fprintf(stderr,
                              "minimal: warning: plugin view '%s' shares a core view name; "
                              "command view hints open the core view instead\n",
                              core_view);
             }
         }
-        keys.EnsureDefault(view->spec().id, view->spec().default_keybinding);
-        const std::string bound = keys.KeyFor(view->spec().id);
+        keys.EnsureDefault(surface, view->spec().default_keybinding);
+        const std::string bound = keys.KeyFor(surface);
         if (const auto clash = core_keys.find(NormalizeKeySpec(bound));
             !bound.empty() && clash != core_keys.end()) {
             std::fprintf(stderr,
                          "minimal: warning: plugin view '%s' is bound to '%s', which '%s' "
                          "already uses -- the view's key does nothing; rebind one in "
                          "keybindings.json\n",
-                         view->spec().id.c_str(), bound.c_str(), clash->second.c_str());
+                         surface.c_str(), bound.c_str(), clash->second.c_str());
         }
         // Plugin component code: a throw out of component() would propagate
         // into the frame assembly (and, later, the ftxui loop, where it would
@@ -252,17 +271,18 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             // into it unguarded.
             if (component == nullptr) {
                 common::DefaultLogger().warn("plugin view '{}' returned no component; skipped",
-                                             view->spec().id);
+                                             surface);
                 continue;
             }
-            out.plugin_views.push_back(PluginViewEntry{view.get(), std::move(component), false});
+            PluginViewEntry entry{view.get(), std::move(component), false, false, surface, {}};
+            entry.plugin = out.registries.views.attributions()[i].plugin_name;
+            out.plugin_views.push_back(std::move(entry));
         } catch (const std::exception& error) {
-            common::DefaultLogger().warn("plugin view '{}' threw on component(): {}",
-                                         view->spec().id, error.what());
+            common::DefaultLogger().warn("plugin view '{}' threw on component(): {}", surface,
+                                         error.what());
         } catch (...) {
             common::DefaultLogger().warn(
-                "plugin view '{}' threw on component() (non-standard exception)",
-                view->spec().id);
+                "plugin view '{}' threw on component() (non-standard exception)", surface);
         }
     }
     // Parsed ONCE, after keys.all() has settled (core defaults + the user's
@@ -294,14 +314,14 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             std::fprintf(stderr, "minimal: unknown status segment '{%s}'\n", id.c_str());
         }
     }
-    // Core segment ids are reserved: a plugin segment reusing one is ignored
-    // (the frame skips it) -- it used to overwrite the core value silently.
-    for (const auto& segment : out.registries.status_segments.All()) {
-        if (minimal::client::IsKnownStatusSegment(segment->id())) {
+    // Core segment ids are reserved: a plugin segment answering to one is
+    // ignored (the frame skips it), never overwriting the core value.
+    for (const auto& surface : out.registries.status_segments.surfaces()) {
+        if (minimal::client::IsKnownStatusSegment(surface)) {
             std::fprintf(stderr,
                          "minimal: warning: a plugin status segment reuses the core id "
                          "'{%s}'; the core segment is kept\n",
-                         std::string(segment->id()).c_str());
+                         surface.c_str());
         }
     }
 

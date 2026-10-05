@@ -211,7 +211,7 @@ client::plugins::PluginViewEntry ConsumingPanel(const std::string& id, bool visi
     // startup, so the test must too, or the dispatch loop calls OnEvent on a
     // null Component.
     return client::plugins::PluginViewEntry{store.back().get(), store.back()->component(), visible,
-                                            focused};
+                                            focused, id, {}};
 }
 
 // The tab's SESSION id ("" while the tab is sessionless -- OpenTab mints a

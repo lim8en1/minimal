@@ -167,7 +167,7 @@ void ShowPluginView(std::vector<plugins::PluginViewEntry>& views,
         }
         if (entry.component == nullptr) {
             common::DefaultLogger().warn("plugin view '{}' has no component; modal not opened",
-                                         std::string(entry.view->spec().id));
+                                         entry.surface_id);
             entry.visible = false;
             modal_slot = nullptr;
             show_modal = false;
@@ -189,7 +189,13 @@ bool ApplyViewRequest(std::vector<plugins::PluginViewEntry>& views,
                       bool& show_modal) {
     using Op = plugins::ViewRequest::Op;
     for (auto& entry : views) {
-        if (entry.view->spec().id != request.view_id) continue;
+        // A plugin's own request names its view's canonical id; anything else
+        // (a server view hint) names the surface the user sees.
+        const bool addressed = request.plugin.empty()
+                                   ? entry.surface_id == request.view_id
+                                   : entry.plugin == request.plugin &&
+                                         entry.view->spec().id == request.view_id;
+        if (!addressed) continue;
         const bool is_panel = entry.view->spec().placement == plugins::ViewPlacement::Panel;
         const bool show = request.op == Op::kShow ||
                           (request.op == Op::kSetPanelVisible && request.visible);
@@ -785,18 +791,17 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
             consumed = entry.component->OnEvent(event);
         } catch (const std::exception& error) {
             common::DefaultLogger().warn("plugin view '{}' threw on an event: {}",
-                                         std::string(entry.view->spec().id), error.what());
+                                         entry.surface_id, error.what());
         } catch (...) {
             common::DefaultLogger().warn(
-                "plugin view '{}' threw a non-standard exception on an event",
-                std::string(entry.view->spec().id));
+                "plugin view '{}' threw a non-standard exception on an event", entry.surface_id);
         }
         if (consumed) {
             return true;
         }
     }
     for (auto& entry : ctx.plugin_views) {
-        if (ctx.keymap.Matches(entry.view->spec().id, event)) {
+        if (ctx.keymap.Matches(entry.surface_id, event)) {
             if (!entry.visible) {
                 ShowPluginView(ctx.plugin_views, entry, *ctx.plugin_modal_child_slot,
                                ctx.show_plugin_modal);

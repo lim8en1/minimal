@@ -217,7 +217,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     context.attention = seams_.attention;
     context.client_api = seams_.client_api;
     context.focus = seams_.focus;
-    context.ui = seams_.ui;
+    context.ui = seams_.ui_for_plugin ? seams_.ui_for_plugin(record.name) : seams_.ui;
 
     // Partial-registration rollback, captured BEFORE the first hook runs
     // (ported from the server loader, plugin_loader.cpp:233-260). Every

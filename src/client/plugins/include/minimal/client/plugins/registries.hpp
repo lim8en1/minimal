@@ -41,6 +41,7 @@
 #include <ftxui/component/component.hpp>
 
 #include "minimal/client/subscribe_outcome.hpp"
+#include "minimal/plugins/name_table.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <nlohmann/json.hpp>
 #include <tree_sitter/api.h>
@@ -393,7 +394,10 @@ public:
 enum class ViewPlacement { Panel, Modal };
 
 struct ViewSpec {
-    std::string id;  // stable; how keybindings.json addresses it
+    // The canonical id: what the plugin's own code addresses (HostUi view
+    // requests). Users address the SURFACE name -- this id, or the
+    // client-plugins.json alias that renamed it (keybindings.json, view hints).
+    std::string id;
     std::string title;
     ViewPlacement placement = ViewPlacement::Panel;
     // Registered as the DEFAULT binding only if the user's keybindings.json
@@ -449,6 +453,12 @@ struct PluginViewEntry {
     // focused one moves focus to the first remaining visible panel. Modals
     // never use it (they stage into the modal layer whole).
     bool focused = false;
+    // What keybindings and view hints address: the client-plugins.json alias
+    // that renamed the view, else spec().id.
+    std::string surface_id;
+    // The registering plugin ("" for core): with spec().id, what that plugin's
+    // own view requests address (ViewRequest::plugin).
+    std::string plugin;
 };
 
 // --- Start views (additive: the initial view on start) ----------------------
@@ -659,6 +669,12 @@ public:
     // with a later, healthy plugin.
     virtual void RemoveByAttribution(const std::string& plugin_name) = 0;
 
+    // Renames entries per client-plugins.json `aliases` (keyed by stable
+    // identity, "plugin.original_name"). Called by the bootstrap only for
+    // NAME namespaces, after the collision check passed; a slot registry is
+    // never renamed. Default: nothing to rename.
+    virtual void ApplyAliases(const std::map<std::string, std::string>& aliases) { (void)aliases; }
+
 protected:
     // False, with a warning, once sealed.
     bool Admit() const;
@@ -670,8 +686,10 @@ protected:
 
 // Many plugins, one entry per key. `KeyOf` maps an entry to its key (a view
 // id, a tool name, ...). A duplicate key is NOT replaced: it is kept and
-// recorded, Find() answers with the first, and the startup collision scan
-// (name resolution) turns the duplicate fatal, naming both claimants.
+// recorded, and the startup collision scan (name resolution) turns the
+// duplicate fatal, naming both claimants. Each entry also has a SURFACE name
+// -- its key, or the alias ApplyAliases gave it -- and Find() looks up the
+// surface.
 template <typename T, typename KeyOf>
 class AdditiveRegistry : public RegistryBase {
 public:
@@ -680,37 +698,52 @@ public:
         if (!Admit() || entry == nullptr) return;
         std::string key(KeyOf{}(*entry));
         if (key.empty()) return;
+        surfaces_.push_back(key);
         attributions_.push_back({attribution_, std::move(key)});
         entries_.push_back(std::move(entry));
     }
 
     // In registration order.
     const std::vector<std::unique_ptr<T>>& All() const { return entries_; }
+    // Index-aligned with All(): the name each entry answers to.
+    const std::vector<std::string>& surfaces() const { return surfaces_; }
 
-    T* Find(std::string_view key) const {
-        for (const auto& entry : entries_) {
-            if (KeyOf{}(*entry) == key) return entry.get();
+    T* Find(std::string_view surface) const {
+        for (std::size_t i = 0; i < entries_.size(); ++i) {
+            if (surfaces_[i] == surface) return entries_[i].get();
         }
         return nullptr;
     }
 
+    void ApplyAliases(const std::map<std::string, std::string>& aliases) override {
+        for (std::size_t i = 0; i < attributions_.size(); ++i) {
+            const auto it = aliases.find(minimal::plugins::StableIdentity(
+                attributions_[i].plugin_name, attributions_[i].original_name));
+            if (it != aliases.end()) surfaces_[i] = it->second;
+        }
+    }
+
     void RemoveByAttribution(const std::string& plugin_name) override {
-        // entries_ and attributions_ are index-aligned: compact both together.
+        // entries_, surfaces_ and attributions_ are index-aligned: compact
+        // them together.
         std::size_t write = 0;
         for (std::size_t read = 0; read < attributions_.size(); ++read) {
             if (attributions_[read].plugin_name == plugin_name) continue;
             if (write != read) {
                 attributions_[write] = std::move(attributions_[read]);
                 entries_[write] = std::move(entries_[read]);
+                surfaces_[write] = std::move(surfaces_[read]);
             }
             ++write;
         }
         attributions_.resize(write);
         entries_.resize(write);
+        surfaces_.resize(write);
     }
 
 private:
     std::vector<std::unique_ptr<T>> entries_;
+    std::vector<std::string> surfaces_;
 };
 
 // Warns that `claimant` lost the exclusive slot to `holder`.

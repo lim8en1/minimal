@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -32,6 +33,10 @@ struct ViewRequest {
     Op op = Op::kShow;
     std::string view_id;
     bool visible = true;   // kSetPanelVisible only
+    // The requesting plugin, when it came through its bound HostUi (UiFor):
+    // then `view_id` is that plugin's CANONICAL id, which still reaches its own
+    // view after an alias renamed it. Empty: `view_id` is a surface name.
+    std::string plugin;
 };
 
 std::unique_ptr<AttentionSink> MakeHostAttentionSink(AttentionState* state, HostUi* ui = nullptr);
@@ -53,6 +58,9 @@ std::unique_ptr<ClientApi> MakeHostClientApi(SessionClient* client);
 // the same Attach/Detach lifetime.
 class HostFocusProvider final : public FocusProvider, public HostUi {
 public:
+    HostFocusProvider();
+    ~HostFocusProvider() override;  // out of line: BoundUi is complete only there
+
     // Once, after AppState is constructed.
     void Attach(AppState* app);
     // Before AppState is destroyed: RunTui declares AppState's owner after
@@ -75,12 +83,21 @@ public:
     void SetPanelVisible(const std::string& view_id, bool visible) override;
     void FocusPanel(const std::string& view_id) override;
 
+    // The HostUi handed to one plugin: the same seam, with that plugin's name
+    // stamped on its view requests. Owned here, stable for this provider's
+    // lifetime.
+    HostUi* UiFor(const std::string& plugin_name);
+
     // The UI thread's half: every view request queued since the last call,
     // oldest first.
     std::vector<ViewRequest> TakeViewRequests();
 
 private:
+    class BoundUi;
     void Enqueue(ViewRequest request);
+
+    std::mutex bound_mtx_;
+    std::map<std::string, std::unique_ptr<BoundUi>> bound_;  // by plugin name
 
     mutable std::mutex mtx_;
     AppState* app_ = nullptr;  // guarded by mtx_; host-owned, null until Attach/after Detach

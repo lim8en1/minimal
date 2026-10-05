@@ -370,7 +370,7 @@ ftxui::Element FrameRenderer::Render() {
             // cannot protect against it.
             if (entry.component == nullptr) continue;
             Element body;
-            const std::string id(entry.view->spec().id);
+            const std::string& id = entry.surface_id;
             if (!GuardPluginCall("panel:" + id, "plugin view '" + id + "'",
                                  [&] { body = entry.component->Render(); })) {
                 continue;
@@ -558,11 +558,14 @@ ftxui::Element FrameRenderer::Render() {
     // blocking) is stated on the interface; a THROW is contained (that
     // segment renders nothing for this frame), never fatal.
     std::map<std::string, int> priorities;
-    for (const auto& segment : deps_.status_registry.All()) {
+    const auto& segments = deps_.status_registry.All();
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+        const auto& segment = segments[i];
         // Segments are SESSION-keyed (cost-view caches per focused session);
         // the frame's focused handle is a TAB id, so the snapshot's session
-        // id goes out (empty = no tab / sessionless).
-        const std::string id(segment->id());
+        // id goes out (empty = no tab / sessionless). The value lands under
+        // the SURFACE id -- what ui.json's status_format names.
+        const std::string& id = deps_.status_registry.surfaces()[i];
         if (IsKnownStatusSegment(id)) continue;   // core ids are reserved (warned at startup)
         GuardPluginCall("segment:" + id, "status segment '" + id + "'", [&] {
             values[id] = segment->Render(focused_details.session_id);

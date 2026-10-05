@@ -330,17 +330,26 @@ the `on_session_end` disposition (`detach`, the default, or `kill`).
 ## Aliases
 
 Aliases live in the `"aliases"` map of `plugins.json` (client: the same map in
-`client-plugins.json`) and **rename what the model and the user see**. On the
-CLIENT an alias only resolves a collision: both registrations stay live under
-their original names (lookups, keybindings and view hints hit the first), so
-the fatal duplicate becomes a coexistence rather than a rename:
+`client-plugins.json`) and **rename what the model and the user see**:
 
 ```json
 { "aliases": { "bash_over_ssh.bash": "ssh_bash" } }
 ```
 
+- Only **names** are aliasable — keys a plugin chooses and a user or the
+  model addresses: tools and commands (server), view ids and status segments
+  (client). The renamed entry answers to its alias everywhere it is
+  addressed: the model calls the tool by it, the user types the command,
+  `keybindings.json` binds the view, `ui.json`'s `status_format` places the
+  segment, a command's view hint opens it. A plugin's own code keeps using
+  its original id.
+- **Slots are never aliased** — keys that are a contract with something
+  outside the plugin: service names, hook points, renderer payload kinds, the
+  tool a result renderer draws, grammar languages, client commands. Renaming
+  one would only detach it from what it serves, so an alias naming a slot is
+  a startup warning and a slot collision is resolved by disabling a plugin.
 - Keys are fully-qualified **`plugin.original_name`**; values are the surface
-  name. One flat namespace covers **tools and commands together**.
+  name. A plugin providing a tool and a command under one name renames both.
 - Aliasing is the designed way to **resolve name collisions** — duplicate
   registrations are fatal, but applying an alias before registration makes
   both coexist (the canonical example: two plugins both providing `bash`).
