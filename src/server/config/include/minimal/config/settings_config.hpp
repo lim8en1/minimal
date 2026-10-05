@@ -99,31 +99,11 @@ struct ToolsViewSettings {
     std::int64_t stdout_buffer_lines = 100;
 };
 
-// Project context files (AGENTS.md, CLAUDE.md): read once per session from the
-// session's project_root -- at creation, resume, and subagent spawn -- and
-// appended to the system prompt. This is a SESSION property, not a preset one:
-// a mid-session /agent re-resolves the preset and must not drop the project's
-// instructions (see AgentLoop::BuildChatRequest).
-//
-// `files` is tried in order WITHIN each directory. With search_ancestors the
-// search also walks upward from project_root, nearest directory first -- so a
-// CLAUDE.md sitting IN the project beats an AGENTS.md three levels up, because
-// closer instructions are more specific. Walking stops at the filesystem root,
-// which makes a ~/AGENTS.md a global fallback; that is a feature, not an
-// accident to fence off. max_bytes == 0 means unlimited. A symlinked file
-// that resolves outside the directory it was found in is ignored.
-struct ProjectContextSettings {
-    bool enabled = true;
-    std::vector<std::string> files = {"AGENTS.md", "CLAUDE.md"};
-    std::int64_t max_bytes = 262144;
-    bool search_ancestors = false;
-};
-
 // Whether the project's own agents/, skills/ and commands/ directories (found by
 // walking up from the session's project root to its git root) are loaded. They
 // are content a cloned repository ships, so by default they load only for
-// directories the operator has trusted (`/trust-directory`). `project_context`
-// (AGENTS.md / CLAUDE.md) has its own switch and is not governed by this.
+// directories the operator has trusted (`/trust-directory`). AGENTS.md /
+// CLAUDE.md is the project-context plugin's, and not governed by this.
 enum class ProjectLocalMode {
     kTrusted,  // load for trusted directories only (the default)
     kAll,      // load for every project (the behaviour before the trust gate)
@@ -216,7 +196,6 @@ struct SettingsConfig {
     MemorySettings memory;
     ToolsSettings tools;
     ToolsViewSettings tools_view;
-    ProjectContextSettings project_context;
     ProjectLocalSettings project_local;
     ContextContributorSettings context_contributors;
     SessionSettings sessions;

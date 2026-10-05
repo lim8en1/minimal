@@ -765,7 +765,6 @@ static int RunServer(int argc, char** argv) {
     // Project context (AGENTS.md/CLAUDE.md): each session loads its own, from
     // its own project_root, at creation/resume/spawn -- never at startup, since
     // the server serves many project roots and no file belongs to all of them.
-    session_options.project_context = settings.project_context;
     session_options.small_model = settings.small_model;
     session_options.prompt_timeout =
         std::chrono::seconds(settings.sessions.unattended_prompt_timeout_seconds);

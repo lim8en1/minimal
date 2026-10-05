@@ -67,6 +67,7 @@ names. Configured in providers.json, not plugins.json
 | session-titler | LLM-generated session titles after turn 1. **Ships disabled** — enable in plugins.json | [README](server/session-titler/README.md) |
 | signals-message | `message_session` tool (cross-session messaging) | [README](server/signals-message/README.md) |
 | skills | `skill` tool + per-skill permission model (`plugin_permissions.skills`), per-preset listing and preloads | [README](server/skills/README.md) |
+| project-context | AGENTS.md / CLAUDE.md as the first context section of every session | [README](server/project-context/README.md) |
 | compaction-structured | the `structured` compaction strategy (`record_summary` tool call → typed summary sections) | [README](server/compaction-structured/README.md) |
 | opencode-compat | opencode-shaped `providers.json` entries and opencode's `auth.json`, read through the providers.json extension seam | [README](server/opencode-compat/README.md) |
 | typesafe-advisor | Jev-based permission advisor (auto-allow/auto-deny with abstain-to-human). **Ships disabled** — enable in plugins.json + permissions.json `advisor` | [README](server/typesafe-advisor/README.md) |

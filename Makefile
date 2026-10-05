@@ -4,8 +4,9 @@
 # prefix) and writes build/config.mk recording the chosen preset and prefix.
 # These targets just replay that state; they auto-configure first if the build
 # tree does not exist yet. To change options, re-run ./configure, e.g.
-# `./configure --debug`. The per-preset targets below (debug, asan, ...) are
-# shorthands for exactly that.
+# `./configure --debug`. The per-preset targets below (debug, asan, ...) build
+# (and the -test ones then test) that preset WITHOUT switching the one
+# `make build` uses: they configure with --no-state, leaving build/config.mk.
 #
 # `install` installs the configured preset's build tree into the prefix chosen
 # at configure time (override per-invocation with `make install PREFIX=...`).
@@ -70,31 +71,34 @@ test:
 	ctest --preset $(PRESET)
 
 debug:
-	./configure --debug
+	./configure --debug --no-state
 	cmake --build --preset debug
 
 server-only:
-	./configure --server-only
+	./configure --server-only --no-state
 	cmake --build --preset server-only
 
 asan:
-	./configure --asan
+	./configure --asan --no-state
 	cmake --build --preset asan
 
 tsan:
-	./configure --tsan
+	./configure --tsan --no-state
 	cmake --build --preset tsan
 
 debug-test:
-	./configure --debug
+	./configure --debug --no-state
+	cmake --build --preset debug
 	ctest --preset debug
 
 asan-test:
-	./configure --asan
+	./configure --asan --no-state
+	cmake --build --preset asan
 	ctest --preset asan
 
 tsan-test:
-	./configure --tsan
+	./configure --tsan --no-state
+	cmake --build --preset tsan
 	ctest --preset tsan
 
 clean:

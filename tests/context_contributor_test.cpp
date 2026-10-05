@@ -129,3 +129,53 @@ TEST_CASE("context contributors: RemoveByAttribution rolls back a failed plugin'
     CHECK(registry.count() == 1);
     CHECK(registry.Render(Request()) == "## Keep\nk");
 }
+
+namespace {
+
+class Ranked final : public agent::ContextContributor {
+public:
+    Ranked(std::string body, int priority) : body_(std::move(body)), priority_(priority) {}
+    std::optional<agent::ContextSection> Contribute(const agent::ContextRequest&) override {
+        return agent::ContextSection{"", body_};
+    }
+    int priority() const override { return priority_; }
+
+private:
+    std::string body_;
+    int priority_;
+};
+
+}  // namespace
+
+TEST_CASE("context sections render by declared priority, 0 first, ties in registration order",
+          "[context_contributor]") {
+    agent::ContextContributorRegistry registry(common::DefaultLogger());
+    registry.Register(std::make_shared<Ranked>("late-a", 100));
+    registry.Register(std::make_shared<Ranked>("first", 0));
+    registry.Register(std::make_shared<Ranked>("late-b", 100));
+    auto sections = registry.RenderSections(agent::ContextRequest{});
+    // Core's own signal section slots in by its priority.
+    sections.push_back({agent::kSignalContextPriority, "signals"});
+    CHECK(agent::JoinContextSections(std::move(sections)) ==
+          "first\n\nsignals\n\nlate-a\n\nlate-b");
+}
+
+TEST_CASE("a contributor's own cap replaces the generic one", "[context_contributor]") {
+    class Big final : public agent::ContextContributor {
+    public:
+        std::optional<agent::ContextSection> Contribute(const agent::ContextRequest&) override {
+            return agent::ContextSection{"", std::string(100, 'x')};
+        }
+        std::optional<std::int64_t> max_bytes() const override { return 0; }  // uncapped
+    };
+    agent::ContextContributorRegistry registry(common::DefaultLogger());
+    config::ContextContributorSettings settings;
+    settings.max_bytes_per_section = 10;
+    registry.Configure(settings);
+    registry.Register(std::make_shared<Big>());
+    registry.Register(std::make_shared<Ranked>(std::string(100, 'y'), 100));
+    const auto sections = registry.RenderSections(agent::ContextRequest{});
+    REQUIRE(sections.size() == 2);
+    CHECK(sections[0].text == std::string(100, 'x'));
+    CHECK(sections[1].text.find("[... section truncated]") != std::string::npos);
+}

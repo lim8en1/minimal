@@ -49,7 +49,8 @@ void ContextContributorRegistry::Configure(ContextContributorSettings settings) 
     settings_ = std::move(settings);
 }
 
-std::string ContextContributorRegistry::Render(const ContextRequest& request) const {
+std::vector<RenderedContextSection> ContextContributorRegistry::RenderSections(
+    const ContextRequest& request) const {
     // Snapshot under the lock, call outside it: a contributor is plugin code
     // and may take its own locks; holding ours across it would serialize every
     // session creation behind the slowest contributor for no benefit.
@@ -61,7 +62,7 @@ std::string ContextContributorRegistry::Render(const ContextRequest& request) co
         settings = settings_;
     }
 
-    std::string out;
+    std::vector<RenderedContextSection> out;
     for (const auto& entry : entries) {
         if (std::find(settings.disabled.begin(), settings.disabled.end(), entry.plugin) !=
             settings.disabled.end()) {
@@ -82,18 +83,36 @@ std::string ContextContributorRegistry::Render(const ContextRequest& request) co
         if (!section || section->body.empty()) continue;
 
         std::string body = std::move(section->body);
-        if (settings.max_bytes_per_section > 0 &&
-            body.size() > static_cast<std::size_t>(settings.max_bytes_per_section)) {
+        const std::int64_t cap =
+            entry.contributor->max_bytes().value_or(settings.max_bytes_per_section);
+        if (cap > 0 && body.size() > static_cast<std::size_t>(cap)) {
             logger_.warn("session {}: context section '{}' from '{}' is {} bytes; cut to {}",
-                         request.session_id, section->title, entry.plugin, body.size(),
-                         settings.max_bytes_per_section);
-            body = common::TruncateUtf8Bytes(
-                       body, static_cast<std::size_t>(settings.max_bytes_per_section)) +
+                         request.session_id, section->title, entry.plugin, body.size(), cap);
+            body = common::TruncateUtf8Bytes(body, static_cast<std::size_t>(cap)) +
                    "\n[... section truncated]";
         }
+        std::string text;
+        if (!section->title.empty()) text = "## " + section->title + "\n";
+        text += body;
+        out.push_back({entry.contributor->priority(), std::move(text)});
+    }
+    return out;
+}
+
+std::string ContextContributorRegistry::Render(const ContextRequest& request) const {
+    return JoinContextSections(RenderSections(request));
+}
+
+std::string JoinContextSections(std::vector<RenderedContextSection> sections) {
+    std::stable_sort(sections.begin(), sections.end(),
+                     [](const RenderedContextSection& a, const RenderedContextSection& b) {
+                         return a.priority < b.priority;
+                     });
+    std::string out;
+    for (const auto& section : sections) {
+        if (section.text.empty()) continue;
         if (!out.empty()) out += "\n\n";
-        if (!section->title.empty()) out += "## " + section->title + "\n";
-        out += body;
+        out += section.text;
     }
     return out;
 }

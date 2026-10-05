@@ -156,6 +156,18 @@ public:
     // overrides). Empty: the declared category stands. MCP: "mcp".
     virtual std::string_view HookCategory() const { return {}; }
 
+    // Startup lint of this model's slices: what is well-formed but suspicious
+    // (a name that matches nothing -- a typo, or content that is not
+    // installed). One warning per finding, surfaced by the startup sanity
+    // check; `preset_slice` is null for the operator's global slice alone.
+    // Malformed slices are BuildLayer's to reject, not this. Default: none.
+    virtual std::vector<std::string> LintSlices(const nlohmann::json& global_slice,
+                                                const nlohmann::json& preset_slice) const {
+        (void)global_slice;
+        (void)preset_slice;
+        return {};
+    }
+
     // One line for `/permissions show`. Default: nothing.
     virtual std::string Describe(const void* layer) const {
         (void)layer;

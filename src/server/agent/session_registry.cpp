@@ -7,7 +7,6 @@
 
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/agent/transcript_repair.hpp"
-#include "minimal/config/project_context.hpp"
 #include "minimal/config/project_trust.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/session/sqlite_history_store.hpp"
@@ -41,7 +40,6 @@ SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, SessionWiri
       db_(db),
       history_reader_(std::make_shared<session::SessionReader>(db_)),
       loop_config_(loop_config),
-      project_context_(std::move(options.project_context)),
       prompt_timeout_(options.prompt_timeout),
       logger_(logger),
       initial_attach_guard_(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -217,7 +215,6 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     const std::vector<std::string> signal_selectors = std::move(params.signal_selectors);
     const bool resume = params.resume;
 
-    ApplyProjectContext(params);
     // S5.3: same funnel, same reasoning -- a producer that built its own
     // permission_checker (an advised session) owns its own timeout policy, so
     // this only takes effect on the default WirePermissionChecker/
@@ -232,8 +229,7 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // just above -- the defaults are built against it -- and here because this
     // is the one funnel every session (top-level, resume, subagent) passes.
     wire_session_(params);
-    AppendSignalContext(params);
-    AppendContributedContext(params, preset);
+    AssembleContext(params, preset);
 
     // The user's model outranks the preset's. Applied here rather than inside
     // the preset registry because it is a property of this SESSION, not of the
@@ -322,60 +318,29 @@ void SessionRegistry::AnnounceIgnoredProjectContent(Session& session) const {
         "project trust notice");
 }
 
-void SessionRegistry::ApplyProjectContext(SessionParams& params) const {
-    // PROJECT CONTEXT (AGENTS.md/CLAUDE.md), loaded HERE -- in the funnel every
-    // session passes through: top-level creation, resume, and SubagentManager
-    // spawns alike. The file is a property of the session's project_root, which
-    // no preset knows; the rendered section rides SessionParams into the loop,
-    // which appends it after the preset body on every request. Absence is the
-    // normal state and silent; a file that exists but cannot be read is worth
-    // one warning, since the operator wrote instructions and got silence.
-    std::string error;
-    if (auto context = config::LoadProjectContext(params.project_root, project_context_, &error)) {
-        params.project_context = config::RenderProjectContextSection(*context);
-        logger_.info("session {}: loaded project context from {}", params.session_id,
-                     context->source_path.string());
-    } else if (!error.empty()) {
-        logger_.warn("session {}: {}", params.session_id, error);
+void SessionRegistry::AssembleContext(SessionParams& params, const AgentPreset& preset) const {
+    // The session's constant context tail, rendered once here -- the funnel
+    // creation, resume and subagent spawns share -- and frozen for the
+    // session: plugin sections (project instructions, ...) and core's signal-
+    // channel instructions, ordered by priority (0 first; ties keep
+    // registration order). AgentLoop renders it after the preset body on every
+    // request and knows nothing of where it came from.
+    std::vector<RenderedContextSection> sections;
+    if (registries_.context_contributors != nullptr) {
+        ContextRequest request;
+        request.session_id = params.session_id;
+        request.parent_session_id = params.parent_session_id;
+        request.project_root = params.project_root;
+        request.preset_name = preset.name;
+        request.is_subagent = !params.parent_session_id.empty();
+        request.resume = params.resume;
+        sections = registries_.context_contributors->RenderSections(request);
     }
-}
-
-void SessionRegistry::AppendSignalContext(SessionParams& params) const {
-    // Signal-channel instructions ride AFTER the project context in the same
-    // system section: both are operator-authored framing of the environment,
-    // and both are constant within the session (subscriptions are fixed at
-    // start). Appending here, in the funnel, keeps AgentLoop unaware of
-    // signals -- it renders one context string.
-    if (params.signal_context.empty()) return;
-    if (params.project_context.empty()) {
-        params.project_context = std::move(params.signal_context);
-    } else {
-        params.project_context += "\n\n" + params.signal_context;
+    if (!params.signal_context.empty()) {
+        sections.push_back({kSignalContextPriority, std::move(params.signal_context)});
+        params.signal_context.clear();
     }
-    params.signal_context.clear();
-}
-
-void SessionRegistry::AppendContributedContext(SessionParams& params,
-                                               const AgentPreset& preset) const {
-    // Plugin-contributed sections ride LAST in the same system tail: after the
-    // operator-authored framing (project context, signal channels), so a
-    // plugin can never push the operator's own instructions further from the
-    // front. Rendered once here and frozen with the rest of project_context.
-    if (registries_.context_contributors == nullptr) return;
-    ContextRequest request;
-    request.session_id = params.session_id;
-    request.parent_session_id = params.parent_session_id;
-    request.project_root = params.project_root;
-    request.preset_name = preset.name;
-    request.is_subagent = !params.parent_session_id.empty();
-    request.resume = params.resume;
-    const std::string contributed = registries_.context_contributors->Render(request);
-    if (contributed.empty()) return;
-    if (params.project_context.empty()) {
-        params.project_context = contributed;
-    } else {
-        params.project_context += "\n\n" + contributed;
-    }
+    params.project_context = JoinContextSections(std::move(sections));
 }
 
 ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id,

@@ -63,12 +63,6 @@ Full example (`bundled/settings.json`):
   },
   "tools": {},
   "tools_view": { "stdout_buffer_lines": 100 },
-  "project_context": {
-    "enabled": true,
-    "files": ["AGENTS.md", "CLAUDE.md"],
-    "max_bytes": 262144,
-    "search_ancestors": false
-  },
   "project_local": { "mode": "trusted" },
   "context_contributors": { "disabled": [], "max_bytes_per_section": 16384 },
   "logging": { "level": "info", "max_size_mb": 10, "max_files": 5 }
@@ -194,15 +188,6 @@ requirements paths), delivered to the tools per invocation. See
 |---|---|---|
 | `stdout_buffer_lines` | int | `100` |
 
-### `project_context.*`
-
-| Field | Type | Default | Notes |
-|---|---|---|---|
-| `enabled` | bool | `true` | |
-| `files` | string array | `["AGENTS.md", "CLAUDE.md"]` | plain file names only — no `/` or `\`, non-empty |
-| `max_bytes` | int | `262144` | `0` = unlimited. A symlinked file resolving outside its directory is ignored |
-| `search_ancestors` | bool | `false` | walk up from the project root |
-
 ### `project_local.*`
 
 Whether a repository's own `agents/`, `skills/` and `commands/` directories
@@ -222,16 +207,19 @@ settings); an unreadable file trusts nothing. A grant takes effect for what is
 resolved afterwards (`/agent`, a new session, the next listing) — the running
 session's current preset is not swapped. A new session in an untrusted project
 that ships such content gets a one-line notice naming `/trust-directory`.
-`project_context` (AGENTS.md / CLAUDE.md) has its own switch and is not governed
-by this section. Presets in the config dir and bundled presets are always
+The project-context plugin (AGENTS.md / CLAUDE.md) is not governed by this
+section. Presets in the config dir and bundled presets are always
 trusted; a *trusted* project's presets are still only allowed to narrow, never
 widen, your permissions.
 
 ### `context_contributors.*`
 
-Plugin-contributed sections of the system context (e.g. the `memory`
-plugin's index). Rendered after `project_context` and signal-channel
-context, once per session.
+Plugin-contributed sections of the system context (the project-context
+plugin's AGENTS.md, the `memory` plugin's index, ...), rendered once per
+session and ordered by each contributor's declared priority: `0` first,
+core's signal-channel instructions at `50`, plugins by default at `100`; ties
+keep plugin load order. A contributor that declares its own size cap
+(project-context's `max_bytes`) is exempt from `max_bytes_per_section`.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|

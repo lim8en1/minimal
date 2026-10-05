@@ -20,6 +20,7 @@ VCPKG_REPO_URL=https://github.com/microsoft/vcpkg
 
 preset=default
 prefix=/usr/local
+write_state=1
 arg_vcpkg_root=''
 env_vcpkg_root=${VCPKG_ROOT:-}
 
@@ -36,6 +37,8 @@ options:
   --server-only       no TUI client, server + tests only (build-server/)
   --asan              AddressSanitizer build (build-asan/)
   --tsan              ThreadSanitizer build (build-tsan/)
+  --no-state          configure the preset but leave build/config.mk (the
+                      preset 'make build' uses) as it is
   --vcpkg-root=DIR    use this vcpkg checkout instead of \$VCPKG_ROOT or
                       auto-bootstrapping one into ./.vcpkg/
   -h, --help          this help
@@ -52,6 +55,7 @@ while [ $# -gt 0 ]; do
         --server-only)   preset=server-only ;;
         --asan)          preset=asan ;;
         --tsan)          preset=tsan ;;
+        --no-state)      write_state=0 ;;
         -h|--help)       usage; exit 0 ;;
         *)               usage >&2; die "unknown option: $1" ;;
     esac
@@ -149,6 +153,11 @@ cd "$REPO_ROOT"
 say "configuring preset '$preset' (install prefix: $prefix) ..."
 VCPKG_ROOT="$vcpkg_root" cmake --preset "$preset" \
     -DCMAKE_INSTALL_PREFIX="$prefix"
+
+if [ "$write_state" -eq 0 ]; then
+    say "done ($preset configured; build/config.mk left as it was)"
+    exit 0
+fi
 
 # State for the Makefile. Plain assignments, unquoted: make is being make about
 # spaces in paths, as usual.

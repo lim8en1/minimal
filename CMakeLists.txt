@@ -473,6 +473,10 @@ endif()
 # registers one symlink per plugin. Missing dir or empty glob: fine; new
 # entries are picked up by the next build (CONFIGURE_DEPENDS re-globs).
 #
+# A sibling `<name>.skip` file parks an entry without unlinking it: the plugin
+# is not configured or built (an unmaintained plugin whose sources lag the
+# harness). Delete the file to build it again.
+#
 # After add_subdirectory(tests) so a user plugin's own tests can link
 # minimal::test_support when it exists.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/user-plugins")
@@ -489,6 +493,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/user-plugins")
                     continue()  # a stray file, or a repo root that is not a plugin
                 endif()
                 cmake_path(GET _entry FILENAME _entry_name)
+                if(EXISTS "${_entry}.skip")
+                    message(STATUS "minimal: user plugin '${_entry_name}' parked (${_entry_name}.skip); not built")
+                    continue()
+                endif()
                 set(MINIMAL_USER_PLUGIN_KIND "${_kind}")
                 add_subdirectory("${_entry}" "user-plugins/${_kind}/${_entry_name}")
                 unset(MINIMAL_USER_PLUGIN_KIND)

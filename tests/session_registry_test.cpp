@@ -18,6 +18,7 @@
 #include "minimal/common/logger.hpp"
 #include "session_events.hpp"
 #include "temp_dir.hpp"
+#include "project_context.hpp"
 
 using namespace minimal;
 using namespace std::chrono_literals;
@@ -753,9 +754,10 @@ TEST_CASE("project context is loaded from the session's project_root into the sy
           "[session_registry][project_context]") {
     RegistryFixture fixture;
     fixture.config.WriteDefaults();
-    // Explicit wiring turns the feature on; the registry defaults to disabled
-    // so unwired tests never scan the filesystem.
-    fixture.options.project_context = config::ProjectContextSettings{};
+    // The project-context plugin's contributor, as the loader would register it.
+    agent::ContextContributorRegistry contributors(common::DefaultLogger());
+    contributors.Register(project_context::MakeProjectContextContributor({}));
+    fixture.context_contributors = &contributors;
     fixture.Build();
 
     testing::TempDir project;
@@ -782,7 +784,9 @@ TEST_CASE("project context falls back to CLAUDE.md and skips empty files",
           "[session_registry][project_context]") {
     RegistryFixture fixture;
     fixture.config.WriteDefaults();
-    fixture.options.project_context = config::ProjectContextSettings{};
+    agent::ContextContributorRegistry contributors(common::DefaultLogger());
+    contributors.Register(project_context::MakeProjectContextContributor({}));
+    fixture.context_contributors = &contributors;
     fixture.Build();
 
     testing::TempDir project;
@@ -803,12 +807,12 @@ TEST_CASE("project context falls back to CLAUDE.md and skips empty files",
     CHECK(request.system->find("Claude-side instructions.") != std::string::npos);
 }
 
-TEST_CASE("project context is absent when disabled or when no candidate file exists",
+TEST_CASE("project context is absent without the plugin or when no candidate file exists",
           "[session_registry][project_context]") {
     RegistryFixture fixture;
     fixture.config.WriteDefaults();
 
-    SECTION("registry defaults: the feature is off until wired") {
+    SECTION("no project-context plugin: nothing is read") {
         fixture.Build();
         auto session = fixture.registry->Create(Params("s1"));
         // Past the worker's startup (its tool-group refresh writes the loop), so
@@ -818,8 +822,10 @@ TEST_CASE("project context is absent when disabled or when no candidate file exi
         REQUIRE(request.system.has_value());
         CHECK(request.system->find("## Project context") == std::string::npos);
     }
-    SECTION("enabled, but the project has neither file") {
-        fixture.options.project_context = config::ProjectContextSettings{};
+    SECTION("the plugin is there, but the project has neither file") {
+        agent::ContextContributorRegistry contributors(common::DefaultLogger());
+        contributors.Register(project_context::MakeProjectContextContributor({}));
+        fixture.context_contributors = &contributors;
         fixture.Build();
         auto session = fixture.registry->Create(Params("s1"));
         // Past the worker's startup (its tool-group refresh writes the loop), so

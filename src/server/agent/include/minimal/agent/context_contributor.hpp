@@ -53,19 +53,40 @@ struct ContextSection {
     std::string body;
 };
 
+// Where sections land in the session's context tail: ascending priority, 0
+// first; equal priorities keep registration (plugins.json load) order. Core's
+// own signal-channel instructions sit at kSignalContextPriority.
+inline constexpr int kDefaultContextPriority = 100;
+inline constexpr int kSignalContextPriority = 50;
+
 class ContextContributor {
 public:
     virtual ~ContextContributor() = default;
     virtual std::optional<ContextSection> Contribute(const ContextRequest& request) = 0;
+    virtual int priority() const { return kDefaultContextPriority; }
+    // This section's own size cap in bytes (0 = uncapped), replacing the
+    // operator's generic max_bytes_per_section -- for a contributor whose
+    // size is configured where it is defined (project-context's max_bytes).
+    // nullopt: the generic cap applies.
+    virtual std::optional<std::int64_t> max_bytes() const { return std::nullopt; }
 };
+
+// One rendered section and where it goes.
+struct RenderedContextSection {
+    int priority = kDefaultContextPriority;
+    std::string text;
+};
+
+// Joins sections in priority order (stable), "\n\n" between them.
+std::string JoinContextSections(std::vector<RenderedContextSection> sections);
 
 // settings.json context_contributors: {disabled: [plugin names],
 // max_bytes_per_section}.
 using ContextContributorSettings = config::ContextContributorSettings;
 
 // Additive: every plugin may register any number of contributors. Sections
-// render in registration order (plugins.json load order), which is
-// deterministic -- again the prompt-cache argument.
+// render by declared priority, then registration order (plugins.json load
+// order) -- deterministic either way, the prompt-cache argument.
 class ContextContributorRegistry {
 public:
     explicit ContextContributorRegistry(common::Logger& logger);
@@ -91,8 +112,10 @@ public:
 
     void Configure(ContextContributorSettings settings);
 
-    // Every enabled contributor's section, rendered and joined; "" when none
-    // contributed.
+    // Every enabled contributor's section, rendered, in registration order
+    // with its priority (the caller merges in core sections and orders).
+    std::vector<RenderedContextSection> RenderSections(const ContextRequest& request) const;
+    // RenderSections, ordered and joined; "" when none contributed.
     std::string Render(const ContextRequest& request) const;
 
 private:

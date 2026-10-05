@@ -21,7 +21,10 @@ struct SkillsLayer {
     SkillAccess access;  // merged global + preset, "*" not yet expanded
 };
 
-std::shared_ptr<const tools::PermissionModel> MakeSkillsPermissionModel();
+// `registry` (borrowed, may be null) lets the startup lint name entries that
+// match no global skill; project skills are unknown until a session's root.
+std::shared_ptr<const tools::PermissionModel> MakeSkillsPermissionModel(
+    const SkillRegistry* registry = nullptr);
 
 // The bound "skills" layer in a preset's models, or null.
 const SkillsLayer* FindSkillsLayer(const tools::PermissionModels& models);

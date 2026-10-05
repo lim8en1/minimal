@@ -4,11 +4,11 @@
 #include <fstream>
 #include <string>
 
-#include "minimal/config/project_context.hpp"
+#include "project_context.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
-using namespace minimal::config;
+using namespace minimal::project_context;
 
 namespace {
 
@@ -74,16 +74,6 @@ TEST_CASE("project context: a directory without either file yields nothing", "[p
     CHECK_FALSE(LoadProjectContext(project.dir, Settings(), &error).has_value());
     // Absence is the normal state, not an error.
     CHECK(error.empty());
-}
-
-TEST_CASE("project context: disabled yields nothing even with the file present",
-          "[project_context]") {
-    TempProject project;
-    project.Write("AGENTS.md", "ignored\n");
-
-    ProjectContextSettings settings = Settings();
-    settings.enabled = false;
-    CHECK_FALSE(LoadProjectContext(project.dir, settings).has_value());
 }
 
 TEST_CASE("project context: an empty file carries no instructions", "[project_context]") {
@@ -247,4 +237,34 @@ TEST_CASE("project context: a symlink staying inside its directory is read", "[p
     const auto context = LoadProjectContext(project.dir, Settings());
     REQUIRE(context.has_value());
     CHECK(context->body == "inside\n");
+}
+
+TEST_CASE("project-context config: defaults and overrides", "[project_context]") {
+    const auto defaults = ParseProjectContextSettings(nlohmann::json());
+    CHECK(defaults.files == std::vector<std::string>{"AGENTS.md", "CLAUDE.md"});
+    CHECK(defaults.max_bytes == 262144);
+    CHECK_FALSE(defaults.search_ancestors);
+
+    const auto set = ParseProjectContextSettings(
+        {{"files", {"AGENTS.md", "MINIMAL.md"}}, {"max_bytes", 65536}, {"search_ancestors", true}});
+    CHECK(set.files == std::vector<std::string>{"AGENTS.md", "MINIMAL.md"});
+    CHECK(set.max_bytes == 65536);
+    CHECK(set.search_ancestors);
+}
+
+TEST_CASE("project-context config: rejects malformed shapes", "[project_context]") {
+    CHECK_THROWS(ParseProjectContextSettings("on"));
+    CHECK_THROWS(ParseProjectContextSettings({{"files", "AGENTS.md"}}));
+    CHECK_THROWS(ParseProjectContextSettings({{"files", {""}}}));
+    CHECK_THROWS(ParseProjectContextSettings({{"files", {7}}}));
+    CHECK_THROWS(ParseProjectContextSettings({{"files", {"docs/AGENTS.md"}}}));
+    CHECK_THROWS(ParseProjectContextSettings({{"files", {"../AGENTS.md"}}}));
+    CHECK_THROWS(ParseProjectContextSettings({{"max_bytes", -1}}));
+}
+
+TEST_CASE("the project-context contributor goes first and is not cut by the generic cap",
+          "[project_context]") {
+    const auto contributor = MakeProjectContextContributor(ProjectContextSettings{});
+    CHECK(contributor->priority() == 0);
+    CHECK(contributor->max_bytes() == std::optional<std::int64_t>(0));
 }

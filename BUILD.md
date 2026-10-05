@@ -15,9 +15,11 @@ package, are vendored via `FetchContent`, pinned, and fetched automatically.
 default preset, and records the choice in `build/config.mk`; the `make` targets
 replay that state and auto-configure first if the build tree is missing.
 Options: `--prefix=DIR`, `--debug`, `--server-only`, `--asan`, `--tsan`,
-`--vcpkg-root=DIR`. Re-running `./configure` with different flags reconfigures;
-the per-preset `make debug` / `make asan` / ... targets are shorthands for the
-same thing.
+`--vcpkg-root=DIR`, `--no-state` (configure without recording the preset).
+Re-running `./configure` with different flags switches the preset `make build`
+uses. The per-preset `make debug` / `make asan` / `make asan-test` / ...
+targets build (and test) that preset WITHOUT switching it: they configure with
+`--no-state`, so `make build` keeps building the recorded one.
 
 `sudo make install` seeds the invoking user's config dir (not root's). `make
 clean` removes build trees but keeps `.vcpkg/`; `make distclean` removes that

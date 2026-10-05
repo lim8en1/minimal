@@ -99,17 +99,6 @@ public:
         // left its entry behind for the life of the process). Optional: unset
         // (tests) means no signal cleanup runs.
         SignalRouter* signal_router = nullptr;
-        // Project context (AGENTS.md/CLAUDE.md) settings. DEFAULTS TO DISABLED:
-        // until the producer wires parsed settings in, no session reads anything
-        // from its project_root -- a missing producer is a feature that is off,
-        // not one running on guessed defaults. Loaded per session in
-        // CreateResolved (the funnel creation, resume and subagent spawns share),
-        // because the file lives in the SESSION's project_root, not in any preset.
-        config::ProjectContextSettings project_context = [] {
-            config::ProjectContextSettings disabled;
-            disabled.enabled = false;
-            return disabled;
-        }();
         // small_model (settings.json): a <provider>/<model> reference resolved
         // ONCE against providers.json and the shared provider cache and stamped
         // into the loop config, so every session compacts on it. Empty or
@@ -252,9 +241,7 @@ private:
     // One notice to a new top-level session whose project's own agents, skills
     // and commands are being ignored for want of /trust-directory.
     void AnnounceIgnoredProjectContent(Session& session) const;
-    void ApplyProjectContext(SessionParams& params) const;
-    void AppendSignalContext(SessionParams& params) const;
-    void AppendContributedContext(SessionParams& params, const AgentPreset& preset) const;
+    void AssembleContext(SessionParams& params, const AgentPreset& preset) const;
     // `pending_repair`, when set on return, is a synthesized tool-result
     // repair message already folded into the returned seed's history but NOT
     // yet persisted -- the caller must append it via db_.AppendMessage only
@@ -293,7 +280,6 @@ private:
     // a fresh one per session plus a second stack-local one for resume.
     std::shared_ptr<session::SessionReader> history_reader_;
     LoopConfig loop_config_;
-    config::ProjectContextSettings project_context_;
     std::chrono::milliseconds prompt_timeout_{0};
     common::Logger& logger_;
     std::chrono::milliseconds initial_attach_guard_;

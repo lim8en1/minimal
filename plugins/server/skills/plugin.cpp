@@ -92,8 +92,8 @@ void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
 
 void minimal_plugin_register_permission_models(
     minimal::tools::PermissionModelRegistry& registry,
-    const minimal::plugins::PluginRegistrationContext&) {
-    registry.Register(minimal::skills::MakeSkillsPermissionModel());
+    const minimal::plugins::PluginRegistrationContext& context) {
+    registry.Register(minimal::skills::MakeSkillsPermissionModel(&EnsureRegistry(context)));
 }
 
 void minimal_plugin_register_preset_extensions(

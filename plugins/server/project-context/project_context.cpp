@@ -1,11 +1,14 @@
-#include "minimal/config/project_context.hpp"
+#include "project_context.hpp"
+
+#include "minimal/common/logger.hpp"
 
 #include <cstdint>
 #include <fstream>
+#include <stdexcept>
 #include <system_error>
 #include <utility>
 
-namespace minimal::config {
+namespace minimal::project_context {
 namespace {
 
 // Reads at most limit bytes (limit == 0 means the whole file) and reports
@@ -49,7 +52,7 @@ std::optional<ProjectContext> LoadProjectContext(const std::filesystem::path& pr
                                                  const ProjectContextSettings& settings,
                                                  std::string* error) {
     if (error) error->clear();
-    if (!settings.enabled || settings.files.empty()) return std::nullopt;
+    if (settings.files.empty()) return std::nullopt;
 
     // Walk from the real root: a symlinked project_root must not make the
     // ancestor search start somewhere its project_root does not actually sit.
@@ -123,4 +126,91 @@ std::string RenderProjectContextSection(const ProjectContext& context) {
     return out;
 }
 
-}  // namespace minimal::config
+ProjectContextSettings ParseProjectContextSettings(const nlohmann::json& config) {
+    ProjectContextSettings result;
+    if (config.is_null()) return result;
+    if (!config.is_object()) throw std::runtime_error("project-context: config must be an object");
+    if (config.contains("search_ancestors")) {
+        if (!config.at("search_ancestors").is_boolean()) {
+            throw std::runtime_error("project-context: search_ancestors must be a boolean");
+        }
+        result.search_ancestors = config.at("search_ancestors").get<bool>();
+    }
+    if (config.contains("max_bytes")) {
+        const auto& value = config.at("max_bytes");
+        if (!value.is_number_integer() || value.get<std::int64_t>() < 0) {
+            throw std::runtime_error("project-context: max_bytes must be a non-negative integer");
+        }
+        result.max_bytes = value.get<std::int64_t>();
+    }
+    if (config.contains("files")) {
+        const auto& files = config.at("files");
+        if (!files.is_array()) {
+            throw std::runtime_error("project-context: files must be an array of file names");
+        }
+        result.files.clear();
+        for (const auto& entry : files) {
+            if (!entry.is_string() || entry.get<std::string>().empty()) {
+                throw std::runtime_error("project-context: files must contain non-empty strings");
+            }
+            // File NAMES, not paths: the loader composes them against
+            // project_root (and, with search_ancestors, its ancestors). A
+            // separator would silently redefine the search, and an absolute
+            // path would not follow the session at all.
+            const std::string name = entry.get<std::string>();
+            if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
+                throw std::runtime_error("project-context: files entries must be plain file names, "
+                                         "not paths ('" + name + "')");
+            }
+            result.files.push_back(name);
+        }
+    }
+    return result;
+}
+
+namespace {
+
+class ProjectContextContributor final : public minimal::agent::ContextContributor {
+public:
+    explicit ProjectContextContributor(ProjectContextSettings settings)
+        : settings_(std::move(settings)) {}
+
+    std::optional<minimal::agent::ContextSection> Contribute(
+        const minimal::agent::ContextRequest& request) override {
+        // Absence is the normal state and silent; a file that exists but
+        // cannot be read is worth one warning -- the operator wrote
+        // instructions and got silence.
+        std::string error;
+        auto context =
+            LoadProjectContext(request.project_root, settings_, &error);
+        if (!context) {
+            if (!error.empty()) {
+                minimal::common::DefaultLogger().warn("session {}: {}", request.session_id, error);
+            }
+            return std::nullopt;
+        }
+        minimal::common::DefaultLogger().info("session {}: loaded project context from {}",
+                                              request.session_id, context->source_path.string());
+        // Pre-rendered with its own heading and truncation marker.
+        return minimal::agent::ContextSection{
+            "", RenderProjectContextSection(*context)};
+    }
+
+    // Operator-authored framing of the project: ahead of everything else.
+    int priority() const override { return 0; }
+    // Sized by its own max_bytes (applied while loading, with a marker), not
+    // the generic per-section cap.
+    std::optional<std::int64_t> max_bytes() const override { return 0; }
+
+private:
+    ProjectContextSettings settings_;
+};
+
+}  // namespace
+
+std::shared_ptr<agent::ContextContributor> MakeProjectContextContributor(
+    ProjectContextSettings settings) {
+    return std::make_shared<ProjectContextContributor>(std::move(settings));
+}
+
+}  // namespace minimal::project_context

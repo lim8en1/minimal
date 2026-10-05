@@ -18,6 +18,8 @@
 #include "minimal/startup/sanity_check.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/mcp/mcp_permission_model.hpp"
+#include "skill_registry.hpp"
+#include "skills_model.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/tools/tool_source.hpp"
 #include "temp_dir.hpp"
@@ -850,6 +852,30 @@ TEST_CASE("a permission slice naming no registered model warns",
     REQUIRE(hits.size() == 2);
     CHECK(hits[0]->message.find("plugins.tools-webb") != std::string::npos);
     CHECK(hits[1]->message.find("plugin_permissions.ghost") != std::string::npos);
+}
+
+TEST_CASE("a plugin model lints its own slices: unknown skill names warn",
+          "[sanity_check][naming_model]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.Write("skills/real/SKILL.md", "---\nname: real\ndescription: A skill.\n---\nBody.\n");
+    const auto skills = skills::SkillRegistry::Load(f.config_dir);
+    f.permission_models.SetAttribution("skills");
+    f.permission_models.Register(skills::MakeSkillsPermissionModel(&skills));
+    f.permission_models.ClearAttribution();
+    f.Write("permissions.json", R"({"plugins":{"skills":{"*":"allow","gone":"ask"}}})");
+    f.Write("agents/build.md",
+            "---\nname: build\nmodel: fixture-main/test-model\nallowed_tools: [bash]\n"
+            "plugin_permissions:\n  skills: [real, ghost-skill]\n---\nBody.\n");
+
+    const auto results = RunChecks(f);
+    const auto hits = ByCheck(results, "naming_model");
+    REQUIRE(hits.size() == 2);
+    CHECK(hits[0]->message == "permissions.json plugins.skills: skill 'gone' is unknown");
+    CHECK(hits[1]->message ==
+          "agent preset 'build': plugin_permissions.skills: skill 'ghost-skill' is unknown");
 }
 
 TEST_CASE("an ambiguous bare permission key warns", "[sanity_check][naming_model]") {

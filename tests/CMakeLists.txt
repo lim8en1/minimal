@@ -65,6 +65,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/skills/skills_model.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/skills/skills_preset.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/compaction-structured/structured_compaction.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/project-context/project_context.cpp"
     skills_plugin_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/opencode-compat/opencode_providers.cpp"
     mcps_config_test.cpp
@@ -382,6 +383,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/opencode-compat"
     "${CMAKE_SOURCE_DIR}/plugins/server/skills"
     "${CMAKE_SOURCE_DIR}/plugins/server/compaction-structured"
+    "${CMAKE_SOURCE_DIR}/plugins/server/project-context"
     "${CMAKE_SOURCE_DIR}/plugins/client/logo")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,

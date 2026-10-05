@@ -31,6 +31,7 @@ Installed to `<libdir>/minimal/plugins/server/`. All enabled by default unless n
 | `cost-tracker` | Command `/cost`; startup auto-refresh of pricing snapshots (also `--plugin-call cost-tracker refresh_rates`); per-session cost accumulation; RPC endpoint `cost-tracker.rpc`, and the `cost-tracker.endpoint` whose totals push stream `cost-view` subscribes to |
 | `session-titler` | Session observer that auto-titles sessions (~100 tokens/session spend). **Ships disabled** |
 | `skills` | `SKILL.md` instruction bundles: the `skill` tool, its per-skill permission model (a preset's `plugin_permissions.skills`), the per-preset listing in the tool description and preloaded bodies in the system prompt, and the project's skill dirs in the trust prompt. Disabled, no skill concept remains |
+| `project-context` | The project's instructions file (`AGENTS.md`, else `CLAUDE.md`) as the first section of every session's context (context contributor, priority 0). Config: `{"files": [...], "max_bytes": 262144, "search_ancestors": false}`. Disabled, no instructions file is read |
 | `compaction-structured` | The `structured` compaction strategy: the summarizer answers through a strict `record_summary` tool call parsed into typed sections (task, done, next steps, topics, important, lessons, future tasks). Its instruction is `prompts/compression-structured.md`. Disabled, a setting or preset naming `structured` warns and falls back to core's `summarize` |
 | `opencode-compat` | Reads opencode's config so an existing setup works zero-copy: opencode-shaped `providers.json` entries (`npm`, `options.baseURL/apiKey/headers`, `models.<id>.limit/options/name`) are translated into core's shape, and opencode's `~/.local/share/opencode/auth.json` is a credential source after core's own `auth.json` (for entries with `"credentials": "auth-file"`). Disabled, core reads only its own shapes |
 
@@ -64,6 +65,10 @@ a plugin's `CMakeLists.txt` is the same one-liner on either side:
 ```cmake
 minimal_add_user_plugin(my-plugin plugin.cpp)
 ```
+
+To park an entry without unlinking it (an unmaintained plugin whose sources
+lag the harness), create an empty `user-plugins/<kind>/<name>.skip` beside it:
+the entry is not configured or built until the file is removed.
 
 Entries can be:
 

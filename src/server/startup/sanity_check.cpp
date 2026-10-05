@@ -748,13 +748,46 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
         }
     }
 
-    // Permission slices (permissions.json `plugins`, preset
-    // `plugin_permissions`) must name a registered permission model: a slice
-    // for a plugin that is disabled or misspelled governs nothing.
     const auto* models = inputs_.registries.permission_models;
     const auto has_model = [models](const std::string& name) {
         return models != nullptr && models->Has(name);
     };
+    // Each model lints its own slices (names that match nothing): the
+    // operator's global slice once, then every preset's.
+    if (models != nullptr) {
+        const auto& globals = bundle_.permissions.plugin_slices;
+        for (const auto& name : models->kinds()) {
+            const auto* model = models->FindEntry(name);
+            if (model == nullptr || *model == nullptr) continue;
+            const nlohmann::json global =
+                globals.is_object() && globals.contains(name) ? globals.at(name) : nlohmann::json();
+            const auto lint = [&](const nlohmann::json& preset_slice) {
+                try {
+                    return (*model)->LintSlices(global, preset_slice);
+                } catch (...) {
+                    return std::vector<std::string>{};  // a lint is never worth a startup failure
+                }
+            };
+            if (!global.is_null()) {
+                for (const auto& finding : lint(nullptr)) {
+                    results.push_back(
+                        Warning("naming_model", "permissions.json plugins." + name + ": " + finding));
+                }
+            }
+            for (const auto& [preset_name, raw] : presets_) {
+                if (!raw.plugin_permissions.contains(name)) continue;
+                for (const auto& finding : lint(raw.plugin_permissions.at(name))) {
+                    results.push_back(Warning("naming_model", "agent preset '" + preset_name +
+                                                                  "': plugin_permissions." + name +
+                                                                  ": " + finding));
+                }
+            }
+        }
+    }
+
+    // Permission slices (permissions.json `plugins`, preset
+    // `plugin_permissions`) must name a registered permission model: a slice
+    // for a plugin that is disabled or misspelled governs nothing.
     for (const auto& [name, slice] : bundle_.permissions.plugin_slices.items()) {
         (void)slice;
         if (!has_model(name)) {
