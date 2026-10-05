@@ -258,11 +258,9 @@ static int RunServer(int argc, char** argv) {
     } catch (const std::exception&) {
     }
 
-    // LOGGING FIRST, before anything logs -- ahead of plugin load, which is
-    // the first thing with anything to say. (DefaultLogger() no longer
-    // caches: it resolves spdlog's default per call, so ConfigureLogging's
-    // swap is picked up by every later call. Ordering still matters for
-    // "nothing logs before the sinks exist", not for caching.)
+    // LOGGING FIRST: ahead of plugin load (the first thing with anything to
+    // say) and while the process is still single-threaded, per
+    // ConfigureLogging's contract.
     {
         minimal::common::LoggingOptions logging;
         if (settings_preload) {

@@ -271,8 +271,6 @@ public:
             return CommandResult::Error("usage: /model [provider/model]");
         }
         const std::string& text = args.positional.front();
-        // SplitModelRef, not ParseModelRef: a discovered model's id may
-        // itself carry slashes ("openrouter/anthropic/claude-opus-5").
         const auto ref = minimal::common::SplitModelRef(text);
         if (!ref) {
             return CommandResult::Error("'" + text +
@@ -315,8 +313,6 @@ public:
             context.session().set_subagent_model_override(std::nullopt);
             return CommandResult::Ok("subagent model: inherit (same as parent)");
         }
-        // SplitModelRef, not ParseModelRef: a discovered model's id may itself
-        // carry slashes ("openrouter/anthropic/claude-opus-5").
         const auto ref = minimal::common::SplitModelRef(text);
         if (!ref) {
             return CommandResult::Error("'" + text +

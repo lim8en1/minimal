@@ -31,7 +31,6 @@ namespace minimal::config {
 // not accept something the server would reject. Re-exported here so server-side
 // code reads in one namespace.
 using common::ModelRef;
-using common::ParseModelRef;
 using common::SplitModelRef;
 
 // One effort VARIANT of a base model: `<provider>/<model>@<name>` resolves to a

@@ -31,9 +31,8 @@ target_compile_definitions(minimal_common
         MINIMAL_ABI_TAG="${MINIMAL_ABI_TAG}"
         MINIMAL_VERSION="${PROJECT_VERSION}${MINIMAL_VERSION_SUFFIX}"
     # The plugin install location, PRIVATE because only bundled_assets.cpp
-    # resolves it, and it must be the SAME value CMake installs to -- it used to
-    # be hardcoded in the lookup, so overriding the cache variable moved the
-    # install without moving the search. Plugins are the only bundled thing with
+    # resolves it. It is the SAME value CMake installs to, so overriding the
+    # cache variable moves the install and the search together. Plugins are the only bundled thing with
     # a runtime lookup at all: they are code the user does not edit, so they stay
     # in the install tree. Everything else is seeded into the config dir.
     PRIVATE

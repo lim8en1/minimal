@@ -3,11 +3,8 @@
 // The plugins.json / client-plugins.json file format and plugin-file discovery,
 // shared by the server and client plugin hosts. The two files are the same
 // document shape (an `enabled`-toggled list keyed by (provenance, file), aliases,
-// and any other top-level key carried through untouched); they used to be
-// structural twins that drifted -- a fix on one side (non-throwing directory
-// iteration, type-checked reads, warnings for a wrongly-typed `plugins` /
-// `aliases`) would land on the other only by hand. This is the one
-// implementation; each host passes a PluginConfigFormat for what genuinely
+// and any other top-level key carried through untouched), so there is one
+// implementation and fixes cannot drift between hosts; each host passes a PluginConfigFormat for what genuinely
 // differs (the file's name for messages, which bundled plugins ship disabled,
 // extra "this key was renamed" checks).
 //

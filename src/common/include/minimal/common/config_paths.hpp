@@ -10,9 +10,9 @@ namespace minimal::common {
 //   3. $HOME/.config/minimal -- terminal-tool convention (git/gh/rg), deliberately
 //      not macOS's GUI ~/Library/Application Support
 //
-// A relative value is rejected at EVERY step, the escape hatch included; it
-// used to resolve against the cwd -- which for a spawned server (chdir'd to /)
-// meant a different directory than the client's. Each step is independent: an
+// A relative value is rejected at EVERY step, the escape hatch included: a
+// spawned server (chdir'd to /) and the client would resolve it against
+// different directories. Each step is independent: an
 // absolute $XDG_CONFIG_HOME answers even when $HOME is unset, and only step 3
 // needs $HOME (it throws when there is none). Shared by server and client: the
 // client reads themes/ and keybindings.json from the same directory the

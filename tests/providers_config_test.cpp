@@ -105,7 +105,7 @@ VariantParamsHook AnthropicVariantParamsHookFixture() {
 }
 
 const ResolvedModel& Require(const ProvidersConfig& config, const std::string& text) {
-    const auto ref = ParseModelRef(text);
+    const auto ref = minimal::config::SplitModelRef(text);
     REQUIRE(ref.has_value());
     const auto model = config.Resolve(*ref);
     REQUIRE(model != nullptr);
@@ -113,26 +113,6 @@ const ResolvedModel& Require(const ProvidersConfig& config, const std::string& t
 }
 
 }  // namespace
-
-// --- <provider>/<model> parsing ---------------------------------------------
-
-TEST_CASE("ParseModelRef splits exactly one slash", "[providers]") {
-    const auto ref = ParseModelRef("local/qwen4");
-    REQUIRE(ref.has_value());
-    CHECK(ref->provider == "local");
-    CHECK(ref->model == "qwen4");
-    CHECK(ref->str() == "local/qwen4");
-}
-
-TEST_CASE("ParseModelRef rejects anything it would have to guess about", "[providers]") {
-    CHECK_FALSE(ParseModelRef("qwen4").has_value());       // no provider
-    CHECK_FALSE(ParseModelRef("local/").has_value());      // no model
-    CHECK_FALSE(ParseModelRef("/qwen4").has_value());      // no provider
-    CHECK_FALSE(ParseModelRef("").has_value());
-    CHECK_FALSE(ParseModelRef("/").has_value());
-    // Taking the first slash here would silently produce a provider called "a".
-    CHECK_FALSE(ParseModelRef("a/b/c").has_value());
-}
 
 // --- The case the old schema could not express -------------------------------
 

@@ -2,28 +2,17 @@
 
 // Applies settings.json's `logging.*` to the process-wide logger.
 //
-// THIS EXISTED ONLY AS A COMMENT. `LoggingSettings` was fully parsed, seeded
-// into bundled/settings.json, and documented in ARCHITECTURE.md as backing "a
-// spdlog rotating file sink (no custom rotation code), with `path` alongside
-// `session_db_path` under the platform data dir" -- and nothing anywhere read
-// it. DefaultLogger() returned spdlog's console default, so there was no file
-// sink and `level` was ignored, which also made every logger_.debug() in the
-// tree dead output.
+// The log matters beyond diagnostics: much of this codebase's error handling
+// IS the log (dropped command results, a dropped subagent result, a plugin
+// found twice), and an auto-spawned server has no terminal, so without the
+// file sink those go nowhere.
 //
-// That matters more than a missing feature, because a large share of this
-// codebase's error handling IS the log: dropped CommandResults, a dropped
-// subagent result, the plugin-exists-twice warning, compaction disabled for a
-// session. Those are visible today only because the server happens to run in a
-// terminal; the moment a client auto-spawns it (which main() already anticipates
-// -- "NO DAEMON: refcounted by attached clients") they go nowhere at all.
-//
-// Called before anything LOGS (an earlier comment claimed DefaultLogger()
-// caches the logger on first use and made this an ordering requirement
-// against caching -- stale: DefaultLogger() resolves spdlog's default per
-// call, so a later ConfigureLogging is picked up everywhere). The ordering
-// still matters for the simpler reason that nothing should log before the
-// sinks exist: config lives a layer above common/, so this stays a free
-// function main calls explicitly.
+// Contract: call ONCE per process, early in main, while the process is still
+// single-threaded. DefaultLogger() resolves the default logger through a raw
+// pointer on every call (see logger.hpp), so swapping it while another thread
+// logs would free a logger under that thread. Lines logged before this call
+// go to spdlog's built-in console logger. It is a free function main calls
+// explicitly because the settings it reads live a layer above common/.
 
 #include <cstdint>
 #include <string>

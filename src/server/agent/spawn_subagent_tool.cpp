@@ -149,8 +149,6 @@ tools::ToolResult SpawnSubagentTool::execute(const nlohmann::json& input,
         if (!input.at("model").is_string()) {
             return {true, "spawn_subagent \"model\" must be a \"<provider>/<model>\" string"};
         }
-        // SplitModelRef, not ParseModelRef: discovered ids can carry slashes,
-        // and the tolerant split is what /model accepts too.
         auto model = common::SplitModelRef(input.at("model").get<std::string>());
         if (!model) {
             return {true, "spawn_subagent \"model\" must be \"<provider>/<model>\" (got \"" +

@@ -10,12 +10,9 @@ namespace minimal::common {
 // thin: it forwards to spdlog's CURRENT default logger on every call, so the
 // sink (console default, the rotating file from settings.json's `logging.*`)
 // can be swapped by ConfigureLogging without touching a single call site.
-//
-// The indirection is load-bearing. An earlier version pinned
-// spdlog::default_logger() on first use -- and first use happens during
-// plugin-config parsing, BEFORE ConfigureLogging runs -- so the file sink was
-// wired into a logger nothing used anymore, and logging.path was silently
-// inert. Resolving per call is what makes the swap real.
+// Lines logged before ConfigureLogging runs (config-dir resolution, settings
+// parsing) go to spdlog's built-in console logger; everything after follows
+// the swap.
 class Logger {
 public:
     Logger() = default;
@@ -39,15 +36,11 @@ public:
 
 private:
     // default_logger_raw(), not default_logger(): the latter takes spdlog's
-    // registry-wide mutex and copies a shared_ptr on every single call, ahead
-    // of the level check inside logger->debug() -- so a filtered-out debug()
-    // at a hot call site (the agent loop, tool executors, stream readers)
-    // still serializes every thread in the process on one lock for output
-    // that is then discarded. default_logger_raw() is what spdlog's own free
-    // functions (spdlog::info, etc.) use, and is exactly as safe here: nothing
-    // is meant to log before ConfigureLogging installs the real logger (see
-    // logging_setup.hpp), so there is no "resolve before the swap" window to
-    // race.
+    // registry-wide mutex and copies a shared_ptr on every call, ahead of the
+    // level check, serializing every thread on output that is then discarded.
+    // The raw pointer is safe because the swap happens exactly once, while the
+    // process is still single-threaded (see ConfigureLogging); no thread can
+    // be mid-call on the logger being replaced.
     static spdlog::logger* current() { return spdlog::default_logger_raw(); }
 };
 

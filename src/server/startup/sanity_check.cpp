@@ -97,13 +97,6 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
     std::unordered_map<std::string, bool> backend_reported;
 
     for (const auto& ref_text : refs) {
-        // SplitModelRef, not ParseModelRef: ref_text is ModelRef::str() of an
-        // entry from bundle_.providers.ModelRefs(), which includes discovered models
-        // whose id can itself contain a slash (e.g. an OpenRouter model under
-        // provider "openrouter") -- ParseModelRef rejected those outright, so
-        // this check silently skipped validating every backend-registration
-        // for a discovered slash-bearing model instead of the "already
-        // rejected by ParseProvidersConfig" case the old comment claimed.
         const auto ref = common::SplitModelRef(ref_text);
         if (!ref) continue;  // truly malformed; ParseProvidersConfig rejects those
         const auto model = bundle_.providers.Resolve(*ref);

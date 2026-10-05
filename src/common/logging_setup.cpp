@@ -30,10 +30,7 @@ spdlog::level::level_enum ParseLevel(const std::string& name, std::string& error
 
 std::string ConfigureLogging(const LoggingOptions& options) {
     // Accumulated, not overwritten: level and path are independent knobs, and
-    // a bad path used to clobber an already-recorded bad level, so a
-    // misspelled logging.level went unreported whenever logging.path also
-    // happened to fail -- exactly the silent-typo case ParseLevel's own
-    // comment says this return value exists to surface.
+    // a bad path must not hide a misspelled level.
     std::vector<std::string> problems;
     std::string level_error;
     const auto level = ParseLevel(options.level, level_error);
