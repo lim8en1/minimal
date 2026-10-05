@@ -102,6 +102,7 @@ nlohmann::json TranslateOpencodeProvider(const nlohmann::json& provider, const s
         }
         out["models"] = std::move(models);
     }
+    out.erase("name");  // opencode's display name; core parses entries strictly
     return out;
 }
 

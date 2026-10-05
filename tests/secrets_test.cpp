@@ -83,6 +83,13 @@ TEST_CASE("Bind: empty, literal and env references", "[secrets]") {
                       ContainsSubstring("unset"));
     CHECK_THROWS(resolver.Bind("env:", "http://x"));
 
+    // A typo'd scheme is refused rather than sent as the key; the error names
+    // the scheme, never the value.
+    CHECK_THROWS_WITH(resolver.Bind("secrets:openai", "http://x"),
+                      ContainsSubstring("unknown key reference scheme 'secrets:'"));
+    CHECK_THROWS(resolver.Bind("Env:FOO", "http://x"));
+    CHECK(resolver.Bind("sk-or-v1:abc", "http://x").Get().value == "sk-or-v1:abc");
+
     // Equality is the reference, never the value.
     CHECK(resolver.Bind("secret:a", "http://x") == resolver.Bind("secret:a", "http://y"));
     CHECK_FALSE(resolver.Bind("secret:a", "http://x") == resolver.Bind("secret:b", "http://x"));

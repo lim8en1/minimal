@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <initializer_list>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include <nlohmann/json.hpp>
@@ -31,5 +33,13 @@ std::unordered_map<std::string, std::string> ParseStringMap(const nlohmann::json
 // and cannot be forgotten by a future one.
 std::int64_t ReadClampedInt64(const nlohmann::json& parent, const char* key,
                               std::int64_t fallback, std::int64_t min, std::int64_t max);
+
+// Strict schema for a config object: throws std::runtime_error naming `where`,
+// the first key of `object` not in `known`, and the known set. Keys starting
+// with "//" are comments and always allowed. A non-object is not checked (the
+// caller's own type check names that). A misspelled or removed field must be a
+// named error, not a silent ignore that surfaces later as a 401.
+void RejectUnknownKeys(const nlohmann::json& object, std::initializer_list<std::string_view> known,
+                       const std::string& where);
 
 }  // namespace minimal::config

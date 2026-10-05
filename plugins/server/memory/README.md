@@ -148,6 +148,7 @@ written by a newer binary), the plugin disables itself for that run and
 
 Installs that already have a `plugins.json` keep their existing
 `"enabled": false` entry, so there memory has to be switched on by hand.
+An unknown field disables the plugin for that run, naming the field.
 Full config:
 
 ```json

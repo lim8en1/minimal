@@ -1,5 +1,6 @@
 #include "minimal/config/parse_util.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -41,6 +42,20 @@ std::int64_t ReadClampedInt64(const nlohmann::json& parent, const char* key,
     if (value < min) return min;
     if (value > max) return max;
     return value;
+}
+
+void RejectUnknownKeys(const nlohmann::json& object, std::initializer_list<std::string_view> known,
+                       const std::string& where) {
+    if (!object.is_object()) return;
+    for (const auto& [key, unused] : object.items()) {
+        (void)unused;
+        if (key.rfind("//", 0) == 0) continue;
+        if (std::find(known.begin(), known.end(), key) != known.end()) continue;
+        std::string list;
+        for (const auto name : known) list += (list.empty() ? "" : ", ") + std::string(name);
+        throw std::runtime_error(where + " has unknown field \"" + key + "\" (known: " + list +
+                                 ")");
+    }
 }
 
 }  // namespace minimal::config

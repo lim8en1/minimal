@@ -10,6 +10,7 @@
 // against OpenRouter /api/alpha/decisions (see that directory's README).
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -199,6 +200,12 @@ TEST_CASE("typesafe-advisor settings default and degrade", "[typesafe_advisor][s
     // A non-object config degrades to defaults, like every bundled plugin.
     const auto degraded = ParseSettings(nlohmann::json::array());
     CHECK(degraded.api_key == "env:TYPESAFE_API_KEY");
+
+    // An unknown field (top level or retry) is a named error, not a default.
+    CHECK_THROWS_WITH(ParseSettings(nlohmann::json{{"apikey", "k"}}),
+                      Catch::Matchers::ContainsSubstring("unknown field \"apikey\""));
+    CHECK_THROWS_WITH(ParseSettings(nlohmann::json{{"retry", {{"retries", 3}}}}),
+                      Catch::Matchers::ContainsSubstring("config.retry has unknown field"));
 
     // Wrong-typed fields keep the default; the struct's own defaults survive.
     const auto wrong_types = ParseSettings(nlohmann::json{

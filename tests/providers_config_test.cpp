@@ -2138,6 +2138,40 @@ TEST_CASE("malformed metadata knobs are named parse errors", "[providers][metada
     }
 }
 
+TEST_CASE("unknown fields are named parse errors at every level", "[providers]") {
+    using Catch::Matchers::ContainsSubstring;
+    const auto parse = [](const char* body) {
+        return ParseProvidersConfig(nlohmann::json::parse(body));
+    };
+    CHECK_THROWS_WITH(parse(R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                                    "credentials": "secret:p", "models": {"m": {}}}}})"),
+                      ContainsSubstring("\"credentials\" was removed"));
+    CHECK_THROWS_WITH(parse(R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                                    "api_key_env": "K", "models": {"m": {}}}}})"),
+                      ContainsSubstring("\"api_key_env\" was removed"));
+    CHECK_THROWS_WITH(parse(R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                                    "apikey": "k", "models": {"m": {}}}}})"),
+                      ContainsSubstring("provider 'p' has unknown field \"apikey\""));
+    CHECK_THROWS_WITH(parse(R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                                    "models": {"m": {"max_token": 5}}}}})"),
+                      ContainsSubstring("model 'p/m' has unknown field \"max_token\""));
+    CHECK_THROWS_WITH(parse(R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
+                                    "timeouts": {"connect": 5}, "models": {"m": {}}}}})"),
+                      ContainsSubstring("timeouts has unknown field \"connect\""));
+    CHECK_THROWS_WITH(parse(R"({"providers": {}, "provider": {}})"),
+                      ContainsSubstring("unknown field \"provider\""));
+}
+
+TEST_CASE("comment keys are allowed wherever fields are", "[providers]") {
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+        "//": "top",
+        "providers": {"p": {"//": "entry", "backend": "openai", "url": "http://x/v1",
+                            "models": {"//note": "a comment among models",
+                                       "m": {"//": "model"}}}}})"));
+    CHECK(config.Resolve(ModelRef{"p", "m"}) != nullptr);
+    CHECK(config.Resolve(ModelRef{"p", "//note"}) == nullptr);
+}
+
 // --- runtime concurrency characterization (extraction safety net) ------------------
 //
 // The runtime half of ProvidersConfig is called from RPC threads (ListModels),
