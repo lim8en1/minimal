@@ -19,7 +19,6 @@
 #include "minimal/rpc/stream_attachment.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
-#include "minimal/config/skill_registry.hpp"
 #include "minimal/rpc/event_translator.hpp"
 #include "minimal/rpc/session_wiring.hpp"
 #include "minimal/rpc/transport_channels.hpp"
@@ -1730,9 +1729,8 @@ TEST_CASE("a borrowed turn does not revert a SetRunMode switch", "[session][run_
     // restore.
     std::ofstream(dir.path() / "agents" / "test.md")
         << "---\nname: test\nmodel: main/test-model\n---\nborrow body\n";
-    config::SkillRegistry skills = config::SkillRegistry::Load(dir.path());
     agent::AgentPresetRegistry registry(
-        dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
+        dir.path(), config::LoadSettingsConfig(dir.path() / "settings.json"));
 
     SessionFixture fixture(dir.path());
     fixture.preset_registry = &registry;
@@ -1793,9 +1791,8 @@ TEST_CASE("a per-turn provider override keeps the borrowed provider alive throug
     std::filesystem::create_directories(dir.path() / "agents");
     std::ofstream(dir.path() / "agents" / "test.md")
         << "---\nname: test\nmodel: main/test-model\n---\nborrow body\n";
-    config::SkillRegistry skills = config::SkillRegistry::Load(dir.path());
     agent::AgentPresetRegistry registry(
-        dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
+        dir.path(), config::LoadSettingsConfig(dir.path() / "settings.json"));
 
     // Every "fake" provider the factory constructs is scripted to answer once;
     // the fixture's own `provider` (the session's sticky one) is never used

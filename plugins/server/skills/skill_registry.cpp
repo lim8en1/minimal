@@ -1,4 +1,4 @@
-#include "minimal/config/skill_registry.hpp"
+#include "skill_registry.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -11,8 +11,9 @@
 #include "minimal/config/frontmatter.hpp"
 #include "minimal/config/project_dirs.hpp"
 #include "minimal/config/project_trust.hpp"
+#include "minimal/config/project_trust.hpp"
 
-namespace minimal::config {
+namespace minimal::skills {
 namespace {
 
 // A skill's frontmatter+body is prose, not a data file -- kilobytes, not
@@ -89,9 +90,9 @@ SkillMeta LoadCandidate(const std::filesystem::path& candidate) {
         return meta;
     }
 
-    ParsedFrontmatter parsed;
+    config::ParsedFrontmatter parsed;
     try {
-        parsed = parse_frontmatter_markdown(*contents);
+        parsed = config::parse_frontmatter_markdown(*contents);
     } catch (const std::exception& e) {
         meta.load_error = std::string("frontmatter parse error: ") + e.what();
         return meta;
@@ -219,7 +220,7 @@ std::optional<std::string> ReadSkillBody(const SkillMeta* meta) {
     const std::optional<std::string> contents = ReadFile(meta->body_path);
     if (!contents) return std::nullopt;
     try {
-        return parse_frontmatter_markdown(*contents).body;
+        return config::parse_frontmatter_markdown(*contents).body;
     } catch (const std::exception&) {
         return std::nullopt;
     }
@@ -254,7 +255,7 @@ std::filesystem::path CanonicalPath(const std::filesystem::path& path) {
 // occurrence of a name in walk order survives, and a shadowed duplicate is
 // logged. This builder runs at most once per canonical root (the caller
 // caches), so the warnings are once per root, not once per call.
-std::vector<SkillMeta> BuildOverlay(const ProjectDirs& dirs) {
+std::vector<SkillMeta> BuildOverlay(const config::ProjectDirs& dirs) {
     std::vector<SkillMeta> overlay;
     std::unordered_map<std::string, std::size_t> index;
     for (const auto& dir : dirs.dirs()) {
@@ -297,7 +298,7 @@ const std::vector<SkillMeta>& SkillRegistry::MergedFor(
     auto [it, inserted] = cache_->merged.try_emplace(CanonicalPath(project_root).string());
     if (inserted) {
         std::vector<SkillMeta> merged = skills_;
-        for (auto& meta : BuildOverlay(ProjectDirs(project_root))) {
+        for (auto& meta : BuildOverlay(config::ProjectDirs(project_root))) {
             auto found = std::find_if(merged.begin(), merged.end(),
                                       [&meta](const SkillMeta& global) {
                                           return global.name == meta.name;
@@ -340,4 +341,4 @@ std::optional<std::string> SkillRegistry::LoadBodyFor(const std::filesystem::pat
     return ReadSkillBody(meta);
 }
 
-}  // namespace minimal::config
+}  // namespace minimal::skills

@@ -50,9 +50,11 @@ v1::ToolExecutionEvent FinishTool(bool is_error = false, std::int64_t duration_m
 
 v1::BackgroundTaskEvent BackgroundEvent(const std::string& tool_use_id,
                                         v1::BackgroundTaskEvent::State state,
-                                        const std::string& command = "make -j8") {
+                                        const std::string& command = "make -j8",
+                                        const std::string& tool_name = "bash") {
     v1::BackgroundTaskEvent evt;
     evt.set_tool_use_id(tool_use_id);
+    evt.set_tool_name(tool_name);
     evt.set_state(state);
     evt.set_command(command);
     return evt;
@@ -487,9 +489,8 @@ TEST_CASE("a fresh assistant turn and terminal events clear a pending ask", "[se
 TEST_CASE("OnToolStarted carries the call's input through to the snapshot, "
           "for the live row's SummarizeToolInput",
           "[session_state][tool]") {
-    // The wire's ToolExecutionEvent.summary is currently always empty in
-    // production (rendering from tool_name + input is the client's job) --
-    // this is the field the live row actually has to draw from.
+    // A tool with no Tool::Summary sends an empty wire summary; the input is
+    // then what the live row draws from.
     v1::ToolExecutionEvent evt = StartTool("t-1", "bash");
     (*evt.mutable_input()->mutable_fields())["command"].set_string_value("ls -la");
 
@@ -652,6 +653,17 @@ TEST_CASE("a background task's terminal event REOPENS a row the panel already sw
     CHECK_FALSE(snap.tools[0].started);
     CHECK(snap.tools[0].is_error);
     CHECK(snap.tools[0].summary == "flaky-build.sh");
+    CHECK(snap.tools[0].tool_name == "bash");
+}
+
+TEST_CASE("a reopened background row is labeled by the event's tool, not assumed to be bash",
+          "[session_state][background]") {
+    SessionState state("s-1");
+    state.OnBackgroundTask(BackgroundEvent("t-py", v1::BackgroundTaskEvent::COMPLETED,
+                                           "print(1)", "python_exec"));
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.tools.size() == 1);
+    CHECK(snap.tools[0].tool_name == "python_exec");
 }
 
 TEST_CASE("OnTurnCompleted records occupancy and clears tools, but does not set Done",

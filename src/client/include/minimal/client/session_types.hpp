@@ -31,12 +31,12 @@ namespace minimal::client {
 struct ToolExecutionState {
     std::string tool_use_id;
     std::string tool_name;
-    std::optional<std::string> summary;      // human-readable from ToolExecutionEvent
+    // The tool's own one-line description (Tool::Summary via
+    // ToolExecutionEvent.summary), or a background task's command. Empty when
+    // the tool sends none.
+    std::optional<std::string> summary;
     // The model's call args (ToolExecutionEvent.input), for SummarizeToolInput
-    // to build a one-line row summary from -- `summary` above is currently
-    // always empty on the wire (rendering from tool_name + input is the
-    // client's job; see agent_loop.hpp), so this is what the live row actually
-    // has to work with.
+    // when `summary` is empty.
     nlohmann::json input = nlohmann::json::object();
     std::chrono::milliseconds started_at_unix_ms{-1};  // server-supplied timestamp
     // Set by OnToolFinished from the finish event's duration_ms; -1 while the

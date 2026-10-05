@@ -7,11 +7,12 @@
 #include <unistd.h>
 
 #include "minimal/config/project_trust.hpp"
-#include "minimal/config/skill_registry.hpp"
+#include "skill_registry.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
 using namespace minimal::config;
+using namespace minimal::skills;
 
 namespace {
 

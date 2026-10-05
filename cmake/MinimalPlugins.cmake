@@ -59,8 +59,24 @@ _minimal_libdir_to_runtime_dep_rpath(MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH)
 
 # --- Bundled -----------------------------------------------------------------
 
+# minimal_add_plugin(<name> [DISABLED_BY_DEFAULT] <sources>...)
+#
+# DISABLED_BY_DEFAULT: the plugin ships present but off until the operator
+# enables it in plugins.json (it spends tokens or sends data on its own
+# initiative). Expressed as a marker file beside the module, which discovery
+# checks (common::kDisabledByDefaultSuffix) -- so the host carries no list of
+# plugin names.
+function(_minimal_plugin_disabled_marker name install_dir)
+    set(marker "${name}.disabled-by-default")
+    file(GENERATE OUTPUT "$<TARGET_FILE_DIR:${name}>/${marker}" CONTENT "")
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${marker}.install" CONTENT "")
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/${marker}.install"
+        DESTINATION "${install_dir}" RENAME "${marker}")
+endfunction()
+
 function(minimal_add_plugin name)
-    add_library(${name} MODULE ${ARGN})
+    cmake_parse_arguments(PARSE_ARGV 1 map "DISABLED_BY_DEFAULT" "" "")
+    add_library(${name} MODULE ${map_UNPARSED_ARGUMENTS})
     target_link_libraries(${name} PRIVATE minimal::server_core)
     target_compile_options(${name} PRIVATE ${MINIMAL_WARNING_FLAGS})
     set_target_properties(${name} PROPERTIES PREFIX "" OUTPUT_NAME "${name}")
@@ -89,6 +105,9 @@ function(minimal_add_plugin name)
         RUNTIME_DEPENDENCY_SET minimal_runtime_deps
         LIBRARY DESTINATION "${MINIMAL_PLUGIN_INSTALL_DIR}")
     minimal_strip_debug_info(${name} "${MINIMAL_PLUGIN_INSTALL_DIR}")
+    if(map_DISABLED_BY_DEFAULT)
+        _minimal_plugin_disabled_marker(${name} "${MINIMAL_PLUGIN_INSTALL_DIR}")
+    endif()
 endfunction()
 
 # The client twin: MODULE, links the SHARED minimal::client_core (one copy in

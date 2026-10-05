@@ -2,7 +2,8 @@
 name: ctf
 description: Full toolkit for capture-the-flag challenges -- binary exploitation, reversing, forensics, crypto.
 allowed_tools: [bash, read, write, edit, grep, glob, python_exec, python_interrupt, skill, ask_user]
-allowed_skills: ["*"]
+plugin_permissions:
+  skills: ["*"]
 permission_mode:
   read_only: allow
   file_write: allow

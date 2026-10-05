@@ -2,7 +2,6 @@
 name: review
 description: Investigates and QAs code.
 allowed_tools: ["ask_user", "read", "grep", "glob", "bash", "write", "edit", "checklist"]
-allowed_skills: []
 tool_sources: {}
 permission_mode:
   read_only: allow

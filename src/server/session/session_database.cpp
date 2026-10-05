@@ -520,8 +520,8 @@ SessionDatabase::SessionDatabase(const std::filesystem::path& db_path, const Ope
         // binary deletes messages BEFORE the session row (see DeleteSession), so a
         // crash mid-delete leaves a session with a partial transcript, not
         // orphans -- the sweep exists for databases written by paths that cannot
-        // make that promise (a legacy database, or one written while
-        // foreign_keys was off). One indexed pass at open: NOT EXISTS probes
+        // make that promise (one written while foreign_keys was off, or by a
+        // crashed older binary). One indexed pass at open: NOT EXISTS probes
         // sessions through the (session_id, ...) index prefix per row rather than
         // scanning the sessions table per message.
         //

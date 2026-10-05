@@ -163,11 +163,9 @@ std::vector<bool> LabelContinuations(const std::vector<ChatRow>& rows);
 nlohmann::json StructToJson(const google::protobuf::Struct& value);
 
 // A bounded one-line dump of a tool's raw input JSON (truncated at 120
-// chars), for a tool with no dedicated special case below.
+// chars). A tool that wants a better line sends ToolExecutionEvent.summary
+// (Tool::Summary on the server); the client never special-cases tool names.
 std::string InputSummary(const nlohmann::json& input);
-
-// bash's own $command, if `tool_name` is "bash" and `input` has one.
-std::optional<std::string> BashCommandOf(const std::string& tool_name, const nlohmann::json& input);
 
 // Collapses a tool summary to the single line the LIVE tool row and the
 // running-tools panel render it as. text() declares itself ONE row tall
@@ -177,14 +175,10 @@ std::optional<std::string> BashCommandOf(const std::string& tool_name, const nlo
 // Newlines collapse to spaces; overlong commands truncate.
 std::string OneLineSummary(std::string summary);
 
-// The single-line merge of the two above -- bash's $command or the generic
-// JSON dump, in that preference order. Shared by the persisted ToolActivity
-// renderer (core_registrations.cpp, which also uses the two individually for
-// their distinct per-kind styling) and the
-// LIVE tool row renderers (ChatView::RenderLiveToolRow, RenderToolsPanel),
-// which have room for only one dim line and want it to read the same
-// whether the call is still running or already in the transcript.
-std::string SummarizeToolInput(const std::string& tool_name, const nlohmann::json& input);
+// InputSummary collapsed to one line. Shared by the persisted ToolActivity
+// renderer (core_registrations.cpp) and the LIVE tool row renderers
+// (ChatView::RenderLiveToolRow, RenderToolsPanel) when no wire summary came.
+std::string SummarizeToolInput(const nlohmann::json& input);
 
 // ============================================================================
 // Scrollback row windowing (ChatView::Render). The chat column's Element

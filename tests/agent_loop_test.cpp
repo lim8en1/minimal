@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -15,10 +16,10 @@
 #include "deadline.hpp"
 #include "fakes.hpp"
 #include "minimal/agent/agent_loop.hpp"
-#include "minimal/agent/structured_compaction.hpp"
-#include "minimal/config/skill_registry.hpp"
+#include "structured_compaction.hpp"
+#include "skill_registry.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
-#include "minimal/tools/skill_tool.hpp"
+#include "skill_tool.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
@@ -149,7 +150,7 @@ struct Harness {
     // they are destroyed LAST: the registry below owns a SkillTool that holds a
     // reference into `skills`.
     std::unique_ptr<testing::TempDir> skill_arena;
-    std::unique_ptr<config::SkillRegistry> skills;
+    std::unique_ptr<skills::SkillRegistry> skills;
 
     FakeLlmProvider provider;
     tools::ToolRegistry registry;
@@ -168,6 +169,10 @@ struct Harness {
     std::unique_ptr<agent::AgentLoop> loop;
     std::vector<llm::StreamEvent> seen_events;
     std::vector<agent::CompactionEvent> compaction_events;
+    // Pushed from tool workers (parallel dispatch): guarded.
+    std::mutex sink_mu;
+    std::vector<agent::ToolLifecycleEvent> lifecycle_events;
+    std::vector<tools::BackgroundTaskEvent> task_events;
     // Atomic because the backoff test flips it from the main thread while the
     // loop polls it mid-sleep; every other test sets it from the same thread.
     std::atomic<bool> cancel_flag{false};
@@ -201,9 +206,9 @@ struct Harness {
             std::ofstream(dir / "SKILL.md") << "---\nname: " << name
                                             << "\ndescription: test skill\n---\n" << body;
         }
-        skills = std::make_unique<config::SkillRegistry>(
-            config::SkillRegistry::Load(skill_arena->path()));
-        registry.Register(std::make_unique<tools::SkillTool>(*skills));
+        skills = std::make_unique<skills::SkillRegistry>(
+            skills::SkillRegistry::Load(skill_arena->path()));
+        registry.Register(std::make_unique<skills::SkillTool>(*skills));
     }
 
     void Build(agent::AgentPreset preset = {}, agent::LoopConfig config = {},
@@ -226,7 +231,16 @@ struct Harness {
             session.tool_lifecycle_sink = [](const agent::ToolLifecycleEvent&) {
                 throw std::runtime_error("simulated sink failure");
             };
+        } else {
+            session.tool_lifecycle_sink = [this](const agent::ToolLifecycleEvent& event) {
+                std::lock_guard lock(sink_mu);
+                lifecycle_events.push_back(event);
+            };
         }
+        session.task_event_sink = [this](const tools::BackgroundTaskEvent& event) {
+            std::lock_guard lock(sink_mu);
+            task_events.push_back(event);
+        };
         session.compaction_sink = [this](const agent::CompactionEvent& event) {
             compaction_events.push_back(event);
         };
@@ -244,6 +258,43 @@ struct Harness {
 };
 
 }  // namespace
+
+namespace {
+
+// Starts "background work": reports one task event without naming itself,
+// and describes its call through Tool::Summary.
+class BackgroundStarterTool : public testing::FakeTool {
+public:
+    BackgroundStarterTool() : FakeTool("starter", ToolCategory::ReadOnly) {}
+    std::string Summary(const nlohmann::json& input) const override {
+        return "> " + input.value("what", std::string("?"));
+    }
+    tools::ToolResult execute(const nlohmann::json& input, tools::ToolContext& ctx) override {
+        tools::BackgroundTaskEvent event;
+        event.tool_use_id = ctx.tool_use_id;
+        event.command = "job";
+        if (ctx.emit_task_event) ctx.emit_task_event(event);
+        return FakeTool::execute(input, ctx);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("core stamps the invoking tool on its task events and carries its Summary",
+          "[agent_loop][background]") {
+    Harness h;
+    h.registry.Register(std::make_unique<BackgroundStarterTool>());
+    h.provider.PushResponse(ToolUseResponse("tu1", "starter", {{"what", "build"}}));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build();
+
+    h.loop->RunTurn(UserText("go"));
+
+    REQUIRE(h.task_events.size() == 1);
+    CHECK(h.task_events[0].tool_name == "starter");
+    REQUIRE_FALSE(h.lifecycle_events.empty());
+    CHECK(h.lifecycle_events[0].summary == "> build");
+}
 
 TEST_CASE("a single turn ends and persists user + assistant", "[agent_loop]") {
     Harness h;
@@ -1821,8 +1872,9 @@ TEST_CASE("the seedless wake turn carries only the injected messages", "[agent_l
 TEST_CASE("the skill tool round-trips a lazy-loaded body through the loop", "[agent_loop][skills]") {
     Harness h;
     h.EnableSkills({{"deploy", "Always run the smoke tests first.\n"}});
+    // Per-skill gating is the skills plugin's permission model (tested with
+    // it); here the core policy allows the read-only tool outright.
     agent::AgentPreset preset;
-    preset.allowed_skills = {{"deploy", agent::SkillMode::Allow}};
     preset.system_prompt = "You are a test agent.\n";
     h.provider.PushResponse(ToolUseResponse("tu1", "skill", {{"name", "deploy"}}));
     h.provider.PushResponse(TextResponse("done"));
@@ -1846,62 +1898,26 @@ TEST_CASE("the skill tool round-trips a lazy-loaded body through the loop", "[ag
     CHECK(text.ends_with("Always run the smoke tests first.\n"));
 }
 
-TEST_CASE("the skill tool is offered only when the preset allows skills", "[agent_loop][skills]") {
-    const auto has_skill = [](const std::vector<llm::ToolDefinition>& tools) {
+TEST_CASE("an empty-named per-preset definition withholds the tool from the request",
+          "[agent_loop]") {
+    // The generic form of "no skill allowed -> no skill tool": a definition
+    // builder answers an empty-named definition and the request drops it.
+    const auto has = [](const std::vector<llm::ToolDefinition>& tools, const std::string& name) {
         return std::any_of(tools.begin(), tools.end(),
-                           [](const llm::ToolDefinition& t) { return t.name == "skill"; });
+                           [&](const llm::ToolDefinition& t) { return t.name == name; });
     };
-
-    SECTION("allowed skills -> offered") {
-        Harness h;
-        h.EnableSkills({{"deploy", "body\n"}});
-        agent::AgentPreset preset;
-        preset.allowed_skills = {{"deploy", agent::SkillMode::Allow}};
-        h.provider.PushResponse(TextResponse("hi"));
-        h.Build(std::move(preset));
-
-        h.loop->RunTurn(UserText("hi"));
-
-        CHECK(has_skill(h.provider.requests().front().tools));
-    }
-
-    SECTION("no allowed skills -> withheld even under allowed_tools ['*']") {
-        Harness h;
-        h.EnableSkills({{"deploy", "body\n"}});
-        agent::AgentPreset preset;  // allowed_skills empty; Build() defaults allowed_tools to {"*"}
-        h.provider.PushResponse(TextResponse("hi"));
-        h.Build(std::move(preset));
-
-        h.loop->RunTurn(UserText("hi"));
-
-        CHECK_FALSE(has_skill(h.provider.requests().front().tools));
-    }
-}
-
-TEST_CASE("invoking a skill the preset does not allow yields an error result",
-          "[agent_loop][skills]") {
     Harness h;
-    // Two real, loaded skills; the preset admits one and the model asks for the
-    // other. Previously this used a preset naming a skill that did not exist,
-    // which AgentPresetRegistry can no longer produce -- it resolves
-    // allowed_skills to allowed ∩ loaded, so an unknown name yields an empty
-    // list and the tool is withheld rather than offered-but-unusable.
-    h.EnableSkills({{"deploy", "body\n"}, {"other", "other body\n"}});
+    h.registry.Register(std::make_unique<testing::FakeTool>("probe", ToolCategory::ReadOnly));
+    h.registry.Register(std::make_unique<testing::FakeTool>("kept", ToolCategory::ReadOnly));
     agent::AgentPreset preset;
-    preset.allowed_skills = {{"other", agent::SkillMode::Allow}};
-    h.provider.PushResponse(ToolUseResponse("tu1", "skill", {{"name", "deploy"}}));
-    h.provider.PushResponse(TextResponse("ok"));
+    preset.tool_definition_overrides["probe"] = llm::ToolDefinition{};
+    h.provider.PushResponse(TextResponse("hi"));
     h.Build(std::move(preset));
 
-    h.loop->RunTurn(UserText("go"));
+    h.loop->RunTurn(UserText("hi"));
 
-    REQUIRE(h.store.messages.size() == 4);
-    REQUIRE(h.store.messages[2].content.size() == 1);
-    const auto* block = std::get_if<llm::ToolResultBlock>(&h.store.messages[2].content.front());
-    REQUIRE(block != nullptr);
-    CHECK(block->is_error);
-    const std::string text = std::get<llm::TextBlock>(block->content.front()).text;
-    CHECK(text.find("not available in this session") != std::string::npos);
+    CHECK_FALSE(has(h.provider.requests().front().tools, "probe"));
+    CHECK(has(h.provider.requests().front().tools, "kept"));
 }
 
 // --- Resume: seeded history ----------------------------------------------------
@@ -2503,8 +2519,7 @@ TEST_CASE("the retry wait honors the server's Retry-After hint", "[agent_loop][r
 // S4: the compaction strategy seam
 // ---------------------------------------------------------------------------
 
-TEST_CASE("LoopConfig.cut_selector is consulted instead of the legacy history.size()/2 "
-         "halving",
+TEST_CASE("LoopConfig.cut_selector is consulted instead of the default summarize cut",
          "[agent_loop][compaction]") {
     Harness h;
     std::size_t seen_size = 0;
@@ -2853,7 +2868,7 @@ llm::Message AssistantText(std::string text) {
 
 TEST_CASE("compaction_replace_percent cuts by token weight, not message count",
           "[agent_loop][compaction]") {
-    // Three small messages and one huge recent one: halving by COUNT keeps
+    // Three small messages and one huge recent one: cutting by COUNT would keep
     // the huge one plus a small one (~all the tokens); 80% by WEIGHT folds
     // everything but the newest message, because that alone exceeds the 20%
     // keep budget -- and the newest message is always kept whole.
@@ -2961,13 +2976,18 @@ TEST_CASE("a successful compaction reports one CompactionEvent with before/after
     CHECK(event.at_seq == h.store.last_appended_seq());
 }
 
-TEST_CASE("offer_summary_tool puts record_summary on main requests; a stray call is a no-op",
+TEST_CASE("a strategy's request tools ride main requests; a stray call gets its reply",
           "[agent_loop][compaction]") {
     Harness h;
     h.AddTool("read");
     agent::LoopConfig config;
-    config.offer_summary_tool = true;
-    h.provider.PushResponse(ToolUseResponse("rs1", std::string(agent::kRecordSummaryToolName)));
+    // What main.cpp copies from CompactionStrategyRegistry: the structured
+    // plugin's record_summary and its stray-call reply.
+    const auto structured =
+        compaction_structured::MakeStructuredCompactionStrategy("instruction");
+    config.strategy_tools = structured.request_tools;
+    config.strategy_tool_replies = {{"record_summary", structured.stray_call_reply}};
+    h.provider.PushResponse(ToolUseResponse("rs1", "record_summary"));
     h.provider.PushResponse(TextResponse("done"));
     h.Build({}, config);
 
@@ -3031,7 +3051,7 @@ TEST_CASE("a checkpoint resume drops thinking only from the messages the fold ke
 
 TEST_CASE("the record_summary definition stays small: it rides every request",
           "[agent_loop][compaction]") {
-    const auto definition = agent::MakeRecordSummaryToolDefinition();
+    const auto definition = compaction_structured::MakeRecordSummaryToolDefinition();
     const auto bytes = definition.description.size() + definition.input_schema.dump().size();
     CHECK(bytes < 800);   // ~200 estimated tokens at most
 }

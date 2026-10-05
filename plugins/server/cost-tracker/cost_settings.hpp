@@ -22,7 +22,7 @@ namespace minimal::cost_tracker {
 // config tier (ParseRateTable owns the entry schema).
 struct CostSettings {
     // The two pricing snapshots the plugin fetches (at server start when the
-    // cached snapshot is stale, from --refresh-cost-rates, and through the
+    // cached snapshot is stale, from --plugin-call cost-tracker refresh_rates, and through the
     // .rpc service's refresh_rates): LiteLLM's all-vendors catalog and
     // OpenRouter's own /api/v1/models list. Constant URLs by default so
     // pricing works with zero configuration; overridable for a mirror or a
@@ -38,7 +38,7 @@ struct CostSettings {
     int rates_fetch_timeout_ms = 30000;
     // How stale the cached snapshot may be before a server start fetches
     // again: 7 by default, 0 to fetch on every start. The CLI's
-    // --refresh-cost-rates ignores this gate -- it always fetches.
+    // --plugin-call cost-tracker refresh_rates ignores this gate -- it always fetches.
     int rates_refresh_days = 7;
 };
 

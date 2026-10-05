@@ -9,8 +9,8 @@ minimal_server_module(agent
         compaction_strategy.cpp
         compaction_trigger.cpp
         context_compactor.cpp
-        structured_compaction.cpp
         agent_loop.cpp
+        permission_gate_service.cpp
         compaction_controller.cpp
         request_builder.cpp
         retry_policy.cpp

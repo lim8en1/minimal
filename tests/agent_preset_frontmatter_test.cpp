@@ -15,12 +15,19 @@ namespace {
 // Pins today's bundled tool vocabulary at the test -- production passes
 // ToolRegistry::PermissionKeys() (see agent_preset_registry.cpp), not a
 // literal list.
-const std::vector<std::string> kBundledToolPermissionKeys = {"bash",  "read", "write",
-                                                              "edit", "glob", "grep"};
+// The web tools declare their opencode spellings and take no pattern rules
+// (Tool::config_aliases / accepts_pattern_rules), exactly as tools-web does.
+ToolVocabulary BundledTools() {
+    ToolVocabulary tools(std::vector<std::string>{"bash", "read", "write", "edit", "glob", "grep",
+                                                  "web_fetch", "web_search"});
+    tools.config_aliases = {{"webfetch", "web_fetch"}, {"websearch", "web_search"}};
+    tools.no_pattern_rules = {"web_fetch", "web_search"};
+    return tools;
+}
 
 AgentPresetFrontmatter Parse(const std::string& markdown) {
     return ParseAgentPresetFrontmatter(config::parse_frontmatter_markdown(markdown),
-                                       kBundledToolPermissionKeys);
+                                       BundledTools());
 }
 
 AgentPresetFrontmatter ParseWithTools(const std::string& markdown,
@@ -42,7 +49,6 @@ TEST_CASE("ParseAgentPresetFrontmatter: minimal valid preset", "[agent_preset_fr
     CHECK(preset.description.empty());
     CHECK(preset.model.empty());
     CHECK(preset.allowed_tools.empty());
-    CHECK(preset.allowed_skills.empty());
     CHECK(preset.tool_sources.empty());
     CHECK(preset.compression_prompt.empty());
     CHECK(preset.body == "You are a build agent.\n");
@@ -88,15 +94,14 @@ TEST_CASE("ParseAgentPresetFrontmatter: allowed_* lists decode", "[agent_preset_
         "description: Builds things\n"
         "model: openai-main/gpt-4.1\n"
         "allowed_tools: [read, write, bash]\n"
-        "allowed_skills: [refactor]\n"
-        "allowed_mcp_servers: [search]\n"
+        "tool_sources:\n"
+        "  mcp: [search]\n"
         "---\n"
         "body\n");
 
     CHECK(preset.description == "Builds things");
     CHECK(preset.model == "openai-main/gpt-4.1");
     CHECK(preset.allowed_tools == std::vector<std::string>{"read", "write", "bash"});
-    CHECK(preset.allowed_skills == std::map<std::string, SkillMode>{{"refactor", SkillMode::Allow}});
     CHECK(preset.tool_sources.at("mcp") == std::vector<std::string>{"search"});
 }
 
@@ -195,19 +200,6 @@ TEST_CASE("ParseAgentPresetFrontmatter: empty-string override key throws", "[age
                         "---\n"
                         "body\n"),
                     std::runtime_error);
-}
-
-TEST_CASE("ParseAgentPresetFrontmatter: legacy mcp_permissions lands in the mcp plugin's slice",
-          "[agent_preset_frontmatter]") {
-    auto preset = Parse(
-        "---\n"
-        "name: build\n"
-        "mcp_permissions:\n"
-        "  search: allow\n"
-        "---\n"
-        "body\n");
-
-    CHECK(preset.plugin_permissions["mcp"]["servers"]["search"] == "allow");
 }
 
 TEST_CASE("ParseAgentPresetFrontmatter: plugin_permissions carries slices verbatim",
@@ -328,39 +320,35 @@ TEST_CASE("ParseAgentPresetFrontmatter: a native permission_mode wins over the a
     CHECK(*preset.permission_mode.file_write == PermissionMode::AlwaysAllow);
 }
 
-TEST_CASE("ParseAgentPresetFrontmatter: the deprecated tools map folds into overrides",
-          "[agent_preset_frontmatter][compat]") {
+TEST_CASE("ParseAgentPresetFrontmatter: a tools key is neither a permission nor a provider "
+          "parameter",
+          "[agent_preset_frontmatter]") {
+    // opencode's old `tools: {name: bool}` map is not read; and `tools` names
+    // a request field the harness owns, so it never passes through either.
     auto preset = Parse(
         "---\n"
         "name: build\n"
         "tools:\n"
         "  write: false\n"
-        "  read: true\n"
         "---\n"
         "body\n");
-    REQUIRE(preset.permission_mode.per_tool_overrides.count("write") == 1);
-    CHECK(preset.permission_mode.per_tool_overrides.at("write") == PermissionMode::AlwaysDeny);
-    CHECK(preset.permission_mode.per_tool_overrides.at("read") == PermissionMode::AlwaysAllow);
+    CHECK(preset.permission_mode.per_tool_overrides.empty());
+    CHECK_FALSE(preset.extra_parameters.contains("tools"));
 }
 
-TEST_CASE("ParseAgentPresetFrontmatter: a native permission_mode override wins over the "
-          "tools alias",
-          "[agent_preset_frontmatter][compat]") {
-    // The stated contract: native beats alias. Applying the tools alias AFTER
-    // the permission_mode block used to invert this -- tools.write re-allowed
-    // what the native file denied.
-    auto preset = Parse(
-        "---\n"
-        "name: build\n"
-        "permission_mode:\n"
-        "  overrides:\n"
-        "    write: deny\n"
-        "tools:\n"
-        "  write: true\n"
-        "---\n"
-        "body\n");
-    REQUIRE(preset.permission_mode.per_tool_overrides.count("write") == 1);
-    CHECK(preset.permission_mode.per_tool_overrides.at("write") == PermissionMode::AlwaysDeny);
+TEST_CASE("ParseAgentPresetFrontmatter: a permission key resolves through the live tool "
+          "vocabulary, not a fixed list",
+          "[agent_preset_frontmatter]") {
+    ToolVocabulary tools(std::vector<std::string>{"remote_exec"});
+    tools.config_aliases = {{"rexec", "remote_exec"}};
+    const auto preset = ParseAgentPresetFrontmatter(
+        config::parse_frontmatter_markdown("---\nname: build\npermission:\n  rexec: deny\n"
+                                           "  bash: allow\n---\nbody\n"),
+        tools);
+    // The declared alias reaches its tool; `bash` is no tool here, so it is
+    // named and ignored rather than assumed.
+    CHECK(preset.permission_mode.per_tool_overrides.at("remote_exec") == PermissionMode::AlwaysDeny);
+    CHECK(preset.permission_mode.per_tool_overrides.count("bash") == 0);
 }
 
 TEST_CASE("ParseAgentPresetFrontmatter: alias keys collapsing onto one category keep the "
@@ -496,40 +484,6 @@ TEST_CASE("ParseAgentPresetFrontmatter: malformed tool_config throws",
     CHECK_THROWS_AS(Parse("---\nname: a\ntool_config: [a, b]\n---\nb\n"), std::runtime_error);
     // An empty-string namespace key would be unreachable by any tool.
     CHECK_THROWS_AS(Parse("---\nname: a\ntool_config:\n  \"\": {}\n---\nb\n"), std::runtime_error);
-}
-
-// --- allowed_skills modes -------------------------------------------------------
-
-TEST_CASE("ParseAgentPresetFrontmatter: allowed_skills accepts the list and the map form",
-          "[agent_preset_frontmatter][compat]") {
-    auto list = Parse("---\nname: a\nallowed_skills: [git-release]\n---\nb\n");
-    CHECK(list.allowed_skills ==
-          std::map<std::string, SkillMode>{{"git-release", SkillMode::Allow}});
-
-    auto map = Parse(
-        "---\n"
-        "name: a\n"
-        "allowed_skills:\n"
-        "  \"*\": allow\n"
-        "  git-release: preload\n"
-        "  internal-docs: ask\n"
-        "  experimental-x: deny\n"
-        "---\n"
-        "b\n");
-    CHECK(map.allowed_skills ==
-          (std::map<std::string, SkillMode>{
-              {"*", SkillMode::Allow},
-              {"git-release", SkillMode::Preload},
-              {"internal-docs", SkillMode::Ask},
-              {"experimental-x", SkillMode::Deny},
-          }));
-}
-
-TEST_CASE("ParseAgentPresetFrontmatter: an invalid allowed_skills mode throws",
-          "[agent_preset_frontmatter][compat]") {
-    CHECK_THROWS_AS(Parse("---\nname: a\nallowed_skills:\n  x: sometimes\n---\nb\n"),
-                    std::runtime_error);
-    CHECK_THROWS_AS(Parse("---\nname: a\nallowed_skills: 42\n---\nb\n"), std::runtime_error);
 }
 
 // --- pattern rules -----------------------------------------------------------------
@@ -668,7 +622,7 @@ TEST_CASE("LoadAgentPresetFrontmatter: an oversized file is refused before the r
         // Comfortably over the 1 MiB cap.
         out << std::string(2 << 20, 'x');
     }
-    CHECK_THROWS_AS(LoadAgentPresetFrontmatter(path, kBundledToolPermissionKeys),
+    CHECK_THROWS_AS(LoadAgentPresetFrontmatter(path, BundledTools()),
                     std::runtime_error);
 }
 
@@ -680,7 +634,7 @@ TEST_CASE("LoadAgentPresetFrontmatter: a normally-sized file is unaffected by th
         std::ofstream out(path);
         out << "---\nname: build\n---\nbody\n";
     }
-    const auto preset = LoadAgentPresetFrontmatter(path, kBundledToolPermissionKeys);
+    const auto preset = LoadAgentPresetFrontmatter(path, BundledTools());
     CHECK(preset.name == "build");
 }
 

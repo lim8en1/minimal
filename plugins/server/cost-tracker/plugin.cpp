@@ -10,7 +10,7 @@
 //     plugins through the §2.2 service channel;
 //   - "cost-tracker.rpc" serves the same state as JSON over the generic
 //     PluginCall channel -- the data path the future UI view consumes -- and
-//     its refresh_rates method is what the server's --refresh-cost-rates
+//     its refresh_rates method is what the server's --plugin-call
 //     flag drives;
 //   - the startup auto-refresh (rates_refresh.hpp) fetches the LiteLLM and
 //     OpenRouter pricing snapshots when the cached ones are older than
@@ -30,7 +30,7 @@
 // bundled: the user's "rates" slice in plugins.json, the OpenRouter snapshot
 // (its slugs ARE the wire model ids an OpenRouter-shaped provider sends, so
 // no provider naming is consulted), the LiteLLM snapshot (both cached by the
-// startup auto-refresh, the --refresh-cost-rates flag, or the .rpc service's
+// startup auto-refresh, the --plugin-call cost-tracker refresh_rates flag, or the .rpc service's
 // refresh_rates), and the seeded cost-rates.json in the config dir
 // (bundled/ treatment: user-editable text, never overwritten, never compiled
 // in). Keys are model ids -- the ccusage convention. A model with no rate
@@ -211,7 +211,7 @@ void minimal_plugin_register_services(
     registry.Provide(minimal::cost_tracker::kCostTrackingServiceName, &tracking);
 
     // The PluginCall dispatch target, under the "<plugin_name>.rpc" convention
-    // (see minimal/plugins/plugin_rpc.hpp). The server's --refresh-cost-rates
+    // (see minimal/plugins/plugin_rpc.hpp). The server's --plugin-call
     // flag resolves this one directly.
     registry.Provide(minimal::plugins::PluginRpcServiceName(minimal::cost_tracker::kPluginName),
                      SharedRpc().get());

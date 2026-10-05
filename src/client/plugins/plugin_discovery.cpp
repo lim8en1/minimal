@@ -7,7 +7,6 @@ common::PluginConfigFormat Format() {
     common::PluginConfigFormat format;
     format.file_label = "client-plugins.json";
     format.noun = "client plugin";
-    // No bundled client plugin ships disabled.
     return format;
 }
 

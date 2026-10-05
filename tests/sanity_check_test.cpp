@@ -17,6 +17,7 @@
 #include "minimal/config/config_bundle.hpp"
 #include "minimal/startup/sanity_check.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
+#include "minimal/mcp/mcp_permission_model.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/tools/tool_source.hpp"
 #include "temp_dir.hpp"
@@ -115,9 +116,9 @@ struct Fixture {
     llm::ProviderFactoryRegistry provider_factories;
     llm::ModelCatalogRegistry model_catalogs;
     agent::CompactionStrategyRegistry compaction_strategies;
-    config::SkillRegistry skills;
     plugins::ServiceRegistry service_registry;
     tools::ToolSourceRegistry tool_sources;
+    tools::PermissionModelRegistry permission_models;
     hooks::HookDispatcher hook_dispatcher{common::DefaultLogger()};
 
     Fixture() {
@@ -180,7 +181,8 @@ struct Fixture {
         registries.compaction_strategies = &compaction_strategies;
         registries.hooks = &hook_dispatcher;
         registries.tool_sources = &tool_sources;
-        return startup::SanityCheckInputs{config_dir, records, skills, plugin_config, resolution,
+        registries.permission_models = &permission_models;
+        return startup::SanityCheckInputs{config_dir, records, plugin_config, resolution,
                                           registries};
     }
 };
@@ -630,18 +632,6 @@ TEST_CASE("an absent compression prompt is loud", "[sanity_check][presets]") {
         CHECK(hits[0]->severity == CheckSeverity::Warning);
         CHECK(hits[0]->message.find("compression.md") != std::string::npos);
     }
-    // The structured prompt: the structured strategy degrades to free text.
-    {
-        Fixture f;
-        WriteGoodConfig(f.config_dir);
-        ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
-        std::filesystem::remove(f.config_dir / "prompts" / "compression-structured.md");
-
-        const auto results = RunChecks(f);
-        const auto hits = ByCheck(results, "presets");
-        REQUIRE(hits.size() == 1);
-        CHECK(hits[0]->message.find("compression-structured.md") != std::string::npos);
-    }
     // A preset override pointing at a missing file. The frontmatter value is
     // the stem -- ".md" is appended by the resolver (see ResolveUncached).
     {
@@ -818,6 +808,50 @@ TEST_CASE("per_tool_overrides keys that resolve to nothing warn", "[sanity_check
     CHECK(hits[0]->message.find("edti") != std::string::npos);
 }
 
+TEST_CASE("per_tool_overrides keys in a reserved namespace are not checked; others are",
+          "[sanity_check][naming_model]") {
+    // A plugin's reserved namespace holds tools registered after startup, so
+    // a key inside it has nothing to check against. Outside every reserved
+    // namespace the same spelling is an ordinary unknown key -- nothing in
+    // core treats "mcp__" specially.
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.tool_registry.SetAttribution("remote-tools");
+    REQUIRE(f.tool_registry.ReserveNamespace("rt__"));
+    f.tool_registry.ClearAttribution();
+    f.Write("permissions.json",
+            R"({"per_tool_overrides":{"rt__srv__fetch":"deny","mcp__srv__fetch":"deny"}})");
+
+    const auto results = RunChecks(f);
+    const auto hits = ByCheck(results, "naming_model");
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0]->message.find("mcp__srv__fetch") != std::string::npos);
+}
+
+TEST_CASE("a permission slice naming no registered model warns",
+          "[sanity_check][naming_model]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.permission_models.SetAttribution("mcp");
+    f.permission_models.Register(mcp::MakeMcpPermissionModel());
+    f.permission_models.ClearAttribution();
+    f.Write("permissions.json",
+            R"({"plugins":{"mcp":{"default":"ask"},"tools-webb":{"default":"deny"}}})");
+    f.Write("agents/build.md",
+            "---\nname: build\nmodel: fixture-main/test-model\nallowed_tools: [bash]\n"
+            "plugin_permissions:\n  ghost: {}\n---\nBody.\n");
+
+    const auto results = RunChecks(f);
+    const auto hits = ByCheck(results, "naming_model");
+    REQUIRE(hits.size() == 2);
+    CHECK(hits[0]->message.find("plugins.tools-webb") != std::string::npos);
+    CHECK(hits[1]->message.find("plugin_permissions.ghost") != std::string::npos);
+}
+
 TEST_CASE("an ambiguous bare permission key warns", "[sanity_check][naming_model]") {
     Fixture f;
     WriteGoodConfig(f.config_dir);
@@ -834,41 +868,6 @@ TEST_CASE("an ambiguous bare permission key warns", "[sanity_check][naming_model
     REQUIRE(hits.size() == 2);
     CHECK(hits[0]->message.find("ambiguous") != std::string::npos);
     CHECK(hits[1]->message.find("allowed_tools") != std::string::npos);
-}
-
-TEST_CASE("unknown allowed_skills entries are reported", "[sanity_check][naming_model]") {
-    // The known gap this check closes: resolution silently drops them, which is
-    // correct for lookup but must be loud at startup.
-    Fixture f;
-    WriteGoodConfig(f.config_dir);
-    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
-    f.Write("agents/build.md",
-            "---\nname: build\nmodel: fixture-main/test-model\nallowed_skills:\n  - ghost-skill\n---\nBody.\n");
-
-    const auto results = RunChecks(f);
-    const auto hits = ByCheck(results, "naming_model");
-    REQUIRE(hits.size() == 1);
-    CHECK(hits[0]->severity == CheckSeverity::Warning);
-    CHECK(hits[0]->message.find("ghost-skill") != std::string::npos);
-}
-
-TEST_CASE("every not-loaded skill warns with its reason", "[sanity_check][naming_model]") {
-    Fixture f;
-    WriteGoodConfig(f.config_dir);
-    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
-    // Frontmatter without the required `description`.
-    f.Write("skills/broken/SKILL.md", "---\nname: broken\n---\nBody.\n");
-    f.skills = config::SkillRegistry::Load(f.config_dir);
-    // Register bash so the preset's allowed_tools:[bash] resolves and does not
-    // produce an unrelated naming_model warning.
-    f.RegisterTool("tools-bash", "bash");
-
-    const auto results = RunChecks(f);
-    const auto hits = ByCheck(results, "naming_model");
-    REQUIRE(hits.size() == 1);
-    CHECK(hits[0]->severity == CheckSeverity::Warning);
-    CHECK(hits[0]->message.find("broken") != std::string::npos);
-    CHECK(hits[0]->message.find("not loaded") != std::string::npos);
 }
 
 namespace {
@@ -895,9 +894,8 @@ TEST_CASE("a preset tool_sources member the source does not know warns",
     ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
     f.tool_sources.Register("mcp", std::make_shared<FixedToolSource>(
                                        std::vector<std::string>{"off"}));
-    // The legacy spelling reads as tool_sources.mcp.
     f.Write("agents/build.md",
-            "---\nname: build\nmodel: fixture-main/test-model\nallowed_mcp_servers:\n  - ghost-mcp\n---\nBody.\n");
+            "---\nname: build\nmodel: fixture-main/test-model\ntool_sources:\n  mcp: [ghost-mcp]\n---\nBody.\n");
 
     const auto results = RunChecks(f);
     const auto hits = ByCheck(results, "naming_model");
@@ -927,7 +925,7 @@ TEST_CASE("a preset naming a tool source no plugin provides warns",
     WriteGoodConfig(f.config_dir);
     ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
     f.Write("agents/build.md",
-            "---\nname: build\nmodel: fixture-main/test-model\nallowed_mcp_servers: [x]\n---\nBody.\n");
+            "---\nname: build\nmodel: fixture-main/test-model\ntool_sources:\n  mcp: [x]\n---\nBody.\n");
 
     const auto results = RunChecks(f);
     const auto hits = ByCheck(results, "naming_model");

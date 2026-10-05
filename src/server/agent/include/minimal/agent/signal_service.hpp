@@ -66,6 +66,12 @@ struct ExternalChannel {
     // signal name passes, and sessions subscribe at channel level.
     bool extended = false;
     std::vector<std::string> signals;
+    // The registering plugin. Its permission model gates each signal per
+    // receiving session (PermissionModel::ResolveSubject with kind "signal",
+    // key "<channel>/<signal>"), checked when the session's worker takes the
+    // message; no rule = delivered (the subscription is the consent). Empty:
+    // ungated.
+    std::string owner;
 };
 
 // Implemented by the producer of external channels. The router calls it when

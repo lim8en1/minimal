@@ -18,8 +18,9 @@ namespace {
 class FakeSource : public ToolSource {
 public:
     enum class Mode { kOk, kFail, kThrow, kHang };
-    explicit FakeSource(Mode mode) : mode_(mode) {}
+    explicit FakeSource(Mode mode, std::string hint = {}) : mode_(mode), hint_(std::move(hint)) {}
     std::vector<std::string> Members() const override { return {}; }
+    std::string ReconnectHint() const override { return hint_; }
     std::optional<std::string> Activate(const std::string& member, std::string& error) override {
         switch (mode_) {
             case Mode::kOk: return "group-" + member;
@@ -32,6 +33,7 @@ public:
 
 private:
     Mode mode_;
+    std::string hint_;
 };
 
 void Add(ToolSourceRegistry& registry, const std::string& name, FakeSource::Mode mode) {
@@ -74,6 +76,18 @@ TEST_CASE("ActivateToolSources leaves out a member that misses the deadline",
     REQUIRE(activation.failures.size() == 1);
     CHECK(activation.failures[0].member == "s");
     CHECK(activation.failures[0].message.find("did not become ready") != std::string::npos);
+    // No hint from this source: core adds none of its own.
+    CHECK(activation.failures[0].message.find("(") == std::string::npos);
+}
+
+TEST_CASE("a timed-out member's message carries its source's reconnect hint",
+          "[session][tool_sources]") {
+    ToolSourceRegistry registry;
+    registry.Register("slow", std::make_shared<FakeSource>(FakeSource::Mode::kHang,
+                                                           "reconnect it with /fake"));
+    const auto activation = ActivateToolSources({{"slow", {"s"}}}, &registry, 50ms);
+    REQUIRE(activation.failures.size() == 1);
+    CHECK(activation.failures[0].message.find("(reconnect it with /fake)") != std::string::npos);
 }
 
 TEST_CASE("ActivateToolSources with no registry fails every named member",

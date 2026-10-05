@@ -3,7 +3,8 @@ name: general
 description: General-purpose child for multi-step research and tasks that may change files.
 mode: subagent
 allowed_tools: ["*"]
-allowed_skills: ["*"]
+plugin_permissions:
+  skills: ["*"]
 steps: 25
 ---
 

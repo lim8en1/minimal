@@ -27,12 +27,12 @@
 
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
+#include "minimal/agent/permission_gate_service.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/agent/session_support.hpp"
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/agent/signal_service.hpp"
 #include "minimal/agent/spawn_subagent_tool.hpp"
-#include "minimal/agent/structured_compaction.hpp"
 #include "minimal/agent/subagent_manager.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
@@ -44,7 +44,7 @@
 #include "minimal/config/config_bundle.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/project_trust.hpp"
-#include "minimal/config/skill_registry.hpp"
+#include "minimal/config/provider_config_extensions.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/agent/hook_observer_bridge.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
@@ -62,7 +62,6 @@
 #include "minimal/session/session_database.hpp"
 #include "minimal/startup/sanity_check.hpp"
 #include "minimal/tools/atomic_write.hpp"
-#include "minimal/tools/skill_tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace {
@@ -160,12 +159,30 @@ static int RunServer(int argc, char** argv) {
     std::signal(SIGTERM, OnShutdownSignal);
 
     std::filesystem::path socket_path = minimal::rpc::DefaultSocketPath();
-    bool refresh_cost_rates = false;
+    // --plugin-call <plugin> <method> [<json-args>]: a one-shot call into a
+    // plugin's "<plugin>.rpc" handler (plugin_rpc.hpp), run after plugins load
+    // and before listening -- e.g. `--plugin-call cost-tracker refresh_rates`.
+    struct PluginCall {
+        std::string plugin, method, args = "{}";
+    };
+    std::optional<PluginCall> plugin_call;
+    // --check: start up through config, plugin load, the sanity check and the
+    // preset registry, then exit -- 0 when the server would serve, 1 when not.
+    bool check_only = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--listen") == 0 && i + 1 < argc) {
             socket_path = argv[++i];
-        } else if (std::strcmp(argv[i], "--refresh-cost-rates") == 0) {
-            refresh_cost_rates = true;
+        } else if (std::strcmp(argv[i], "--check") == 0) {
+            check_only = true;
+        } else if (std::strcmp(argv[i], "--plugin-call") == 0) {
+            if (i + 2 >= argc) {
+                std::fprintf(stderr,
+                             "minimal-server: --plugin-call needs <plugin> <method> [<json-args>]\n");
+                return 2;
+            }
+            plugin_call = PluginCall{argv[i + 1], argv[i + 2]};
+            i += 2;
+            if (i + 1 < argc && argv[i + 1][0] != '-') plugin_call->args = argv[++i];
         } else if (std::strcmp(argv[i], "--version") == 0) {
             std::printf("minimal-server %s\n", minimal::common::Version());
             return 0;
@@ -177,7 +194,7 @@ static int RunServer(int argc, char** argv) {
             // socket (--listen mistyped means a second server nobody addressed).
             std::fprintf(stderr,
                          "minimal-server: unknown argument '%s' (known: --listen <path>, "
-                         "--refresh-cost-rates, --version)\n",
+                         "--plugin-call <plugin> <method> [<json-args>], --check, --version)\n",
                          argv[i]);
             return 2;
         }
@@ -270,9 +287,6 @@ static int RunServer(int argc, char** argv) {
         std::printf("  log file:   %s\n", logging.path.c_str());
     }
 
-    // Frontmatter-only scan; bodies stay on disk until a skill is invoked.
-    auto skills = minimal::config::SkillRegistry::Load(config_dir);
-
     // Which project directories may supply their own agents, skills and commands
     // (settings.json project_local.mode; `/trust-directory` grants). Built before
     // anything consults a project root, and handed to every consumer below.
@@ -280,7 +294,6 @@ static int RunServer(int argc, char** argv) {
         config_dir / "trusted_projects.json",
         settings_preload ? settings_preload->project_local.mode
                          : minimal::config::ProjectLocalMode::kTrusted);
-    skills.SetProjectTrust(&project_trust);
 
     // --- Stage 2: plugins ----------------------------------------------------
     const auto bundled_dir = minimal::plugins::BundledPluginDir();
@@ -380,24 +393,20 @@ static int RunServer(int argc, char** argv) {
     minimal::llm::VariantParamsRegistry variant_params;
     // S4: additive across plugins, keyed by name -- memory.compaction_strategy
     // selects one, with agent-preset frontmatter overriding per preset. Core's
-    // own strategies are registered directly here, BEFORE plugin load, so the
-    // default path is never plugin-dependent -- a plugin adds a kind core has
-    // never heard of (drop-oldest, tool-result-elide, the deferred
-    // llamacpp-kv's external-KV strategy), it does not replace these two.
-    // "structured" is the settings.json DEFAULT: the summarizer's output is
-    // constrained to a forced record_summary tool call parsed into typed
-    // sections; "summarize" is the free-text format, reachable globally by
-    // settings or per agent by declaring `compaction_strategy: summarize` in
-    // the preset's frontmatter.
+    // own "summarize" is registered directly here, BEFORE plugin load, so the
+    // default path is never plugin-dependent; plugins add kinds ("structured",
+    // compaction-structured), they do not replace it.
     minimal::agent::CompactionStrategyRegistry compaction_strategies;
     compaction_strategies.Register("summarize", minimal::agent::MakeSummarizeCompactionStrategy());
-    compaction_strategies.Register("structured",
-                                   minimal::agent::MakeStructuredCompactionStrategy());
     // The sanctioned cross-plugin channel (pull; SessionObserver is push).
     // Additive: many plugins may each provide services, and a duplicate name is
     // fatal at startup via the name resolution below. Also handed to every
     // plugin as the consumer side, through PluginRegistrationContext.
     minimal::plugins::ServiceRegistry services;
+    // providers.json translators/credential sources plugins add (opencode-compat).
+    minimal::config::ProviderConfigExtensions provider_config_extensions;
+    // Per-preset tool definitions and prompt appendices plugins add (skills).
+    minimal::agent::PresetExtensionRegistry preset_extensions;
 
     // Per-plugin persistent KV storage, constructed BEFORE plugin load: the
     // pointer rides PluginRegistrationContext into every registration hook.
@@ -437,6 +446,15 @@ static int RunServer(int argc, char** argv) {
     // (timers, file watchers) would Find the same seam.
     minimal::agent::SignalRouter signal_router;
     services.Provide(minimal::agent::kSignalServiceName, &signal_router);
+    // core.project_trust: may a root's own content load? Asked by plugins that
+    // load project-local files (skills, commands-md) before they do.
+    // core.permission_gate: plugins gate their own non-tool subjects per
+    // session. Wired to the session registry once serving starts.
+    minimal::agent::SessionPermissionGate permission_gate;
+    services.Provide(minimal::agent::kPermissionGateServiceName,
+                     static_cast<minimal::agent::PermissionGateService*>(&permission_gate));
+    services.Provide(minimal::config::kProjectTrustServiceName,
+                     static_cast<minimal::config::ProjectTrustQuery*>(&project_trust));
 
     // The tools slice of settings.json is forwarded verbatim to every plugin;
     // core imposes no schema on it. Falls back to {} exactly as if
@@ -465,42 +483,45 @@ static int RunServer(int argc, char** argv) {
         .mention_resolvers = &mention_resolvers,
         .services = &services,
         .hooks = &hook_dispatcher,
+        .provider_config = &provider_config_extensions,
+        .preset_extensions = &preset_extensions,
     };
     minimal::plugins::PluginLoader loader(registries, tools_settings, plugin_storage.get(),
                                           plugin_data_root);
     const auto records = loader.LoadAll(candidates);
+    // Plugins that load project-local content (commands-md) report it for the
+    // trust prompt. The loader is declared after project_trust, so it is gone
+    // first -- but only after every session (the sole Inspect callers) ended.
+    project_trust.SetContentProvider(&loader);
     // The load thread is the only writer; from here the map is read-only, which
     // is what makes unguarded Find from session workers and the command pool
     // safe. A runtime Provide is logged and ignored (the registry's own rule).
     services.Seal();
 
-    // One-shot rates refresh: load plugins exactly as a normal start does, ask
-    // cost-tracker's .rpc service to fetch its pricing snapshots, print the
-    // outcome, and exit before listening. This is the manual escape hatch the
-    // old /cost-update-rates command was (cost-tracker's startup auto-refresh
-    // gates itself on the snapshot's age; this flag always fetches). Reaching
-    // the plugin through the generic PluginCall channel -- the same sealed
-    // registry the RPC transport dispatches through -- keeps core from
-    // depending on any bundled plugin: the name is a runtime string, and a
-    // disabled or failed cost-tracker is an error, not a link dependency.
-    if (refresh_cost_rates) {
-        void* raw = services.Find(minimal::plugins::PluginRpcServiceName("cost-tracker"));
+    // --plugin-call: load plugins exactly as a normal start does, call the
+    // named plugin's .rpc handler once, print the reply, and exit before
+    // listening. Reached through the same sealed registry the PluginCall RPC
+    // dispatches through, so core names no plugin: a disabled or failed one
+    // is an error, not a link dependency.
+    if (plugin_call) {
+        void* raw = services.Find(minimal::plugins::PluginRpcServiceName(plugin_call->plugin));
         if (raw == nullptr) {
-            std::fprintf(stderr, "cost-tracker is not loaded or disabled; nothing to refresh\n");
+            std::fprintf(stderr, "%s: not loaded, disabled, or has no .rpc handler\n",
+                         plugin_call->plugin.c_str());
             return 1;
         }
         // The .rpc convention's handler type (see plugin_rpc.hpp): the name
-        // registry guarantees what sits under "cost-tracker.rpc" is one.
+        // registry guarantees what sits under "<plugin>.rpc" is one.
         const auto reply = static_cast<minimal::plugins::PluginRpcHandler*>(raw)->Handle(
-            "refresh_rates", "{}");
+            plugin_call->method, plugin_call->args);
         if (!reply.ok) {
             std::fprintf(stderr, "%s\n", reply.error.c_str());
             return 1;
         }
         std::printf("%s\n", reply.payload.c_str());
         return 0;
-        // The exit cascade joins cost-tracker's startup auto-refresh worker
-        // (its observer-owner) with plugin storage still alive.
+        // The exit cascade joins any plugin worker (e.g. an observer-owned
+        // startup task) with plugin storage still alive.
     }
 
     // The project-scoped half of the /-command catalog (docs/COMMANDS_HOWTO.md
@@ -520,24 +541,6 @@ static int RunServer(int argc, char** argv) {
             for (const auto& name : names) {
                 std::printf("      %-8s %s\n", label.c_str(), name.c_str());
             }
-        }
-    }
-
-    // Core tools are registered by the harness itself, not by a plugin: the
-    // empty attribution marks them as built-ins for collision reporting.
-    tools.Register(std::make_unique<minimal::tools::SkillTool>(skills));
-
-    std::printf("skills (%zu):\n", skills.All().size());
-    // An empty registry is normal; an unreadable skills/ is not, and the two are
-    // otherwise indistinguishable from here.
-    if (!skills.scan_error().empty()) {
-        std::printf("  WARNING: %s\n", skills.scan_error().c_str());
-    }
-    for (const auto& skill : skills.All()) {
-        if (skill.loaded) {
-            std::printf("  %-16s %s\n", skill.name.c_str(), skill.description.c_str());
-        } else {
-            std::printf("  %-16s NOT LOADED: %s\n", skill.name.c_str(), skill.load_error.c_str());
         }
     }
 
@@ -568,12 +571,13 @@ static int RunServer(int argc, char** argv) {
     // problem. Then the linter: every problem surfaces at once, a single Fatal
     // aborts startup, warnings degrade and continue.
     minimal::config::ConfigBundle bundle = minimal::config::LoadConfigBundle(
-        config_dir, minimal::config::MakeVariantParamsHook(&variant_params));
+        config_dir, minimal::config::MakeVariantParamsHook(&variant_params),
+        &provider_config_extensions);
     std::vector<minimal::config::CheckResult> check_results = bundle.problems;
     auto session_db = minimal::startup::OpenSessionDatabase(bundle, check_results);
     {
         minimal::startup::StartupSanityCheck sanity(
-            bundle, minimal::startup::SanityCheckInputs{config_dir, records, skills, plugin_config,
+            bundle, minimal::startup::SanityCheckInputs{config_dir, records, plugin_config,
                                                         std::move(name_resolution), registries});
         auto validation = sanity.RunAll();
         check_results.insert(check_results.end(), std::make_move_iterator(validation.begin()),
@@ -611,14 +615,20 @@ static int RunServer(int argc, char** argv) {
     // rather than a hardcoded read/write/edit/bash/glob/grep literal list
     // (ARCHITECTURE.md, "Core vs. plugin surface").
     const minimal::agent::ToolPermissionKeys tool_permission_keys{
-        tools.PermissionKeys(), tools.DotenvProtectedPermissionKeys()};
+        tools.PermissionKeys(), tools.DotenvProtectedPermissionKeys(),
+        tools.ConfigAliasPermissionKeys(), tools.NoPatternRulePermissionKeys()};
     try {
         presets = std::make_unique<minimal::agent::AgentPresetRegistry>(
-            config_dir, skills, settings, permissions, model_catalog, tool_permission_keys);
+            config_dir, settings, permissions, model_catalog, tool_permission_keys);
         presets->SetProjectTrust(&project_trust);
+        presets->SetExtensions(&preset_extensions);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "\nconfiguration error (%s): %s\n", config_dir.c_str(), e.what());
         return 1;
+    }
+    if (check_only) {
+        std::printf("\ncheck: ok\n");
+        return 0;
     }
 
     // Inject discovery (track N): providers.json "discover": true entries list
@@ -687,8 +697,6 @@ static int RunServer(int argc, char** argv) {
     // and each tool owns its own presentation -- and here rather than later
     // because every builder must exist before the first Resolve(), the same
     // deadline the discovery hook above is under.
-    presets->SetDefinitionBuilder(minimal::agent::kSkillToolName,
-                                  minimal::agent::AgentPresetRegistry::MakeSkillDefinitionBuilder());
     presets->SetDefinitionBuilder(minimal::agent::kSpawnSubagentToolName,
                                   minimal::agent::MakeSpawnDefinitionBuilder());
     // Same deadline: every preset binds the plugin permission models' slices
@@ -700,7 +708,8 @@ static int RunServer(int argc, char** argv) {
     loop_config.compaction_trigger = settings.memory.context_compaction_trigger;
     loop_config.compaction_keep_recent_tokens = settings.memory.compaction_keep_recent_tokens;
     loop_config.compaction_replace_percent = settings.memory.compaction_replace_percent;
-    loop_config.offer_summary_tool = true;
+    loop_config.strategy_tools = compaction_strategies.RequestTools();
+    loop_config.strategy_tool_replies = compaction_strategies.StrayCallReplies();
     loop_config.max_parallel_tool_calls = settings.tools.max_parallel_tool_calls;
     loop_config.max_tool_input_bytes = settings.tools.max_input_bytes;
     loop_config.max_tool_result_bytes = settings.tools.max_result_bytes;
@@ -764,13 +773,20 @@ static int RunServer(int argc, char** argv) {
                                              registries, *session_db, loop_config,
                                              minimal::common::DefaultLogger(),
                                              std::move(session_options));
+    permission_gate.SetRegistry(&sessions);
+    // Declared after `sessions`, so destroyed first: the gate stops answering
+    // (denies) before the registry it forwards to goes away.
+    struct PermissionGateUnwire {
+        minimal::agent::SessionPermissionGate& gate;
+        ~PermissionGateUnwire() { gate.SetRegistry(nullptr); }
+    } permission_gate_unwire{permission_gate};
 
     // Stage-4 wiring for the core support service Provided above (see the
     // comment there): the dependencies only exist now. Serving has not
     // started, so this is still ahead of any Find().
     session_support.Wire(sessions, *session_db, *presets);
 
-    // Registered by the harness itself, like SkillTool, but only NOW: the
+    // Registered by the harness itself, but only NOW: the
     // manager needs the SessionRegistry to exist, and no session can build a
     // tool set before serving starts, so registering here is still before
     // first use. Core surface by design -- making it a plugin would expose

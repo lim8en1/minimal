@@ -56,6 +56,7 @@
 // what you need (ApplyModel does) rather than holding the pointer across calls.
 
 #include "minimal/config/model_catalog_service.hpp"
+#include "minimal/config/provider_config_extensions.hpp"
 #include "minimal/config/providers_types.hpp"
 
 namespace minimal::config {
@@ -192,12 +193,17 @@ std::string DescribeDiscovery(const ProvidersConfig& providers, const std::strin
 // Defaulted to {} so a caller with no plugin registry handy (most tests, and
 // any caller that only wants the generic reasoning_effort shape) keeps
 // compiling.
+//
+// `extensions` (nullable): plugin translators applied to each entry before it
+// is parsed, and plugin credential sources behind core's own auth.json.
 ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc,
-                                     const VariantParamsHook& variant_params_hook = {});
+                                     const VariantParamsHook& variant_params_hook = {},
+                                     const ProviderConfigExtensions* extensions = nullptr);
 
 // Thin: reads the file and parses it. Throws if the file is missing or is not
 // valid JSON, or per ParseProvidersConfig above.
 ProvidersConfig LoadProvidersConfig(const std::filesystem::path& path,
-                                    const VariantParamsHook& variant_params_hook = {});
+                                    const VariantParamsHook& variant_params_hook = {},
+                                    const ProviderConfigExtensions* extensions = nullptr);
 
 }  // namespace minimal::config

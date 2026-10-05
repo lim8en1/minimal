@@ -1022,44 +1022,71 @@ TEST_CASE("concurrent Resolve is safe and fetches once", "[providers][discover]"
     CHECK(hook.calls == 1);  // one fetch, not eight
 }
 
-// --- opencode-compat provider surface ---------------------------------------------
+// --- plugin extensions: entry translators and credential sources ------------------
 
-TEST_CASE("an opencode-shaped provider entry normalizes onto minimal's fields",
-          "[providers][compat]") {
-    testing::TempDir dir;
-    std::ofstream(dir.path() / "providers.json") << R"json({
-      "providers": {
-        "local": {
-          "npm": "@ai-sdk/openai-compatible",
-          "name": "LM Studio (local)",
-          "options": {
-            "baseURL": "http://127.0.0.1:1234/v1",
-            "apiKey": "lmstudio-key",
-            "headers": {"X-Oven": "hot"}
-          },
-          "models": {
-            "qwen": {"name": "Qwen (local)", "limit": {"context": 128000, "output": 65536}}
-          }
+namespace {
+
+struct RenameTranslator final : ProviderEntryTranslator {
+    void Translate(nlohmann::json& entry, const std::string&) const override {
+        if (entry.contains("endpoint")) {
+            entry["url"] = entry.at("endpoint");
+            entry.erase("endpoint");
         }
-      }
-    })json";
+    }
+};
 
-    const auto config = LoadProvidersConfig(dir.path() / "providers.json");
-    const auto model = config.Resolve(ModelRef{"local", "qwen"});
+struct FixedSource final : CredentialSource {
+    std::string Describe() const override { return "fixed source"; }
+    std::optional<std::string> Lookup(const std::string& name) const override {
+        return name == "remote" ? std::optional<std::string>("plugin-key") : std::nullopt;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("a plugin translator rewrites an entry before core parses it", "[providers][extensions]") {
+    const nlohmann::json doc = nlohmann::json::parse(R"({
+      "providers": {"local": {"backend": "openai", "endpoint": "http://x/v1", "models": {"m": {}}}}
+    })");
+    // Core alone does not know the foreign key: the entry lacks a url.
+    CHECK_THROWS(ParseProvidersConfig(doc));
+
+    ProviderConfigExtensions extensions;
+    extensions.AddTranslator(std::make_shared<RenameTranslator>());
+    const auto config = ParseProvidersConfig(doc, {}, &extensions);
+    const auto model = config.Resolve(ModelRef{"local", "m"});
     REQUIRE(model != nullptr);
-    CHECK(model->backend == "openai");  // the one npm package that names a wire shape
-    CHECK(model->provider.base_url == "http://127.0.0.1:1234/v1");
-    CHECK(model->provider.api_key == "lmstudio-key");
-    REQUIRE(model->context_window_tokens.has_value());
-    CHECK(*model->context_window_tokens == 128000);
-    REQUIRE(model->max_tokens.has_value());
-    CHECK(*model->max_tokens == 65536);
-    REQUIRE(model->provider.headers.size() == 1);
-    CHECK(model->provider.headers[0].first == "X-Oven");
-    CHECK(model->provider.headers[0].second == "hot");
+    CHECK(model->provider.base_url == "http://x/v1");
 }
 
-// --- OpenRouter app attribution ----------------------------------------------------
+TEST_CASE("a plugin credential source answers after core's auth.json, and only on opt-in",
+          "[providers][extensions]") {
+    testing::TempDir data;
+    ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
+    ProviderConfigExtensions extensions;
+    extensions.AddCredentialSource(std::make_shared<FixedSource>());
+
+    const auto opted = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"remote": {"backend": "openai", "url": "http://x/v1",
+                               "credentials": "auth-file", "models": {"m": {}}}}
+    })"), {}, &extensions);
+    CHECK(opted.Resolve(ModelRef{"remote", "m"})->provider.api_key == "plugin-key");
+
+    const auto not_opted = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"remote": {"backend": "openai", "url": "http://x/v1", "models": {"m": {}}}}
+    })"), {}, &extensions);
+    CHECK(not_opted.Resolve(ModelRef{"remote", "m"})->provider.api_key.empty());
+
+    // Core's own auth.json wins over the plugin's source.
+    std::filesystem::create_directories(data.path() / "minimal");
+    std::ofstream(data.path() / "minimal" / "auth.json") << R"({"remote": {"key": "core-key"}})";
+    const auto both = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"remote": {"backend": "openai", "url": "http://x/v1",
+                               "credentials": "auth-file", "models": {"m": {}}}}
+    })"), {}, &extensions);
+    CHECK(both.Resolve(ModelRef{"remote", "m"})->provider.api_key == "core-key");
+}
+
 
 TEST_CASE("openrouter_app_id synthesizes the attribution headers on every request surface",
           "[providers][attribution]") {
@@ -1163,42 +1190,6 @@ TEST_CASE("a non-boolean openrouter_app_id is a named parse error", "[providers]
                     std::runtime_error);
 }
 
-TEST_CASE("an opencode-shaped model's options fold into parameters, native keys winning "
-          "per-key",
-          "[providers][compat]") {
-    // opencode's AI SDK spreads a model's `options` into the request body;
-    // `parameters` is minimal's verbatim passthrough, so the fold makes an
-    // opencode providers.json (e.g. OpenRouter's provider routing:
-    // {"options": {"provider": {"only": ["z-ai/fp8"]}}}) work verbatim.
-    testing::TempDir dir;
-    std::ofstream(dir.path() / "providers.json") << R"json({
-      "providers": {
-        "openrouter": {
-          "backend": "openai",
-          "url": "https://openrouter.ai/api/v1",
-          "models": {
-            "glm": {"options": {"provider": {"only": ["z-ai/fp8"]}}},
-            "kimi": {"options": {"provider": {"only": ["deepinfra/fp8"]}, "temperature": 0.1},
-                     "parameters": {"temperature": 0.7}}
-          }
-        }
-      }
-    })json";
-
-    const auto config = LoadProvidersConfig(dir.path() / "providers.json");
-
-    // Options only: folded over verbatim.
-    const auto glm = config.Resolve(ModelRef{"openrouter", "glm"});
-    REQUIRE(glm != nullptr);
-    CHECK(glm->parameters == nlohmann::json{{"provider", {{"only", {"z-ai/fp8"}}}}});
-
-    // Both: the native parameters keys win, the non-conflicting option stays.
-    const auto kimi = config.Resolve(ModelRef{"openrouter", "kimi"});
-    REQUIRE(kimi != nullptr);
-    CHECK(kimi->parameters ==
-          nlohmann::json{{"provider", {{"only", {"deepinfra/fp8"}}}}, {"temperature", 0.7}});
-}
-
 TEST_CASE("a model's non-object options is dropped with a warning, not a parse failure",
           "[providers][compat]") {
     testing::TempDir dir;
@@ -1276,7 +1267,7 @@ TEST_CASE("ModelRefs honors blacklist and whitelist as a listing filter only",
 }
 
 TEST_CASE("a missing api_key falls back to the credentials file ONLY when the entry opts "
-          "in with credentials: auth-file (minimal's, then opencode's own)",
+          "in with credentials: auth-file",
           "[providers][compat]") {
     testing::TempDir dir;
 
@@ -1295,23 +1286,6 @@ TEST_CASE("a missing api_key falls back to the credentials file ONLY when the en
         const auto model = config.Resolve(ModelRef{"local", "m"});
         REQUIRE(model != nullptr);
         CHECK(model->provider.api_key == "minimal-stored");
-    }
-
-    // 2. opencode's own auth store, honored zero-copy -- still gated on opt-in.
-    {
-        testing::TempDir home;
-        ScopedEnv home_env("HOME", home.path().string().c_str());
-        const auto oc_dir = home.path() / ".local" / "share" / "opencode";
-        std::filesystem::create_directories(oc_dir);
-        std::ofstream(oc_dir / "auth.json") << R"({"remote": {"type": "api", "key": "oc-key"}})";
-        std::ofstream(dir.path() / "providers2.json") << R"({
-          "providers": {"remote": {"backend": "openai", "url": "http://x/v1",
-                                    "credentials": "auth-file", "models": {"m": {}}}}
-        })";
-        const auto config = LoadProvidersConfig(dir.path() / "providers2.json");
-        const auto model = config.Resolve(ModelRef{"remote", "m"});
-        REQUIRE(model != nullptr);
-        CHECK(model->provider.api_key == "oc-key");
     }
 }
 

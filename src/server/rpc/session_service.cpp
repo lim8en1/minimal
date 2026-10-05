@@ -1087,7 +1087,6 @@ grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
         v1::CommandInfo* info = response->add_commands();
         info->set_name(entry.surface);
         info->set_summary(std::string(command->Summary()));
-        info->set_usage(std::string(command->Usage()));
         info->set_read_only(command->ReadOnly());
         info->set_requires_session(command->RequiresSession());
 
@@ -1100,18 +1099,6 @@ grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
             info->set_kind(v1::COMMAND_KIND_LLM);
         } else {
             info->set_kind(v1::COMMAND_KIND_HARNESS);
-        }
-
-        switch (command->Display()) {
-            case commands::CommandDisplay::kView:
-                info->set_display(v1::COMMAND_DISPLAY_VIEW);
-                break;
-            case commands::CommandDisplay::kSilent:
-                info->set_display(v1::COMMAND_DISPLAY_SILENT);
-                break;
-            case commands::CommandDisplay::kStatus:
-                info->set_display(v1::COMMAND_DISPLAY_STATUS);
-                break;
         }
     };
 

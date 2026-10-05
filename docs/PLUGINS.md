@@ -21,15 +21,18 @@ Installed to `<libdir>/minimal/plugins/server/`. All enabled by default unless n
 | `tool-ask` | Tool `ask_user` — structured model→operator questions (up to 4, options with descriptions, multi-select, optional free text), asked through core's plugin prompt (kind `ask`) and answered in the `ask-view` client plugin's modal; see ARCHITECTURE.md "Asking the user" |
 | `tools-bash` | Tool `bash`; commands `/restart-shell`, `/tasks`; hook point `before_command`; per-session cwd/env retention |
 | `tools-web` | Tools `web_fetch`, `web_search`; a per-host permission model for them (`plugins.tools-web` / `plugin_permissions.tools-web`, see its README) |
-| `mcp` | The MCP client: `mcps.json` servers as tool source `mcp` (`mcp__<server>__<tool>` tools), their per-server permission model, `/mcp`, the `mcp.endpoint` the `mcp-view` picker reads, and `channels.json` channels as external signal channels. Limits in its `config` (`connect_timeout_ms`, `request_timeout_ms`, `max_list_pages`, `restart_cooldown_ms`; legacy `settings.json` `tools.mcp.*` still read). Disabled, nothing MCP remains |
+| `mcp` | The MCP client: `mcps.json` servers as tool source `mcp` (`mcp__<server>__<tool>` tools), their per-server permission model, `/mcp`, the `mcp.endpoint` the `mcp-view` picker reads, and `channels.json` channels as external signal channels. Limits in its `config` (`connect_timeout_ms`, `request_timeout_ms`, `max_list_pages`, `restart_cooldown_ms`). Disabled, nothing MCP remains |
 | `provider-openai` | Provider kind `openai` (chat-completions shape) + model catalog for it |
 | `provider-anthropic` | Provider kind `anthropic` (Messages API, prompt caching) |
 | `commands-core` | Commands `/help`, `/clear`, `/compact`, `/agent`, `/model`, `/sessions`, `/connect` (stores a provider credential in `<data dir>/auth.json`) — `/mcp` is the `mcp` plugin's |
 | `commands-md` | Turns `commands/*.md` files into `/`-commands (config dir, project, and `.opencode/commands/`; opencode-syntax desugaring — see CONFIGURATION.md, how-to in COMMANDS_HOWTO.md) |
 | `checklist` | Tool `checklist` + cross-plugin RPC endpoint `checklist.rpc`, and the `checklist.endpoint` whose push stream `checklist-view` subscribes to |
 | `signals-message` | Tool `message_session` (cross-session messaging on the core `signals` service) |
-| `cost-tracker` | Command `/cost`; startup auto-refresh of pricing snapshots (also `--refresh-cost-rates`); per-session cost accumulation; RPC endpoint `cost-tracker.rpc`, and the `cost-tracker.endpoint` whose totals push stream `cost-view` subscribes to |
+| `cost-tracker` | Command `/cost`; startup auto-refresh of pricing snapshots (also `--plugin-call cost-tracker refresh_rates`); per-session cost accumulation; RPC endpoint `cost-tracker.rpc`, and the `cost-tracker.endpoint` whose totals push stream `cost-view` subscribes to |
 | `session-titler` | Session observer that auto-titles sessions (~100 tokens/session spend). **Ships disabled** |
+| `skills` | `SKILL.md` instruction bundles: the `skill` tool, its per-skill permission model (a preset's `plugin_permissions.skills`), the per-preset listing in the tool description and preloaded bodies in the system prompt, and the project's skill dirs in the trust prompt. Disabled, no skill concept remains |
+| `compaction-structured` | The `structured` compaction strategy: the summarizer answers through a strict `record_summary` tool call parsed into typed sections (task, done, next steps, topics, important, lessons, future tasks). Its instruction is `prompts/compression-structured.md`. Disabled, a setting or preset naming `structured` warns and falls back to core's `summarize` |
+| `opencode-compat` | Reads opencode's config so an existing setup works zero-copy: opencode-shaped `providers.json` entries (`npm`, `options.baseURL/apiKey/headers`, `models.<id>.limit/options/name`) are translated into core's shape, and opencode's `~/.local/share/opencode/auth.json` is a credential source after core's own `auth.json` (for entries with `"credentials": "auth-file"`). Disabled, core reads only its own shapes |
 
 ## Bundled client plugins (`plugins/client/`)
 
@@ -138,9 +141,11 @@ Enablement is recorded in `<config>/plugins.json` (client:
   `enabled` field (`true`/`false`); the file is rewritten on every startup, so
   edits persist.
 - **Default state is by provenance:** bundled plugins default **enabled**,
-  user plugins default **disabled**. One exception: `session-titler` ships
-  disabled (hardcoded, since it spends tokens). Once an entry exists in
-  `plugins.json`, your `enabled` value wins forever.
+  user plugins default **disabled**. A bundled plugin can opt out of the
+  enabled default from its own build: `minimal_add_plugin(<name>
+  DISABLED_BY_DEFAULT ...)` installs a `<name>.disabled-by-default` marker
+  beside the module (`session-titler` and `typesafe-advisor` do). Once an
+  entry exists in `plugins.json`, your `enabled` value wins forever.
 - **`config`** is a per-plugin JSON object forwarded verbatim to the plugin
   (e.g. the `logo` plugin's `text`/`styles`/`charset` options).
 - A failed **bundled** plugin is a fatal startup error (losing `tools-fs` or
@@ -223,7 +228,7 @@ tool_config:
 ---
 ```
 
-The pattern ("per-preset tool config", the `allowed_skills` delivery shape):
+The pattern ("per-preset tool config"):
 
 1. Declare the namespace: override `Tool::config_namespace()` (default empty =
    reads nothing). Several tools of ONE plugin may share a namespace; two
@@ -330,8 +335,7 @@ the fatal duplicate becomes a coexistence rather than a rename:
 ```
 
 - Keys are fully-qualified **`plugin.original_name`**; values are the surface
-  name. One flat namespace covers **tools and commands together** (the old
-  `command_aliases` key is rejected with a warning).
+  name. One flat namespace covers **tools and commands together**.
 - Aliasing is the designed way to **resolve name collisions** — duplicate
   registrations are fatal, but applying an alias before registration makes
   both coexist (the canonical example: two plugins both providing `bash`).

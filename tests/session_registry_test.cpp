@@ -72,7 +72,7 @@ struct TempConfigDir {
 // Everything SessionRegistry borrows, in one place and destroyed after it.
 struct RegistryFixture {
     explicit RegistryFixture(std::chrono::milliseconds guard = std::chrono::seconds(10))
-        : skills(config::SkillRegistry::Load(config.dir)), guard_(guard) {
+        : guard_(guard) {
         options.reaper.initial_attach_guard = guard;
     }
 
@@ -81,7 +81,7 @@ struct RegistryFixture {
 
     void Build(bool register_provider_kind = true) {
         presets = std::make_unique<agent::AgentPresetRegistry>(
-            config.dir, skills, config::LoadSettingsConfig(config.dir / "settings.json"));
+            config.dir, config::LoadSettingsConfig(config.dir / "settings.json"));
         if (register_provider_kind) {
             providers.Register("fake", [](const llm::ProviderConfig&) {
                 return std::make_unique<testing::FakeLlmProvider>();
@@ -106,7 +106,6 @@ struct RegistryFixture {
     ~RegistryFixture() { registry.reset(); }
 
     TempConfigDir config;
-    config::SkillRegistry skills;
     tools::ToolRegistry tools_registry;
     llm::ProviderFactoryRegistry providers;
     std::unique_ptr<agent::AgentPresetRegistry> presets;

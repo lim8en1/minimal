@@ -8,12 +8,14 @@
 #include <unistd.h>
 
 #include "minimal/common/logger.hpp"
-#include "minimal/config/skill_registry.hpp"
-#include "minimal/tools/skill_tool.hpp"
+#include "skill_access.hpp"
+#include "skill_registry.hpp"
+#include "skill_tool.hpp"
+#include "skills_model.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
-using namespace minimal::config;
+using namespace minimal::skills;
 using namespace minimal::tools;
 
 namespace {
@@ -63,17 +65,11 @@ struct SkillFixture {
     // snapshot taken from it, then the tool bound to that snapshot.
     SkillFixture() : registry(LoadDefaultSkills(config.dir)), tool(registry) {}
 
-    ToolContext MakeContext(std::vector<ToolContext::SkillAccess> allowed_skills = {}) const {
+    ToolContext MakeContext() const {
         ToolContext ctx{common::DefaultLogger()};
         ctx.session_id = "s1";
         ctx.project_root = config.dir;
-        ctx.allowed_skills = std::move(allowed_skills);
         return ctx;
-    }
-
-    // Sugar for the common allow-shaped case.
-    static ToolContext::SkillAccess Allow(std::string name, bool ask = false) {
-        return ToolContext::SkillAccess{std::move(name), ask};
     }
 };
 
@@ -96,7 +92,7 @@ TEST_CASE("SkillTool returns the SKILL.md body verbatim, frontmatter stripped, w
           "naming the skill directory",
           "[skill_tool]") {
     SkillFixture fixture;
-    ToolContext ctx = fixture.MakeContext({SkillFixture::Allow("alpha")});
+    ToolContext ctx = fixture.MakeContext();
 
     const ToolResult result = fixture.tool.execute({{"name", "alpha"}}, ctx);
 
@@ -114,7 +110,7 @@ TEST_CASE("SkillTool returns the SKILL.md body verbatim, frontmatter stripped, w
 TEST_CASE("SkillTool's header names the global skill directory when the project has no overlay",
           "[skill_tool]") {
     SkillFixture fixture;
-    ToolContext ctx = fixture.MakeContext({SkillFixture::Allow("alpha")});
+    ToolContext ctx = fixture.MakeContext();
     // A different project root: alpha is no longer a project-local skill and
     // resolves through the global registry, but its directory line must still
     // point at the real files.
@@ -131,7 +127,7 @@ TEST_CASE("SkillTool's header names the global skill directory when the project 
 
 TEST_CASE("SkillTool rejects a missing, non-string, or empty name", "[skill_tool]") {
     SkillFixture fixture;
-    ToolContext ctx = fixture.MakeContext({SkillFixture::Allow("alpha")});
+    ToolContext ctx = fixture.MakeContext();
 
     CHECK(fixture.tool.execute({}, ctx).content_text == "missing required string field: name");
     CHECK(fixture.tool.execute({{"name", 42}}, ctx).content_text ==
@@ -142,7 +138,7 @@ TEST_CASE("SkillTool rejects a missing, non-string, or empty name", "[skill_tool
 
 TEST_CASE("SkillTool reports an unknown skill as such", "[skill_tool]") {
     SkillFixture fixture;
-    ToolContext ctx = fixture.MakeContext({SkillFixture::Allow("alpha")});
+    ToolContext ctx = fixture.MakeContext();
 
     const ToolResult result = fixture.tool.execute({{"name", "nope"}}, ctx);
 
@@ -150,13 +146,11 @@ TEST_CASE("SkillTool reports an unknown skill as such", "[skill_tool]") {
     CHECK(result.content_text == "unknown skill: nope");
 }
 
-TEST_CASE("SkillTool reports a not-loaded skill with its reason, before the allowed check",
+TEST_CASE("SkillTool reports a not-loaded skill with its reason",
           "[skill_tool]") {
     SkillFixture fixture;
-    ToolContext ctx = fixture.MakeContext({SkillFixture::Allow("alpha")});
+    ToolContext ctx = fixture.MakeContext();
 
-    // `broken` is ALSO not in allowed_skills -- the load failure must win, since
-    // it is unusable by every preset and names the config problem to fix.
     const ToolResult result = fixture.tool.execute({{"name", "broken"}}, ctx);
 
     CHECK(result.is_error);
@@ -164,69 +158,74 @@ TEST_CASE("SkillTool reports a not-loaded skill with its reason, before the allo
           "skill 'broken' is not loaded: missing required frontmatter field: description");
 }
 
-TEST_CASE("SkillTool rejects a loaded skill the preset does not allow, listing what is",
-          "[skill_tool]") {
-    SkillFixture fixture;
-    ToolContext ctx = fixture.MakeContext({SkillFixture::Allow("alpha")});
-
-    const ToolResult result = fixture.tool.execute({{"name", "beta"}}, ctx);
-
-    CHECK(result.is_error);
-    CHECK(result.content_text ==
-          "skill 'beta' is not available in this session. Available skills: alpha");
-}
-
-TEST_CASE("SkillTool with no allowed skills reports none available", "[skill_tool]") {
-    SkillFixture fixture;
-    ToolContext ctx = fixture.MakeContext();
-
-    const ToolResult result = fixture.tool.execute({{"name", "alpha"}}, ctx);
-
-    CHECK(result.is_error);
-    CHECK(result.content_text ==
-          "skill 'alpha' is not available in this session. Available skills: (none)");
-}
-
-TEST_CASE("SkillTool admits every skill listed explicitly -- wildcard expansion happened at "
-          "resolve time",
-          "[skill_tool]") {
-    // The tool no longer honours a literal "*": the registry's allowed_skills
-    // resolution expands it, so the context arrives with per-skill rows. The
-    // broken skill still fails with its reason, not the availability error.
-    SkillFixture fixture;
-    ToolContext ctx = fixture.MakeContext({SkillFixture::Allow("alpha"), SkillFixture::Allow("broken")});
-
-    const ToolResult alpha = fixture.tool.execute({{"name", "alpha"}}, ctx);
-    CHECK_FALSE(alpha.is_error);
-    CHECK(alpha.content_text.ends_with("Alpha body.\n"));
-
-    const ToolResult broken = fixture.tool.execute({{"name", "broken"}}, ctx);
-    CHECK(broken.is_error);
-    CHECK(broken.content_text.find("is not loaded:") != std::string::npos);
-}
-
-// --- ask-mode skills ------------------------------------------------------------
-
-TEST_CASE("SkillTool narrows its own resolution to Ask for an ask-mode skill only",
-          "[skill_tool][compat]") {
-    SkillFixture fixture;
-    ToolContext ctx = fixture.MakeContext({SkillFixture::Allow("alpha"), SkillFixture::Allow("beta", /*ask=*/true)});
-
-    CHECK(fixture.tool.mode_override_for({{"name", "alpha"}}, ctx) == std::nullopt);
-    const auto narrowed = fixture.tool.mode_override_for({{"name", "beta"}}, ctx);
-    REQUIRE(narrowed.has_value());
-    CHECK(*narrowed == PermissionMode::Ask);
-    CHECK(fixture.tool.mode_override_for({{"name", "unlisted"}}, ctx) == std::nullopt);
-    CHECK(fixture.tool.mode_override_for({{"name", 42}}, ctx) == std::nullopt);
-}
-
 TEST_CASE("SkillTool's disclosure offers the stable per-skill grant key",
           "[skill_tool][compat]") {
     SkillFixture fixture;
-    ToolContext ctx = fixture.MakeContext({SkillFixture::Allow("beta", /*ask=*/true)});
+    ToolContext ctx = fixture.MakeContext();
 
     const auto disclosure = fixture.tool.Disclose({{"name", "beta"}}, ctx);
     CHECK(disclosure.complete);
     REQUIRE(disclosure.grants.size() == 1);
     CHECK(disclosure.grants.front().key == "skill:beta");
+}
+
+// --- the skills permission model and per-preset access -------------------------
+
+namespace {
+
+PermissionAnswer Gate(const PermissionModel& model, const void* layer, const std::string& name,
+                      const ToolContext& ctx, const Tool& tool) {
+    const nlohmann::json input{{"name", name}};
+    return model.Resolve(PermissionStage::kBase,
+                         PermissionQuery{tool, "skill", input, ctx, nullptr, layer});
+}
+
+}  // namespace
+
+TEST_CASE("the skills model gates the skill tool per name: allow, ask, deny, preload",
+          "[skill_tool][skills_model]") {
+    SkillFixture fixture;
+    const auto model = MakeSkillsPermissionModel();
+    CHECK(model->Claims("skill"));
+    CHECK_FALSE(model->Claims("read"));
+
+    // The operator allows everything; the preset narrows per name.
+    const auto layer = model->BuildLayer(
+        {{"*", "allow"}}, {{"beta", "ask"}, {"secret", "deny"}, {"style", "preload"}},
+        /*preset_trusted=*/true);
+    const ToolContext ctx = fixture.MakeContext();
+    CHECK(Gate(*model, layer.get(), "alpha", ctx, fixture.tool).mode == PermissionMode::AlwaysAllow);
+    CHECK(Gate(*model, layer.get(), "beta", ctx, fixture.tool).mode == PermissionMode::Ask);
+    CHECK(Gate(*model, layer.get(), "secret", ctx, fixture.tool).mode == PermissionMode::AlwaysDeny);
+    // Preloaded bodies are already in the prompt: the tool is refused for them.
+    CHECK(Gate(*model, layer.get(), "style", ctx, fixture.tool).mode == PermissionMode::AlwaysDeny);
+
+    // No slice anywhere: nothing is allowed.
+    const auto empty = model->BuildLayer(nullptr, nullptr, true);
+    CHECK(Gate(*model, empty.get(), "alpha", ctx, fixture.tool).mode == PermissionMode::AlwaysDeny);
+    CHECK_THROWS(model->BuildLayer(nullptr, {{"alpha", "sometimes"}}, true));
+}
+
+TEST_CASE("skill access resolves against the loaded skills and clamps to a parent",
+          "[skill_tool][skills_model]") {
+    SkillFixture fixture;
+    const auto merged = fixture.registry.AllFor(fixture.config.dir);
+
+    // "*" expands to the LOADED skills only; denies resolve out.
+    const auto resolved =
+        ResolveForRoot({{"*", SkillMode::Allow}, {"beta", SkillMode::Ask}}, merged);
+    CHECK(resolved == SkillAccess{{"alpha", SkillMode::Allow}, {"beta", SkillMode::Ask}});
+
+    // The child keeps only what the parent has, at the stricter mode.
+    const auto clamped = ClampToParent(resolved, {{"beta", SkillMode::Allow}});
+    CHECK(clamped == SkillAccess{{"beta", SkillMode::Ask}});
+
+    CHECK(RenderListing(resolved, merged) ==
+          "Available skills:\n- alpha: First skill.\n- beta: Second skill. (asks before loading)");
+    CHECK(RenderListing({}, merged).empty());
+
+    const std::string preloads =
+        RenderPreloads({{"alpha", SkillMode::Preload}}, fixture.registry, fixture.config.dir);
+    CHECK(preloads.find("## Preloaded skills") != std::string::npos);
+    CHECK(preloads.find("Alpha body.") != std::string::npos);
 }

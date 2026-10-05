@@ -36,6 +36,8 @@ public:
     std::string Render(const std::string& focused_session_id) const override {
         return feed_->Render(focused_session_id, field_);
     }
+    // Reference detail, but above the session name and version.
+    int priority() const override { return 40; }
 
 private:
     std::string_view id_;

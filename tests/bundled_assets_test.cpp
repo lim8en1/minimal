@@ -67,8 +67,7 @@ TEST_CASE("a seeded config dir resolves the default preset", "[bundled_assets]")
     testing::TempDir config;
     WriteSeededConfig(config.path());
 
-    const auto skills = config::SkillRegistry::Load(config.path());
-    agent::AgentPresetRegistry registry(config.path(), skills,
+    agent::AgentPresetRegistry registry(config.path(),
                                          config::LoadSettingsConfig(config.path() / "settings.json"));
     const auto& preset = registry.Resolve("build");
 
@@ -88,16 +87,14 @@ TEST_CASE("a seeded compression prompt reaches AgentPreset::compression_prompt",
     WriteSeededConfig(config.path());
 
     SECTION("absent, compaction has no prompt and is silently inert") {
-        const auto skills = config::SkillRegistry::Load(config.path());
-        agent::AgentPresetRegistry registry(config.path(), skills,
+        agent::AgentPresetRegistry registry(config.path(),
                                          config::LoadSettingsConfig(config.path() / "settings.json"));
         CHECK(registry.Resolve("build").compression_prompt.empty());
     }
 
     SECTION("present, the default prompt is live") {
         Write(config.path() / "prompts" / "compression.md", "THE DEFAULT COMPACTION PROMPT.\n");
-        const auto skills = config::SkillRegistry::Load(config.path());
-        agent::AgentPresetRegistry registry(config.path(), skills,
+        agent::AgentPresetRegistry registry(config.path(),
                                          config::LoadSettingsConfig(config.path() / "settings.json"));
         CHECK(registry.Resolve("build").compression_prompt == "THE DEFAULT COMPACTION PROMPT.\n");
     }
@@ -115,8 +112,7 @@ TEST_CASE("a preset's compression_prompt override wins over the seeded default",
     Write(config.path() / "agents" / "brief.md",
           "---\nname: brief\ncompression_prompt: terse\n---\nHi.\n");
 
-    const auto skills = config::SkillRegistry::Load(config.path());
-    agent::AgentPresetRegistry registry(config.path(), skills,
+    agent::AgentPresetRegistry registry(config.path(),
                                          config::LoadSettingsConfig(config.path() / "settings.json"));
 
     CHECK(registry.Resolve("brief").compression_prompt == "BE BRIEF.\n");
@@ -146,7 +142,7 @@ TEST_CASE("every bundled/agents preset parses through the production load path",
         SECTION(entry.path().filename().string()) {
             agent::AgentPresetFrontmatter preset;
             REQUIRE_NOTHROW(preset = agent::LoadAgentPresetFrontmatter(
-                                entry.path(), {"bash", "read", "write", "edit", "glob", "grep"}));
+                                entry.path(), std::vector<std::string>{"bash", "read", "write", "edit", "glob", "grep"}));
             CHECK(preset.name == entry.path().stem().string());
             CHECK(!preset.body.empty());
             CHECK(!preset.description.empty());
@@ -165,7 +161,7 @@ TEST_CASE("the bundled plan preset: bash is deny + atomic allow, write is denied
     // prompts, and this preset asks nothing -- every outcome is allow or deny.
     const auto preset = agent::LoadAgentPresetFrontmatter(
         std::filesystem::path(MINIMAL_BUNDLED_DIR) / "agents" / "plan.md",
-        {"bash", "read", "write", "edit", "glob", "grep"});
+        std::vector<std::string>{"bash", "read", "write", "edit", "glob", "grep"});
     const auto policy = agent::BuildPermissionPolicy(preset.permission_mode, {},
                                                      /*preset_is_trusted=*/true,
                                                      {"read", "write", "edit"});

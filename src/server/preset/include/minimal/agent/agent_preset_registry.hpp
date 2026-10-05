@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -13,7 +14,6 @@
 #include "minimal/config/project_trust.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/config/settings_config.hpp"
-#include "minimal/config/skill_registry.hpp"
 
 namespace minimal::agent {
 
@@ -34,9 +34,6 @@ struct PresetToolEnv {
     // INCLUDED -- spawnability is independent of picker visibility. Name is
     // the preset KEY (file stem), what a spawn request's agent_preset accepts.
     std::vector<AgentPresetSummary> available_agents;
-    // The merged skill view for the same root (global ∪ project overlay,
-    // sorted), for builders that render names + descriptions.
-    std::vector<config::SkillMeta> skills;
 };
 
 // Everything a definition builder may read. `preset_key` is carried separately
@@ -44,18 +41,62 @@ struct PresetToolEnv {
 // their file stem everywhere a spawn or /agent names one, while
 // AgentPreset::name is the frontmatter display value, which need not match
 // (see ListAvailable's stem-keying note).
+// `project_root` is the root the preset resolves for (empty: no project
+// scope). `parent` is the spawning session's preset on the subagent path, null
+// otherwise: an extension that grants something per preset clamps a child to
+// what its parent has (the subagent ceiling, applied at resolve time).
 struct PresetToolContext {
     const AgentPreset& preset;
     const std::string& preset_key;
     const PresetToolEnv& env;
+    const std::filesystem::path& project_root;
+    const AgentPreset* parent = nullptr;
 };
 
 // Returns the definition the named tool advertises TO THIS PRESET: the
 // builder's one shot at a preset-scoped description/schema. Runs once per
 // (preset, root) inside ResolveUncached -- lazily, with the rest of the
 // resolve -- and its result rides AgentPreset::tool_definition_overrides.
+// A definition with an EMPTY name means "this preset does not get the tool"
+// (the skill tool with no skill allowed): the request leaves it out.
 using PresetToolDefinitionBuilder =
     std::function<llm::ToolDefinition(const PresetToolContext&)>;
+
+// Text appended to a preset's system prompt at resolve time (the skills
+// plugin's preloaded skill bodies). Empty: nothing appended.
+using PresetPromptAppendix = std::function<std::string(const PresetToolContext&)>;
+
+// What plugins add to preset resolution: per-tool definition builders and
+// system-prompt appendices. Filled during plugin load
+// (minimal_plugin_register_preset_extensions), read-only afterwards.
+class PresetExtensionRegistry {
+public:
+    void AddDefinitionBuilder(std::string tool_name, PresetToolDefinitionBuilder builder);
+    void AddPromptAppendix(PresetPromptAppendix appendix);
+
+    struct Builder {
+        std::string plugin;
+        std::string tool_name;
+        PresetToolDefinitionBuilder build;
+    };
+    struct Appendix {
+        std::string plugin;
+        PresetPromptAppendix render;
+    };
+    const std::vector<Builder>& builders() const { return builders_; }
+    const std::vector<Appendix>& appendices() const { return appendices_; }
+
+    // Plugin-loader bookkeeping (registration window and rollback).
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+    void RemoveByAttribution(const std::string& plugin_name);
+    std::vector<std::string> OwnedBy(const std::string& plugin_name) const;
+
+private:
+    std::vector<Builder> builders_;
+    std::vector<Appendix> appendices_;
+    std::string attribution_;
+};
 
 // The live ToolRegistry's structural tool-name vocabulary, resolved ONCE
 // (main.cpp, after ToolRegistry::ApplyAliases) and handed down rather than a
@@ -68,6 +109,15 @@ using PresetToolDefinitionBuilder =
 struct ToolPermissionKeys {
     std::vector<std::string> all;              // ToolRegistry::PermissionKeys()
     std::vector<std::string> dotenv_protected;  // ToolRegistry::DotenvProtectedPermissionKeys()
+    std::map<std::string, std::string> config_aliases;  // ToolRegistry::ConfigAliasPermissionKeys()
+    std::vector<std::string> no_pattern_rules;  // ToolRegistry::NoPatternRulePermissionKeys()
+
+    ToolVocabulary vocabulary() const {
+        ToolVocabulary out(all);
+        out.config_aliases = config_aliases;
+        out.no_pattern_rules = no_pattern_rules;
+        return out;
+    }
 };
 
 // Loads providers.json/permissions.json/agents/*.md into fully resolved
@@ -85,11 +135,6 @@ public:
     // absent) -- a future sanity_check is what makes their absence loud in a
     // real deployment.
     //
-    // `skills` is shared with SkillTool rather than loaded again: one scan of
-    // skills/, one set of load-status entries, and both consumers agree on what
-    // exists. The listing rendered into each preset's system prompt comes from
-    // it (allowed_skills ∩ loaded, see ResolveUncached).
-    //
     // `settings` is passed in rather than parsed here, so the server validates
     // and runs on the same parse (config::LoadConfigBundle in production).
     // `tool_permission_keys` defaults to {} so a caller with no ToolRegistry
@@ -101,7 +146,7 @@ public:
     // "variants": [...] entry derives its wire parameters (see
     // VariantParametersFor), and it runs DURING construction, so the registry
     // must arrive as a constructor parameter.
-    AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
+    AgentPresetRegistry(std::filesystem::path config_dir,
                         const config::SettingsConfig& settings,
                         ToolPermissionKeys tool_permission_keys = {},
                         const llm::VariantParamsRegistry* variant_params = nullptr);
@@ -109,7 +154,7 @@ public:
     // Same as above, but takes an already-parsed PermissionsConfig instead of
     // loading permissions.json itself. Still loads and owns its own
     // providers.json -- the self-contained form tests construct directly.
-    AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
+    AgentPresetRegistry(std::filesystem::path config_dir,
                         const config::SettingsConfig& settings,
                         const config::PermissionsConfig& permissions,
                         ToolPermissionKeys tool_permission_keys = {},
@@ -119,7 +164,7 @@ public:
     // (config::ConfigBundle), and the model catalog BORROWED from its owner,
     // which also injects the catalog's discovery/metadata/variant hooks. The
     // catalog must outlive this registry.
-    AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
+    AgentPresetRegistry(std::filesystem::path config_dir,
                         const config::SettingsConfig& settings,
                         const config::PermissionsConfig& permissions,
                         const config::ProvidersConfig& providers,
@@ -142,18 +187,14 @@ public:
     // BEFORE config_dir/agents/<name>.md, so a project can override a global
     // preset by name (the shadowing is logged once per resolve, and the cache
     // makes that once per (name, root)). An empty project_root -- the default,
-    // and what every global-only caller passes -- means no project scope. The
-    // project skill listing and allowed_skills resolution consult the same
-    // root, so a preset resolved for one project advertises exactly the skills
-    // SkillTool will serve in it.
+    // and what every global-only caller passes -- means no project scope. Extensions (builders,
+    // prompt appendices) see the same root.
     //
-    // parent_skills (the spawn path) clamps the resolved skill modes BEFORE the
-    // system prompt is baked: an elementwise most-restrictive fold against the
-    // parent's map (Preload widest, Deny narrowest; a skill the parent lacks is
-    // deny). The clamp has to live here because a preload entry is CONSUMED at
-    // resolve time -- its body ships in the prompt -- so a post-resolve clamp
-    // could not stop the injection. Uncached when given: the clamp input varies
-    // per parent, and spawn is rare enough to pay a resolve every time.
+    // `parent` (the spawn path) is the spawning session's preset, handed to
+    // every extension so it can clamp the child to what the parent has BEFORE
+    // anything is baked into the prompt -- a post-resolve clamp could not undo
+    // an injected body. Uncached when given: the clamp input varies per parent,
+    // and spawn is rare enough to pay a resolve every time.
     //
     // model_override, when given, is what the CALLER already decided the
     // session's model is (--model, /model, a fork's pinned choice, or a
@@ -165,11 +206,11 @@ public:
     // session cannot start because of a settings.json value nobody asked
     // about": without this, an unresolvable default_model throws here before
     // the caller's own ResolveModel-style override application ever runs.
-    // Uncached for the same reason parent_skills is: the override varies per
+    // Uncached for the same reason `parent` is: the override varies per
     // caller and session creation is not a hot path.
     AgentPreset Resolve(
         const std::string& preset_name, const std::filesystem::path& project_root = {},
-        const std::optional<std::map<std::string, SkillMode>>& parent_skills = std::nullopt,
+        const AgentPreset* parent = nullptr,
         const std::optional<config::ModelRef>& model_override = std::nullopt) const;
 
     // A cheap peek at whether agents/<preset_name>.md declares its own
@@ -223,6 +264,11 @@ public:
 
     void SetDefinitionBuilder(std::string tool_name, PresetToolDefinitionBuilder builder);
 
+    // The plugins' builders and prompt appendices, consulted on every
+    // resolve beside SetDefinitionBuilder's. Startup-only, before the first
+    // Resolve(); must outlive this registry. Null: none.
+    void SetExtensions(const PresetExtensionRegistry* extensions) { extensions_ = extensions; }
+
     // The plugin permission models every resolved preset binds its slices to
     // (AgentPreset::permission_models). Same startup-only rule as the
     // builders above: set after plugin load, before the first Resolve(). The
@@ -230,12 +276,6 @@ public:
     void SetPermissionModels(const tools::PermissionModelRegistry* models) {
         permission_models_ = models;
     }
-
-    // The `skill` tool's preset-scoped definition: the static base schema with
-    // this preset's resolved (clamped, expanded, preload-consumed) skill
-    // listing appended to the description -- the migration of what used to be
-    // rendered into the system prompt, onto the generic builder mechanism.
-    static PresetToolDefinitionBuilder MakeSkillDefinitionBuilder();
 
     const std::string& SubagentPrefix() const { return subagent_prefix_; }
 
@@ -246,17 +286,17 @@ public:
 
 private:
     // Exactly one of `owned` / `borrowed` is set.
-    AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
+    AgentPresetRegistry(std::filesystem::path config_dir,
                         const config::SettingsConfig& settings,
                         const config::PermissionsConfig& permissions,
                         std::unique_ptr<config::ProvidersConfig> owned,
                         const config::ProvidersConfig* borrowed,
                         ToolPermissionKeys tool_permission_keys);
 
-    AgentPreset ResolveUncached(
-        const std::string& preset_name, const std::filesystem::path& project_root,
-        const std::optional<std::map<std::string, SkillMode>>& parent_skills,
-        const std::optional<config::ModelRef>& model_override) const;
+    AgentPreset ResolveUncached(const std::string& preset_name,
+                                const std::filesystem::path& project_root,
+                                const AgentPreset* parent,
+                                const std::optional<config::ModelRef>& model_override) const;
 
     // Project-local-shadows-global path search shared by ResolveUncached and
     // PresetDeclaresModel. Throws "unknown agent preset" if neither exists.
@@ -296,12 +336,11 @@ private:
     const config::ProvidersConfig& providers_;
     config::SettingsConfig settings_;
     config::PermissionsConfig permissions_;
-    const config::SkillRegistry& skills_;
     ToolPermissionKeys tool_permission_keys_;
     const tools::PermissionModelRegistry* permission_models_ = nullptr;
+    const PresetExtensionRegistry* extensions_ = nullptr;
     std::string subagent_prefix_;
     std::string default_compression_prompt_;
-    std::string structured_compression_prompt_;  // prompts/compression-structured.md
     // Startup-only in practice (main.cpp wires builders beside the tool
     // registrations), but guarded because ResolveUncached reads it from
     // session-creation threads and a stray late SetDefinitionBuilder must not
@@ -309,7 +348,7 @@ private:
     std::map<std::string, PresetToolDefinitionBuilder> definition_builders_;
     // The builders' per-root inputs, computed lazily on the first resolve
     // that needs them and memoized per canonical root: N presets of one root
-    // scan agents/ and skills/ once, and a deployment with no builders never
+    // scan agents/ once, and a deployment with no builders never
     // scans at all. Same lifetime assumption as the preset cache -- files do
     // not change at runtime. GUARDED (populated from ResolveUncached, whose
     // callers are on different threads); std::map so a returned reference

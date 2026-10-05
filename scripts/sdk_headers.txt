@@ -1,0 +1,78 @@
+# SDK v0 -- UNSTABLE. The core headers a server plugin may include.
+#
+# Everything else under src/server/*/include is core-internal: a plugin that
+# needs it has found either a missing extension point (add one, list it here)
+# or code on the wrong side of the boundary. scripts/check_module_deps.py
+# --plugins enforces this list over plugins/server/ (ctest: plugin_conformance).
+#
+# The ABI and every type its registration hooks take.
+minimal/agent/agent_preset_registry.hpp
+minimal/agent/compaction_boundary.hpp
+minimal/agent/compaction_strategy.hpp
+minimal/agent/context_compactor.hpp
+minimal/agent/context_contributor.hpp
+minimal/agent/mention_resolver.hpp
+minimal/agent/session_observer_registry.hpp
+minimal/agent/session_observer.hpp
+minimal/agent/session_support_service.hpp
+minimal/commands/command_context.hpp
+minimal/commands/command_registry.hpp
+minimal/commands/command.hpp
+minimal/common/abi_tag.hpp
+minimal/common/config_paths.hpp
+minimal/common/logger.hpp
+minimal/config/project_trust.hpp
+minimal/config/provider_config_extensions.hpp
+minimal/hooks/hook_dispatcher.hpp
+minimal/llm/metadata_catalog.hpp
+minimal/llm/model_catalog.hpp
+minimal/llm/provider_factory_registry.hpp
+minimal/llm/provider.hpp
+minimal/llm/variant_params.hpp
+minimal/net/http_client.hpp
+minimal/net/sse_parser.hpp
+minimal/plugins/plugin_rpc.hpp
+minimal/plugins/plugin_storage.hpp
+minimal/plugins/service_registry.hpp
+minimal/session/history_window.hpp
+minimal/session/session_reader.hpp
+minimal/tools/atomic_write.hpp
+minimal/tools/file_access.hpp
+minimal/tools/path_confinement.hpp
+minimal/tools/permission_advisor.hpp
+minimal/tools/permission_model.hpp
+minimal/tools/tool_registry.hpp
+minimal/tools/tool_source.hpp
+minimal/tools/tool.hpp
+minimal/plugins/plugin_abi.h
+
+# Contracts reached through those hooks or through ServiceRegistry.
+minimal/config/providers_config.hpp   # CommandContext::providers()
+minimal/agent/permission_gate_service.hpp
+minimal/agent/signal_service.hpp
+minimal/commands/confirmation_broker.hpp
+minimal/llm/chat.hpp
+minimal/llm/message.hpp
+minimal/llm/stream_event.hpp
+minimal/tools/cancel_token.hpp
+minimal/tools/permission.hpp
+
+# Shared utilities (no policy; safe for any plugin to build on).
+minimal/common/event_queue.hpp
+minimal/common/file_lock.hpp
+minimal/common/model_ref.hpp
+minimal/common/read_file.hpp
+minimal/common/sqlite_util.hpp
+minimal/common/utf8.hpp
+minimal/config/frontmatter.hpp
+minimal/config/json_config_loader.hpp
+minimal/config/parse_util.hpp
+minimal/config/permission_codec.hpp
+minimal/config/project_dirs.hpp
+minimal/llm/json_depth.hpp
+minimal/session/ulid.hpp
+minimal/sidecar/capped_buffer.hpp
+minimal/sidecar/drain.hpp
+minimal/sidecar/process.hpp
+minimal/sidecar/task_registry.hpp
+minimal/tools/pattern_match.hpp

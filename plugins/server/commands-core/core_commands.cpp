@@ -10,9 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "minimal/agent/agent_loop.hpp"
 #include "minimal/commands/command_context.hpp"
-#include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/file_lock.hpp"
 #include "minimal/common/model_ref.hpp"
@@ -112,9 +110,7 @@ public:
                     "compression prompt '" + args.positional.front() + "' is empty");
             }
         }
-        const auto folded = prompt.empty()
-                                ? context.session().loop().CompactNow()
-                                : context.session().loop().CompactNow(prompt);
+        const auto folded = context.session().CompactNow(prompt);
         if (!folded) {
             // The reason is already in the log at the point it was decided --
             // repeating a guess here would be a second, possibly wrong, story.
@@ -139,8 +135,7 @@ public:
     bool RequiresConfirmation() const override { return true; }
 
     CommandResult Execute(CommandContext& context, const CommandArgs&) override {
-        const auto dropped = context.session().loop().history().size();
-        context.session().loop().ClearHistory();
+        const auto dropped = context.session().ClearHistory();
         // The store is untouched, the same rule compaction follows: what the
         // model sees and what scrollback shows are different things.
         return CommandResult::Ok("cleared " + std::to_string(dropped) +
@@ -231,7 +226,7 @@ public:
             // override in force; see AgentPresetRegistry::Resolve's model_override
             // doc.
             resolved = context.presets().Resolve(wanted, context.session().project_root(),
-                                                 std::nullopt, context.session().model_override());
+                                                 nullptr, context.session().model_override());
         } catch (const std::exception& error) {
             return CommandResult::Error(error.what());
         }
@@ -832,7 +827,7 @@ public:
             return CommandResult::Ok(root.string() + " is already trusted");
         }
 
-        const auto inventory = minimal::config::InspectProjectLocal(root);
+        const auto inventory = trust->Inspect(root);
         minimal::commands::ConfirmationRequest request;
         request.kind = "command_confirmation";
         request.title = "Trust " + root.string() + "?";

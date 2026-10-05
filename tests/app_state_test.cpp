@@ -74,7 +74,6 @@ struct ClientFixture {
         Write("permissions.json", "{}");
         Write("agents/main.md", "---\nname: main\nmodel: main/test-model\nallowed_tools: [\"*\"]\n---\nYou help.\n");
 
-        skills = config::SkillRegistry::Load(dir);
     }
 
     void Write(const std::filesystem::path& relative, const std::string& contents) const {
@@ -128,7 +127,7 @@ struct ClientFixture {
 
     void Start() {
         presets = std::make_unique<agent::AgentPresetRegistry>(
-            dir, skills, config::LoadSettingsConfig(dir / "settings.json"));
+            dir, config::LoadSettingsConfig(dir / "settings.json"));
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
         for (auto& command : commands_core::MakeCoreCommands()) commands.Register(std::move(command));
@@ -171,7 +170,6 @@ struct ClientFixture {
     }
 
     std::filesystem::path dir, socket;
-    config::SkillRegistry skills;
     tools::ToolRegistry tools;
     commands::CommandRegistry commands;
     llm::ProviderFactoryRegistry providers;

@@ -311,14 +311,14 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
     fs::create_directories(dir.path() / "agents");
     std::ofstream(dir.path() / "agents/main.md")
         << "---\nname: main\nallowed_tools: [\"*\"]\n"
-           "allowed_mcp_servers: [\"broken\"]\n---\nmain\n";
+           "tool_sources:\n  mcp: [\"broken\"]\n---\nmain\n";
     std::ofstream(dir.path() / "agents/child.md")
-        << "---\nname: child\nallowed_tools: [\"*\"]\nallowed_mcp_servers: [\"broken\"]\n---\nchild\n";
+        << "---\nname: child\nallowed_tools: [\"*\"]\ntool_sources:\n  mcp: [\"broken\"]\n---\nchild\n";
     std::ofstream(dir.path() / "settings.json")
         << nlohmann::json{{"default_agent_preset", "main"},
                           {"default_model", "main/fake-model"}}.dump();
     std::ofstream(dir.path() / "permissions.json")
-        << nlohmann::json{{"mcp_default_mode", "ask"}}.dump();
+        << nlohmann::json{{"plugins", {{"mcp", {{"default", "ask"}}}}}}.dump();
     std::ofstream(dir.path() / "providers.json")
         << nlohmann::json{{"providers",
                            {{"main",
@@ -329,8 +329,7 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
 
     // AgentPresetRegistry borrows the registry: it must outlive it, so a
     // local -- never a temporary.
-    config::SkillRegistry skills = config::SkillRegistry::Load(dir.path());
-    agent::AgentPresetRegistry presets(dir.path(), skills,
+    agent::AgentPresetRegistry presets(dir.path(),
                                         config::LoadSettingsConfig(dir.path() / "settings.json"));
     agent::SessionObserverRegistry observers{minimal::common::DefaultLogger()};
     session::SessionDatabase db(dir.path() / "sessions.db");

@@ -21,7 +21,8 @@ CheckResult Warning(const std::string& check, const std::string& message) {
 }  // namespace
 
 ConfigBundle LoadConfigBundle(const std::filesystem::path& dir,
-                              const VariantParamsHook& variant_params) {
+                              const VariantParamsHook& variant_params,
+                              const ProviderConfigExtensions* provider_extensions) {
     ConfigBundle bundle;
     auto& results = bundle.problems;
 
@@ -45,7 +46,8 @@ ConfigBundle LoadConfigBundle(const std::filesystem::path& dir,
     }
 
     try {
-        bundle.providers = LoadProvidersConfig(dir / "providers.json", variant_params);
+        bundle.providers =
+            LoadProvidersConfig(dir / "providers.json", variant_params, provider_extensions);
         bundle.providers_loaded = true;
     } catch (const std::exception& e) {
         results.push_back(Fatal("config_parse", std::string("providers.json: ") + e.what()));

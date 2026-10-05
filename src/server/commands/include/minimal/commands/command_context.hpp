@@ -21,10 +21,12 @@
 //     would be surface built ahead of its consumer.
 
 #include <cassert>
+#include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/agent_preset_registry.hpp"
@@ -33,10 +35,6 @@
 #include "minimal/common/model_ref.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/tools/tool_executor.hpp"
-
-namespace minimal::agent {
-class AgentLoop;  // only a reference crosses this interface; users include agent_loop.hpp
-}
 
 namespace minimal::commands {
 
@@ -62,7 +60,15 @@ public:
     // fakes and means "no project scope" everywhere it is consumed.
     virtual std::filesystem::path project_root() const = 0;
 
-    virtual agent::AgentLoop& loop() = 0;
+    // Folds the oldest history into one summary now (the /compact path),
+    // with `prompt_override` as the compression prompt for this call only.
+    // The number of messages folded, or nullopt when nothing was compacted
+    // (the reason is logged where it was decided).
+    virtual std::optional<std::size_t> CompactNow(std::string_view prompt_override = {}) = 0;
+    // Forgets the working history (the transcript on disk is kept). Returns
+    // how many messages the model no longer sees.
+    virtual std::size_t ClearHistory() = 0;
+    // The permission gate, for commands that inspect or revoke what it allows.
     virtual tools::ToolExecutor& executor() = 0;
 
     // The preset this session is actually running: the registry's copy with any

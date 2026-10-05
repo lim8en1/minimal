@@ -4,7 +4,6 @@
 #include <memory>
 #include <mutex>
 
-#include "minimal/agent/structured_compaction.hpp"
 #include "minimal/common/utf8.hpp"
 #include "tool_result_caps.hpp"
 
@@ -51,14 +50,6 @@ ToolRound::Outcome ToolRound::Run(const std::vector<const llm::ToolUseBlock*>& t
                              tools::ToolContext ctx{session_.logger};
                               ctx.session_id = session_.session_id;
                               ctx.project_root = session_.project_root;
-                              // Map -> plain SkillAccess rows: Preload/Deny never
-                              // reach the tool (preloaded bodies are in the prompt;
-                              // denied names are absent = refused); Ask rides as
-                              // the flag the tool narrows its own mode with.
-                              for (const auto& [skill, mode] : preset_.allowed_skills) {
-                                  ctx.allowed_skills.push_back(
-                                      {skill, mode == SkillMode::Ask});
-                              }
                               ctx.is_cancelled = is_cancelled_;
                              ctx.cancel_token = cancel_token_;
                              // Per invocation, from the Session-owned window: a
@@ -104,7 +95,18 @@ ToolRound::Outcome ToolRound::Run(const std::vector<const llm::ToolUseBlock*>& t
                               // session's shared channels block -- not this call, not this loop.
                               ctx.schedule_injection = session_.injection_sink;
                               ctx.session_lifetime = session_.session_lifetime;
-                              ctx.emit_task_event = session_.task_event_sink;
+                              // Stamped with the invoking tool's surface name, so
+                              // a client labels a background row without knowing
+                              // which tools run background work.
+                              if (session_.task_event_sink) {
+                                  ctx.emit_task_event =
+                                      [sink = session_.task_event_sink, tool_name = use->name](
+                                          const tools::BackgroundTaskEvent& event) {
+                                          tools::BackgroundTaskEvent stamped = event;
+                                          stamped.tool_name = tool_name;
+                                          sink(stamped);
+                                      };
+                              }
                               ctx.prompt_user = session_.prompt_user;
                               return ctx;
                           }(),
@@ -133,14 +135,12 @@ ToolRound::Outcome ToolRound::Run(const std::vector<const llm::ToolUseBlock*>& t
             // same skip-Prepare path as an oversized input.
             prepared.denial = stopped_by_user(use->id);
             denied_for_input = true;
-        } else if (use->name == kRecordSummaryToolName) {
-            // Declared on every request for the summarizer's sake (see
-            // BuildSystemAndTools); outside a compaction it records nothing.
-            prepared.denial = llm::ToolResultBlock{
-                use->id,
-                {llm::TextBlock{"record_summary is only used when the harness asks for a "
-                                "context summary; nothing was recorded. Continue the task."}},
-                true};
+        } else if (const auto reply = config_.strategy_tool_replies.find(use->name);
+                   reply != config_.strategy_tool_replies.end()) {
+            // A compaction strategy's tool, declared on every request for its
+            // summarizer's sake (see BuildSystemAndTools); outside a
+            // compaction it does nothing.
+            prepared.denial = llm::ToolResultBlock{use->id, {llm::TextBlock{reply->second}}, true};
             denied_for_input = true;
         } else if (config_.max_tool_input_bytes > 0) {
             const std::size_t input_bytes = use->input.dump().size();
@@ -221,6 +221,13 @@ ToolRound::Outcome ToolRound::Run(const std::vector<const llm::ToolUseBlock*>& t
         lifecycle.tool_use_id = use->id;
         lifecycle.tool_name = use->name;
         lifecycle.input = use->input;
+        if (call.prepared.tool) {
+            try {
+                lifecycle.summary = call.prepared.tool->Summary(use->input);
+            } catch (...) {
+                // A display nicety: a throwing Summary just leaves it empty.
+            }
+        }
         lifecycle.started = true;
         lifecycle.started_at_unix_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -231,6 +238,10 @@ ToolRound::Outcome ToolRound::Run(const std::vector<const llm::ToolUseBlock*>& t
         const auto tool_started = std::chrono::steady_clock::now();
         llm::ToolResultBlock tool_result;
         try {
+            struct InToolScope {
+                InToolScope() { g_in_tool_execution = true; }
+                ~InToolScope() { g_in_tool_execution = false; }
+            } in_tool;
             tool_result = executor_.Execute(call.prepared, call.ctx);
         } catch (const std::exception& error) {
             // Execute never throws by contract (tool_executor.hpp) -- but

@@ -22,8 +22,10 @@ Project-local skills shadow global ones of the same name; the nearest
 directory wins. Discovery reads only frontmatter; the body is lazy-loaded on
 invocation, so a large skill library is cheap to have.
 
-Skills only surface where a preset opts in — `allowed_skills: ["*"]` in its
-frontmatter (or per-name entries). Access modes, per skill name:
+Skills come from the `skills` plugin and only surface where a preset opts in —
+`plugin_permissions: {skills: ["*"]}` in its frontmatter (or per-name entries;
+`permissions.json` `plugins.skills` sets the operator default). Access modes,
+per skill name:
 
 | Mode | Behavior |
 |---|---|
@@ -32,7 +34,7 @@ frontmatter (or per-name entries). Access modes, per skill name:
 | `deny` | hidden; the tool refuses |
 | `preload` | body ships in the system prompt at session start; not tool-callable |
 
-Example: `allowed_skills: {repo-etiquette: preload, "*": allow}` — the
+Example: `plugin_permissions: {skills: {repo-etiquette: preload, "*": allow}}` — the
 conventions ride in every prompt, the rest load on demand. Subagents clamp
 elementwise; a child can never widen into its parent's preloads.
 
@@ -42,4 +44,4 @@ elementwise; a child can never widen into its parent's preloads.
 | `eda-checklist/` | A checklist skill — on-demand procedure, pairs with `agents/data-analyst.md` |
 | `ctf-triage/` | A methodology skill — pairs with `agents/ctf.md` |
 
-Reference: `docs/CONFIGURATION.md`, "agents/ and prompts/" (`allowed_skills`).
+Reference: `plugins/server/skills/README.md`.

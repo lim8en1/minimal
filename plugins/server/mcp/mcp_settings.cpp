@@ -6,26 +6,21 @@
 namespace minimal::mcp {
 namespace {
 
-std::int64_t Knob(const nlohmann::json& config, const nlohmann::json& legacy, const char* key,
-                  std::int64_t fallback) {
+std::int64_t Knob(const nlohmann::json& config, const char* key, std::int64_t fallback) {
     if (config.is_object() && config.contains(key)) return config.at(key).get<std::int64_t>();
-    if (legacy.is_object() && legacy.contains(key)) return legacy.at(key).get<std::int64_t>();
     return fallback;
 }
 
 }  // namespace
 
-McpLimits ParseMcpLimits(const nlohmann::json& config, const nlohmann::json& tools_settings) {
-    const nlohmann::json legacy = tools_settings.is_object() && tools_settings.contains("mcp")
-                                      ? tools_settings.at("mcp")
-                                      : nlohmann::json();
+McpLimits ParseMcpLimits(const nlohmann::json& config) {
     McpLimits limits;
     try {
-        const auto connect = Knob(config, legacy, "connect_timeout_ms", limits.connect.count());
-        const auto request = Knob(config, legacy, "request_timeout_ms", limits.request.count());
-        const auto pages = Knob(config, legacy, "max_list_pages", limits.max_list_pages);
+        const auto connect = Knob(config, "connect_timeout_ms", limits.connect.count());
+        const auto request = Knob(config, "request_timeout_ms", limits.request.count());
+        const auto pages = Knob(config, "max_list_pages", limits.max_list_pages);
         const auto cooldown =
-            Knob(config, legacy, "restart_cooldown_ms", limits.restart_cooldown.count());
+            Knob(config, "restart_cooldown_ms", limits.restart_cooldown.count());
         if (connect < 0 || request < 0) {
             throw std::runtime_error("mcp: connect/request timeouts must not be negative");
         }

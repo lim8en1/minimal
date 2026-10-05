@@ -19,7 +19,7 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
     CHECK(config.memory.context_compaction_trigger.kind == CompactionTriggerSettings::Kind::Never);
     CHECK(config.memory.compaction_keep_recent_tokens == 0);
     CHECK(config.memory.scrollback_page_size == 0);
-    CHECK(config.memory.compaction_strategy == "structured");
+    CHECK(config.memory.compaction_strategy == "summarize");
     CHECK(config.tools_view.stdout_buffer_lines == 100);
     CHECK(config.project_context.enabled == true);
     REQUIRE(config.project_context.files.size() == 2);
@@ -127,45 +127,19 @@ TEST_CASE("ParseSettingsConfig: compaction trigger is a one-of strategy choice",
     }
 }
 
-TEST_CASE("ParseSettingsConfig: legacy context_compaction_trigger_tokens still parses",
+TEST_CASE("ParseSettingsConfig: context_compaction_trigger_tokens is not a trigger",
           "[settings_config]") {
-    // Pre-strategy config dirs must not silently stop compacting. The new object
-    // wins when both are present.
-    SECTION("legacy key alone") {
-        const auto config = ParseSettingsConfig(
-            {{"memory", {{"context_compaction_trigger_tokens", 100000}}}});
-        CHECK(config.memory.context_compaction_trigger.kind ==
-              CompactionTriggerSettings::Kind::FixedTokens);
-        CHECK(config.memory.context_compaction_trigger.tokens == 100000);
-    }
-    SECTION("legacy zero keeps its old meaning of never") {
-        const auto config = ParseSettingsConfig(
-            {{"memory", {{"context_compaction_trigger_tokens", 0}}}});
-        CHECK(config.memory.context_compaction_trigger.kind ==
-              CompactionTriggerSettings::Kind::Never);
-    }
-    SECTION("new object wins over the legacy key") {
-        const auto config =
-            ParseSettingsConfig({{"memory", {{"context_compaction_trigger_tokens", 100000},
-                                               {"context_compaction_trigger", {{"percent", 80}}}}}});
-        CHECK(config.memory.context_compaction_trigger.kind ==
-              CompactionTriggerSettings::Kind::PercentOfWindow);
-        CHECK(config.memory.context_compaction_trigger.percent == 80);
-    }
-    SECTION("negative legacy value is fatal, not a silent never") {
-        // A negative value used to fall out as Kind::Never -- the one
-        // misconfiguration whose symptom is a context that quietly grows
-        // until the backend starts rejecting requests. It must fail loudly
-        // like the new-object path does.
-        CHECK_THROWS_AS(ParseSettingsConfig(
-                            {{"memory", {{"context_compaction_trigger_tokens", -1}}}}),
-                        std::runtime_error);
-    }
-    SECTION("wrong-typed legacy value is fatal") {
-        CHECK_THROWS_AS(ParseSettingsConfig(
-                            {{"memory", {{"context_compaction_trigger_tokens", "big"}}}}),
-                        std::runtime_error);
-    }
+    const auto config =
+        ParseSettingsConfig({{"memory", {{"context_compaction_trigger_tokens", 100000}}}});
+    CHECK(config.memory.context_compaction_trigger.kind ==
+          CompactionTriggerSettings::Kind::Never);
+}
+
+TEST_CASE("ParseSettingsConfig: negative compaction_keep_recent_tokens is fatal",
+          "[settings_config]") {
+    CHECK_THROWS_AS(
+        ParseSettingsConfig({{"memory", {{"compaction_keep_recent_tokens", -1}}}}),
+        std::runtime_error);
 }
 
 TEST_CASE("ParseSettingsConfig: tools.raw carries the whole slice verbatim, including keys "
@@ -186,15 +160,6 @@ TEST_CASE("ParseSettingsConfig: tools.raw defaults to an empty object with no \"
           "[settings_config]") {
     auto config = ParseSettingsConfig(nlohmann::json::object());
     CHECK(config.tools.raw == nlohmann::json::object());
-}
-
-TEST_CASE("ParseSettingsConfig: tools.mcp rides verbatim for the mcp plugin",
-          "[settings_config]") {
-    // The limits belong to the mcp plugin now (plugins/server/mcp/
-    // mcp_settings.hpp); core only carries the object through tools.raw.
-    nlohmann::json doc = {{"tools", {{"mcp", {{"max_list_pages", 0}}}}}};
-    auto config = ParseSettingsConfig(doc);
-    CHECK(config.tools.raw["mcp"]["max_list_pages"] == 0);
 }
 
 TEST_CASE("ParseSettingsConfig: max_parallel_tool_calls defaults to 4, must be positive",

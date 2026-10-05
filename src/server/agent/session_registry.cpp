@@ -101,7 +101,7 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
     // override-still-wins case; passing it here as well is what rescues the
     // preset-does-NOT-resolve case, which ResolveModel runs too late to fix.
     AgentPreset preset =
-        presets_.Resolve(params.agent_preset, params.project_root, std::nullopt,
+        presets_.Resolve(params.agent_preset, params.project_root, nullptr,
                          params.model_override);
     return CreateResolved(std::move(params), std::move(preset));
 }
@@ -314,7 +314,7 @@ void SessionRegistry::AnnounceIgnoredProjectContent(Session& session) const {
     if (trust == nullptr || trust->mode() != config::ProjectLocalMode::kTrusted) return;
     const std::filesystem::path& root = session.info().project_root;
     if (trust->Allows(root)) return;
-    const config::ProjectLocalInventory found = config::InspectProjectLocal(root);
+    const config::ProjectLocalInventory found = trust->Inspect(root);
     if (found.empty()) return;
     session.EmitOrWarn(
         SessionEvent{SessionError{"project-local " + found.Describe() +

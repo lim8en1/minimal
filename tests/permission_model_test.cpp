@@ -65,6 +65,18 @@ public:
         return {mode, "fake " + std::string(tools::mode_name(mode))};
     }
 
+    // Non-tool subjects of kind "thing" resolve to the layer's base mode;
+    // any other kind has no rule here.
+    std::optional<tools::PermissionAnswer> ResolveSubject(
+        const tools::SubjectQuery& query) const override {
+        if (throws) throw std::runtime_error("boom");
+        if (query.subject.kind != "thing") return std::nullopt;
+        const FakeLayer layer =
+            query.layer != nullptr ? *static_cast<const FakeLayer*>(query.layer) : FakeLayer{};
+        return tools::PermissionAnswer{layer.base,
+                                       "fake thing " + std::string(tools::mode_name(layer.base))};
+    }
+
     bool throws = false;
 
 private:
@@ -391,4 +403,152 @@ TEST_CASE("permissions.json: plugins carries model slices verbatim", "[permissio
     CHECK(config.plugin_slices["tools-web"]["hosts"]["*.internal"] == "deny");
     CHECK(config.unknown_keys.empty());
     CHECK_THROWS(config::ParsePermissionsConfig({{"plugins", "tools-web"}}));
+}
+
+// --- non-tool subjects (ToolExecutor::CheckSubject) -----------------------------
+
+namespace {
+
+tools::ToolExecutor::SubjectCheck Thing(std::string key = "x",
+                                        PermissionMode fallback = PermissionMode::Ask) {
+    return {"fake", tools::PermissionSubject{"thing", std::move(key)}, "thing x", fallback};
+}
+
+}  // namespace
+
+TEST_CASE("CheckSubject: the owner's model decides, no rule leaves the caller's default",
+          "[permission_model][subject]") {
+    Fixture f;
+    auto model = std::make_shared<const FakeModel>(std::set<std::string>{}, kBase);
+    UnreachablePermissionChecker checker;
+    auto ctx = f.Context();
+    tools::ToolExecutor allow(f.registry, checker, AskAll(),
+                              tools::PermissionModels{Bound(model, {PermissionMode::AlwaysAllow})},
+                              PermissionRunMode::Normal);
+    CHECK(allow.CheckSubject(Thing(), ctx).allowed);
+    tools::ToolExecutor deny(f.registry, checker, AskAll(),
+                             tools::PermissionModels{Bound(model, {PermissionMode::AlwaysDeny})},
+                             PermissionRunMode::Normal);
+    CHECK_FALSE(deny.CheckSubject(Thing(), ctx).allowed);
+    // Another kind: no rule, so the default decides (allow here, no prompt).
+    auto other = Thing();
+    other.subject.kind = "other";
+    other.default_mode = PermissionMode::AlwaysAllow;
+    CHECK(deny.CheckSubject(other, ctx).allowed);
+    // Only the OWNER's model is consulted: a subject claiming another owner
+    // gets the default, not "fake"'s rule.
+    auto foreign = Thing("x", PermissionMode::AlwaysDeny);
+    foreign.owner = "someone-else";
+    CHECK_FALSE(allow.CheckSubject(foreign, ctx).allowed);
+    CHECK_FALSE(checker.called);
+}
+
+TEST_CASE("CheckSubject: kill switch, parent ceiling and a throwing model all deny",
+          "[permission_model][subject]") {
+    Fixture f;
+    auto model = std::make_shared<FakeModel>(std::set<std::string>{}, kBase);
+    UnreachablePermissionChecker checker;
+    auto ctx = f.Context();
+    const tools::PermissionModels allows{Bound(model, {PermissionMode::AlwaysAllow})};
+
+    tools::PermissionPolicy killed = AskAll();
+    killed.per_tool_overrides["x"] = PermissionMode::AlwaysDeny;
+    tools::ToolExecutor kill(f.registry, checker, killed, allows, PermissionRunMode::Normal);
+    CHECK_FALSE(kill.CheckSubject(Thing(), ctx).allowed);
+
+    tools::ToolExecutor child(f.registry, checker, AskAll(), allows, PermissionRunMode::Normal,
+                              AskAll(),
+                              tools::PermissionModels{Bound(model, {PermissionMode::AlwaysDeny})});
+    const auto ceiling = child.CheckSubject(Thing(), ctx);
+    CHECK_FALSE(ceiling.allowed);
+    CHECK(ceiling.why == "parent session: fake thing deny");
+
+    model->throws = true;
+    tools::ToolExecutor broken(f.registry, checker, AskAll(), allows, PermissionRunMode::Bypass);
+    const auto failed = broken.CheckSubject(Thing(), ctx);
+    CHECK_FALSE(failed.allowed);  // Bypass only washes Ask
+    CHECK(failed.why == "permission model 'fake' failed: boom");
+    CHECK_FALSE(checker.called);
+}
+
+TEST_CASE("CheckSubject: an Ask prompts once; the grant answers later checks",
+          "[permission_model][subject]") {
+    Fixture f;
+    auto model = std::make_shared<const FakeModel>(std::set<std::string>{}, kBase);
+    GrantingPermissionChecker checker;
+    auto ctx = f.Context();
+    tools::ToolExecutor executor(f.registry, checker, AskAll(),
+                                 tools::PermissionModels{Bound(model, {PermissionMode::Ask})},
+                                 PermissionRunMode::Normal);
+    CHECK(executor.CheckSubject(Thing(), ctx).allowed);
+    REQUIRE(checker.seen.size() == 1);
+    CHECK(checker.seen[0].tool_name == "fake:thing");
+    REQUIRE(checker.seen[0].disclosure.grants.size() == 1);
+    CHECK(checker.seen[0].disclosure.grants[0].key == "fake:thing:x");
+    CHECK(executor.CheckSubject(Thing(), ctx).allowed);
+    CHECK(checker.seen.size() == 1);  // answered by the grant, no second prompt
+
+    AlwaysDenyPermissionChecker denier;
+    tools::ToolExecutor denied(f.registry, denier, AskAll(),
+                               tools::PermissionModels{Bound(model, {PermissionMode::Ask})},
+                               PermissionRunMode::Normal);
+    CHECK_FALSE(denied.CheckSubject(Thing(), ctx).allowed);
+    tools::ToolExecutor allow_only(f.registry, denier, AskAll(),
+                                   tools::PermissionModels{Bound(model, {PermissionMode::Ask})},
+                                   PermissionRunMode::AllowOnly);
+    CHECK_FALSE(allow_only.CheckSubject(Thing(), ctx).allowed);
+    CHECK(denier.seen.size() == 1);  // allow-only denied without asking
+}
+
+TEST_CASE("the mcp model gates channel signals by key, channel, then wildcard",
+          "[permission_model][subject][mcp]") {
+    const auto model = mcp::MakeMcpPermissionModel();
+    const auto layer = model->BuildLayer(
+        {{"signals", {{"ci", "ask"}, {"*", "deny"}}}},
+        {{"signals", {{"ci/build.completed", "allow"}}}}, /*preset_trusted=*/true);
+    const auto mode = [&](const std::string& key) -> std::optional<PermissionMode> {
+        const tools::PermissionSubject subject{"signal", key};
+        const auto answer = model->ResolveSubject(tools::SubjectQuery{subject, nullptr, layer.get()});
+        return answer ? std::optional<PermissionMode>(answer->mode) : std::nullopt;
+    };
+    CHECK(mode("ci/build.completed") == PermissionMode::AlwaysAllow);
+    CHECK(mode("ci/build.failed") == PermissionMode::Ask);
+    CHECK(mode("pager/alert") == PermissionMode::AlwaysDeny);
+
+    // No signal rules at all: no answer (delivered, the subscription consented).
+    const auto bare = model->BuildLayer(nullptr, nullptr, true);
+    const tools::PermissionSubject subject{"signal", "ci/x"};
+    CHECK_FALSE(model->ResolveSubject(tools::SubjectQuery{subject, nullptr, bare.get()}).has_value());
+
+    // A project preset may only narrow the operator's rule for a key.
+    const auto narrowed = model->BuildLayer({{"signals", {{"ci", "deny"}}}},
+                                            {{"signals", {{"ci", "allow"}}}},
+                                            /*preset_trusted=*/false);
+    const tools::PermissionSubject ci{"signal", "ci/x"};
+    CHECK(model->ResolveSubject(tools::SubjectQuery{ci, nullptr, narrowed.get()})->mode ==
+          PermissionMode::AlwaysDeny);
+}
+
+TEST_CASE("the mcp model's transport default splits local and remote servers",
+          "[permission_model][mcp]") {
+    Fixture f;
+    f.AddTool("mcp__gh__get", ToolCategory::ReadOnly);
+    f.AddTool("mcp__fs__read", ToolCategory::ReadOnly);
+    const auto model = mcp::MakeMcpPermissionModel([](std::string_view server) {
+        return std::optional<std::string>(server == "fs" ? "local" : "remote");
+    });
+    const auto layer = model->BuildLayer(
+        {{"default", "ask"}, {"transport", {{"local", "allow"}, {"remote", "deny"}}}},
+        {{"servers", {{"gh", "ask"}}}}, /*preset_trusted=*/true);
+    auto ctx = f.Context();
+    const auto resolve = [&](const std::string& key) {
+        return model
+            ->Resolve(PermissionStage::kBase,
+                      tools::PermissionQuery{*f.registry.Find(key), key, nlohmann::json::object(),
+                                             ctx, nullptr, layer.get()})
+            .mode;
+    };
+    CHECK(resolve("mcp__fs__read") == PermissionMode::AlwaysAllow);  // local
+    CHECK(resolve("mcp__gh__get") == PermissionMode::Ask);           // the server rule beats remote
+    CHECK_THROWS(model->BuildLayer({{"transport", {{"lan", "allow"}}}}, nullptr, true));
 }

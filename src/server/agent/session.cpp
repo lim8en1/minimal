@@ -325,6 +325,42 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
     return true;
 }
 
+tools::ToolExecutor::SubjectVerdict Session::CheckPermission(
+    tools::ToolExecutor::SubjectCheck check) {
+    if (g_in_tool_execution) {
+        return {false, "a permission check cannot run from inside a tool call"};
+    }
+    if (worker_.get_id() == std::this_thread::get_id()) return RunGateCheck(check);
+    auto job = std::make_shared<GateJob>();
+    job->check = std::move(check);
+    auto answer = job->answer.get_future();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (terminated_.load(std::memory_order_acquire)) return {false, "session terminated"};
+        if (!work_.TryPush(QueuedGateCheck{job})) return {false, "session backlog is full"};
+    }
+    turn_cv_.notify_one();
+    try {
+        return answer.get();
+    } catch (const std::future_error&) {
+        return {false, "the session ended before the check ran"};
+    }
+}
+
+tools::ToolExecutor::SubjectVerdict Session::RunGateCheck(
+    const tools::ToolExecutor::SubjectCheck& check) {
+    tools::ToolContext ctx{logger_};
+    ctx.session_id = params_.session_id;
+    ctx.project_root = params_.project_root;
+    try {
+        return executor_.CheckSubject(check, ctx);
+    } catch (const std::exception& e) {
+        return {false, std::string("permission check failed: ") + e.what()};
+    } catch (...) {
+        return {false, "permission check failed"};
+    }
+}
+
 bool Session::SubmitCommand(QueuedCommand command) {
     // Every refusal branch below must reject through RejectCommand, not a
     // bare `return false`: a client waiting on this request_id's
@@ -627,7 +663,7 @@ void Session::EmitSessionRewound(std::int64_t truncated_to_seq, std::int64_t act
     EmitEvent(SessionEvent{SessionRewound{truncated_to_seq, active_last_seq}});
 }
 
-bool Session::QueueInjectedMessage(llm::Message message) {
+bool Session::QueueInjectedMessage(llm::Message message, std::optional<InjectionGate> gate) {
     if (terminated_.load(std::memory_order_acquire)) return false;
     // The wake decision is the worker's, not ours: its wait predicate sees the
     // pending message (WorkerShouldProceed) and runs a seedless turn when
@@ -637,7 +673,7 @@ bool Session::QueueInjectedMessage(llm::Message message) {
     // critical section closes the lost-wakeup window: a worker either saw
     // (work empty, injections pending) before parking, or was not yet parked
     // and cannot miss the notify because it must acquire mutex_ to park.
-    const bool staged = channels_->injections.Push(std::move(message));
+    const bool staged = channels_->injections.Push(std::move(message), std::move(gate));
     if (staged) {
         WakeWorker();
     }
@@ -1038,6 +1074,8 @@ void Session::WorkerMain() {
                     RunOneTurn(std::nullopt);
                 } else if (auto* rewind = std::get_if<QueuedRewind>(&item)) {
                     RunOneRewind(*rewind);
+                } else if (auto* gate = std::get_if<QueuedGateCheck>(&item)) {
+                    gate->job->answer.set_value(RunGateCheck(gate->job->check));
                 } else {
                     RunOneCommand(std::get<QueuedCommand>(item));
                 }
@@ -1049,7 +1087,8 @@ void Session::WorkerMain() {
             }
         }
         // else: dropped silently -- the session is finished and collected;
-        // there is no client stream left worth answering on.
+        // there is no client stream left worth answering on. (A dropped gate
+        // check's promise breaks with the item: its submitter reads a denial.)
 
         {
             std::lock_guard<std::mutex> lock(mutex_);

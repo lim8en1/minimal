@@ -12,7 +12,7 @@ namespace minimal::plugins {
 // Services are their own namespace: a service name may repeat a tool or
 // command name without colliding, and services are NOT user-aliasable (a
 // service name is addressed by code through ServiceRegistry::Find, never by
-// the model or the user, so command_aliases has nothing to rename).
+// the model or the user, so an alias has nothing to rename).
 // Hook points follow the same shape (addressed by hooks.json `on` and by code,
 // never aliased), and live in their own namespace for the same reason.
 //

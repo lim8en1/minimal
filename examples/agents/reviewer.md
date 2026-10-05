@@ -4,7 +4,8 @@ description: Read-only subagent that reviews a diff or design and reports findin
 mode: subagent
 steps: 15
 allowed_tools: [read, grep, glob, skill]
-allowed_skills: ["*"]
+plugin_permissions:
+  skills: ["*"]
 permission:
   edit: deny
   write: deny

@@ -40,6 +40,11 @@ public:
     // subagent; may block for the source's own connect budget. Must not
     // throw (a throw is treated as an unavailable member).
     virtual std::optional<std::string> Activate(const std::string& member, std::string& error) = 0;
+
+    // What the operator can do about a member that did not come up in time
+    // ("reconnect it with /mcp"), appended to the timeout message. Empty: no
+    // hint.
+    virtual std::string ReconnectHint() const { return {}; }
 };
 
 // Keyed by source name -- the key a preset's tool_sources map uses. One

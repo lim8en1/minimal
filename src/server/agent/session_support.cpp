@@ -49,7 +49,7 @@ std::optional<SessionLlm> SessionSupport::LlmForSession(const std::string& sessi
                      session_id, row->agent_preset);
         return SessionLlm{std::move(provider), preset.provider.model_name};
     } catch (const std::exception& error) {
-        logger_.warn("session {}: titler could not re-resolve preset '{}': {}", session_id,
+        logger_.warn("session {}: session-support rename could not re-resolve preset '{}': {}", session_id,
                      row->agent_preset, error.what());
         return std::nullopt;
     }
@@ -60,7 +60,7 @@ std::optional<SessionLlm> SessionSupport::ResolveModelRef(const std::string& pro
     std::string error;
     auto resolved = sessions_->resolver().ResolveLlm(provider_model, error);
     if (!resolved) {
-        logger_.warn("session titler model override {}", error);
+        logger_.warn("session-support model override {}", error);
         return std::nullopt;
     }
     return SessionLlm{std::move(resolved->provider), resolved->model->provider.model_name};
@@ -96,7 +96,7 @@ bool SessionSupport::RenameSession(const std::string& session_id, const std::str
     // concurrent user /rename landing in between, letting this titler seam
     // clobber a rename that arrived after the check but before the write.
     if (!db_->UpdateSessionNameUnlessExplicit(session_id, name)) {
-        logger_.info("session {}: not renamed (explicitly named, or unknown session); titler skipped",
+        logger_.info("session {}: not renamed (explicitly named, or unknown session)",
                      session_id);
         return false;
     }

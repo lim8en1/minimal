@@ -114,15 +114,6 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
             }
             config.plugin_slices = slices;
         }
-        // Legacy spelling from before the MCP client became a plugin: a key
-        // table, not MCP logic -- the value lands in the mcp plugin's slice
-        // verbatim, and the plugin's model parses it. An explicit
-        // plugins.mcp.default wins.
-        if (doc.contains("mcp_default_mode")) {
-            auto& slice = config.plugin_slices["mcp"];
-            if (!slice.is_object()) slice = nlohmann::json::object();
-            if (!slice.contains("default")) slice["default"] = doc.at("mcp_default_mode");
-        }
         if (doc.contains("advisor")) {
             config.advisor = doc.at("advisor").get<std::string>();
         }
@@ -140,7 +131,7 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
         CollectUnknownKeys(doc, "",
                            {"default_run_mode", "fallback", "per_tool_overrides",
                             "pattern_overrides", "external_directory_patterns",
-                            "pattern_precedence", "mcp_default_mode", "plugins", "advisor",
+                            "pattern_precedence", "plugins", "advisor",
                             "advisor_inherit", "advisor_timeout_ms"},
                            config.unknown_keys);
         if (doc.contains("fallback")) {

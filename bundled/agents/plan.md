@@ -2,7 +2,6 @@
 name: plan
 description: Investigates and proposes, without changing anything.
 allowed_tools: ["ask_user", "read", "grep", "glob", "bash", "write", "edit", "checklist"]
-allowed_skills: []
 tool_sources: {}
 permission_mode:
   read_only: allow

@@ -67,35 +67,7 @@ std::int64_t RequirePositiveInt(const nlohmann::json& value, const std::string& 
 
 CompactionTriggerSettings ParseCompactionTrigger(const nlohmann::json& memory) {
     CompactionTriggerSettings result;
-    if (!memory.contains("context_compaction_trigger")) {
-        // Legacy flat key, from before the trigger became a strategy choice.
-        // Still honoured so an existing settings.json does not silently stop
-        // compacting; 0 keeps its old meaning of "never". The new object wins
-        // when both are present.
-        if (memory.contains("context_compaction_trigger_tokens")) {
-            // Explicit reads, not value()-with-default: a wrong-typed or
-            // negative legacy value must fail loudly like the new-object path
-            // does, not silently fall out as Kind::Never ("never compact")
-            // -- the one misconfiguration whose symptom is a context that
-            // quietly grows until the backend starts rejecting requests.
-            const auto& legacy_value = memory.at("context_compaction_trigger_tokens");
-            if (!legacy_value.is_number_integer()) {
-                throw std::runtime_error(
-                    "settings.json: memory.context_compaction_trigger_tokens must be an integer");
-            }
-            const std::int64_t legacy = legacy_value.get<std::int64_t>();
-            if (legacy < 0) {
-                throw std::runtime_error(
-                    "settings.json: memory.context_compaction_trigger_tokens must not be "
-                    "negative");
-            }
-            if (legacy > 0) {
-                result.kind = CompactionTriggerSettings::Kind::FixedTokens;
-                result.tokens = legacy;
-            }
-        }
-        return result;
-    }
+    if (!memory.contains("context_compaction_trigger")) return result;
 
     const auto& trigger = memory.at("context_compaction_trigger");
     if (!trigger.is_object() || trigger.size() != 1) {
@@ -132,6 +104,10 @@ MemorySettings ParseMemory(const nlohmann::json& doc) {
     result.context_compaction_trigger = ParseCompactionTrigger(memory);
     result.compaction_keep_recent_tokens =
         GetField(memory, "memory", "compaction_keep_recent_tokens", result.compaction_keep_recent_tokens);
+    if (result.compaction_keep_recent_tokens < 0) {
+        throw std::runtime_error(
+            "settings.json: memory.compaction_keep_recent_tokens must not be negative (0 = unset)");
+    }
     if (memory.contains("compaction_replace_percent")) {
         const auto& value = memory.at("compaction_replace_percent");
         const std::int64_t percent = value.is_number_integer() ? value.get<std::int64_t>() : 0;

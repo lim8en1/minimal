@@ -172,6 +172,8 @@ SignalDelivery SignalRouter::DeliverExternal(const std::string& channel, const s
         return Delivery::kInvalid;
     }
 
+    // The owner's per-session gate, applied by each receiving worker.
+    std::optional<InjectionGate> gate;
     // Restricted allowlist check: the declared signals are what the operator
     // reviewed. A name outside the list is exactly the config-drift case this
     // mode exists to catch, so it is loud.
@@ -184,6 +186,12 @@ SignalDelivery SignalRouter::DeliverExternal(const std::string& channel, const s
             return Delivery::kInvalid;
         }
         const auto& declared = it->second.declaration;
+        if (!declared.owner.empty()) {
+            gate = InjectionGate{declared.owner,
+                                 tools::PermissionSubject{"signal", channel + "/" + signal,
+                                                          {{"channel", channel}, {"signal", signal}}},
+                                 "signal " + channel + "/" + signal};
+        }
         if (!declared.extended &&
             std::find(declared.signals.begin(), declared.signals.end(), signal) ==
                 declared.signals.end()) {
@@ -203,7 +211,7 @@ SignalDelivery SignalRouter::DeliverExternal(const std::string& channel, const s
     // session whose InjectionQueue refused every delivery attempt (it is
     // terminating, or already staged kMaxPending messages) -- so they get
     // distinct messages rather than one that fits neither.
-    const Delivery delivery = Deliver(channel, signal, wrapped);
+    const Delivery delivery = Deliver(channel, signal, wrapped, gate);
     switch (delivery) {
         case Delivery::kNoSubscriber:
             minimal::common::DefaultLogger().warn(
@@ -271,7 +279,8 @@ SignalDelivery SignalRouter::DeliverInternal(const std::string& from_session,
 
 SignalDelivery SignalRouter::Deliver(const std::string& channel,
                                      const std::string& filter_signal,
-                                     const std::string& wrapped_content) {
+                                     const std::string& wrapped_content,
+                                     const std::optional<InjectionGate>& gate) {
     // Collect under the lock, inject outside it: QueueInjectedMessage takes
     // the session's own mutex and notifies its worker -- held under mu_ that
     // would invert against nothing today but would be one config edit away
@@ -310,7 +319,7 @@ SignalDelivery SignalRouter::Deliver(const std::string& channel,
         // subagent_manager.cpp established), and the seedless wake path treats
         // the injected messages as that turn's user content.
         llm::Message message{llm::Role::User, {llm::TextBlock{wrapped_content}}};
-        if (session->QueueInjectedMessage(std::move(message))) any = true;
+        if (session->QueueInjectedMessage(std::move(message), gate)) any = true;
     }
     return any ? Delivery::kDelivered : Delivery::kDropped;
 }

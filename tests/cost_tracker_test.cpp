@@ -704,7 +704,7 @@ TEST_CASE("the /cost table sizes columns to content and never fakes a price",
     CHECK(unknown_text.find('+') == std::string::npos);
     CHECK(unknown_text.find(
               "(1 turn(s) unpriced -- prices refresh at server start; refresh now with "
-              "minimal-server --refresh-cost-rates)") != std::string::npos);
+              "minimal-server --plugin-call cost-tracker refresh_rates)") != std::string::npos);
 
     // Partially priced: the priced portion is shown as a floor, ">= $X".
     SessionTotals partial = unknown;
@@ -1003,7 +1003,7 @@ TEST_CASE("a failed rates fetch keeps the old table", "[cost_tracker]") {
     harness.store.AppendTurn("s1", "", Turn("m1", 1000000, 0));
 
     // Unroutable ports for BOTH sources: every fetch entry point (the startup
-    // auto-refresh, --refresh-cost-rates, the .rpc method) must fail cleanly
+    // auto-refresh, --plugin-call cost-tracker refresh_rates, the .rpc method) must fail cleanly
     // and the price must survive. (No live network in tests; this hits
     // nothing.) Drives FetchAndUpdateRates directly -- it is the shared path
     // all three run on.

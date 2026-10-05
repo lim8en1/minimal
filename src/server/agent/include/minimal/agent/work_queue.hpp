@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <future>
+#include <memory>
 #include <optional>
 #include <string>
 #include <variant>
@@ -48,6 +50,19 @@ struct QueuedRewind {
 // the pending continuation at pop instead.
 struct QueuedResume {};
 
+// A plugin's permission check for a non-tool subject, marshalled onto the
+// session worker -- the only thread that may touch the executor's grant state
+// (Session::CheckPermission). The submitter blocks on `answer`; an item that
+// never runs (session ended) breaks the promise, which the submitter reads
+// as a denial.
+struct GateJob {
+    tools::ToolExecutor::SubjectCheck check;
+    std::promise<tools::ToolExecutor::SubjectVerdict> answer;
+};
+struct QueuedGateCheck {
+    std::shared_ptr<GateJob> job;
+};
+
 // A user turn carrying PER-TURN model/agent overrides. Applied for this turn
 // only, on the worker at turn pop -- the sticky session preset, the session's
 // model_override_, and every metadata event are untouched. The model rides as
@@ -64,7 +79,8 @@ struct QueuedTurn {
     std::uint64_t turn_id = 0;
 };
 
-using WorkItem = std::variant<QueuedTurn, QueuedCommand, QueuedRewind, QueuedResume>;
+using WorkItem =
+    std::variant<QueuedTurn, QueuedCommand, QueuedRewind, QueuedResume, QueuedGateCheck>;
 
 // The session worker's queue: ONE ordered, bounded queue for turns, commands
 // and rewinds (two queues would have no order between them, so `/model x` typed

@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -13,18 +14,6 @@
 #include "minimal/tools/permission.hpp"
 
 namespace minimal::agent {
-
-// Per-skill access (opencode-compat). The ORDERING is the subagent clamp
-// lattice: Preload is the WIDEST mode (the body ships in the system prompt,
-// always on) and Deny the narrowest, so clamping a child takes the elementwise
-// MAX -- a child can never widen into its parent's preloads, and a parent's
-// deny beats every child request.
-enum class SkillMode {
-    Preload = 0,  // body appended to the system prompt; not callable via the tool
-    Allow = 1,    // listed; the `skill` tool loads it outright
-    Ask = 2,      // listed; the `skill` tool prompts (permission key `skill:<name>`)
-    Deny = 3,     // absent from the listing; the `skill` tool refuses
-};
 
 // How a preset may be surfaced (opencode-compat `mode`). VISIBILITY-ONLY by
 // design: `spawn_subagent` accepts any registered preset, and mode never gates
@@ -58,22 +47,15 @@ struct AgentPresetFrontmatter {
     // `local/qwen4`. Empty means "use settings.default_model".
     std::string model;
     std::vector<std::string> allowed_tools;         // default empty (fail closed; "*" must be explicit)
-    // List form = every entry Allow (the native shape). Map form
-    // (name: allow|ask|deny|preload) is the opencode-compat shape. "*" is legal
-    // in both and means "every loaded skill", with the map form additionally
-    // able to demote individual names below it ({"*": allow, "internal-*"-style
-    // exact names: ask}).
-    std::map<std::string, SkillMode> allowed_skills;
     // tool_sources: {<source>: [members]} -- the dynamic tool-source members
-    // (tools/tool_source.hpp) this preset allows. The legacy
-    // `allowed_mcp_servers: [...]` key lands here as tool_sources["mcp"].
+    // (tools/tool_source.hpp) this preset allows.
     std::map<std::string, std::vector<std::string>> tool_sources;
     // Allowlist of agent preset keys THIS preset may spawn via spawn_subagent
     // (agents/<name>.md file stems -- the names a spawn request's agent_preset
     // accepts, not the frontmatter display `name:`). Absent = every spawnable
     // preset; an explicit list may contain "*" (= all); an explicit empty list
     // means no spawns at all -- the tool is withheld downstream, the same rule
-    // as allowed_skills resolving empty. Enforced by SubagentManager::Spawn and
+    // as a definition builder withholding a tool. Enforced by SubagentManager::Spawn and
     // reflected in the spawn tool's per-preset description (the registry's
     // definition builder filters its listing with exactly this list).
     std::optional<std::vector<std::string>> allowed_subagents;
@@ -124,22 +106,26 @@ struct AgentPresetFrontmatter {
 // in permission_mode.overrides -- see permissions_config.hpp for why that key
 // is reserved).
 //
-// `known_tool_permission_keys`: the live ToolRegistry's permission-key
-// vocabulary (AgentPresetRegistry::ToolPermissionKeys::all) -- what
-// `permission:` block keys not in the fixed opencode-shape category set
-// (read/glob/grep/list/edit/write/bash/webfetch/websearch/external_directory)
-// are checked against before being accepted as a per-tool pattern-map alias.
-// Structural, not a hardcoded literal list, so a renamed/aliased/third-party
-// tool name works here exactly like the bundled ones. Required, not
-// defaulted: an empty list is a real, distinguishable answer ("no tools
-// known yet"), not "caller forgot".
-AgentPresetFrontmatter ParseAgentPresetFrontmatter(
-    const config::ParsedFrontmatter& parsed,
-    const std::vector<std::string>& known_tool_permission_keys);
+// The live tool vocabulary a preset's `permission:` block resolves against,
+// taken from ToolRegistry once tools are registered (never a literal list):
+//   permission_keys  -- every live tool's permission key;
+//   config_aliases   -- Tool::config_aliases(): foreign spelling -> key;
+//   no_pattern_rules -- keys whose tool takes no pattern rules.
+// Implicit from a key list for callers (tests) that only need the keys.
+struct ToolVocabulary {
+    ToolVocabulary() = default;
+    ToolVocabulary(std::vector<std::string> keys) : permission_keys(std::move(keys)) {}  // NOLINT
+    std::vector<std::string> permission_keys;
+    std::map<std::string, std::string> config_aliases;
+    std::vector<std::string> no_pattern_rules;
+};
+
+AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatter& parsed,
+                                                   const ToolVocabulary& tools);
 
 // Thin: reads the file, splits frontmatter/body, then parses. Throws if the
 // file is missing.
-AgentPresetFrontmatter LoadAgentPresetFrontmatter(
-    const std::filesystem::path& path, const std::vector<std::string>& known_tool_permission_keys);
+AgentPresetFrontmatter LoadAgentPresetFrontmatter(const std::filesystem::path& path,
+                                                  const ToolVocabulary& tools);
 
 }  // namespace minimal::agent

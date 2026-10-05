@@ -9,7 +9,7 @@
 //   2. the fetched OpenRouter snapshot (its own /api/v1/models list), cached
 //      in this plugin's storage by the startup auto-refresh (a server start
 //      fetches when the cached snapshot is older than rates_refresh_days;
-//      --refresh-cost-rates and the .rpc refresh_rates method fetch on
+//      --plugin-call cost-tracker refresh_rates and the .rpc refresh_rates method fetch on
 //      demand);
 //   3. the fetched LiteLLM snapshot, the same paths, the same rule;
 //   4. the seeded bundled snapshot (cost-rates.json in the config dir).
@@ -184,7 +184,7 @@ public:
 
     // Re-reads both fetched snapshots from storage and swaps them in. Called
     // at registration and after every fetch (the startup auto-refresh, the
-    // --refresh-cost-rates one-shot, the .rpc refresh_rates method). A
+    // --plugin-call cost-tracker refresh_rates one-shot, the .rpc refresh_rates method). A
     // missing or corrupt blob clears only THAT tier -- one corrupt snapshot
     // must not lose the other.
     void RefreshFetched();

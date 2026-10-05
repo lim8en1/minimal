@@ -30,7 +30,6 @@ namespace minimal::commands {
 // name, verbatim, for commands that want it unparsed.
 struct CommandArgs {
     std::vector<std::string> positional;
-    std::unordered_map<std::string, std::string> flags;
     std::string raw;
 };
 

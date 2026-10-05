@@ -99,7 +99,6 @@ PluginConfigFile ParsePluginConfigFile(const std::string& json_text,
             if (value.is_string()) config.aliases.emplace(key, value.get<std::string>());
         }
     }
-    if (format.check_keys) format.check_keys(parsed);
 
     // Anything this parser does not model is kept verbatim, so serializing back
     // does not silently delete it. See PluginConfigFile::preserved.
@@ -197,16 +196,18 @@ std::vector<PluginFileCandidate> DiscoverPluginFiles(const std::filesystem::path
 
         if (existing == config.plugins.end()) {
             // Provenance decides the default, mechanically: shipped-with-this-build
-            // is trusted, dropped-in-later is opt-in -- except a bundled plugin the
-            // host lists as defaulting to disabled (it spends the user's tokens or
-            // data on its own initiative, so enabling it is a deliberate act). Once
-            // an entry exists, the user's `enabled` governs and this default is
-            // never consulted again.
+            // is trusted, dropped-in-later is opt-in -- except a bundled plugin
+            // whose build marked it disabled-by-default (kDisabledByDefaultSuffix).
+            // Once an entry exists, the user's `enabled` governs and this default
+            // is never consulted again.
+            std::error_code marker_ec;
+            const auto marker = item.path.parent_path() /
+                                (item.path.stem().string() + kDisabledByDefaultSuffix);
             PluginConfigFile::Entry entry;
             entry.file = item.file;
             entry.provenance = item.provenance;
             entry.enabled = item.provenance == PluginProvenance::Bundled &&
-                            !(format.defaults_disabled && format.defaults_disabled(item.file));
+                            !std::filesystem::exists(marker, marker_ec);
             config.plugins.push_back(entry);
             existing = std::prev(config.plugins.end());
         }

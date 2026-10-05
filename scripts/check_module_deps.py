@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Fails when a src/server module includes a header from a module it may not depend on.
 
+With --plugins, checks plugins/ against the SDKs instead: every
+`#include "minimal/..."` in a plugin must be the plugin's own header, a header
+listed in scripts/sdk_headers.txt (server) or scripts/client_sdk_headers.txt
+(client). Anything else is a missing extension point or code on the wrong side
+of the boundary.
+
 The server core is one shared library, so layering needs a check of its own. This
 resolves every `#include "minimal/..."` in src/server/<module>/ to the module
 whose include/ tree provides it and checks the edge against the module's DEPS.
@@ -86,5 +92,54 @@ def main(root):
     return 1 if failed else 0
 
 
+def read_list(path):
+    """Non-comment, non-blank lines of a manifest file."""
+    if not os.path.exists(path):
+        return []
+    lines = []
+    for line in open(path):
+        line = line.split("#", 1)[0].strip()
+        if line:
+            lines.append(line)
+    return lines
+
+
+def check_plugins(root):
+    """Server plugins against sdk_headers.txt, client plugins against
+    client_sdk_headers.txt."""
+    failed = False
+    for side, manifest in (("server", "sdk_headers.txt"), ("client", "client_sdk_headers.txt")):
+        sdk = set(read_list(os.path.join(root, "scripts", manifest)))
+        failed |= check_plugin_tree(root, os.path.join(root, "plugins", side), sdk)
+    return 1 if failed else 0
+
+
+def check_plugin_tree(root, plugins_root, sdk):
+    failed = False
+    for plugin in sorted(os.listdir(plugins_root)):
+        plugin_dir = os.path.join(plugins_root, plugin)
+        if not os.path.isdir(plugin_dir):
+            continue
+        own_include = os.path.join(plugin_dir, "include")
+        for dirpath, _, files in os.walk(plugin_dir):
+            for name in files:
+                if not name.endswith((".cpp", ".hpp", ".h")):
+                    continue
+                path = os.path.join(dirpath, name)
+                with open(path, errors="ignore") as handle:
+                    for line in handle:
+                        match = INCLUDE.search(line)
+                        if not match:
+                            continue
+                        header = match.group(1)
+                        if os.path.exists(os.path.join(own_include, header)) or header in sdk:
+                            continue
+                        failed = True
+                        print(f"not in the SDK: {os.path.relpath(path, root)}: {header}")
+    return failed
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else os.getcwd()))
+    args = [a for a in sys.argv[1:] if a != "--plugins"]
+    root = args[0] if args else os.getcwd()
+    sys.exit(check_plugins(root) if "--plugins" in sys.argv[1:] else main(root))

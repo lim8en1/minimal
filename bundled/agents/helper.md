@@ -2,7 +2,6 @@
 name: helper
 description: Answers questions, writes code, helps with research.
 allowed_tools: ["ask_user", "read", "grep", "glob", "bash", "write", "edit", "checklist"]
-allowed_skills: []
 tool_sources: {}
 permission_mode:
   read_only: allow

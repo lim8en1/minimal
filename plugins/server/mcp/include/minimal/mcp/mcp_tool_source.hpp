@@ -24,6 +24,8 @@ public:
 
     std::optional<std::string> Activate(const std::string& member, std::string& error) override;
 
+    std::string ReconnectHint() const override { return "reconnect it with /mcp to add them"; }
+
 private:
     McpClientManager& manager_;
     common::Logger& logger_;

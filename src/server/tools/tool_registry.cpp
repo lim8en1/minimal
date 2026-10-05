@@ -145,6 +145,30 @@ std::vector<std::string> ToolRegistry::DotenvProtectedPermissionKeys() const {
     return keys;
 }
 
+std::map<std::string, std::string> ToolRegistry::ConfigAliasPermissionKeys() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::map<std::string, std::string> out;
+    for (const auto& [name, tool] : tools_) {
+        if (group_owners_.count(name) || !tool) continue;
+        for (const auto& alias : tool->config_aliases()) {
+            out.emplace(alias, std::string(PermissionKeyForUnlocked(name)));
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> ToolRegistry::NoPatternRulePermissionKeys() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::vector<std::string> keys;
+    for (const auto& [name, tool] : tools_) {
+        if (group_owners_.count(name) || !tool || tool->accepts_pattern_rules()) continue;
+        keys.push_back(std::string(PermissionKeyForUnlocked(name)));
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    return keys;
+}
+
 void ToolRegistry::ApplyAliases(const std::map<std::string, std::string>& aliases) {
     // Startup-only: exclusive for the whole body. It manipulates tools_ and
     // shadowed_ directly and must not overlap a runtime MCP replacement.

@@ -44,8 +44,10 @@ struct ConfigBundle {
 
 // Loads every file under `config_dir`. Never throws for a file's content.
 // `variant_params` resolves a providers.json list-form variant recipe at
-// parse time (see VariantParametersFor).
+// parse time (see VariantParametersFor). `provider_extensions` (nullable):
+// plugin translators and credential sources for providers.json.
 ConfigBundle LoadConfigBundle(const std::filesystem::path& config_dir,
-                              const VariantParamsHook& variant_params);
+                              const VariantParamsHook& variant_params,
+                              const ProviderConfigExtensions* provider_extensions = nullptr);
 
 }  // namespace minimal::config

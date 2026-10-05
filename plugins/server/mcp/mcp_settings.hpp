@@ -13,11 +13,10 @@ namespace minimal::mcp {
 //                                 "max_list_pages": 100,
 //                                 "restart_cooldown_ms": 30000}}
 //
-// Each key falls back to settings.json's legacy `tools.mcp` object (handed to
-// every plugin verbatim as tools_settings), then to the McpLimits default.
+// An absent key keeps the McpLimits default.
 // Throws on an invalid value (max_list_pages < 1, a negative timeout or
 // cooldown) -- a bundled plugin's registration failure, fatal at startup,
 // like core's own settings errors were.
-McpLimits ParseMcpLimits(const nlohmann::json& config, const nlohmann::json& tools_settings);
+McpLimits ParseMcpLimits(const nlohmann::json& config);
 
 }  // namespace minimal::mcp

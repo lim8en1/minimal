@@ -318,6 +318,12 @@ public:
         return ScanCommand(input.at("command").get<std::string>()).allow_eligible;
     }
 
+    // The live row's header: the command itself, as a shell would show it.
+    std::string Summary(const nlohmann::json& input) const override {
+        const auto it = input.find("command");
+        return it != input.end() && it->is_string() ? "$ " + it->get<std::string>() : std::string();
+    }
+
     // Bash keeps the interface default for path confinement: there is no sound
     // way to know which paths an arbitrary command touches. A background
     // command is the same command string through the same shell, so disclosure

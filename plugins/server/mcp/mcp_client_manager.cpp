@@ -578,6 +578,14 @@ std::vector<std::string> McpClientManager::ToolServerNames() const {
     return names;
 }
 
+std::optional<std::string> McpClientManager::LocalityOf(const std::string& server_name) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    const auto it = handles_.find(server_name);
+    if (it == handles_.end()) return std::nullopt;
+    return it->second->entry.transport == config::McpTransport::Stdio ? std::string("local")
+                                                                       : std::string("remote");
+}
+
 bool McpClientManager::IsConfigured(const std::string& server_name) const {
     std::lock_guard<std::mutex> lock(mu_);
     return handles_.count(server_name) != 0;

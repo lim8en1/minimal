@@ -28,7 +28,7 @@ namespace {
 // Same shape as session_registry_test.cpp's fixture: one config dir per test
 // process (catch_discover_tests runs every TEST_CASE as its own ctest entry).
 struct SupportFixture {
-    // First member: the layout must exist before `skills` loads -- member
+    // First member: the layout must exist before anything loads -- member
     // initializers run in declaration order.
     struct Layout {
         explicit Layout(const std::filesystem::path& base) {
@@ -37,7 +37,6 @@ struct SupportFixture {
     };
     testing::TempDir dir;
     Layout layout{dir.path()};
-    config::SkillRegistry skills{config::SkillRegistry::Load(dir.path())};
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
     std::unique_ptr<agent::AgentPresetRegistry> presets;
@@ -59,7 +58,7 @@ struct SupportFixture {
         Write("agents/build.md",
               "---\nname: build\nmodel: main/test-model\n---\nYou are a build agent.\n");
         presets = std::make_unique<agent::AgentPresetRegistry>(
-            dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
+            dir.path(), config::LoadSettingsConfig(dir.path() / "settings.json"));
         providers.Register("fake", [](const llm::ProviderConfig&) {
             return std::make_unique<testing::FakeLlmProvider>();
         });

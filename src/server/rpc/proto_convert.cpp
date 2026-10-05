@@ -373,6 +373,7 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 execution->set_tool_use_id(value.tool_use_id);
                 execution->set_tool_name(value.tool_name);
                 *execution->mutable_input() = JsonToStruct(value.input);
+                execution->set_summary(Clean(value.summary));
                 execution->set_started(value.started);
                 if (!value.started) {
                     execution->set_is_error(value.is_error);
@@ -381,10 +382,9 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 execution->set_started_at_unix_ms(value.started_at_unix_ms);
             } else if constexpr (std::is_same_v<T, tools::BackgroundTaskEvent>) {
                 auto* message = out.mutable_background_task();
-                message->set_task_id(value.task_id);
                 message->set_tool_use_id(value.tool_use_id);
+                message->set_tool_name(value.tool_name);
                 message->set_command(Clean(value.command));
-                message->set_pid(value.pid);
                 switch (value.state) {
                     case tools::BackgroundTaskEvent::State::kStarted:
                         message->set_state(v1::BackgroundTaskEvent::STARTED);
@@ -489,7 +489,6 @@ v1::PermissionRequest ToProto(const tools::PermissionRequest& request) {
     v1::PermissionRequest out;
     out.set_tool_name(request.tool_name);
     out.set_category(ToProto(request.category));
-    *out.mutable_tool_input() = JsonToStruct(request.tool_input);
     // The disclosure's summary is the prompt line when there is one; the bare
     // tool name is the default Disclose() produces for a tool that has not opted
     // in, and is what request.summary already carries.
@@ -550,7 +549,6 @@ v1::SessionSummary ToProto(const session::SessionSummary& summary) {
 commands::CommandArgs FromProto(const v1::CommandArgs& args) {
     commands::CommandArgs out;
     out.positional.assign(args.positional().begin(), args.positional().end());
-    for (const auto& [key, value] : args.flags()) out.flags.emplace(key, value);
     out.raw = args.raw();
     return out;
 }

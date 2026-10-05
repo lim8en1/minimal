@@ -45,7 +45,7 @@ optional cosmetic plugin must not disable it.
 
 ## Enabled state
 
-Ships **DISABLED** (`session-titler` is in the DefaultsDisabled list): it is
+Ships **DISABLED** (built with `minimal_add_plugin(... DISABLED_BY_DEFAULT)`): it is
 the one bundled plugin whose entire job is to spend the user's tokens on its
 own initiative (~100 per session). Trusted code, but a cost the operator
 should opt into — enable it with one `plugins.json` edit (`"enabled": true`).

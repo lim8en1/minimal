@@ -94,23 +94,18 @@ TEST_CASE("ValidateMcpConfig: per transport, disabled skipped, channel conflicts
     CHECK(Mentions(warnings, "also an mcps.json server name"));
 }
 
-TEST_CASE("ParseMcpLimits: plugin config over legacy tools.mcp over defaults", "[mcp_plugin]") {
-    const auto defaults = mcp::ParseMcpLimits(nlohmann::json::object(), nlohmann::json::object());
+TEST_CASE("ParseMcpLimits: plugin config over defaults", "[mcp_plugin]") {
+    const auto defaults = mcp::ParseMcpLimits(nlohmann::json::object());
     CHECK(defaults.connect.count() == 10000);
     CHECK(defaults.max_list_pages == 100);
 
-    const nlohmann::json legacy = {{"mcp", {{"connect_timeout_ms", 1000}, {"max_list_pages", 7}}}};
-    const auto from_legacy = mcp::ParseMcpLimits(nlohmann::json::object(), legacy);
-    CHECK(from_legacy.connect.count() == 1000);
-    CHECK(from_legacy.max_list_pages == 7);
-
-    const auto from_config = mcp::ParseMcpLimits({{"max_list_pages", 3}}, legacy);
+    const auto from_config = mcp::ParseMcpLimits({{"max_list_pages", 3}});
     CHECK(from_config.max_list_pages == 3);
-    CHECK(from_config.connect.count() == 1000);  // untouched keys still fall back
+    CHECK(from_config.connect.count() == 10000);  // untouched keys keep the default
 
-    CHECK_THROWS(mcp::ParseMcpLimits({{"max_list_pages", 0}}, nlohmann::json::object()));
-    CHECK_THROWS(mcp::ParseMcpLimits({{"restart_cooldown_ms", -1}}, nlohmann::json::object()));
-    CHECK_THROWS(mcp::ParseMcpLimits({{"connect_timeout_ms", "soon"}}, nlohmann::json::object()));
+    CHECK_THROWS(mcp::ParseMcpLimits({{"max_list_pages", 0}}));
+    CHECK_THROWS(mcp::ParseMcpLimits({{"restart_cooldown_ms", -1}}));
+    CHECK_THROWS(mcp::ParseMcpLimits({{"connect_timeout_ms", "soon"}}));
 }
 
 TEST_CASE("mcp.endpoint: list and set_enabled over the manager", "[mcp_plugin]") {

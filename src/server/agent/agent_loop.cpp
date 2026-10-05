@@ -11,7 +11,6 @@
 
 #include "minimal/agent/compaction_boundary.hpp"
 #include "minimal/agent/compaction_trigger.hpp"
-#include "minimal/agent/structured_compaction.hpp"
 #include "minimal/agent/transcript_repair.hpp"
 #include "minimal/agent/compaction_controller.hpp"
 #include "minimal/agent/request_builder.hpp"
@@ -120,7 +119,23 @@ bool AgentLoop::PushInjectedMessage(llm::Message message) {
 void AgentLoop::FlushInjectedMessages() {
     // DrainAll runs the sink outside the queue's mutex; AppendAndPersist
     // touches the store and must not hold it.
-    injections_->DrainAll([this](llm::Message message) {
+    injections_->DrainAll([this](llm::Message message, const InjectionGate* gate) {
+        // A gated message (an external signal) passes its owner's permission
+        // model for THIS session first; the subscription already consented, so
+        // a model with no rule lets it through.
+        if (gate != nullptr) {
+            tools::ToolContext ctx{session_.logger};
+            ctx.session_id = session_.session_id;
+            ctx.project_root = session_.project_root;
+            const auto verdict = executor_.CheckSubject(
+                {gate->owner, gate->subject, gate->summary, tools::PermissionMode::AlwaysAllow},
+                ctx);
+            if (!verdict.allowed) {
+                session_.logger.info("session {}: {} not delivered: {}", session_.session_id,
+                                     gate->summary, verdict.why);
+                return;
+            }
+        }
         // REAL-TIME STEERING VETO. A user-text injection is a human prompt
         // arriving mid-turn, so it crosses the same seam a turn-pop prompt
         // does: core.user_prompt_submit, on the worker, where the hook's

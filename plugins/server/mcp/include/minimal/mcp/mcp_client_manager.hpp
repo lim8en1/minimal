@@ -117,6 +117,10 @@ public:
     // The mcps.json servers only -- ServerNames() minus channel handles.
     std::vector<std::string> ToolServerNames() const;
     bool IsConfigured(const std::string& server_name) const;
+    // "local" (stdio: a process on this machine) or "remote" (http), for a
+    // configured server; nullopt otherwise. The permission model's locality
+    // dimension.
+    std::optional<std::string> LocalityOf(const std::string& server_name) const;
 
     // Channel names that survived construction's reserved/collision rules AND
     // are currently runtime-enabled -- the channels this manager will

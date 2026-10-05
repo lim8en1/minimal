@@ -1,4 +1,4 @@
-#include "minimal/agent/structured_compaction.hpp"
+#include "structured_compaction.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,7 +10,14 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/chat.hpp"
 
-namespace minimal::agent {
+namespace minimal::compaction_structured {
+
+using agent::BuildSummarizerRequest;
+using agent::IsBlank;
+using agent::ProposeSummarizeCut;
+using agent::compact_messages;
+using agent::estimate_tokens;
+using agent::kSummaryFraming;
 namespace {
 
 // The tool call whose input carries the structured summary. Declared on EVERY
@@ -240,7 +247,7 @@ llm::ToolDefinition MakeRecordSummaryToolDefinition() {
 
 std::optional<CompactionResult> compact_messages_structured(
     std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
-    const CompactionRequest& params) {
+    const CompactionRequest& params, const std::string& instruction) {
     // MIRRORS compact_messages line for line up to the parse: same logging
     // shape, same refusals, same request fields. The two compacters are kept
     // deliberately parallel -- a fix to one (a new refusal, a routing change)
@@ -253,7 +260,7 @@ std::optional<CompactionResult> compact_messages_structured(
     // A custom prompt (preset frontmatter, /compact <name>) describes its own
     // output shape; the schema would override it. Free text honors it. So does
     // a missing prompts/compression-structured.md (the sanity check says so).
-    if (params.custom_prompt || IsBlank(params.structured_prompt)) {
+    if (params.custom_prompt || IsBlank(instruction)) {
         return compact_messages(messages_to_compact, provider, params);
     }
 
@@ -265,7 +272,7 @@ std::optional<CompactionResult> compact_messages_structured(
     // harness consumes the call's input as the summary payload.
     std::vector<llm::Message> storage;
     llm::ChatRequest request = BuildSummarizerRequest(
-        messages_to_compact, params, std::string(params.structured_prompt), storage);
+        messages_to_compact, params, instruction, storage);
     // The loop's own tools already carry it; a direct caller's may not.
     const bool has_tool = std::any_of(request.tools.begin(), request.tools.end(),
                                       [](const llm::ToolDefinition& def) {
@@ -371,13 +378,21 @@ std::optional<CompactionResult> compact_messages_structured(
     return result;
 }
 
-CompactionStrategy MakeStructuredCompactionStrategy() {
+CompactionStrategy MakeStructuredCompactionStrategy(std::string instruction) {
     CompactionStrategy strategy;
     // Identical to "summarize"'s cut selection: where to cut is orthogonal to
     // how to summarize, and duplicating the walk here would let the two drift.
     strategy.cut_selector = ProposeSummarizeCut;
-    strategy.summarize = compact_messages_structured;
+    strategy.summarize = [instruction = std::move(instruction)](
+                             std::span<const llm::Message> messages, llm::LlmProvider& provider,
+                             const CompactionRequest& request) {
+        return compact_messages_structured(messages, provider, request, instruction);
+    };
+    strategy.request_tools = {MakeRecordSummaryToolDefinition()};
+    strategy.stray_call_reply =
+        "record_summary is only used when the harness asks for a context summary; nothing was "
+        "recorded. Continue the task.";
     return strategy;
 }
 
-}  // namespace minimal::agent
+}  // namespace minimal::compaction_structured

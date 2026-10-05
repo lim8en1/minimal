@@ -2,7 +2,8 @@
 name: research
 description: Web research and synthesis. Reads, searches, fetches -- never writes.
 allowed_tools: [web_search, web_fetch, read, grep, glob, skill, ask_user]
-allowed_skills: ["*"]
+plugin_permissions:
+  skills: ["*"]
 permission_mode:
   read_only: allow
   network: allow

@@ -742,4 +742,100 @@ std::vector<std::string> ToolExecutor::granted_keys() const {
     return keys;
 }
 
+namespace {
+
+std::optional<PermissionAnswer> ResolveSubjectGuarded(const BoundPermissionModel& bound,
+                                                      const PermissionSubject& subject,
+                                                      const PermissionPolicy* core_policy) {
+    try {
+        return bound.model->ResolveSubject(SubjectQuery{subject, core_policy, bound.layer.get()});
+    } catch (const std::exception& e) {
+        return PermissionAnswer{PermissionMode::AlwaysDeny,
+                                "permission model '" + bound.name + "' failed: " + e.what()};
+    } catch (...) {
+        return PermissionAnswer{PermissionMode::AlwaysDeny,
+                                "permission model '" + bound.name + "' failed"};
+    }
+}
+
+}  // namespace
+
+ToolExecutor::SubjectVerdict ToolExecutor::CheckSubject(const SubjectCheck& check,
+                                                        ToolContext& ctx) {
+    const std::string& key = check.subject.key;
+    PermissionMode mode = check.default_mode;
+    std::string why = "no " + check.owner + " rule for " + check.subject.kind + " " + key;
+    const auto tighten = [&](PermissionMode candidate, std::string reason) {
+        if (candidate < mode) {
+            mode = candidate;
+            why = std::move(reason);
+        }
+    };
+
+    // 1. The owner's own model (and only the owner's).
+    if (const BoundPermissionModel* own = FindByName(models_, check.owner)) {
+        if (auto answer = ResolveSubjectGuarded(*own, check.subject, &policy_)) {
+            mode = answer->mode;
+            why = std::move(answer->why);
+        }
+    }
+    // 2. The operator's per-tool deny is a kill switch on the subject key too.
+    if (policy_.per_tool_denies(key)) tighten(PermissionMode::AlwaysDeny, "per-tool rule " + key + "=deny");
+    // 3. The subagent ceiling: the parent's binding of the same model, and its denies.
+    if (models_ceiling_) {
+        if (const BoundPermissionModel* parent = FindByName(*models_ceiling_, check.owner)) {
+            const PermissionPolicy* parent_policy = policy_ceiling_ ? &*policy_ceiling_ : nullptr;
+            if (auto answer = ResolveSubjectGuarded(*parent, check.subject, parent_policy)) {
+                tighten(answer->mode, "parent session: " + answer->why);
+            }
+        }
+    }
+    if (policy_ceiling_ && policy_ceiling_->per_tool_denies(key)) {
+        tighten(PermissionMode::AlwaysDeny, "parent session: per-tool rule " + key + "=deny");
+    }
+    // 4. The run mode wraps the decision.
+    const PermissionRunMode run_mode = run_mode_.load(std::memory_order_relaxed);
+    const PermissionMode wrapped = apply_run_mode(mode, run_mode);
+    if (wrapped != mode) {
+        why = run_mode == PermissionRunMode::AllowOnly
+                  ? "run mode allow-only turns ask into deny (would ask: " + why + ")"
+                  : "run mode bypass approves prompts (would ask: " + why + ")";
+        mode = wrapped;
+    }
+    if (mode == PermissionMode::AlwaysDeny) return {false, why};
+    if (mode == PermissionMode::AlwaysAllow) return {true, why};
+
+    // 5. Ask: a session grant answers it, else the human does.
+    const std::string grant_key = check.owner + ":" + check.subject.kind + ":" + key;
+    if (session_grants_.count(grant_key) != 0) return {true, "granted for this session"};
+    const std::string label = check.owner + " " + check.subject.kind + " " + key;
+    if (hooks_ != nullptr) {
+        hooks_->EmitAsync(hooks::kPermissionPrompted,
+                          nlohmann::json{{"session_id", ctx.session_id},
+                                         {"tool_name", check.owner + ":" + check.subject.kind},
+                                         {"permission_key", key},
+                                         {"category", check.subject.kind},
+                                         {"summary", check.summary}});
+    }
+    PermissionRequest request;
+    request.session_id = ctx.session_id;
+    request.tool_name = check.owner + ":" + check.subject.kind;
+    request.category = ToolCategory::ReadOnly;
+    request.tool_input = check.subject.attributes;
+    request.summary = check.summary;
+    request.reason = why;
+    request.disclosure.summary = check.summary;
+    request.disclosure.grants.push_back(GrantOffer{grant_key, label});
+    request.disclosure.complete = true;
+    const PermissionResponse response = checker_.check(request);
+    if (response.decision == PermissionDecision::Deny) {
+        return {false, response.deny_message.empty() ? "denied by the user"
+                                                     : "denied by the user: " + response.deny_message};
+    }
+    for (const auto& granted : response.granted_keys) {
+        if (granted == grant_key) session_grants_.insert(granted);  // only what was offered
+    }
+    return {true, "allowed by the user"};
+}
+
 }  // namespace minimal::tools

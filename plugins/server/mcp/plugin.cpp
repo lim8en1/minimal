@@ -8,11 +8,10 @@
 //                               config dir); servers publish their tools as
 //                               groups ("mcp__<server>__") when they come up
 //   register_tool_sources       the servers as tool source "mcp": presets
-//                               allow them under tool_sources.mcp (legacy:
-//                               allowed_mcp_servers), sessions activate them
+//                               allow them under tool_sources.mcp, sessions
+//                               activate them
 //   register_permission_models  the per-server permission model (slices
-//                               plugins.mcp / plugin_permissions.mcp; legacy:
-//                               mcp_default_mode / mcp_permissions)
+//                               plugins.mcp / plugin_permissions.mcp)
 //   register_commands           /mcp
 //   register_services           "mcp.endpoint" for the mcp-view client plugin
 //   core.signals (consumed)     channels.json channels as external signal
@@ -92,7 +91,7 @@ void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
     auto& s = state();
     if (s.manager) return;
 
-    const auto limits = minimal::mcp::ParseMcpLimits(context.config, context.tools_settings);
+    const auto limits = minimal::mcp::ParseMcpLimits(context.config);
     auto servers = LoadOrEmpty<minimal::config::McpsConfig>(context, "mcps.json",
                                                             minimal::config::LoadMcpsConfig);
     auto channels = LoadOrEmpty<minimal::config::ChannelsConfig>(
@@ -133,7 +132,12 @@ void minimal_plugin_register_tool_sources(minimal::tools::ToolSourceRegistry& re
 
 void minimal_plugin_register_permission_models(minimal::tools::PermissionModelRegistry& registry,
                                                const PluginRegistrationContext&) {
-    registry.Register(minimal::mcp::MakeMcpPermissionModel());
+    // The locality dimension asks the manager which transport a server uses.
+    minimal::mcp::McpClientManager* manager = state().manager.get();
+    registry.Register(minimal::mcp::MakeMcpPermissionModel(
+        [manager](std::string_view server) -> std::optional<std::string> {
+            return manager != nullptr ? manager->LocalityOf(std::string(server)) : std::nullopt;
+        }));
 }
 
 void minimal_plugin_register_commands(minimal::commands::CommandRegistry& registry,

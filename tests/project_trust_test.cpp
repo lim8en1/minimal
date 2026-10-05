@@ -224,9 +224,23 @@ TEST_CASE("InspectProjectLocal counts what a project would contribute", "[projec
     touch(repo / ".claude" / "skills" / "two" / "SKILL.md");
     touch(repo / "commands" / "c.md");
 
-    const auto inventory = minimal::config::InspectProjectLocal(repo / "src");  // from a subdir
-    CHECK(inventory.agents == 2);
-    CHECK(inventory.skills == 2);
-    CHECK(inventory.commands == 1);
-    CHECK(inventory.Describe() == "2 agents, 2 skills, 1 command");
+    // Core counts its own agents; skills/ and commands/ belong to whichever
+    // plugin loads them, so without a provider they are not core's to count.
+    const auto core_only = minimal::config::InspectProjectLocal(repo / "src");  // from a subdir
+    CHECK(core_only.CountOf("agent") == 2);
+    CHECK(core_only.CountOf("skill") == 0);
+    CHECK(core_only.CountOf("command") == 0);
+    CHECK(core_only.Describe() == "2 agents");
+
+    struct Commands : minimal::config::ProjectContentProvider {
+        void DescribeProjectContent(const fs::path&,
+                                    std::vector<minimal::config::ProjectContentCount>& out) const override {
+            out.push_back({"command", "commands", 1});
+            out.push_back({"command", "commands", 2});  // a second source merges
+            out.push_back({"widget", "widgets", 0});    // zero counts stay out
+        }
+    } commands;
+    const auto inventory = minimal::config::InspectProjectLocal(repo / "src", &commands);
+    CHECK(inventory.CountOf("command") == 3);
+    CHECK(inventory.Describe() == "2 agents, 3 commands");
 }

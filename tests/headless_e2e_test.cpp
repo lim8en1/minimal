@@ -97,7 +97,6 @@ struct HeadlessFixture {
         Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
         Write("agents/main.md",
               "---\nname: main\nmodel: main/test-model\nallowed_tools: [\"*\"]\n---\nYou help.\n");
-        skills = config::SkillRegistry::Load(dir);
     }
 
     void Write(const std::filesystem::path& relative, const std::string& contents) const {
@@ -130,7 +129,7 @@ struct HeadlessFixture {
 
     void Start() {
         presets = std::make_unique<agent::AgentPresetRegistry>(
-            dir, skills, config::LoadSettingsConfig(dir / "settings.json"));
+            dir, config::LoadSettingsConfig(dir / "settings.json"));
         auto scripted = std::make_shared<decltype(steps)>(steps);
         auto attempts = provider_attempts;
         providers.Register("fake", [scripted, attempts](const llm::ProviderConfig&) {
@@ -205,7 +204,6 @@ struct HeadlessFixture {
 
     testing::TempDir tempdir;
     std::filesystem::path dir, socket;
-    config::SkillRegistry skills;
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
     // Plugin-owned state for the real bash tool (tools-bash's store type, the

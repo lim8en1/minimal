@@ -145,6 +145,29 @@ public:
     std::optional<Verdict> Explain(const std::string& tool_name, const nlohmann::json& input,
                                    const ToolContext& ctx, bool* grants_satisfy = nullptr) const;
 
+    // --- Non-tool subjects ----------------------------------------------------
+    //
+    // A plugin's request to gate something that is not a tool call (an inbound
+    // signal, a resource read). `owner` is the submitting plugin: only ITS
+    // permission model is consulted (ResolveSubject), and a model answering
+    // nullopt leaves `default_mode`. Around that, the same pipeline a tool call
+    // gets: an operator per-tool deny on `subject.key`, the subagent ceiling
+    // (the parent's binding of the same model, and its per-tool denies), the
+    // run mode, session grants (key "<owner>:<kind>:<key>"), the
+    // permission_prompted hook, and the human prompt. Fail-closed: a model
+    // that throws denies. SESSION WORKER ONLY, like Prepare.
+    struct SubjectCheck {
+        std::string owner;
+        PermissionSubject subject;
+        std::string summary;  // the prompt line
+        PermissionMode default_mode = PermissionMode::Ask;
+    };
+    struct SubjectVerdict {
+        bool allowed = false;
+        std::string why;
+    };
+    SubjectVerdict CheckSubject(const SubjectCheck& check, ToolContext& ctx);
+
     // Exposed for testing and for surfacing "what would happen" without running.
     PermissionMode ResolveMode(const Tool& tool, const nlohmann::json& input,
                                 const ToolContext& ctx) const {

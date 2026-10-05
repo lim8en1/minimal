@@ -22,7 +22,7 @@
 #include "../../plugins/server/commands-md/commands_md.hpp"
 #include "minimal/agent/agent_preset_frontmatter.hpp"
 #include "minimal/config/frontmatter.hpp"
-#include "minimal/config/skill_registry.hpp"
+#include "skill_registry.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
@@ -61,7 +61,7 @@ TEST_CASE("every examples/agents preset parses through the production load path"
         SECTION(path.filename().string()) {
             agent::AgentPresetFrontmatter preset;
             REQUIRE_NOTHROW(preset = agent::LoadAgentPresetFrontmatter(
-                                path, {"bash", "read", "write", "edit", "glob", "grep"}));
+                                path, std::vector<std::string>{"bash", "read", "write", "edit", "glob", "grep"}));
             // The file stem is the address (`--agent research`); a preset whose
             // display name drifts from it would resolve under a name the docs
             // never mention.
@@ -101,7 +101,7 @@ TEST_CASE("every examples/skills skill loads through SkillRegistry", "[examples]
     }
     REQUIRE(copied >= 3);
 
-    const auto skills = config::SkillRegistry::Load(config.path());
+    const auto skills = skills::SkillRegistry::Load(config.path());
     REQUIRE(skills.All().size() == copied);
     for (const auto& skill : skills.All()) {
         INFO("skill '" << skill.name << "': " << skill.load_error);

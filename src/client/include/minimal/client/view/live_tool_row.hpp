@@ -30,7 +30,7 @@ inline std::string LiveToolName(const ToolExecutionState& tool) {
 inline std::string LiveToolSummary(const ToolExecutionState& tool) {
     return (tool.summary.has_value() && !tool.summary->empty())
                ? OneLineSummary(*tool.summary)
-               : SummarizeToolInput(tool.tool_name, tool.input);
+               : SummarizeToolInput(tool.input);
 }
 
 // Running: the elapsed time since the server-stamped start (ticking -- the

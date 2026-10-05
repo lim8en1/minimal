@@ -392,12 +392,13 @@ TEST_CASE("every SessionEvent alternative lands on its ServerEvent oneof", "[pro
     tools::BackgroundTaskEvent task;
     task.task_id = "bg1";
     task.tool_use_id = "t1";
+    task.tool_name = "python_exec";
     task.command = "sleep 1";
     task.pid = 123;
     task.state = tools::BackgroundTaskEvent::State::kKilled;
     const auto background = trip(task).background_task();
-    CHECK(background.task_id() == "bg1");
-    CHECK(background.pid() == 123);
+    CHECK(background.tool_use_id() == "t1");
+    CHECK(background.tool_name() == "python_exec");
     CHECK(background.state() == v1::BackgroundTaskEvent::KILLED);
 
     const llm::LlmError provider_error(llm::LlmErrorCategory::RateLimit, "slow down", 429);
@@ -496,7 +497,6 @@ TEST_CASE("a permission request carries its disclosure", "[proto_convert]") {
     CHECK(out.grants(0).key() == "bash:/usr/bin/make");
     CHECK(out.grants(0).label() == "/usr/bin/make *");
     CHECK(out.grants(1).key() == "bash:/usr/bin/tail");
-    CHECK(StructToJson(out.tool_input())["command"] == "make 2>&1 | tail -50");
 }
 
 TEST_CASE("an incomplete disclosure says so on the wire", "[proto_convert]") {

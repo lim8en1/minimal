@@ -136,17 +136,6 @@ std::string InputSummary(const nlohmann::json& input) {
     }
 }
 
-// bash's own input shape (tools-bash plugin): {"command": "..."}. Every other
-// tool falls back to InputSummary's generic JSON dump -- this is a header
-// improvement for the single most common tool, not a general input schema.
-std::optional<std::string> BashCommandOf(const std::string& tool_name,
-                                         const nlohmann::json& input) {
-    if (tool_name != "bash") return std::nullopt;
-    const auto it = input.find("command");
-    if (it == input.end() || !it->is_string()) return std::nullopt;
-    return it->get<std::string>();
-}
-
 // The single-line merge of the above, for a caller (the LIVE tool row) that
 // has no room for the persisted view's per-kind styling and just wants the
 // best available one-liner.
@@ -175,10 +164,7 @@ std::string OneLineSummary(std::string summary) {
     return summary;
 }
 
-std::string SummarizeToolInput(const std::string& tool_name, const nlohmann::json& input) {
-    if (const auto bash_command = BashCommandOf(tool_name, input); bash_command.has_value()) {
-        return OneLineSummary("$ " + *bash_command);
-    }
+std::string SummarizeToolInput(const nlohmann::json& input) {
     return OneLineSummary(InputSummary(input));
 }
 

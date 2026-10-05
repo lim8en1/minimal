@@ -146,6 +146,10 @@ public:
 
     const ToolSpec& spec() const override { return spec_; }
     bool network_access_required() const override { return true; }
+    // opencode's preset vocabulary spells this tool "webfetch"; its rules are
+    // per host (the plugin's permission model), never core patterns.
+    std::vector<std::string> config_aliases() const override { return {"webfetch"}; }
+    bool accepts_pattern_rules() const override { return false; }
 
     ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override {
         if (!input.contains("url") || !input.at("url").is_string()) {

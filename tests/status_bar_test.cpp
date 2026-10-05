@@ -203,3 +203,15 @@ TEST_CASE("WithHiddenRowsSuffix composes the live-view cut notice, never overrid
     CHECK(WithHiddenRowsSuffix("working · earlier rows hidden") ==
           "working · earlier rows hidden");
 }
+
+TEST_CASE("a plugin segment gives way by its own declared priority", "[status_bar]") {
+    // Core knows no plugin segment by name: {low} and {high} are both plugin
+    // ids, ranked only by the priority each declared.
+    const auto format = ParseStatusFormat("{low} | {model} | {high}");
+    const std::map<std::string, std::string> values = {
+        {"low", "aaaaaaaa"}, {"model", "local/x"}, {"high", "bbbbbbbb"}};
+    const std::map<std::string, int> priorities = {{"low", 5}, {"high", 95}};
+    // Room for model + one plugin value: the lower-priority one goes.
+    const auto parts = ResolveStatusBar(format, values, /*max_width=*/22, priorities);
+    CHECK(Texts(parts) == std::vector<std::string>{"local/x", " | ", "bbbbbbbb"});
+}

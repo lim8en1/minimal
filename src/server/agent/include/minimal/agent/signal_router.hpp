@@ -3,9 +3,11 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "minimal/agent/injection_queue.hpp"
 #include "minimal/agent/signal_service.hpp"
 
 namespace minimal::agent {
@@ -133,7 +135,8 @@ private:
     // deliver outside it. `filter_signal` empty matches every subscription of
     // the channel (extended sources are subscribed channel-level).
     Delivery Deliver(const std::string& channel, const std::string& filter_signal,
-                     const std::string& wrapped_content);
+                     const std::string& wrapped_content,
+                     const std::optional<InjectionGate>& gate = std::nullopt);
 
     struct Channel {
         ExternalChannel declaration;

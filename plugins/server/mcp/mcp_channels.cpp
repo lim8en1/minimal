@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/mcp/mcp_permission_model.hpp"
 #include "minimal/mcp/signal_protocol.hpp"
 
 namespace minimal::mcp {
@@ -42,7 +43,9 @@ void RegisterChannels(const config::ChannelsConfig& channels, McpClientManager& 
         if (std::find(enabled.begin(), enabled.end(), entry.name) == enabled.end()) continue;
         std::string error;
         if (!signals.RegisterExternalChannel(
-                agent::ExternalChannel{entry.name, entry.extended, entry.signals}, &source,
+                agent::ExternalChannel{entry.name, entry.extended, entry.signals,
+                                       std::string(kMcpPluginName)},
+                &source,
                 error)) {
             warn("signal channel '" + entry.name + "' skipped: " + error);
         }

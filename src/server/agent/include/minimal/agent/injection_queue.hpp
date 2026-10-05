@@ -24,9 +24,13 @@
 
 #include <deque>
 #include <mutex>
+#include <optional>
+#include <string>
+#include <type_traits>
 #include <utility>
 
 #include "minimal/llm/message.hpp"
+#include "minimal/tools/permission_model.hpp"
 
 namespace minimal::agent {
 
@@ -42,6 +46,15 @@ inline bool IsUserTextMessage(const llm::Message& message) {
     }
     return false;
 }
+
+// A permission check a message must pass when the worker drains it
+// (ToolExecutor::CheckSubject with `owner`'s model) -- how an external
+// signal is gated per receiving session without blocking its producer.
+struct InjectionGate {
+    std::string owner;
+    tools::PermissionSubject subject;
+    std::string summary;
+};
 
 class InjectionQueue {
 public:
@@ -59,12 +72,12 @@ public:
     // False means the message was NOT staged -- the owning session has
     // terminated (Close ran) or the staging bound is hit. The caller logs the
     // loss, the same contract Session::QueueInjectedMessage has always had.
-    bool Push(llm::Message message) {
+    bool Push(llm::Message message, std::optional<InjectionGate> gate = std::nullopt) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (closed_) return false;
             if (pending_.size() >= kMaxPending) return false;
-            pending_.push_back(std::move(message));
+            pending_.push_back(Staged{std::move(message), std::move(gate)});
         }
         return true;
     }
@@ -72,14 +85,22 @@ public:
     // Session worker. Drains everything staged so far, in arrival order,
     // through `sink`. The swap happens under the lock; the sink runs outside
     // it -- AppendAndPersist touches SQLite and must not hold this mutex.
+    // A sink taking (llm::Message, const InjectionGate*) also sees each
+    // message's gate (null: ungated); a one-argument sink sees messages only.
     template <typename Sink>
     void DrainAll(Sink&& sink) {
-        std::deque<llm::Message> ready;
+        std::deque<Staged> ready;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ready.swap(pending_);
         }
-        for (auto& message : ready) sink(std::move(message));
+        for (auto& staged : ready) {
+            if constexpr (std::is_invocable_v<Sink&, llm::Message, const InjectionGate*>) {
+                sink(std::move(staged.message), staged.gate ? &*staged.gate : nullptr);
+            } else {
+                sink(std::move(staged.message));
+            }
+        }
     }
 
     bool empty() const {
@@ -98,8 +119,8 @@ public:
     // explicit intent, which a background result is not.
     bool HasUserText() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (const auto& message : pending_) {
-            if (IsUserTextMessage(message)) return true;
+        for (const auto& staged : pending_) {
+            if (IsUserTextMessage(staged.message)) return true;
         }
         return false;
     }
@@ -122,8 +143,12 @@ public:
     }
 
 private:
+    struct Staged {
+        llm::Message message;
+        std::optional<InjectionGate> gate;
+    };
     mutable std::mutex mutex_;
-    std::deque<llm::Message> pending_;
+    std::deque<Staged> pending_;
     bool closed_ = false;
 };
 

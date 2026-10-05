@@ -310,7 +310,7 @@ Elements RenderToolActivityBlocks(const ChatRow& row, const Theme& theme,
     // Collapsed is ONE line -- the input summary rides the header rather than
     // a row of its own -- so a turn of many calls reads as a compact list.
     if (ctx.collapsed) {
-        const std::string summary = SummarizeToolInput(row.tool_name, row.tool_input);
+        const std::string summary = SummarizeToolInput(row.tool_input);
         // Shrinks first: the chat view right-aligns the row timestamp after it.
         if (!summary.empty()) line.push_back(text("  " + summary) | Muted(theme) | flex_shrink);
         return {hbox(std::move(line))};
@@ -322,20 +322,10 @@ Elements RenderToolActivityBlocks(const ChatRow& row, const Theme& theme,
     // indivisible scroll anchor.
     Elements first;
     first.push_back(hbox(std::move(line)));
-    const auto bash_command = BashCommandOf(row.tool_name, row.tool_input);
-    if (bash_command.has_value()) {
-        // bash's real command, not a JSON dump of it -- the header IS the
-        // orientation for the most common tool call.
-        first.push_back(paragraph("$ " + *bash_command) |
-                        color(theme.ColorForOr("tool", "syntax_function")));
-    } else {
-        // The input summary rides the header of every OTHER tool row
-        // (pending and result alike): it is what makes "tool <name>" say
-        // what was run.
-        const std::string summary = InputSummary(row.tool_input);
-        if (!summary.empty()) {
-            first.push_back(paragraph(summary) | color(theme.ColorFor("system_message")));
-        }
+    // The input summary rides the header (pending and result alike): it is
+    // what makes "tool <name>" say what was run.
+    if (const std::string summary = InputSummary(row.tool_input); !summary.empty()) {
+        first.push_back(paragraph(summary) | color(theme.ColorFor("system_message")));
     }
     Elements blocks;
     blocks.push_back(first.size() == 1 ? std::move(first[0]) : vbox(std::move(first)));

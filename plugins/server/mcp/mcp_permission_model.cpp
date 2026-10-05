@@ -25,8 +25,24 @@ PermissionMode ParseMode(const nlohmann::json& value, const std::string& where) 
     throw std::runtime_error(where + " must be \"allow\", \"ask\" or \"deny\"");
 }
 
+std::unordered_map<std::string, PermissionMode> ParseModeMap(const nlohmann::json& value,
+                                                             const std::string& where) {
+    std::unordered_map<std::string, PermissionMode> out;
+    if (value.is_null()) return out;
+    if (!value.is_object()) throw std::runtime_error(where + " must be a map of {name: mode}");
+    for (const auto& [name, mode] : value.items()) out[name] = ParseMode(mode, where + " '" + name + "'");
+    return out;
+}
+
+const nlohmann::json& Member(const nlohmann::json& slice, const char* key) {
+    static const nlohmann::json kNull;
+    return slice.is_object() && slice.contains(key) ? slice.at(key) : kNull;
+}
+
 class McpPermissionModel final : public tools::PermissionModel {
 public:
+    explicit McpPermissionModel(McpLocalityFn locality_of) : locality_of_(std::move(locality_of)) {}
+
     unsigned Replaces() const override {
         return static_cast<unsigned>(tools::PermissionStage::kBase);
     }
@@ -52,8 +68,24 @@ public:
                 per_server[server] = ParseMode(mode, "mcp server '" + server + "'");
             }
         }
-        return std::make_shared<const McpPermissionPolicy>(
-            BuildMcpPolicy(per_server, global_default, preset_trusted));
+        McpPermissionPolicy policy = BuildMcpPolicy(per_server, global_default, preset_trusted);
+        for (const auto& [transport, mode] :
+             ParseModeMap(Member(global_slice, "transport"), "mcp transport")) {
+            if (transport != "local" && transport != "remote") {
+                throw std::runtime_error("mcp transport keys are \"local\" and \"remote\"");
+            }
+            policy.per_transport[transport] = mode;
+        }
+        policy.signals = ParseModeMap(Member(global_slice, "signals"), "mcp signals");
+        for (const auto& [key, mode] : ParseModeMap(Member(preset_slice, "signals"), "mcp signals")) {
+            // A project preset may only narrow the operator's rule for the
+            // same key (no rule = delivered, so any value there narrows).
+            const auto global = policy.signals.find(key);
+            policy.signals[key] = preset_trusted || global == policy.signals.end()
+                                      ? mode
+                                      : tools::most_restrictive(mode, global->second);
+        }
+        return std::make_shared<const McpPermissionPolicy>(std::move(policy));
     }
 
     tools::PermissionAnswer Resolve(tools::PermissionStage stage,
@@ -64,18 +96,37 @@ public:
                                  ? *static_cast<const McpPermissionPolicy*>(query.layer)
                                  : kDefault;
         const std::string server = McpServerOf(query.permission_key);
+        const std::optional<std::string> locality =
+            locality_of_ ? locality_of_(server) : std::nullopt;
+        const std::optional<std::string_view> locality_view =
+            locality ? std::optional<std::string_view>(*locality) : std::nullopt;
         tools::PermissionAnswer answer;
         if (query.core_policy != nullptr) {
             answer.mode = ResolveMcpToolMode(*query.core_policy, policy, server,
-                                             query.permission_key, &answer.why);
+                                             query.permission_key, &answer.why, locality_view);
         } else {
-            answer.mode = policy.mode_for(server);
+            answer.mode = policy.mode_for(server, locality_view);
             answer.why = "mcp " + server + "=" + std::string(tools::mode_name(answer.mode));
         }
         return answer;
     }
 
+    std::optional<tools::PermissionAnswer> ResolveSubject(
+        const tools::SubjectQuery& query) const override {
+        if (query.subject.kind != "signal" || query.layer == nullptr) return std::nullopt;
+        const auto& policy = *static_cast<const McpPermissionPolicy*>(query.layer);
+        const std::string& key = query.subject.key;
+        const auto slash = key.find('/');
+        const std::string channel = key.substr(0, slash);
+        const std::string signal = slash == std::string::npos ? std::string() : key.substr(slash + 1);
+        const auto mode = policy.signal_mode(channel, signal);
+        if (!mode) return std::nullopt;
+        return tools::PermissionAnswer{*mode, "mcp signal " + key + "=" +
+                                                  std::string(tools::mode_name(*mode))};
+    }
+
     std::string_view HookCategory() const override { return "mcp"; }
+
 
     std::string Describe(const void* layer) const override {
         if (layer == nullptr) return {};
@@ -84,17 +135,41 @@ public:
         for (const auto& [server, mode] : policy.per_server) {
             out += " " + server + "=" + std::string(tools::mode_name(mode));
         }
+        for (const auto& [transport, mode] : policy.per_transport) {
+            out += " transport " + transport + "=" + std::string(tools::mode_name(mode));
+        }
+        for (const auto& [signal, mode] : policy.signals) {
+            out += " signal " + signal + "=" + std::string(tools::mode_name(mode));
+        }
         return out;
     }
+
+private:
+    McpLocalityFn locality_of_;
 };
 
 }  // namespace
 
-PermissionMode McpPermissionPolicy::mode_for(std::string_view server_name) const {
+PermissionMode McpPermissionPolicy::mode_for(std::string_view server_name,
+                                             std::optional<std::string_view> locality) const {
     if (auto it = per_server.find(std::string(server_name)); it != per_server.end()) {
         return it->second;
     }
+    if (locality) {
+        if (auto it = per_transport.find(std::string(*locality)); it != per_transport.end()) {
+            return it->second;
+        }
+    }
     return default_mode;
+}
+
+std::optional<PermissionMode> McpPermissionPolicy::signal_mode(std::string_view channel,
+                                                               std::string_view signal) const {
+    for (const std::string& key :
+         {std::string(channel) + "/" + std::string(signal), std::string(channel), std::string("*")}) {
+        if (auto it = signals.find(key); it != signals.end()) return it->second;
+    }
+    return std::nullopt;
 }
 
 McpPermissionPolicy BuildMcpPolicy(
@@ -112,8 +187,8 @@ McpPermissionPolicy BuildMcpPolicy(
 PermissionMode ResolveMcpToolMode(const tools::PermissionPolicy& policy,
                                   const McpPermissionPolicy& mcp_policy,
                                   std::string_view server_name, std::string_view tool_name,
-                                  std::string* reason) {
-    const PermissionMode server_mode = mcp_policy.mode_for(server_name);
+                                  std::string* reason, std::optional<std::string_view> locality) {
+    const PermissionMode server_mode = mcp_policy.mode_for(server_name, locality);
     // McpPermissionPolicy::per_server carries only the PRESET's entries (the
     // global side is default_mode), so its presence is "the preset spoke".
     const bool preset_spoke_for_server =
@@ -159,9 +234,8 @@ PermissionMode ResolveMcpToolMode(const tools::PermissionPolicy& policy,
     return answer(server_mode, server_text);
 }
 
-std::shared_ptr<const tools::PermissionModel> MakeMcpPermissionModel() {
-    static const auto model = std::make_shared<const McpPermissionModel>();
-    return model;
+std::shared_ptr<const tools::PermissionModel> MakeMcpPermissionModel(McpLocalityFn locality_of) {
+    return std::make_shared<const McpPermissionModel>(std::move(locality_of));
 }
 
 tools::BoundPermissionModel BindMcpPermissionModel(McpPermissionPolicy policy) {

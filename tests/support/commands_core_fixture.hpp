@@ -76,7 +76,6 @@ public:
         Write("agents/build.md", "---\nname: build\nmodel: main/fast\n---\nbody\n");
         Write("agents/other.md", "---\nname: other\nmodel: main/fast\n---\nother body\n");
 
-        skills_ = std::make_unique<config::SkillRegistry>(config::SkillRegistry::Load(dir_.path()));
         BuildPresets();
         preset_ = presets_->Resolve("build");
 
@@ -153,8 +152,17 @@ public:
     // The fixture's config dir doubles as the project root: no project-local
     // scope beyond what a test writes into it deliberately.
     std::filesystem::path project_root() const override { return dir_.path(); }
-    agent::AgentLoop& loop() override { return *loop_; }
+    std::optional<std::size_t> CompactNow(std::string_view prompt_override = {}) override {
+        return loop_->CompactNow(prompt_override);
+    }
+    std::size_t ClearHistory() override {
+        const std::size_t dropped = loop_->history().size();
+        loop_->ClearHistory();
+        return dropped;
+    }
     tools::ToolExecutor& executor() override { return *executor_; }
+    // Test access to the loop behind the session (not SessionControl).
+    agent::AgentLoop& loop() { return *loop_; }
     const agent::AgentPreset& preset() const override { return preset_; }
     agent::AgentPreset preset_snapshot() const override { return preset_; }
     void ApplyPreset(agent::AgentPreset preset) override {
@@ -265,7 +273,6 @@ private:
     std::unique_ptr<mcp::McpClientManager> mcp_manager_;
     AlwaysAllowPermissionChecker checker_;
     InMemoryHistoryStore store_;
-    std::unique_ptr<config::SkillRegistry> skills_;
     // The one providers.json parse, owned here and borrowed by presets_ --
     // declared first so it outlives the registry.
     std::unique_ptr<config::ProvidersConfig> catalog_;
@@ -277,7 +284,7 @@ private:
         catalog_ = std::make_unique<config::ProvidersConfig>(
             config::LoadProvidersConfig(dir_.path() / "providers.json"));
         presets_ = std::make_unique<agent::AgentPresetRegistry>(
-            dir_.path(), *skills_, config::LoadSettingsConfig(dir_.path() / "settings.json"),
+            dir_.path(), config::LoadSettingsConfig(dir_.path() / "settings.json"),
             config::LoadPermissionsConfig(dir_.path() / "permissions.json"), *catalog_);
     }
     agent::AgentPreset preset_;

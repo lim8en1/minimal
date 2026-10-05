@@ -363,7 +363,18 @@ public:
     // a turn boundary. False means the session is already terminating and the
     // message was NOT queued -- the caller (the spawner) logs the loss rather
     // than reporting a completion nobody will ever see.
-    bool QueueInjectedMessage(llm::Message message);
+    bool QueueInjectedMessage(llm::Message message,
+                              std::optional<InjectionGate> gate = std::nullopt);
+
+    // Gates a plugin's non-tool subject for this session
+    // (ToolExecutor::CheckSubject: the plugin's model, the operator's denies,
+    // the subagent ceiling, run mode, grants, the human prompt). Runs ON THE
+    // WORKER: inline when called there, otherwise queued as non-turn work and
+    // waited for -- so from another thread it answers between turns (a
+    // running turn finishes first). Refused from inside a tool call (the
+    // worker is waiting for that tool), when the backlog is full, or when the
+    // session ends before it runs. Any thread.
+    tools::ToolExecutor::SubjectVerdict CheckPermission(tools::ToolExecutor::SubjectCheck check);
 
     // Reader thread. Interrupts the in-flight turn, leaving the session alive
     // and able to accept the next one.
@@ -412,6 +423,8 @@ public:
     // reads. The empty critical section closes the lost-wakeup window: the
     // worker either saw the change before parking, or has not parked yet and
     // must take mutex_ to do so.
+    tools::ToolExecutor::SubjectVerdict RunGateCheck(const tools::ToolExecutor::SubjectCheck& check);
+
     void WakeWorker() {
         { std::lock_guard<std::mutex> lock(mutex_); }
         turn_cv_.notify_all();
@@ -471,8 +484,18 @@ public:
     // Immutable for the session's lifetime (SessionParams::project_root): no
     // lock, and safe from any thread.
     std::filesystem::path project_root() const override { return params_.project_root; }
-    AgentLoop& loop() override { return *loop_; }
+    std::optional<std::size_t> CompactNow(std::string_view prompt_override = {}) override {
+        return loop_->CompactNow(prompt_override);
+    }
+    std::size_t ClearHistory() override {
+        const std::size_t dropped = loop_->history().size();
+        loop_->ClearHistory();
+        return dropped;
+    }
     tools::ToolExecutor& executor() override { return executor_; }
+    // Core's own handle on the loop (subagent spawning, tests); not part of
+    // SessionControl, so commands cannot reach it.
+    AgentLoop& loop() { return *loop_; }
     // WORKER-THREAD ONLY: a reference into state the worker rewrites in
     // ApplyPreset. A read-only command runs on the RPC layer's pool, not the
     // worker, and must use preset_snapshot() instead.

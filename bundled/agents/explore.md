@@ -3,7 +3,6 @@ name: explore
 description: Fast, read-only child for finding files, searching code and answering questions about the codebase.
 mode: subagent
 allowed_tools: ["read", "grep", "glob", "bash", "checklist"]
-allowed_skills: []
 permission_mode:
   file_write: deny
 steps: 20

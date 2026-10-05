@@ -8,7 +8,6 @@
 
 #include "minimal/agent/agent_preset_frontmatter.hpp"
 #include "minimal/config/config_bundle.hpp"
-#include "minimal/config/skill_registry.hpp"
 #include "minimal/agent/host_registries.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
@@ -26,7 +25,6 @@ using config::CheckSeverity;
 struct SanityCheckInputs {
     std::filesystem::path config_dir;
     const std::vector<plugins::PluginRecord>& plugin_records;
-    const config::SkillRegistry& skills;
     plugins::PluginConfig plugin_config;  // aliases, enablement state
     // A VALUE, not a reference: it is computed once (by ResolveRegistrationNames) and
     // its owner must not have to outlive the inputs struct.

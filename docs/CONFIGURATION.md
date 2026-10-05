@@ -94,10 +94,9 @@ Full example (`bundled/settings.json`):
 |---|---|---|---|
 | `auto_compact` | bool | `true` | |
 | `context_compaction_trigger` | object | absent = never | **exactly one** of `percent` (1–100), `tokens` (> 0), `buffer_tokens` (> 0) |
-| `context_compaction_trigger_tokens` | int | `0` | legacy flat key, honored only when the object form is absent; `0` = never |
 | `compaction_keep_recent_tokens` | int | `0` | absolute keep-verbatim budget (estimated tokens, newest first); when > 0 it overrides `compaction_replace_percent`. Keep it well below the trigger |
 | `compaction_replace_percent` | int | `80` | 1–100. Share of the working history (by estimated tokens, oldest first) that a compaction **replaces** with the summary; the rest stays verbatim after it. The summarizer always reads the **whole** history — its request is the session's own system prompt, tools and messages plus one appended instruction, so a provider with prefix caching serves it from cache. `100` replaces everything but the newest message. On the Anthropic provider, thinking blocks in the kept part are dropped from the working set (newer Claude models reject replaying thinking after the preceding context changed); chat-completions backends never replay thinking, so nothing changes there |
-| `compaction_strategy` | string | `"structured"` | name of a registered strategy (core built-in `structured`/`summarize` or plugin-registered); unknown name → warning, falls back. An agent preset's `compaction_strategy:` frontmatter overrides this per agent. `structured` asks the model to call the strict `record_summary` tool, which is therefore declared on every request (names and types only, ~190 tokens; the field guidance is sent with the compaction instruction; a stray call outside compaction is a no-op); a model that answers in text instead degrades to the free-text summary. A custom `compression_prompt:` (preset frontmatter or `/compact <name>`) always runs as free text |
+| `compaction_strategy` | string | `"summarize"` (seeded: `"structured"`) | name of a registered strategy (core built-in `summarize`, or plugin-registered — `structured` is the `compaction-structured` plugin); unknown name → warning, falls back. An agent preset's `compaction_strategy:` frontmatter overrides this per agent. `structured` asks the model to call the strict `record_summary` tool, which is therefore declared on every request (names and types only, ~190 tokens; the field guidance is sent with the compaction instruction; a stray call outside compaction is a no-op); a model that answers in text instead degrades to the free-text summary. A custom `compression_prompt:` (preset frontmatter or `/compact <name>`) always runs as free text |
 | `estimate_zero_usage` | bool | `true` | when a turn's backend usage is all zero (some OpenAI-compatible proxies), seed occupancy from the request's bytes/4 estimate so the compaction trigger arms, and flag the turn's wire usage `usage_estimated`. Estimates are never priced by cost tracking and never enter cumulative totals |
 | `scrollback_page_size` | int | `0` | |
 
@@ -106,8 +105,8 @@ the last message of the summarizer request: `prompts/compression.md` (free
 text; also the fallback) and `prompts/compression-structured.md` (the
 `structured` strategy's `record_summary` instruction and field guidance).
 Both are seeded from `bundled/prompts/` and never overwritten; a missing
-`compression-structured.md` is a startup warning and the structured strategy
-runs as free text.
+`compression-structured.md` makes the compaction-structured plugin log a
+warning at load, and the structured strategy runs as free text.
 
 Auto-compaction guards (manual `/compact` skips the first two):
 
@@ -127,10 +126,7 @@ scrollback, and appear on the headless `compaction` JSONL line.
 ### `tools.*`
 
 `tools` is also passed **verbatim to plugins** as `tools_settings` — unknown
-subkeys are legal and plugin-owned. `tools.mcp.{connect_timeout_ms,
-request_timeout_ms, max_list_pages, restart_cooldown_ms}` is the `mcp`
-plugin's legacy spelling of its limits (its `plugins.json` `config` wins; see
-docs/PLUGINS.md). Core recognizes:
+subkeys are legal and plugin-owned. Core recognizes:
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
@@ -331,7 +327,7 @@ provider for all its models — synthesizes sibling models addressed as
 appear in `/model`, `--model`, and `/think` like any model.
 
 Two spellings, one key (JSON's array/object distinction separates them, the
-same list-or-map convention `allowed_skills` uses):
+same list-or-map convention the skills plugin's slice uses):
 
 ```json
 "claude-opus-4-5": {
@@ -413,8 +409,7 @@ Mode vocabulary:
 | `pattern_overrides` | object | `{}` | tool permission key → **glob → mode** rules matched against the tool's subject (bash: the command line **and its stages** — see below; `read`/`write`/`edit`/`grep`/`glob`: the canonical path). Semantics: when any rule matches, the **most restrictive matching rule** replaces the category default, folded most-restrictively with an exact `per_tool_overrides` entry if there is one (so `"bash": "allow"` cannot defeat a matching deny); zero matches leave the exact entry or category default. Downstream folds (out-of-workdir, network, subagent ceilings, run modes) apply as always — a pattern can never bypass the substrate. An `ask` rule is never satisfied by a session grant: a held grant on `/usr/bin/git` does not carry `git push --force` past `"git push *": ask`. What most-restrictive folding cannot express: a strict broad rule plus a more-specific allow (`"git *": ask` + `"git status": allow` stays ask) — set `pattern_precedence: "specific"` for that |
 | `pattern_precedence` | string | `"restrictive"` | how matching pattern rules for one tool combine. `"restrictive"`: the most restrictive match wins. `"specific"`: a matching **deny** still wins outright; otherwise the most specific match wins (most literal characters; ties go to the stricter rule), so `"git *": ask` + `"git status": allow` allows `git status` and asks for everything else. For bash, every stage needs an allow winner and any ask or deny winner decides; normalized respellings still only tighten. Also settable per preset (`permission_mode.pattern_precedence`); a project-local preset cannot choose `"specific"` |
 | `external_directory_patterns` | object | `{}` | glob → mode rules on the `out_of_workdir` dimension, matched against the canonical **absolute** path of an invocation that resolved outside the project root; the most restrictive matching rule replaces the scalar `out_of_workdir` for that invocation |
-| `plugins` | object | `{}` | plugin name → that plugin's permission-model slice, verbatim (core checks only that it is an object). `mcp`: `{"default": mode}` — the mode for MCP servers a preset does not name. `tools-web`: `{"default": mode, "hosts": {glob: mode}}` — per-host network rules for `web_fetch`/`web_search` (most specific glob wins; unmatched → `default`, else `fallback.network`) |
-| `mcp_default_mode` | string | — | legacy spelling of `plugins.mcp.default` (an explicit `plugins.mcp.default` wins) |
+| `plugins` | object | `{}` | plugin name → that plugin's permission-model slice, verbatim (core checks only that it is an object). `mcp`: `{"default": mode, "transport": {"local": mode, "remote": mode}, "signals": {"<channel>/<signal>"|"<channel>"|"*": mode}}` — `default` is the mode for MCP servers a preset does not name, `transport` overrides it by how the server is reached (`local` = stdio, `remote` = http), and `signals` gates `channels.json` notifications per receiving session (most specific key wins; no rule = delivered; a preset's `plugin_permissions.mcp.signals` refines it and a project preset may only narrow). `tools-web`: `{"default": mode, "hosts": {glob: mode}}` — per-host network rules for `web_fetch`/`web_search` (most specific glob wins; unmatched → `default`, else `fallback.network`) |
 | `advisor` | string | — | plugin name of a permission advisor; unknown name → warning |
 | `advisor_inherit` | bool | `false` | also let the advisor answer inside subagent sessions. An advisor decides one invocation at a time and never mints session grants |
 | `advisor_timeout_ms` | int | `30000` | ≥ 0; `0` disables the advisor budget |
@@ -716,8 +711,8 @@ shows through.
   preset is **required**; a broken *non-default* preset only warns. A preset may
   name its own `model: <provider>/<model>`, overriding `default_model`
   (`--model` / `/model` override both), and its own `compaction_strategy: <name>`
-  — the strategy kind its compaction summaries use (`structured`, the settings
-  default, or `summarize`; see `memory.compaction_strategy`). Absent = the
+  — the strategy kind its compaction summaries use (`summarize`, or a
+  plugin's: `structured`; see `memory.compaction_strategy`). Absent = the
   settings-level strategy stands; a name nothing registered warns once per
   session and degrades the same way.
 - **`allowed_tools`** — the allow-list of core/plugin tools the preset runs
@@ -730,8 +725,8 @@ shows through.
   unknown entry warns at startup ("matches no registered tool" — a typo, or
   the providing plugin is disabled). MCP tools are never governed by
   `allowed_tools` — not even by `["*"]` — they follow `tool_sources` /
-  `plugin_permissions`. Two names are conditional: `skill` only surfaces when
-  `allowed_skills` is non-empty, and `spawn_subagent` is stripped from
+  `plugin_permissions`. Two names are conditional: `skill` (skills plugin)
+  only surfaces when the preset may load a skill, and `spawn_subagent` is stripped from
   subagent sessions (no recursion is a hard rule, not preset config). The
   valid set is whatever is registered under `plugins.json`'s enablement; with
   every bundled plugin enabled:
@@ -754,7 +749,7 @@ shows through.
   preset may spawn. Absent = every spawnable preset; `["*"]` is explicit
   "all"; a present list is the exact set, and a present EMPTY list means no
   spawns at all — `spawn_subagent` is withheld from the session entirely, the
-  same fail-closed rule as `allowed_skills` resolving empty. An unlisted
+  same fail-closed rule as the skills plugin withholding `skill`. An unlisted
   preset is refused by `SubagentManager::Spawn` with a named error before any
   child session exists. An entry naming no preset warns at resolve time (a
   typo would silently shrink the set). The spawn tool's per-preset definition
@@ -779,34 +774,35 @@ shows through.
   `mode: subagent` presets, and the merged skill view) are memoized per
   canonical project root.
 
-- **opencode-compat preset fields** — also accepted in the frontmatter:
+- **More preset fields** (opencode's names, native here) — also accepted in the frontmatter:
   `mode: all|primary|subagent` (subagent = spawnable but hidden from the agent
   picker; never gates spawnability), `disable: true` (refuses to resolve, not
   listed), `hidden: true` (not listed, still spawnable), `color: "#rrggbb"`
   (agent picker), `steps: <int>` (ceiling on tool rounds when the preset runs
-  AS A SUBAGENT; a spawn request may lower it, never raise it), a deprecated
-  opencode `tools:` map (`name: true|false` → per-tool allow/deny overrides),
-  and a `permission:` block (`read/glob/grep/list`→read_only, `edit`/`write`→
-  file_write, `bash`→execute, `webfetch`/`websearch`→network,
-   `external_directory`→out_of_workdir; a native `permission_mode` field wins
-   over the alias). Note that `permission_mode` (native or aliased) only sets
-   ask/allow/deny for tools the preset already admits — see `allowed_tools`
-   above. Any OTHER frontmatter key is passed through to the provider
-   as a request parameter (`temperature`, `top_p`, `reasoningEffort`, ...),
-   overriding the model config's value.
+  AS A SUBAGENT; a spawn request may lower it, never raise it), and a
+  `permission:` block: `edit`/`write`→file_write, `external_directory`→
+  out_of_workdir, and a key naming a loaded tool — its permission key, or a
+  spelling the tool declares (tools-web: `webfetch`, `websearch`) — governs
+  that tool only (a scalar is a per-tool rule, a `{glob: mode}` map its
+  patterns, unless the tool takes no patterns). A key naming neither warns and
+  is ignored; a native `permission_mode` field wins over the block. Note that
+  `permission_mode` (native or aliased) only sets ask/allow/deny for tools the
+  preset already admits — see `allowed_tools` above. Any OTHER frontmatter key
+  is passed through to the provider as a request parameter (`temperature`,
+  `top_p`, `reasoningEffort`, ...), overriding the model config's value —
+  except request fields the harness owns (`tools`, `tool_choice`, `messages`,
+  `stream`), which are ignored with a warning.
 - **`tool_sources:`** — dynamic tool members a plugin offers, per source:
   `tool_sources: {mcp: [github, search]}` allows those `mcps.json` servers'
   tools. Each member is brought up at session start and on `/agent`; one that
   cannot come up is reported as a session error and its tools stay hidden.
   A subagent keeps only members its parent also has. A source no loaded
-  plugin provides, or a member it does not know, warns at startup. Legacy:
-  `allowed_mcp_servers: [...]` reads as `tool_sources.mcp`.
+  plugin provides, or a member it does not know, warns at startup.
 - **`plugin_permissions:`** — each plugin permission model's preset slice,
   verbatim: `plugin_permissions: {mcp: {servers: {github: allow}}, tools-web:
   {hosts: {"docs.python.org": allow}}}`. A preset's rule wins over
   `permissions.json`'s `plugins` slice; a project-local preset may only
-  narrow. Legacy: `mcp_permissions: {server: mode}` reads as
-  `plugin_permissions.mcp.servers`.
+  narrow.
 - **`tool_config:`** — per-tool/per-plugin configuration, a map of
   `{<namespace>: {...}}` addressed by the namespace a plugin's tools declare
   (`Tool::config_namespace()`; currently `python` for the tools-python
@@ -828,20 +824,22 @@ shows through.
   `<dir>/.agents/skills/*/SKILL.md`; the nearest directory wins on a name
   collision and a project skill shadows a global one. The `skill` tool's
   preset-scoped description (see the preset-scoped tool definitions note under
-  `allowed_subagents`), the preset's `allowed_skills` resolution, and the tool
-  itself all consult the same session-scoped view, so the description never
-  advertises a skill the tool would refuse.
-- **`allowed_skills` modes** — the list form means every entry is `allow`; the
-  map form gives per-skill `allow` (listed, tool loads outright), `ask` (listed,
-  marked "(asks before loading)"; the tool narrows its own permission resolution
-  to Ask with the stable grant key `skill:<name>`, so "always" covers later
-  loads of that skill only), `deny` (hidden; the tool refuses), and `preload`
-  (the full body ships in the system prompt at session start and survives
-  compaction like any constant section; not tool-callable). `"*"` is legal in
-  both forms and an explicit entry beats it for that name. Subagent clamping is
-  elementwise most-restrictive over `preload < allow < ask < deny` — a child
-  can never widen into its parent's preloads, and a preload under an
-  allow-only parent demotes to plain allow.
+  `allowed_subagents`), the skills slice's resolution, and the tool itself all
+  consult the same session-scoped view, so the description never advertises a
+  skill the tool would refuse.
+- **Skill access (the `skills` plugin)** — a preset's
+  `plugin_permissions: {skills: ...}` slice over `permissions.json`'s
+  `plugins.skills` (a preset entry replaces the operator's for that name). The
+  list form means every entry is `allow`; the map form gives per-skill `allow`
+  (listed, tool loads outright), `ask` (listed, marked "(asks before
+  loading)"; loading prompts with the stable grant key `skill:<name>`, so
+  "always" covers later loads of that skill only), `deny` (hidden; the tool is
+  refused), and `preload` (the full body ships in the system prompt and
+  survives compaction like any constant section; not tool-callable). `"*"` is
+  legal in both forms and an explicit entry beats it for that name. Subagent
+  clamping is elementwise most-restrictive over `preload < allow < ask <
+  deny` — a child can never widen into its parent's preloads, and a preload
+  under an allow-only parent demotes to plain allow.
 - **`prompts/<name>.md`** — system prompt fragments (e.g. `compression.md`,
   `subagent.md`). Missing `compression.md` → warning.
 

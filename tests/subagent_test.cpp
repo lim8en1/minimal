@@ -41,6 +41,10 @@
 #include "minimal/agent/subagent_manager.hpp"
 #include "minimal/common/logger.hpp"
 #include "temp_dir.hpp"
+#include "skill_registry.hpp"
+#include "skill_tool.hpp"
+#include "skills_model.hpp"
+#include "skills_preset.hpp"
 
 using namespace minimal;
 using namespace std::chrono_literals;
@@ -62,8 +66,7 @@ struct SubagentFixture {
     explicit SubagentFixture(std::int64_t max_concurrent = 4,
                              nlohmann::json permissions =
                                  nlohmann::json{{"per_tool_overrides",
-                                                 {{"spawn_subagent", "allow"}}}})
-        : skills(config::SkillRegistry::Load(dir.path())) {
+                                                 {{"spawn_subagent", "allow"}}}}) {
         std::filesystem::create_directories(dir.path() / "agents");
         std::filesystem::create_directories(dir.path() / "prompts");
         std::filesystem::create_directories(workdir);
@@ -115,12 +118,19 @@ struct SubagentFixture {
                bool advisor_inherit = false,
                std::string default_subagent_model = "") {
         presets = std::make_unique<agent::AgentPresetRegistry>(
-            dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
+            dir.path(), config::LoadSettingsConfig(dir.path() / "settings.json"));
         // Production registers the preset-scoped definition builders beside the
         // tools themselves (main.cpp); the mirror here keeps the spawn path's
         // child resolve producing the same overrides a real server bakes in.
-        presets->SetDefinitionBuilder(agent::kSkillToolName,
-                                      agent::AgentPresetRegistry::MakeSkillDefinitionBuilder());
+        // The skills plugin's seams, as the loader would register them.
+        skill_models.SetAttribution("skills");
+        skill_models.Register(skills::MakeSkillsPermissionModel());
+        skill_models.ClearAttribution();
+        skill_extensions.AddDefinitionBuilder(skills::kSkillToolName,
+                                              skills::MakeSkillDefinitionBuilder(skill_registry));
+        skill_extensions.AddPromptAppendix(skills::MakePreloadAppendix(skill_registry));
+        presets->SetPermissionModels(&skill_models);
+        presets->SetExtensions(&skill_extensions);
         presets->SetDefinitionBuilder(agent::kSpawnSubagentToolName,
                                       agent::MakeSpawnDefinitionBuilder());
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
@@ -152,7 +162,7 @@ struct SubagentFixture {
 
     void BuildWithLimit(std::int64_t max_concurrent) {
         presets = std::make_unique<agent::AgentPresetRegistry>(
-            dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
+            dir.path(), config::LoadSettingsConfig(dir.path() / "settings.json"));
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir.path() / "sessions.db");
         sessions = std::make_unique<agent::SessionRegistry>(*presets, rpc::FinishSessionWiring,
@@ -254,12 +264,12 @@ struct SubagentFixture {
 
     testing::TempDir dir;
     std::filesystem::path workdir = dir.path() / "work";
-    config::SkillRegistry skills;
+    skills::SkillRegistry skill_registry;
+    tools::PermissionModelRegistry skill_models;
+    agent::PresetExtensionRegistry skill_extensions;
 
-    // Re-scans skills/ AFTER a test has written skill files: the member
-    // initialiser runs before the fixture body writes anything, so a skill
-    // test reloads explicitly before Build().
-    void LoadSkills() { skills = config::SkillRegistry::Load(dir.path()); }
+    // Scans skills/ AFTER a test has written skill files, before Build().
+    void LoadSkills() { skill_registry = skills::SkillRegistry::Load(dir.path()); }
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
     std::map<std::string, std::shared_ptr<Script>> scripts;
@@ -1272,10 +1282,10 @@ TEST_CASE("a child cannot widen a skill into preload its parent only allows",
                   "---\nname: research\ndescription: Deep research.\n---\nRESEARCH BODY.\n");
     fixture.Write("agents/main.md",
                   "---\nname: main\nmodel: main/parent-script\nallowed_tools: [\"*\"]\n"
-                  "allowed_skills:\n  research: allow\n---\nYou are the main agent.\n");
+                  "plugin_permissions:\n  skills:\n    research: allow\n---\nYou are the main agent.\n");
     fixture.Write("agents/child.md",
                   "---\nname: child\nmodel: childmain/child-script\nallowed_tools: [\"*\"]\n"
-                  "allowed_skills:\n  research: preload\n---\nYou are the child agent.\n");
+                  "plugin_permissions:\n  skills:\n    research: preload\n---\nYou are the child agent.\n");
     fixture.LoadSkills();
     fixture.Build();
     auto parent = fixture.CreateParent();
@@ -1298,13 +1308,11 @@ TEST_CASE("a child cannot widen a skill into preload its parent only allows",
     // The demotion is the point: the child asked for always-on, the parent
     // offered on-demand, and the child is never MORE permissive than its
     // parent -- so it gets the listing and the tool, not the prompt injection.
-    CHECK(child->preset().allowed_skills ==
-          (std::map<std::string, agent::SkillMode>{{"research", agent::SkillMode::Allow}}));
     CHECK(child->preset().system_prompt.find("## Preloaded skills") == std::string::npos);
     // The demoted skill is listed in the child's preset-scoped skill tool
     // description (the listing no longer renders into the system prompt).
-    REQUIRE(child->preset().tool_definition_overrides.count(agent::kSkillToolName) == 1);
-    CHECK(child->preset().tool_definition_overrides.at(agent::kSkillToolName)
+    REQUIRE(child->preset().tool_definition_overrides.count(skills::kSkillToolName) == 1);
+    CHECK(child->preset().tool_definition_overrides.at(skills::kSkillToolName)
               .description.find("- research: Deep research.") != std::string::npos);
 
     // And the equal-mode case survives intact: preload under preload stays

@@ -84,9 +84,8 @@ struct SubagentE2EFixture {
     }
 
     void Start() {
-        skills = config::SkillRegistry::Load(dir);
         presets = std::make_unique<agent::AgentPresetRegistry>(
-            dir, skills, config::LoadSettingsConfig(dir / "settings.json"));
+            dir, config::LoadSettingsConfig(dir / "settings.json"));
         providers.Register("fake", [scripts = this->scripts](const llm::ProviderConfig& cfg)
                                        -> std::unique_ptr<llm::LlmProvider> {
             const auto it = scripts.find(cfg.model_name);
@@ -136,7 +135,6 @@ struct SubagentE2EFixture {
 
     std::filesystem::path dir, socket;
     std::map<std::string, std::shared_ptr<testing::ScriptedProviderScript>> scripts;
-    config::SkillRegistry skills;
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
     std::unique_ptr<agent::AgentPresetRegistry> presets;

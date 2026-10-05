@@ -149,36 +149,28 @@ TEST_CASE("LabelContinuations labels an assistant turn once, resetting at bounda
     CHECK(continuations == expected);
 }
 
-TEST_CASE("SummarizeToolInput prefers bash's $command over a generic dump",
+TEST_CASE("SummarizeToolInput is the same generic dump for every tool name",
           "[chat_model][tool_summary]") {
+    // A better line is the tool's own business (Tool::Summary -> the wire
+    // summary); the client never special-cases a tool by name.
     nlohmann::json input = {{"command", "ls -la"}};
-    CHECK(client::SummarizeToolInput("bash", input) == "$ ls -la");
-}
-
-TEST_CASE("SummarizeToolInput falls back to a truncated JSON dump for other tools",
-          "[chat_model][tool_summary]") {
-    nlohmann::json input = {{"path", "a.md"}};
-    CHECK(client::SummarizeToolInput("read", input) == input.dump());
+    CHECK(client::SummarizeToolInput(input) == input.dump());
 }
 
 TEST_CASE("SummarizeToolInput is empty for null/empty input, not a bare \"{}\"",
           "[chat_model][tool_summary]") {
-    CHECK(client::SummarizeToolInput("bash", nlohmann::json::object()).empty());
-    CHECK(client::SummarizeToolInput("bash", nlohmann::json()).empty());
+    CHECK(client::SummarizeToolInput(nlohmann::json::object()).empty());
+    CHECK(client::SummarizeToolInput(nlohmann::json()).empty());
 }
 
-TEST_CASE("SummarizeToolInput collapses a multi-line bash command to one line",
+TEST_CASE("OneLineSummary collapses a multi-line wire summary to one line",
           "[chat_model][tool_summary]") {
     // The live tool row and the tools panel render the summary as ONE
     // text() -- which ftxui sizes as a single row regardless of embedded
     // '\n's, so heredocs and line continuations used to spill over every
     // row below them (frame_renderer.cpp's notice-path bug class).
-    nlohmann::json input = {{"command", "cat <<EOF\nhello\nworld\nEOF"}};
-    const auto summary = client::SummarizeToolInput("bash", input);
-    CHECK(summary.find('\n') == std::string::npos);
-    CHECK(summary.find("hello") != std::string::npos);
-    CHECK(summary.find("world") != std::string::npos);
-    CHECK(client::SummarizeToolInput("bash", input) == "$ cat <<EOF hello world EOF");
+    const auto summary = client::OneLineSummary("$ cat <<EOF\nhello\nworld\nEOF");
+    CHECK(summary == "$ cat <<EOF hello world EOF");
 }
 
 TEST_CASE("OneLineSummary truncates an overlong command mid-content",

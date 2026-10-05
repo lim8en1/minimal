@@ -40,6 +40,9 @@ public:
     std::optional<PermissionMode> mode_override_for(const nlohmann::json& input,
                                                     const ToolContext& ctx) const override;
     PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext& ctx) const override;
+    std::string Summary(const nlohmann::json& input) const override { return inner_->Summary(input); }
+    std::vector<std::string> config_aliases() const override { return inner_->config_aliases(); }
+    bool accepts_pattern_rules() const override { return inner_->accepts_pattern_rules(); }
 
 private:
     std::shared_ptr<Tool> inner_;

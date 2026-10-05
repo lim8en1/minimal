@@ -13,7 +13,6 @@
 #include "minimal/common/read_file.hpp"
 #include "minimal/config/frontmatter.hpp"
 #include "minimal/config/project_dirs.hpp"
-#include "minimal/tools/skill_tool.hpp"
 
 namespace minimal::agent {
 
@@ -28,138 +27,36 @@ std::string ReadFileRequired(const std::filesystem::path& path, const std::strin
     return std::move(result.contents);
 }
 
-// Resolves the raw allowed_skills map against the session's merged skill view
-// (global ∪ project overlay). Only LOADED skills appear: a failed skill's
-// reason surfaces through SkillTool at invocation time, and unknown names are
-// skipped here (the startup sanity check reports them at load time). `merged`
-// is sorted, so both the resolved map and every rendering of it are
-// deterministic -- they sit in the cached prefix and must not reorder turn to
-// turn.
-//
-// allowed_skills ∩ loaded, with `*` expanded. An explicit entry wins over the
-// "*" entry for the same name (specific beats catch-all, matching opencode's
-// last-rule-wins spirit). Explicit deny entries resolve OUT -- absence is deny,
-// which keeps the subagent clamp uniform -- so the resolved map holds only
-// Preload/Allow/Ask. Computed ONCE and used for both the listing and
-// AgentPreset::allowed_skills, so the prompt cannot advertise a skill the tool
-// would refuse, nor the tool be offered with nothing listed.
-std::map<std::string, SkillMode> ResolveAllowedSkills(
-    const std::map<std::string, SkillMode>& allowed,
-    const std::vector<config::SkillMeta>& merged) {
-    const auto star = allowed.find("*");
-    const bool has_star = star != allowed.end();
-    const SkillMode star_mode =
-        has_star && star->second != SkillMode::Deny ? star->second : SkillMode::Deny;
-
-    std::map<std::string, SkillMode> resolved;
-    for (const auto& meta : merged) {
-        if (!meta.loaded) continue;
-        const auto it = allowed.find(meta.name);
-        const SkillMode mode = it != allowed.end() ? it->second : star_mode;
-        if (mode == SkillMode::Deny) continue;
-        resolved[meta.name] = mode;
-    }
-    return resolved;  // merged is sorted; the map keeps it so
-}
-
-const config::SkillMeta* FindInMerged(const std::vector<config::SkillMeta>& merged,
-                                      const std::string& name) {
-    for (const auto& meta : merged) {
-        if (meta.name == name) return &meta;
-    }
-    return nullptr;
-}
-
-// The on-demand listing, as rendered into the `skill` tool's preset-scoped
-// description (AgentPresetRegistry::MakeSkillDefinitionBuilder): Allow and Ask
-// entries, one bullet each. Ask entries say so, so the model can prefer a
-// no-friction skill when two cover the task. No trailing newline -- it is
-// appended to the description text.
-std::string RenderSkillListing(const std::map<std::string, SkillMode>& resolved,
-                               const std::vector<config::SkillMeta>& merged) {
-    std::string out;
-    for (const auto& [name, mode] : resolved) {
-        if (mode == SkillMode::Preload) continue;  // not tool-callable
-        const config::SkillMeta* meta = FindInMerged(merged, name);
-        if (meta == nullptr) continue;  // unreachable: resolved came from merged
-        if (out.empty()) {
-            out = "Available skills:\n";
-        } else {
-            out += "\n";
-        }
-        out += "- " + meta->name + ": " + meta->description +
-               (mode == SkillMode::Ask ? " (asks before loading)" : "");
-    }
-    return out;
-}
-
-// The preload half: full bodies under one header, plus the instruction that
-// makes re-invocation pointless to the model. Returns the section (possibly
-// empty) and DEMOTES an unreadable preload to on-demand (Allow) -- a skill that
-// fails to open must fall back to being listed, never silently vanish.
-std::string RenderPreloadedSkills(
-    const std::map<std::string, SkillMode>& resolved,
-    const config::SkillRegistry& skills, const std::filesystem::path& project_root,
-    std::map<std::string, SkillMode>& tool_skills) {
-    std::string out;
-    for (const auto& [name, mode] : resolved) {
-        if (mode != SkillMode::Preload) continue;
-        const auto body = skills.LoadBodyFor(project_root, name);
-        if (!body) {
-            common::DefaultLogger().warn(
-                "skill '{}' is marked preload but its body could not be read; "
-                "falling back to on-demand loading",
-                name);
-            tool_skills[name] = SkillMode::Allow;
-            continue;
-        }
-        // Successfully preloaded: OUT of the tool-side map. (A failed read
-        // demotes to Allow above, so the name stays loadable on demand.)
-        tool_skills.erase(name);
-        if (out.empty()) {
-            out = "\n## Preloaded skills\n\n"
-                  "The full instructions for these skills are ALREADY in your context; "
-                  "do not call the `skill` tool for them.\n\n";
-        }
-        out += "### " + name + "\n\n" + *body + "\n";
-    }
-    return out;
-}
-
 }  // namespace
 
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
-                                         const config::SkillRegistry& skills,
                                          const config::SettingsConfig& settings,
                                          ToolPermissionKeys tool_permission_keys,
                                          const llm::VariantParamsRegistry* variant_params)
-    : AgentPresetRegistry(config_dir, skills, settings,
+    : AgentPresetRegistry(config_dir, settings,
                           config::LoadPermissionsConfig(config_dir / "permissions.json"),
                           std::move(tool_permission_keys), variant_params) {}
 
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
-                                         const config::SkillRegistry& skills,
                                          const config::SettingsConfig& settings,
                                          const config::PermissionsConfig& permissions,
                                          ToolPermissionKeys tool_permission_keys,
                                          const llm::VariantParamsRegistry* variant_params)
-    : AgentPresetRegistry(config_dir, skills, settings, permissions,
+    : AgentPresetRegistry(config_dir, settings, permissions,
                           std::make_unique<config::ProvidersConfig>(config::LoadProvidersConfig(
                               config_dir / "providers.json",
                               config::MakeVariantParamsHook(variant_params))),
                           nullptr, std::move(tool_permission_keys)) {}
 
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
-                                         const config::SkillRegistry& skills,
                                          const config::SettingsConfig& settings,
                                          const config::PermissionsConfig& permissions,
                                          const config::ProvidersConfig& providers,
                                          ToolPermissionKeys tool_permission_keys)
-    : AgentPresetRegistry(config_dir, skills, settings, permissions, nullptr, &providers,
+    : AgentPresetRegistry(config_dir, settings, permissions, nullptr, &providers,
                           std::move(tool_permission_keys)) {}
 
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
-                                         const config::SkillRegistry& skills,
                                          const config::SettingsConfig& settings,
                                          const config::PermissionsConfig& permissions,
                                          std::unique_ptr<config::ProvidersConfig> owned,
@@ -171,28 +68,24 @@ AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
       providers_(borrowed != nullptr ? *borrowed : *owned_providers_),
       settings_(settings),
       permissions_(permissions),
-      skills_(skills),
       tool_permission_keys_(std::move(tool_permission_keys)) {
     // Both optional at this phase -- a real deployment's absence is the
     // startup sanity check's job to flag, not this constructor's.
     subagent_prefix_ = common::ReadFileOrEmpty(config_dir_ / "prompts" / "subagent.md");
     default_compression_prompt_ =
         config::parse_frontmatter_markdown(common::ReadFileOrEmpty(config_dir_ / "prompts" / "compression.md")).body;
-    structured_compression_prompt_ = config::parse_frontmatter_markdown(
-        common::ReadFileOrEmpty(config_dir_ / "prompts" / "compression-structured.md")).body;
 }
 
 AgentPreset AgentPresetRegistry::Resolve(
     const std::string& preset_name, const std::filesystem::path& requested_root,
-    const std::optional<std::map<std::string, SkillMode>>& parent_skills,
-    const std::optional<config::ModelRef>& model_override) const {
+    const AgentPreset* parent, const std::optional<config::ModelRef>& model_override) const {
     const std::filesystem::path project_root = EffectiveRoot(requested_root);
-    if (parent_skills.has_value() || model_override.has_value()) {
+    if (parent != nullptr || model_override.has_value()) {
         // The clamp input varies per parent, so no cache: resolve fresh every
         // time (spawn is rare; a resolve is frontmatter reads plus a model
         // lookup, not a turn). A model_override is likewise per-caller state,
         // not a property of (preset_name, root) worth caching.
-        return ResolveUncached(preset_name, project_root, parent_skills, model_override);
+        return ResolveUncached(preset_name, project_root, parent, model_override);
     }
 
     // The cache key canonicalizes the root: two sessions giving the same
@@ -217,7 +110,7 @@ AgentPreset AgentPresetRegistry::Resolve(
     // result is a pure function of files that do not change at runtime, and the
     // insert below keeps whichever landed first so every later caller still sees
     // one consistent value.
-    AgentPreset resolved = ResolveUncached(preset_name, canonical, std::nullopt, std::nullopt);
+    AgentPreset resolved = ResolveUncached(preset_name, canonical, nullptr, std::nullopt);
 
     std::lock_guard<std::mutex> lock(cache_mu_);
     return cache_.emplace(std::make_pair(preset_name, std::move(canonical)), std::move(resolved))
@@ -265,7 +158,7 @@ std::vector<AgentPresetSummary> AgentPresetRegistry::ListPresets(
             const std::string id = entry.path().stem().string();
             try {
                 const AgentPresetFrontmatter raw =
-                    LoadAgentPresetFrontmatter(entry.path(), tool_permission_keys_.all);
+                    LoadAgentPresetFrontmatter(entry.path(), tool_permission_keys_.vocabulary());
                 if (record != nullptr) record->insert(id);
                 // Visibility rules. Picker: disabled presets cannot run at all;
                 // `hidden` and `mode: subagent` presets are spawnable but not
@@ -332,7 +225,6 @@ const PresetToolEnv& AgentPresetRegistry::EnvFor(const std::filesystem::path& pr
     // keeps whichever landed first so every caller sees one consistent env.
     PresetToolEnv env;
     env.available_agents = ListPresets(project_root, /*picker_visibility=*/false);
-    env.skills = skills_.AllFor(project_root);
 
     std::lock_guard<std::mutex> lock(cache_mu_);
     return env_cache_.emplace(std::move(canonical), std::move(env)).first->second;
@@ -391,12 +283,12 @@ bool AgentPresetRegistry::PresetDeclaresModel(const std::string& preset_name,
     bool from_project = false;
     const std::filesystem::path preset_path =
         FindPresetPath(preset_name, EffectiveRoot(requested_root), from_project);
-    return !LoadAgentPresetFrontmatter(preset_path, tool_permission_keys_.all).model.empty();
+    return !LoadAgentPresetFrontmatter(preset_path, tool_permission_keys_.vocabulary()).model.empty();
 }
 
 AgentPreset AgentPresetRegistry::ResolveUncached(
     const std::string& preset_name, const std::filesystem::path& project_root,
-    const std::optional<std::map<std::string, SkillMode>>& parent_skills,
+    const AgentPreset* parent,
     const std::optional<config::ModelRef>& model_override) const {
     // Shadowing is logged once per (name, root) because the cache makes
     // ResolveUncached run once per key -- FindPresetPath itself stays silent
@@ -410,7 +302,7 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
             preset_path.string());
     }
     const AgentPresetFrontmatter raw =
-        LoadAgentPresetFrontmatter(preset_path, tool_permission_keys_.all);
+        LoadAgentPresetFrontmatter(preset_path, tool_permission_keys_.vocabulary());
     if (raw.disable) {
         // Refuse rather than resolve: a disabled preset must not run through
         // /agent, spawn, or a default_model reference.
@@ -475,39 +367,9 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     preset.hidden = raw.hidden;
     preset.color = raw.color;
     preset.steps = raw.steps;
-    // The skill listing is part of the resolved system prompt, baked in here at
-    // resolution time: config is static for the process lifetime, so it cannot
-    // drift from what SkillTool will serve on invocation. The merged view is
-    // taken for THIS session's project root, so a project's skills/ directory
-    // is advertised in its own sessions and nobody else's. The parent ceiling
-    // (spawn path) clamps BEFORE baking -- a demoted preload must never ship
-    // its body -- and only then are preload entries consumed (their bodies
-    // ship; they never reach the tool) while an unreadable body demotes to
-    // on-demand rather than vanishing.
-    const std::vector<config::SkillMeta> merged_skills = skills_.AllFor(project_root);
-    std::map<std::string, SkillMode> resolved_skills =
-        ResolveAllowedSkills(raw.allowed_skills, merged_skills);
-    if (parent_skills.has_value()) {
-        // Elementwise most-restrictive over the SkillMode lattice (Preload
-        // widest .. Deny narrowest); a skill the parent lacks is deny.
-        std::map<std::string, SkillMode> clamped;
-        for (const auto& [skill, mode] : resolved_skills) {
-            const auto it = parent_skills->find(skill);
-            if (it == parent_skills->end()) continue;
-            clamped[skill] = std::max(it->second, mode);
-        }
-        resolved_skills = std::move(clamped);
-    }
-    std::map<std::string, SkillMode> tool_skills = resolved_skills;
-    const std::string preloaded = RenderPreloadedSkills(resolved_skills, skills_, project_root,
-                                                        tool_skills);
-    // The on-demand skill listing used to be rendered into the system prompt;
-    // it now rides the `skill` tool's preset-scoped definition instead (the
-    // builder below -- registered by main.cpp beside the tool itself), so the
-    // prompt carries only the preset body and the preloaded bodies. The
-    // preload demotion in the call above still runs HERE: it must, or an
-    // unreadable preload would silently vanish from both surfaces.
-    preset.system_prompt = raw.body + preloaded;
+    // Plugin prompt appendices (preloaded skill bodies) join below, once the
+    // preset's permission models are bound -- they read them.
+    preset.system_prompt = raw.body;
     preset.model_declared = !raw.model.empty();
     ApplyModel(preset, *resolved_model);
     // Preset extras (temperature, top_p, reasoningEffort, ...) override the
@@ -532,7 +394,6 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
             preset.allowed_subagents = raw.allowed_subagents;
         }
     }
-    preset.allowed_skills = tool_skills;
     preset.tool_sources = raw.tool_sources;
     // Per-tool plugin config rides verbatim; namespaced slices are delivered
     // per-invocation by the agent loop (ToolContext::tool_config).
@@ -561,7 +422,6 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     } else {
         preset.compression_prompt = default_compression_prompt_;
     }
-    preset.structured_compression_prompt = structured_compression_prompt_;
     // The NAME travels verbatim; resolving it against the strategy registry is
     // the loop's job at compaction time (the registry is still filling here --
     // plugins register after presets load -- and /agent re-resolution must
@@ -571,17 +431,27 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     // memory.compaction_strategy.
     preset.compaction_strategy = raw.compaction_strategy;
 
-    // --- Preset-scoped tool definitions ---------------------------------------
+    // --- Preset-scoped extensions: tool definitions and prompt appendices ----
     // Run ONCE here, on the frozen preset the cache is about to hold (and on
-    // the uncached spawn path too, where the skill builder MUST re-run: the
-    // parent clamp above changes the listing per parent). The builders'
-    // per-root inputs come memoized from EnvFor, so N presets of one root
-    // scan agents/ and skills/ once; a deployment with neither a builder nor
-    // any allowlisted preset skips the scan entirely.
+    // the uncached spawn path too, where an extension MUST re-run: `parent`
+    // changes what a child may have). The builders' per-root inputs come
+    // memoized from EnvFor, so N presets of one root scan agents/ once; a
+    // deployment with neither a builder nor any allowlisted preset skips the
+    // scan entirely.
     std::map<std::string, PresetToolDefinitionBuilder> builders;
     {
         std::lock_guard<std::mutex> lock(cache_mu_);
         builders = definition_builders_;
+    }
+    if (extensions_ != nullptr) {
+        for (const auto& entry : extensions_->builders()) builders[entry.tool_name] = entry.build;
+    }
+    if (extensions_ != nullptr && !extensions_->appendices().empty()) {
+        const PresetToolEnv no_env;
+        const PresetToolContext ctx{preset, preset_name, no_env, project_root, parent};
+        for (const auto& appendix : extensions_->appendices()) {
+            preset.system_prompt += appendix.render(ctx);
+        }
     }
     const bool need_listing =
         !builders.empty() ||
@@ -607,7 +477,7 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
         }
         for (auto& [tool_name, builder] : builders) {
             preset.tool_definition_overrides[tool_name] =
-                builder(PresetToolContext{preset, preset_name, env});
+                builder(PresetToolContext{preset, preset_name, env, project_root, parent});
         }
     }
 
@@ -634,22 +504,31 @@ std::string AgentPresetRegistry::ResolveCompressionPrompt(const std::string& nam
     return LoadCompressionPromptFile(name, "compression prompt '" + name + "'");
 }
 
-PresetToolDefinitionBuilder AgentPresetRegistry::MakeSkillDefinitionBuilder() {
-    // The static base definition comes from the tool itself (skill_tool.hpp),
-    // so the schema lives in exactly one place; the builder's whole job is
-    // appending the preset's own listing. preset.allowed_skills is the FINAL
-    // tool-side set -- clamped for spawn children, "*" expanded, preload
-    // entries consumed (they ship in the system prompt, never the tool) --
-    // so the description cannot advertise a skill the tool would refuse,
-    // which is the invariant the old system-prompt rendering guaranteed.
-    return [](const PresetToolContext& ctx) {
-        llm::ToolDefinition def = tools::MakeSkillToolDefinition();
-        std::string listing = RenderSkillListing(ctx.preset.allowed_skills, ctx.env.skills);
-        if (!listing.empty()) {
-            def.description += "\n\n" + std::move(listing);
-        }
-        return def;
-    };
+void PresetExtensionRegistry::AddDefinitionBuilder(std::string tool_name,
+                                                   PresetToolDefinitionBuilder builder) {
+    if (builder) builders_.push_back({attribution_, std::move(tool_name), std::move(builder)});
+}
+
+void PresetExtensionRegistry::AddPromptAppendix(PresetPromptAppendix appendix) {
+    if (appendix) appendices_.push_back({attribution_, std::move(appendix)});
+}
+
+void PresetExtensionRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    const auto owned = [&](const auto& entry) { return entry.plugin == plugin_name; };
+    builders_.erase(std::remove_if(builders_.begin(), builders_.end(), owned), builders_.end());
+    appendices_.erase(std::remove_if(appendices_.begin(), appendices_.end(), owned),
+                      appendices_.end());
+}
+
+std::vector<std::string> PresetExtensionRegistry::OwnedBy(const std::string& plugin_name) const {
+    std::vector<std::string> out;
+    for (const auto& entry : builders_) {
+        if (entry.plugin == plugin_name) out.push_back(entry.tool_name + " definition");
+    }
+    for (const auto& entry : appendices_) {
+        if (entry.plugin == plugin_name) out.push_back("system prompt appendix");
+    }
+    return out;
 }
 
 }  // namespace minimal::agent

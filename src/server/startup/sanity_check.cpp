@@ -280,8 +280,10 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
             if (!entry.is_regular_file(ec) || entry.path().extension() != ".md") continue;
             const auto preset_name = entry.path().stem().string();
             try {
-                presets_[preset_name] = agent::LoadAgentPresetFrontmatter(
-                    entry.path(), inputs_.registries.tools->PermissionKeys());
+                agent::ToolVocabulary vocabulary(inputs_.registries.tools->PermissionKeys());
+                vocabulary.config_aliases = inputs_.registries.tools->ConfigAliasPermissionKeys();
+                vocabulary.no_pattern_rules = inputs_.registries.tools->NoPatternRulePermissionKeys();
+                presets_[preset_name] = agent::LoadAgentPresetFrontmatter(entry.path(), vocabulary);
                 for (const auto& key : presets_[preset_name].unknown_permission_keys) {
                     results.push_back(Warning("presets", "agents/" + preset_name +
                                                              ".md: unknown permission_mode key '" +
@@ -374,10 +376,6 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
     // The default compaction prompt: absence degrades every session's compaction
     // to a log line, and making that loud is this check's job (ARCHITECTURE.md,
     // "Bundled assets").
-    if (!std::filesystem::exists(inputs_.config_dir / "prompts" / "compression-structured.md", ec)) {
-        results.push_back(Warning("presets", "prompts/compression-structured.md not found -- the "
-                             "structured compaction strategy runs as free text"));
-    }
     if (!std::filesystem::exists(inputs_.config_dir / "prompts" / "compression.md", ec)) {
         results.push_back(Warning("presets", "prompts/compression.md not found -- compaction is disabled "
                              "for every preset that does not override it"));
@@ -648,11 +646,6 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
     std::vector<CheckResult> results;
     const auto& resolution = inputs_.name_resolution;
 
-    if (!inputs_.skills.scan_error().empty()) {
-        results.push_back(Warning("naming_model", "skills directory could not be scanned: " +
-                                 inputs_.skills.scan_error()));
-    }
-
     // The valid permission keys, and which bare names are ambiguous (two
     // plugins provide the original name -- the same count NameRegistry uses to
     // decide when a key must be qualified).
@@ -663,11 +656,12 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
     const auto ambiguous = [&original_counts](const std::string& name) { return original_counts[name] > 1; };
 
     // per_tool_overrides keys (global and per-preset) must reference a permission key.
-    const auto check_override_key = [&results, &valid_keys, &ambiguous](const std::string& where,
-                                                                         const std::string& key) {
-        // MCP tools (mcp__<server>__<tool>) register when their server
-        // connects, after startup -- there is nothing to check them against.
-        if (key.rfind("mcp__", 0) == 0) return;
+    const auto* tools = inputs_.registries.tools;
+    const auto check_override_key = [&results, &valid_keys, &ambiguous, tools](
+                                        const std::string& where, const std::string& key) {
+        // A key inside a namespace a plugin reserved names a tool that plugin
+        // registers at runtime (after startup) -- nothing to check it against.
+        if (tools->IsReserved(key)) return;
         if (ambiguous(key)) {
             results.push_back(Warning("naming_model", where + " per_tool_overrides key '" + key +
                                   "' is ambiguous -- two plugins provide that name; write it qualified as "
@@ -728,29 +722,6 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
         }
     }
 
-    // Unknown allowed_skills entries: the known gap this check closes -- they
-    // are silently dropped by resolution, which is correct for lookup but must
-    // be loud at startup.
-    for (const auto& [preset_name, raw] : presets_) {
-        for (const auto& [skill, mode] : raw.allowed_skills) {
-            if (skill == "*") continue;
-            if (inputs_.skills.Find(skill) == nullptr) {
-                results.push_back(Warning("naming_model", "agent preset '" + preset_name +
-                                      "': allowed_skills entry '" + skill + "' is unknown"));
-            }
-            // A known-but-not-loaded candidate is reported once at skill level
-            // below, with its load_error, rather than once per referencing preset.
-            (void)mode;
-        }
-    }
-
-    // Every not-loaded skill entry is itself a warning, referenced or not.
-    for (const auto& meta : inputs_.skills.All()) {
-        if (!meta.loaded) {
-            results.push_back(Warning("naming_model", "skill '" + meta.name + "' not loaded: " + meta.load_error));
-        }
-    }
-
     // tool_sources members must name a member the source knows; the source
     // must be registered by a loaded plugin.
     for (const auto& [preset_name, raw] : presets_) {
@@ -777,8 +748,35 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
         }
     }
 
+    // Permission slices (permissions.json `plugins`, preset
+    // `plugin_permissions`) must name a registered permission model: a slice
+    // for a plugin that is disabled or misspelled governs nothing.
+    const auto* models = inputs_.registries.permission_models;
+    const auto has_model = [models](const std::string& name) {
+        return models != nullptr && models->Has(name);
+    };
+    for (const auto& [name, slice] : bundle_.permissions.plugin_slices.items()) {
+        (void)slice;
+        if (!has_model(name)) {
+            results.push_back(Warning("naming_model", "permissions.json plugins." + name +
+                                                          " names no registered permission model "
+                                                          "(typo, or the providing plugin is disabled)"));
+        }
+    }
+    for (const auto& [preset_name, raw] : presets_) {
+        for (const auto& [name, slice] : raw.plugin_permissions.items()) {
+            (void)slice;
+            if (!has_model(name)) {
+                results.push_back(Warning("naming_model", "agent preset '" + preset_name +
+                                                              "': plugin_permissions." + name +
+                                                              " names no registered permission model "
+                                                              "(typo, or the providing plugin is disabled)"));
+            }
+        }
+    }
+
     // tool_config namespace keys must name a namespace some registered tool
-    // claims (the allowed_skills-unknown gap, one level up): a typo or a slice
+    // claims: a typo or a slice
     // stranded by a disabled plugin is silent data -- no tool will ever read
     // it -- and must be loud at startup.
     const auto claimed_namespaces = inputs_.registries.tools->ConfigNamespaces();
@@ -820,12 +818,12 @@ std::vector<CheckResult> StartupSanityCheck::check_compaction_strategy() {
     if (!bundle_.settings_loaded) return results;  // already Fatal under config_parse
 
     const std::string& name = bundle_.settings.memory.compaction_strategy;
-    // "summarize" and "structured" are core's own built-ins, registered
-    // directly in main.cpp before plugin load -- they resolve even when
-    // inputs_.registries.compaction_strategies is null (a test harness that never wires
-    // the registry).
+    // "summarize" is core's own built-in, registered directly in main.cpp
+    // before plugin load -- it resolves even when
+    // inputs_.registries.compaction_strategies is null (a test harness that
+    // never wires the registry).
     const bool resolved =
-        name == "summarize" || name == "structured" ||
+        name == "summarize" ||
         (inputs_.registries.compaction_strategies != nullptr && inputs_.registries.compaction_strategies->Has(name));
     if (!resolved) {
         results.push_back(Warning(
@@ -842,7 +840,7 @@ std::vector<CheckResult> StartupSanityCheck::check_compaction_keep_recent() {
     if (!bundle_.settings_loaded) return results;  // already Fatal under config_parse
 
     const auto keep_recent = bundle_.settings.memory.compaction_keep_recent_tokens;
-    if (keep_recent <= 0) return results;  // 0 = legacy halving; nothing to compare
+    if (keep_recent <= 0) return results;  // 0 = unset (replace_percent governs); nothing to compare
 
     // Only FixedTokens has a value comparable without a session's resolved
     // model: PercentOfWindow and WindowBuffer resolve against

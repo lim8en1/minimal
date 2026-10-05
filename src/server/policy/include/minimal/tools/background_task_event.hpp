@@ -17,6 +17,9 @@ struct BackgroundTaskEvent {
     enum class State { kStarted, kCompleted, kFailed, kTimedOut, kKilled };
     std::string task_id;
     std::string tool_use_id;
+    // The tool that started the task (its surface name). Filled by core when
+    // the event leaves the invocation's ToolContext; producers need not set it.
+    std::string tool_name;
     std::string command;
     int pid = 0;
     State state = State::kStarted;

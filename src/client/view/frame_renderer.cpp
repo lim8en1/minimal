@@ -557,6 +557,7 @@ ftxui::Element FrameRenderer::Render() {
     // render thread at ~20 Hz -- the provider contract (cheap, never
     // blocking) is stated on the interface; a THROW is contained (that
     // segment renders nothing for this frame), never fatal.
+    std::map<std::string, int> priorities;
     for (const auto& segment : deps_.status_registry.All()) {
         // Segments are SESSION-keyed (cost-view caches per focused session);
         // the frame's focused handle is a TAB id, so the snapshot's session
@@ -565,10 +566,11 @@ ftxui::Element FrameRenderer::Render() {
         if (IsKnownStatusSegment(id)) continue;   // core ids are reserved (warned at startup)
         GuardPluginCall("segment:" + id, "status segment '" + id + "'", [&] {
             values[id] = segment->Render(focused_details.session_id);
+            priorities[id] = segment->priority();
         });
     }
     rows.push_back(RenderStatusBar(deps_.status_format, values, deps_.theme,
-                                   ftxui::Terminal::Size().dimx, emphasis));
+                                   ftxui::Terminal::Size().dimx, emphasis, priorities));
 
     return vbox(std::move(rows));
 }

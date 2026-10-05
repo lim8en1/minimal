@@ -9,5 +9,4 @@ minimal_server_module(tools
         tool_executor.cpp
         permission_model.cpp
         tool_pool.cpp
-        skill_tool.cpp
 )

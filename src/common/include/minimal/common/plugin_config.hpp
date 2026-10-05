@@ -14,10 +14,8 @@
 // Lives in common because the client cannot link server core.
 
 #include <filesystem>
-#include <functional>
 #include <map>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -70,13 +68,14 @@ struct PluginConfigFormat {
     std::string file_label = "plugins.json";
     // "plugin" / "client plugin", for the discovery warnings.
     std::string noun = "plugin";
-    // Bundled plugins that ship present but DISABLED (opt-in cost or
-    // privacy); consulted only when a file has no entry yet. Empty = none.
-    std::function<bool(std::string_view basename)> defaults_disabled;
-    // Called with the parsed top-level object for host-specific warnings (a key
-    // that was renamed and now does nothing).
-    std::function<void(const nlohmann::json& parsed)> check_keys;
 };
+
+// A bundled plugin that ships present but DISABLED (it spends the user's
+// tokens or data on its own initiative) says so itself: its build drops this
+// marker beside the module (minimal_add_plugin(... DISABLED_BY_DEFAULT)), so
+// no host keeps a list of plugin names. Consulted only when a file has no
+// plugins.json entry yet.
+inline constexpr const char* kDisabledByDefaultSuffix = ".disabled-by-default";
 
 PluginConfigFile ParsePluginConfigFile(const std::string& json_text,
                                        const PluginConfigFormat& format);

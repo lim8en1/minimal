@@ -60,7 +60,7 @@ TEST_CASE("CompactionStrategyRegistry: registering an incomplete strategy is ref
     CHECK_FALSE(registry.Has("half"));
 }
 
-TEST_CASE("MakeSummarizeCompactionStrategy: keep_recent_tokens==0 falls back to plain halving",
+TEST_CASE("MakeSummarizeCompactionStrategy: keep_recent_tokens==0 cuts by message count",
          "[compaction_strategy]") {
     const auto strategy = MakeSummarizeCompactionStrategy();
     std::vector<llm::Message> history;

@@ -159,9 +159,8 @@ TEST_CASE("the guard runs on the wire: a denying provider rejects OpenSession",
     { std::ofstream(root / "settings.json") << "{}"; }
     { std::ofstream(root / "permissions.json") << "{}"; }
     std::filesystem::create_directories(root / "agents");
-    config::SkillRegistry skills = config::SkillRegistry::Load(root);
     auto presets = std::make_unique<agent::AgentPresetRegistry>(
-        root, skills, config::LoadSettingsConfig(root / "settings.json"));
+        root, config::LoadSettingsConfig(root / "settings.json"));
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
     agent::SessionObserverRegistry observers(common::DefaultLogger());
@@ -214,9 +213,8 @@ TEST_CASE("the guard runs on the wire: a denying provider rejects SuggestPaths",
     { std::ofstream(root / "settings.json") << "{}"; }
     { std::ofstream(root / "permissions.json") << "{}"; }
     std::filesystem::create_directories(root / "agents");
-    config::SkillRegistry skills = config::SkillRegistry::Load(root);
     auto presets = std::make_unique<agent::AgentPresetRegistry>(
-        root, skills, config::LoadSettingsConfig(root / "settings.json"));
+        root, config::LoadSettingsConfig(root / "settings.json"));
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
     agent::SessionObserverRegistry observers(common::DefaultLogger());

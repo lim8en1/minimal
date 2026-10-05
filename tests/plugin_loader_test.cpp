@@ -298,25 +298,6 @@ TEST_CASE("malformed plugins.json degrades to empty rather than throwing",
     CHECK(plugins::ParsePluginConfig("").plugins.empty());
 }
 
-TEST_CASE("the legacy command_aliases key is ignored, not applied", "[plugin_config]") {
-    // Renamed to "aliases" with NO fallback: a file from before the rename
-    // must not have its aliases silently apply under a key the docs no longer
-    // name -- and must not have them silently NOT apply either. The key is
-    // preserved verbatim (it round-trips through `preserved`), parsed into
-    // nothing, and the rename is warned about by the parser. This test pins
-    // the first two properties; the warning is a log line, not observable
-    // here.
-    const std::string text = R"({"plugins":[],"command_aliases":{"p.cmd":"alias"}})";
-    const auto config = plugins::ParsePluginConfig(text);
-    CHECK(config.aliases.empty());
-
-    const auto round_tripped = nlohmann::json::parse(plugins::SerializePluginConfig(config));
-    // Preserved, so the operator's file is not edited behind their back --
-    // and the warning has something to point at on the next boot too.
-    CHECK(round_tripped.at("command_aliases").at("p.cmd") == "alias");
-    CHECK_FALSE(round_tripped.contains("aliases"));
-}
-
 TEST_CASE("discovery applies the provenance enablement rule", "[plugin_discovery]") {
     // Bundled came out of this build and is trusted; user was dropped in and is
     // opt-in. A mechanical rule, not a special case.
@@ -343,6 +324,33 @@ TEST_CASE("discovery applies the provenance enablement rule", "[plugin_discovery
     REQUIRE(config.plugins.size() == 2);
 
     std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("a bundled plugin with a disabled-by-default marker ships disabled",
+          "[plugin_discovery]") {
+    // The plugin's own build drops the marker (minimal_add_plugin
+    // DISABLED_BY_DEFAULT); discovery honors it for a NEW entry only.
+    testing::TempDir root;
+    const auto bundled = root.path() / "bundled";
+    std::filesystem::create_directories(bundled / "titler");
+    { std::ofstream(bundled / "titler" / "titler.so") << "x"; }
+    { std::ofstream(bundled / "titler" / "titler.disabled-by-default"); }
+    { std::ofstream(bundled / "plain.so") << "x"; }
+
+    plugins::PluginConfig config;
+    const auto candidates = plugins::DiscoverPlugins(bundled, root.path() / "none", config);
+    REQUIRE(candidates.size() == 2);
+    const auto find = [&](const std::string& file) {
+        return *std::find_if(candidates.begin(), candidates.end(),
+                             [&](const auto& c) { return c.file.filename() == file; });
+    };
+    CHECK(find("plain.so").enabled);
+    CHECK_FALSE(find("titler.so").enabled);
+
+    // Once an entry exists the operator's choice governs, marker or not.
+    for (auto& entry : config.plugins) entry.enabled = true;
+    const auto again = plugins::DiscoverPlugins(bundled, root.path() / "none", config);
+    CHECK(std::all_of(again.begin(), again.end(), [](const auto& c) { return c.enabled; }));
 }
 
 TEST_CASE(

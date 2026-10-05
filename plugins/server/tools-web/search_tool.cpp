@@ -78,6 +78,8 @@ public:
 
     const ToolSpec& spec() const override { return spec_; }
     bool network_access_required() const override { return true; }
+    std::vector<std::string> config_aliases() const override { return {"websearch"}; }
+    bool accepts_pattern_rules() const override { return false; }
 
     ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override {
         if (settings_.search_api_url.empty()) {

@@ -13,7 +13,7 @@ every completed turn (the only writer).
   `rates_refresh_days` (default 7), the plugin fetches fresh LiteLLM +
   OpenRouter prices on a bounded background thread as the server boots. No
   network during a turn; a failed refresh keeps the previous prices.
-- **Server flag**: `minimal-server --refresh-cost-rates` — fetch both pricing
+- **Server flag**: `minimal-server --plugin-call cost-tracker refresh_rates` — fetch both pricing
   snapshots now and exit (bypasses the staleness gate). The manual escape
   hatch the old `/cost-update-rates` command was; there is no TUI command for
   refreshing prices.
@@ -39,7 +39,7 @@ resolved through ONE RateTable so a report can never disagree with itself:
 
 1. The user's `rates` slice in plugins.json (below).
 2. The fetched OpenRouter snapshot, cached by the startup auto-refresh, the
-   `--refresh-cost-rates` flag, or the `.rpc` service's `refresh_rates` method
+   `--plugin-call cost-tracker refresh_rates` flag, or the `.rpc` service's `refresh_rates` method
    (keys are model ids — the ccusage convention; a cached snapshot from an
    earlier run is picked up at startup). Ranked above the LiteLLM snapshot
    because the wire ids an OpenRouter-shaped provider sends ARE OpenRouter
@@ -76,7 +76,7 @@ optional; an absent or partial config object is normal rather than an error.
 | `rates` | *(none)* | Per-model rate overrides, consumed verbatim as the RateTable's config tier. Keys are model ids. |
 | `rates_fetch_url` | LiteLLM `model_prices_and_context_window.json` on GitHub | What the fetch (startup auto-refresh, the flag, the `.rpc` method) reads. A constant by default so pricing works with zero configuration; overridable for a mirror or pinned revision. |
 | `rates_fetch_timeout_ms` | `30000` | Every fetch — the startup auto-refresh included — is bounded even when the transfer stalls. |
-| `rates_refresh_days` | `7` | How stale the cached snapshot may be before a server start fetches again. `0` fetches on every start; the `--refresh-cost-rates` flag always fetches regardless. |
+| `rates_refresh_days` | `7` | How stale the cached snapshot may be before a server start fetches again. `0` fetches on every start; the `--plugin-call cost-tracker refresh_rates` flag always fetches regardless. |
 
 ## Notes
 

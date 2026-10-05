@@ -4,7 +4,6 @@
 
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/context_compactor.hpp"
-#include "minimal/agent/structured_compaction.hpp"
 #include "tool_result_caps.hpp"
 
 namespace minimal::agent {
@@ -32,7 +31,7 @@ RequestBuilder::SystemAndTools RequestBuilder::BuildSystemAndTools() const {
     }
     // Fail-closed spawn allowlist: a preset whose allowed_subagents resolved
     // to an explicit EMPTY list gets no spawn tool, exactly like a preset
-    // whose allowed_skills resolve empty gets no skill tool -- advertising a
+    // a definition builder withholds (an empty-named definition) -- advertising a
     // tool every call of which would be refused is worse than offering none.
     // nullopt (the default) means no restriction and reaches this check not
     // at all.
@@ -50,12 +49,13 @@ RequestBuilder::SystemAndTools RequestBuilder::BuildSystemAndTools() const {
     {
         std::vector<llm::ToolDefinition> group_defs = registry_.DefinitionsForGroups(tool_groups_);
         out.tools.insert(out.tools.end(), group_defs.begin(), group_defs.end());
-        // record_summary rides every request, whatever the preset allows: the
-        // summarizer request reuses this exact tools array (plus one appended
-        // instruction), so the tool must already be in it for the prompt
-        // cache to cover the history. A stray call outside compaction is
-        // answered with a no-op error in RunToolRound, never executed.
-        if (config_.offer_summary_tool) out.tools.push_back(MakeRecordSummaryToolDefinition());
+        // Compaction strategies' tools ride every request, whatever the preset
+        // allows: a summarizer request reuses this exact tools array (plus one
+        // appended instruction), so the tool must already be in it for the
+        // prompt cache to cover the history. A stray call outside compaction
+        // is answered in RunToolRound, never executed.
+        out.tools.insert(out.tools.end(), config_.strategy_tools.begin(),
+                         config_.strategy_tools.end());
         std::sort(out.tools.begin(), out.tools.end(),
                   [](const llm::ToolDefinition& a, const llm::ToolDefinition& b) {
                       return a.name < b.name;
@@ -79,16 +79,12 @@ RequestBuilder::SystemAndTools RequestBuilder::BuildSystemAndTools() const {
         const auto it = preset_.tool_definition_overrides.find(def.name);
         if (it != preset_.tool_definition_overrides.end()) def = it->second;
     }
-    if (preset_.allowed_skills.empty()) {
-        // No skills in this preset: the tool would only ever return errors. One
-        // post-erase suffices here (unlike the subagent case above) because it
-        // covers both an explicit allowed_tools list and "*".
-        out.tools.erase(std::remove_if(out.tools.begin(), out.tools.end(),
-                                       [](const llm::ToolDefinition& def) {
-                                           return def.name == kSkillToolName;
-                                       }),
-                        out.tools.end());
-    }
+    // A builder that withholds its tool from this preset answers an
+    // EMPTY-named definition (the skill tool with no skill allowed): the tool
+    // would only ever return errors, so the request leaves it out.
+    out.tools.erase(std::remove_if(out.tools.begin(), out.tools.end(),
+                                   [](const llm::ToolDefinition& def) { return def.name.empty(); }),
+                    out.tools.end());
     return out;
 }
 

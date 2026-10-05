@@ -10,9 +10,33 @@ bool CompactionStrategyRegistry::Register(std::string kind, CompactionStrategy s
     return AttributedRegistry::Register(std::move(kind), std::move(strategy));
 }
 
+std::vector<llm::ToolDefinition> CompactionStrategyRegistry::RequestTools() const {
+    std::vector<llm::ToolDefinition> out;
+    for (const auto& kind : kinds()) {
+        for (const auto& tool : Find(kind)->request_tools) {
+            const bool seen = std::any_of(out.begin(), out.end(), [&](const llm::ToolDefinition& t) {
+                return t.name == tool.name;
+            });
+            if (!seen) out.push_back(tool);
+        }
+    }
+    return out;
+}
+
+std::map<std::string, std::string> CompactionStrategyRegistry::StrayCallReplies() const {
+    std::map<std::string, std::string> out;
+    for (const auto& kind : kinds()) {
+        const auto* strategy = Find(kind);
+        for (const auto& tool : strategy->request_tools) {
+            out.emplace(tool.name, strategy->stray_call_reply);
+        }
+    }
+    return out;
+}
+
 std::size_t ProposeSummarizeCut(const std::vector<llm::Message>& history,
                                 std::int64_t keep_recent_tokens) {
-    if (keep_recent_tokens <= 0) return history.size() / 2;  // legacy default
+    if (keep_recent_tokens <= 0) return history.size() / 2;  // no budget: cut by count
 
     // Walk from the tail, accumulating PER-MESSAGE estimates, until the
     // budget would be exceeded. Each message is its own unit -- a giant

@@ -10,8 +10,10 @@
 #include <vector>
 
 namespace minimal::config {
+class ProjectTrustQuery;
+}  // namespace minimal::config
 
-class ProjectTrust;
+namespace minimal::skills {
 
 // One candidate under skills/. EVERY entry directly under the directory gets a
 // record -- including ones that failed to load. `loaded` plus `load_error` are
@@ -62,7 +64,7 @@ public:
     // others see the global view, exactly as an empty project_root would. Null
     // (the default) applies no gate. Startup only: call before the registry is
     // shared; `trust` must outlive it.
-    void SetProjectTrust(const ProjectTrust* trust) { trust_ = trust; }
+    void SetProjectTrust(const config::ProjectTrustQuery* trust) { trust_ = trust; }
 
     const std::vector<SkillMeta>& All() const { return skills_; }
 
@@ -115,10 +117,10 @@ private:
     // True when `project_root` has a project scope AND it may be loaded.
     bool ProjectScoped(const std::filesystem::path& project_root) const;
 
-    const ProjectTrust* trust_ = nullptr;
+    const config::ProjectTrustQuery* trust_ = nullptr;
     std::vector<SkillMeta> skills_;
     std::string scan_error_;
     mutable std::unique_ptr<OverlayCache> cache_ = std::make_unique<OverlayCache>();
 };
 
-}  // namespace minimal::config
+}  // namespace minimal::skills

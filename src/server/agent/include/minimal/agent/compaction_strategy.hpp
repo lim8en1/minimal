@@ -32,6 +32,13 @@ namespace minimal::agent {
 struct CompactionStrategy {
     CutSelector cut_selector;
     Compactor summarize;
+    // Tools the summarizer request asks the model to call (a structured
+    // strategy's record_summary). They ride EVERY main request -- the
+    // summarizer reuses the main tools array, so the prompt cache covers the
+    // history -- and a model call to one outside a compaction is answered with
+    // `stray_call_reply`, never executed.
+    std::vector<llm::ToolDefinition> request_tools;
+    std::string stray_call_reply;
 };
 
 class CompactionStrategyRegistry : public plugins::AttributedRegistry<CompactionStrategy> {
@@ -45,13 +52,17 @@ public:
     // is a startup sanity-check warning, not a crash -- the session falls
     // back to the built-in behavior (see agent_loop.hpp's LoopConfig comment).
     const CompactionStrategy* Find(std::string_view kind) const { return FindEntry(kind); }
+
+    // Every registered strategy's request_tools, and each one's stray-call
+    // reply by tool name: what the loop puts on every request and answers.
+    std::vector<llm::ToolDefinition> RequestTools() const;
+    std::map<std::string, std::string> StrayCallReplies() const;
 };
 
 // The built-in "summarize" strategy: today's production behavior.
-// ProposeCut honors keep_recent_tokens (W11) when it is positive -- a
-// token-budget walk from the tail, so a giant recent tool result is kept
-// whole or pushes the cut before it, never split -- and falls back to plain
-// history.size()/2 halving when it is 0 (the legacy default). Summarize is
+// ProposeCut is a keep_recent_tokens (W11) token-budget walk from the tail,
+// so a giant recent tool result is kept whole or pushes the cut before it,
+// never split; with no budget (0) it cuts at history.size()/2. Summarize is
 // compact_messages, calling the provider with the preset's compression
 // prompt. Registered by CORE in main.cpp, not a plugin, so the default path
 // is never plugin-dependent.

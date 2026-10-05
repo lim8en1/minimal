@@ -37,20 +37,8 @@ struct AgentPreset {
     // a present list -- possibly EMPTY -- is the exact set of preset keys a
     // spawn_subagent call may name. Enforced by SubagentManager::Spawn; the
     // empty case also withholds the tool entirely (AgentLoop::BuildChatRequest),
-    // the same fail-closed rule as allowed_skills resolving empty.
+    // the same fail-closed rule as a definition builder withholding a tool.
     std::optional<std::vector<std::string>> allowed_subagents;
-    // RESOLVED, not the raw frontmatter map: `*` is already expanded and names
-    // that are unknown or failed to load are already dropped, so this is exactly
-    // the set the system-prompt listing advertises. Keeping it raw let the
-    // listing and the tool-exposure gate be computed from different conditions
-    // in different files, which is how they drifted -- `allowed_skills: [typo]`
-    // offered the model a `skill` tool with nothing listed and no call that
-    // could succeed. Holds ONLY Preload/Allow/Ask entries: explicit denies
-    // resolve out, because absence IS deny -- which is what makes the subagent
-    // clamp's "parent without the entry" rule uniform. Empty means the tool is
-    // withheld entirely. (Preload entries are consumed at resolve time -- their
-    // bodies ship in the system prompt -- and carry no tool-side access.)
-    std::map<std::string, SkillMode> allowed_skills;
     // Dynamic tool-source members this preset allows, per source name
     // (tools/tool_source.hpp); the session activates them and exposes the
     // active groups' tools.
@@ -91,7 +79,7 @@ struct AgentPreset {
     // prompts/compression-structured.md: the instruction the structured
     // strategy appends (it asks for a record_summary call). Empty when the
     // file is missing -- the structured strategy then runs as free text.
-    std::string structured_compression_prompt;
+
     // The resolved `compaction_strategy:` frontmatter, verbatim: a NAME, not a
     // strategy object -- the preset cache is built before the strategy
     // registry is fully loaded, and the loop resolves the name at each
@@ -152,10 +140,5 @@ void ApplyModel(AgentPreset& preset, const config::ResolvedModel& model);
 // on is_subagent, not a preset field, so a misconfigured preset cannot reopen
 // recursion.
 inline constexpr const char* kSpawnSubagentToolName = "spawn_subagent";
-
-// The core skill accessor. Offered only when the preset allows at least one
-// skill -- see AgentLoop::BuildChatRequest. A preset with no skills gets no
-// tool that can only return errors.
-inline constexpr const char* kSkillToolName = "skill";
 
 }  // namespace minimal::agent

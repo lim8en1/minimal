@@ -150,6 +150,11 @@ public:
     // Tool::default_dotenv_protected().
     std::vector<std::string> DotenvProtectedPermissionKeys() const;
 
+    // Tool::config_aliases() of every live tool: alias -> permission key.
+    std::map<std::string, std::string> ConfigAliasPermissionKeys() const;
+    // The permission keys of live tools that do not accept pattern rules.
+    std::vector<std::string> NoPatternRulePermissionKeys() const;
+
     // Startup rollback for a plugin whose registration threw: removes every
     // tool -- and its attribution/owner entries -- attributed to `plugin_name`.
     // Valid ONLY before ApplyAliases and before any session exists: aliases

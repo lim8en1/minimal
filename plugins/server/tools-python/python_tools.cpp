@@ -115,6 +115,10 @@ public:
     std::string_view config_namespace() const override { return "python"; }
     bool parallel_safe() const override { return false; }
 
+    std::string Summary(const nlohmann::json& input) const override {
+        return ">>> " + FirstLine(StringField(input, "code"), 200);
+    }
+
     PermissionDisclosure Disclose(const nlohmann::json& input,
                                   const tools::ToolContext& ctx) const override {
         PermissionDisclosure disclosure;

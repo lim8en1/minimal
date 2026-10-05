@@ -58,6 +58,15 @@ add_executable(minimal_tests
     model_catalog_live_test.cpp
     permission_codec_test.cpp
     providers_config_test.cpp
+    opencode_compat_test.cpp
+    "${CMAKE_SOURCE_DIR}/plugins/server/skills/skill_registry.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/skills/skill_access.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/skills/skill_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/skills/skills_model.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/skills/skills_preset.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/compaction-structured/structured_compaction.cpp"
+    skills_plugin_test.cpp
+    "${CMAKE_SOURCE_DIR}/plugins/server/opencode-compat/opencode_providers.cpp"
     mcps_config_test.cpp
     channels_config_test.cpp
     signals_message_test.cpp
@@ -370,6 +379,9 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-python"
     "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor"
+    "${CMAKE_SOURCE_DIR}/plugins/server/opencode-compat"
+    "${CMAKE_SOURCE_DIR}/plugins/server/skills"
+    "${CMAKE_SOURCE_DIR}/plugins/server/compaction-structured"
     "${CMAKE_SOURCE_DIR}/plugins/client/logo")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,
@@ -515,4 +527,16 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME module_deps
              COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/check_module_deps.py"
                      "${CMAKE_SOURCE_DIR}")
+    # Core + one provider is a working harness, and every bundled plugin can be
+    # disabled alone (tests/plugin_matrix_test.py, against the real binaries).
+    add_test(NAME plugin_matrix
+             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/plugin_matrix_test.py"
+                     $<TARGET_FILE:minimal-server> $<TARGET_FILE:minimal>
+                     "${CMAKE_BINARY_DIR}/plugins/server"
+                     "${CMAKE_SOURCE_DIR}/cmake/SeedConfig.cmake" "${CMAKE_SOURCE_DIR}/bundled")
+    set_tests_properties(plugin_matrix PROPERTIES TIMEOUT 600)
+    # Plugins include only the SDK (scripts/sdk_headers.txt) or their own headers.
+    add_test(NAME plugin_conformance
+             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/check_module_deps.py"
+                     --plugins "${CMAKE_SOURCE_DIR}")
 endif()

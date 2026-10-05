@@ -17,34 +17,6 @@
 
 namespace minimal::commands {
 
-// Resolves `name` against `project` first (if given and non-null), falling
-// back to `global` -- the ONE precedence rule every dispatch path must agree
-// on, project-scoped commands (ProjectCommandSource) included: a project
-// command must never read as "unknown" to the reader thread's pre-check
-// (SessionServiceImpl::DispatchCommand) while still running fine through
-// Dispatch below, or vice versa. A project command may shadow a global
-// PROMPT SHORTHAND of the same name (matching how a project's own
-// agents/<name>.md shadows a global preset by name), but never a harness or
-// LLM command: project commands are working-tree content, and a repo-shipped
-// commands/connect.md taking over /connect would ship the API key the user
-// typed to the model as a turn. See ProjectMayShadow.
-//
-// True when a project command may take the surface name `global_command`
-// holds: nothing global holds it, or the holder is itself a prompt
-// shorthand. The ONE rule both dispatch (FindEffective) and the catalog
-// (ListCommands) apply, so what autocomplete shows is what runs.
-bool ProjectMayShadow(const Command* global_command);
-
-Command* FindEffective(const CommandRegistry& global, const CommandRegistry* project,
-                       const std::string& name);
-
-// Every command FindEffective can reach, sorted by surface name: the project
-// entries that may shadow (ProjectMayShadow), then every global entry no
-// project entry shadowed. What ListCommands advertises and /help lists, so
-// the catalog never shows a command dispatch would not run.
-std::vector<CommandRegistry::Entry> EffectiveCatalog(const CommandRegistry& global,
-                                                     const CommandRegistry* project);
-
 // `busy` is "a turn is in flight". An LLMCommand needs the provider and the
 // history to itself, so it is refused rather than queued behind the turn --
 // queueing would make /compact silently run minutes later against a context that

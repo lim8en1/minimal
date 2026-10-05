@@ -89,6 +89,21 @@ void minimal_plugin_register_project_commands(
     LoadInto(registry, ProjectCommandDirs(project_root));
 }
 
+void minimal_plugin_describe_project_content(
+    const std::filesystem::path& project_root,
+    std::vector<minimal::config::ProjectContentCount>& out) {
+    std::size_t count = 0;
+    std::error_code ec;
+    for (const auto& dir : ProjectCommandDirs(project_root)) {
+        for (std::filesystem::directory_iterator it(dir.path, ec), end; !ec && it != end;
+             it.increment(ec)) {
+            if (it->path().extension() == ".md") ++count;
+        }
+        ec.clear();
+    }
+    out.push_back({"command", "commands", count});
+}
+
 void minimal_plugin_project_commands_fingerprint(const std::filesystem::path& project_root,
                                                  std::string& out) {
     try {

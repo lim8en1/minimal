@@ -53,11 +53,12 @@ struct StatusBarPart {
 //   2. Still too wide: the lowest-priority segment goes, with the separator
 //      that joined it, until the bar fits. Version and the reference detail
 //      (token_detail, session) go first; permission_mode -- the one
-//      safety-relevant value -- goes last. Unknown (plugin) ids sit in the
-//      middle.
+//      safety-relevant value -- goes last. A plugin segment ranks by its own
+//      StatusSegment::priority(), passed in `priorities` (default 30).
 std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& format,
                                             const std::map<std::string, std::string>& values,
-                                            int max_width);
+                                            int max_width,
+                                            const std::map<std::string, int>& priorities = {});
 
 // "62k/200k · 31%" (window known) or "4.2k tok" (not). Compact on purpose --
 // the exact count was seven digits of noise at a glance -- but never
@@ -91,6 +92,7 @@ std::string WithHiddenRowsSuffix(std::string activity);
 ftxui::Element RenderStatusBar(const std::vector<StatusSegment>& format,
                                const std::map<std::string, std::string>& values,
                                const Theme& theme, int max_width,
-                               const std::map<std::string, ftxui::Color>& emphasis = {});
+                               const std::map<std::string, ftxui::Color>& emphasis = {},
+                               const std::map<std::string, int>& priorities = {});
 
 }  // namespace minimal::client

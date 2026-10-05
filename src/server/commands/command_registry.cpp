@@ -1,6 +1,7 @@
 #include "minimal/commands/command_registry.hpp"
 
 #include <algorithm>
+#include <set>
 #include <unordered_map>
 #include <utility>
 
@@ -95,6 +96,41 @@ void CommandRegistry::RemoveByAttribution(const std::string& plugin_name) {
     for (const auto& surface : surfaces_owned_by_removed) {
         commands_.erase(surface);
     }
+}
+
+bool ProjectMayShadow(const Command* global_command) {
+    return global_command == nullptr ||
+           dynamic_cast<const PromptShorthandCommand*>(global_command) != nullptr;
+}
+
+Command* FindEffective(const CommandRegistry& global, const CommandRegistry* project,
+                       const std::string& name) {
+    Command* global_command = global.Find(name);
+    if (project != nullptr && ProjectMayShadow(global_command)) {
+        if (Command* found = project->Find(name)) return found;
+    }
+    return global_command;
+}
+
+std::vector<CommandRegistry::Entry> EffectiveCatalog(const CommandRegistry& global,
+                                                     const CommandRegistry* project) {
+    std::vector<CommandRegistry::Entry> out;
+    std::set<std::string> shadowed;
+    if (project != nullptr) {
+        for (const auto& entry : project->All()) {
+            if (!ProjectMayShadow(global.Find(entry.surface))) continue;
+            shadowed.insert(entry.surface);
+            out.push_back(entry);
+        }
+    }
+    for (const auto& entry : global.All()) {
+        if (shadowed.count(entry.surface) == 0) out.push_back(entry);
+    }
+    std::sort(out.begin(), out.end(),
+              [](const CommandRegistry::Entry& a, const CommandRegistry::Entry& b) {
+                  return a.surface < b.surface;
+              });
+    return out;
 }
 
 }  // namespace minimal::commands

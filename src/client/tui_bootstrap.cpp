@@ -23,12 +23,13 @@ namespace minimal::client {
 
 namespace {
 
-// Left: what is happening and what it costs. Right ({>}): what it is running
-// on. {version} and {session} are out of the default -- the banner/help carry
-// the one, the tab bar the other -- but remain available ids.
+// Left: what is happening. Right ({>}): what it is running on. {version} and
+// {session} are out of the default -- the banner/help carry the one, the tab
+// bar the other -- but remain available ids. Core segments only: a plugin's
+// segments ({cost}, {todo}, ...) are placed by ui.json's status_format (the
+// seeded one includes them).
 constexpr const char* kDefaultStatusFormat =
-    "{activity} · {tokens} · {cost?} · {token_detail?}{>}{model} · {agent} · {permission_mode} · "
-    "{paused}";
+    "{activity} · {tokens}{>}{model} · {agent} · {permission_mode} · {paused}";
 
 }  // namespace
 

@@ -1,0 +1,21 @@
+# Client SDK v0 -- UNSTABLE. The client headers a client plugin may include
+# (checked by scripts/check_module_deps.py --plugins over plugins/client/).
+#
+# The ABI and the registries its hooks fill.
+minimal/client/plugins/client_plugin_abi.h
+minimal/client/plugins/registries.hpp
+minimal/client/plugins/host_seams.hpp
+minimal/client/plugins/observer_events.hpp
+minimal/client/plugins/background_poller.hpp
+minimal/client/session_client.hpp
+
+# Rendering and UI building blocks a plugin composes with.
+minimal/client/render/theme.hpp
+minimal/client/utf8.hpp
+minimal/client/view/filterable_menu.hpp
+minimal/client/view/prompt_modal.hpp
+minimal/client/view/tool_status.hpp
+
+# Shared utilities.
+minimal/common/abi_tag.hpp
+minimal/common/logger.hpp

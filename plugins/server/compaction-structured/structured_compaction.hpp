@@ -8,7 +8,11 @@
 #include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/agent/context_compactor.hpp"
 
-namespace minimal::agent {
+namespace minimal::compaction_structured {
+
+using agent::CompactionRequest;
+using agent::CompactionResult;
+using agent::CompactionStrategy;
 
 // The structured summary tool. The agent loop puts its definition on EVERY
 // main request (so the summarizer request, which reuses that request's tools,
@@ -77,14 +81,18 @@ std::string RenderStructuredSummary(const StructuredSummary& summary);
 // args that do not parse as JSON at all. A provider that ignored tool_choice
 // but produced text degrades to a framed free-text summary, logged -- the
 // same head shape compact_messages returns.
+// `instruction` is prompts/compression-structured.md's body; blank (or a
+// custom prompt on the request) degrades to core's free-text summarizer.
 std::optional<CompactionResult> compact_messages_structured(
     std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
-    const CompactionRequest& request);
+    const CompactionRequest& request, const std::string& instruction);
 
 // The "structured" strategy: today's cut selection (identical to "summarize" --
 // where to cut is orthogonal to how to summarize) with the structured
 // Compactor above. Registered by CORE in main.cpp beside "summarize", and the
 // default value of settings.json's memory.compaction_strategy.
-CompactionStrategy MakeStructuredCompactionStrategy();
+// The "structured" strategy: core's cut selection, this summarizer, and
+// record_summary as its request tool.
+CompactionStrategy MakeStructuredCompactionStrategy(std::string instruction);
 
-}  // namespace minimal::agent
+}  // namespace minimal::compaction_structured

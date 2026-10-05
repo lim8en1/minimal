@@ -62,11 +62,9 @@ struct CompactionRequest {
     std::string_view model_name;
     // The instruction appended after the conversation, verbatim -- the text
     // lives in the config dir's prompts/, not here. The free-text compactor
-    // sends compression_prompt; the structured one sends structured_prompt,
-    // unless `custom_prompt` is set or structured_prompt is blank, in which
-    // case it degrades to free text.
+    // sends it; a strategy with its own instruction (structured) sends that
+    // unless `custom_prompt` is set.
     std::string_view compression_prompt;
-    std::string_view structured_prompt;
     // True when compression_prompt is not the bundled default -- a preset's
     // `compression_prompt:` frontmatter or a /compact <name> override. A
     // custom prompt describes its own output shape, so it runs unstructured.

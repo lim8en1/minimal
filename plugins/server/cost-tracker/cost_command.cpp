@@ -223,7 +223,7 @@ std::string FormatSessionTotals(const SessionTotals& totals) {
     if (totals.unpriced_turns > 0) {
         report << "  (" << totals.unpriced_turns
                << " turn(s) unpriced -- prices refresh at server start; refresh now with "
-                  "minimal-server --refresh-cost-rates)";
+                  "minimal-server --plugin-call cost-tracker refresh_rates)";
     }
     report << '\n';
     return report.str();

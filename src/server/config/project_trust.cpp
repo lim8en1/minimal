@@ -1,5 +1,6 @@
 #include "minimal/config/project_trust.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
@@ -51,46 +52,45 @@ std::size_t CountFiles(const std::filesystem::path& dir, std::string_view extens
     return count;
 }
 
-// <dir>/<name>/SKILL.md for each immediate subdirectory.
-std::size_t CountSkills(const std::filesystem::path& dir) {
-    std::error_code ec;
-    std::size_t count = 0;
-    for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end;
-         it.increment(ec)) {
-        std::error_code exists_ec;
-        if (it->is_directory(exists_ec) &&
-            std::filesystem::exists(it->path() / "SKILL.md", exists_ec)) {
-            ++count;
-        }
-    }
-    return count;
-}
-
 std::string Plural(std::size_t n, const char* singular, const char* plural) {
     return std::to_string(n) + " " + (n == 1 ? singular : plural);
 }
 
 }  // namespace
 
-ProjectLocalInventory InspectProjectLocal(const std::filesystem::path& project_root) {
-    ProjectLocalInventory out;
+ProjectLocalInventory InspectProjectLocal(const std::filesystem::path& project_root,
+                                          const ProjectContentProvider* plugins) {
+    std::vector<ProjectContentCount> found{{"agent", "agents", 0}};
     const ProjectDirs dirs(project_root);
-    for (const auto& dir : dirs.dirs()) {
-        out.agents += CountFiles(dir / "agents", ".md");
-        for (const char* skills : {"skills", ".claude/skills", ".agents/skills"}) {
-            out.skills += CountSkills(dir / skills);
+    for (const auto& dir : dirs.dirs()) found[0].count += CountFiles(dir / "agents", ".md");
+    if (plugins != nullptr) plugins->DescribeProjectContent(project_root, found);
+
+    ProjectLocalInventory out;
+    for (const auto& item : found) {
+        if (item.count == 0) continue;
+        const auto same = std::find_if(out.items.begin(), out.items.end(),
+                                       [&](const auto& e) { return e.singular == item.singular; });
+        if (same != out.items.end()) {
+            same->count += item.count;
+        } else {
+            out.items.push_back(item);
         }
-        out.commands += CountFiles(dir / "commands", ".md");
-        out.commands += CountFiles(dir / ".opencode" / "commands", ".md");
     }
     return out;
 }
 
+std::size_t ProjectLocalInventory::CountOf(std::string_view singular) const {
+    for (const auto& item : items) {
+        if (item.singular == singular) return item.count;
+    }
+    return 0;
+}
+
 std::string ProjectLocalInventory::Describe() const {
     std::vector<std::string> parts;
-    if (agents != 0) parts.push_back(Plural(agents, "agent", "agents"));
-    if (skills != 0) parts.push_back(Plural(skills, "skill", "skills"));
-    if (commands != 0) parts.push_back(Plural(commands, "command", "commands"));
+    for (const auto& item : items) {
+        parts.push_back(Plural(item.count, item.singular.c_str(), item.plural.c_str()));
+    }
     if (parts.empty()) return "nothing";
     std::string joined = parts.front();
     for (std::size_t i = 1; i < parts.size(); ++i) joined += ", " + parts[i];

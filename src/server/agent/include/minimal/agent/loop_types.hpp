@@ -42,6 +42,12 @@
 
 namespace minimal::agent {
 
+// True on a thread while it runs a tool's execute(): a permission check
+// marshalled onto the session worker from there would deadlock (the worker
+// is waiting for this very tool), so Session::CheckPermission refuses it.
+inline thread_local bool g_in_tool_execution = false;
+
+
 struct LoopConfig {
     bool auto_compact = true;
     // When to compact. Never (the default) means compaction only ever runs on
@@ -53,14 +59,17 @@ struct LoopConfig {
     // Compact() turns this into a keep-recent token budget of
     // (100 - percent)% of the working history's estimate, so the cut is by
     // token weight rather than message count. 0 (the default for hand-built
-    // configs) keeps the legacy history.size()/2 halving.
+    // configs) cuts by message count instead: history.size()/2.
     int compaction_replace_percent = 0;
-    // Put record_summary on every main request, so the structured
-    // summarizer's request (the main request + one instruction) keeps the
-    // tools array -- and the prompt cache -- intact. main.cpp turns it on;
-    // off for hand-built configs, whose structured summarizer then appends the
-    // tool to its own request (a cache miss, nothing worse).
-    bool offer_summary_tool = false;
+    // Every registered compaction strategy's request tools
+    // (CompactionStrategyRegistry::RequestTools), on every main request so a
+    // summarizer request (the main request + one instruction) keeps the tools
+    // array -- and the prompt cache -- intact; and the reply a stray call to
+    // one gets outside a compaction. main.cpp fills both; empty for hand-built
+    // configs, whose summarizer then adds its tool to its own request (a cache
+    // miss, nothing worse).
+    std::vector<llm::ToolDefinition> strategy_tools;
+    std::map<std::string, std::string> strategy_tool_replies;
     int max_retries = 3;
     int max_turns = 0;  // 0 = unbounded; subagents bound their own life
 
@@ -110,8 +119,9 @@ struct LoopConfig {
     // at the producer. Default-constructed (every LoopConfig a test builds by
     // hand, and any AgentLoop built directly with its own `compactor`
     // constructor argument) falls back to today's production behavior
-    // exactly: an unset cut_selector means AgentLoop::Compact() keeps the
-    // legacy history.size()/2 halving; EffectiveCompactor() below is what
+    // exactly: an unset cut_selector means AgentLoop::Compact() uses the
+    // summarize cut (token budget, or history.size()/2 with no budget);
+    // EffectiveCompactor() below is what
     // Session actually passes to AgentLoop's ctor. Neither half ever bypasses
     // snap_compaction_boundary, which AgentLoop::Compact() applies
     // unconditionally regardless of where the candidate cut came from.
@@ -202,6 +212,7 @@ struct ToolLifecycleEvent {
     nlohmann::json input;
     bool started = false;
     bool is_error = false;  // meaningful only when started == false
+    std::string summary;    // Tool::Summary; empty = client summarizes the input
     std::int64_t started_at_unix_ms = 0;
     // Wall time the call took, set on the FINISH event only. SessionObserver's
     // ToolInvocation carries a duration and this is the only place that knows

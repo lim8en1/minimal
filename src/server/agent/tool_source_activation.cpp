@@ -19,6 +19,7 @@ struct Pending {
     std::string source_name;
     std::string member;
     std::shared_future<Outcome> result;
+    std::string reconnect_hint;  // the source's, for the timeout message
 };
 
 }  // namespace
@@ -32,7 +33,8 @@ ToolSourceActivation ActivateToolSources(
             sources != nullptr ? sources->Find(source_name) : nullptr;
         for (const auto& member : members) {
             auto promise = std::make_shared<std::promise<Outcome>>();
-            pending.push_back({source_name, member, promise->get_future().share()});
+            pending.push_back({source_name, member, promise->get_future().share(),
+                               source != nullptr ? source->ReconnectHint() : std::string()});
             if (source == nullptr) {
                 Outcome outcome;
                 outcome.error = "tool source '" + source_name +
@@ -73,7 +75,9 @@ ToolSourceActivation ActivateToolSources(
             error = "did not become ready within " +
                     std::to_string(
                         std::chrono::duration_cast<std::chrono::seconds>(budget).count()) +
-                    "s; its tools are not loaded (reconnect it with /mcp to add them)";
+                    "s; its tools are not loaded" +
+                    (entry.reconnect_hint.empty() ? std::string()
+                                                  : " (" + entry.reconnect_hint + ")");
         }
         activation.failures.push_back({entry.source_name, entry.member, std::move(error)});
     }

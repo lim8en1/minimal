@@ -151,12 +151,11 @@ struct TempConfigDir {
 
 struct HistoryFixture {
     HistoryFixture()
-        : skills(config::SkillRegistry::Load(config.dir)),
-          observers(std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger())) {}
+        : observers(std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger())) {}
 
     void Build() {
         presets = std::make_unique<agent::AgentPresetRegistry>(
-            config.dir, skills, config::LoadSettingsConfig(config.dir / "settings.json"));
+            config.dir, config::LoadSettingsConfig(config.dir / "settings.json"));
         providers.Register("fake", [this](const llm::ProviderConfig&) {
             return std::make_unique<testing::ScriptedProvider>(script);
         });
@@ -169,7 +168,6 @@ struct HistoryFixture {
     }
 
     TempConfigDir config;
-    config::SkillRegistry skills;
     tools::ToolRegistry tools_registry;
     llm::ProviderFactoryRegistry providers;
     std::unique_ptr<agent::AgentPresetRegistry> presets;

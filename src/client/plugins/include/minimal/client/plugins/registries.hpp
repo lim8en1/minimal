@@ -286,6 +286,10 @@ public:
     virtual ~StatusSegment() = default;
     virtual std::string_view id() const = 0;
     virtual std::string Render(const std::string& focused_session_id) const = 0;
+    // Which segment gives way first when the bar overflows: lowest first.
+    // Core's range: permission_mode 100 .. version 10; 30 sits below the live
+    // core state and above pure reference detail.
+    virtual int priority() const { return 30; }
 };
 
 // --- Syntax grammars (additive, keyed by language) --------------------------

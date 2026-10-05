@@ -16,6 +16,7 @@
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/commands/project_command_source.hpp"
+#include "minimal/config/project_trust.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/agent/host_registries.hpp"
 #include "minimal/llm/metadata_catalog.hpp"
@@ -102,7 +103,8 @@ std::string_view ToString(LoadStatus status);
 // dlclose'd. A registered Tool's vtable lives inside its .so, so unloading a
 // plugin while the registry still holds its objects is a use-after-free that
 // surfaces as an unrelated crash much later. Do not "clean this up".
-class PluginLoader : public commands::ProjectCommandProvider {
+class PluginLoader : public commands::ProjectCommandProvider,
+                     public config::ProjectContentProvider {
 public:
     // `registries`: every seam a plugin may register into; a null member is
     // simply not offered (plugins treat every registration hook as optional).
@@ -147,6 +149,12 @@ public:
     // when this changes. Empty when no plugin exports the hook.
     std::string ProjectCommandsFingerprint(
         const std::filesystem::path& project_root) const override;
+
+    // Every loaded plugin's OPTIONAL minimal_plugin_describe_project_content
+    // for `project_root`, appended to `out`. A throwing hook contributes
+    // nothing (logged).
+    void DescribeProjectContent(const std::filesystem::path& project_root,
+                                std::vector<config::ProjectContentCount>& out) const override;
 
     // One registry the loader drives; defined in plugin_loader.cpp.
     struct Target;

@@ -7,7 +7,6 @@
 #include "minimal/agent/compaction_boundary.hpp"
 #include "minimal/agent/compaction_trigger.hpp"
 #include "minimal/agent/context_compactor.hpp"
-#include "minimal/agent/structured_compaction.hpp"
 #include "minimal/agent/transcript_repair.hpp"
 #include "minimal/common/utf8.hpp"
 #include "tool_result_caps.hpp"
@@ -207,9 +206,8 @@ Compactor CompactionController::ResolveSummarizer() {
 std::optional<std::size_t> CompactionController::ChooseCut(std::string_view trigger) {
     // compaction_replace_percent is expressed to the selector as the
     // keep-recent budget it already understands: (100 - percent)% of the
-    // working history's token estimate stays verbatim. Counting messages (the
-    // legacy halving) kept ~40% of a tool-heavy context, whose newest
-    // messages carry most of the bytes. An explicit keep_recent_tokens wins.
+    // working history's token estimate stays verbatim. An explicit
+    // keep_recent_tokens wins; with neither, the cut is by message count.
     std::int64_t keep_recent_tokens = config_.compaction_keep_recent_tokens;
     if (keep_recent_tokens <= 0 && config_.compaction_replace_percent > 0) {
         const std::int64_t total = estimate_tokens(working_.messages());
@@ -223,8 +221,7 @@ std::optional<std::size_t> CompactionController::ChooseCut(std::string_view trig
     try {
         candidate = config_.compaction_strategy.cut_selector
                         ? config_.compaction_strategy.cut_selector(working_.messages(), keep_recent_tokens)
-                    : keep_recent_tokens > 0 ? ProposeSummarizeCut(working_.messages(), keep_recent_tokens)
-                                             : working_.messages().size() / 2;
+                        : ProposeSummarizeCut(working_.messages(), keep_recent_tokens);
     } catch (const std::exception& error) {
         session_.logger.warn("session {}: compaction cut selector threw: {}", session_.session_id,
                              error.what());
@@ -333,9 +330,8 @@ std::optional<std::size_t> CompactionController::Compact(std::string_view trigge
 
     // Keep the tail verbatim; summarize everything older. The candidate cut
     // comes from the configured strategy's cut selector (S4) when one is
-    // set -- honoring memory.compaction_keep_recent_tokens (W11) via a
-    // token-budget walk from the tail, instead of the legacy plain halving
-    // -- else the boundary snap below is what makes ANY candidate safe.
+    // set, else the summarize token-budget walk from the tail; the boundary
+    // snap below is what makes ANY candidate safe.
     //
     const std::optional<std::size_t> chosen_cut = ChooseCut(trigger);
     if (!chosen_cut) return std::nullopt;
@@ -357,7 +353,6 @@ std::optional<std::size_t> CompactionController::Compact(std::string_view trigge
     params.compression_prompt =
         prompt_override.empty() ? preset_.compression_prompt : prompt_override;
     params.custom_prompt = !prompt_override.empty() || preset_.custom_compression_prompt;
-    params.structured_prompt = preset_.structured_compression_prompt;
     {
         RequestBuilder::SystemAndTools system_and_tools = request_.BuildSystemAndTools();
         params.system = std::move(system_and_tools.system);

@@ -51,8 +51,7 @@ struct McpE2eFixture {
         Write("permissions.json", "{}");  // the mcp model's default is ASK
         Write("agents/main.md",
               "---\nname: main\nmodel: main/test-model\nallowed_tools: [\"*\"]\n"
-              "allowed_mcp_servers: [\"fake\"]\n---\nYou help.\n");
-        skills = config::SkillRegistry::Load(dir);
+              "tool_sources:\n  mcp: [\"fake\"]\n---\nYou help.\n");
 
         timeouts.request = request_timeout;
     }
@@ -72,7 +71,7 @@ struct McpE2eFixture {
     }
 
     void Start() {
-        presets = std::make_unique<agent::AgentPresetRegistry>(dir, skills,
+        presets = std::make_unique<agent::AgentPresetRegistry>(dir,
                                                                config::SettingsConfig{});
         // The mcp plugin's permission model, bound to every preset the way
         // the plugin registers it (permissions.json leaves its default: Ask).
@@ -138,7 +137,6 @@ struct McpE2eFixture {
 
     testing::TempDir tempdir;
     std::filesystem::path dir, socket;
-    config::SkillRegistry skills;
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
     std::shared_ptr<testing::ScriptedProviderScript> script =

@@ -220,7 +220,7 @@ public:
             if (page >= max_list_pages_) {
                 slot.Complete(std::nullopt,
                               "MCP tools/list exceeded " + std::to_string(max_list_pages_) +
-                                  " pages (tools.mcp.max_list_pages); refusing further "
+                                  " pages (the mcp plugin's max_list_pages); refusing further "
                                   "cursors from a possibly broken or malicious server");
                 return;
             }

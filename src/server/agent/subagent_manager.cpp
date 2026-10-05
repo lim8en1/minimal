@@ -186,7 +186,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
             // ahead of the explicit choice -- the same rescue CreateResolved's
             // own model_override plumbing needs.
             child_preset = presets_.Resolve(preset_name, parent->info().project_root,
-                                            parent->loop().preset().allowed_skills, spawn_model);
+                                            &parent->loop().preset(), spawn_model);
         } else {
             // Nothing more specific: the child inherits its parent's model,
             // unless its preset declares one. PresetDeclaresModel is a cheap
@@ -197,7 +197,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
             // own model.
             if (presets_.PresetDeclaresModel(preset_name, parent->info().project_root)) {
                 child_preset = presets_.Resolve(preset_name, parent->info().project_root,
-                                                parent->loop().preset().allowed_skills, std::nullopt);
+                                                &parent->loop().preset(), std::nullopt);
                 spawn_model = std::nullopt;  // the preset's own choice stands
             } else {
                 std::optional<common::ModelRef> fallback;
@@ -218,7 +218,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
                 }
                 if (!fallback) fallback = parent->loop().preset().model_ref;
                 child_preset = presets_.Resolve(preset_name, parent->info().project_root,
-                                                parent->loop().preset().allowed_skills, fallback);
+                                                &parent->loop().preset(), fallback);
                 spawn_model = std::move(fallback);
             }
         }

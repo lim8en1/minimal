@@ -18,10 +18,9 @@ message UserChatTurn {
 }
 
 message CommandArgs {
+  reserved 2;
+  reserved "flags";
   repeated string positional = 1;
-  // Currently unconsumed (reserved): no client sends flags and no server
-  // command reads them; kept for wire compatibility.
-  map<string, string> flags = 2;
   string raw = 3;
 }
 
@@ -246,10 +245,8 @@ message PermissionRequest {
   string request_id = 1;
   string tool_name = 2;
   ToolCategory category = 3;
-  // Currently unconsumed by clients (producer-only): the raw invocation input
-  // is available to server-side policy and plugins; clients render `summary`
-  // instead. Kept for wire compatibility.
-  google.protobuf.Struct tool_input = 4;
+  reserved 4;
+  reserved "tool_input";
   string summary = 5; // one-line human-readable description for the prompt
   // What this invocation was able to name, and therefore which grants may be
   // offered. May be a LOWER BOUND -- `find . | xargs rm` names find and xargs,
@@ -327,14 +324,9 @@ message CommandResult {
 message CommandInfo {
   string name = 1;
   string summary = 2;
-  // Currently unconsumed by clients (reserved): autocomplete and /help render
-  // summary/name only. Kept for wire compatibility.
-  string usage = 3;
+  reserved 3, 5;
+  reserved "usage", "display";
   CommandKind kind = 4;
-  // Currently unconsumed by clients (reserved): the display decision is taken
-  // from CommandResult.display at outcome time, not from the catalog. Kept
-  // for wire compatibility.
-  CommandDisplay display = 5;
   bool read_only = 6;
   // The Command::RequiresSession taxonomy answer: whether Execute needs a live
   // session ref. The client filters these OUT of /-autocomplete and the /help
@@ -463,14 +455,12 @@ message BackgroundTaskEvent {
     TIMED_OUT = 3;   // the task's wall-clock deadline; process group killed
     KILLED = 4;      // the session terminated; the watcher killed the group
   }
-  string task_id = 1;
+  reserved 1, 4;
+  reserved "task_id", "pid";
   string tool_use_id = 2;
   string command = 3;
-  // Producer-only/reserved for diagnostics: clients key rows by tool_use_id
-  // and read command/state; pid and task_id are not consumed. Kept for wire
-  // compatibility.
-  int32 pid = 4;
   State state = 5;
+  string tool_name = 6;  // the tool that started the task
 }
 
 // The session's transcript was rewound or redone. The client trims its

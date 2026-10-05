@@ -79,7 +79,7 @@ RatesFetchOutcome FetchAndUpdateRates(const CostSettings& settings, CostStore& s
     // shared state between the two calls), so running them one after the
     // other doubled worst-case latency for no reason. This matters most on
     // the paths that block a human or the whole process on the result:
-    // startup auto-refresh, `--refresh-cost-rates`, and the `.rpc
+    // startup auto-refresh, `--plugin-call cost-tracker refresh_rates`, and the `.rpc
     // refresh_rates` handler thread all run through here.
     std::string litellm_error;
     std::string openrouter_error;

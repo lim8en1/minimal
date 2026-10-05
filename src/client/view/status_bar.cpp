@@ -14,14 +14,14 @@ constexpr std::size_t kSessionColumnCap = 24;
 // Which segment gives way first when the bar overflows: lowest first. The
 // live, decision-relevant state (mode, activity, model, context) outranks
 // reference detail the user can get elsewhere (version, the tab bar's own
-// session name, the cost breakdown).
-int SegmentPriority(std::string_view id) {
+// session name). A plugin segment ranks by its own priority (`priorities`).
+int SegmentPriority(std::string_view id, const std::map<std::string, int>& priorities) {
+    if (const auto it = priorities.find(std::string(id)); it != priorities.end()) return it->second;
     if (id == "permission_mode") return 100;
     if (id == "activity") return 90;
     if (id == "model") return 80;
     if (id == "tokens") return 70;
     if (id == "agent") return 60;
-    if (id == "cost") return 40;
     // Decision-relevant like the mode: a paused session is not running, and
     // knowing why nothing is happening outranks reference detail.
     if (id == "paused") return 50;
@@ -121,7 +121,8 @@ std::string WithHiddenRowsSuffix(std::string activity) {
 
 std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& format,
                                             const std::map<std::string, std::string>& values,
-                                            int max_width) {
+                                            int max_width,
+                                            const std::map<std::string, int>& priorities) {
     std::vector<StatusBarPart> parts;
     std::string pending_literal;
     bool group_empty = true;   // no value yet in the current (left or right) group
@@ -183,8 +184,8 @@ std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& fo
         std::optional<std::size_t> victim;
         for (std::size_t i = 0; i < parts.size(); ++i) {
             if (parts[i].is_literal || parts[i].is_split) continue;
-            if (!victim || SegmentPriority(parts[i].segment_id) <
-                               SegmentPriority(parts[*victim].segment_id)) {
+            if (!victim || SegmentPriority(parts[i].segment_id, priorities) <
+                               SegmentPriority(parts[*victim].segment_id, priorities)) {
                 victim = i;
             }
         }
@@ -197,10 +198,12 @@ std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& fo
 ftxui::Element RenderStatusBar(const std::vector<StatusSegment>& format,
                                const std::map<std::string, std::string>& values,
                                const Theme& theme, int max_width,
-                               const std::map<std::string, ftxui::Color>& emphasis) {
+                               const std::map<std::string, ftxui::Color>& emphasis,
+                               const std::map<std::string, int>& priorities) {
     using namespace ftxui;
     // One column of padding at each edge, so values never touch the frame.
-    const auto parts = ResolveStatusBar(format, values, max_width > 2 ? max_width - 2 : max_width);
+    const auto parts =
+        ResolveStatusBar(format, values, max_width > 2 ? max_width - 2 : max_width, priorities);
     if (parts.empty()) return emptyElement();
     const Color literal_color = MutedColor(theme);
     const Color value_color = theme.ColorFor("assistant_message");

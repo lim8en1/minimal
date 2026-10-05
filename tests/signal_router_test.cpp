@@ -10,9 +10,11 @@
 
 #include "deadline.hpp"
 #include "fakes.hpp"
+#include "minimal/agent/permission_gate_service.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/mcp/mcp_permission_model.hpp"
 #include "minimal/mcp/signal_protocol.hpp"
 #include "minimal/rpc/session_wiring.hpp"
 
@@ -526,4 +528,78 @@ TEST_CASE("ParseSignalNotification: the MCP wire frame", "[signals][mcp]") {
             .dump(),
         frame, error));
     CHECK(error == "dropped a signal frame missing string 'signal'/'content'");
+}
+
+// --- per-session gating of external signals (the owner's permission model) ---
+
+namespace {
+
+// The mcp plugin's model, bound into the session's preset with a signal rule.
+void BindMcpSignalRules(agent::AgentPreset& preset, const nlohmann::json& signals) {
+    const auto model = mcp::MakeMcpPermissionModel();
+    preset.permission_models.push_back(
+        {"mcp", model, model->BuildLayer({{"signals", signals}}, nullptr, true)});
+}
+
+}  // namespace
+
+TEST_CASE("an owned channel's signal passes its owner's model per receiving session",
+          "[signals][router][permission]") {
+    agent::SignalRouter router;
+    auto channel = CiChannel();
+    channel.owner = "mcp";
+    Register(router, channel);
+    RouterSessionFixture eve;
+    BindMcpSignalRules(eve.preset, {{"ci/build.failed", "deny"}});
+    eve.Script("ack");
+    eve.Script("ack");
+    eve.Start("eve-gated");
+    std::string error;
+    REQUIRE(router.Subscribe(eve.session, "ci/build.failed", error));
+    REQUIRE(router.Subscribe(eve.session, "ci/build.completed", error));
+
+    // Accepted by the queue either way: the gate runs on the session's worker.
+    router.DeliverExternal("ci", "build.failed", "build 9 failed", {});
+    router.DeliverExternal("ci", "build.completed", "build 10 passed", {});
+
+    CHECK(WaitForInTranscript(eve.store, "build 10 passed"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    for (const auto& message : eve.store->Snapshot()) {
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
+                CHECK(text->text.find("build 9 failed") == std::string::npos);
+            }
+        }
+    }
+}
+
+TEST_CASE("Session::CheckPermission is answered by the worker, and refused inside a tool",
+          "[signals][permission]") {
+    RouterSessionFixture eve;
+    BindMcpSignalRules(eve.preset, {{"ci", "deny"}});
+    eve.Start("eve-check");
+    const auto check = [](const std::string& key) {
+        return tools::ToolExecutor::SubjectCheck{"mcp", tools::PermissionSubject{"signal", key},
+                                                 "signal " + key,
+                                                 tools::PermissionMode::AlwaysAllow};
+    };
+    // From this (non-worker) thread: queued, run on the worker, answered.
+    CHECK_FALSE(eve.session->CheckPermission(check("ci/x")).allowed);
+    CHECK(eve.session->CheckPermission(check("pager/x")).allowed);
+
+    // From inside a tool's execute() the worker is busy waiting for that tool:
+    // refused rather than deadlocked.
+    agent::g_in_tool_execution = true;
+    const auto refused = eve.session->CheckPermission(check("pager/x"));
+    agent::g_in_tool_execution = false;
+    CHECK_FALSE(refused.allowed);
+    CHECK(refused.why.find("inside a tool call") != std::string::npos);
+}
+
+TEST_CASE("core.permission_gate denies before serving starts", "[permission]") {
+    agent::SessionPermissionGate gate;
+    const auto verdict = gate.Check(
+        "any", {"mcp", tools::PermissionSubject{"signal", "ci/x"}, "x",
+                tools::PermissionMode::AlwaysAllow});
+    CHECK_FALSE(verdict.allowed);
 }

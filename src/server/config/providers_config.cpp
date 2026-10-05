@@ -39,10 +39,12 @@ struct ApiKeyResolution {
 };
 
 std::optional<std::string> LookupCredentialsFile(const std::string& provider_name,
-                                                 std::filesystem::path* found_in);
+                                                 std::string& origin,
+                                                 const ProviderConfigExtensions* extensions);
 
 ApiKeyResolution ResolveApiKey(const nlohmann::json& provider, const std::string& where,
-                               const std::string& provider_name) {
+                               const std::string& provider_name,
+                               const ProviderConfigExtensions* extensions) {
     const bool has_key = provider.contains("api_key") && provider.at("api_key").is_string() &&
                          !provider.at("api_key").get<std::string>().empty();
     const bool has_env = provider.contains("api_key_env") &&
@@ -62,7 +64,7 @@ ApiKeyResolution ResolveApiKey(const nlohmann::json& provider, const std::string
         // pasted from an untrusted source, redirecting `url`/`options.baseURL`
         // to an attacker's host and supplying no key of its own, would
         // otherwise silently pull the operator's REAL key out of the shared
-        // auth store (this file, then opencode's own) and send it wherever
+        // auth store (this file, then any plugin credential source) and send it wherever
         // `url` points -- on the first request, with nothing in providers.json
         // that looks like a credential at all. Opt-in makes using the shared
         // store a deliberate, visible act instead of an implicit default;
@@ -74,10 +76,10 @@ ApiKeyResolution ResolveApiKey(const nlohmann::json& provider, const std::string
         ApiKeyResolution resolved;
         resolved.auth_file_opt_in = opt_in;
         if (!opt_in) return resolved;
-        std::filesystem::path found_in;
-        if (auto key = LookupCredentialsFile(provider_name, &found_in)) {
+        std::string found_in;
+        if (auto key = LookupCredentialsFile(provider_name, found_in, extensions)) {
             resolved.key = std::move(*key);
-            resolved.origin = "auth-file (" + found_in.string() + ")";
+            resolved.origin = "auth-file (" + found_in + ")";
         } else {
             // The explicit miss state: distinguishable from "configured no
             // credential" on the entry, and the input to the startup warning.
@@ -96,9 +98,8 @@ ApiKeyResolution ResolveApiKey(const nlohmann::json& provider, const std::string
 }
 
 // Last link of the api-key chain: a credentials file. {"<provider>": {"key":
-// "..."}}, read from <data dir>/auth.json first and then opencode's own
-// credentials (~/.local/share/opencode/auth.json), so an existing opencode
-// install's keys are honored zero-copy. Missing files are the normal state;
+// "..."}}, read from <data dir>/auth.json first and then from any plugin
+// CredentialSource (provider_config_extensions.hpp). Missing files are the normal state;
 // malformed ones warn and yield nothing -- a local server needs no key, and a
 // cloud provider fails its own auth with a clear 401 rather than blocking
 // startup over a file that may belong to a different provider.
@@ -137,22 +138,14 @@ std::optional<std::string> LookupAuthFile(const std::filesystem::path& path,
 }
 
 std::optional<std::string> LookupCredentialsFile(const std::string& provider_name,
-                                                 std::filesystem::path* found_in) {
+                                                 std::string& origin,
+                                                 const ProviderConfigExtensions* extensions) {
     const auto auth_path = common::DataDir() / "auth.json";
     if (auto key = LookupAuthFile(auth_path, provider_name)) {
-        if (found_in) *found_in = auth_path;
+        origin = auth_path.string();
         return key;
     }
-    // opencode-compat: its own auth store. Windows uses APPDATA, POSIX the
-    // XDG-ish path opencode documents.
-    if (const auto home = common::LookupEnv("HOME")) {
-        const auto oc_path = std::filesystem::path(*home) / ".local" / "share" / "opencode" /
-                             "auth.json";
-        if (auto key = LookupAuthFile(oc_path, provider_name)) {
-            if (found_in) *found_in = oc_path;
-            return key;
-        }
-    }
+    if (extensions != nullptr) return extensions->LookupCredential(provider_name, origin);
     return std::nullopt;
 }
 
@@ -323,130 +316,30 @@ bool HasDeclaredVariants(const nlohmann::json& provider, const nlohmann::json& m
 }
 
 
-//
-//   options.baseURL -> url        (only when url absent)
-//   options.apiKey  -> api_key    (only when neither api_key nor api_key_env)
-//   options.headers / headers -> connection headers (additive, both shapes)
-//   models.<id>.limit.context  -> context_window_tokens
-//   models.<id>.limit.output   -> max_tokens
-//   models.<id>.options -> parameters  (opencode's AI SDK spreads a model's
-//          `options` into the request body; `parameters` is minimal's verbatim
-//          passthrough. Keys already present in a native `parameters` object
-//          win, same precedence rule as the provider-level fields above.)
-//   models.<id>.name -> dropped (the picker shows the ref id; no display name)
-//   npm -> consumed: the AI-SDK package selector maps to a backend kind, and
-//          the one package that names a wire shape (@ai-sdk/openai-compatible)
-//          is exactly what backend "openai" already speaks.
-//   blacklist / whitelist -> the picker filters (parsed into the entry below).
-nlohmann::json NormalizeOpencodeProvider(const nlohmann::json& provider,
-                                         const std::string& where) {
-    if (!provider.is_object()) return provider;
+// Connection headers: providers.json accepts an object or a list of
+// [name, value] pairs; both normalize to the pair list. Scalars are coerced
+// (a silent drop would turn "unusual but working" into an auth failure with
+// no trace), non-scalars dropped with a warning.
+nlohmann::json NormalizeHeaders(const nlohmann::json& provider) {
+    if (!provider.is_object() || !provider.contains("headers") ||
+        !provider.at("headers").is_object()) {
+        return provider;
+    }
     nlohmann::json out = provider;
-
-    if (out.contains("npm") && out.at("npm").is_string()) {
-        const std::string npm = out.at("npm").get<std::string>();
-        if (!out.contains("backend")) {
-            if (npm == "@ai-sdk/openai-compatible") {
-                out["backend"] = "openai";
-            } else {
-                common::DefaultLogger().warn(
-                    "providers.json: {} names npm '{}' with no backend; add \"backend\" "
-                    "(the npm package does not select the wire shape here)",
-                    where, npm);
-            }
+    nlohmann::json flat = nlohmann::json::array();
+    for (const auto& [name, value] : out.at("headers").items()) {
+        if (value.is_string()) {
+            flat.push_back(nlohmann::json::array({name, value}));
+        } else if (value.is_number_integer() || value.is_number_float() || value.is_boolean()) {
+            flat.push_back(nlohmann::json::array(
+                {name, value.is_boolean() ? std::string(value.get<bool>() ? "true" : "false")
+                                          : value.dump()}));
+        } else {
+            common::DefaultLogger().warn(
+                "providers.json: header '{}' has a non-scalar value and was dropped", name);
         }
-        out.erase("npm");
     }
-
-    if (out.contains("options") && out.at("options").is_object()) {
-        const auto& options = out.at("options");
-        if (options.contains("baseURL") && options.at("baseURL").is_string() &&
-            !out.contains("url")) {
-            out["url"] = options.at("baseURL");
-        }
-        if (options.contains("apiKey") && options.at("apiKey").is_string() &&
-            !out.contains("api_key") && !out.contains("api_key_env")) {
-            out["api_key"] = options.at("apiKey");
-        }
-        if (options.contains("headers") && options.at("headers").is_object() &&
-            !out.contains("headers")) {
-            out["headers"] = options.at("headers");
-        }
-        out.erase("options");
-    }
-
-    // Headers: either shape normalizes to a flat array of [name, value] pairs.
-    if (out.contains("headers") && out.at("headers").is_object()) {
-        nlohmann::json flat = nlohmann::json::array();
-        for (const auto& [name, value] : out.at("headers").items()) {
-            if (value.is_string()) {
-                flat.push_back(nlohmann::json::array({name, value}));
-            } else if (value.is_number_integer() || value.is_number_float() ||
-                       value.is_boolean()) {
-                // Coerce scalars, don't drop them: opencode-shaped configs
-                // carry numeric/boolean header values, and a silent drop
-                // turns "unusual but working" into a discovery or auth
-                // failure with no trace in any log.
-                flat.push_back(
-                    nlohmann::json::array({name, value.is_boolean()
-                                                    ? std::string(value.get<bool>() ? "true" : "false")
-                                                    : value.dump()}));
-            } else {
-                common::DefaultLogger().warn(
-                    "providers.json: header '{}' has a non-scalar value and was dropped", name);
-            }
-        }
-        out["headers"] = std::move(flat);
-    }
-
-    if (out.contains("models") && out.at("models").is_object()) {
-        nlohmann::json models = nlohmann::json::object();
-        for (const auto& [id, model] : out.at("models").items()) {
-            nlohmann::json normalized = model.is_object() ? model : nlohmann::json::object();
-            if (normalized.contains("limit") && normalized.at("limit").is_object()) {
-                const auto& limit = normalized.at("limit");
-                if (limit.contains("context") && limit.at("context").is_number_integer() &&
-                    !normalized.contains("context_window_tokens")) {
-                    normalized["context_window_tokens"] = limit.at("context");
-                }
-                if (limit.contains("output") && limit.at("output").is_number_integer() &&
-                    !normalized.contains("max_tokens")) {
-                    normalized["max_tokens"] = limit.at("output");
-                }
-                normalized.erase("limit");
-            }
-            if (normalized.contains("options")) {
-                // opencode spreads a model's `options` into the request body
-                // (the AI SDK does the spreading); minimal's equivalent is
-                // `parameters`, which the provider builders emit verbatim
-                // before the structural fields. Fold the object over with
-                // native `parameters` keys winning per-key -- the same
-                // "native keys always win" rule the provider-level fields
-                // follow. Anything else (a string, an array) is dropped with
-                // a trace: a silent ignore turns "unusual but working" into
-                // an unexplained routing/sampling failure at request time.
-                if (normalized.at("options").is_object()) {
-                    nlohmann::json folded = normalized.at("options");
-                    if (normalized.contains("parameters") &&
-                        normalized.at("parameters").is_object()) {
-                        for (const auto& [key, value] : normalized.at("parameters").items()) {
-                            folded[key] = value;
-                        }
-                    }
-                    normalized["parameters"] = std::move(folded);
-                } else {
-                    common::DefaultLogger().warn(
-                        "providers.json: {} model '{}' field \"options\" must be an object and "
-                        "was dropped",
-                        where, id);
-                }
-                normalized.erase("options");
-            }
-            normalized.erase("name");
-            models[id] = std::move(normalized);
-        }
-        out["models"] = std::move(models);
-    }
+    out["headers"] = std::move(flat);
     return out;
 }
 
@@ -687,6 +580,7 @@ std::string DescribeDiscovery(const ProvidersConfig& providers, const std::strin
 }
 
 ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
+                                              const ProviderConfigExtensions* extensions,
                                               const VariantParamsHook& variant_params_hook) {
     // The pre-`models` schema was a top-level array of flat provider+model
     // records. Named explicitly rather than allowed to fail as "expected an
@@ -730,11 +624,14 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
         if (!provider.is_object()) {
             throw std::runtime_error("providers.json: " + where + " must be an object");
         }
-        const nlohmann::json provider_normalized = NormalizeOpencodeProvider(provider, where);
+        nlohmann::json translated = provider;
+        if (extensions != nullptr) extensions->Translate(translated, where);
+        const nlohmann::json provider_normalized = NormalizeHeaders(translated);
 
         const std::string backend = RequireString(provider_normalized, "backend", where);
         const std::string url = RequireString(provider_normalized, "url", where);
-        const ApiKeyResolution api_key = ResolveApiKey(provider_normalized, where, provider_name);
+        const ApiKeyResolution api_key =
+            ResolveApiKey(provider_normalized, where, provider_name, extensions);
         // One line per entry, naming the source but never the key: this is
         // the moment the key is frozen in for the process's lifetime, so an
         // empty resolution must be visible HERE, not only as a 401 on the
@@ -743,12 +640,17 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
             common::DefaultLogger().info("providers.json: {} -- api key from {}",
                                          where, api_key.origin);
         } else if (api_key.auth_file_opt_in) {
+            std::string searched = (common::DataDir() / "auth.json").string();
+            if (extensions != nullptr) {
+                for (const auto& source : extensions->DescribeCredentialSources()) {
+                    searched += ", " + source;
+                }
+            }
             common::DefaultLogger().warn(
                 "providers.json: {} -- opted into \"credentials\": \"auth-file\" but no key was "
-                "found in {} or ~/.local/share/opencode/auth.json. Credentials resolve once at "
-                "startup: if the key was written after the server started (e.g. via /connect), "
-                "restart the server.",
-                where, (common::DataDir() / "auth.json").string());
+                "found in {}. Credentials resolve once at startup: if the key was written after "
+                "the server started (e.g. via /connect), restart the server.",
+                where, searched);
         }
 
         bool discover = false;
@@ -991,27 +893,29 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
 }
 
 ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc,
-                                     const VariantParamsHook& variant_params_hook) {
+                                     const VariantParamsHook& variant_params_hook,
+                                     const ProviderConfigExtensions* extensions) {
     // ParseProvidersConfigUnwrapped already throws well-formed
     // "providers.json: ..." runtime_errors for every schema violation it
     // anticipates (checked with contains()/is_*() before every get<T>()); this
     // only catches a stray nlohmann::json::exception a future unguarded get<T>()
     // might leak, normalizing it the same way settings/permissions self-wrap.
     try {
-        return ParseProvidersConfigUnwrapped(doc, variant_params_hook);
+        return ParseProvidersConfigUnwrapped(doc, extensions, variant_params_hook);
     } catch (const nlohmann::json::exception& error) {
         throw std::runtime_error(std::string("providers.json: ") + error.what());
     }
 }
 
 ProvidersConfig LoadProvidersConfig(const std::filesystem::path& path,
-                                    const VariantParamsHook& variant_params_hook) {
+                                    const VariantParamsHook& variant_params_hook,
+                                    const ProviderConfigExtensions* extensions) {
     // LoadJsonConfig's parse callback is single-argument (const json&); the
     // hook rides a capture instead of a second callback parameter.
     return LoadJsonConfig<ProvidersConfig>(
         path, "providers", AbsencePolicy::kThrow, EmptyFilePolicy::kTreatAsMalformed,
-        [&variant_params_hook](const nlohmann::json& doc) {
-            return ParseProvidersConfig(doc, variant_params_hook);
+        [&variant_params_hook, extensions](const nlohmann::json& doc) {
+            return ParseProvidersConfig(doc, variant_params_hook, extensions);
         });
 }
 

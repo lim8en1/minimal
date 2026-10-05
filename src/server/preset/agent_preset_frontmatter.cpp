@@ -122,21 +122,19 @@ tools::PermissionOverrideLayer DecodePermissionModeBlock(const YAML::Node& node,
     return layer;
 }
 
-// opencode-compat `permission` block, folded into the native layer. Runs BEFORE
-// DecodePermissionModeBlock, so a native `permission_mode` field always wins
-// over an alias encoding of the same intent.
+// The `permission` block (opencode's spelling), folded into the native layer.
+// Runs BEFORE DecodePermissionModeBlock, so a native `permission_mode` field
+// always wins over an alias encoding of the same intent.
 //
-// Keys that name ONE tool in opencode (bash, read, glob, grep, webfetch,
-// websearch) govern that tool only: a scalar becomes a per-tool override on
-// the matching minimal permission key (webfetch -> web_fetch, websearch ->
-// web_search). Mapping them onto categories made `bash: allow` allow every
-// Execute tool (python, subagents) and `read: deny` deny grep, glob, ask_user
-// and skills. `edit`/`write` keep feeding file_write: opencode's `edit` governs
-// every file-modifying tool. external_directory -> out_of_workdir. A MAP value
-// under a tool key is the pattern layer: each entry becomes a
-// PermissionPatternRule on that tool's permission key. A map under a key whose
-// tool has no pattern subject (webfetch, websearch) collapses to its most
-// restrictive mode.
+// A key naming ONE tool -- a live tool's permission key, or a spelling the
+// tool itself declared (Tool::config_aliases: tools-web answers "webfetch")
+// -- governs that tool only: a scalar becomes a per-tool override. Mapping
+// tool words onto categories made `bash: allow` allow every Execute tool and
+// `read: deny` deny every read-only one. `edit`/`write` feed file_write (they
+// govern every file-modifying tool); external_directory -> out_of_workdir. A
+// MAP value under a tool key is the pattern layer, unless the tool declares
+// it takes no pattern rules (Tool::accepts_pattern_rules) -- then the map
+// collapses to its most restrictive mode. Core names no tool here.
 std::optional<tools::PermissionMode> CollapsePermissionValue(const YAML::Node& value,
                                                              const std::string& key) {
     if (value.IsScalar()) return config::ParsePermissionMode(value.as<std::string>());
@@ -185,8 +183,8 @@ void DecodeToolPatternMap(const YAML::Node& value, const std::string& key,
     }
 }
 
-tools::PermissionOverrideLayer DecodePermissionAlias(
-    const YAML::Node& node, const std::vector<std::string>& known_tool_permission_keys) {
+tools::PermissionOverrideLayer DecodePermissionAlias(const YAML::Node& node,
+                                                    const ToolVocabulary& tools) {
     tools::PermissionOverrideLayer layer;
     const YAML::Node block = node["permission"];
     if (!block || !block.IsMap()) return layer;
@@ -197,40 +195,40 @@ tools::PermissionOverrideLayer DecodePermissionAlias(
         {"write", &layer.file_write},
         {"external_directory", &layer.out_of_workdir},
     };
-    // Alias key -> the ONE tool it governs, by minimal permission key.
-    static const std::unordered_map<std::string, std::string> kToolKeys{
-        {"bash", "bash"}, {"read", "read"}, {"glob", "glob"}, {"grep", "grep"},
-        {"webfetch", "web_fetch"}, {"websearch", "web_search"},
+    const auto is_live = [&tools](const std::string& key) {
+        return AliasKeyIsToolName(key, tools.permission_keys);
     };
 
     for (const auto& entry : block) {
         const std::string key = entry.first.as<std::string>();
-        if (const auto tool = kToolKeys.find(key); tool != kToolKeys.end()) {
-            const std::string& tool_key = tool->second;
-            if (entry.second.IsMap() && tool_key != "web_fetch" && tool_key != "web_search") {
-                DecodeToolPatternMap(entry.second, tool_key, layer);
+        // A key naming ONE tool -- a live tool's permission key, or a spelling
+        // the tool declared (Tool::config_aliases) -- governs that tool only.
+        // The category words above stay categories even when a tool shares
+        // the name; a pattern map under one still reaches that tool below.
+        std::optional<std::string> tool_key;
+        if (const auto alias = tools.config_aliases.find(key); alias != tools.config_aliases.end()) {
+            tool_key = alias->second;
+        } else if (!by_key.count(key) && is_live(key)) {
+            tool_key = key;
+        }
+        if (tool_key) {
+            const bool takes_patterns =
+                std::find(tools.no_pattern_rules.begin(), tools.no_pattern_rules.end(),
+                          *tool_key) == tools.no_pattern_rules.end();
+            if (entry.second.IsMap() && takes_patterns) {
+                DecodeToolPatternMap(entry.second, *tool_key, layer);
             } else if (const auto mode = CollapsePermissionValue(entry.second, key)) {
-                layer.per_tool_overrides[tool_key] = *mode;
+                layer.per_tool_overrides[*tool_key] = *mode;
             }
             continue;
         }
         const auto it = by_key.find(key);
         if (it == by_key.end()) {
-            // Not one of the fixed opencode-shape category words -- but a map
-            // value naming a LIVE registered tool still has a real subject to
-            // match against, so it decodes as a pattern-map alias exactly like
-            // the fixed-vocabulary tool names below. A scalar value has no
-            // category to fold into regardless of the key's tool-name status,
-            // so it falls through to the same warning as an unknown key.
-            if (AliasKeyIsToolName(key, known_tool_permission_keys) && entry.second.IsMap()) {
-                DecodeToolPatternMap(entry.second, key, layer);
-                continue;
-            }
-            // task/skill/question/lsp/doom_loop are opencode keys minimal has
-            // no category for; silently dropping a rule the author wrote would
-            // WIDEN what they asked for, so it is named instead.
+            // Neither a category word nor a tool this server has (task, skill,
+            // lsp, a disabled plugin's tool): silently dropping a rule the
+            // author wrote would WIDEN what they asked for, so it is named.
             common::DefaultLogger().warn(
-                "agent preset: permission key '{}' has no minimal category; ignored", key);
+                "agent preset: permission key '{}' names no category or loaded tool; ignored", key);
             continue;
         }
         if (key == "external_directory" && entry.second.IsMap()) {
@@ -248,7 +246,7 @@ tools::PermissionOverrideLayer DecodePermissionAlias(
             }
             continue;
         }
-        if (AliasKeyIsToolName(key, known_tool_permission_keys) && entry.second.IsMap()) {
+        if (is_live(key) && entry.second.IsMap()) {
             DecodeToolPatternMap(entry.second, key, layer);
             continue;
         }
@@ -265,32 +263,6 @@ tools::PermissionOverrideLayer DecodePermissionAlias(
     return layer;
 }
 
-// opencode's deprecated `tools` map (name -> bool), folded into per-tool
-// overrides: true -> allow, false -> deny. minimal's allowed_tools is an
-// allow-LIST (fail closed), so a deny-by-bool is expressible only through the
-// override layer -- which is exactly what opencode's `tools: {write: false}`
-// means: everything stays available except the named tool.
-void ApplyToolsAlias(const YAML::Node& node, tools::PermissionOverrideLayer& layer) {
-    const YAML::Node block = node["tools"];
-    if (!block || !block.IsMap()) return;
-    for (const auto& entry : block) {
-        const std::string tool_name = entry.first.as<std::string>();
-        if (tool_name.empty() || tool_name == "*") {
-            throw std::runtime_error(
-                "agent preset: tools keys must name a tool ('*' would deny-or-allow "
-                "everything; use allowed_tools or permission categories)");
-        }
-        const std::string value = entry.second.as<std::string>();
-        if (value == "true") {
-            layer.per_tool_overrides[tool_name] = tools::PermissionMode::AlwaysAllow;
-        } else if (value == "false") {
-            layer.per_tool_overrides[tool_name] = tools::PermissionMode::AlwaysDeny;
-        } else {
-            throw std::runtime_error("agent preset: tools." + tool_name + " must be true or false");
-        }
-    }
-}
-
 AgentMode DecodeMode(const YAML::Node& node) {
     const YAML::Node value = node["mode"];
     if (!value || !value.IsScalar()) return AgentMode::All;
@@ -302,50 +274,15 @@ AgentMode DecodeMode(const YAML::Node& node) {
                              text + "'");
 }
 
-// allowed_skills: a LIST is the native form (every entry = allow); a MAP is the
-// opencode-compat form (name -> allow|ask|deny|preload). "*" is legal in both.
-std::map<std::string, SkillMode> DecodeAllowedSkills(const YAML::Node& node) {
-    std::map<std::string, SkillMode> result;
-    const YAML::Node value = node["allowed_skills"];
-    if (!value) return result;
-    if (value.IsSequence()) {
-        for (const auto& item : value) result[item.as<std::string>()] = SkillMode::Allow;
-        return result;
-    }
-    if (value.IsMap()) {
-        for (const auto& entry : value) {
-            const std::string name = entry.first.as<std::string>();
-            const std::string mode = entry.second.as<std::string>();
-            if (mode == "allow") {
-                result[name] = SkillMode::Allow;
-            } else if (mode == "ask") {
-                result[name] = SkillMode::Ask;
-            } else if (mode == "deny") {
-                result[name] = SkillMode::Deny;
-            } else if (mode == "preload") {
-                result[name] = SkillMode::Preload;
-            } else {
-                throw std::runtime_error("agent preset: allowed_skills." + name +
-                                         " must be one of allow|ask|deny|preload, got '" +
-                                         mode + "'");
-            }
-        }
-        return result;
-    }
-    throw std::runtime_error(
-        "agent preset: allowed_skills must be a list of names or a name->mode map");
-}
-
 // Structural keys this parser consumes itself. EVERYTHING else (scalars, maps,
 // whatever) is passthrough provider-parameter material -- see the class comment.
 bool IsKnownKey(const std::string& key) {
     static const std::unordered_map<std::string, char> kKnown{
         {"name", 0},          {"description", 0},   {"model", 0},
-        {"allowed_tools", 0}, {"allowed_skills", 0},{"allowed_mcp_servers", 0},
-        {"tool_sources", 0},
+        {"allowed_tools", 0}, {"tool_sources", 0},
         {"allowed_subagents", 0},
-        {"permission_mode", 0}, {"permission", 0},  {"tools", 0},
-        {"mcp_permissions", 0}, {"compression_prompt", 0}, {"compaction_strategy", 0},
+        {"permission_mode", 0}, {"permission", 0},
+        {"compression_prompt", 0}, {"compaction_strategy", 0},
         {"mode", 0},          {"disable", 0},       {"hidden", 0},
         {"color", 0},         {"steps", 0},         {"tool_config", 0},
         {"plugin_permissions", 0},
@@ -388,12 +325,25 @@ nlohmann::json YamlToJson(const YAML::Node& node) {
     return node.as<std::string>();
 }
 
+// Request fields the provider builders own: a frontmatter key spelled like one
+// is never passed through (it would fight the structural field it names).
+bool IsRequestStructural(const std::string& key) {
+    return key == "tools" || key == "tool_choice" || key == "messages" || key == "stream";
+}
+
 nlohmann::json DecodeExtraParameters(const YAML::Node& node) {
     nlohmann::json extras = nlohmann::json::object();
     if (!node || !node.IsMap()) return extras;
     for (const auto& entry : node) {
         const std::string key = entry.first.as<std::string>();
         if (IsKnownKey(key)) continue;
+        if (IsRequestStructural(key)) {
+            common::DefaultLogger().warn(
+                "agent preset: frontmatter key '{}' names a request field the harness owns; "
+                "ignored",
+                key);
+            continue;
+        }
         try {
             extras[key] = YamlToJson(entry.second);
         } catch (const std::exception& error) {
@@ -428,18 +378,13 @@ nlohmann::json DecodeToolConfig(const YAML::Node& node) {
     return result;
 }
 
-// Legacy spellings of plugin-owned keys, from before the MCP client became a
-// plugin: each is read into the generic key under the plugin's name. A key
-// table, not MCP logic -- core does not interpret what it moves.
-constexpr const char* kLegacyMcpSource = "mcp";
-
 void AppendUnique(std::vector<std::string>& out, const std::vector<std::string>& items) {
     for (const auto& item : items) {
         if (std::find(out.begin(), out.end(), item) == out.end()) out.push_back(item);
     }
 }
 
-// tool_sources: {<source>: [members]}, plus legacy allowed_mcp_servers.
+// tool_sources: {<source>: [members]}.
 std::map<std::string, std::vector<std::string>> DecodeToolSources(const YAML::Node& node) {
     std::map<std::string, std::vector<std::string>> result;
     if (const YAML::Node value = node["tool_sources"]) {
@@ -458,8 +403,6 @@ std::map<std::string, std::vector<std::string>> DecodeToolSources(const YAML::No
             AppendUnique(result[source], members);
         }
     }
-    const auto legacy = OptionalStringList(node, "allowed_mcp_servers");
-    if (!legacy.empty()) AppendUnique(result[kLegacyMcpSource], legacy);
     return result;
 }
 
@@ -488,8 +431,7 @@ nlohmann::json DecodePluginPermissions(const YAML::Node& node) {
 }  // namespace
 
 AgentPresetFrontmatter ParseAgentPresetFrontmatter(
-    const config::ParsedFrontmatter& parsed,
-    const std::vector<std::string>& known_tool_permission_keys) {
+    const config::ParsedFrontmatter& parsed, const ToolVocabulary& tools) {
     const YAML::Node& node = parsed.frontmatter;
 
     AgentPresetFrontmatter result;
@@ -512,7 +454,6 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
                                  "' must be <provider>/<model>, e.g. local/qwen4");
     }
     result.allowed_tools = OptionalStringList(node, "allowed_tools");
-    result.allowed_skills = DecodeAllowedSkills(node);
     result.tool_sources = DecodeToolSources(node);
     // Present-vs-absent is semantic here (absent = no restriction, present =
     // the exact allowlist), so this cannot go through OptionalStringList,
@@ -541,8 +482,7 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
     // native field or override replaces what an alias wrote; running the
     // `tools` alias after the block would let it overwrite a native
     // permission_mode.overrides entry, inverting this contract.
-    result.permission_mode = DecodePermissionAlias(node, known_tool_permission_keys);
-    ApplyToolsAlias(node, result.permission_mode);
+    result.permission_mode = DecodePermissionAlias(node, tools);
     result.permission_mode = DecodePermissionModeBlock(node, std::move(result.permission_mode));
     if (const YAML::Node block = node["permission_mode"]; block && block.IsMap()) {
         static const std::vector<std::string> kKnownPermissionKeys{
@@ -557,13 +497,6 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
         }
     }
     result.plugin_permissions = DecodePluginPermissions(node);
-    // Legacy `mcp_permissions: {server: mode}` -> the mcp plugin's slice
-    // `plugin_permissions.mcp.servers` (key table; an explicit slice wins).
-    if (const YAML::Node legacy = node["mcp_permissions"]; legacy && legacy.IsMap()) {
-        auto& slice = result.plugin_permissions[kLegacyMcpSource];
-        if (!slice.is_object()) slice = nlohmann::json::object();
-        if (!slice.contains("servers")) slice["servers"] = YamlToJson(legacy);
-    }
     result.compression_prompt = OptionalString(node, "compression_prompt");
     result.compaction_strategy = OptionalString(node, "compaction_strategy");
 
@@ -587,15 +520,14 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
     return result;
 }
 
-AgentPresetFrontmatter LoadAgentPresetFrontmatter(
-    const std::filesystem::path& path, const std::vector<std::string>& known_tool_permission_keys) {
+AgentPresetFrontmatter LoadAgentPresetFrontmatter(const std::filesystem::path& path,
+                                                  const ToolVocabulary& tools) {
     common::ReadFileResult file = common::ReadFile(path, kMaxPresetFileBytes);
     if (file.status == common::ReadFileResult::Status::kNotFound) {
         throw std::runtime_error("agent preset not found: " + path.string());
     }
     if (!file.ok()) throw std::runtime_error("agent preset: " + file.error);
-    return ParseAgentPresetFrontmatter(config::parse_frontmatter_markdown(file.contents),
-                                       known_tool_permission_keys);
+    return ParseAgentPresetFrontmatter(config::parse_frontmatter_markdown(file.contents), tools);
 }
 
 }  // namespace minimal::agent

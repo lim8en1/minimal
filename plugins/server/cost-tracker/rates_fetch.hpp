@@ -1,7 +1,7 @@
 #pragma once
 
 // The one implementation of the snapshot fetch, shared by the startup
-// auto-refresh, the server's --refresh-cost-rates one-shot, and the .rpc
+// auto-refresh, the server's --plugin-call one-shot, and the .rpc
 // service's refresh_rates method. Two snapshots are fetched (LiteLLM's
 // catalog, OpenRouter's own /api/v1/models list), each cached under its own
 // storage key. The fetches are bounded (rates_fetch_timeout_ms per source)
@@ -12,7 +12,7 @@
 // no price. Only when BOTH fail does the outcome carry an error.
 //
 // Runs on a plugin-owned background thread (the startup auto-refresh) or a
-// gRPC handler thread (--refresh-cost-rates / refresh_rates) -- blocking is
+// gRPC handler thread (--plugin-call cost-tracker refresh_rates / refresh_rates) -- blocking is
 // acceptable there.
 
 #include <string>

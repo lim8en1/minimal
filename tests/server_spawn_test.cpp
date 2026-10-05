@@ -31,7 +31,6 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
-#include "minimal/config/skill_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
@@ -122,13 +121,12 @@ TEST_CASE("EnsureServerRunning recognises an already-running server without spaw
     // only the transport has to come up for WaitForConnected. SeedConfig gives
     // the preset registry its floor (one agents/*.md), like every other fixture.
     SeedConfig(dir.path());
-    const auto skills = config::SkillRegistry::Load(dir.path());
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
     agent::SessionObserverRegistry observers{common::DefaultLogger()};
     session::SessionDatabase db{dir.path() / "sessions.db"};
     config::SettingsConfig settings;
-    agent::AgentPresetRegistry presets{dir.path(), skills, settings};
+    agent::AgentPresetRegistry presets{dir.path(), settings};
     agent::SessionRegistry registry{presets, rpc::FinishSessionWiring,
         plugins::HostRegistries{.tools = &tools,
                                 .providers = &providers,

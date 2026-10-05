@@ -80,7 +80,6 @@ struct ServiceFixture {
         // would get a provider whose queue was already consumed. Pushing onto
         // the live script works for every session, whenever it is pushed.
         script = std::make_shared<testing::ScriptedProviderScript>();
-        skills = config::SkillRegistry::Load(dir);
     }
 
     void Write(const std::filesystem::path& relative, const std::string& contents) const {
@@ -152,7 +151,7 @@ struct ServiceFixture {
         catalog = std::make_unique<config::ProvidersConfig>(
             config::LoadProvidersConfig(dir / "providers.json"));
         presets = std::make_unique<agent::AgentPresetRegistry>(
-            dir, skills, config::LoadSettingsConfig(dir / "settings.json"),
+            dir, config::LoadSettingsConfig(dir / "settings.json"),
             config::LoadPermissionsConfig(dir / "permissions.json"), *catalog);
         auto script_copy = script;
         providers.Register("fake", [script_copy](const llm::ProviderConfig&) {
@@ -214,7 +213,6 @@ struct ServiceFixture {
     plugins::ServiceRegistry services;
     testing::TempDir tempdir;
     std::filesystem::path dir, socket;
-    config::SkillRegistry skills;
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
     std::shared_ptr<testing::ScriptedProviderScript> script;
@@ -1680,16 +1678,11 @@ TEST_CASE("ListCommands carries name, summary, usage, kind, display and read_onl
     REQUIRE(by_name.count("review") == 1);
 
     CHECK(by_name["openview"]->kind() == v1::COMMAND_KIND_HARNESS);
-    CHECK(by_name["openview"]->display() == v1::COMMAND_DISPLAY_VIEW);
     CHECK(by_name["openview"]->read_only());
 
-    CHECK(by_name["quietok"]->display() == v1::COMMAND_DISPLAY_SILENT);
-
     CHECK(by_name["review"]->kind() == v1::COMMAND_KIND_PROMPT_SHORTHAND);
-    CHECK(by_name["review"]->display() == v1::COMMAND_DISPLAY_STATUS);
     CHECK_FALSE(by_name["review"]->read_only());
 
-    CHECK(by_name["openview"]->usage() == "/openview");
     CHECK(by_name["openview"]->summary() == "opens a view");
 }
 

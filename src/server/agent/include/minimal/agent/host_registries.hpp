@@ -31,6 +31,7 @@ class SessionObserverRegistry;
 class CompactionStrategyRegistry;
 class ContextContributorRegistry;
 class MentionResolverRegistry;
+class PresetExtensionRegistry;
 }  // namespace minimal::agent
 namespace minimal::rpc {
 class AuthProviderRegistry;
@@ -38,6 +39,9 @@ class AuthProviderRegistry;
 namespace minimal::hooks {
 class HookDispatcher;
 }  // namespace minimal::hooks
+namespace minimal::config {
+class ProviderConfigExtensions;
+}  // namespace minimal::config
 
 namespace minimal::plugins {
 
@@ -61,6 +65,10 @@ struct HostRegistries {
     ServiceRegistry* services = nullptr;
     // The hook mechanism: plugins register points here; sessions emit through it.
     hooks::HookDispatcher* hooks = nullptr;
+    // providers.json translators and credential sources (read once, at config load).
+    config::ProviderConfigExtensions* provider_config = nullptr;
+    // Per-preset tool definitions and system-prompt appendices (resolve time).
+    agent::PresetExtensionRegistry* preset_extensions = nullptr;
 };
 
 }  // namespace minimal::plugins

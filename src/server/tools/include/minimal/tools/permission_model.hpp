@@ -36,6 +36,7 @@
 // the core model.
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -93,6 +94,23 @@ struct PermissionQuery {
     const void* layer = nullptr;
 };
 
+// Something other than a tool call that a plugin wants gated: an inbound
+// signal, a resource read, ... `kind` and `key` are the owner's vocabulary
+// ("signal", "ci/build.completed"); `attributes` carry whatever its model
+// decides on (host, transport, ...). Core never interprets them.
+struct PermissionSubject {
+    std::string kind;
+    std::string key;
+    nlohmann::json attributes = nlohmann::json::object();
+};
+
+// Everything one ResolveSubject call may consult. Borrowed for the call only.
+struct SubjectQuery {
+    const PermissionSubject& subject;
+    const PermissionPolicy* core_policy = nullptr;  // same scope as `layer`
+    const void* layer = nullptr;
+};
+
 struct PermissionAnswer {
     PermissionMode mode = PermissionMode::Ask;
     // The rule that decided, in the words a denial and a prompt show the
@@ -124,6 +142,14 @@ public:
     // Resolves one replaced `stage` for one claimed invocation. Pure; runs
     // on the session worker per gated call. May throw -- core answers Deny.
     virtual PermissionAnswer Resolve(PermissionStage stage, const PermissionQuery& query) const = 0;
+
+    // Resolves a NON-tool subject this model's plugin submitted (see
+    // ToolExecutor::CheckSubject). nullopt: no rule here -- the caller's
+    // default stands. Pure; may throw -- core answers Deny.
+    virtual std::optional<PermissionAnswer> ResolveSubject(const SubjectQuery& query) const {
+        (void)query;
+        return std::nullopt;
+    }
 
     // The `category` label tool hooks carry for the tools whose BASE stage
     // this model owns (their declared category is a placeholder the model

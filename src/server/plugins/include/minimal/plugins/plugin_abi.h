@@ -31,11 +31,13 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
 
 // --- Half 2: utilities plugins consume -------------------------------------
+#include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/agent/context_contributor.hpp"
 #include "minimal/agent/mention_resolver.hpp"
@@ -45,6 +47,8 @@
 #include "minimal/commands/command.hpp"
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/config/project_trust.hpp"
+#include "minimal/config/provider_config_extensions.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/metadata_catalog.hpp"
@@ -297,6 +301,33 @@ void minimal_plugin_register_project_commands(
 // std::string). A plugin without it never triggers a rebuild.
 void minimal_plugin_project_commands_fingerprint(const std::filesystem::path& project_root,
                                                  std::string& out);
+
+// OPTIONAL: what project-local content THIS plugin would load for
+// `project_root` (commands-md: its commands/ files), appended to `out` as
+// {singular, plural, count}. Core shows it when asking the operator to trust
+// a directory, and when announcing that a directory's content is ignored --
+// so a plugin that loads repo-shipped content must report it here, or the
+// trust prompt under-reports what a grant enables. Cheap (a directory walk,
+// no parsing); must not throw.
+void minimal_plugin_describe_project_content(
+    const std::filesystem::path& project_root,
+    std::vector<minimal::config::ProjectContentCount>& out);
+
+// OPTIONAL, additive: providers.json extensions -- entry translators that
+// rewrite another tool's provider shape into core's before it is parsed, and
+// credential sources consulted after core's own auth.json
+// (config/provider_config_extensions.hpp). Runs at load, before providers.json
+// is read.
+void minimal_plugin_register_provider_config_extensions(
+    minimal::config::ProviderConfigExtensions&, const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL, additive: preset-resolution extensions -- a per-preset tool
+// definition builder (an empty-named definition withholds the tool from that
+// preset) and system-prompt appendices, both run once per resolved preset
+// with the preset, its project root and, on the spawn path, the parent's
+// preset (agent/agent_preset_registry.hpp).
+void minimal_plugin_register_preset_extensions(minimal::agent::PresetExtensionRegistry&,
+                                               const minimal::plugins::PluginRegistrationContext&);
 
 // OPTIONAL, additive: contributes services other plugins may reach. Each
 // registration is an (name, abstract-interface pointer) pair; the interface

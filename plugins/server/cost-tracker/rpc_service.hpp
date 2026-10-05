@@ -19,7 +19,7 @@
 //                                   (per-session, no roll-up)
 //   refresh_rates {}             -> fetches both pricing snapshots now; same
 //                                   path as the startup auto-refresh and the
-//                                   server's --refresh-cost-rates flag.
+//                                   server's --plugin-call flag.
 //                                   Returns {"updated": N, "litellm_updated": N,
 //                                   "openrouter_updated": N, "fetched_at":
 //                                   "...", "warning": "..."} or !ok with the

@@ -1,5 +1,7 @@
 #include "minimal/plugins/plugin_loader.hpp"
 
+#include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/config/provider_config_extensions.hpp"
 #include "minimal/rpc/auth_provider.hpp"
 
 #include <dlfcn.h>
@@ -43,6 +45,8 @@ using RegisterProjectCommandsFn = void (*)(commands::CommandRegistry&,
                                            const std::filesystem::path&,
                                            const PluginRegistrationContext&);
 using ProjectCommandsFingerprintFn = void (*)(const std::filesystem::path&, std::string&);
+using DescribeProjectContentFn = void (*)(const std::filesystem::path&,
+                                          std::vector<config::ProjectContentCount>&);
 using RegisterAuthProviderFn =
     void (*)(rpc::AuthProviderRegistry&, const PluginRegistrationContext&);
 using RegisterMentionResolverFn =
@@ -284,6 +288,16 @@ void PluginLoader::BuildTargets() {
               KindsOwned<llm::VariantParamsRegistry>);
     AddTarget(targets_, "minimal_plugin_register_compaction_strategies", "compaction",
               registries_.compaction_strategies, KindsOwned<agent::CompactionStrategyRegistry>);
+    AddTarget(targets_, "minimal_plugin_register_provider_config_extensions", "providers.json",
+              registries_.provider_config,
+              [](const config::ProviderConfigExtensions& registry, const std::string& plugin) {
+                  return registry.OwnedBy(plugin);
+              });
+    AddTarget(targets_, "minimal_plugin_register_preset_extensions", "preset",
+              registries_.preset_extensions,
+              [](const agent::PresetExtensionRegistry& registry, const std::string& plugin) {
+                  return registry.OwnedBy(plugin);
+              });
     AddTarget(targets_, "minimal_plugin_register_services", "service", registries_.services,
               [](const ServiceRegistry& registry, const std::string& plugin) {
                   std::vector<std::string> out;
@@ -528,6 +542,24 @@ std::string PluginLoader::ProjectCommandsFingerprint(
         out += '\0';
     }
     return out;
+}
+
+void PluginLoader::DescribeProjectContent(const std::filesystem::path& project_root,
+                                          std::vector<config::ProjectContentCount>& out) const {
+    for (const auto& [name, handle] : loaded_) {
+        auto fn = Lookup<DescribeProjectContentFn>(handle, "minimal_plugin_describe_project_content");
+        if (fn == nullptr) continue;
+        std::vector<config::ProjectContentCount> found;
+        try {
+            fn(project_root, found);
+        } catch (...) {
+            common::DefaultLogger().warn(
+                "plugin '{}': minimal_plugin_describe_project_content threw for '{}'", name,
+                project_root.string());
+            continue;
+        }
+        out.insert(out.end(), found.begin(), found.end());
+    }
 }
 
 }  // namespace minimal::plugins

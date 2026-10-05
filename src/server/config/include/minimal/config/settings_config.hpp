@@ -30,6 +30,7 @@ struct CompactionTriggerSettings {
 struct MemorySettings {
     bool auto_compact = true;
     CompactionTriggerSettings context_compaction_trigger;
+    // Absolute keep-recent budget; 0 = unset, compaction_replace_percent governs.
     std::int64_t compaction_keep_recent_tokens = 0;
     // Share of the working history (by estimated tokens, oldest first) that a
     // compaction REPLACES with the summary; the rest stays verbatim after it.
@@ -40,14 +41,13 @@ struct MemorySettings {
     int compaction_replace_percent = 80;
     std::int64_t scrollback_page_size = 0;
     // S4: selects a CompactionStrategyRegistry entry by name. "summarize"
-    // (free-text summary head) and "structured" (a strict record_summary
-    // tool call parsed into typed sections) are core's own built-ins
-    // (registered in main.cpp, not plugins, so this never resolves to nothing
-    // on a bundled-only install); "structured" is the default. A name naming
-    // no registered strategy is a startup sanity-check warning, not a crash --
-    // the session falls back to the built-in. An agent preset's
-    // `compaction_strategy:` frontmatter overrides this per agent.
-    std::string compaction_strategy = "structured";
+    // (free-text summary head) is core's own built-in and the default, so
+    // this never resolves to nothing; plugins add others ("structured", the
+    // compaction-structured plugin; the seeded settings.json selects it). A
+    // name naming no registered strategy is a startup sanity-check warning,
+    // not a crash -- the session falls back to the built-in. An agent
+    // preset's `compaction_strategy:` frontmatter overrides this per agent.
+    std::string compaction_strategy = "summarize";
     // Some OpenAI-compatible proxies report an all-zero Usage; without a
     // fallback the compaction trigger never arms and the status bar reads
     // 0/max forever. When set (the default), a zero-usage turn seeds

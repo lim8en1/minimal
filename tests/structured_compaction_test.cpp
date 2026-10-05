@@ -11,10 +11,11 @@
 
 #include "fakes.hpp"
 #include "minimal/agent/compaction_strategy.hpp"
-#include "minimal/agent/structured_compaction.hpp"
+#include "structured_compaction.hpp"
 
 using namespace minimal;
 using namespace minimal::agent;
+using namespace minimal::compaction_structured;
 using namespace minimal::testing;
 
 namespace {
@@ -35,11 +36,13 @@ llm::ChatResponse SummaryResponse(nlohmann::json input) {
     return response;
 }
 
+// The strategy's own instruction (prompts/compression-structured.md's body).
+const std::string kInstruction = "STRUCTURED PROMPT";
+
 agent::CompactionRequest Params(std::int64_t last_reported = 0) {
     agent::CompactionRequest params;
     params.model_name = "model-x";
     params.compression_prompt = "THE PROMPT";
-    params.structured_prompt = "STRUCTURED PROMPT";
     params.last_reported_input_tokens = last_reported;
     return params;
 }
@@ -144,7 +147,7 @@ TEST_CASE("compact_messages_structured sends the session prefix plus an instruct
     params.session_id = "s1";
     params.system = "SESSION SYSTEM";
     params.tools = {llm::ToolDefinition{"read", "reads", nlohmann::json{{"type", "object"}}}};
-    const auto result = compact_messages_structured(MixedHistory(), provider, params);
+    const auto result = compact_messages_structured(MixedHistory(), provider, params, kInstruction);
     REQUIRE(result.has_value());
     CHECK(result->context_tokens_before == 1234);
 
@@ -184,8 +187,7 @@ TEST_CASE("compact_messages_structured without a structured prompt runs as free 
     FakeLlmProvider provider;
     provider.PushResponse(TextResponse("plain summary"));
     auto params = Params(1);
-    params.structured_prompt = "";
-    const auto result = compact_messages_structured(MixedHistory(), provider, params);
+    const auto result = compact_messages_structured(MixedHistory(), provider, params, "");
     REQUIRE(result.has_value());
     const auto& request = SingleRequest(provider);
     CHECK(request.tools.empty());
@@ -199,7 +201,7 @@ TEST_CASE("compact_messages_structured leaves an already-offered record_summary 
     auto params = Params(1);
     params.tools = {llm::ToolDefinition{"a", "", nlohmann::json::object()},
                     MakeRecordSummaryToolDefinition()};
-    REQUIRE(compact_messages_structured(MixedHistory(), provider, params).has_value());
+    REQUIRE(compact_messages_structured(MixedHistory(), provider, params, kInstruction).has_value());
     const auto& request = SingleRequest(provider);
     REQUIRE(request.tools.size() == 2);
     CHECK(request.tools[1].name == "record_summary");
@@ -210,7 +212,7 @@ TEST_CASE("compact_messages_structured runs a custom prompt as free text", "[str
     provider.PushResponse(TextResponse("custom-shaped summary"));
     auto params = Params(1);
     params.custom_prompt = true;
-    const auto result = compact_messages_structured(MixedHistory(), provider, params);
+    const auto result = compact_messages_structured(MixedHistory(), provider, params, kInstruction);
     REQUIRE(result.has_value());
     const auto& text = std::get<llm::TextBlock>(result->summary_message.content.front()).text;
     CHECK(text.ends_with("custom-shaped summary"));
@@ -235,7 +237,7 @@ TEST_CASE("compact_messages_structured parses the tool call into the summary hea
         {"lessons", nlohmann::json::array({"refusals must degrade"})},
         {"future_tasks", nlohmann::json::array({"kv-cache reuse"})}}));
 
-    const auto result = compact_messages_structured(MixedHistory(), provider, Params(50));
+    const auto result = compact_messages_structured(MixedHistory(), provider, Params(50), kInstruction);
     REQUIRE(result.has_value());
     REQUIRE(result->summary_message.role == llm::Role::User);
     const auto& text = std::get<llm::TextBlock>(result->summary_message.content.front()).text;
@@ -260,7 +262,7 @@ TEST_CASE("compact_messages_structured: missing current_task degrades with a mar
         {"done", nlohmann::json::array({"the work"})},
     }));
 
-    const auto result = compact_messages_structured(MixedHistory(), provider, Params(10));
+    const auto result = compact_messages_structured(MixedHistory(), provider, Params(10), kInstruction);
     REQUIRE(result.has_value());
     const auto& text = std::get<llm::TextBlock>(result->summary_message.content.front()).text;
     CHECK(text.find("(current task: not reported)") != std::string::npos);
@@ -279,7 +281,7 @@ TEST_CASE("compact_messages_structured filters malformed entries with the rest i
                                 nlohmann::json{{"name", "keeper.txt"}, {"why", "named"}}})},
     }));
 
-    const auto result = compact_messages_structured(MixedHistory(), provider, Params(10));
+    const auto result = compact_messages_structured(MixedHistory(), provider, Params(10), kInstruction);
     REQUIRE(result.has_value());
     const auto& text = std::get<llm::TextBlock>(result->summary_message.content.front()).text;
     // Non-string array items are skipped; string items around them survive.
@@ -298,7 +300,7 @@ TEST_CASE("compact_messages_structured: a tool call with no usable fields is ref
     FakeLlmProvider provider;
     provider.PushResponse(SummaryResponse(nlohmann::json::object()));
 
-    CHECK_FALSE(compact_messages_structured(MixedHistory(), provider, Params(10)).has_value());
+    CHECK_FALSE(compact_messages_structured(MixedHistory(), provider, Params(10), kInstruction).has_value());
 }
 
 TEST_CASE("compact_messages_structured: unparseable tool-call arguments are refused",
@@ -310,7 +312,7 @@ TEST_CASE("compact_messages_structured: unparseable tool-call arguments are refu
     response.stop_reason = llm::StopReason::ToolUse;
     provider.PushResponse(std::move(response));
 
-    CHECK_FALSE(compact_messages_structured(MixedHistory(), provider, Params(10)).has_value());
+    CHECK_FALSE(compact_messages_structured(MixedHistory(), provider, Params(10), kInstruction).has_value());
 }
 
 TEST_CASE("compact_messages_structured refuses a truncated summary before parsing",
@@ -322,7 +324,7 @@ TEST_CASE("compact_messages_structured refuses a truncated summary before parsin
     provider.PushResponse(TextResponse("The user asked me to refac",
                                        llm::StopReason::MaxTokens));
 
-    CHECK_FALSE(compact_messages_structured(MixedHistory(), provider, Params(10)).has_value());
+    CHECK_FALSE(compact_messages_structured(MixedHistory(), provider, Params(10), kInstruction).has_value());
 }
 
 TEST_CASE("compact_messages_structured: a model that did not call the tool degrades to the "
@@ -334,7 +336,7 @@ TEST_CASE("compact_messages_structured: a model that did not call the tool degra
     provider.PushResponse(TextResponse("the free-text summary"));
 
     auto params = Params(99);
-    const auto result = compact_messages_structured(MixedHistory(), provider, params);
+    const auto result = compact_messages_structured(MixedHistory(), provider, params, kInstruction);
     REQUIRE(result.has_value());
     CHECK(result->context_tokens_before == 99);
     const auto& text = std::get<llm::TextBlock>(result->summary_message.content.front()).text;
@@ -350,7 +352,7 @@ TEST_CASE("compact_messages_structured: no tool call and no text is refused",
     weird.stop_reason = llm::StopReason::EndTurn;
     provider.PushResponse(std::move(weird));
 
-    CHECK_FALSE(compact_messages_structured(MixedHistory(), provider, Params(10)).has_value());
+    CHECK_FALSE(compact_messages_structured(MixedHistory(), provider, Params(10), kInstruction).has_value());
 }
 
 TEST_CASE("compact_messages_structured shares compact_messages' refusal chain", "[structured]") {
@@ -360,25 +362,25 @@ TEST_CASE("compact_messages_structured shares compact_messages' refusal chain", 
     auto blank_params = Params(10);
     blank_params.compression_prompt = "  \n\t";
     blank_params.custom_prompt = true;
-    CHECK_FALSE(compact_messages_structured(MixedHistory(), blank, blank_params).has_value());
+    CHECK_FALSE(compact_messages_structured(MixedHistory(), blank, blank_params, kInstruction).has_value());
     CHECK(blank.call_count() == 0);
 
     // Provider error (retryable or not): degrade to no compaction.
     FakeLlmProvider transport;
     transport.PushError(llm::LlmError(llm::LlmErrorCategory::Transport, "connection reset"));
-    CHECK_FALSE(compact_messages_structured(MixedHistory(), transport, Params(10)).has_value());
+    CHECK_FALSE(compact_messages_structured(MixedHistory(), transport, Params(10), kInstruction).has_value());
 
     FakeLlmProvider request_error;
     request_error.PushError(llm::LlmError(llm::LlmErrorCategory::RequestError, "context too long"));
     CHECK_FALSE(
-        compact_messages_structured(MixedHistory(), request_error, Params(10)).has_value());
+        compact_messages_structured(MixedHistory(), request_error, Params(10), kInstruction).has_value());
 
     // Cancellation aborts the call and yields no compaction.
     FakeLlmProvider cancelled;
     cancelled.PushResponse(TextResponse("never assembled"), {llm::TextDeltaEvent{0, "partial"}});
     auto cancel_params = Params(10);
     cancel_params.is_cancelled = [] { return true; };
-    CHECK_FALSE(compact_messages_structured(MixedHistory(), cancelled, cancel_params).has_value());
+    CHECK_FALSE(compact_messages_structured(MixedHistory(), cancelled, cancel_params, kInstruction).has_value());
 }
 
 TEST_CASE("compact_messages_structured carries the preset's sampling settings", "[structured]") {
@@ -388,7 +390,7 @@ TEST_CASE("compact_messages_structured carries the preset's sampling settings", 
     auto params = Params(10);
     params.parameters = nlohmann::json{{"temperature", 0.1}};
     params.max_tokens = 2048;
-    REQUIRE(compact_messages_structured(MixedHistory(), provider, params).has_value());
+    REQUIRE(compact_messages_structured(MixedHistory(), provider, params, kInstruction).has_value());
 
     const auto& request = SingleRequest(provider);
     CHECK(request.parameters == nlohmann::json{{"temperature", 0.1}});
@@ -408,13 +410,13 @@ TEST_CASE("both branches of context_tokens_before measure the same span under th
     auto estimated = Params(0);
     estimated.full_history = &full;
     const auto without_usage =
-        compact_messages_structured(cut, estimated_provider, estimated);
+        compact_messages_structured(cut, estimated_provider, estimated, kInstruction);
 
     FakeLlmProvider reporting_provider;
     reporting_provider.PushResponse(SummaryResponse(nlohmann::json{{"current_task", "t"}}));
     auto ground_truth = Params(2000);
     ground_truth.full_history = &full;
-    const auto with_usage = compact_messages_structured(cut, reporting_provider, ground_truth);
+    const auto with_usage = compact_messages_structured(cut, reporting_provider, ground_truth, kInstruction);
 
     REQUIRE(without_usage.has_value());
     REQUIRE(with_usage.has_value());
@@ -425,7 +427,7 @@ TEST_CASE("both branches of context_tokens_before measure the same span under th
 TEST_CASE("MakeStructuredCompactionStrategy: same cut selection as summarize, structured "
           "summarizer",
           "[structured]") {
-    const auto structured = MakeStructuredCompactionStrategy();
+    const auto structured = MakeStructuredCompactionStrategy(kInstruction);
     const auto summarize = MakeSummarizeCompactionStrategy();
 
     REQUIRE(structured.cut_selector != nullptr);
@@ -441,7 +443,7 @@ TEST_CASE("MakeStructuredCompactionStrategy: same cut selection as summarize, st
 
 TEST_CASE("the structured strategy end-to-end through its registry entry", "[structured]") {
     CompactionStrategyRegistry registry;
-    CHECK(registry.Register("structured", MakeStructuredCompactionStrategy()));
+    CHECK(registry.Register("structured", MakeStructuredCompactionStrategy(kInstruction)));
     const auto* strategy = registry.Find("structured");
     REQUIRE(strategy != nullptr);
 

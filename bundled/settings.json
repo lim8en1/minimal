@@ -10,6 +10,7 @@
     "auto_compact": true,
     "context_compaction_trigger": { "percent": 80 },
     "compaction_replace_percent": 80,
+    "compaction_strategy": "structured",
     "scrollback_page_size": 100
   },
 

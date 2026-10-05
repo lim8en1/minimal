@@ -2,7 +2,8 @@
 name: data-analyst
 description: Crunches data with a persistent Python interpreter. Reads files, runs Python, edits nothing.
 allowed_tools: [read, glob, grep, python_exec, python_interrupt, skill, ask_user]
-allowed_skills: ["*"]
+plugin_permissions:
+  skills: ["*"]
 permission_mode:
   read_only: allow
   file_write: ask

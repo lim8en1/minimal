@@ -50,25 +50,10 @@ struct ToolContext {
     // needs the id, and no tool can know it any other way.
     std::string tool_use_id;
 
-    // The active preset's skill access for this session, as plain data so the
-    // tools layer stays free of agent-layer types. SkillTool validates its
-    // input against it at invocation time; empty means no skills are permitted.
-    // `ask` marks a skill loadable only after a permission prompt (opencode's
-    // `ask` mode) -- the skill tool narrows its own resolution for those via
-    // mode_override_for. Preloaded skills are NOT listed here: their bodies
-    // already sit in the system prompt, and calling the tool for them is a
-    // no-op the prompt forbids.
-    struct SkillAccess {
-        std::string name;
-        bool ask = false;
-    };
-    std::vector<SkillAccess> allowed_skills;
-
     // The active preset's slice of `tool_config` for THIS tool (its
     // config_namespace() key in agents/*.md frontmatter), as plain data so the
-    // tools layer stays free of agent-layer types -- the same pattern as
-    // allowed_skills above. Null when the tool declares no namespace or the
-    // preset declares no slice for it. Points into the agent loop's preset,
+    // tools layer stays free of agent-layer types. Null when the tool declares
+    // no namespace or the preset declares no slice for it. Points into the agent loop's preset,
     // which is stable for the turn (preset swaps happen on the worker between
     // turns), so a tool may retain the pointer for its invocation's duration
     // -- background watchers included, which hold the ctx handles anyway.
@@ -305,6 +290,26 @@ public:
         (void)input;
         (void)ctx;
         return PermissionDisclosure{spec().name, {}, true};
+    }
+
+    // Other spellings an agent preset's `permission:` block may use for this
+    // tool (tools-web's web_fetch answers "webfetch"). The tool's own
+    // permission key always works; this is only for foreign vocabularies.
+    virtual std::vector<std::string> config_aliases() const { return {}; }
+
+    // Whether pattern rules ({glob: mode}) can match this tool's calls. False
+    // for a tool with no pattern subject (no path, no command line): a pattern
+    // map aimed at it in a preset's `permission:` block collapses to its most
+    // restrictive mode instead of becoming rules that never match.
+    virtual bool accepts_pattern_rules() const { return true; }
+
+    // One line describing THIS call for a client's live tool row ("$ make
+    // test"), carried on the wire as ToolExecutionEvent.summary. Cheap and
+    // pure: it runs on every call. Empty (the default): the client summarizes
+    // the input itself.
+    virtual std::string Summary(const nlohmann::json& input) const {
+        (void)input;
+        return {};
     }
 };
 

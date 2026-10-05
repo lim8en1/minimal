@@ -9,7 +9,7 @@
 //     the caller sees the same failed call ".rpc" gave it.
 //   - Subscribe("totals", _) attaches the stream to the push hub
 //     (totals_hub.hpp); anything else is refused (NOT_FOUND).
-// ".rpc" stays Provided too: the server's --refresh-cost-rates flag resolves
+// ".rpc" stays Provided too: the server's --plugin-call flag resolves
 // it directly (src/server/main.cpp).
 
 #include <memory>

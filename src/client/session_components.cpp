@@ -172,7 +172,7 @@ bool ToolRunTracker::BackgroundTask(const v1::BackgroundTaskEvent& evt) {
     }
     ToolExecutionState row;
     row.tool_use_id = evt.tool_use_id();
-    row.tool_name = "bash";   // background tasks are bash's own extension
+    row.tool_name = evt.tool_name();
     row.summary = evt.command();
     row.is_background = true;
     row.started = !is_terminal;
