@@ -15,7 +15,7 @@ Through `minimal_plugin_register_provider_config_extensions`:
   | --- | --- |
   | `npm: "@ai-sdk/openai-compatible"` | `backend: "openai"` (other packages warn: set `backend`) |
   | `options.baseURL` | `url` (unless set) |
-  | `options.apiKey` | `api_key` (unless set) |
+  | `options.apiKey` | `api_key` (unless set); a whole-value `{env:NAME}` becomes `env:NAME`, any other `{env:…}`/`{file:…}` use is a load error |
   | `options.headers` | `headers` (unless set) |
   | `models.<id>.limit.context` / `.output` | `context_window_tokens` / `max_tokens` |
   | `models.<id>.options` | folded into `parameters` (native keys win per key) |

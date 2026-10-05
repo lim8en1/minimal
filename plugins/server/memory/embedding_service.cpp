@@ -62,12 +62,14 @@ EmbeddingPlan MakeEmbeddingPlan(const MemorySettings& settings,
     if (strategy == StrategyKind::kHttp && !settings.api_base.empty()) {
         plan.strategy = "http";
         plan.signature = HttpEmbeddingFunction::SignatureFor(settings);
-        plan.factory = [settings, secrets] {
-            static const config::SecretResolver kDefaultSecrets;
-            const auto& resolver = secrets != nullptr ? *secrets : kDefaultSecrets;
-            return std::make_unique<HttpEmbeddingFunction>(
-                settings, resolver.Bind(settings.api_key, settings.api_base + "/embeddings"),
-                net::HttpClient{});
+        // Bound here, at load: a reference that can never resolve (an unset
+        // env: variable) fails the plugin's load rather than every embedding.
+        static const config::SecretResolver kDefaultSecrets;
+        const auto& resolver = secrets != nullptr ? *secrets : kDefaultSecrets;
+        common::SecretHandle api_key =
+            resolver.Bind(settings.api_key, settings.api_base + "/embeddings");
+        plan.factory = [settings, api_key = std::move(api_key)] {
+            return std::make_unique<HttpEmbeddingFunction>(settings, api_key, net::HttpClient{});
         };
     } else if (strategy == StrategyKind::kSidecar && !settings.sidecar_model.empty()) {
         plan.strategy = "sidecar";

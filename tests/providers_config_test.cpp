@@ -2165,10 +2165,16 @@ TEST_CASE("unknown fields are named parse errors at every level", "[providers]")
 TEST_CASE("comment keys are allowed wherever fields are", "[providers]") {
     const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
         "//": "top",
-        "providers": {"p": {"//": "entry", "backend": "openai", "url": "http://x/v1",
+        "providers": {"//": "a comment among providers",
+                      "p": {"//": "entry", "backend": "openai", "url": "http://x/v1",
+                            "headers": {"//": "header", "X-A": "1"},
                             "models": {"//note": "a comment among models",
-                                       "m": {"//": "model"}}}}})"));
-    CHECK(config.Resolve(ModelRef{"p", "m"}) != nullptr);
+                                       "m": {"//": "model",
+                                             "variants": {"//": "variant", "hi": {}}}}}}})"));
+    const auto model = config.Resolve(ModelRef{"p", "m"});
+    REQUIRE(model != nullptr);
+    REQUIRE(model->provider.headers.size() == 1);
+    CHECK(model->provider.headers[0].first == "X-A");
     CHECK(config.Resolve(ModelRef{"p", "//note"}) == nullptr);
 }
 

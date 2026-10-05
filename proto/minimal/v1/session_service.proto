@@ -333,6 +333,9 @@ message CommandInfo {
   // overlay while the focused tab has no session (a sessionless tab), so a
   // command that would only refuse server-side is never even offered.
   bool requires_session = 7;
+  // Command::SensitiveArgs: the arguments may carry a credential, so the
+  // client never persists the line in its prompt history.
+  bool sensitive_args = 8;
 }
 
 // A command invocation that needs no session at all: dispatched with a null

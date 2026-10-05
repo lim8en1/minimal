@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdlib>
 #include <memory>
 
 #include <nlohmann/json.hpp>
@@ -105,4 +106,28 @@ TEST_CASE("opencode's auth.json yields a provider's key from either spelling",
     CHECK(opencode_compat::LookupOpencodeKey(doc, "b") == "k2");
     CHECK_FALSE(opencode_compat::LookupOpencodeKey(doc, "c").has_value());
     CHECK_FALSE(opencode_compat::LookupOpencodeKey(doc, "missing").has_value());
+}
+
+TEST_CASE("opencode's {env:NAME} apiKey becomes an env: reference", "[opencode_compat]") {
+    ::setenv("OPENCODE_COMPAT_TEST_KEY", "from-env", 1);
+    const auto config = Parse(R"json({
+      "providers": {"p": {"backend": "openai",
+                          "options": {"baseURL": "http://x/v1",
+                                      "apiKey": "{env:OPENCODE_COMPAT_TEST_KEY}"},
+                          "models": {"m": {}}}}
+    })json");
+    const auto model = config.Resolve(ModelRef{"p", "m"});
+    REQUIRE(model != nullptr);
+    CHECK(model->provider.api_key.Get().value == "from-env");
+    ::unsetenv("OPENCODE_COMPAT_TEST_KEY");
+
+    // Any other substitution would go out verbatim as the key: refused.
+    for (const char* key : {"{file:~/.key}", "Bearer {env:X}"}) {
+        nlohmann::json doc = nlohmann::json::parse(R"json({
+          "providers": {"p": {"backend": "openai", "options": {"baseURL": "http://x/v1"},
+                              "models": {"m": {}}}}
+        })json");
+        doc["providers"]["p"]["options"]["apiKey"] = key;
+        CHECK_THROWS(Parse(doc.dump().c_str()));
+    }
 }

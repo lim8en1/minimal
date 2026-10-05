@@ -75,10 +75,10 @@ struct EmbeddingPlan {
     // strategy == "none".
     std::function<std::unique_ptr<EmbeddingFunction>()> factory;
 };
-// `secrets` binds the http backend's `api_key` reference when the backend is
-// created; null = the default resolver (the operator's store, no plugin
-// namespaces). A reference that can never resolve fails that creation, which
-// the breaker reports like any other unavailable backend.
+// `secrets` binds the http backend's `api_key` reference here, at load; null =
+// the default resolver (the operator's store, no plugin namespaces). A
+// reference that can never resolve (an unset env: variable) throws
+// std::runtime_error; a stored secret not set yet fails per request instead.
 EmbeddingPlan MakeEmbeddingPlan(const MemorySettings& settings,
                                 const std::filesystem::path& data_dir,
                                 const config::SecretResolver* secrets = nullptr);

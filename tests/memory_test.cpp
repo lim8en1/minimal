@@ -460,6 +460,17 @@ TEST_CASE("memory embeddings: an unusable sidecar throws its reason", "[memory]"
     CHECK(MakeEmbeddingPlan(MemorySettings{}, fs::temp_directory_path()).strategy == "none");
 }
 
+TEST_CASE("memory embeddings: an http key that can never resolve fails the plan",
+          "[memory]") {
+    MemorySettings settings;
+    settings.api_base = "http://127.0.0.1:1/v1";
+    settings.api_key = "env:MEMORY_TEST_DEFINITELY_UNSET_KEY";
+    CHECK_THROWS_WITH(MakeEmbeddingPlan(settings, fs::temp_directory_path()),
+                      ContainsSubstring("unset"));
+    settings.api_key = "secret:not-stored-yet";  // binds; fails per request instead
+    CHECK(MakeEmbeddingPlan(settings, fs::temp_directory_path()).strategy == "http");
+}
+
 TEST_CASE("memory sidecar embedder: real fastembed round trip", "[memory][sidecar]") {
     const std::string python_path = minimal::sidecar::ResolveOnPath("python3");
     if (python_path.empty()) SKIP("python3 not available");

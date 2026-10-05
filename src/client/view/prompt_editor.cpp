@@ -284,6 +284,23 @@ void PromptUndo::Clear() {
 namespace {
 // 500 recent entries is far past what arrow-up recall is used for.
 constexpr std::size_t kMaxHistoryEntries = 500;
+
+// What of a submitted line the history may keep. A /-command whose
+// arguments may carry a credential (CommandCatalogEntry::sensitive_args) is
+// kept as its bare name, and so is any /-command with arguments while the
+// catalog is not known yet: the history is persisted in plaintext.
+std::string HistoryLine(const std::string& line, const CommandCatalogSource& catalog) {
+    if (line.front() != '/') return line;
+    const auto end = line.find_first_of(" \t\n");
+    if (end == std::string::npos) return line;
+    const std::string name = line.substr(1, end - 1);
+    const auto entries = catalog != nullptr ? catalog() : nullptr;
+    if (entries == nullptr || entries->empty()) return "/" + name;
+    for (const auto& entry : *entries) {
+        if (entry.name == name) return entry.sensitive_args ? "/" + name : line;
+    }
+    return line;
+}
 }  // namespace
 
 void PromptHistory::Record(const std::string& line) {
@@ -642,7 +659,7 @@ ftxui::Component MakePromptEditor(
             // Record's. The browse position is per-tab (state.history_cursor,
             // not PromptHistory), so submitting always exits browsing for
             // THIS tab only.
-            hist.Record(line);
+            hist.Record(HistoryLine(line, command_catalog));
             state.history_cursor.reset();
             state.undo.Clear();
             if (line.front() == '/') {

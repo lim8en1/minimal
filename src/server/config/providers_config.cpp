@@ -147,6 +147,7 @@ std::vector<ModelVariant> ParseVariants(const nlohmann::json& node,
     }
     if (node.is_object()) {
         for (const auto& [name, body] : node.items()) {
+            if (IsCommentKey(name)) continue;
             if (name.empty() || name.find('@') != std::string::npos) {
                 throw std::runtime_error("providers.json: " + where + " names variant '" +
                                          name +
@@ -241,6 +242,7 @@ nlohmann::json NormalizeHeaders(const nlohmann::json& provider) {
     nlohmann::json out = provider;
     nlohmann::json flat = nlohmann::json::array();
     for (const auto& [name, value] : out.at("headers").items()) {
+        if (IsCommentKey(name)) continue;  // never a valid header name
         if (value.is_string()) {
             flat.push_back(nlohmann::json::array({name, value}));
         } else if (value.is_number_integer() || value.is_number_float() || value.is_boolean()) {
@@ -535,6 +537,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
     const SecretResolver secrets(SecretStorePath(), extensions);
 
     for (const auto& [provider_name, provider] : providers.items()) {
+        if (IsCommentKey(provider_name)) continue;
         const std::string where = "provider '" + provider_name + "'";
         if (!provider.is_object()) {
             throw std::runtime_error("providers.json: " + where + " must be an object");

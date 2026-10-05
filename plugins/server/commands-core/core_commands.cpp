@@ -4,6 +4,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -696,6 +697,7 @@ public:
         return "/secret set <name> <value> [--host <host[:port]>]... | list | delete <name>";
     }
     bool ReadOnly() const override { return true; }
+    bool SensitiveArgs() const override { return true; }
 
     CommandResult Execute(CommandContext&, const CommandArgs& args) override {
         const auto& words = args.positional;
@@ -706,6 +708,12 @@ public:
             for (std::size_t i = 3; i < words.size(); i += 2) {
                 if (words[i] != "--host" || i + 1 >= words.size() || words[i + 1].empty()) {
                     return CommandResult::Error("usage: " + std::string(Usage()));
+                }
+                // host or host:port only: a URL here would never match a
+                // destination, and every use of the secret would be refused.
+                if (words[i + 1].find_first_of("/@?#") != std::string::npos) {
+                    return CommandResult::Error("--host takes host or host:port, not a URL: '" +
+                                                words[i + 1] + "'");
                 }
                 hosts.push_back(words[i + 1]);
             }
@@ -805,10 +813,10 @@ private:
         {   // merge into whatever is already stored
             std::ifstream in(path);
             if (in) {
-                try {
-                    doc = nlohmann::json::parse(in);
-                    if (!doc.is_object()) doc = nlohmann::json::object();
-                } catch (const std::exception&) {
+                const std::string contents{std::istreambuf_iterator<char>(in), {}};
+                // Empty reads as no secrets, as ParseSecretStore has it.
+                if (!contents.empty()) doc = nlohmann::json::parse(contents, nullptr, false);
+                if (!doc.is_object()) {
                     return CommandResult::Error(path.string() +
                                                 " is malformed; fix or remove it first");
                 }

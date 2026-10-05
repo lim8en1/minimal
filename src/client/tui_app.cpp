@@ -76,7 +76,7 @@ std::vector<CommandCatalogEntry> ToCatalogEntries(const v1::ListCommandsResponse
     for (const auto& info : response.commands()) {
         entries.push_back({info.name(), info.summary(), info.read_only(),
                            info.kind() == v1::COMMAND_KIND_PROMPT_SHORTHAND,
-                           info.requires_session()});
+                           info.requires_session(), info.sensitive_args()});
     }
     return entries;
 }

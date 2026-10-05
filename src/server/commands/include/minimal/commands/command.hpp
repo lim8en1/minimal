@@ -115,6 +115,10 @@ public:
         return ReadOnly();
     }
 
+    // True when the arguments may carry a credential (/secret set). The
+    // client keeps such a line out of its persisted prompt history.
+    virtual bool SensitiveArgs() const { return false; }
+
     // Whether Execute needs a live session (a non-null CommandContext session
     // ref). Defaults to true -- the safe answer: a command author who thinks
     // about neither this nor ReadOnly() gets "session-bound" and can never

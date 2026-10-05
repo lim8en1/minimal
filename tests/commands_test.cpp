@@ -742,6 +742,19 @@ TEST_CASE("/secret set, list and delete manage secrets.json and refuse junk",
     CHECK(fixture.Run("secret", {"set", "a:b", "key"}).status == Status::kError);
     CHECK(fixture.Run("secret", {"set", "x", "key", "--host"}).status == Status::kError);
     CHECK(fixture.Run("secret", {"set", "x", "key", "--hots", "h"}).status == Status::kError);
+    // A URL as --host could never match a destination.
+    CHECK(fixture.Run("secret", {"set", "x", "key", "--host", "https://api.example.com"})
+              .status == Status::kError);
+    CHECK(fixture.Run("secret", {"set", "x", "key", "--host", "[::1]:8080"}).status ==
+          Status::kOk);
+
+    // A store that parses but is not an object is refused, not replaced.
+    std::ofstream(secrets_path) << "[]";
+    CHECK(fixture.Run("secret", {"set", "y", "key"}).status == Status::kError);
+    CHECK(nlohmann::json::parse(std::ifstream(secrets_path)) == nlohmann::json::array());
+    // An empty one reads as no secrets.
+    std::ofstream(secrets_path, std::ios::trunc).flush();
+    CHECK(fixture.Run("secret", {"set", "y", "key"}).status == Status::kOk);
 }
 
 TEST_CASE("/secret writes secrets.json 0600, never group/other-readable",

@@ -16,8 +16,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -309,4 +311,32 @@ TEST_CASE("PromptUndo: the history is capped", "[prompt_editor][undo]") {
     while (auto step = undo.Undo({"current", 0})) last = step;
     REQUIRE(last.has_value());
     CHECK(last->content == "20");
+}
+
+TEST_CASE("PromptEditor: a sensitive command's arguments stay out of the history",
+          "[prompt_editor][history]") {
+    using minimal::client::CommandCatalogEntry;
+    auto catalog = std::make_shared<const std::vector<CommandCatalogEntry>>(
+        std::vector<CommandCatalogEntry>{
+            {"secret", "store a secret", true, false, false, /*sensitive_args=*/true},
+            {"model", "pick a model", false, false, true, false}});
+    minimal::client::PromptHistory hist;
+    PromptEditorState state;
+    auto editor = MakePromptEditor(
+        TestTheme(), state, {}, [](const std::string&) {}, {}, [&] { return catalog; },
+        nullptr, nullptr, nullptr, &hist);
+    const auto submit = [&](const std::string& line) {
+        state.content = line;
+        state.cursor_position = static_cast<int>(line.size());
+        REQUIRE(editor->OnEvent(ftxui::Event::Return));
+    };
+
+    submit("/secret set openai sk-live-123");
+    submit("/model local/llama");
+    CHECK(hist.entries == std::vector<std::string>{"/secret", "/model local/llama"});
+
+    // Before the catalog arrives, no /-command's arguments are kept.
+    catalog = std::make_shared<const std::vector<CommandCatalogEntry>>();
+    submit("/secret set other sk-live-456");
+    CHECK(hist.entries.back() == "/secret");
 }

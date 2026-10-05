@@ -48,6 +48,8 @@ struct CommandCatalogEntry {
     // overlay) while the focused tab has no session -- a command that cannot
     // run without one is never offered as one.
     bool requires_session = true;
+    // Command::SensitiveArgs: the line is kept out of the persisted history.
+    bool sensitive_args = false;
 };
 
 // True when the command is usable on a tab with NO session: either the

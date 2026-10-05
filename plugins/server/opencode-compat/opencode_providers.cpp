@@ -1,12 +1,38 @@
 #include "opencode_providers.hpp"
 
+#include <stdexcept>
+#include <string_view>
+
 #include "minimal/common/logger.hpp"
 
 namespace minimal::opencode_compat {
 
+namespace {
+
+// opencode substitutes "{env:NAME}" and "{file:path}" anywhere in its config.
+// A whole-value "{env:NAME}" is core's "env:NAME"; any other use of either
+// form is refused -- sent verbatim it would go out as the key itself.
+std::string TranslateOpencodeKey(const std::string& key, const std::string& where) {
+    constexpr std::string_view kEnvOpen = "{env:";
+    if (key.size() > kEnvOpen.size() + 1 && key.rfind(kEnvOpen, 0) == 0 && key.back() == '}' &&
+        key.find('}') == key.size() - 1) {
+        return "env:" + key.substr(kEnvOpen.size(), key.size() - kEnvOpen.size() - 1);
+    }
+    if (key.find("{env:") != std::string::npos || key.find("{file:") != std::string::npos) {
+        throw std::runtime_error("providers.json: " + where +
+                                 " options.apiKey uses an opencode substitution this harness "
+                                 "does not expand; only a whole-value {env:NAME} is translated "
+                                 "(otherwise use \"api_key\": \"secret:NAME\")");
+    }
+    return key;
+}
+
+}  // namespace
+
 // opencode's provider block, mapped onto core's:
 //   options.baseURL -> url        (only when url absent)
-//   options.apiKey  -> api_key    (only when api_key is absent)
+//   options.apiKey  -> api_key    (only when api_key is absent; a whole-value
+//          "{env:NAME}" becomes "env:NAME")
 //   options.headers -> headers (core then normalizes either header shape)
 //   models.<id>.limit.context  -> context_window_tokens
 //   models.<id>.limit.output   -> max_tokens
@@ -45,7 +71,7 @@ nlohmann::json TranslateOpencodeProvider(const nlohmann::json& provider, const s
         }
         if (options.contains("apiKey") && options.at("apiKey").is_string() &&
             !out.contains("api_key")) {
-            out["api_key"] = options.at("apiKey");
+            out["api_key"] = TranslateOpencodeKey(options.at("apiKey").get<std::string>(), where);
         }
         if (options.contains("headers") && options.at("headers").is_object() &&
             !out.contains("headers")) {

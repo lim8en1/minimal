@@ -1089,6 +1089,7 @@ grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
         info->set_summary(std::string(command->Summary()));
         info->set_read_only(command->ReadOnly());
         info->set_requires_session(command->RequiresSession());
+        info->set_sensitive_args(command->SensitiveArgs());
 
         // The taxonomy IS the type (the same rule the busy-check runs on), so
         // the kind is derived from it rather than carried as a flag a command
