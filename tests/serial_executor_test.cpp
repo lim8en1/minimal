@@ -89,3 +89,22 @@ TEST_CASE("SerialExecutor::Stop(kDiscard) drops the backlog and leaves nothing o
     // before the discard is timing. What matters is that WaitForIdle returned.
     CHECK(ran.load() >= 1);
 }
+
+TEST_CASE("a task may stop its own executor: the backlog still runs and nothing deadlocks",
+          "[serial_executor][invariant]") {
+    std::atomic<int> ran{0};
+    auto finished = minimal::testing::RunInBackground([&ran] {
+        SerialExecutor executor("test", 16, minimal::common::DefaultLogger());
+        REQUIRE(executor.TryPost([&] {
+            executor.Stop(SerialExecutor::Backlog::kRun);  // on the worker: no self-join
+            ++ran;
+        }));
+        REQUIRE(executor.TryPost([&] { ++ran; }));
+        executor.WaitForIdle();
+        CHECK(executor.stopped());
+        CHECK_FALSE(executor.TryPost([] {}));
+        return true;  // the destructor joins here
+    });
+    REQUIRE(finished.WaitFor(5s));
+    CHECK(ran.load() == 2);
+}

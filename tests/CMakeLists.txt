@@ -41,6 +41,7 @@ add_executable(minimal_tests
     config_paths_test.cpp
     file_lock_test.cpp
     logger_test.cpp
+    periodic_task_test.cpp
     sqlite_util_test.cpp
     tool_executor_test.cpp
     permission_model_test.cpp

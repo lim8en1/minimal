@@ -25,7 +25,9 @@ class SerialExecutor {
 public:
     // `name` labels the warning logged when a task throws.
     SerialExecutor(std::string name, std::size_t capacity, Logger& logger);
-    // Stop(Backlog::kRun) if Stop was not called.
+    // Stop(Backlog::kRun) if Stop was not called. Must not run on the worker
+    // thread (a task destroying its own executor): the worker cannot join
+    // itself.
     ~SerialExecutor();
 
     SerialExecutor(const SerialExecutor&) = delete;
@@ -38,11 +40,14 @@ public:
     enum class Backlog { kRun, kDiscard };
     // Refuses further posts, then either runs or discards what is queued, and
     // joins the worker. A task already running always completes. Idempotent.
+    // Called from a task (the worker thread) it closes the queue but does not
+    // join -- the worker finishes the backlog and the destructor joins.
     void Stop(Backlog backlog);
 
     bool stopped() const { return tasks_.closed(); }
 
-    // Blocks until every task posted so far has run (or been discarded).
+    // Blocks until every task posted so far has run (or been discarded). Not
+    // callable from a task: the calling task is itself outstanding.
     void WaitForIdle();
 
 private:
@@ -55,7 +60,9 @@ private:
     std::condition_variable idle_cv_;
     std::size_t outstanding_ = 0;  // guarded by mutex_: queued plus running
     std::thread worker_;
+    std::thread::id worker_id_;  // set once in the constructor; read without a lock
     std::once_flag stop_once_;
+    std::mutex join_mutex_;      // serializes concurrent Stop() joins
 };
 
 }  // namespace minimal::common
