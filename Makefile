@@ -15,6 +15,10 @@
 # (there is no user whose config dir a staged package should write into) --
 # seed by running the server once on the target machine, or by hand.
 #
+# Test binaries are not part of the default build: `make build` skips them.
+# `make build-tests` (or `make build TESTS=1`) builds them too; `make test` and
+# the -test targets build them before running ctest.
+#
 # `clean` keeps .vcpkg/ (expensive to re-clone; deps are binary-cached anyway).
 # `distclean` removes it too.
 
@@ -26,7 +30,11 @@ ifeq ($(strip $(PREFIX)),)
 PREFIX := /usr/local
 endif
 
-.PHONY: configure build install test debug server-only asan tsan \
+# Extra build targets: the test binaries, when asked for.
+TEST_TARGETS := --target all minimal_test_binaries
+BUILD_TARGETS := $(if $(filter-out 0,$(TESTS)),$(TEST_TARGETS))
+
+.PHONY: configure build build-tests install test debug server-only asan tsan \
         debug-test asan-test tsan-test clean distclean vcpkg-clean help
 
 # Run ./configure if the build tree for the recorded preset does not exist yet.
@@ -43,7 +51,11 @@ configure:
 
 build:
 	$(ensure-configured)
-	cmake --build --preset $(PRESET)
+	cmake --build --preset $(PRESET) $(BUILD_TARGETS)
+
+build-tests:
+	$(ensure-configured)
+	cmake --build --preset $(PRESET) $(TEST_TARGETS)
 
 # sudo installs would seed root's home (SeedConfig.cmake resolves $HOME);
 # redirect seeding to the invoking user's config dir instead. An explicit
@@ -68,6 +80,7 @@ install:
 
 test:
 	$(ensure-configured)
+	cmake --build --preset $(PRESET) $(TEST_TARGETS)
 	ctest --preset $(PRESET)
 
 debug:
@@ -88,17 +101,17 @@ tsan:
 
 debug-test:
 	./configure --debug --no-state
-	cmake --build --preset debug
+	cmake --build --preset debug $(TEST_TARGETS)
 	ctest --preset debug
 
 asan-test:
 	./configure --asan --no-state
-	cmake --build --preset asan
+	cmake --build --preset asan $(TEST_TARGETS)
 	ctest --preset asan
 
 tsan-test:
 	./configure --tsan --no-state
-	cmake --build --preset tsan
+	cmake --build --preset tsan $(TEST_TARGETS)
 	ctest --preset tsan
 
 clean:
@@ -117,8 +130,9 @@ vcpkg-clean:
 help:
 	@echo "minimal build targets:"
 	@echo "  ./configure          set up vcpkg + cmake (run this first; see --help)"
-	@echo "  make build           build the configured preset"
-	@echo "  make test            run the test suite"
+	@echo "  make build           build the configured preset (no tests; TESTS=1 adds them)"
+	@echo "  make build-tests     build the configured preset including test binaries"
+	@echo "  make test            build the test binaries and run the test suite"
 	@echo "  make install         install to the configured prefix (PREFIX=... to override)"
 	@echo "  make debug|asan|tsan configure + build that preset"
 	@echo "  make clean           remove build trees (keeps .vcpkg/)"

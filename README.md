@@ -128,7 +128,8 @@ config dir's `commands/` — walkthrough in
 ## Development
 
 ```sh
-make test          # ctest (Catch2)
+make build-tests   # build including test binaries (make build skips them)
+make test          # build tests + ctest (Catch2)
 make asan          # AddressSanitizer build (dependencies instrumented too)
 make tsan          # ThreadSanitizer build
 make server-only   # no TUI client
