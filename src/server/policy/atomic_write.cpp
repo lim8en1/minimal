@@ -45,6 +45,17 @@ private:
     bool committed_ = false;
 };
 
+// The process umask, read ONCE during static initialization -- before main,
+// so before any thread exists. umask has no getter: reading it means setting
+// it to 0 and back, and doing that lazily on the first write (as this once
+// did) left a window where a file another thread created, or a child forked
+// then, got umask 0 -- world-writable.
+const mode_t kProcessUmask = [] {
+    const mode_t mask = ::umask(0);
+    ::umask(mask);
+    return mask;
+}();
+
 }  // namespace
 
 WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::string_view content,
@@ -125,11 +136,6 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
         // mkstemp creates 0600; give the file what a normal create would:
         // 0666 filtered by the process umask (a user with umask 077 must not
         // get world-readable files from the write tool).
-        static const mode_t kProcessUmask = [] {
-            const mode_t mask = ::umask(0);  // read-only query: umask has no getter
-            ::umask(mask);
-            return mask;
-        }();
         std::filesystem::permissions(
             temp.path(), static_cast<std::filesystem::perms>(0666 & ~kProcessUmask & 0777),
             std::filesystem::perm_options::replace, ec);
