@@ -135,9 +135,8 @@ std::string EmbedText(const std::string& title, const std::string& description,
 
 class MemoryStore {
 public:
-    // Opens (creating if needed) and migrates (v1 -> v2 in one transaction).
-    // Throws std::runtime_error on any failure, including a newer-user_version
-    // database: never rebuild over a newer store.
+    // Opens (creating if needed). Throws std::runtime_error on any failure,
+    // including a store at any other schema version: never rebuild over it.
     explicit MemoryStore(const std::filesystem::path& db_path);
     ~MemoryStore();
 
@@ -229,7 +228,6 @@ public:
 
 private:
     void Migrate();
-    void MigrateV1ToV2();
     std::vector<EntryRow> HydrateLocked(const std::vector<std::string>& ids,
                                         const ScopeFilter& filter);
     void DropUnusedTagsLocked();

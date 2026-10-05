@@ -275,42 +275,6 @@ bool Normalize(std::vector<float>& values) {
     return true;
 }
 
-std::string Trim(std::string_view text) {
-    std::size_t start = 0, end = text.size();
-    while (start < end && std::isspace(static_cast<unsigned char>(text[start]))) ++start;
-    while (end > start && std::isspace(static_cast<unsigned char>(text[end - 1]))) --end;
-    return std::string(text.substr(start, end - start));
-}
-
-// v1 entries were one text blob. v2 wants a title and a description; derive
-// them from the blob the way a person skimming it would: the first line is
-// the title (markdown heading marks stripped), the v1 summary -- when the
-// enricher ever wrote one -- or else the first line after it is the
-// description.
-void DeriveTitleAndDescription(const std::string& text, const std::string& summary,
-                               std::string& title, std::string& description) {
-    std::vector<std::string> lines;
-    std::size_t start = 0;
-    while (start <= text.size() && lines.size() < 2) {
-        const auto end = text.find('\n', start);
-        std::string line = Trim(std::string_view(text).substr(
-            start, end == std::string::npos ? std::string::npos : end - start));
-        if (!line.empty()) lines.push_back(std::move(line));
-        if (end == std::string::npos) break;
-        start = end + 1;
-    }
-    std::string first = lines.empty() ? std::string("(untitled)") : lines[0];
-    std::size_t hashes = 0;
-    while (hashes < first.size() && first[hashes] == '#') ++hashes;
-    if (hashes > 0) first = Trim(first.substr(hashes));
-    if (first.empty()) first = "(untitled)";
-    title = common::TruncateCodePoints(first, 80);
-    const std::string desc = !Trim(summary).empty() ? Trim(summary)
-                             : lines.size() > 1     ? lines[1]
-                                                    : first;
-    description = common::TruncateCodePoints(desc, 200);
-}
-
 std::int64_t FindTagIdLocked(sqlite3* db, int scope, const std::string& project_root,
                              const std::string& key) {
     Stmt stmt(db, "SELECT id FROM memory_tags WHERE scope = ?1 AND project_root = ?2 "
@@ -438,8 +402,7 @@ std::string EmbedText(const std::string& title, const std::string& description,
 
 MemoryStore::MemoryStore(const std::filesystem::path& db_path) : path_(db_path) {
     std::filesystem::create_directories(db_path.parent_path());
-    // The lock appends ".lock" itself (like PluginStorage/SessionDatabase);
-    // v1 passed "<db>.lock" and so locked "<db>.lock.lock".
+    // The lock appends ".lock" itself (like PluginStorage/SessionDatabase).
     lock_ = std::make_unique<store::ExclusiveFileLock>(db_path);
     if (sqlite3_open(db_path.string().c_str(), &db_) != SQLITE_OK) {
         const std::string message = db_ != nullptr ? sqlite3_errmsg(db_) : "unknown";
@@ -473,106 +436,17 @@ void MemoryStore::Migrate() {
             throw std::runtime_error("memory: schema version " + std::to_string(current) +
                                      " is newer than this binary understands; refusing to open");
         }
+        if (current != 0 && current != kSchemaVersion) {
+            throw std::runtime_error("memory: unsupported schema version " +
+                                     std::to_string(current) + "; delete " + path_.string());
+        }
         if (current == 0) {
             ExecChecked(db_, kCreateAuxSql, "memory: create aux tables");
             ExecChecked(db_, kCreateV2Sql, "memory: create v2 schema");
-        } else if (current == 1) {
-            MigrateV1ToV2();
         }
         ExecChecked(db_, ("PRAGMA user_version = " + std::to_string(kSchemaVersion) + ";").c_str(),
                     "memory: record schema version");
     });
-}
-
-void MemoryStore::MigrateV1ToV2() {
-    // v1: one `text` blob per entry, a topic_id into a 4096-cap taxonomy and a
-    // trigram FTS index. Rows keep their id, rowid, provenance and created_ms;
-    // topics become tags; every row re-embeds (the embedded text changed).
-    ExecChecked(db_,
-                "DROP TRIGGER IF EXISTS memory_fts_insert;"
-                "DROP TRIGGER IF EXISTS memory_fts_delete;"
-                "DROP TABLE IF EXISTS memory_fts;"
-                "ALTER TABLE memory_entries RENAME TO memory_entries_v1;"
-                "DROP INDEX IF EXISTS memory_entries_scope;"
-                "DROP INDEX IF EXISTS memory_entries_pending;"
-                "DROP INDEX IF EXISTS memory_entries_by_group;",
-                "memory: v1 teardown");
-    ExecChecked(db_, kCreateV2Sql, "memory: create v2 schema");
-
-    std::map<std::string, int> next_chunk;  // ingest_group -> next chunk_index
-    std::vector<std::int64_t> tagged_rowids;
-    {
-        Stmt rows(db_,
-                  "SELECT e.rowid_, e.id, e.scope, e.project_root, e.session_id, e.origin, "
-                  "e.origin_ref, e.ingest_group, e.created_ms, e.text, e.summary, t.name "
-                  "FROM memory_entries_v1 e LEFT JOIN memory_topics t ON t.id = e.topic_id "
-                  "ORDER BY e.rowid_;",
-                  "memory: read v1 rows");
-        while (sqlite3_step(rows.stmt) == SQLITE_ROW) {
-            NewEntry entry;
-            const std::int64_t rowid = sqlite3_column_int64(rows.stmt, 0);
-            const std::string id = ColText(rows.stmt, 1);
-            entry.scope = sqlite3_column_int(rows.stmt, 2);
-            entry.project_root = ColText(rows.stmt, 3);
-            entry.session_id = ColText(rows.stmt, 4);
-            entry.origin = ColText(rows.stmt, 5);
-            entry.origin_ref = ColText(rows.stmt, 6);
-            std::optional<std::string> group;
-            if (sqlite3_column_type(rows.stmt, 7) != SQLITE_NULL) group = ColText(rows.stmt, 7);
-            const std::int64_t created_ms = sqlite3_column_int64(rows.stmt, 8);
-            entry.body = ColText(rows.stmt, 9);
-            DeriveTitleAndDescription(entry.body, ColText(rows.stmt, 10), entry.title,
-                                      entry.description);
-            const int chunk_index = group ? next_chunk[*group]++ : 0;
-
-            Stmt insert(db_,
-                        "INSERT INTO memory_entries (rowid_, id, scope, project_root, session_id, "
-                        "origin, origin_ref, ingest_group, chunk_index, created_ms, updated_ms, "
-                        "title, description, body) "
-                        "VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,?11,?12,?13);",
-                        "memory: copy v1 row");
-            sqlite3_bind_int64(insert.stmt, 1, rowid);
-            BindText(insert.stmt, 2, id);
-            sqlite3_bind_int(insert.stmt, 3, entry.scope);
-            BindText(insert.stmt, 4, entry.project_root);
-            BindText(insert.stmt, 5, entry.session_id);
-            BindText(insert.stmt, 6, entry.origin);
-            if (entry.origin_ref.empty()) sqlite3_bind_null(insert.stmt, 7);
-            else BindText(insert.stmt, 7, entry.origin_ref);
-            if (group) BindText(insert.stmt, 8, *group);
-            else sqlite3_bind_null(insert.stmt, 8);
-            sqlite3_bind_int(insert.stmt, 9, chunk_index);
-            sqlite3_bind_int64(insert.stmt, 10, created_ms);
-            BindText(insert.stmt, 11, entry.title);
-            BindText(insert.stmt, 12, entry.description);
-            BindText(insert.stmt, 13, entry.body);
-            StepDone(db_, insert.stmt, "memory: copy v1 row");
-
-            if (sqlite3_column_type(rows.stmt, 11) != SQLITE_NULL) {
-                const std::string topic = ColText(rows.stmt, 11);
-                if (!TagMatchKey(NormalizeTagName(topic)).empty()) {
-                    const auto tag_id =
-                        CreateTagLocked(db_, entry.scope, entry.project_root, topic, "");
-                    Stmt bind(db_, "INSERT OR IGNORE INTO memory_entry_tags (entry_rowid, tag_id) "
-                                   "VALUES (?1, ?2);",
-                              "memory: copy v1 topic");
-                    sqlite3_bind_int64(bind.stmt, 1, rowid);
-                    sqlite3_bind_int64(bind.stmt, 2, tag_id);
-                    StepDone(db_, bind.stmt, "memory: copy v1 topic");
-                    tagged_rowids.push_back(rowid);
-                }
-            }
-        }
-    }
-    for (const auto rowid : tagged_rowids) {
-        RefreshTagsTextLocked(rowid);
-        Stmt stmt(db_, "UPDATE memory_entries SET tag_status = 1 WHERE rowid_ = ?1;",
-                  "memory: mark migrated tagged");
-        sqlite3_bind_int64(stmt.stmt, 1, rowid);
-        StepDone(db_, stmt.stmt, "memory: mark migrated tagged");
-    }
-    ExecChecked(db_, "DROP TABLE memory_entries_v1; DROP TABLE memory_topics;",
-                "memory: drop v1 tables");
 }
 
 // ------------------------------------------------------------------ writes

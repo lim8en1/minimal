@@ -163,18 +163,12 @@ const std::string& PromptOf(const minimal::llm::ChatRequest& request) {
 
 // ------------------------------------------------------------------ settings
 
-TEST_CASE("memory settings: defaults, clamps, v1 key compatibility", "[memory]") {
+TEST_CASE("memory settings: defaults and clamps", "[memory]") {
     const auto defaults = ParseMemorySettings(nlohmann::json::object());
     CHECK(defaults.tagger_model.empty());
     CHECK(defaults.max_tags == 100);
     CHECK(defaults.writes_prompt);
     CHECK(defaults.index_enabled);
-
-    const auto v1 = ParseMemorySettings({{"summarizer_model", "p/m"}, {"max_topics", 7}});
-    CHECK(v1.tagger_model == "p/m");
-    CHECK(v1.max_tags == 7);
-    const auto both = ParseMemorySettings({{"summarizer_model", "old/m"}, {"tagger_model", "new/m"}});
-    CHECK(both.tagger_model == "new/m");
 
     const auto clamped = ParseMemorySettings({{"batch_size", -3},
                                               {"default_limit", 1000},
@@ -588,93 +582,6 @@ TEST_CASE("memory ingest: re-ingest replaces; chunks refuse delete/update; group
     CHECK(fx.store->DeleteGroup("/proj/notes.md", From("/elsewhere")) == 0);  // not visible
     CHECK(fx.store->DeleteGroup(second.group_id, From()) == 3);
     CHECK(fx.store->Stats(From()).entries_by_scope.empty());
-}
-
-// --------------------------------------------------------------- migration
-
-TEST_CASE("memory migration: a v1 store upgrades in place", "[memory]") {
-    const fs::path dir = fs::temp_directory_path() / ("memory-v1-" + std::to_string(getpid()));
-    fs::remove_all(dir);
-    fs::create_directories(dir);
-    const fs::path db_path = dir / "memory.sqlite3";
-    {
-        sqlite3* db = nullptr;
-        REQUIRE(sqlite3_open(db_path.string().c_str(), &db) == SQLITE_OK);
-        const char* v1 = R"sql(
-CREATE TABLE memory_entries (
-    rowid_ INTEGER PRIMARY KEY, id TEXT UNIQUE NOT NULL, scope INTEGER NOT NULL,
-    project_root TEXT NOT NULL DEFAULT '', session_id TEXT NOT NULL DEFAULT '',
-    origin TEXT NOT NULL DEFAULT 'model', origin_ref TEXT, ingest_group TEXT,
-    created_ms INTEGER NOT NULL, text TEXT NOT NULL, summary TEXT,
-    topic_id INTEGER REFERENCES memory_topics(id), embedding BLOB,
-    embed_status INTEGER NOT NULL DEFAULT 0, signature TEXT, dim INTEGER, embed_error TEXT);
-CREATE INDEX memory_entries_scope ON memory_entries(scope, project_root);
-CREATE INDEX memory_entries_pending ON memory_entries(embed_status) WHERE embed_status = 0;
-CREATE INDEX memory_entries_by_group ON memory_entries(ingest_group);
-CREATE TABLE memory_topics (id INTEGER PRIMARY KEY, scope INTEGER NOT NULL,
-    project_root TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, created_ms INTEGER NOT NULL,
-    last_used_ms INTEGER NOT NULL DEFAULT 0, UNIQUE(scope, project_root, name));
-CREATE TABLE memory_ingest_groups (id TEXT PRIMARY KEY, scope INTEGER NOT NULL,
-    project_root TEXT NOT NULL DEFAULT '', origin_ref TEXT NOT NULL,
-    chunk_count INTEGER NOT NULL, created_ms INTEGER NOT NULL);
-CREATE TABLE memory_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE VIRTUAL TABLE memory_fts USING fts5(text, project_root, content='memory_entries',
-    content_rowid='rowid_', tokenize='trigram');
-CREATE TRIGGER memory_fts_insert AFTER INSERT ON memory_entries BEGIN
-    INSERT INTO memory_fts(rowid, text, project_root) VALUES (new.rowid_, new.text, new.project_root);
-END;
-CREATE TRIGGER memory_fts_delete AFTER DELETE ON memory_entries BEGIN
-    INSERT INTO memory_fts(memory_fts, rowid, text, project_root)
-        VALUES ('delete', old.rowid_, old.text, old.project_root);
-END;
-INSERT INTO memory_topics (id, scope, project_root, name, created_ms) VALUES (1, 1, '/proj', 'Docker Stuff', 1);
-INSERT INTO memory_entries (id, scope, project_root, origin, created_ms, text, summary, topic_id, embed_status, signature)
-    VALUES ('E1', 1, '/proj', 'model', 1000, '# Compose tips
-Use docker compose up -d for the stack.', 'Run the stack with compose.', 1, 1, 'old');
-INSERT INTO memory_entries (id, scope, project_root, origin, created_ms, text)
-    VALUES ('E2', 0, '', 'model', 2000, 'The user prefers metric units.');
-INSERT INTO memory_ingest_groups VALUES ('igX', 1, '/proj', '/proj/a.md', 2, 3000);
-INSERT INTO memory_entries (id, scope, project_root, origin, origin_ref, ingest_group, created_ms, text)
-    VALUES ('E3', 1, '/proj', 'ingest', '/proj/a.md', 'igX', 3000, '# One
-first');
-INSERT INTO memory_entries (id, scope, project_root, origin, origin_ref, ingest_group, created_ms, text)
-    VALUES ('E4', 1, '/proj', 'ingest', '/proj/a.md', 'igX', 3000, '# Two
-second');
-PRAGMA user_version = 1;
-)sql";
-        REQUIRE(sqlite3_exec(db, v1, nullptr, nullptr, nullptr) == SQLITE_OK);
-        sqlite3_close(db);
-    }
-
-    {
-        MemoryStore store(db_path);
-        const auto e1 = store.Get("E1", From());
-        REQUIRE(e1);
-        CHECK(e1->title == "Compose tips");
-        CHECK(e1->description == "Run the stack with compose.");  // the v1 summary
-        CHECK(e1->created_ms == 1000);
-        CHECK(e1->tags == std::vector<std::string>{"docker-stuff"});
-        const auto e2 = store.Get("E2", From());
-        REQUIRE(e2);
-        CHECK(e2->title == "The user prefers metric units.");
-        CHECK(e2->scope == kScopeGlobal);
-        const auto e4 = store.Get("E4", From());
-        REQUIRE(e4);
-        CHECK(e4->chunk_index == 1);
-        CHECK(e4->chunk_count == 2);
-        // Everything re-embeds; only the untagged rows await the tagger.
-        CHECK(store.PendingEmbeddings(10).size() == 4);
-        CHECK(store.PendingTagging(10).size() == 3);
-        // The new FTS index works over migrated rows, tags included.
-        CHECK(store.Lexical("docker", Filters(), 10).size() == 1);
-        CHECK(store.Lexical("stuff", Filters(), 10).size() == 1);
-    }
-    {
-        MemoryStore again(db_path);  // reopening a v2 store is a no-op migration
-        CHECK(again.Get("E1", From()).has_value());
-    }
-    std::error_code ec;
-    fs::remove_all(dir, ec);
 }
 
 // ------------------------------------------------------------------ tagger

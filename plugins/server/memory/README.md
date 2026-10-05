@@ -169,14 +169,5 @@ The remaining knobs:
 - `batch_size`, `default_limit`
 - `index_enabled`
 
-v1 names still work: `summarizer_model` for `tagger_model`, and
-`max_topics` for `max_tags`. `allow_inline: false` is the file-only mode:
-entries enter only through `memory_store(path=...)`.
-
-A v1 store migrates in place on first open:
-
-- entries keep their ids and dates,
-- title and description are derived from the text (a v1 summary becomes
-  the description),
-- topics become tags,
-- everything re-embeds.
+`allow_inline: false` is the file-only mode: entries enter only through
+`memory_store(path=...)`.

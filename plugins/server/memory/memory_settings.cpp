@@ -62,11 +62,10 @@ MemorySettings ParseMemorySettings(const nlohmann::json& config) {
     out.sidecar_request_timeout_ms = Clamp(
         IntOr(config, "sidecar_request_timeout_ms", out.sidecar_request_timeout_ms), 1, 600000);
 
-    out.tagger_model = StringOr(config, "tagger_model", StringOr(config, "summarizer_model", ""));
+    out.tagger_model = StringOr(config, "tagger_model", "");
     out.tagger_max_tokens = Clamp(IntOr(config, "tagger_max_tokens", out.tagger_max_tokens), 64, 8192);
     out.tagger_timeout_ms = Clamp(IntOr(config, "tagger_timeout_ms", out.tagger_timeout_ms), 1000, 600000);
-    // `max_topics` was the v1 name for the same per-scope cap.
-    out.max_tags = Clamp(IntOr(config, "max_tags", IntOr(config, "max_topics", out.max_tags)), 0, 1000);
+    out.max_tags = Clamp(IntOr(config, "max_tags", out.max_tags), 0, 1000);
     out.max_tags_per_entry = Clamp(IntOr(config, "max_tags_per_entry", out.max_tags_per_entry), 1, 16);
     out.tag_merge_similarity =
         std::min(std::max(DoubleOr(config, "tag_merge_similarity", out.tag_merge_similarity), 0.5), 1.0);
