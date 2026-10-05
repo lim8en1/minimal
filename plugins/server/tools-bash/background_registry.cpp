@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <utility>
@@ -32,7 +33,8 @@ using tools::BackgroundTaskEvent;
 // the shared one.
 void WatchBackgroundTask(TaskRegistry::TaskState& task,
                          minimal::sidecar::Launched launched, const BashSettings& settings,
-                         std::int64_t timeout_ms, const TaskRegistry::WatchHandles& handles) {
+                         std::int64_t timeout_ms, const TaskRegistry::WatchHandles& handles,
+                         std::atomic<bool>& reaped) {
     common::Logger& logger = handles.logger ? *handles.logger : common::DefaultLogger();
 
     std::vector<PipeSink> sinks(2);
@@ -60,6 +62,9 @@ void WatchBackgroundTask(TaskRegistry::TaskState& task,
     const auto outcome = minimal::sidecar::DrainAndReap(
         std::move(launched), std::move(sinks), options,
         [&] { return TaskRegistry::SessionGone(handles); });
+    // DrainAndReap has reaped (or given up on) the shell and forgotten its
+    // pgid: from here the pid may be recycled, so the cleanup must not kill it.
+    reaped.store(true, std::memory_order_release);
 
     // Classification. Session death wins over the deadline (the drain loop
     // checks it first too): "the session ended" is the more useful report for
@@ -206,10 +211,12 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
     // same lifetime story the registry uses for its TaskState.
     auto handles_box =
         std::make_shared<minimal::sidecar::Launched>(std::move(launched));
-    args.body = [handles_box, settings, timeout_ms](TaskRegistry::TaskState& task,
-                                                    const TaskRegistry::WatchHandles& watch_handles) {
+    auto reaped = std::make_shared<std::atomic<bool>>(false);
+    args.body = [handles_box, settings, timeout_ms, reaped](
+                    TaskRegistry::TaskState& task,
+                    const TaskRegistry::WatchHandles& watch_handles) {
         WatchBackgroundTask(task, std::move(*handles_box), settings, timeout_ms,
-                            watch_handles);
+                            watch_handles, *reaped);
     };
     // Covers two teardown paths that never reach the body: a REFUSAL, where
     // `args` is destroyed with its body never run (nobody drains, kills,
@@ -218,8 +225,11 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
     // of the body skips the drain-and-reap's own kill+reap+forget. Both leave
     // the same residue -- a live process group plus a stale pgid registration,
     // which pid reuse turns into a wrong-target kill at process exit -- so one
-    // best-effort, idempotent cleanup covers both.
-    args.cleanup = [pid] {
+    // best-effort, idempotent cleanup covers both. Not once the watcher's own
+    // reap ran: a throw AFTER it would otherwise kill a pid that may already
+    // belong to an unrelated process.
+    args.cleanup = [pid, reaped] {
+        if (reaped->load(std::memory_order_acquire)) return;
         try {
             sidecar::TerminateGroup(pid);  // kill, bounded reap, forget the pgid
         } catch (...) {
