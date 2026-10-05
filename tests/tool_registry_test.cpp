@@ -107,3 +107,33 @@ TEST_CASE("PermissionKeys/DotenvProtectedPermissionKeys reflect the live registr
     const auto dotenv = registry.DotenvProtectedPermissionKeys();
     CHECK(dotenv == std::vector<std::string>{"custom_read"});
 }
+
+TEST_CASE("PermissionKeysByPlugin groups live permission keys by registering plugin",
+          "[tool_registry][plugins]") {
+    tools::ToolRegistry registry;
+    registry.SetAttribution("a");
+    registry.Register(std::make_unique<FakeTool>("shared", tools::ToolCategory::ReadOnly));
+    registry.Register(std::make_unique<FakeTool>("x", tools::ToolCategory::ReadOnly));
+    registry.SetAttribution("b");
+    registry.Register(std::make_unique<FakeTool>("shared", tools::ToolCategory::ReadOnly));
+    registry.Register(std::make_unique<FakeTool>("y", tools::ToolCategory::ReadOnly));
+    registry.SetAttribution("empty");  // a plugin whose tools are all core-reserved: none
+    registry.ClearAttribution();
+    registry.Register(std::make_unique<FakeTool>("core_tool", tools::ToolCategory::ReadOnly));
+    REQUIRE(registry.ReserveNamespace("grp__"));
+    std::vector<std::unique_ptr<tools::Tool>> batch;
+    batch.push_back(std::make_unique<FakeTool>("grp__t", tools::ToolCategory::ReadOnly));
+    registry.ReplaceGroupTools("grp__", std::move(batch));
+
+    // What name resolution produces for a name two plugins provide: b's copy
+    // served under an alias, both keyed by their qualified names.
+    registry.ApplyAliases({{"b.shared", "b_shared"}});
+    registry.SetPermissionKeys({{"shared", "a.shared"}, {"b_shared", "b.shared"}});
+
+    const auto by_plugin = registry.PermissionKeysByPlugin();
+    CHECK(by_plugin.at("a") == std::vector<std::string>{"a.shared", "x"});
+    CHECK(by_plugin.at("b") == std::vector<std::string>{"b.shared", "y"});
+    // Core built-ins and group (MCP) tools belong to no plugin group.
+    CHECK(by_plugin.count("") == 0);
+    CHECK(by_plugin.size() == 2);
+}

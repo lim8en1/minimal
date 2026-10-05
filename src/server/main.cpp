@@ -622,7 +622,8 @@ static int RunServer(int argc, char** argv) {
     // (ARCHITECTURE.md, "Core vs. plugin surface").
     const minimal::agent::ToolPermissionKeys tool_permission_keys{
         tools.PermissionKeys(), tools.DotenvProtectedPermissionKeys(),
-        tools.ConfigAliasPermissionKeys(), tools.NoPatternRulePermissionKeys()};
+        tools.ConfigAliasPermissionKeys(), tools.NoPatternRulePermissionKeys(),
+        tools.PermissionKeysByPlugin()};
     try {
         presets = std::make_unique<minimal::agent::AgentPresetRegistry>(
             config_dir, settings, permissions, model_catalog, tool_permission_keys);

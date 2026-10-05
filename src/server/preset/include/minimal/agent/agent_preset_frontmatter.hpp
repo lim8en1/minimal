@@ -47,6 +47,10 @@ struct AgentPresetFrontmatter {
     // `local/qwen4`. Empty means "use settings.default_model".
     std::string model;
     std::vector<std::string> allowed_tools;         // default empty (fail closed; "*" must be explicit)
+    // plugins: [<plugin name>] -- every tool those plugins register, added to
+    // allowed_tools at resolve (AgentPresetRegistry). Visibility only: the
+    // permission modes still decide each call.
+    std::vector<std::string> plugins;
     // tool_sources: {<source>: [members]} -- the dynamic tool-source members
     // (tools/tool_source.hpp) this preset allows.
     std::map<std::string, std::vector<std::string>> tool_sources;

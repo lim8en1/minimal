@@ -743,6 +743,16 @@ shows through.
   plugin's: `structured`; see `memory.compaction_strategy`). Absent = the
   settings-level strategy stands; a name nothing registered warns once per
   session and degrades the same way.
+- **`plugins`** — `[<plugin name>, ...]`: every tool those plugins register
+  (by their `plugins.json` name: `tools-fs`, `memory`, ...), added to
+  `allowed_tools` when the preset resolves — so a plugin that later gains a
+  tool reaches the preset without an edit. Only visibility: `permission_mode`
+  still decides each call. MCP tools never join a group (they follow
+  `tool_sources`). An entry naming no loaded plugin, or one that registers no
+  tools, warns at startup and allows nothing. A subagent's groups are clamped
+  by its parent like any `allowed_tools` entry. Prefer explicit `allowed_tools`
+  names where a preset must NOT get a plugin's future tools (the bundled
+  read-only presets list `memory_search`/`memory_get` rather than `memory`).
 - **`allowed_tools`** — the allow-list of core/plugin tools the preset runs
   with. **Fail-closed: omitted or empty means NO core tools.** `permission_mode`
   only decides what happens when an admitted tool is called (allow/ask/deny);

@@ -1,7 +1,8 @@
 ---
 name: plan
 description: Investigates and proposes, without changing anything.
-allowed_tools: ["ask_user", "read", "grep", "glob", "bash", "write", "edit", "checklist"]
+allowed_tools: ["ask_user", "checklist", "memory_search", "memory_get"]
+plugins: ["tools-fs", "tools-search", "tools-bash"]
 tool_sources: {}
 permission_mode:
   read_only: allow

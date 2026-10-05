@@ -171,6 +171,34 @@ std::vector<std::string> ToolRegistry::NoPatternRulePermissionKeys() const {
     return keys;
 }
 
+std::map<std::string, std::vector<std::string>> ToolRegistry::PermissionKeysByPlugin() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    // The live key set, exactly as PermissionKeys() computes it. A plugin's
+    // tool answers to "plugin.name" when name resolution qualified it (two
+    // plugins provide the name), else to the bare name -- matching keys
+    // rather than objects keeps an aliased (wrapped) tool attributed.
+    std::set<std::string> live;
+    for (const auto& [name, tool] : tools_) {
+        if (group_owners_.count(name)) continue;
+        live.emplace(PermissionKeyForUnlocked(name));
+    }
+    std::map<std::string, std::vector<std::string>> out;
+    for (const auto& attr : attributions_) {
+        if (attr.plugin_name.empty()) continue;  // core built-ins belong to no plugin
+        auto& keys = out[attr.plugin_name];
+        if (const auto qualified = attr.plugin_name + "." + attr.tool_name; live.count(qualified)) {
+            keys.push_back(qualified);
+        } else if (live.count(attr.tool_name)) {
+            keys.push_back(attr.tool_name);
+        }
+    }
+    for (auto& [plugin, keys] : out) {
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    }
+    return out;
+}
+
 void ToolRegistry::ApplyAliases(const std::map<std::string, std::string>& aliases) {
     // Startup-only: exclusive for the whole body. It manipulates tools_ and
     // shadowed_ directly and must not overlap a runtime MCP replacement.

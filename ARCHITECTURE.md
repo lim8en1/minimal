@@ -1520,7 +1520,7 @@ There are three flush points and one loop: turn start (before the seed), after e
 
 - **system** = `prompts/subagent.md` (if the session has a parent) + the preset body + the allowed-skill registry listing + the session's project-context section (below).
 - **messages** = the compacted view, never the raw persisted history.
-- **tools** = registered tools ∩ `allowed_tools`, + the active tool groups of the preset's `tool_sources` (MCP servers), + the skills plugin's `skill` tool unless its per-preset definition withholds it, + `SpawnSubagentTool` **iff `parent_session_id` is null**.
+- **tools** = registered tools ∩ (`allowed_tools` ∪ the tools of each `plugins:` entry, expanded at resolve from `ToolRegistry::PermissionKeysByPlugin`), + the active tool groups of the preset's `tool_sources` (MCP servers), + the skills plugin's `skill` tool unless its per-preset definition withholds it, + `SpawnSubagentTool` **iff `parent_session_id` is null**.
 
 Two requirements that are easy to miss and expensive to get wrong:
 
@@ -1672,7 +1672,7 @@ variable the install rule uses, so overriding one moves both.
 
 **File format**: agents, skills, and prompts are Markdown with YAML frontmatter — the same convention Claude Code and opencode use: frontmatter for structured metadata, Markdown body for prompt text, loaded verbatim. `src/server/config/frontmatter.{hpp,cpp}` provides `parse_frontmatter_markdown(contents) -> {YAML::Node frontmatter, std::string body}` (split on `---` delimiters, frontmatter to **yaml-cpp**, remainder as body). The `.json` files stay plain JSON — harness config, not prompt content, with no body to split.
 
-- **`agents/*.md`** — presets: frontmatter `name, description, model, allowed_tools, tool_sources?: {<source>: [members]}, permission_mode: {read_only, file_write, execute, out_of_workdir, network, overrides}, plugin_permissions?: {<plugin>: {...}}, compression_prompt?, tool_config?: {<namespace>: {...}}`; `tool_sources` allows a plugin's dynamic tool members (`mcp: [github]`), `plugin_permissions` carries each plugin permission model's preset slice verbatim.; **body is the system prompt directly**. `model` is a `<provider>/<model>` reference, or absent to take `settings.default_model`. `tool_config` carries per-tool/per-plugin configuration VERBATIM ({namespace: {...}}), structural (never provider passthrough), delivered to each tool per-invocation as its own `config_namespace()` slice on `ToolContext` (§ Core tools; the collision/typo discipline mirrors permission keys: unclaimed namespace warns, cross-plugin claim is fatal). `build.md`, `explore.md`, `general.md`, `plan.md` and `review.md` ship in `bundled/agents/` and are seeded like everything else there.
+- **`agents/*.md`** — presets: frontmatter `name, description, model, allowed_tools, plugins?: [<plugin>], tool_sources?: {<source>: [members]}, permission_mode: {read_only, file_write, execute, out_of_workdir, network, overrides}, plugin_permissions?: {<plugin>: {...}}, compression_prompt?, tool_config?: {<namespace>: {...}}`; `tool_sources` allows a plugin's dynamic tool members (`mcp: [github]`), `plugin_permissions` carries each plugin permission model's preset slice verbatim.; **body is the system prompt directly**. `model` is a `<provider>/<model>` reference, or absent to take `settings.default_model`. `tool_config` carries per-tool/per-plugin configuration VERBATIM ({namespace: {...}}), structural (never provider passthrough), delivered to each tool per-invocation as its own `config_namespace()` slice on `ToolContext` (§ Core tools; the collision/typo discipline mirrors permission keys: unclaimed namespace warns, cross-plugin claim is fatal). `build.md`, `explore.md`, `general.md`, `plan.md` and `review.md` ship in `bundled/agents/` and are seeded like everything else there.
 - **`prompts/subagent.md`** — plain Markdown, no frontmatter. Prepended to the resolved preset's body whenever `parent_session_id` is non-null. Also seeded.
 - **`prompts/compression.md`** — default compaction prompt; a preset's `compression_prompt` overrides it, resolved relative to this directory. **Seeded from `bundled/prompts/` by `cmake --install` and never overwritten after** — see *Bundled assets* below.
 - **`skills/<name>/SKILL.md`** (+ supporting files) — lazy-loaded: frontmatter (`name`, `description`) resident in the registry; body loads only on invocation.
@@ -1727,7 +1727,7 @@ The core chain and every plugin model's answer are then subject to `apply_run_mo
 struct AgentPreset {
     std::string name, description, system_prompt;  // prompts/subagent.md (if any) + body
     ProviderConfig provider;
-    std::vector<std::string> allowed_tools;
+    std::vector<std::string> allowed_tools;  // `plugins:` groups already expanded in
     std::map<std::string, std::vector<std::string>> tool_sources;  // {"mcp": ["github"]}
     PermissionPolicy permission_mode;
     PermissionModels permission_models;  // every plugin model, bound to this preset's slices

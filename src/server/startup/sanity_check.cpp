@@ -665,6 +665,27 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
         }
     }
 
+    // plugins: entries name a LOADED plugin that registers tools; anything
+    // else expands to nothing, which is a typo or a disabled plugin.
+    for (const auto& [preset_name, raw] : presets_) {
+        for (const auto& plugin : raw.plugins) {
+            const auto record = std::find_if(
+                inputs_.plugin_records.begin(), inputs_.plugin_records.end(),
+                [&](const plugins::PluginRecord& r) {
+                    return r.name == plugin && r.status == plugins::LoadStatus::Loaded;
+                });
+            if (record == inputs_.plugin_records.end()) {
+                results.push_back(Warning("naming_model", "agent preset '" + preset_name +
+                                      "': plugins entry '" + plugin +
+                                      "' names no loaded plugin; it allows no tools"));
+            } else if (record->Registered("tool").empty()) {
+                results.push_back(Warning("naming_model", "agent preset '" + preset_name +
+                                      "': plugins entry '" + plugin +
+                                      "' registers no tools; it allows none"));
+            }
+        }
+    }
+
     // tool_sources members must name a member the source knows; the source
     // must be registered by a loaded plugin.
     for (const auto& [preset_name, raw] : presets_) {

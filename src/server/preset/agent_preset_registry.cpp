@@ -379,6 +379,20 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
         preset.parameters[key] = value;
     }
     preset.allowed_tools = raw.allowed_tools;
+    // `plugins:` groups expand HERE, into plain permission keys, so every
+    // downstream consumer (the request's tool list, the subagent
+    // intersection, the policy) sees one ordinary allowed list. A plugin that
+    // is not loaded contributes nothing; the sanity check warns about it.
+    for (const auto& plugin : raw.plugins) {
+        const auto group = tool_permission_keys_.by_plugin.find(plugin);
+        if (group == tool_permission_keys_.by_plugin.end()) continue;
+        for (const auto& key : group->second) {
+            if (std::find(preset.allowed_tools.begin(), preset.allowed_tools.end(), key) ==
+                preset.allowed_tools.end()) {
+                preset.allowed_tools.push_back(key);
+            }
+        }
+    }
     // Spawn allowlist, resolved: "*" expands to no restriction (nullopt);
     // anything else carries verbatim -- an explicit EMPTY list stays empty,
     // meaning no spawns at all (the tool is withheld downstream and every

@@ -43,6 +43,11 @@ write-permission policy: a stored memory outlives the session and, at global
 scope, follows the user everywhere. `writes_prompt: false` makes them
 prompt-free.
 
+A preset reaches the tools by naming them in `allowed_tools`, or all five
+at once with `plugins: [memory]` (docs/CONFIGURATION.md, agents). The
+bundled `build`/`helper` presets take the group; `plan`/`review`/`explore`
+list only `memory_search` and `memory_get`.
+
 ## Search
 
 Lexical and semantic candidates are fused with Reciprocal Rank Fusion:
