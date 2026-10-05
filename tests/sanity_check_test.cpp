@@ -1294,3 +1294,40 @@ TEST_CASE("a well-formed hooks.json produces no hook warnings", "[sanity_check][
     const auto results = RunChecks(f);
     CHECK(ByCheck(results, "hooks").empty());
 }
+
+TEST_CASE("a preset plugins: entry naming no loaded plugin, or one without tools, warns",
+          "[sanity_check][naming_model][plugins]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.Write("agents/grouped.md",
+            "---\nname: grouped\nmodel: fixture-main/test-model\n"
+            "plugins: [memory, quiet, disabled-one, typo]\n---\nGrouped.\n");
+    f.RegisterTool("memory", "memory_search", tools::ToolCategory::ReadOnly);
+
+    std::vector<plugins::PluginRecord> records = {
+        Record("memory.so", "memory", plugins::Provenance::Bundled, plugins::LoadStatus::Loaded),
+        Record("quiet.so", "quiet", plugins::Provenance::Bundled, plugins::LoadStatus::Loaded),
+        Record("disabled.so", "disabled-one", plugins::Provenance::Bundled,
+               plugins::LoadStatus::Disabled)};
+    records[0].registered["tool"] = {"memory_search"};
+
+    const auto results = RunChecks(f, records);
+    std::vector<std::string> messages;
+    for (const auto* hit : ByCheck(results, "naming_model")) {
+        if (hit->message.find("plugins entry") != std::string::npos) {
+            CHECK(hit->severity == CheckSeverity::Warning);
+            messages.push_back(hit->message);
+        }
+    }
+    const auto mentions = [&](const std::string& needle) {
+        return std::count_if(messages.begin(), messages.end(), [&](const std::string& m) {
+            return m.find(needle) != std::string::npos;
+        });
+    };
+    CHECK(messages.size() == 3);
+    CHECK(mentions("'quiet' registers no tools") == 1);
+    CHECK(mentions("'disabled-one' names no loaded plugin") == 1);
+    CHECK(mentions("'typo' names no loaded plugin") == 1);
+    CHECK(mentions("'memory'") == 0);
+}

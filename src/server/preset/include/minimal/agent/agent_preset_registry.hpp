@@ -111,6 +111,8 @@ struct ToolPermissionKeys {
     std::vector<std::string> dotenv_protected;  // ToolRegistry::DotenvProtectedPermissionKeys()
     std::map<std::string, std::string> config_aliases;  // ToolRegistry::ConfigAliasPermissionKeys()
     std::vector<std::string> no_pattern_rules;  // ToolRegistry::NoPatternRulePermissionKeys()
+    // ToolRegistry::PermissionKeysByPlugin(): what a preset's `plugins:` entry expands to.
+    std::map<std::string, std::vector<std::string>> by_plugin;
 
     ToolVocabulary vocabulary() const {
         ToolVocabulary out(all);

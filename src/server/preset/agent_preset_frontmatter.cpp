@@ -279,7 +279,7 @@ AgentMode DecodeMode(const YAML::Node& node) {
 bool IsKnownKey(const std::string& key) {
     static const std::unordered_map<std::string, char> kKnown{
         {"name", 0},          {"description", 0},   {"model", 0},
-        {"allowed_tools", 0}, {"tool_sources", 0},
+        {"allowed_tools", 0}, {"tool_sources", 0}, {"plugins", 0},
         {"allowed_subagents", 0},
         {"permission_mode", 0}, {"permission", 0},
         {"compression_prompt", 0}, {"compaction_strategy", 0},
@@ -446,6 +446,7 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
                                  "' must be <provider>/<model>, e.g. local/qwen4");
     }
     result.allowed_tools = OptionalStringList(node, "allowed_tools");
+    result.plugins = OptionalStringList(node, "plugins");
     result.tool_sources = DecodeToolSources(node);
     // Present-vs-absent is semantic here (absent = no restriction, present =
     // the exact allowlist), so this cannot go through OptionalStringList,

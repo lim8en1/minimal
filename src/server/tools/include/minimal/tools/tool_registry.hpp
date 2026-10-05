@@ -163,6 +163,11 @@ public:
     std::map<std::string, std::string> ConfigAliasPermissionKeys() const;
     // The permission keys of live tools that do not accept pattern rules.
     std::vector<std::string> NoPatternRulePermissionKeys() const;
+    // plugin name -> the permission keys of its live tools, for presets'
+    // `plugins:` groups. Every plugin that registered a tool appears (an
+    // empty list when none is live); group (MCP) tools and core built-ins
+    // never do.
+    std::map<std::string, std::vector<std::string>> PermissionKeysByPlugin() const;
 
     // Startup rollback for a plugin whose registration threw: removes every
     // tool -- and its attribution/owner entries -- attributed to `plugin_name`.

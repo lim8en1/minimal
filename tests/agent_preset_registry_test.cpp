@@ -9,6 +9,7 @@
 
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/spawn_subagent_tool.hpp"
+#include "minimal/agent/subagent_spawn.hpp"
 #include "minimal/mcp/mcp_permission_model.hpp"
 #include "temp_dir.hpp"
 
@@ -1183,4 +1184,42 @@ TEST_CASE("AgentPresetRegistry: mode all loads project presets without a grant; 
     REQUIRE(none.Trust(project_root, error));  // a grant does not beat "none"
     registry.SetProjectTrust(&none);
     CHECK_THROWS_AS(registry.Resolve("local", project_root), std::runtime_error);
+}
+
+TEST_CASE("AgentPresetRegistry: plugins: expands to the plugins' tools beside allowed_tools",
+          "[agent_preset_registry][plugins]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/grouped.md",
+                 "---\nname: grouped\nmodel: openai-main/gpt-4o-mini\n"
+                 "allowed_tools: [ask_user, memory_get]\n"
+                 "plugins: [memory, tools-fs, not-loaded]\n---\nGrouped.\n");
+
+    ToolPermissionKeys tools;
+    tools.all = {"ask_user", "edit", "memory_get", "memory_search", "memory_store", "read"};
+    tools.by_plugin = {{"memory", {"memory_get", "memory_search", "memory_store"}},
+                       {"tools-fs", {"edit", "read"}},
+                       {"tool-ask", {"ask_user"}}};
+    AgentPresetRegistry registry(config.dir,
+                                 config::LoadSettingsConfig(config.dir / "settings.json"), tools);
+
+    // allowed_tools first, verbatim; each group's keys after, deduped (memory_get
+    // is named both ways); a plugin that is not loaded contributes nothing.
+    CHECK(registry.Resolve("grouped").allowed_tools ==
+          std::vector<std::string>{"ask_user", "memory_get", "memory_search", "memory_store",
+                                   "edit", "read"});
+    // A preset without plugins: is untouched.
+    CHECK(registry.Resolve("build").allowed_tools.empty());
+}
+
+TEST_CASE("AgentPresetRegistry: a subagent's plugins: group is still clamped by its parent",
+          "[agent_preset_registry][plugins]") {
+    // Groups expand at resolve, so the spawn-time intersection sees two plain
+    // lists: a child naming the whole memory group under a parent that allows
+    // only memory_search gets memory_search alone.
+    const std::vector<std::string> parent = {"read", "memory_search"};
+    const std::vector<std::string> child_expanded = {"memory_get", "memory_search",
+                                                     "memory_store"};
+    CHECK(intersect_allowed(parent, child_expanded) ==
+          std::vector<std::string>{"memory_search"});
 }
