@@ -22,6 +22,7 @@ examples live beside them once copied.
 
 | File | Demonstrates |
 |---|---|
+| `reference.md` | **Every structural field, annotated**: `plugins:` groups, `tool_sources` (MCP servers), `plugin_permissions` (skills, mcp, tools-web), `permission_mode` overrides/patterns, `allowed_subagents`, `steps`, `compaction_strategy`, `tool_config`, passthrough parameters. Start here |
 | `research.md` | Tool selection for non-coding work (`web_search`/`web_fetch`), `network: allow`, write denied |
 | `data-analyst.md` | `tool_config.python` (`packages:` ensured into the shared per-project venv), python tools alongside read-only fs tools |
 | `writer.md` | **Fail-closed zero tools**: no `allowed_tools` at all means no core tools; unknown frontmatter keys (`temperature:`) pass through to the provider as request parameters |
@@ -35,9 +36,12 @@ Notes:
   and `permission_mode` only sets ask/allow/deny for tools the preset already
   admits. `["*"]` (all registered tools) must be written explicitly.
 - Any frontmatter key the parser does not recognize rides to the provider as
-  a request parameter (`temperature`, `top_p`, `reasoningEffort`, ...) —
-  which is why a typo'd structural key is silently harmless. The recognized
-  structural keys are in `docs/CONFIGURATION.md` under "agents/ and prompts/".
+  a request parameter (`temperature`, `top_p`, `reasoningEffort`, ...). So a
+  typo'd or outdated structural key is NOT an error: it silently does nothing
+  for the preset and is sent to the provider. MCP servers are
+  `tool_sources: {mcp: [...]}` and skills are `plugin_permissions: {skills: ...}`
+  (see `reference.md`). The recognized structural keys are in
+  `docs/CONFIGURATION.md` under "agents/ and prompts/".
 - Presets may pin their own `model: <provider>/<model>` (a `<provider>/<model>`
   ref from `providers.json`, overriding `default_model`); none of these do,
   so they inherit the session's model — see `commands/agent-override.md` for
