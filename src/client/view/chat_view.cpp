@@ -1096,7 +1096,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             if (tool != nullptr) {
                 ChatRow live_row{.kind = ChatRowKind::ToolActivity,
                                  .tool_name = tool->tool_name,
-                                 .tool_input = tool->input,
+                                 .tool_input = *tool->input,
                                  .tool_is_error = tool->is_error,
                                  .tool_pending = tool->started};
                 Element plugin_row = RenderLiveWithPlugin(live_row);

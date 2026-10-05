@@ -195,7 +195,10 @@ public:
     void RestorePersisted(std::vector<llm::Message> rows, std::int64_t first_seq);
 
     // /agent, /model. The preset carries the model, so both go through here.
-    void SetPreset(AgentPreset preset) { preset_ = std::move(preset); }
+    void SetPreset(AgentPreset preset) {
+        preset_ = std::move(preset);
+        request_.InvalidateSystemAndTools();  // the cached system/tools came from the old one
+    }
     const AgentPreset& preset() const { return preset_; }
 
     // The allowed-AND-active tool groups, resolved by the session through the
@@ -216,29 +219,6 @@ public:
     void SetProvider(llm::LlmProvider& provider) { provider_ = provider; }
 
 private:
-    // The system/tools half of BuildChatRequest, factored out so
-    // EstimateContextTokens does not have to deep-copy the whole working
-    // history (BuildChatRequest's request.messages = history_) just to read
-    // request.system and request.tools -- for a 512k-1M-token session that
-    // copy ran on every compaction check, every resume, and every rewind/
-    // redo, exactly the RAM spike ARCHITECTURE.md's "the request body is
-    // serialized, not materialized" section argues against. messages stays
-    // empty; callers that need the full request still call BuildChatRequest.
-    using SystemAndTools = RequestBuilder::SystemAndTools;
-    SystemAndTools BuildSystemAndTools() const;
-
-
-    // The estimate's real body, taking an already-built system/tools pair
-    // instead of calling BuildSystemAndTools() itself. The public
-    // EstimateContextTokens() delegates to this after building its own pair;
-    // the zero-usage-estimate call inside RunTurnLoop calls it directly with
-    // the SAME chat_request.system/chat_request.tools BuildChatRequest just
-    // built a few lines earlier in the same tool round, instead of paying a
-    // second DefinitionsFor/DefinitionsForMcpServers materialization and sort
-    // for values it already has.
-    std::int64_t EstimateContextTokens(const std::optional<std::string>& system,
-                                       const std::vector<llm::ToolDefinition>& tools) const;
-
     void AppendAndPersist(llm::Message message, std::optional<int> output_tokens = std::nullopt);
     // Who produced an assistant row: the EFFECTIVE preset and model for this turn.
     session::MessageAttribution AssistantAttribution() const;

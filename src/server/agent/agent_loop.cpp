@@ -44,7 +44,7 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       is_paused_(std::move(is_paused)),
       event_sink_(std::move(event_sink)),
       working_(store, std::move(seed.history), seed.first_persisted_seq, seed.head_is_summary),
-      request_(preset_, std::move(project_context), registry_, config_, working_.messages(),
+      request_(preset_, std::move(project_context), registry_, config_, working_,
                working_.tokens(), is_cancelled_, session_.session_id),
       compaction_(preset_, config_, session_, store, working_, request_, provider_,
                   std::move(compactor), compaction_strategies, is_cancelled_),
@@ -153,15 +153,8 @@ void AgentLoop::FlushInjectedMessages() {
 
 // Request building lives in RequestBuilder; these keep the loop's own call sites
 // (and the public BuildChatRequest / EstimateContextTokens) unchanged.
-AgentLoop::SystemAndTools AgentLoop::BuildSystemAndTools() const {
-    return request_.BuildSystemAndTools();
-}
 llm::ChatRequest AgentLoop::BuildChatRequest() const { return request_.BuildChatRequest(); }
 std::int64_t AgentLoop::EstimateContextTokens() const { return request_.EstimateContextTokens(); }
-std::int64_t AgentLoop::EstimateContextTokens(const std::optional<std::string>& system,
-                                              const std::vector<llm::ToolDefinition>& tools) const {
-    return request_.EstimateContextTokens(system, tools);
-}
 std::int64_t AgentLoop::ToolResultByteCap() const { return request_.ToolResultByteCap(); }
 
 // Compaction lives in CompactionController; these keep the loop's call sites and
@@ -494,15 +487,11 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             // mirrored into last_usage so the status bar renders -- the wire
             // flag and cost-tracker's unpriced rule keep it honest.
             //
-            // Reuses chat_request.system/chat_request.tools -- BuildChatRequest
-            // (a few lines above, this same tool round) already built them --
-            // instead of the zero-arg overload, which would call
-            // BuildSystemAndTools() a second time: a redundant
-            // DefinitionsFor/DefinitionsForGroups materialization and sort
-            // on every zero-usage round, which is every round against any
+            // The zero-arg form reads the same cached system/tools this
+            // round's BuildChatRequest was built from (O(1), no tools-array
+            // walk) -- this runs on every round against any
             // OpenAI-compatible proxy that does not report usage.
-            std::int64_t estimate =
-                EstimateContextTokens(chat_request.system, chat_request.tools);
+            std::int64_t estimate = EstimateContextTokens();
             // A tool round's assistant message is not in working_.messages() yet.
             if (tool_round) estimate += estimate_tokens(std::span(&assistant, 1));
             working_.tokens().SeedOccupancy(estimate);
@@ -534,8 +523,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                 // The pair is two rows; the first of them opens the suffix.
                 working_.first_persisted_seq() = store_.last_appended_seq() - 1;
             }
-            working_.messages().push_back(std::move(assistant));
-            working_.messages().push_back(std::move(results_message));
+            working_.CommitRound(std::move(assistant), std::move(results_message));
         }
 
         // "Deny and stop": the round is answered and persisted; no provider

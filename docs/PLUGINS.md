@@ -284,17 +284,17 @@ on it instead of forking process code again:
 | `minimal/sidecar/drain.hpp` | `DrainAndReap`: sliced poll of the launched pipes into per-pipe sinks (`kCapped` head+tail with an optional live emit tap, `kBounded` all-or-nothing accumulate, `kDiscard`), deadline + cancellation, bounded post-kill reap |
 | `minimal/sidecar/capped_buffer.hpp` | The head+tail capped output buffer |
 | `minimal/sidecar/task_registry.hpp` | The generic background-task registry: id minting, per-session records/limits, `STARTED`-before-watch ordering, lifecycle events, result injection at a turn boundary, terminal-state-stored-last quiescence, watcher containment |
-| `minimal/sidecar/lifetime_watch.hpp` | `WatchLifetime`: fires a cleanup once when the session's lifetime expires (the mechanism for resources that live OUTSIDE this process) |
 
-The non-blocking contract a tool gets by combining the last two with the
+The non-blocking contract a tool gets by combining the task registry with the
 deferred-completion handles on `ToolContext` (`emit_output`,
 `schedule_injection`, `emit_task_event`, `session_lifetime`): the tool call
 acknowledges immediately, output streams to the operator live, the result
 reaches the model as an injected message at the next turn boundary, session
 death terminates the work, and cancelling the turn that started it does not.
-`tools-bash` (background tasks) and `tools-windbg` (remote debugger jobs) are
-the worked examples — the latter lives in a user plugin repo (below), not the
-bundled set.
+`tools-bash` (background tasks) is the worked example. A resource that lives
+outside this process is torn down the same way: the watcher thread that owns
+it polls `session_lifetime`, and `SessionObserver::OnSessionEnded` releases the
+per-session bookkeeping.
 
 ### tools-windbg (user plugin)
 

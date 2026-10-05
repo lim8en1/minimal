@@ -53,19 +53,16 @@ std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
         // terminator yet -- it may be the first half of a CRLF split across
         // chunks, and terminating there would let the next chunk's '\n' flush
         // a partial frame as if it were complete.
-        const std::size_t nl = line_buffer_.find('\n', start);
-        const std::size_t cr = line_buffer_.find('\r', start);
-        std::size_t eol;
-        std::size_t advance;
-        if (nl != std::string::npos && (cr == std::string::npos || nl < cr)) {
-            eol = nl;
-            advance = 1;
-        } else if (cr != std::string::npos) {
-            if (cr + 1 == line_buffer_.size()) break;  // wait for the byte after '\r'
-            eol = cr;
-            advance = line_buffer_[cr + 1] == '\n' ? 2 : 1;
-        } else {
-            break;
+        //
+        // ONE scan for whichever terminator comes first. Two separate finds
+        // made the '\r' search run to the END of the buffer for every line of
+        // an LF-only stream (the common case): O(lines x chunk) per chunk.
+        const std::size_t eol = line_buffer_.find_first_of("\r\n", start);
+        if (eol == std::string::npos) break;
+        std::size_t advance = 1;
+        if (line_buffer_[eol] == '\r') {
+            if (eol + 1 == line_buffer_.size()) break;  // wait for the byte after '\r'
+            if (line_buffer_[eol + 1] == '\n') advance = 2;
         }
         const std::string_view line =
             strip_cr(std::string_view(line_buffer_).substr(start, eol - start));

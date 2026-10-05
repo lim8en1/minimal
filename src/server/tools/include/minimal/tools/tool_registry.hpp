@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -78,6 +80,13 @@ public:
     // through the tool sources; groups not in the list contribute nothing,
     // which is how a dead or de-scoped member's tools vanish from the
     // model's view.
+    // Bumped by every mutation (register, removal, aliasing, namespace
+    // reservation, permission keys, group replacement). Readers that cache
+    // what DefinitionsFor/DefinitionsForGroups returned (RequestBuilder)
+    // compare it to tell "unchanged" from "rebuild". Tool specs themselves
+    // are immutable after construction, so this covers every input.
+    std::uint64_t generation() const { return generation_.load(std::memory_order_acquire); }
+
     std::vector<llm::ToolDefinition> DefinitionsForGroups(
         const std::vector<std::string>& groups) const;
 
@@ -239,6 +248,8 @@ private:
     // mutable: readers are const and run on session workers; startup and MCP
     // replacement are the writers.
     mutable std::shared_mutex mutex_;
+    // Bumped under mutex_ by every writer (see generation()); read lock-free.
+    std::atomic<std::uint64_t> generation_{0};
 };
 
 }  // namespace minimal::tools

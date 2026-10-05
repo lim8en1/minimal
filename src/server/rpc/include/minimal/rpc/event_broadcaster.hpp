@@ -70,12 +70,20 @@ public:
     // producer, not a tuning knob (see event_queue.hpp for the arithmetic).
     static constexpr std::size_t kDefaultMaxEvents = 65536;
     static constexpr std::size_t kDefaultMaxBytes = 64ull << 20;
+    // The zero-subscriber backlog's byte bound, deliberately far below a live
+    // subscriber's: nobody is reading it, so it is pure resident memory per
+    // detached session (a background subagent streaming tool output filled
+    // 64 MiB each). Overflow is the same drop-oldest + resync latch as
+    // everywhere else -- the transcript, not the backlog, is the durable log.
+    static constexpr std::size_t kDefaultBacklogMaxBytes = 8ull << 20;
 
     // session_id is stamped onto the ResyncRequiredEvents this broadcaster
     // synthesizes -- they must be wire-valid ServerEvents like any other.
+    // A byte bound of 0 means "events-count bound only".
     explicit EventBroadcaster(std::string session_id,
                               std::size_t max_events = kDefaultMaxEvents,
-                              std::size_t max_bytes = kDefaultMaxBytes);
+                              std::size_t max_bytes = kDefaultMaxBytes,
+                              std::size_t max_backlog_bytes = kDefaultBacklogMaxBytes);
     ~EventBroadcaster();
 
     EventBroadcaster(const EventBroadcaster&) = delete;
@@ -132,20 +140,24 @@ public:
     std::size_t queued(const Handle& handle) const;
 
 private:
+    // A queued event with its wire size, computed ONCE at enqueue: eviction
+    // and dequeue read it back instead of re-running ByteSizeLong().
+    struct QueuedEvent {
+        v1::ServerEvent event;
+        std::size_t bytes = 0;
+    };
+
     // Takes the subscriber's mutex itself. The *Locked helpers require the
     // caller to already hold it -- never nest them.
     bool Deliver(SubscriberState& sub, v1::ServerEvent event);
     void AcceptLocked(SubscriberState& sub, v1::ServerEvent event, std::size_t bytes);
     // Evicts the oldest item(s) from `items` until `incoming_bytes` fits under
-    // max_events_/max_bytes_, or the container empties -- the drop-oldest rule
-    // shared by Deliver's per-subscriber queue and Publish's zero-subscriber
-    // backlog, which otherwise duplicated it against two differently-shaped
-    // containers (Item-with-cached-bytes vs. a bare event with bytes tracked
-    // alongside). `byte_cost` reads one item's byte cost; `pop_front` removes
-    // it. Returns whether anything was evicted.
-    template <typename Container, typename ByteCostFn>
-    bool EvictOldestUntilFits(Container& items, std::size_t& bytes_total,
-                              std::size_t incoming_bytes, ByteCostFn byte_cost) const;
+    // max_events_ and `max_bytes` (0 = no byte bound), or the container
+    // empties -- the drop-oldest rule shared by Deliver's per-subscriber queue
+    // and Publish's zero-subscriber backlog. Returns whether anything was
+    // evicted.
+    bool EvictOldestUntilFits(std::deque<QueuedEvent>& items, std::size_t& bytes_total,
+                              std::size_t incoming_bytes, std::size_t max_bytes) const;
     // Latches the subscriber's resync flag (once) and appends the notice.
     void TakeResyncLocked(SubscriberState& sub, const char* reason);
     static std::size_t SizeOf(const v1::ServerEvent& event);
@@ -153,10 +165,11 @@ private:
     const std::string session_id_;
     const std::size_t max_events_;
     const std::size_t max_bytes_;
+    const std::size_t max_backlog_bytes_;
 
     mutable std::mutex set_mutex_;
     std::vector<Handle> subscribers_;
-    std::deque<v1::ServerEvent> backlog_;
+    std::deque<QueuedEvent> backlog_;
     std::size_t backlog_bytes_ = 0;
     bool backlog_latched_ = false;
     // Set by the first Subscribe: from then on the backlog is a PARTIAL

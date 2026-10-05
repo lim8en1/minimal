@@ -28,6 +28,12 @@ namespace minimal::client {
 // matching its start — we key on that, never on position.
 // ============================================================================
 
+// The shared `{}` every ToolExecutionState::input starts as (never null).
+inline const std::shared_ptr<const nlohmann::json>& EmptyToolInput() {
+    static const auto kEmpty = std::make_shared<const nlohmann::json>(nlohmann::json::object());
+    return kEmpty;
+}
+
 struct ToolExecutionState {
     std::string tool_use_id;
     std::string tool_name;
@@ -36,8 +42,11 @@ struct ToolExecutionState {
     // the tool sends none.
     std::optional<std::string> summary;
     // The model's call args (ToolExecutionEvent.input), for SummarizeToolInput
-    // when `summary` is empty.
-    nlohmann::json input = nlohmann::json::object();
+    // when `summary` is empty. Shared and immutable, never null: every
+    // snapshot (the light one per tab per frame included) copies the row, and
+    // a write/edit call's input carries the whole file -- a deep copy per row
+    // per snapshot was the cost. Parsed once at Start; copies bump a refcount.
+    std::shared_ptr<const nlohmann::json> input = EmptyToolInput();
     std::chrono::milliseconds started_at_unix_ms{-1};  // server-supplied timestamp
     // Set by OnToolFinished from the finish event's duration_ms; -1 while the
     // tool is still running (elapsed is computed from started_at_unix_ms
@@ -47,11 +56,20 @@ struct ToolExecutionState {
     // Accumulated chunks arrive here (lossy ring buffer). The final authoritative
     // record is the persisted ToolResultBlock, but this is what the panel shows.
     //
-    // SESSIONSTATE-INTERNAL working buffer: appended in place by
-    // OnToolOutputDelta (O(delta)), never copied out to a snapshot. The
-    // published view snapshots carry is `buffered_output` below -- rebuilt
-    // lazily (copy-on-publish) only when this changed since the last publish.
-    std::string buffered_output_working;
+    // SESSIONSTATE-INTERNAL working buffer, split head/tail like the server's
+    // sidecar CappedBuffer: OnToolOutputDelta fills `output_head` up to the
+    // head budget (cap/4) and appends the rest to `output_tail`, which is
+    // compacted only once it reaches TWICE its budget -- amortized O(delta).
+    // Rebuilding a cap-sized head+marker+tail string on EVERY delta past the
+    // cap was a full-buffer copy per 8 KiB chunk on the gRPC reader thread.
+    // The exact cap is applied at PUBLISH (ToolRunTracker::Copy), which is the
+    // only reader; storage may transiently hold up to ~2x the cap. Never
+    // copied out to a snapshot: `buffered_output` below is what they carry.
+    std::string output_head;
+    std::string output_tail;
+    // Latched once head+tail first exceeded the cap: from then on the
+    // published view carries the trimmed marker.
+    bool output_over_cap = false;
 
     // The published live-stdout view: WHAT SNAPSHOTS CARRY. Null unless the
     // snapshot was taken with include_tool_output (only the running-tools

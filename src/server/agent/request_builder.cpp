@@ -8,7 +8,30 @@
 
 namespace minimal::agent {
 
+const RequestBuilder::Cache& RequestBuilder::EnsureCache() const {
+    // Read the generation BEFORE building: a registry change racing the build
+    // leaves a stale generation behind, so the next call rebuilds instead of
+    // trusting a value that may predate the change.
+    const std::uint64_t generation = registry_.generation();
+    if (!cache_ || cache_->registry_generation != generation) {
+        Cache fresh;
+        fresh.value = ComputeSystemAndTools();
+        fresh.fixed_bytes = FixedBytes(fresh.value.system, fresh.value.tools);
+        fresh.registry_generation = generation;
+        cache_ = std::move(fresh);
+    }
+    return *cache_;
+}
+
+const RequestBuilder::SystemAndTools& RequestBuilder::CachedSystemAndTools() const {
+    return EnsureCache().value;
+}
+
 RequestBuilder::SystemAndTools RequestBuilder::BuildSystemAndTools() const {
+    return EnsureCache().value;
+}
+
+RequestBuilder::SystemAndTools RequestBuilder::ComputeSystemAndTools() const {
     SystemAndTools out;
     if (!preset_.system_prompt.empty()) out.system = preset_.system_prompt;
     // Project context appends AFTER the preset body: both are constant within
@@ -90,15 +113,14 @@ RequestBuilder::SystemAndTools RequestBuilder::BuildSystemAndTools() const {
 
 llm::ChatRequest RequestBuilder::BuildChatRequest() const {
     llm::ChatRequest request;
-    SystemAndTools system_and_tools = BuildSystemAndTools();
+    const Cache& cache = EnsureCache();
     // The larger of the fresh estimate and the last backend-reported
     // occupancy: the estimate can undercount, the occupancy lags a round.
     const std::int64_t input_tokens =
-        std::max(EstimateContextTokens(system_and_tools.system, system_and_tools.tools),
-                 tokens_.last_occupancy());
-    request.system = std::move(system_and_tools.system);
-    request.tools = std::move(system_and_tools.tools);
-    request.messages = history_;
+        std::max(cache.fixed_bytes / 4 + working_.estimated_tokens(), tokens_.last_occupancy());
+    request.system = cache.value.system;
+    request.tools = cache.value.tools;
+    request.messages = working_.messages();
     request.should_abort = is_cancelled_;
     request.model = preset_.provider.model_name;
     request.parameters = preset_.parameters;
@@ -111,30 +133,33 @@ llm::ChatRequest RequestBuilder::BuildChatRequest() const {
     return request;
 }
 
-// The estimate is built FROM the same system/tools construction BuildChatRequest
+// The estimate is built FROM the same cached system/tools BuildChatRequest
 // uses -- system prompt, project context and tools array included -- rather
 // than alongside it, so the two cannot drift: a /agent switch, a
-// project-context load or an allowed-tools change flow through
-// BuildSystemAndTools into both. Deliberately does NOT go through
-// BuildChatRequest: that assigns request.messages = history_, a full deep copy
-// of the working history's every message and string that this call never
-// reads -- for a 512k-1M-token session, on every compaction check, resume, and
-// rewind/redo. The bytes/4 roughness matches estimate_tokens, which is
-// deliberate: the first real response replaces the estimate with the
-// backend's ground truth anyway.
+// project-context load or an allowed-tools change invalidate the one cache
+// both read. The history half is WorkingHistory's running count, so neither
+// half walks anything per call. The bytes/4 roughness matches
+// estimate_tokens, which is deliberate: the first real response replaces the
+// estimate with the backend's ground truth anyway.
 std::int64_t RequestBuilder::EstimateContextTokens() const {
-    const SystemAndTools system_and_tools = BuildSystemAndTools();
-    return EstimateContextTokens(system_and_tools.system, system_and_tools.tools);
+    return EnsureCache().fixed_bytes / 4 + working_.estimated_tokens();
 }
+
+std::int64_t RequestBuilder::FixedContextTokens() const { return EnsureCache().fixed_bytes / 4; }
 
 std::int64_t RequestBuilder::EstimateContextTokens(const std::optional<std::string>& system,
                                               const std::vector<llm::ToolDefinition>& tools) const {
+    return FixedBytes(system, tools) / 4 + working_.estimated_tokens();
+}
+
+std::int64_t RequestBuilder::FixedBytes(const std::optional<std::string>& system,
+                                        const std::vector<llm::ToolDefinition>& tools) {
     std::int64_t bytes = system ? static_cast<std::int64_t>(system->size()) : 0;
     for (const auto& def : tools) {
         bytes += static_cast<std::int64_t>(def.name.size() + def.description.size());
         bytes += JsonSizeEstimate(def.input_schema);
     }
-    return bytes / 4 + estimate_tokens(history_);
+    return bytes;
 }
 
 std::int64_t RequestBuilder::ToolResultByteCap() const {

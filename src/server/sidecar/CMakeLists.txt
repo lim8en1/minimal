@@ -5,5 +5,4 @@ minimal_server_module(sidecar
         capped_buffer.cpp
         drain.cpp
         task_registry.cpp
-        lifetime_watch.cpp
 )

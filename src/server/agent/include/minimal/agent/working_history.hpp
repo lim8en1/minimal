@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "minimal/llm/message.hpp"
@@ -30,17 +31,34 @@ public:
     // `history` / `first_persisted_seq` / `head_is_summary` are a resume seed
     // (empty for a fresh session).
     WorkingHistory(session::HistoryStore& store, std::vector<llm::Message> history,
-                   std::optional<std::int64_t> first_persisted_seq, bool head_is_summary)
-        : store_(store),
-          messages_(std::move(history)),
-          first_persisted_seq_(first_persisted_seq),
-          head_is_summary_(head_is_summary) {}
+                   std::optional<std::int64_t> first_persisted_seq, bool head_is_summary);
 
-    // Direct access for the loop's algorithms (compaction rewrites these in
-    // place). The references stay valid for the object's life: nothing here ever
-    // reseats them, it assigns through.
-    std::vector<llm::Message>& messages() { return messages_; }
+    // READ-ONLY on purpose: every write goes through a method below, so the
+    // running byte count (estimated_tokens) can never drift from the contents.
+    // The reference stays valid for the object's life.
     const std::vector<llm::Message>& messages() const { return messages_; }
+
+    // bytes/4 over the working set (estimate_tokens(messages()), kept as a
+    // running total). O(1): the per-round request build and the compaction
+    // check used to re-walk the whole history -- every tool input's JSON
+    // included -- two or three times per provider round.
+    std::int64_t estimated_tokens() const;
+
+    // A tool round's [assistant, results] pair, ALREADY persisted by the
+    // caller's AppendRound transaction: memory only.
+    void CommitRound(llm::Message assistant, llm::Message results);
+
+    // In-place rewrite (compaction's [summary + tail] rebuild, the
+    // oversized-result elision). The running count is recomputed afterwards.
+    template <typename Fn>
+    decltype(auto) MutateInPlace(Fn&& fn) {
+        struct Recounter {
+            WorkingHistory& self;
+            ~Recounter() { self.Recount(); }
+        } recount{*this};
+        return std::forward<Fn>(fn)(messages_);
+    }
+
     std::optional<std::int64_t>& first_persisted_seq() { return first_persisted_seq_; }
     const std::optional<std::int64_t>& first_persisted_seq() const { return first_persisted_seq_; }
     bool& head_is_summary() { return head_is_summary_; }
@@ -90,8 +108,11 @@ public:
     bool Restore(std::vector<llm::Message> rows, std::int64_t first_seq);
 
 private:
+    void Recount();
+
     session::HistoryStore& store_;
     std::vector<llm::Message> messages_;
+    std::int64_t history_bytes_ = 0;  // estimate_bytes(messages_), maintained
     std::optional<std::int64_t> first_persisted_seq_;
     bool head_is_summary_ = false;
     llm::TokenAccumulator tokens_;

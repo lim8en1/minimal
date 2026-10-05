@@ -139,6 +139,9 @@ std::optional<CompactionResult> compact_messages(
 // Exposed beyond the compactor because resume has the same problem: it seeds
 // the compaction trigger with a loaded transcript and no backend count either.
 std::int64_t estimate_tokens(std::span<const llm::Message> messages);
+// The byte count behind estimate_tokens (estimate_tokens == this / 4). Sums
+// across ranges, so WorkingHistory can keep a running total and divide once.
+std::int64_t estimate_bytes(std::span<const llm::Message> messages);
 
 // Serialized size of a JSON value, without serializing it. Structural
 // characters are counted the way dump() would emit them; the point is a stable

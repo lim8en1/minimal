@@ -163,10 +163,28 @@ TEST_CASE("one chunk carrying many complete lines does not trip the line cap", "
     SseParser parser;
     std::string chunk;
     for (int i = 0; i < 4096; ++i) chunk += "data: {\"i\":" + std::to_string(i) + "}\n\n";
-    REQUIRE_NOTHROW(parser.Feed(chunk));
+    std::vector<SseFrame> frames;
+    REQUIRE_NOTHROW(frames = parser.Feed(chunk));
+    REQUIRE(frames.size() == 4096);
+    CHECK(frames.back().data == "{\"i\":4095}");
     // The cap now bounds the UNTERMINATED tail: complete lines were consumed,
     // so a subsequent feed whose bytes never terminate still fails.
     CHECK_THROWS_AS(parser.Feed(std::string((1ull << 20) + 2, 'x')), std::runtime_error);
+}
+
+TEST_CASE("LF, CR and CRLF terminators mix within one chunk", "[sse]") {
+    // The single first-terminator scan must pick whichever of '\r'/'\n' comes
+    // first, consume a CRLF pair as one terminator, and still hold a trailing
+    // lone '\r' until the next byte arrives.
+    SseParser parser;
+    auto frames = parser.Feed("data: a\n\ndata: b\r\rdata: c\r\n\r\ndata: d\r");
+    REQUIRE(frames.size() == 3);
+    CHECK(frames[0].data == "a");
+    CHECK(frames[1].data == "b");
+    CHECK(frames[2].data == "c");
+    frames = parser.Feed("\n\n");  // the held '\r' was the first half of a CRLF
+    REQUIRE(frames.size() == 1);
+    CHECK(frames[0].data == "d");
 }
 
 TEST_CASE("the last-event-id buffer persists across frames and NUL ids are ignored",
