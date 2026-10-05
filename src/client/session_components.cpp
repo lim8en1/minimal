@@ -27,6 +27,44 @@ void AppendFlatCapped(std::string& buffer, bool& truncated, std::string_view tex
         truncated = true;
     }
 }
+
+constexpr std::string_view kToolOutputTrimMarker =
+    "\n··· live output trimmed -- the full result is in the transcript ···\n";
+
+// The published tool-output shape for a cap: head 1/4 + marker + tail,
+// mirroring the server's persisted-result cap. Defensive floor: ui_config.cpp
+// rejects a bound below the marker's own size, but a cap that cannot hold the
+// head AND the marker degrades to a plain keep-the-tail truncation (no head,
+// no marker) -- always safe, never an underflowed budget.
+struct ToolOutputBudget {
+    std::size_t head = 0;
+    std::size_t tail = 0;
+    bool marker = false;
+};
+
+ToolOutputBudget ToolOutputBudgetFor(std::size_t cap) {
+    const std::size_t head = cap / 4;
+    if (head + kToolOutputTrimMarker.size() >= cap) return {0, cap, false};
+    return {head, cap - head - kToolOutputTrimMarker.size(), true};
+}
+
+// The exact, capped view of a row's split working buffer. Both cuts land on a
+// codepoint boundary: the head by TruncateUtf8, the tail by ceiling its start
+// (the raw head/tail split itself can fall inside a multi-byte sequence).
+std::string PublishToolOutput(const ToolExecutionState& row, std::size_t cap) {
+    if (!row.output_over_cap) return row.output_head + row.output_tail;
+    const ToolOutputBudget budget = ToolOutputBudgetFor(cap);
+    const std::string& tail = row.output_tail;
+    const std::size_t start =
+        Utf8CeilToBoundary(tail, tail.size() > budget.tail ? tail.size() - budget.tail : 0);
+    std::string out;
+    if (budget.marker) {
+        out = TruncateUtf8(row.output_head, budget.head);
+        out += kToolOutputTrimMarker;
+    }
+    out.append(tail, start, std::string::npos);
+    return out;
+}
 }  // namespace
 
 // --- PendingPrompts ------------------------------------------------------------
@@ -85,7 +123,7 @@ void ToolRunTracker::Start(const v1::ToolExecutionEvent& evt) {
     tool.tool_use_id = evt.tool_use_id();
     tool.tool_name = evt.tool_name();
     tool.summary = evt.summary();
-    tool.input = StructToJson(evt.input());
+    tool.input = std::make_shared<const nlohmann::json>(StructToJson(evt.input()));
     tool.started_at_unix_ms = std::chrono::milliseconds(evt.started_at_unix_ms());
     tool.started = true;
     rows_.push_back(std::move(tool));
@@ -95,37 +133,31 @@ void ToolRunTracker::Start(const v1::ToolExecutionEvent& evt) {
 void ToolRunTracker::OutputDelta(const std::string& tool_use_id, const std::string& chunk) {
     for (auto it = rows_.rbegin(); it != rows_.rend(); ++it) {
         if (it->tool_use_id != tool_use_id || !it->started) continue;   // the active execution
-        it->buffered_output_working.append(chunk);
         // Cap AT APPEND (track R2): render-time truncation alone let a chatty
         // tool (a build, a `tail -f`) grow client memory for the whole turn.
-        // Head 1/4 + marker + tail 3/4, mirroring the server's persisted-result
-        // cap. An EXACT per-delta bound, not amortized: the running-tools
-        // panel renders mid-stream, so a transient overshoot is visible
+        // The bound is AMORTIZED here (the tail compacts at 2x its budget) and
+        // EXACT at publish (PublishToolOutput) -- the running-tools panel
+        // renders only published views, so no overshoot is ever visible
         // (session_state_test.cpp, "tool output deltas stay bounded").
         const auto cap = static_cast<std::size_t>(output_cap_bytes_);
-        if (it->buffered_output_working.size() > cap) {
-            static const std::string kMarker =
-                "\n··· live output trimmed -- the full result is in the transcript ···\n";
-            const std::size_t head_bytes = cap / 4;
-            // Defensive floor: ui_config.cpp rejects a bound below the
-            // marker's own size, but this is the site that would underflow
-            // (size_t wraparound threw an out-of-range substr() on the gRPC
-            // reader thread) -- a plain keep-the-tail truncation is always
-            // safe. Utf8CeilToBoundary on both tail cuts: a raw byte offset
-            // can land inside a multi-byte sequence.
-            if (head_bytes + kMarker.size() >= cap) {
-                const std::size_t size = it->buffered_output_working.size();
-                const std::size_t start = size > cap ? size - cap : 0;
-                it->buffered_output_working = it->buffered_output_working.substr(
-                    Utf8CeilToBoundary(it->buffered_output_working, start));
-            } else {
-                const std::size_t tail_budget = cap - head_bytes - kMarker.size();
-                const std::size_t tail_start = Utf8CeilToBoundary(
-                    it->buffered_output_working, it->buffered_output_working.size() - tail_budget);
-                it->buffered_output_working =
-                    TruncateUtf8(it->buffered_output_working, head_bytes) + kMarker +
-                    it->buffered_output_working.substr(tail_start);
-            }
+        const ToolOutputBudget budget = ToolOutputBudgetFor(cap);
+        std::string_view rest = chunk;
+        // The head keeps UTF-8's 3 continuation bytes of slack past its
+        // budget: the publish-time cut (TruncateUtf8) decides "does this cut
+        // split a character" from the byte AFTER the cut, which must be held.
+        const std::size_t head_fill = budget.head == 0 ? 0 : budget.head + 3;
+        if (it->output_head.size() < head_fill) {
+            const std::size_t take = std::min(head_fill - it->output_head.size(), rest.size());
+            it->output_head.append(rest.substr(0, take));
+            rest.remove_prefix(take);
+        }
+        it->output_tail.append(rest);
+        if (it->output_head.size() + it->output_tail.size() > cap) it->output_over_cap = true;
+        if (it->output_over_cap && it->output_tail.size() > 2 * budget.tail) {
+            // Each compaction discards at least budget.tail bytes, so the
+            // total moved is O(total output), not O(output x cap / chunk).
+            it->output_tail.erase(
+                0, Utf8CeilToBoundary(it->output_tail, it->output_tail.size() - budget.tail));
         }
         it->output_dirty = true;
         BumpVersion();   // the panel's live-tail rows changed
@@ -248,7 +280,8 @@ std::vector<ToolExecutionState> ToolRunTracker::Copy(bool include_output) const 
         t.is_background = row.is_background;
         if (include_output) {
             if (row.buffered_output == nullptr || row.output_dirty) {
-                row.buffered_output = std::make_shared<const std::string>(row.buffered_output_working);
+                row.buffered_output = std::make_shared<const std::string>(
+                    PublishToolOutput(row, static_cast<std::size_t>(output_cap_bytes_)));
                 row.output_dirty = false;
             }
             t.buffered_output = row.buffered_output;

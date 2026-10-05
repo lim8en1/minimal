@@ -1,9 +1,10 @@
 #include "web_settings.hpp"
 
-#include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
+#include "minimal/common/env.hpp"
 #include "minimal/config/parse_util.hpp"
 
 namespace minimal::tools_web {
@@ -79,12 +80,12 @@ WebSettings ParseWebSettings(const nlohmann::json& config) {
         PositiveOr(config, "search", "timeout_ms", settings.search_timeout_ms);
 
     if (!settings.search_api_key_env.empty()) {
-        const char* value = std::getenv(settings.search_api_key_env.c_str());
-        if (value == nullptr || *value == '\0') {
+        auto value = common::LookupEnv(settings.search_api_key_env);
+        if (!value) {
             throw std::runtime_error("tools-web: search.api_key_env names '" +
                                      settings.search_api_key_env + "' which is unset");
         }
-        settings.search_api_key = value;
+        settings.search_api_key = std::move(*value);
     }
 
     return settings;

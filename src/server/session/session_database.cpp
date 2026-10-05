@@ -17,19 +17,20 @@
 #include <variant>
 
 #include "minimal/common/config_paths.hpp"
-#include "minimal/common/file_lock.hpp"
-#include "minimal/common/sqlite_util.hpp"
+#include "minimal/store/file_lock.hpp"
+#include "minimal/common/clock.hpp"
+#include "minimal/store/sqlite_util.hpp"
 #include "minimal/session/message_codec.hpp"
 #include "minimal/session/ulid.hpp"
 
 namespace minimal::session {
 namespace {
 
-using common::BestEffortRollback;
-using common::ExecChecked;
+using store::BestEffortRollback;
+using store::ExecChecked;
 using common::NowMillis;
-using common::Stmt;
-using common::ThrowSqliteError;
+using store::Stmt;
+using store::ThrowSqliteError;
 
 const std::vector<Migration>& DefaultMigrationsImpl() {
     static const std::vector<Migration> migrations = {{
@@ -307,7 +308,7 @@ void ApplyMigrations(sqlite3* db, int target_version, const std::vector<Migratio
                     "failed to record schema version");
         ExecChecked(db, "COMMIT;", "failed to commit migration");
     } catch (...) {
-        common::BestEffortRollback(db);
+        store::BestEffortRollback(db);
         throw;
     }
 }
@@ -467,7 +468,7 @@ SessionDatabase::SessionDatabase(const std::filesystem::path& db_path, const Ope
     // of silently interleaving appends with divergent working sets. Held for
     // the process lifetime; the member order below releases it before the
     // SQLite connection closes.
-    lock_ = std::make_unique<common::ExclusiveFileLock>(db_path);
+    lock_ = std::make_unique<store::ExclusiveFileLock>(db_path);
 
     // This file holds verbatim transcripts and tool output, which routinely
     // carry secrets -- the same material atomic_write's credentials-store

@@ -284,17 +284,17 @@ on it instead of forking process code again:
 | `minimal/sidecar/drain.hpp` | `DrainAndReap`: sliced poll of the launched pipes into per-pipe sinks (`kCapped` head+tail with an optional live emit tap, `kBounded` all-or-nothing accumulate, `kDiscard`), deadline + cancellation, bounded post-kill reap |
 | `minimal/sidecar/capped_buffer.hpp` | The head+tail capped output buffer |
 | `minimal/sidecar/task_registry.hpp` | The generic background-task registry: id minting, per-session records/limits, `STARTED`-before-watch ordering, lifecycle events, result injection at a turn boundary, terminal-state-stored-last quiescence, watcher containment |
-| `minimal/sidecar/lifetime_watch.hpp` | `WatchLifetime`: fires a cleanup once when the session's lifetime expires (the mechanism for resources that live OUTSIDE this process) |
 
-The non-blocking contract a tool gets by combining the last two with the
+The non-blocking contract a tool gets by combining the task registry with the
 deferred-completion handles on `ToolContext` (`emit_output`,
 `schedule_injection`, `emit_task_event`, `session_lifetime`): the tool call
 acknowledges immediately, output streams to the operator live, the result
 reaches the model as an injected message at the next turn boundary, session
 death terminates the work, and cancelling the turn that started it does not.
-`tools-bash` (background tasks) and `tools-windbg` (remote debugger jobs) are
-the worked examples — the latter lives in a user plugin repo (below), not the
-bundled set.
+`tools-bash` (background tasks) is the worked example. A resource that lives
+outside this process is torn down the same way: the watcher thread that owns
+it polls `session_lifetime`, and `SessionObserver::OnSessionEnded` releases the
+per-session bookkeeping.
 
 ### tools-windbg (user plugin)
 
@@ -330,17 +330,26 @@ the `on_session_end` disposition (`detach`, the default, or `kill`).
 ## Aliases
 
 Aliases live in the `"aliases"` map of `plugins.json` (client: the same map in
-`client-plugins.json`) and **rename what the model and the user see**. On the
-CLIENT an alias only resolves a collision: both registrations stay live under
-their original names (lookups, keybindings and view hints hit the first), so
-the fatal duplicate becomes a coexistence rather than a rename:
+`client-plugins.json`) and **rename what the model and the user see**:
 
 ```json
 { "aliases": { "bash_over_ssh.bash": "ssh_bash" } }
 ```
 
+- Only **names** are aliasable — keys a plugin chooses and a user or the
+  model addresses: tools and commands (server), view ids and status segments
+  (client). The renamed entry answers to its alias everywhere it is
+  addressed: the model calls the tool by it, the user types the command,
+  `keybindings.json` binds the view, `ui.json`'s `status_format` places the
+  segment, a command's view hint opens it. A plugin's own code keeps using
+  its original id.
+- **Slots are never aliased** — keys that are a contract with something
+  outside the plugin: service names, hook points, renderer payload kinds, the
+  tool a result renderer draws, grammar languages, client commands. Renaming
+  one would only detach it from what it serves, so an alias naming a slot is
+  a startup warning and a slot collision is resolved by disabling a plugin.
 - Keys are fully-qualified **`plugin.original_name`**; values are the surface
-  name. One flat namespace covers **tools and commands together**.
+  name. A plugin providing a tool and a command under one name renames both.
 - Aliasing is the designed way to **resolve name collisions** — duplicate
   registrations are fatal, but applying an alias before registration makes
   both coexist (the canonical example: two plugins both providing `bash`).

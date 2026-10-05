@@ -19,9 +19,7 @@ namespace {
 
 using Code = LaunchError::Code;
 
-// SplitModelRef, not ParseModelRef: a client may name a discovered model whose
-// id itself carries slashes ("openrouter/anthropic/claude-opus-5"). Shape-
-// checked here so a malformed reference is INVALID_ARGUMENT rather than a
+// Shape-checked here so a malformed reference is INVALID_ARGUMENT rather than a
 // precondition failure from deep inside session construction.
 std::optional<common::ModelRef> RequestedModel(const std::string& raw) {
     if (raw.empty()) return std::nullopt;

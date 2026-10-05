@@ -35,57 +35,39 @@ std::filesystem::path ExecutablePath() {
 #endif
 }
 
-std::filesystem::path BundledPluginDir() {
-    // MINIMAL_PLUGIN_DIR is the same value CMake installs to, so overriding
-    // MINIMAL_PLUGIN_INSTALL_DIR moves both halves together. It used to be
-    // hardcoded here, which meant the two could silently disagree.
-    //
-    // Installed first, then the build tree. Build tree: each plugin lands in its
-    // own subdirectory under build/plugins/server, so this returns the parent and
-    // discovery scans one level deeper -- it handles both shapes.
-    //
-    // Returning the installed path on a miss rather than empty is deliberate:
-    // callers treat a nonexistent directory as "nothing bundled", and a real path
-    // in a log is more useful than "".
+namespace {
+
+// Installed tree first (<prefix>/bin/<exe> -> <prefix>/<install_rel>), then the
+// build tree (<build>/src/<host>/<exe> -> <build>/<staged_rel>; each plugin
+// sits in its own subdirectory there and discovery recurses). `install_rel` is
+// the same value CMake installs to, baked in as a compile definition, so
+// overriding the install dir moves the search with it.
+//
+// A miss returns the installed path rather than empty: callers treat a missing
+// directory as "nothing bundled", and a real path in a log beats "".
+std::filesystem::path ProbePluginDir(const char* install_rel, const char* staged_rel) {
     const auto exe = ExecutablePath();
     if (exe.empty()) return {};
     const auto bin_dir = exe.parent_path();
 
     std::error_code ec;
-    const auto installed = bin_dir.parent_path() / MINIMAL_PLUGIN_DIR;
+    const auto installed = bin_dir.parent_path() / install_rel;
     if (std::filesystem::is_directory(installed, ec)) return installed;
 
-    const auto staged = bin_dir.parent_path().parent_path() / "plugins/server";
+    const auto staged = bin_dir.parent_path().parent_path() / staged_rel;
     if (std::filesystem::is_directory(staged, ec)) return staged;
 
     return installed;
 }
 
+}  // namespace
+
+std::filesystem::path BundledPluginDir() {
+    return ProbePluginDir(MINIMAL_PLUGIN_DIR, "plugins/server");
+}
+
 std::filesystem::path BundledClientPluginDir() {
-    // The client twin of the probe above; MINIMAL_CLIENT_PLUGIN_DIR is baked
-    // in as a PRIVATE compile definition on minimal_common itself
-    // (src/common/CMakeLists.txt, fed from the MINIMAL_CLIENT_PLUGIN_INSTALL_DIR
-    // cache variable in the root CMakeLists.txt), not by the client's own
-    // CMakeLists.txt -- so overriding that cache variable moves both halves
-    // together regardless of which target is being built.
-    const auto exe = ExecutablePath();
-    if (exe.empty()) return {};
-    const auto bin_dir = exe.parent_path();
-
-    std::error_code ec;
-    const auto installed = bin_dir.parent_path() / MINIMAL_CLIENT_PLUGIN_DIR;
-    if (std::filesystem::is_directory(installed, ec)) return installed;
-
-    // Build tree: the client binary sits at <build>/src/client, so TWO hops
-    // reach <build>/plugins/client -- the same shape the server probe uses
-    // (its binary sits at <build>/src/server). Three hops used to reach the
-    // repository ROOT's plugins/client -- the source directory, never the
-    // built artifacts -- which nothing noticed until the first bundled client
-    // plugin existed, because the fixtures load .so paths directly.
-    const auto staged = bin_dir.parent_path().parent_path() / "plugins/client";
-    if (std::filesystem::is_directory(staged, ec)) return staged;
-
-    return installed;
+    return ProbePluginDir(MINIMAL_CLIENT_PLUGIN_DIR, "plugins/client");
 }
 
 }  // namespace minimal::common

@@ -78,10 +78,7 @@ void CompactionController::MaybeCompact() {
     // compaction can remove -- system prompt, project context, tool
     // definitions. At or below it, every fold leaves the context over the
     // trigger and the next check fires again.
-    const RequestBuilder::SystemAndTools system_and_tools = request_.BuildSystemAndTools();
-    const std::int64_t fixed_tokens =
-        request_.EstimateContextTokens(system_and_tools.system, system_and_tools.tools) -
-        estimate_tokens(working_.messages());
+    const std::int64_t fixed_tokens = request_.FixedContextTokens();
     if (trigger <= fixed_tokens) {
         if (!compaction_floor_warned_) {
             compaction_floor_warned_ = true;
@@ -210,7 +207,7 @@ std::optional<std::size_t> CompactionController::ChooseCut(std::string_view trig
     // keep_recent_tokens wins; with neither, the cut is by message count.
     std::int64_t keep_recent_tokens = config_.compaction_keep_recent_tokens;
     if (keep_recent_tokens <= 0 && config_.compaction_replace_percent > 0) {
-        const std::int64_t total = estimate_tokens(working_.messages());
+        const std::int64_t total = working_.estimated_tokens();
         keep_recent_tokens =
             std::max<std::int64_t>(1, total * (100 - config_.compaction_replace_percent) / 100);
     }
@@ -270,7 +267,8 @@ std::optional<std::size_t> CompactionController::ChooseCut(std::string_view trig
         // boundaries, so it cannot make the pairing problem worse, and it
         // addresses the actual harm (context SIZE) even though it does not
         // fold any messages together.
-        if (ElideLargestToolResult(working_.messages())) {
+        if (working_.MutateInPlace(
+                [](std::vector<llm::Message>& messages) { return ElideLargestToolResult(messages); })) {
             working_.tokens().SeedOccupancy(request_.EstimateContextTokens());
             session_.logger.warn(
                 "session {}: no safe compaction boundary in {} messages; elided the largest "
@@ -452,7 +450,7 @@ std::optional<std::size_t> CompactionController::Compact(std::string_view trigge
     // -- estimates on both sides (bytes/4), so the comparison is like for like,
     // with the fixed part (system prompt, tools) taken out: it is the same on
     // both sides and would make any fold look ineffective at small sizes.
-    const std::int64_t history_tokens_before = estimate_tokens(working_.messages());
+    const std::int64_t history_tokens_before = working_.estimated_tokens();
     const std::int64_t fixed_tokens =
         request_.EstimateContextTokens(params.system, params.tools) - history_tokens_before;
 
@@ -488,12 +486,14 @@ std::optional<std::size_t> CompactionController::Compact(std::string_view trigge
     // Rebuilt with moves, not copies: the kept tail is shifted once (moving
     // strings, which is pointer swaps) rather than duplicated. The summary
     // message lands at the head, replacing everything the cut removed.
-    std::vector<llm::Message> rebuilt;
-    rebuilt.reserve(working_.messages().size() - cut + 1);
-    rebuilt.push_back(result->summary_message);
-    std::move(working_.messages().begin() + static_cast<long>(cut), working_.messages().end(),
-              std::back_inserter(rebuilt));
-    working_.messages().swap(rebuilt);
+    working_.MutateInPlace([&](std::vector<llm::Message>& messages) {
+        std::vector<llm::Message> rebuilt;
+        rebuilt.reserve(messages.size() - cut + 1);
+        rebuilt.push_back(result->summary_message);
+        std::move(messages.begin() + static_cast<long>(cut), messages.end(),
+                  std::back_inserter(rebuilt));
+        messages.swap(rebuilt);
+    });
 
     // The kept tail's THINKING goes, on backends that bind it to its prefix
     // (working set only; the transcript keeps it). Its blocks were produced

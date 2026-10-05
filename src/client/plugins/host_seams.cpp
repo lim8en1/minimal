@@ -162,6 +162,38 @@ void HostFocusProvider::FocusPanel(const std::string& view_id) {
     Enqueue({ViewRequest::Op::kFocusPanel, view_id});
 }
 
+class HostFocusProvider::BoundUi final : public HostUi {
+public:
+    BoundUi(HostFocusProvider& host, std::string plugin) : host_(host), plugin_(std::move(plugin)) {}
+    void RequestRedraw() override { host_.RequestRedraw(); }
+    void ShowView(const std::string& view_id) override {
+        host_.Enqueue({ViewRequest::Op::kShow, view_id, true, plugin_});
+    }
+    void CloseView(const std::string& view_id) override {
+        host_.Enqueue({ViewRequest::Op::kClose, view_id, true, plugin_});
+    }
+    void SetPanelVisible(const std::string& view_id, bool visible) override {
+        host_.Enqueue({ViewRequest::Op::kSetPanelVisible, view_id, visible, plugin_});
+    }
+    void FocusPanel(const std::string& view_id) override {
+        host_.Enqueue({ViewRequest::Op::kFocusPanel, view_id, true, plugin_});
+    }
+
+private:
+    HostFocusProvider& host_;
+    std::string plugin_;
+};
+
+HostFocusProvider::HostFocusProvider() = default;
+HostFocusProvider::~HostFocusProvider() = default;
+
+HostUi* HostFocusProvider::UiFor(const std::string& plugin_name) {
+    std::lock_guard lk(bound_mtx_);
+    auto& slot = bound_[plugin_name];
+    if (slot == nullptr) slot = std::make_unique<BoundUi>(*this, plugin_name);
+    return slot.get();
+}
+
 std::vector<ViewRequest> HostFocusProvider::TakeViewRequests() {
     std::lock_guard lk(requests_mtx_);
     std::vector<ViewRequest> out;

@@ -1,5 +1,6 @@
 #include "minimal/common/serial_executor.hpp"
 
+#include <cassert>
 #include <exception>
 #include <utility>
 
@@ -19,9 +20,14 @@ SerialExecutor::SerialExecutor(std::string name, std::size_t capacity, Logger& l
             Finished();
         }
     });
+    worker_id_ = worker_.get_id();
 }
 
-SerialExecutor::~SerialExecutor() { Stop(Backlog::kRun); }
+SerialExecutor::~SerialExecutor() {
+    assert(std::this_thread::get_id() != worker_id_.load() &&
+           "SerialExecutor destroyed by one of its own tasks");
+    Stop(Backlog::kRun);
+}
 
 bool SerialExecutor::TryPost(std::function<void()> task) {
     {
@@ -38,15 +44,23 @@ void SerialExecutor::Stop(Backlog backlog) {
         tasks_.Close();
         if (backlog == Backlog::kDiscard) {
             const std::size_t dropped = tasks_.DiscardPending();
-            std::lock_guard<std::mutex> lock(mutex_);
-            outstanding_ -= dropped;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                outstanding_ -= dropped;
+            }
+            idle_cv_.notify_all();
         }
-        if (worker_.joinable()) worker_.join();
-        idle_cv_.notify_all();
     });
+    if (std::this_thread::get_id() == worker_id_.load()) return;  // the destructor joins
+    std::lock_guard<std::mutex> join_lock(join_mutex_);
+    if (worker_.joinable()) {
+        worker_.join();
+        worker_id_.store(std::thread::id{});
+    }
 }
 
 void SerialExecutor::WaitForIdle() {
+    assert(std::this_thread::get_id() != worker_id_.load() && "WaitForIdle called from a task");
     std::unique_lock<std::mutex> lock(mutex_);
     idle_cv_.wait(lock, [this] { return outstanding_ == 0; });
 }

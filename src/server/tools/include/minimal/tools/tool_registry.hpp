@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -78,6 +80,13 @@ public:
     // through the tool sources; groups not in the list contribute nothing,
     // which is how a dead or de-scoped member's tools vanish from the
     // model's view.
+    // Bumped by every mutation (register, removal, aliasing, namespace
+    // reservation, permission keys, group replacement). Readers that cache
+    // what DefinitionsFor/DefinitionsForGroups returned (RequestBuilder)
+    // compare it to tell "unchanged" from "rebuild". Tool specs themselves
+    // are immutable after construction, so this covers every input.
+    std::uint64_t generation() const { return generation_.load(std::memory_order_acquire); }
+
     std::vector<llm::ToolDefinition> DefinitionsForGroups(
         const std::vector<std::string>& groups) const;
 
@@ -101,7 +110,7 @@ public:
 
     // --- Attribution, for collision reporting -------------------------------
     //
-    // NameRegistry's three-naming-levels rule needs (plugin, original_name)
+    // name resolution's three-naming-levels rule needs (plugin, original_name)
     // pairs, but Register() has no idea who is calling. The loader opens a
     // scoped window around each plugin's registration callback so every name
     // that arrives inside it is attributed to that plugin.
@@ -123,7 +132,7 @@ public:
     // What config_namespace() each registered (non-MCP) tool claims, with the
     // plugin that claimed it. The sanity check consumes both halves: owners for
     // the "unclaimed tool_config key" warning, collisions for the fatal
-    // "two plugins claim one namespace" -- the NameRegistry discipline one
+    // "two plugins claim one namespace" -- the name resolution discipline one
     // level up. Multiple tools of ONE plugin sharing a namespace is normal
     // (deduped here); a namespace claimed by a core built-in (empty plugin
     // attribution) is likewise folded under "".
@@ -167,7 +176,7 @@ public:
     //
     // surface_name -> the NON-alias key per_tool_overrides / allowed_tools may
     // reference (bare original name when unambiguous, "plugin.original_name"
-    // when two plugins provide it -- see NameRegistry). Populated once at
+    // when two plugins provide it -- see name resolution). Populated once at
     // startup from ResolveRegistrationNames(), before any session exists.
     void SetPermissionKeys(std::unordered_map<std::string, std::string> keys);
 
@@ -239,6 +248,8 @@ private:
     // mutable: readers are const and run on session workers; startup and MCP
     // replacement are the writers.
     mutable std::shared_mutex mutex_;
+    // Bumped under mutex_ by every writer (see generation()); read lock-free.
+    std::atomic<std::uint64_t> generation_{0};
 };
 
 }  // namespace minimal::tools

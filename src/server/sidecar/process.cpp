@@ -1,5 +1,7 @@
 #include "minimal/sidecar/process.hpp"
 
+#include "minimal/common/env.hpp"
+
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -204,9 +206,8 @@ bool Child::TerminateAfter(std::chrono::milliseconds grace) {
 }
 
 std::string ResolveOnPath(const std::string& name) {
-    const char* path_env = ::getenv("PATH");
-    return ResolveOnPath(name, path_env != nullptr ? std::string_view(path_env)
-                                                   : std::string_view());
+    const auto path_env = common::LookupEnv("PATH");
+    return ResolveOnPath(name, path_env ? std::string_view(*path_env) : std::string_view());
 }
 
 std::string ResolveOnPath(const std::string& name, std::string_view path) {

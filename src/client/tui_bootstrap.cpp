@@ -17,7 +17,7 @@
 #include "minimal/common/bundled_assets.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
-#include "minimal/plugins/name_registry.hpp"
+#include "minimal/plugins/name_table.hpp"
 
 namespace minimal::client {
 
@@ -43,7 +43,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     //   2. vendored grammars registered as the additive registry's defaults
     //   3. PLUGIN LOAD (contexts carry the attention sink and the data path;
     //      registries record what each plugin claimed)
-    //   4. NameRegistry resolve: collisions fatal, dangling aliases warned
+    //   4. Name resolution: collisions fatal, dangling/slot aliases warned
     //   5. THEME (sections may reference loaded plugin names)
     //   6. keybindings (+ plugin view defaults, only where nothing binds)
     //   7. core defaults fill every unclaimed slot, then the frame is assembled
@@ -126,7 +126,11 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             out.registries, {.attention = out.attention_sink.get(),
                              .client_api = out.host_client_api.get(),
                              .focus = out.host_focus_provider.get(),
-                             .ui = out.host_focus_provider.get()});
+                             .ui = out.host_focus_provider.get(),
+                             .ui_for_plugin = [provider = out.host_focus_provider.get()](
+                                                  const std::string& plugin_name) {
+                                 return provider->UiFor(plugin_name);
+                             }});
         const auto records = loader.LoadAll(candidates);
         for (const auto& record : records) {
             if (record.ok()) out.loaded_plugins.push_back(record.name);
@@ -156,45 +160,32 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         }
         if (fatal) return false;
 
-        // Name collisions: the SAME rule as the server, through the shared
-        // NameRegistry (moved to common so both loaders run one mechanism).
-        // Registration keys are original names; a duplicate surface key is
-        // fatal and names both claimants.
-        minimal::plugins::NameRegistry names;
-        const auto hooks = plugins::RegistryHooks(out.registries);
-        std::vector<AliasCandidate> alias_candidates;
-        for (const auto& hook : hooks) {
-            if (!hook.name_kind) continue;   // keys that never collide
-            for (const auto& attribution : hook.registry->attributions()) {
-                names.Register(*hook.name_kind, attribution.plugin_name,
-                               attribution.original_name);
-            }
-            if (hook.aliasable) {
-                alias_candidates.push_back({*hook.name_kind, &hook.registry->attributions()});
-            }
+        // Name collisions: the SAME mechanism as the server (common's NameTable),
+        // with the client's namespaces and policy from the hook table.
+        std::vector<NameFeed> feeds;
+        for (const auto& hook : plugins::RegistryHooks(out.registries)) {
+            if (hook.name_space.empty()) continue;  // keys that never collide
+            feeds.push_back({hook.name_space, hook.policy, &hook.registry->attributions()});
         }
-        // Client aliases resolve collisions (the ARCHITECTURE.md rule: a
-        // duplicate view id / tool name is "fatal and alias-resolvable"). Like
-        // the server's resolver: the alias lands on the ONE kind whose stable
-        // identity it names (so a resolved alias renames that entry's surface
-        // and dedupes the collision), and an identity no kind claims is
-        // dangling on a single kind -- reported once, not four times.
-        // Addressing stays CANONICAL (keybindings.json addresses ids, never
-        // aliases).
-        for (const auto& [alias_key, alias_target] : plugin_config.aliases) {
-            names.SetAlias(MatchAliasKind(alias_candidates, alias_key), alias_key, alias_target);
-        }
-        const auto resolved = names.Resolve();
-        for (const auto& collision : resolved.fatal_collisions) {
-            std::fprintf(stderr, "minimal: FATAL: client plugin name collision: %s\n",
-                         collision.c_str());
+        const auto names = ResolveClientNames(feeds, plugin_config.aliases);
+        for (const auto& message : names.fatal) {
+            std::fprintf(stderr, "minimal: FATAL: %s\n", message.c_str());
             fatal = true;
         }
-        for (const auto& dangling : resolved.dangling_aliases) {
-            std::fprintf(stderr, "minimal: warning: client plugin alias names nothing: %s\n",
-                         dangling.c_str());
+        for (const auto& message : names.warnings) {
+            std::fprintf(stderr, "minimal: warning: %s\n", message.c_str());
         }
         if (fatal) return false;
+
+        // Collisions resolved: rename what the aliases rename. Names only --
+        // a slot registry is never renamed (ResolveClientNames warned).
+        for (const auto& hook : plugins::RegistryHooks(out.registries)) {
+            if (hook.name_space.empty() ||
+                hook.policy != minimal::plugins::NameTable::Policy::kName) {
+                continue;
+            }
+            hook.registry->ApplyAliases(plugin_config.aliases);
+        }
     }
 
     // ui.json's "theme" selects the file (themes/<name>.json); empty means
@@ -241,28 +232,33 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         if (key.empty() || out.registries.views.Find(action) != nullptr) continue;
         core_keys.emplace(NormalizeKeySpec(key), action);
     }
-    for (const auto& view : out.registries.views.All()) {
+    const auto& views = out.registries.views.All();
+    const auto& view_surfaces = out.registries.views.surfaces();
+    for (std::size_t i = 0; i < views.size(); ++i) {
+        const auto& view = views[i];
+        // Users address the SURFACE id (the alias, if one renamed the view).
+        const std::string& surface = view_surfaces[i];
         // A command's view_hint resolves the core overlays first
         // (TabMaintenance::HandleNotice), so a plugin view with one of their
         // names can never be opened by a hint.
         for (const char* core_view : {"sessions", "agents", "models", "subagent-models",
                                       "subagents"}) {
-            if (view->spec().id == core_view) {
+            if (surface == core_view) {
                 std::fprintf(stderr,
                              "minimal: warning: plugin view '%s' shares a core view name; "
                              "command view hints open the core view instead\n",
                              core_view);
             }
         }
-        keys.EnsureDefault(view->spec().id, view->spec().default_keybinding);
-        const std::string bound = keys.KeyFor(view->spec().id);
+        keys.EnsureDefault(surface, view->spec().default_keybinding);
+        const std::string bound = keys.KeyFor(surface);
         if (const auto clash = core_keys.find(NormalizeKeySpec(bound));
             !bound.empty() && clash != core_keys.end()) {
             std::fprintf(stderr,
                          "minimal: warning: plugin view '%s' is bound to '%s', which '%s' "
                          "already uses -- the view's key does nothing; rebind one in "
                          "keybindings.json\n",
-                         view->spec().id.c_str(), bound.c_str(), clash->second.c_str());
+                         surface.c_str(), bound.c_str(), clash->second.c_str());
         }
         // Plugin component code: a throw out of component() would propagate
         // into the frame assembly (and, later, the ftxui loop, where it would
@@ -275,17 +271,18 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             // into it unguarded.
             if (component == nullptr) {
                 common::DefaultLogger().warn("plugin view '{}' returned no component; skipped",
-                                             view->spec().id);
+                                             surface);
                 continue;
             }
-            out.plugin_views.push_back(PluginViewEntry{view.get(), std::move(component), false});
+            PluginViewEntry entry{view.get(), std::move(component), false, false, surface, {}};
+            entry.plugin = out.registries.views.attributions()[i].plugin_name;
+            out.plugin_views.push_back(std::move(entry));
         } catch (const std::exception& error) {
-            common::DefaultLogger().warn("plugin view '{}' threw on component(): {}",
-                                         view->spec().id, error.what());
+            common::DefaultLogger().warn("plugin view '{}' threw on component(): {}", surface,
+                                         error.what());
         } catch (...) {
             common::DefaultLogger().warn(
-                "plugin view '{}' threw on component() (non-standard exception)",
-                view->spec().id);
+                "plugin view '{}' threw on component() (non-standard exception)", surface);
         }
     }
     // Parsed ONCE, after keys.all() has settled (core defaults + the user's
@@ -317,14 +314,14 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             std::fprintf(stderr, "minimal: unknown status segment '{%s}'\n", id.c_str());
         }
     }
-    // Core segment ids are reserved: a plugin segment reusing one is ignored
-    // (the frame skips it) -- it used to overwrite the core value silently.
-    for (const auto& segment : out.registries.status_segments.All()) {
-        if (minimal::client::IsKnownStatusSegment(segment->id())) {
+    // Core segment ids are reserved: a plugin segment answering to one is
+    // ignored (the frame skips it), never overwriting the core value.
+    for (const auto& surface : out.registries.status_segments.surfaces()) {
+        if (minimal::client::IsKnownStatusSegment(surface)) {
             std::fprintf(stderr,
                          "minimal: warning: a plugin status segment reuses the core id "
                          "'{%s}'; the core segment is kept\n",
-                         std::string(segment->id()).c_str());
+                         surface.c_str());
         }
     }
 
@@ -428,14 +425,61 @@ void PushThemeToPlugins(TuiEnvironment& out) {
     }
 }
 
-minimal::plugins::NameKind MatchAliasKind(const std::vector<AliasCandidate>& candidates,
-                                          const std::string& key) {
-    for (const auto& candidate : candidates) {
-        for (const auto& a : *candidate.attributions) {
-            if (a.plugin_name + "." + a.original_name == key) return candidate.kind;
+ClientNameResolution ResolveClientNames(const std::vector<NameFeed>& feeds,
+                                        const std::map<std::string, std::string>& aliases) {
+    using minimal::plugins::NameTable;
+    // One table per namespace, in first-appearance order (std::map would
+    // reorder the diagnostics alphabetically by namespace label; either is
+    // stable, this one follows the hook table).
+    std::vector<std::pair<std::string_view, NameTable>> tables;
+    const auto table_for = [&tables](const NameFeed& feed) -> NameTable& {
+        for (auto& [name_space, table] : tables) {
+            if (name_space == feed.name_space) return table;
+        }
+        return tables.emplace_back(feed.name_space, NameTable(feed.policy)).second;
+    };
+    for (const auto& feed : feeds) {
+        NameTable& table = table_for(feed);
+        for (const auto& attribution : *feed.attributions) {
+            table.Register(attribution.plugin_name, attribution.original_name);
         }
     }
-    return minimal::plugins::NameKind::ViewId;   // dangling
+    std::vector<NameTable*> table_ptrs;
+    for (auto& [name_space, table] : tables) table_ptrs.push_back(&table);
+
+    ClientNameResolution resolution;
+    const auto routing = minimal::plugins::RouteAliases(aliases, table_ptrs);
+    for (const auto& key : routing.dangling) {
+        resolution.warnings.push_back("client plugin alias '" + key + "' names nothing registered");
+    }
+    for (const auto& key : routing.targets_slot) {
+        resolution.warnings.push_back(
+            "client plugin alias '" + key +
+            "' names a renderer, grammar or command, which cannot be aliased (aliases rename "
+            "view ids and status segments) -- ignored");
+    }
+    for (const auto& [name_space, table] : tables) {
+        const auto result = table.Resolve();
+        for (const auto& collision : result.collisions) {
+            std::string owners;
+            for (const auto& plugin_name : collision.claimants) {
+                if (!owners.empty()) owners += ", ";
+                owners += plugin_name.empty() ? "core" : "'" + plugin_name + "'";
+            }
+            resolution.fatal.push_back(
+                "client plugin " + std::string(name_space) + " '" + collision.surface +
+                "' is registered by " + owners +
+                (table.policy() == NameTable::Policy::kName
+                     ? " -- disable one plugin, or alias one of them in client-plugins.json"
+                     : " -- disable one of the plugins"));
+        }
+        for (const auto& identity : result.ambiguous_identities) {
+            resolution.fatal.push_back("client plugin " + std::string(name_space) + " identity '" +
+                                       identity + "' is composed ambiguously (a plugin name "
+                                       "containing a dot) -- rename one of the plugins");
+        }
+    }
+    return resolution;
 }
 
 }  // namespace minimal::client

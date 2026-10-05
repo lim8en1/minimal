@@ -1,5 +1,5 @@
 // The collision twin of fixture-service: a different plugin claiming the SAME
-// service name. Loaded together they exercise the fatal NameKind::Service
+// service name. Loaded together they exercise the fatal service-namespace
 // collision -- fatal, not shadowed, and diagnosable down to both plugins.
 #include "minimal/plugins/plugin_abi.h"
 

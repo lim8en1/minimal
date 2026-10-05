@@ -5,7 +5,7 @@
 //
 //   - ADDITIVE registries (views, tool-result renderers, message renderers,
 //     status segments, syntax grammars) take many plugins; a duplicate key is
-//     recorded through the shared NameRegistry and is FATAL at startup, naming
+//     recorded through the shared name resolution and is FATAL at startup, naming
 //     both claimants.
 //
 //   - EXCLUSIVE registries (chat surface, markdown engine) take one; a second
@@ -41,6 +41,7 @@
 #include <ftxui/component/component.hpp>
 
 #include "minimal/client/subscribe_outcome.hpp"
+#include "minimal/plugins/name_table.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <nlohmann/json.hpp>
 #include <tree_sitter/api.h>
@@ -239,7 +240,7 @@ public:
 // message-kind table specifies. The DATA PLANE (event demux, virtualization,
 // streaming buffer) stays core regardless of who renders a row. A plugin
 // claiming a kind replaces the core default for that kind only; a second
-// plugin claiming the same kind is a fatal collision (a new NameRegistry kind
+// plugin claiming the same kind is a fatal collision (a new name resolution kind
 // is overkill for an enum key -- the registry tracks (kind, plugin) pairs and
 // the loader surfaces duplicates through the same fatal path).
 class MessageRenderer {
@@ -297,7 +298,7 @@ public:
 // One language grammar: the vendored set registers as the defaults, and a
 // plugin may add a language (a grammar ships its own TSLanguage* -- the
 // vendored symbols are not exported). Two plugins claiming the same language
-// is a fatal collision (a NameRegistry kind). The rule type is the
+// is a fatal collision (a name resolution kind). The rule type is the
 // highlighter's own `client::SyntaxRule`; no translation between ABI and core.
 class SyntaxGrammar {
 public:
@@ -393,7 +394,10 @@ public:
 enum class ViewPlacement { Panel, Modal };
 
 struct ViewSpec {
-    std::string id;  // stable; how keybindings.json addresses it
+    // The canonical id: what the plugin's own code addresses (HostUi view
+    // requests). Users address the SURFACE name -- this id, or the
+    // client-plugins.json alias that renamed it (keybindings.json, view hints).
+    std::string id;
     std::string title;
     ViewPlacement placement = ViewPlacement::Panel;
     // Registered as the DEFAULT binding only if the user's keybindings.json
@@ -449,6 +453,12 @@ struct PluginViewEntry {
     // focused one moves focus to the first remaining visible panel. Modals
     // never use it (they stage into the modal layer whole).
     bool focused = false;
+    // What keybindings and view hints address: the client-plugins.json alias
+    // that renamed the view, else spec().id.
+    std::string surface_id;
+    // The registering plugin ("" for core): with spec().id, what that plugin's
+    // own view requests address (ViewRequest::plugin).
+    std::string plugin;
 };
 
 // --- Start views (additive: the initial view on start) ----------------------
@@ -457,7 +467,7 @@ struct PluginViewEntry {
 // app-level empty state (no tab open) and a freshly opened session before its
 // first message arrives. Additive -- every registered start view renders,
 // stacked in registration order; a duplicate id is fatal through the shared
-// NameRegistry like every other view id.
+// name resolution like every other view id.
 //
 // Element, not Component: a start view is non-interactive decoration, which
 // keeps the 20 Hz render contract trivially cheap. The per-render session id
@@ -659,6 +669,12 @@ public:
     // with a later, healthy plugin.
     virtual void RemoveByAttribution(const std::string& plugin_name) = 0;
 
+    // Renames entries per client-plugins.json `aliases` (keyed by stable
+    // identity, "plugin.original_name"). Called by the bootstrap only for
+    // NAME namespaces, after the collision check passed; a slot registry is
+    // never renamed. Default: nothing to rename.
+    virtual void ApplyAliases(const std::map<std::string, std::string>& aliases) { (void)aliases; }
+
 protected:
     // False, with a warning, once sealed.
     bool Admit() const;
@@ -670,8 +686,10 @@ protected:
 
 // Many plugins, one entry per key. `KeyOf` maps an entry to its key (a view
 // id, a tool name, ...). A duplicate key is NOT replaced: it is kept and
-// recorded, Find() answers with the first, and the startup collision scan
-// (NameRegistry) turns the duplicate fatal, naming both claimants.
+// recorded, and the startup collision scan (name resolution) turns the
+// duplicate fatal, naming both claimants. Each entry also has a SURFACE name
+// -- its key, or the alias ApplyAliases gave it -- and Find() looks up the
+// surface.
 template <typename T, typename KeyOf>
 class AdditiveRegistry : public RegistryBase {
 public:
@@ -680,37 +698,52 @@ public:
         if (!Admit() || entry == nullptr) return;
         std::string key(KeyOf{}(*entry));
         if (key.empty()) return;
+        surfaces_.push_back(key);
         attributions_.push_back({attribution_, std::move(key)});
         entries_.push_back(std::move(entry));
     }
 
     // In registration order.
     const std::vector<std::unique_ptr<T>>& All() const { return entries_; }
+    // Index-aligned with All(): the name each entry answers to.
+    const std::vector<std::string>& surfaces() const { return surfaces_; }
 
-    T* Find(std::string_view key) const {
-        for (const auto& entry : entries_) {
-            if (KeyOf{}(*entry) == key) return entry.get();
+    T* Find(std::string_view surface) const {
+        for (std::size_t i = 0; i < entries_.size(); ++i) {
+            if (surfaces_[i] == surface) return entries_[i].get();
         }
         return nullptr;
     }
 
+    void ApplyAliases(const std::map<std::string, std::string>& aliases) override {
+        for (std::size_t i = 0; i < attributions_.size(); ++i) {
+            const auto it = aliases.find(minimal::plugins::StableIdentity(
+                attributions_[i].plugin_name, attributions_[i].original_name));
+            if (it != aliases.end()) surfaces_[i] = it->second;
+        }
+    }
+
     void RemoveByAttribution(const std::string& plugin_name) override {
-        // entries_ and attributions_ are index-aligned: compact both together.
+        // entries_, surfaces_ and attributions_ are index-aligned: compact
+        // them together.
         std::size_t write = 0;
         for (std::size_t read = 0; read < attributions_.size(); ++read) {
             if (attributions_[read].plugin_name == plugin_name) continue;
             if (write != read) {
                 attributions_[write] = std::move(attributions_[read]);
                 entries_[write] = std::move(entries_[read]);
+                surfaces_[write] = std::move(surfaces_[read]);
             }
             ++write;
         }
         attributions_.resize(write);
         entries_.resize(write);
+        surfaces_.resize(write);
     }
 
 private:
     std::vector<std::unique_ptr<T>> entries_;
+    std::vector<std::string> surfaces_;
 };
 
 // Warns that `claimant` lost the exclusive slot to `holder`.

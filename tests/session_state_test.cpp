@@ -499,11 +499,13 @@ TEST_CASE("OnToolStarted carries the call's input through to the snapshot, "
 
     const auto snapshot = state.TakeSnapshot();
     REQUIRE(snapshot.tools.size() == 1);
-    CHECK(snapshot.tools[0].input.at("command") == "ls -la");
+    CHECK(snapshot.tools[0].input->at("command") == "ls -la");
 
     const auto light = state.TakeLightSnapshot();
     REQUIRE(light.tools.size() == 1);
-    CHECK(light.tools[0].input.at("command") == "ls -la");
+    CHECK(light.tools[0].input->at("command") == "ls -la");
+    // Shared, not deep-copied: every snapshot points at the one parsed input.
+    CHECK(light.tools[0].input == snapshot.tools[0].input);
 }
 
 TEST_CASE("tool tracking: start -> deltas -> finish, keyed by tool_use_id", "[session_state]") {
@@ -1634,6 +1636,49 @@ TEST_CASE("INVARIANT: tool output deltas stay bounded, with marker and tail pres
     CHECK(out.size() <= 4096 + 256);   // bounded (small slack for the marker)
     CHECK(out.find("live output trimmed") != std::string::npos);   // marker present
     CHECK(out.find("xxx") != std::string::npos);   // head AND tail content preserved
+}
+
+// The working buffer compacts AMORTIZED (tail at 2x its budget), but the
+// published view must be exactly what the per-delta trim produced: the
+// stream's first cap/4 bytes, the marker, and its LAST tail-budget bytes --
+// at every publish, whatever the compaction phase.
+TEST_CASE("tool output: many small deltas publish the exact head + marker + newest tail",
+          "[session_state][tools][invariant]") {
+    constexpr std::size_t kCap = 4096;
+    SessionState state("s-1");
+    state.SetBounds(2000, static_cast<int>(kCap));
+    state.OnToolStarted(StartTool("t1"));
+
+    std::string stream;
+    for (int i = 0; i < 3000; ++i) {
+        const std::string chunk = std::to_string(i) + ",";
+        stream += chunk;
+        state.OnToolOutputDelta("t1", chunk);
+        if (i % 97 != 0 || stream.size() <= kCap) continue;
+        const auto snap = state.TakeLightSnapshot(/*include_tool_output=*/true);
+        const std::string& out = *snap.tools[0].buffered_output;
+        const std::string marker =
+            "\n··· live output trimmed -- the full result is in the transcript ···\n";
+        const std::size_t head = kCap / 4;
+        const std::size_t tail = kCap - head - marker.size();
+        REQUIRE(out.size() == kCap);
+        CHECK(out.compare(0, head, stream, 0, head) == 0);
+        CHECK(out.compare(head, marker.size(), marker) == 0);
+        CHECK(out.compare(head + marker.size(), tail, stream, stream.size() - tail, tail) == 0);
+    }
+}
+
+TEST_CASE("tool output below the cap publishes verbatim, no marker", "[session_state][tools]") {
+    SessionState state("s-1");
+    state.SetBounds(2000, /*tool_output_buffer_bytes=*/4096);
+    state.OnToolStarted(StartTool("t1"));
+    std::string stream;
+    for (int i = 0; i < 300; ++i) {
+        stream += "ab";
+        state.OnToolOutputDelta("t1", "ab");
+    }
+    const auto snap = state.TakeLightSnapshot(/*include_tool_output=*/true);
+    CHECK(*snap.tools[0].buffered_output == stream);
 }
 
 // The bug: all three cut points (the head-keep boundary and both tail-start

@@ -44,6 +44,7 @@ void ToolRegistry::Register(std::unique_ptr<Tool> tool) {
     // the map: push_backs outside it raced a concurrent Register's resize, and
     // every other access to these arrays already goes through mutex_.
     const std::lock_guard<std::shared_mutex> lock(mutex_);
+    generation_.fetch_add(1, std::memory_order_acq_rel);  // see generation()
     // Recorded even when the name is a duplicate: collision detection needs both
     // sides to name them in its diagnostic.
     attributions_.push_back(Attribution{attribution_, name});
@@ -61,6 +62,7 @@ void ToolRegistry::RemoveByAttribution(const std::string& plugin_name) {
     // entries whose OBJECT (not name) belonged to the plugin, which stays
     // exact even across shadowed duplicate names.
     const std::lock_guard<std::shared_mutex> lock(mutex_);
+    generation_.fetch_add(1, std::memory_order_acq_rel);  // see generation()
     std::set<const Tool*> doomed;
     std::size_t out = 0;
     for (std::size_t i = 0; i < attributions_.size(); ++i) {
@@ -173,6 +175,7 @@ void ToolRegistry::ApplyAliases(const std::map<std::string, std::string>& aliase
     // Startup-only: exclusive for the whole body. It manipulates tools_ and
     // shadowed_ directly and must not overlap a runtime MCP replacement.
     std::unique_lock<std::shared_mutex> lock(mutex_);
+    generation_.fetch_add(1, std::memory_order_acq_rel);  // see generation()
     for (std::size_t i = 0; i < attributions_.size(); ++i) {
         const auto& attr = attributions_[i];
         const auto alias = aliases.find(attr.plugin_name + "." + attr.tool_name);
@@ -279,6 +282,7 @@ std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsForGroups(
 
 bool ToolRegistry::ReserveNamespace(std::string prefix) {
     const std::lock_guard<std::shared_mutex> lock(mutex_);
+    generation_.fetch_add(1, std::memory_order_acq_rel);  // see generation()
     if (prefix.empty()) return false;
     for (const auto& ns : namespaces_) {
         // Overlap either way is a collision: one prefix inside another would
@@ -316,6 +320,7 @@ const ToolRegistry::ReservedNamespace* ToolRegistry::ReservedNamespaceOfUnlocked
 
 void ToolRegistry::SetPermissionKeys(std::unordered_map<std::string, std::string> keys) {
     const std::lock_guard<std::shared_mutex> lock(mutex_);
+    generation_.fetch_add(1, std::memory_order_acq_rel);  // see generation()
     permission_keys_ = std::move(keys);
 }
 
@@ -327,6 +332,7 @@ std::string_view ToolRegistry::PermissionKeyFor(std::string_view surface_name) c
 void ToolRegistry::ReplaceGroupTools(const std::string& group,
                                      std::vector<std::unique_ptr<Tool>> tools) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
+    generation_.fetch_add(1, std::memory_order_acq_rel);  // see generation()
     // A group lives inside a reserved namespace, or it is not a group: an
     // unreserved prefix would let its names collide with Register()ed tools.
     if (group.empty() || ReservedNamespaceOfUnlocked(group) == nullptr) {

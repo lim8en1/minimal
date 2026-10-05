@@ -9,8 +9,7 @@
 // and is the whole rule: a plugin is code the user does not edit, a prompt is
 // text they should, and text they cannot see is text they cannot change.
 //
-// Plugins therefore still need the two-layout probe that config files no longer
-// do: an installed tree (<prefix>/bin/minimal-server, libraries under
+// Plugins therefore need a two-layout probe that config files do not: an installed tree (<prefix>/bin/minimal-server, libraries under
 // <prefix>/lib) and a build tree (build/src/server/minimal-server, libraries
 // under build/plugins). Both resolve relative to the running executable, so a
 // relocated install and a `cmake --build` tree find their own and never each

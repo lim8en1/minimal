@@ -157,7 +157,7 @@ struct PluginRegistrationContext {
 // plugin_name key would let ANY interface registered under it get
 // static_cast to PluginEndpoint by PluginCall's lookup -- a real vtable call
 // through the wrong type, not a theoretical mismatch. The suffix makes that
-// collision unexpressible (NameRegistry would refuse two registrations under
+// collision unexpressible (name resolution would refuse two registrations under
 // the same key), the same way ".rpc" already does for PluginRpcHandler.
 inline std::string PluginEndpointServiceName(std::string_view plugin_name) {
     return std::string(plugin_name) + ".endpoint";

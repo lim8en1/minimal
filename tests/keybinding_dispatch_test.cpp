@@ -467,7 +467,7 @@ private:
 plugins::PluginViewEntry Panel(const std::string& id, bool visible = false) {
     static std::vector<std::unique_ptr<plugins::View>> store;
     store.push_back(std::make_unique<PanelStubView>(id));
-    return plugins::PluginViewEntry{store.back().get(), nullptr, visible, false};
+    return plugins::PluginViewEntry{store.back().get(), nullptr, visible, false, id, {}};
 }
 
 class ModalStubView final : public plugins::View {
@@ -488,7 +488,7 @@ private:
 plugins::PluginViewEntry ModalEntry(const std::string& id, bool visible = false) {
     static std::vector<std::unique_ptr<plugins::View>> store;
     store.push_back(std::make_unique<ModalStubView>(id));
-    return plugins::PluginViewEntry{store.back().get(), nullptr, visible, false};
+    return plugins::PluginViewEntry{store.back().get(), nullptr, visible, false, id, {}};
 }
 
 }  // namespace
@@ -647,4 +647,32 @@ TEST_CASE("view requests: show, focus and hide panels; open and close a modal",
     CHECK_FALSE(minimal::client::ApplyViewRequest(views, {Op::kShow, "nope"}, slot, show_modal));
     CHECK_FALSE(minimal::client::ApplyViewRequest(views, {Op::kSetPanelVisible, "m1", true}, slot, show_modal));
     CHECK_FALSE(minimal::client::ApplyViewRequest(views, {Op::kFocusPanel, "p1"}, slot, show_modal));
+}
+
+TEST_CASE("view requests: an aliased view answers to its surface, and to its own plugin by id",
+          "[keybinding_dispatch][view_requests][names]") {
+    // Two plugins' views share the canonical id "files"; client-plugins.json
+    // aliased b's to "files2". A surface request (a server view hint) picks by
+    // surface; each plugin's OWN request picks its own view by canonical id.
+    using Op = plugins::ViewRequest::Op;
+    std::vector<plugins::PluginViewEntry> views{Panel("files"), Panel("files")};
+    views[0].plugin = "a";
+    views[1].plugin = "b";
+    views[1].surface_id = "files2";
+    ftxui::Component slot;
+    bool show_modal = false;
+
+    CHECK(minimal::client::ApplyViewRequest(views, {Op::kShow, "files2"}, slot, show_modal));
+    CHECK_FALSE(views[0].visible);
+    CHECK(views[1].visible);
+
+    plugins::ViewRequest own{Op::kSetPanelVisible, "files", false, "b"};
+    CHECK(minimal::client::ApplyViewRequest(views, own, slot, show_modal));
+    CHECK_FALSE(views[1].visible);
+    CHECK_FALSE(views[0].visible);  // a's view, same canonical id, untouched
+
+    own.plugin = "a";
+    own.visible = true;
+    CHECK(minimal::client::ApplyViewRequest(views, own, slot, show_modal));
+    CHECK(views[0].visible);
 }

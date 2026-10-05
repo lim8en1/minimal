@@ -818,6 +818,75 @@ TEST_CASE("tools reach the request sorted and stable", "[agent_loop][invariant]"
     }
 }
 
+TEST_CASE("the cached system/tools follow registry changes and SetPreset",
+          "[agent_loop][invariant]") {
+    // The system prompt + tools array is cached across rounds; anything that
+    // changes its inputs must be seen by the very next request.
+    Harness h;
+    h.AddTool("alpha");
+    h.Build();
+    CHECK(h.loop->BuildChatRequest().tools.size() == 1);
+
+    // A registry mutation after the first build -- the shape of an MCP
+    // server's tools arriving on another thread.
+    h.AddTool("beta");
+    CHECK(h.loop->BuildChatRequest().tools.size() == 2);
+
+    agent::AgentPreset narrowed;
+    narrowed.allowed_tools = {"alpha"};
+    narrowed.provider.model_name = "test-model";
+    narrowed.system_prompt = "narrowed";
+    h.loop->SetPreset(std::move(narrowed));
+    const auto request = h.loop->BuildChatRequest();
+    REQUIRE(request.tools.size() == 1);
+    CHECK(request.tools[0].name == "alpha");
+    REQUIRE(request.system.has_value());
+    CHECK(*request.system == "narrowed");
+}
+
+TEST_CASE("the running history estimate matches a full walk through every rewrite",
+          "[agent_loop][invariant]") {
+    // WorkingHistory keeps estimate_tokens(history) as a running total; it
+    // must agree with a full walk after appends, a committed tool round, a
+    // compaction fold and a rewind. The empty system/tools overload isolates
+    // the history half.
+    Harness h;
+    h.AddTool("starter");
+    h.provider.PushResponse(ToolUseResponse("tu1", "starter", {{"what", "build"}}));
+    h.provider.PushResponse(TextResponse("done"));
+    h.provider.PushResponse(TextResponse("again"));
+    auto compactor = [](std::span<const llm::Message>, llm::LlmProvider&,
+                        const agent::CompactionRequest&) {
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    h.Build({}, agent::LoopConfig{}, compactor);
+    const auto check_running = [&] {
+        // EstimateContextTokens() = fixed + running; recompute both halves
+        // independently and compare.
+        const auto request = h.loop->BuildChatRequest();
+        std::int64_t fixed = request.system ? static_cast<std::int64_t>(request.system->size()) : 0;
+        for (const auto& def : request.tools) {
+            fixed += static_cast<std::int64_t>(def.name.size() + def.description.size()) +
+                     agent::JsonSizeEstimate(def.input_schema);
+        }
+        CHECK(h.loop->EstimateContextTokens() ==
+              fixed / 4 + agent::estimate_tokens(h.loop->history()));
+    };
+
+    check_running();  // empty
+    h.loop->RunTurn(UserText("go"));  // seed append + a committed tool round + final text
+    REQUIRE(h.loop->history().size() == 4);
+    check_running();
+    h.loop->RunTurn(UserText("more"));
+    check_running();
+    REQUIRE(h.loop->CompactNow().has_value());  // in-place [summary + tail] rebuild
+    check_running();
+    const auto before_rewind = h.loop->history().size();
+    h.loop->TruncateAfter(5);  // rewind: drops "again" (seq 5)
+    CHECK(h.loop->history().size() == before_rewind - 1);
+    check_running();
+}
+
 TEST_CASE("project context rides the session, not the preset", "[agent_loop][invariant]") {
     // AGENTS.md/CLAUDE.md is a SESSION property held by the loop, appended after
     // whatever preset body is active. /agent re-resolves the preset from disk;

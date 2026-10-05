@@ -172,6 +172,51 @@ TEST_CASE("a latched backlog resyncs the first subscriber instead of a partial r
     CHECK(seeded == 4);
 }
 
+TEST_CASE("the backlog has its own, smaller byte bound than a live subscriber",
+          "[broadcaster]") {
+    // A detached session's backlog is resident memory nobody is reading, so
+    // it is bounded independently of (and far below) a subscriber queue. A
+    // drop latches it exactly like the count bound does.
+    const std::string payload(1024, 'x');
+    const std::size_t one = Text("s1", payload).ByteSizeLong();
+    EventBroadcaster broadcaster{"s1", /*max_events=*/1000, /*max_bytes=*/0,
+                                 /*max_backlog_bytes=*/one * 3};
+    for (int i = 0; i < 10; ++i) {
+        REQUIRE(broadcaster.Publish(Text("s1", payload + std::to_string(i % 10))));
+    }
+    CHECK(broadcaster.backlog_size() <= 3);
+
+    auto sub = Subscribe(broadcaster);
+    const auto first = broadcaster.TryPop(sub);
+    REQUIRE(first.has_value());
+    REQUIRE(first->has_resync_required());
+    CHECK(first->resync_required().reason() == "overflow");
+    std::optional<v1::ServerEvent> last;
+    while (auto event = broadcaster.TryPop(sub)) last = std::move(event);
+    REQUIRE(last.has_value());
+    CHECK(last->stream_event().text_delta().text() == payload + "9");  // newest kept
+
+    // The live subscriber is NOT held to the backlog's bound (max_bytes=0).
+    for (int i = 0; i < 10; ++i) REQUIRE(broadcaster.Publish(Text("s1", payload)));
+    CHECK(broadcaster.queued(sub) == 10);
+}
+
+TEST_CASE("PublishToIfAbsent dedups only against events of the same kind", "[broadcaster]") {
+    // The duplicate check filters on the payload case before serializing; a
+    // prompt queued BEHIND many other-kind events is still found, and a
+    // different-kind event never matches.
+    EventBroadcaster broadcaster{"s1"};
+    auto sub = Subscribe(broadcaster);
+    for (int i = 0; i < 100; ++i) REQUIRE(broadcaster.Publish(Text("s1", "noise")));
+
+    v1::ServerEvent prompt;
+    prompt.set_session_id("s1");
+    prompt.mutable_resync_required()->set_reason("stand-in for a prompt");
+    CHECK(broadcaster.PublishToIfAbsent(sub, prompt));
+    CHECK(broadcaster.PublishToIfAbsent(sub, prompt));  // already queued
+    CHECK(broadcaster.queued(sub) == 101);
+}
+
 TEST_CASE("PublishToIfAbsent skips an event the subscriber already holds", "[broadcaster]") {
     EventBroadcaster broadcaster{"s1"};
     auto sub = Subscribe(broadcaster);

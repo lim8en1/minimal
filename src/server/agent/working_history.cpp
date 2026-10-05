@@ -1,12 +1,41 @@
 #include "minimal/agent/working_history.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <iterator>
+#include <span>
 #include <variant>
 
+#include "minimal/agent/context_compactor.hpp"
 #include "minimal/agent/injection_queue.hpp"
 
 namespace minimal::agent {
+
+WorkingHistory::WorkingHistory(session::HistoryStore& store, std::vector<llm::Message> history,
+                               std::optional<std::int64_t> first_persisted_seq,
+                               bool head_is_summary)
+    : store_(store),
+      messages_(std::move(history)),
+      first_persisted_seq_(first_persisted_seq),
+      head_is_summary_(head_is_summary) {
+    Recount();
+}
+
+void WorkingHistory::Recount() { history_bytes_ = estimate_bytes(messages_); }
+
+std::int64_t WorkingHistory::estimated_tokens() const {
+    // Debug builds prove the running total against a full walk: a write that
+    // bypassed the methods here would surface as an assert, not as a quietly
+    // wrong compaction trigger.
+    assert(history_bytes_ == estimate_bytes(messages_));
+    return history_bytes_ / 4;
+}
+
+void WorkingHistory::CommitRound(llm::Message assistant, llm::Message results) {
+    history_bytes_ += estimate_bytes(std::span(&assistant, 1)) + estimate_bytes(std::span(&results, 1));
+    messages_.push_back(std::move(assistant));
+    messages_.push_back(std::move(results));
+}
 
 void WorkingHistory::Append(llm::Message message, std::optional<int> output_tokens,
                             const session::MessageAttribution& attribution) {
@@ -17,6 +46,7 @@ void WorkingHistory::Append(llm::Message message, std::optional<int> output_toke
     if (!first_persisted_seq_.has_value()) {
         first_persisted_seq_ = store_.last_appended_seq();
     }
+    history_bytes_ += estimate_bytes(std::span(&message, 1));
     messages_.push_back(std::move(message));
 }
 
@@ -34,10 +64,12 @@ void WorkingHistory::DropThinking(std::size_t first, std::size_t last) {
                                     }),
                      blocks.end());
     }
+    Recount();
 }
 
 void WorkingHistory::Clear() {
     messages_.clear();
+    history_bytes_ = 0;
     // The occupancy estimate goes with the history it described: a token count
     // that outlives its messages is the sort of thing a later change trips over,
     // and the compaction trigger reads it.
@@ -66,6 +98,7 @@ WorkingHistory::TruncateResult WorkingHistory::TruncateAfter(std::int64_t target
     // A rewind to the transcript's very start leaves the working set empty.
     const std::size_t idx = static_cast<std::size_t>(std::max<std::int64_t>(signed_idx, 0));
     messages_.erase(messages_.begin() + static_cast<long>(idx), messages_.end());
+    Recount();
     if (messages_.empty()) {
         // An empty set has no persisted portion to be contiguous with, and the
         // next append establishes it. The summary flag goes with it: an empty
@@ -79,6 +112,7 @@ WorkingHistory::TruncateResult WorkingHistory::TruncateAfter(std::int64_t target
 
 void WorkingHistory::Reseed(std::vector<llm::Message> rows, std::int64_t first_seq) {
     messages_ = std::move(rows);
+    Recount();
     first_persisted_seq_ =
         messages_.empty() ? std::nullopt : std::optional<std::int64_t>(first_seq);
     head_is_summary_ = false;
@@ -92,6 +126,7 @@ bool WorkingHistory::Restore(std::vector<llm::Message> rows, std::int64_t first_
         first_persisted_seq_ = first_seq;
         head_is_summary_ = false;
     }
+    history_bytes_ += estimate_bytes(rows);
     messages_.insert(messages_.end(), std::make_move_iterator(rows.begin()),
                      std::make_move_iterator(rows.end()));
     return true;

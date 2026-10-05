@@ -1,61 +1,78 @@
 #include "minimal/common/read_file.hpp"
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <cerrno>
-#include <fstream>
+#include <cstring>
 #include <stdexcept>
-#include <system_error>
 
 namespace minimal::common {
+namespace {
+
+// Closes on every return path.
+struct Fd {
+    int fd;
+    ~Fd() {
+        if (fd >= 0) ::close(fd);
+    }
+};
+
+}  // namespace
 
 ReadFileResult ReadFile(const std::filesystem::path& path, std::size_t max_bytes) {
     using Status = ReadFileResult::Status;
     ReadFileResult result;
-
-    // Some platforms (macOS) open a directory as a stream that reads as empty;
-    // it must not pass for an empty file.
-    std::error_code ec;
-    if (std::filesystem::is_directory(path, ec)) {
-        result.status = Status::kCannotOpen;
-        result.error = "could not open " + path.string() + ": is a directory";
+    const auto fail = [&](Status status, const std::string& error) {
+        result.status = status;
+        result.error = error;
+        result.contents.clear();
         return result;
-    }
+    };
 
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
+    const Fd file{::open(path.c_str(), O_RDONLY | O_CLOEXEC)};
+    if (file.fd < 0) {
         const int error = errno;
-        result.status = error == ENOENT ? Status::kNotFound : Status::kCannotOpen;
-        result.error = "could not open " + path.string() + ": " +
-                       std::error_code(error, std::generic_category()).message();
-        return result;
+        return fail(error == ENOENT ? Status::kNotFound : Status::kCannotOpen,
+                    "could not open " + path.string() + ": " + std::strerror(error));
     }
 
-    // Bounded chunks, not `buffer << in.rdbuf()`: the cap must stop the read,
-    // not be checked after the whole file is already in memory. Reading one
-    // byte PAST the cap is what distinguishes "too big" from "exactly at the
-    // cap". Deliberately not std::filesystem::file_size: that re-resolves the
-    // path (a TOCTOU against the open stream) and answers 0 for things that
-    // are not regular files.
-    char chunk[64 * 1024];
+    // fstat on the open descriptor, not a stat of the path: what is checked
+    // is what gets read. A directory opens O_RDONLY fine on POSIX and must not
+    // pass for an empty file; a FIFO or device would read without end.
+    struct stat st {};
+    if (::fstat(file.fd, &st) != 0) {
+        return fail(Status::kIoError, "could not stat " + path.string() + ": " + std::strerror(errno));
+    }
+    if (S_ISDIR(st.st_mode)) {
+        return fail(Status::kCannotOpen, "could not open " + path.string() + ": is a directory");
+    }
+    if (!S_ISREG(st.st_mode)) {
+        return fail(Status::kCannotOpen, "could not open " + path.string() + ": not a regular file");
+    }
+
+    // Bounded reads: the cap stops the read rather than being checked after the
+    // whole file is in memory. Reading one byte PAST the cap is what tells "too
+    // big" from "exactly at the cap". st_size only sizes the first allocation;
+    // the file may change size while being read.
+    result.contents.reserve(std::min<std::size_t>(static_cast<std::size_t>(st.st_size), max_bytes) + 1);
+    char chunk[16 * 1024];
     while (result.contents.size() <= max_bytes) {
         const auto want = std::min(sizeof(chunk), max_bytes + 1 - result.contents.size());
-        in.read(chunk, static_cast<std::streamsize>(want));
-        const auto got = in.gcount();
-        if (got <= 0) break;
+        const ssize_t got = ::read(file.fd, chunk, want);
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            return fail(Status::kIoError, "read failed (" + path.string() + "): " + std::strerror(errno));
+        }
+        if (got == 0) break;
         result.contents.append(chunk, static_cast<std::size_t>(got));
     }
 
-    // eofbit/failbit are how a short final read announces itself; only badbit
-    // is a genuine I/O error.
-    if (in.bad()) {
-        result.status = Status::kIoError;
-        result.error = "read failed (" + path.string() + "): I/O error";
-        result.contents.clear();
-    } else if (result.contents.size() > max_bytes) {
-        result.status = Status::kTooLarge;
-        result.error = "file exceeds the " + std::to_string(max_bytes) +
-                       " byte read cap: " + path.string();
-        result.contents.clear();
+    if (result.contents.size() > max_bytes) {
+        return fail(Status::kTooLarge, "file exceeds the " + std::to_string(max_bytes) +
+                                           " byte read cap: " + path.string());
     }
     return result;
 }

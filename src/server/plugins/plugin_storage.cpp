@@ -9,16 +9,17 @@
 #include <system_error>
 #include <utility>
 
-#include "minimal/common/file_lock.hpp"
-#include "minimal/common/sqlite_util.hpp"
+#include "minimal/store/file_lock.hpp"
+#include "minimal/common/clock.hpp"
+#include "minimal/store/sqlite_util.hpp"
 
 namespace minimal::plugins {
 namespace {
 
-using common::ExecChecked;
+using store::ExecChecked;
 using common::NowMillis;
-using common::Stmt;
-using common::ThrowSqliteError;
+using store::Stmt;
+using store::ThrowSqliteError;
 
 void BindText(sqlite3_stmt* stmt, int index, std::string_view value, const std::string& context) {
     if (sqlite3_bind_text(stmt, index, value.data(), static_cast<int>(value.size()),
@@ -93,7 +94,7 @@ void ApplyMigrations(sqlite3* db, int target_version) {
                     "plugin storage: failed to record schema version");
         ExecChecked(db, "COMMIT;", "plugin storage: failed to commit migration");
     } catch (...) {
-        common::BestEffortRollback(db);
+        store::BestEffortRollback(db);
         throw;
     }
 }
@@ -116,7 +117,7 @@ PluginStorage::PluginStorage(const std::filesystem::path& db_path) : path_(db_pa
 
     // Same single-writer guarantee as the session store, the same way: a
     // second process on plugins.db is refused at open (see ExclusiveFileLock).
-    lock_ = std::make_unique<common::ExclusiveFileLock>(db_path);
+    lock_ = std::make_unique<store::ExclusiveFileLock>(db_path);
 
     if (sqlite3_open(path_.c_str(), &db_) != SQLITE_OK) {
         const std::string message = db_ ? sqlite3_errmsg(db_) : "sqlite3_open failed";

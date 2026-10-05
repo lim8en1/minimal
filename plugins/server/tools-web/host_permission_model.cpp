@@ -130,7 +130,7 @@ public:
     }
 
     // The permission key is the tool's original name, or "tools-web.<name>"
-    // when another plugin also provides that name (NameRegistry).
+    // when another plugin also provides that name (name resolution).
     bool Claims(std::string_view key) const override {
         return key == "web_fetch" || key == "web_search" || key == "tools-web.web_fetch" ||
                key == "tools-web.web_search";

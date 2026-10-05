@@ -606,8 +606,8 @@ TEST_CASE("an alias resolves a collision: both implementations survive",
     // name back up for the untouched fixture-good entry, letting a
     // pre-existing `permissions: {"fixture_tool": ...}` rule keep matching it.
     const auto resolution = plugins::ResolveRegistrationNames(h.tool_registry, h.aliases);
-    CHECK(resolution.result.fatal_collisions.empty());
-    CHECK(resolution.result.dangling_aliases.empty());
+    CHECK(resolution.collisions.empty());
+    CHECK(resolution.dangling_aliases.empty());
     h.tool_registry.SetPermissionKeys(resolution.permission_keys);
     CHECK(std::string(h.tool_registry.PermissionKeyFor("fixture_tool")) == "fixture_tool");
     CHECK(std::string(h.tool_registry.PermissionKeyFor("ftool2")) ==
@@ -628,8 +628,8 @@ TEST_CASE("two plugins claiming one name without an alias collide", "[plugin_loa
     REQUIRE(records.size() == 2);
 
     const auto resolution = plugins::ResolveRegistrationNames(h.tool_registry, h.aliases);
-    REQUIRE(resolution.result.fatal_collisions.size() == 1);
-    CHECK(resolution.result.fatal_collisions[0] == "fixture_tool");
+    REQUIRE(resolution.collisions.size() == 1);
+    CHECK(resolution.collisions[0].surface == "fixture_tool");
 
     // Both sides are nameable from the attributions: the fatal diagnostic must
     // say WHICH two plugins collided, not merely that something did.
@@ -651,11 +651,11 @@ TEST_CASE("an alias naming nothing registered is dangling, not fatal", "[plugin_
     tool_registry.ApplyAliases(aliases);
 
     const auto resolution = plugins::ResolveRegistrationNames(tool_registry, aliases);
-    CHECK(resolution.result.fatal_collisions.empty());
-    REQUIRE(resolution.result.dangling_aliases.size() == 2);
+    CHECK(resolution.collisions.empty());
+    REQUIRE(resolution.dangling_aliases.size() == 2);
     // Sorted: startup diagnostics must be stable run to run.
-    CHECK(resolution.result.dangling_aliases[0] == "fixture-good.no_such_tool");
-    CHECK(resolution.result.dangling_aliases[1] == "some-other-plugin.tool");
+    CHECK(resolution.dangling_aliases[0] == "fixture-good.no_such_tool");
+    CHECK(resolution.dangling_aliases[1] == "some-other-plugin.tool");
 }
 
 TEST_CASE("per_tool_overrides govern an aliased tool through its permission key",
@@ -703,13 +703,13 @@ TEST_CASE("a reserved core tool name collides with a plugin claiming it",
     const auto resolution =
         plugins::ResolveRegistrationNames(registry, {}, nullptr,
                                           /*core_tool_names=*/{"spawn_subagent"});
-    REQUIRE(resolution.result.fatal_collisions.size() == 1);
-    CHECK(resolution.result.fatal_collisions[0] == "spawn_subagent");
+    REQUIRE(resolution.collisions.size() == 1);
+    CHECK(resolution.collisions[0].surface == "spawn_subagent");
 
     // The proof the reservation is load-bearing: the same registration WITHOUT
     // it produced no collision, which is the hole.
     const auto unreserved = plugins::ResolveRegistrationNames(registry, {});
-    CHECK(unreserved.result.fatal_collisions.empty());
+    CHECK(unreserved.collisions.empty());
 }
 
 TEST_CASE("a late-registered duplicate does not silently shadow the incumbent",
@@ -953,8 +953,8 @@ TEST_CASE("two plugins providing one service name collide",
 
     const auto resolution = plugins::ResolveRegistrationNames(
         h.tool_registry, {}, nullptr, {}, &h.service_registry);
-    REQUIRE(resolution.result.fatal_collisions.size() == 1);
-    CHECK(resolution.result.fatal_collisions[0] == "fixture.service");
+    REQUIRE(resolution.collisions.size() == 1);
+    CHECK(resolution.collisions[0].surface == "fixture.service");
 
     // The diagnostic names both claimants -- that is WHY attributions are taken.
     // (fixture-service provides twice: the service itself plus the context_ok
@@ -980,12 +980,12 @@ TEST_CASE("a service name does not collide with an equal tool name",
 
     const auto resolution = plugins::ResolveRegistrationNames(
         h.tool_registry, {}, nullptr, {}, &h.service_registry);
-    CHECK(resolution.result.fatal_collisions.empty());
+    CHECK(resolution.collisions.empty());
 }
 
 TEST_CASE("the service collision check is load-bearing",
           "[plugin_loader][service][collision][invariant]") {
-    // Removing the NameKind::Service feed from ResolveRegistrationNames (the
+    // Removing the service feed from ResolveRegistrationNames (the
     // "last-wins" world) must fail the collision test above. This test holds
     // the observable half: WITHOUT the feed, the same two plugins produce no
     // collision -- which is exactly the hole.
@@ -995,11 +995,11 @@ TEST_CASE("the service collision check is load-bearing",
 
     const auto without_service_feed =
         plugins::ResolveRegistrationNames(h.tool_registry, {}, nullptr, {});
-    CHECK(without_service_feed.result.fatal_collisions.empty());
+    CHECK(without_service_feed.collisions.empty());
 
     const auto with_service_feed =
         plugins::ResolveRegistrationNames(h.tool_registry, {}, nullptr, {}, &h.service_registry);
-    CHECK_FALSE(with_service_feed.result.fatal_collisions.empty());
+    CHECK_FALSE(with_service_feed.collisions.empty());
 }
 
 // --- project-scoped commands (minimal_plugin_register_project_commands) ----

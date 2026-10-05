@@ -48,3 +48,29 @@ TEST_CASE("IncompleteUtf8Tail holds back only a character cut by the end", "[utf
     CHECK(ScrubUtf8(first) == "price ");
     CHECK(ScrubUtf8(pending + "\xAC" "5") == "\xE2\x82\xAC" "5");
 }
+
+TEST_CASE("Utf8FloorToBoundary and Utf8CeilToBoundary never split a character", "[utf8]") {
+    using minimal::common::Utf8CeilToBoundary;
+    using minimal::common::Utf8FloorToBoundary;
+    // "a" + U+1F600 (4 bytes, indices 1..4) + "b"
+    const std::string text = "a\xF0\x9F\x98\x80" "b";
+    CHECK(Utf8FloorToBoundary(text, 0) == 0);
+    CHECK(Utf8FloorToBoundary(text, 1) == 1);
+    for (std::size_t inside = 2; inside <= 4; ++inside) {
+        CHECK(Utf8FloorToBoundary(text, inside) == 1);
+        CHECK(Utf8CeilToBoundary(text, inside) == 5);
+    }
+    CHECK(Utf8CeilToBoundary(text, 5) == 5);
+    CHECK(Utf8FloorToBoundary(text, 99) == text.size());
+    CHECK(Utf8CeilToBoundary(text, 99) == text.size());
+}
+
+TEST_CASE("the boundary walks are bounded on malformed runs of continuation bytes", "[utf8]") {
+    using minimal::common::Utf8CeilToBoundary;
+    using minimal::common::Utf8FloorToBoundary;
+    // Longer than any well-formed sequence: the cut stands instead of the
+    // walk eating an arbitrary amount of binary junk.
+    const std::string junk(16, '\x80');
+    CHECK(Utf8FloorToBoundary(junk, 10) == 10);
+    CHECK(Utf8CeilToBoundary(junk, 5) == 5);
+}

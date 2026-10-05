@@ -1,5 +1,5 @@
 minimal_server_module(session
-    DEPS llm
+    DEPS llm store
     SOURCES
         ulid.cpp
         message_codec.cpp

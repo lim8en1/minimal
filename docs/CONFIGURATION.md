@@ -568,7 +568,8 @@ router.
 Flat object mapping action name → key string (e.g. `"tab.next": "alt+down"`).
 Missing file → built-in defaults; non-string value fails the load naming the
 action. Unknown action names are **kept, not rejected** — plugin views
-register runtime ids. Bundled actions (see `bundled/keybindings.json`):
+register runtime ids (a view's id, or its `client-plugins.json` alias when one
+renames it). Bundled actions (see `bundled/keybindings.json`):
 `tab.next`, `tab.previous`, `tab.goto.1` … `tab.goto.9` (`alt+1` … `alt+9`, the
 number the tab bar shows), `group.previous`, `group.next`, `jump.attention`,
 `session.picker`, `agent.picker`, `model.picker`, `help.overlay`,

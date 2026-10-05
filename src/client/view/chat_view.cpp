@@ -9,6 +9,7 @@
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/live_tool_row.hpp"
 #include "minimal/client/view/tool_status.hpp"
+#include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::client {
@@ -523,8 +524,7 @@ ftxui::Element ChatView::RenderLiveThinking(const LiveTurnSegment& segment) {
 // convention the ftxui overlay's MINIMAL_FTXUI_DIFF established.
 bool ChatView::VirtualizationEnabled() {
     static const bool enabled = [] {
-        const char* env = std::getenv("MINIMAL_CHAT_VIRTUALIZATION");
-        return env == nullptr || std::strcmp(env, "0") != 0;
+        return common::LookupEnv("MINIMAL_CHAT_VIRTUALIZATION") != "0";
     }();
     return enabled;
 }
@@ -1096,7 +1096,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             if (tool != nullptr) {
                 ChatRow live_row{.kind = ChatRowKind::ToolActivity,
                                  .tool_name = tool->tool_name,
-                                 .tool_input = tool->input,
+                                 .tool_input = *tool->input,
                                  .tool_is_error = tool->is_error,
                                  .tool_pending = tool->started};
                 Element plugin_row = RenderLiveWithPlugin(live_row);

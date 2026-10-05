@@ -1,18 +1,11 @@
 #include "minimal/common/config_paths.hpp"
 
+#include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"
 
-#include <cstdlib>
 #include <stdexcept>
 
 namespace minimal::common {
-
-std::optional<std::string> LookupEnv(std::string_view name) {
-    const char* v = std::getenv(std::string(name).c_str());
-    if (v == nullptr || *v == '\0') return std::nullopt;
-    return std::string(v);
-}
-
 namespace {
 
 std::filesystem::path HomeOrThrow() {
@@ -20,10 +13,9 @@ std::filesystem::path HomeOrThrow() {
     throw std::runtime_error("cannot resolve config directory: $HOME is unset");
 }
 
-// A directory named by an env var must be ABSOLUTE, whichever var it is. A
-// relative value used to be accepted verbatim -- and a spawned server chdir's
-// to "/", so XDG_CONFIG_HOME=relpath silently resolved under / there while the
-// client resolved it against its own cwd: two processes, two different
+// A directory named by an env var must be ABSOLUTE, whichever var it is: a
+// spawned server chdir's to "/", so a relative value would resolve under /
+// there and against the cwd in the client -- two processes, two different
 // directories. Rejected (with the next candidate standing in), like an unset
 // var. `reason` names why absoluteness is required, since XDG has a spec to
 // cite and our own escape hatches do not.

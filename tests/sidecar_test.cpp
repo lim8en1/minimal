@@ -21,7 +21,6 @@
 
 #include "minimal/sidecar/capped_buffer.hpp"
 #include "minimal/sidecar/drain.hpp"
-#include "minimal/sidecar/lifetime_watch.hpp"
 #include "minimal/sidecar/process.hpp"
 #include "minimal/sidecar/task_registry.hpp"
 
@@ -654,41 +653,6 @@ TEST_CASE("EraseSession drops the records; watchers keep running safely",
     registry.EraseSession("session-a");
     CHECK(registry.List("session-a").empty());
     CHECK(registry.List("session-b").empty());
-}
-
-TEST_CASE("WatchLifetime fires the cleanup when the lifetime expires, exactly once",
-          "[sidecar][lifetime_watch]") {
-    auto lifetime = std::make_shared<const int>(42);
-    std::atomic<int> fired{0};
-
-    // Hold the guard somewhere realistic: the object owning the remote
-    // resource holds it.
-    std::shared_ptr<void> guard = WatchLifetime(
-        lifetime, [&fired] { ++fired; }, 10ms);
-    CHECK(fired.load() == 0);
-
-    lifetime.reset();  // the session "ends"
-    CHECK(WaitFor([&] { return fired.load() == 1; }, 2s));
-    std::this_thread::sleep_for(100ms);  // no double-fire
-    CHECK(fired.load() == 1);
-
-    // Destroying the guard after the fire is a no-op.
-    guard.reset();
-    std::this_thread::sleep_for(50ms);
-    CHECK(fired.load() == 1);
-}
-
-TEST_CASE("WatchLifetime is disarmed by releasing the guard before expiry",
-          "[sidecar][lifetime_watch]") {
-    auto lifetime = std::make_shared<const int>(42);
-    std::atomic<int> fired{0};
-    {
-        auto guard = WatchLifetime(lifetime, [&fired] { ++fired; }, 10ms);
-        (void)guard;
-    }  // explicit teardown before the session ends
-    lifetime.reset();
-    std::this_thread::sleep_for(200ms);
-    CHECK(fired.load() == 0);
 }
 
 TEST_CASE("ClampRlimit degrades an over-cap request to the hard cap, and leaves the rest alone",

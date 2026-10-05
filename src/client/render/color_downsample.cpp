@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <string_view>
 
-#include "minimal/common/config_paths.hpp"
+#include "minimal/common/env.hpp"
 
 namespace minimal::client {
 

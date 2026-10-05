@@ -45,9 +45,9 @@
 
 struct sqlite3;  // opaque handle; <sqlite3.h> stays private to the .cpp
 
-namespace minimal::common {
+namespace minimal::store {
 class ExclusiveFileLock;  // the <db>.lock guard; held open for the process lifetime
-}  // namespace minimal::common
+}  // namespace minimal::store
 
 namespace minimal::plugins {
 
@@ -91,7 +91,7 @@ public:
 private:
     // Declared BEFORE db_ so it is destroyed AFTER the connection closes: the
     // database is never open while the lock file does not name this process.
-    std::unique_ptr<common::ExclusiveFileLock> lock_;
+    std::unique_ptr<store::ExclusiveFileLock> lock_;
     sqlite3* db_ = nullptr;  // opaque here; the .cpp includes <sqlite3.h>
     mutable std::mutex mu_;
     std::filesystem::path path_;

@@ -156,125 +156,38 @@ TEST_CASE("a move-only payload is not copied through the queue", "[event_queue]"
     CHECK(**event == 5);
 }
 
-namespace {
-
-// A sized test type: the byte accounting needs a cost per event, the way the
-// session queue passes the protobuf size.
-struct Sized {
-    std::string payload;
-};
-
-std::size_t PayloadBytes(const Sized& event) { return event.payload.size(); }
-
-}  // namespace
-
-TEST_CASE("the byte bound refuses events past the cap",
+TEST_CASE("the count bound refuses TryPush and parks Push until Pop or Close",
           "[event_queue][invariant]") {
-    // A count-only bound does not bound RAM when one event can carry
-    // megabytes: bash streams 8 KiB output chunks, so the 65,536-event cap was
-    // ~540 MB per stalled client -- and the queue exists precisely for the
-    // stalled client. Removing the byte accounting fails this test.
-    EventQueue<Sized> queue(16, /*max_bytes=*/100, PayloadBytes);
+    auto queue = std::make_shared<EventQueue<int>>(2);
+    REQUIRE(queue->TryPush(1));
+    REQUIRE(queue->TryPush(2));
+    CHECK_FALSE(queue->TryPush(3));  // full: refused, never blocks
+    CHECK(queue->size() == 2);
 
-    CHECK(queue.TryPush(Sized{std::string(60, 'x')}));
-    CHECK(queue.buffered_bytes() == 60);
-    CHECK_FALSE(queue.TryPush(Sized{std::string(60, 'y')}));  // would exceed 100
-    CHECK(queue.TryPush(Sized{std::string(40, 'z')}));        // exactly at the cap
-    CHECK(queue.buffered_bytes() == 100);
-    CHECK_FALSE(queue.TryPush(Sized{"a"}));
-
-    // Pop frees bytes, not just slots.
-    (void)queue.Pop();
-    CHECK(queue.buffered_bytes() == 40);
-    CHECK(queue.TryPush(Sized{std::string(60, 'w')}));
-}
-
-TEST_CASE("a lone event larger than the byte cap is delivered, never deadlocked",
-          "[event_queue]") {
-    // A producer whose ONE event can never fit must not block forever:
-    // delivering one oversized event is strictly better than a deadlock. It is
-    // accepted onto an empty queue and refused while anything is buffered.
-    EventQueue<Sized> queue(16, /*max_bytes=*/10, PayloadBytes);
-    CHECK(queue.TryPush(Sized{std::string(100, 'x')}));
-    CHECK(queue.buffered_bytes() == 100);
-    CHECK_FALSE(queue.TryPush(Sized{"tiny"}));
-    (void)queue.Pop();
-    CHECK(queue.TryPush(Sized{"tiny"}));
-}
-
-TEST_CASE("Push blocks on the byte bound and wakes on Pop and Close", "[event_queue]") {
-    auto queue_ptr = std::make_shared<EventQueue<Sized>>(16, 100, PayloadBytes);
-    queue_ptr->TryPush(Sized{std::string(90, 'x')});
-
-    // A push that does not fit parks; Pop frees room and it lands.
-    auto producer = minimal::testing::RunInBackground([queue_ptr] {
-        queue_ptr->Push(Sized{std::string(90, 'y')});
-        return true;
-    });
+    // A blocking push parks while full; one Pop frees room and it lands.
+    auto producer = RunInBackground([queue] { return queue->Push(3); });
     std::this_thread::sleep_for(50ms);
     CHECK_FALSE(producer.Ready());
-    (void)queue_ptr->Pop();
+    CHECK(queue->Pop() == 1);
     CHECK(producer.WaitFor(2s));
-    CHECK(queue_ptr->buffered_bytes() == 90);
+    CHECK(producer.Get());
 
-    // A push parked at the cap wakes on Close -- the Terminate ordering's
-    // wake-up, now also reachable through the byte bound.
-    auto stalled = minimal::testing::RunInBackground([queue_ptr] {
-        queue_ptr->Push(Sized{std::string(90, 'z')});
-        return true;
-    });
+    // A push parked on a full queue wakes on Close and reports the refusal.
+    auto stalled = RunInBackground([queue] { return queue->Push(4); });
     std::this_thread::sleep_for(50ms);
-    queue_ptr->Close();
+    CHECK_FALSE(stalled.Ready());
+    queue->Close();
     CHECK(stalled.WaitFor(2s));
+    CHECK_FALSE(stalled.Get());
 }
 
-TEST_CASE("a nonzero byte bound without a SizeOf is refused at construction",
-          "[event_queue][invariant]") {
-    // Without a SizeOf every event costs 0 by convention (see Fits/Accept), so
-    // the byte cap would never trip and buffered_bytes() would always read 0
-    // -- a caller who thinks they configured a byte bound and, in production,
-    // do not have one. Caught here instead of silently at runtime.
-    CHECK_THROWS_AS((EventQueue<int>(16, /*max_bytes=*/100)), std::invalid_argument);
-    // max_bytes == 0 (the default) needs no SizeOf -- there is no bound to
-    // silently fail to enforce.
-    CHECK_NOTHROW(EventQueue<int>(16));
-}
-
-TEST_CASE("a drain wakes every parked producer, not just one", "[event_queue][invariant]") {
-    // notify_one on space_cv_ could wake a waiter whose OWN event still does
-    // not fit while a different waiter's would -- the woken one re-parks
-    // without re-notifying, and the other starves until some later drain
-    // happens to pick it. Two producers with different-sized pending events,
-    // one Pop that frees room for only the smaller one: both must be woken
-    // (and re-check their own predicate), so the small one is not left parked
-    // with room actually available for it.
-    //
-    // Queue at the 100-byte cap (95 + 5): NEITHER producer's event fits yet.
-    // Popping the 95-byte item leaves 5 bytes buffered, so the small
-    // producer's 5-byte push now fits (5+5<=100) but the big producer's
-    // 96-byte push still does not (5+96>100) -- exactly the asymmetric-room
-    // case notify_one could get wrong.
-    auto queue = std::make_shared<EventQueue<Sized>>(16, /*max_bytes=*/100, PayloadBytes);
-    REQUIRE(queue->TryPush(Sized{std::string(95, 'a')}));
-    REQUIRE(queue->TryPush(Sized{std::string(5, 'b')}));
-
-    auto big = RunInBackground([queue] { return queue->Push(Sized{std::string(96, 'c')}); });
-    auto small = RunInBackground([queue] { return queue->Push(Sized{std::string(5, 'd')}); });
+TEST_CASE("DiscardPending drops the backlog and wakes parked producers", "[event_queue]") {
+    auto queue = std::make_shared<EventQueue<int>>(1);
+    REQUIRE(queue->TryPush(1));
+    auto producer = RunInBackground([queue] { return queue->Push(2); });
     std::this_thread::sleep_for(50ms);
-    CHECK_FALSE(big.Ready());
-    CHECK_FALSE(small.Ready());
-
-    // Frees exactly the 95-byte item: only `small`'s event can possibly fit now.
-    const auto popped = queue->Pop();
-    REQUIRE(popped->payload.size() == 95);
-    CHECK(small.WaitFor(2s));
-    CHECK(small.Get());
-    CHECK_FALSE(big.Ready());  // still correctly parked; not starved, not wrongly woken-and-accepted
-
-    // Clean up the still-parked big producer: its 96-byte event only fits an
-    // EMPTY queue (Fits' oversized-event escape hatch), so drain everything.
-    (void)queue->Pop();  // the original 5-byte item
-    (void)queue->Pop();  // small's 5-byte item
-    CHECK(big.WaitFor(2s));
-    CHECK(big.Get());
+    CHECK_FALSE(producer.Ready());
+    CHECK(queue->DiscardPending() == 1);
+    CHECK(producer.WaitFor(2s));
+    CHECK(queue->Pop() == 2);
 }

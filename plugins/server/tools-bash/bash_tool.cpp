@@ -18,6 +18,7 @@
 #include "bash_process.hpp"
 #include "command_scanner.hpp"
 #include "stage_normalize.hpp"
+#include "minimal/common/utf8.hpp"
 #include "minimal/sidecar/drain.hpp"
 
 namespace minimal::tools_bash {
@@ -40,13 +41,8 @@ constexpr std::size_t kDisplayOutputTailBytes = 16 * 1024;
 
 nlohmann::json ProcessDisplay(const std::string& command, const std::filesystem::path& cwd,
                               std::int64_t duration_ms, const std::string& output) {
-    std::size_t start = output.size() > kDisplayOutputTailBytes
-                            ? output.size() - kDisplayOutputTailBytes
-                            : 0;
-    // Never start mid-codepoint: skip UTF-8 continuation bytes.
-    while (start < output.size() && (static_cast<unsigned char>(output[start]) & 0xC0) == 0x80) {
-        ++start;
-    }
+    const std::size_t start = common::Utf8CeilToBoundary(
+        output, output.size() > kDisplayOutputTailBytes ? output.size() - kDisplayOutputTailBytes : 0);
     return {{"kind", "process"},        {"command", command},
             {"cwd", cwd.string()},      {"duration_ms", duration_ms},
             {"output", output.substr(start)}, {"output_truncated", start > 0},

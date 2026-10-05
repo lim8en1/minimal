@@ -14,8 +14,8 @@
 // DISPATCH CONVENTION: a plugin serving UI consumers provides a handler under
 // PluginRpcServiceName("<plugin_name>") -- "<plugin_name>.rpc". The .rpc
 // suffix keeps the dispatch target out of the way of plain §2.2 services the
-// same plugin may also provide (ServiceRegistry names feed NameRegistry as
-// NameKind::Service, so a collision would be fatal; the suffix makes one
+// same plugin may also provide (ServiceRegistry names are a slot namespace in
+// name resolution, so a collision would be fatal; the suffix makes one
 // unexpressible). Resolution is lazy at call time through
 // ServiceRegistry::Find: null means the plugin is disabled or absent, a
 // runtime condition the transport maps to NOT_FOUND -- never an error.

@@ -97,13 +97,6 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
     std::unordered_map<std::string, bool> backend_reported;
 
     for (const auto& ref_text : refs) {
-        // SplitModelRef, not ParseModelRef: ref_text is ModelRef::str() of an
-        // entry from bundle_.providers.ModelRefs(), which includes discovered models
-        // whose id can itself contain a slash (e.g. an OpenRouter model under
-        // provider "openrouter") -- ParseModelRef rejected those outright, so
-        // this check silently skipped validating every backend-registration
-        // for a discovered slash-bearing model instead of the "already
-        // rejected by ParseProvidersConfig" case the old comment claimed.
         const auto ref = common::SplitModelRef(ref_text);
         if (!ref) continue;  // truly malformed; ParseProvidersConfig rejects those
         const auto model = bundle_.providers.Resolve(*ref);
@@ -430,7 +423,7 @@ std::vector<CheckResult> StartupSanityCheck::check_plugins() {
     // plugin_data_root, the storage namespace, and every attribution key are
     // all keyed by the declared name, so the second load silently shares (and
     // corrupts) the first's state, and collision diagnostics blame one plugin
-    // for both. NameRegistry cannot see this -- it receives already-loaded
+    // for both. Name resolution cannot see this -- it receives already-loaded
     // attributions -- so it is checked here, against the records, naming both
     // files the way the provider-kind fatal below names both claimants.
     std::unordered_map<std::string, std::string> name_owner;
@@ -480,92 +473,42 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
     std::vector<CheckResult> results;
     const auto& resolution = inputs_.name_resolution;
 
-    // Who claims a surface name, across ALL registries. NameRegistry reports the
-    // colliding name; the attributions supply the claimants, which is what makes
-    // the diagnostic actionable -- the name alone does not say which plugin to
-    // disable. Tools, commands and services are separate namespaces, so the kind
-    // is part of the answer rather than an aside.
-    enum class ClaimKind { kTool, kCommand, kService, kHookPoint };
-    const auto claimants = [this](const std::string& surface, ClaimKind& kind) {
+    for (const auto& collision : resolution.collisions) {
         std::vector<std::string> owners;
-        const auto add = [&owners](const std::string& plugin_name) {
-            const auto label = plugin_name.empty() ? "core" : plugin_name;
-            if (std::find(owners.begin(), owners.end(), label) == owners.end()) {
-                owners.push_back(label);
-            }
-        };
-
-        for (const auto& attr : inputs_.registries.tools->attributions()) {
-            std::string s = attr.tool_name;
-            const auto qualified = attr.plugin_name + "." + attr.tool_name;
-            if (auto it = inputs_.plugin_config.aliases.find(qualified);
-                it != inputs_.plugin_config.aliases.end()) {
-                s = it->second;
-            }
-            if (s == surface) add(attr.plugin_name);
+        for (const auto& plugin_name : collision.claimants) {
+            owners.push_back(plugin_name.empty() ? "core" : plugin_name);
         }
-        if (!owners.empty()) {
-            kind = ClaimKind::kTool;
-            return owners;
+        const std::string by = JoinNames(owners);
+        std::string message;
+        switch (collision.space) {
+            case plugins::NameSpace::kTool:
+                message = "tool name '" + collision.surface + "' is provided by " + by +
+                          " -- disable one plugin, or give one of them an aliases entry";
+                break;
+            case plugins::NameSpace::kCommand:
+                message = "command name '/" + collision.surface + "' is provided by " + by +
+                          " -- disable one plugin, or give one of them an aliases entry";
+                break;
+            case plugins::NameSpace::kService:
+                message = "service name '" + collision.surface + "' is provided by " + by +
+                          " -- disable one of the plugins";
+                break;
+            case plugins::NameSpace::kHookPoint:
+                message = "hook point '" + collision.surface + "' is registered by " + by +
+                          " -- disable one of the plugins";
+                break;
         }
-
-        // A command collision, then. Its registry has already applied aliases, so
-        // surface_name is what to compare -- no second alias lookup here.
-        if (inputs_.registries.commands != nullptr) {
-            for (const auto& attr : inputs_.registries.commands->attributions()) {
-                if (attr.surface_name == surface) add(attr.plugin_name);
-            }
-            if (!owners.empty()) kind = ClaimKind::kCommand;
-        }
-        if (!owners.empty()) return owners;
-
-        // A service collision, then. Original names register unaliased, so the
-        // attribution's name is what to compare.
-        if (inputs_.registries.services != nullptr) {
-            for (const auto& attr : inputs_.registries.services->attributions()) {
-                if (attr.service_name == surface) add(attr.plugin_name);
-            }
-            if (!owners.empty()) kind = ClaimKind::kService;
-        }
-        if (!owners.empty()) return owners;
-
-        // A hook point collision (name_resolution merges those into the same
-        // fatal list). Without this arm the report read "provided by nothing".
-        if (inputs_.registries.hooks != nullptr) {
-            for (const auto& attr : inputs_.registries.hooks->attributions()) {
-                if (attr.point_name == surface) add(attr.plugin_name);
-            }
-            if (!owners.empty()) kind = ClaimKind::kHookPoint;
-        }
-        return owners;
-    };
-
-    for (const auto& surface : resolution.result.fatal_collisions) {
-        ClaimKind kind = ClaimKind::kTool;
-        const auto owners = claimants(surface, kind);
-        if (kind == ClaimKind::kHookPoint) {
-            results.push_back(Fatal("name_collisions",
-                                    "hook point '" + surface + "' is registered by " +
-                                        JoinNames(owners) + " -- disable one of the plugins"));
-            continue;
-        }
-        if (kind == ClaimKind::kService) {
-            results.push_back(Fatal("name_collisions",
-                                    "service name '" + surface + "' is provided by " +
-                                        JoinNames(owners) + " -- disable one of the plugins"));
-            continue;
-        }
-        results.push_back(
-            Fatal("name_collisions",
-                  std::string(kind == ClaimKind::kCommand ? "command name '/" : "tool name '") +
-                      surface +
-                      "' is provided by " + JoinNames(owners) +
-                      " -- disable one plugin, or give one of them an aliases entry"));
+        results.push_back(Fatal("name_collisions", message));
     }
 
-    for (const auto& key : resolution.result.dangling_aliases) {
+    for (const auto& key : resolution.dangling_aliases) {
         results.push_back(Warning("aliases", "aliases key '" + key +
                                   "' resolves to nothing registered (typo, or the providing plugin is disabled)"));
+    }
+    for (const auto& key : resolution.slot_aliases) {
+        results.push_back(Warning("aliases", "aliases key '" + key +
+                                  "' names a service or hook point, which cannot be aliased "
+                                  "(aliases rename tools and commands) -- ignored"));
     }
 
     // Dotted plugin names that actually COMPOSE ambiguously: ("a.b","c") and
@@ -574,7 +517,7 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
     // collision -- the Register-time dot warning alone left the resolution
     // order-dependent. Renaming one of the plugin files (or aliasing within
     // one plugin) is the fix.
-    for (const auto& identity : resolution.result.ambiguous_identities) {
+    for (const auto& identity : resolution.ambiguous_identities) {
         results.push_back(Fatal(
             "name_collisions",
             "stable identity '" + identity +
@@ -647,10 +590,10 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
     const auto& resolution = inputs_.name_resolution;
 
     // The valid permission keys, and which bare names are ambiguous (two
-    // plugins provide the original name -- the same count NameRegistry uses to
-    // decide when a key must be qualified).
+    // plugins provide the original name -- the same count name resolution uses
+    // to decide when a key must be qualified).
     std::unordered_set<std::string> valid_keys;
-    for (const auto& entry : resolution.result.entries) valid_keys.insert(entry.permission_key);
+    for (const auto& [surface, key] : resolution.permission_keys) valid_keys.insert(key);
     std::unordered_map<std::string, int> original_counts;
     for (const auto& attr : inputs_.registries.tools->attributions()) ++original_counts[attr.tool_name];
     const auto ambiguous = [&original_counts](const std::string& name) { return original_counts[name] > 1; };

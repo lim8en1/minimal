@@ -1,15 +1,8 @@
-#include "minimal/common/sqlite_util.hpp"
+#include "minimal/store/sqlite_util.hpp"
 
-#include <chrono>
 #include <stdexcept>
 
-namespace minimal::common {
-
-std::int64_t NowMillis() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
-        .count();
-}
+namespace minimal::store {
 
 void ThrowSqliteError(sqlite3* db, const std::string& context) {
     throw std::runtime_error(context + ": " + sqlite3_errmsg(db));
@@ -31,4 +24,4 @@ void BestEffortRollback(sqlite3* db) {
     }
 }
 
-}  // namespace minimal::common
+}  // namespace minimal::store

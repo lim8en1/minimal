@@ -18,9 +18,9 @@
 struct sqlite3;      // opaque handle; <sqlite3.h> stays private to the .cpp
 struct sqlite3_stmt;
 
-namespace minimal::common {
+namespace minimal::store {
 class ExclusiveFileLock;  // the <db>.lock guard; held open for the process lifetime
-}  // namespace minimal::common
+}  // namespace minimal::store
 
 namespace minimal::session {
 
@@ -466,7 +466,7 @@ private:
     // the database is closed. The database is never open while the lock file
     // does not name this process. Unique_ptr because <fcntl.h> stays out of
     // this header.
-    std::unique_ptr<common::ExclusiveFileLock> lock_;
+    std::unique_ptr<store::ExclusiveFileLock> lock_;
     mutable std::mutex mu_;
     std::filesystem::path path_;
     std::int64_t last_ts_ = 0;  // guarded by mu_

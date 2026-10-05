@@ -14,7 +14,8 @@ add_executable(minimal_tests
     json_depth_test.cpp
     sse_parser_test.cpp
     frontmatter_test.cpp
-    name_registry_test.cpp
+    name_table_test.cpp
+    name_resolution_test.cpp
     compaction_boundary_test.cpp
     transcript_repair_test.cpp
     compaction_strategy_test.cpp
@@ -41,6 +42,7 @@ add_executable(minimal_tests
     config_paths_test.cpp
     file_lock_test.cpp
     logger_test.cpp
+    periodic_task_test.cpp
     sqlite_util_test.cpp
     tool_executor_test.cpp
     permission_model_test.cpp
@@ -412,8 +414,8 @@ target_compile_definitions(minimal_tests PRIVATE
 # The headless client is exercised as a real client here, so the test binary
 # links it -- the E2E tier is the whole point of building -p first.
 #
-# SQLite3 comes in transitively via minimal::common (it links it PUBLIC --
-# sqlite_util lives there), so it must NOT be named here as well: that puts
+# SQLite3 comes in transitively via minimal::server_core (it links it PUBLIC --
+# store's sqlite_util.hpp includes <sqlite3.h>), so it must NOT be named here as well: that puts
 # libsqlite3.a on the link line twice and ld notes the duplicate. The
 # session-store tests still see <sqlite3.h> and can build fixtures
 # (a hand-crafted newer-version database) and assert on internals

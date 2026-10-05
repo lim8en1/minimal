@@ -47,8 +47,9 @@ int main(int argc, char** argv) {
             break;
     }
 
-    // LOGGING BEFORE ANYTHING ELSE LOGS: DefaultLogger resolves to spdlog's
-    // console default on first use, and an out-of-band stdout/stderr write
+    // LOGGING BEFORE ANYTHING ELSE LOGS: until ConfigureLogging runs,
+    // DefaultLogger writes to spdlog's console default, and an out-of-band
+    // stdout/stderr write
     // desyncs the alternate screen the same way a resize does (see RunTui);
     // headless stdout carries JSONL. So client logs go to a rotating FILE
     // under the data dir, never the terminal. Configured after the

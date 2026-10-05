@@ -39,6 +39,10 @@ std::int64_t JsonSizeEstimate(const nlohmann::json& value) {
 }
 
 std::int64_t estimate_tokens(std::span<const llm::Message> messages) {
+    return estimate_bytes(messages) / 4;
+}
+
+std::int64_t estimate_bytes(std::span<const llm::Message> messages) {
     std::int64_t bytes = 0;
     for (const auto& message : messages) {
         for (const auto& block : message.content) {
@@ -63,7 +67,7 @@ std::int64_t estimate_tokens(std::span<const llm::Message> messages) {
             }
         }
     }
-    return bytes / 4;
+    return bytes;
 }
 
 llm::ChatRequest BuildSummarizerRequest(std::span<const llm::Message> history,

@@ -38,9 +38,11 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <ftxui/component/component.hpp>
@@ -55,7 +57,7 @@
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/status_format.hpp"
 #include "minimal/client/ui_config.hpp"
-#include "minimal/plugins/name_registry.hpp"
+#include "minimal/plugins/name_table.hpp"
 
 namespace minimal::client {
 
@@ -146,25 +148,25 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out);
 // kept.
 void PushThemeToPlugins(TuiEnvironment& out);
 
-// One kind's attribution list, for MatchAliasKind below. `attributions`
-// points into a registry's own storage (stable for BuildTuiEnvironment's
-// whole call), never owned here.
-struct AliasCandidate {
-    minimal::plugins::NameKind kind;
+// One registry's claims, as fed to ResolveClientNames. `attributions` points
+// into the registry's own storage (stable for BuildTuiEnvironment's whole
+// call), never owned here.
+struct NameFeed {
+    std::string_view name_space;  // registries sharing one collide with each other
+    minimal::plugins::NameTable::Policy policy;
     const std::vector<plugins::Attribution>* attributions;
 };
 
-// The alias-resolution matching decision BuildTuiEnvironment applies to
-// every entry in client-plugins.json's "aliases" map: which NameKind a
-// qualified "plugin.original_name" alias key belongs to -- the first of
-// `candidates` (the aliasable RegistryHooks rows, in table order) holding
-// that attribution. Falls back to NameKind::ViewId -- the "dangling" case,
-// since ViewId is the canonical kind keybindings.json addresses -- when no
-// candidate matches at all.
-//
-// Pure and independently testable: takes only Attribution data, no
-// registries, no plugin loading required to exercise it.
-minimal::plugins::NameKind MatchAliasKind(const std::vector<AliasCandidate>& candidates,
-                                          const std::string& key);
+// The client's collision/alias pass (ARCHITECTURE.md, "Name collisions and
+// aliases"): one NameTable per namespace, client-plugins.json aliases routed
+// to every name namespace claiming them. Collisions are fatal; an alias naming
+// nothing, or naming a slot (which is never aliased), is a warning. Messages
+// are ready to print. Pure: no registries, no plugin loading.
+struct ClientNameResolution {
+    std::vector<std::string> fatal;
+    std::vector<std::string> warnings;
+};
+ClientNameResolution ResolveClientNames(const std::vector<NameFeed>& feeds,
+                                        const std::map<std::string, std::string>& aliases);
 
 }  // namespace minimal::client

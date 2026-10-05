@@ -234,7 +234,7 @@ public:
     // per-invocation as ToolContext::tool_config -- THIS tool's slice only, or
     // null when the preset declares none. Default empty: a tool that reads no
     // per-preset config never sees anyone's slice. Two plugins claiming the
-    // same namespace is a FATAL startup collision (the NameRegistry discipline,
+    // same namespace is a FATAL startup collision (the name resolution discipline,
     // one level up); several tools of ONE plugin sharing a namespace is normal.
     // See ARCHITECTURE.md "Server plugins" and docs/PLUGINS.md for the author
     // contract (the plugin owns its slice's schema and its merge with its own

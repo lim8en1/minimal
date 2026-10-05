@@ -6,15 +6,16 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
 #include <string>
 
-#include "minimal/common/file_lock.hpp"
+#include "minimal/store/file_lock.hpp"
 #include "temp_dir.hpp"
 
-using minimal::common::ExclusiveFileLock;
+using minimal::store::ExclusiveFileLock;
 using minimal::testing::TempDir;
 
 TEST_CASE("a second lock on the same db path in this process is refused",
@@ -25,9 +26,24 @@ TEST_CASE("a second lock on the same db path in this process is refused",
     ExclusiveFileLock first(db_path);
     CHECK_THROWS_AS(ExclusiveFileLock(db_path), std::runtime_error);
 
-    // A DIFFERENT path is unaffected -- the registry key is the path, not a
+    // A DIFFERENT file is unaffected -- the registry key is the file, not a
     // process-wide "one lock ever" rule.
     CHECK_NOTHROW(ExclusiveFileLock(dir.path() / "other.db"));
+}
+
+TEST_CASE("the same-process refusal holds for every spelling of the path",
+          "[file_lock][invariant]") {
+    // Keyed by (device, inode), not by the path string: "./" or a symlinked
+    // directory must not let a second in-process holder through, because
+    // fcntl would not stop it (its locks never conflict within a process).
+    TempDir dir;
+    std::filesystem::create_directory(dir.path() / "data");
+    std::filesystem::create_directory_symlink(dir.path() / "data", dir.path() / "link");
+    ExclusiveFileLock first(dir.path() / "data" / "sessions.db");
+
+    CHECK_THROWS_AS(ExclusiveFileLock(dir.path() / "data" / "." / "sessions.db"),
+                    std::runtime_error);
+    CHECK_THROWS_AS(ExclusiveFileLock(dir.path() / "link" / "sessions.db"), std::runtime_error);
 }
 
 TEST_CASE("releasing the lock (destruction) allows re-acquiring it", "[file_lock][invariant]") {

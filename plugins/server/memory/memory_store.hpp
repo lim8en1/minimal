@@ -24,7 +24,7 @@
 
 struct sqlite3;
 
-namespace minimal::common {
+namespace minimal::store {
 class ExclusiveFileLock;
 }
 
@@ -242,7 +242,7 @@ private:
         std::vector<float> unit;
     };
 
-    std::unique_ptr<common::ExclusiveFileLock> lock_;  // declared before db_: outlives it
+    std::unique_ptr<store::ExclusiveFileLock> lock_;  // declared before db_: outlives it
     sqlite3* db_ = nullptr;
     mutable std::mutex mu_;
     std::filesystem::path path_;

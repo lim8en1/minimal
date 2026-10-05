@@ -451,9 +451,11 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     // client propagates into the child instead of being waited out. Terminating
     // the child is what unblocks this wait: its completion hook fires during
     // the teardown join, which is also why the loop can simply break and read
-    // the future.
+    // the future. The slice only bounds cancel latency (the future itself wakes
+    // the wait on completion), so it is sized to that budget -- 25 ms meant 40
+    // wakeups/s for the whole life of every blocking child.
     auto future = completion->get_future();
-    while (future.wait_for(std::chrono::milliseconds(25)) != std::future_status::ready) {
+    while (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
         if (ctx.is_cancelled && ctx.is_cancelled()) {
             sessions_.Terminate(child_id);
             break;
