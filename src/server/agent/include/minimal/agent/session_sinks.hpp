@@ -40,6 +40,10 @@ struct SessionSinkDeps {
     std::filesystem::path project_root;
 
     std::shared_ptr<SessionChannels> channels;
+    // The session_lifetime token: owned by the Session ALONE and released at
+    // Terminate. Not the channels block -- the outliving sinks hold that
+    // strongly, so a weak_ptr to it never expired while a watcher ran.
+    std::shared_ptr<const void> lifetime;
     SessionEventSink event_sink;
     SessionObserverRegistry& observers;
     const hooks::HookDispatcher* hooks = nullptr;

@@ -288,8 +288,9 @@ struct SessionContext {
 
     // --- Deferred-completion wiring, copied into every ToolContext -----------
     //
-    // All three are lifetime-safe (backed by the session's shared channels
-    // block), which is the whole point: a tool capturing them beyond its own
+    // All three are lifetime-safe (the sinks are backed by the session's
+    // shared channels block; session_lifetime by a token only the Session
+    // owns, released at Terminate), which is the whole point: a tool capturing them beyond its own
     // invocation -- background bash's watcher thread -- degrades cleanly after
     // the session dies instead of dangling. See tools/tool.hpp for the
     // contract each one carries.

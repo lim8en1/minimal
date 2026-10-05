@@ -728,6 +728,8 @@ private:
     // Domain-only cross-thread state; always Session's own (nothing external
     // ever needs to share it since the transport half split out).
     std::shared_ptr<SessionChannels> channels_;
+    // ToolContext::session_lifetime's only strong owner; reset in Terminate.
+    std::shared_ptr<const void> lifetime_ = std::make_shared<char>(0);
     // The permission decision source: always producer-supplied now (the wire
     // default, an advised checker, or a test fake) -- see
     // SessionParams::permission_checker.

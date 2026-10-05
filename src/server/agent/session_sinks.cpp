@@ -28,7 +28,7 @@ SessionSinks BuildSessionSinks(const SessionSinkDeps& deps) {
     const std::string session_id = deps.session_id;
 
     context.injections = std::shared_ptr<InjectionQueue>(channels, &channels->injections);
-    context.session_lifetime = channels;
+    context.session_lifetime = deps.lifetime;
     // ToolContext::schedule_injection for every tool (the loop copies this onto
     // each context): how a background task hands its result back at a turn
     // boundary. Background bash and python REFUSE to start without it ("no

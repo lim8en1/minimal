@@ -264,6 +264,8 @@ public:
     tools::ToolResult execute(const nlohmann::json&, tools::ToolContext& ctx) override {
         had_channel = static_cast<bool>(ctx.schedule_injection);
         channel = ctx.schedule_injection;  // a background task keeps this past the call
+        lifetime = ctx.session_lifetime;
+        output = ctx.emit_output;
         if (ctx.schedule_injection) {
             delivered = ctx.schedule_injection(
                 llm::Message{llm::Role::User, {llm::TextBlock{"background result"}}});
@@ -273,6 +275,8 @@ public:
     bool had_channel = false;
     bool delivered = false;
     std::function<bool(llm::Message)> channel;
+    std::weak_ptr<const void> lifetime;
+    std::function<void(std::string_view)> output;
 
 private:
     tools::ToolSpec spec_;
@@ -304,6 +308,33 @@ TEST_CASE("a session gives its tools a working deferred-completion channel", "[s
         if (llm::TextOf(stored.content) == "background result") found = true;
     }
     CHECK(found);
+}
+
+TEST_CASE("session_lifetime expires at Terminate even while a tool holds its sinks",
+          "[session]") {
+    // A background watcher keeps schedule_injection (and the task-event and
+    // output sinks) past the call. Those hold the session's channels block, so
+    // session_lifetime -- the watcher's ONLY death signal -- must not be tied
+    // to it, or background work is never killed when the session ends.
+    SessionFixture fixture;
+    auto tool = std::make_unique<InjectionProbeTool>();
+    auto* probe = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+    fixture.Script(testing::ToolUseResponse("call-1", "probe", nlohmann::json::object()));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+    fixture.session->SubmitTurn("probe it");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    REQUIRE(probe->channel);
+    CHECK_FALSE(probe->lifetime.expired());
+    fixture.session->Terminate();
+    CHECK(probe->lifetime.expired());
+    CHECK_FALSE(probe->channel(llm::Message{llm::Role::User, {llm::TextBlock{"late"}}}));
+    // The output sink outlives the session too (it must not reach into the
+    // destroyed loop): calling it after the session is gone is safe.
+    fixture.session.reset();
+    if (probe->output) probe->output("late output");
 }
 
 TEST_CASE("a stream attachment pairs subscribe/notify with unsubscribe/notify",

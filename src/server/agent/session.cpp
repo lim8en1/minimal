@@ -130,6 +130,7 @@ Session::Session(SessionParams params, AgentPreset preset,
                               params_.parent_session_id,
                               params_.project_root,
                               channels_,
+                              lifetime_,
                               event_sink_,
                               observers_,
                               loop_config.hooks,
@@ -830,6 +831,9 @@ void Session::Terminate() {
     // injections by design.
     channels_->injections.Close();
     channels_->ClearWake();  // before this object goes away: see SessionChannels::Wake
+    // Expires every tool's session_lifetime: background bash and the python
+    // interpreter see "session gone" and kill their processes.
+    lifetime_.reset();
     // Empty locked section before the notify: the worker's wait predicate
     // reads terminated_ under mutex_ (WorkerMain), and every write to the
     // predicate above this point (terminated_.exchange, the two lines above)

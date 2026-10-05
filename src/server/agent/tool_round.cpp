@@ -69,7 +69,11 @@ ToolRound::Outcome ToolRound::Run(const std::vector<const llm::ToolUseBlock*>& t
                                       std::mutex mu;
                                       std::string pending;
                                   };
-                                  ctx.emit_output = [this, tool_use_id,
+                                  // Captures the sink by value, never `this`:
+                                  // a background task keeps emit_output past
+                                  // the round, the loop and the Session.
+                                  ctx.emit_output = [sink = session_.tool_output_sink,
+                                                     tool_use_id,
                                                      carry = std::make_shared<Carry>()](
                                                         std::string_view chunk) {
                                       std::string text;
@@ -84,9 +88,7 @@ ToolRound::Outcome ToolRound::Run(const std::vector<const llm::ToolUseBlock*>& t
                                                                 tail);
                                           text.resize(text.size() - tail);
                                       }
-                                      if (!text.empty()) {
-                                          session_.tool_output_sink(tool_use_id, text);
-                                      }
+                                      if (!text.empty()) sink(tool_use_id, text);
                                   };
                               }
                               // Deferred-completion surface, copied verbatim from the session's
