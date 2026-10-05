@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <future>
 #include <mutex>
 #include <stdexcept>
 #include <vector>
@@ -95,11 +96,15 @@ TEST_CASE("a task may stop its own executor: the backlog still runs and nothing 
     std::atomic<int> ran{0};
     auto finished = minimal::testing::RunInBackground([&ran] {
         SerialExecutor executor("test", 16, minimal::common::DefaultLogger());
+        std::promise<void> both_posted;
+        auto go = both_posted.get_future();
         REQUIRE(executor.TryPost([&] {
+            go.wait();  // the second task is queued before the queue closes
             executor.Stop(SerialExecutor::Backlog::kRun);  // on the worker: no self-join
             ++ran;
         }));
         REQUIRE(executor.TryPost([&] { ++ran; }));
+        both_posted.set_value();
         executor.WaitForIdle();
         CHECK(executor.stopped());
         CHECK_FALSE(executor.TryPost([] {}));

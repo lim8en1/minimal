@@ -5,6 +5,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "minimal/client/plugins/registries.hpp"
@@ -30,6 +31,11 @@ namespace plugins {
 // ApplyViewRequest).
 struct ViewRequest {
     enum class Op { kShow, kClose, kSetPanelVisible, kFocusPanel };
+
+    ViewRequest() = default;
+    ViewRequest(Op op, std::string view_id, bool visible = true, std::string plugin = {})
+        : op(op), view_id(std::move(view_id)), visible(visible), plugin(std::move(plugin)) {}
+
     Op op = Op::kShow;
     std::string view_id;
     bool visible = true;   // kSetPanelVisible only

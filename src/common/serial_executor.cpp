@@ -24,7 +24,7 @@ SerialExecutor::SerialExecutor(std::string name, std::size_t capacity, Logger& l
 }
 
 SerialExecutor::~SerialExecutor() {
-    assert(std::this_thread::get_id() != worker_id_ &&
+    assert(std::this_thread::get_id() != worker_id_.load() &&
            "SerialExecutor destroyed by one of its own tasks");
     Stop(Backlog::kRun);
 }
@@ -51,13 +51,16 @@ void SerialExecutor::Stop(Backlog backlog) {
             idle_cv_.notify_all();
         }
     });
-    if (std::this_thread::get_id() == worker_id_) return;  // the destructor joins
+    if (std::this_thread::get_id() == worker_id_.load()) return;  // the destructor joins
     std::lock_guard<std::mutex> join_lock(join_mutex_);
-    if (worker_.joinable()) worker_.join();
+    if (worker_.joinable()) {
+        worker_.join();
+        worker_id_.store(std::thread::id{});
+    }
 }
 
 void SerialExecutor::WaitForIdle() {
-    assert(std::this_thread::get_id() != worker_id_ && "WaitForIdle called from a task");
+    assert(std::this_thread::get_id() != worker_id_.load() && "WaitForIdle called from a task");
     std::unique_lock<std::mutex> lock(mutex_);
     idle_cv_.wait(lock, [this] { return outstanding_ == 0; });
 }

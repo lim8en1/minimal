@@ -9,6 +9,7 @@
 // instead), a task that throws is logged and does not stop the worker, and an
 // outstanding count tests can wait on.
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
@@ -60,7 +61,9 @@ private:
     std::condition_variable idle_cv_;
     std::size_t outstanding_ = 0;  // guarded by mutex_: queued plus running
     std::thread worker_;
-    std::thread::id worker_id_;  // set once in the constructor; read without a lock
+    // The live worker's id; cleared once it is joined, because the OS may hand
+    // a dead thread's id to a new thread. Atomic: read by any caller.
+    std::atomic<std::thread::id> worker_id_;
     std::once_flag stop_once_;
     std::mutex join_mutex_;      // serializes concurrent Stop() joins
 };
