@@ -15,6 +15,7 @@
 
 #include "minimal/common/bundled_assets.hpp"
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/env.hpp"
 #include "minimal/common/fd_hygiene.hpp"
 
 namespace minimal::client {

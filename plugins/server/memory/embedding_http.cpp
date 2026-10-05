@@ -1,7 +1,6 @@
 #include "embedding_http.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <iterator>
 #include <map>
 #include <sstream>
@@ -9,6 +8,8 @@
 #include <string>
 
 #include <nlohmann/json.hpp>
+
+#include "minimal/common/env.hpp"
 
 namespace minimal::memory {
 namespace {
@@ -53,12 +54,8 @@ std::vector<Embedding> HttpEmbeddingFunction::EmbedChunk(const std::vector<std::
     request_headers.push_back({"Content-Type", "application/json"});
     request_headers.push_back({"Accept", "application/json"});
     if (!settings_.api_key_env.empty()) {
-        // Resolved per call, not once at construction: a rotated key without a
-        // server restart is worth the getenv cost. tools-web resolves at
-        // startup and fails loud on an unset name; memory resolves at call
-        // time and reports through the same std::runtime_error channel.
-        if (const char* key = std::getenv(settings_.api_key_env.c_str())) {
-            if (*key != '\0') request_headers.push_back({"Authorization", "Bearer " + std::string(key)});
+        if (const auto key = common::LookupEnv(settings_.api_key_env)) {
+            request_headers.push_back({"Authorization", "Bearer " + *key});
         }
     }
 

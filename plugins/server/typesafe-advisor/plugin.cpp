@@ -18,6 +18,7 @@
 #include <memory>
 #include <utility>
 
+#include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/net/http_client.hpp"
 #include "minimal/plugins/plugin_abi.h"
@@ -39,8 +40,8 @@ void minimal_plugin_register_permission_advisor(
     // contained registration failure (the plugin loads degraded, the sanity
     // check warns that the configured advisor resolves to nothing), not a
     // silent 401 on the first gated tool call hours later.
-    const char* api_key = std::getenv(settings.api_key_env.c_str());
-    if (api_key == nullptr || *api_key == '\0') {
+    const auto api_key = minimal::common::LookupEnv(settings.api_key_env);
+    if (!api_key) {
         minimal::common::DefaultLogger().error(
             "typesafe-advisor: environment variable {} is not set; the advisor will not register "
             "(set it, or point api_key_env elsewhere in the plugin's config)",
@@ -49,7 +50,7 @@ void minimal_plugin_register_permission_advisor(
     }
 
     registry.Register(std::make_shared<minimal::typesafe_advisor::TypesafeAdvisor>(
-        settings, api_key, minimal::net::HttpClient{}));
+        settings, *api_key, minimal::net::HttpClient{}));
 }
 
 }  // extern "C"

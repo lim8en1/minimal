@@ -955,15 +955,10 @@ std::string FormatOutcome(const std::string& id, const RequestOutcome& outcome,
         const auto head = cap / 4;
         const auto tail = cap - head;
         // UTF-8-safe cuts: never split a multi-byte sequence at either end.
-        std::string tail_text = text.substr(text.size() - tail);
-        std::size_t skip = 0;
-        while (skip < tail_text.size() &&
-               (static_cast<unsigned char>(tail_text[skip]) & 0xC0) == 0x80) {
-            ++skip;
-        }
+        std::string tail_text = text.substr(common::Utf8CeilToBoundary(text, text.size() - tail));
         text = common::TruncateUtf8Bytes(text, head) + "\n[... " +
                std::to_string(text.size() - cap) + " bytes omitted ...]\n" +
-               tail_text.substr(skip);
+               tail_text;
     }
     return text;
 }

@@ -20,6 +20,7 @@ minimal/commands/command_registry.hpp
 minimal/commands/command.hpp
 minimal/common/abi_tag.hpp
 minimal/common/config_paths.hpp
+minimal/common/env.hpp
 minimal/common/logger.hpp
 minimal/config/project_trust.hpp
 minimal/config/provider_config_extensions.hpp

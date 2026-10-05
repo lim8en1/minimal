@@ -7,6 +7,7 @@
 #include <limits>
 
 #include "html_text.hpp"
+#include "minimal/common/utf8.hpp"
 #include "minimal/tools/atomic_write.hpp"
 #include "url_policy.hpp"
 
@@ -61,43 +62,6 @@ bool ContentTypeLooksBinary(const std::vector<net::HttpHeader>& headers) {
         if (content_type->find(marker) != std::string::npos) return true;
     }
     return false;
-}
-
-// Never end a truncation mid-codepoint: a byte cut inside a UTF-8 multi-byte
-// sequence emits invalid UTF-8 (U+FFFD junk downstream, or a hard error from
-// a strict consumer) instead of a clean prefix. Drops the WHOLE partial
-// sequence rather than any part of it.
-std::size_t Utf8SafeLength(std::string_view text, std::size_t max_bytes) {
-    const std::size_t cut = std::min(max_bytes, text.size());
-    if (cut == 0 || cut == text.size()) return cut;
-    // A UTF-8 sequence is at most 4 bytes (a leader plus up to 3
-    // continuation bytes, 10xxxxxx); walk back at most that far to find the
-    // leader of whatever codepoint is open at the cut point.
-    std::size_t start = cut;
-    int back = 0;
-    while (start > 0 && back < 3 &&
-           (static_cast<unsigned char>(text[start - 1]) & 0xC0) == 0x80) {
-        --start;
-        ++back;
-    }
-    if (start == 0) return cut;
-    const unsigned char lead = static_cast<unsigned char>(text[start - 1]);
-    std::size_t seq_len = 1;
-    if ((lead & 0x80) == 0x00) {
-        seq_len = 1;
-    } else if ((lead & 0xE0) == 0xC0) {
-        seq_len = 2;
-    } else if ((lead & 0xF0) == 0xE0) {
-        seq_len = 3;
-    } else if ((lead & 0xF8) == 0xF0) {
-        seq_len = 4;
-    } else {
-        return cut;  // not a recognizable leader byte -- not ours to fix
-    }
-    // The sequence starting at `lead` doesn't fully fit before `cut`: drop
-    // it whole rather than truncate it.
-    if (start - 1 + seq_len > cut) return start - 1;
-    return cut;
 }
 
 // An ABSOLUTE Location header only. A relative one ("/login") would need
@@ -260,7 +224,7 @@ private:
         // Backed up to a UTF-8 boundary, not a raw byte cut: a cut landing
         // inside a multi-byte sequence emitted invalid UTF-8 into the
         // model's context.
-        const auto safe_len = Utf8SafeLength(text, static_cast<std::size_t>(max_bytes));
+        const auto safe_len = common::Utf8FloorToBoundary(text, static_cast<std::size_t>(max_bytes));
         if (outcome.ok) {
             text.resize(safe_len);
             return ToolResult{false,

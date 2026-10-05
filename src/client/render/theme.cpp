@@ -2,8 +2,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <fstream>
-#include <sstream>
 #include <stdexcept>
 #include <tuple>
 
@@ -12,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/common/read_file.hpp"
 
 namespace minimal::client {
 
@@ -181,14 +180,10 @@ Theme Theme::Parse(std::string_view json, ColorDepth depth,
 Theme Theme::Load(const std::filesystem::path& themes_dir, const std::string& name,
                   ColorDepth depth, const std::vector<std::string>* known_plugins) {
     const std::filesystem::path file = themes_dir / (name + ".json");
-    std::ifstream in(file);
-    if (!in) {
-        throw std::runtime_error("theme: cannot read " + file.string());
-    }
-    std::ostringstream contents;
-    contents << in.rdbuf();
+    const common::ReadFileResult read = common::ReadFile(file, 1u << 20);
+    if (!read.ok()) throw std::runtime_error("theme: " + read.error);
     try {
-        return Parse(contents.str(), depth, known_plugins);
+        return Parse(read.contents, depth, known_plugins);
     } catch (const std::runtime_error& e) {
         throw std::runtime_error(file.string() + ": " + e.what());
     }

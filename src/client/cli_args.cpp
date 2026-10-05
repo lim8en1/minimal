@@ -8,6 +8,7 @@
 
 #include "minimal/client/utf8.hpp"
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/model_ref.hpp"
 

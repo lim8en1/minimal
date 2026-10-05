@@ -18,7 +18,7 @@
 #include <optional>
 #include <string>
 
-#include "minimal/common/config_paths.hpp"
+#include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/read_file.hpp"
 #include "minimal/config/provider_config_extensions.hpp"

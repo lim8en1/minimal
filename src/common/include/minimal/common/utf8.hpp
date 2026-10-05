@@ -1,10 +1,8 @@
 #pragma once
 
-// UTF-8 helpers for server-side text that reaches a model or a
-// proto3 string: a byte cut could split a multi-byte sequence and render
-// U+FFFD (or fail a proto parse). The client keeps its own copy in
-// minimal/client/utf8.hpp; this is the server/plugin one, so plugins stop
-// hand-rolling the same loop.
+// UTF-8 helpers for text that reaches a model, a terminal or a proto3
+// string: a byte cut could split a multi-byte sequence and render U+FFFD (or
+// fail a proto parse). Shared by server, client and plugins.
 
 #include <cstddef>
 #include <string>
@@ -12,13 +10,35 @@
 
 namespace minimal::common {
 
+namespace utf8_detail {
+inline bool IsContinuation(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
+}  // namespace utf8_detail
+
+// The largest index <= pos that does not split a character, for cutting the
+// END of a kept head. Walks back at most 3 continuation bytes (the longest a
+// well-formed sequence has); past that the text is malformed and `pos` stands.
+inline std::size_t Utf8FloorToBoundary(std::string_view text, std::size_t pos) {
+    if (pos >= text.size()) return text.size();
+    for (std::size_t back = 0; back <= 3 && back <= pos; ++back) {
+        if (!utf8_detail::IsContinuation(text[pos - back])) return pos - back;
+    }
+    return pos;
+}
+
+// The smallest index >= pos that does not split a character, for cutting the
+// START of a kept tail. Same 3-byte bound as the floor.
+inline std::size_t Utf8CeilToBoundary(std::string_view text, std::size_t pos) {
+    for (std::size_t ahead = 0; ahead <= 3; ++ahead) {
+        if (pos + ahead >= text.size()) return text.size();
+        if (!utf8_detail::IsContinuation(text[pos + ahead])) return pos + ahead;
+    }
+    return pos;
+}
+
 // At most `max_bytes`, never ending mid-character: a sequence straddling the
 // limit is dropped whole.
 inline std::string TruncateUtf8Bytes(std::string_view text, std::size_t max_bytes) {
-    if (text.size() <= max_bytes) return std::string(text);
-    std::size_t end = max_bytes;
-    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) --end;
-    return std::string(text.substr(0, end));
+    return std::string(text.substr(0, Utf8FloorToBoundary(text, max_bytes)));
 }
 
 // The first `max_chars` code points. Invalid lead bytes count as one

@@ -1,18 +1,8 @@
 #pragma once
 
 #include <filesystem>
-#include <optional>
-#include <string>
-#include <string_view>
 
 namespace minimal::common {
-
-// getenv, but treats an empty value as unset -- an exported-but-empty env var
-// (XDG_CONFIG_HOME, an MCP secret referenced via ${VAR}, providers.json's
-// api_key_env) is common and must not be treated as a resolved value. The one
-// shared "is this env var actually set" primitive; every env-var lookup in
-// the tree should go through this rather than calling getenv directly.
-std::optional<std::string> LookupEnv(std::string_view name);
 
 // Resolution order:
 //   1. $MINIMAL_CONFIG_DIR   -- explicit escape hatch

@@ -18,6 +18,8 @@
 
 #include <ftxui/screen/string.hpp>
 
+#include "minimal/common/utf8.hpp"
+
 namespace minimal::client {
 
 // ASCII-only lowercasing for case-insensitive filter matching (the pickers'
@@ -30,25 +32,12 @@ inline std::string ToLower(std::string_view text) {
     return out;
 }
 
-// Never returns more than `max_bytes`, and never ends mid-character: a sequence
-// straddling the limit is dropped whole.
+// Byte-cut helpers live in common (shared with server and plugins); these are
+// the client's historical names for them.
 inline std::string TruncateUtf8(const std::string& text, std::size_t max_bytes) {
-    if (text.size() <= max_bytes) return text;
-    std::size_t end = max_bytes;
-    // Continuation bytes are 10xxxxxx. Back up to the lead byte of the character
-    // straddling the limit, then drop it.
-    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) --end;
-    return text.substr(0, end);
+    return common::TruncateUtf8Bytes(text, max_bytes);
 }
-
-// The smallest index >= pos that is not a continuation byte -- the
-// forward-scanning complement to TruncateUtf8's backward boundary search.
-// Used when a byte-offset cut point for the START of a kept tail (not the
-// end of a kept head) might land inside a multi-byte sequence.
-inline std::size_t Utf8CeilToBoundary(std::string_view text, std::size_t pos) {
-    while (pos < text.size() && (static_cast<unsigned char>(text[pos]) & 0xC0) == 0x80) ++pos;
-    return pos;
-}
+using common::Utf8CeilToBoundary;
 
 // Terminal display columns for one code point -- FTXUI's own table, the one
 // its renderer lays glyphs out by. The hand-kept range list this replaced

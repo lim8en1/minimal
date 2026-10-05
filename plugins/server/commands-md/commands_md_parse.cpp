@@ -8,14 +8,13 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
-#include <fstream>
 #include <set>
-#include <sstream>
 #include <stdexcept>
 #include <utility>
 
 #include "minimal/common/logger.hpp"
 #include "minimal/common/model_ref.hpp"
+#include "minimal/common/read_file.hpp"
 #include "minimal/config/frontmatter.hpp"
 
 namespace minimal::commands_md {
@@ -331,18 +330,8 @@ MdCommandSpec ParseCommandFile(const std::filesystem::path& path, bool trusted) 
     // every startup and listing. Anything past the cap is a broken command
     // file, skipped with a warning like any other.
     constexpr std::size_t kMaxCommandFileBytes = 1u << 20;  // 1 MiB
-    std::error_code ec;
-    const auto size = std::filesystem::file_size(path, ec);
-    if (!ec && size > kMaxCommandFileBytes) {
-        throw std::runtime_error("command file exceeds 1 MiB; refusing to load");
-    }
-    std::ifstream in(path);
-    if (!in) throw std::runtime_error("command file not found: " + path.string());
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    if (buffer.str().size() > kMaxCommandFileBytes) {
-        throw std::runtime_error("command file exceeds 1 MiB; refusing to load");
-    }
+    common::ReadFileResult file = common::ReadFile(path, kMaxCommandFileBytes);
+    if (!file.ok()) throw std::runtime_error(file.error);
 
     // The stem is what the user types after '/': anything outside this set
     // (a space, a quote) would register a command no one can invoke.
@@ -358,7 +347,7 @@ MdCommandSpec ParseCommandFile(const std::filesystem::path& path, bool trusted) 
                                  "' (letters, digits, '-', '_' and '.', starting with a "
                                  "letter or digit)");
     }
-    return DecodeSpec(stem, config::parse_frontmatter_markdown(buffer.str()), path, trusted);
+    return DecodeSpec(stem, config::parse_frontmatter_markdown(file.contents), path, trusted);
 }
 
 std::vector<std::unique_ptr<commands::Command>> LoadCommands(

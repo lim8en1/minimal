@@ -6,7 +6,7 @@
 #include <filesystem>
 #include <sstream>
 
-#include "minimal/common/config_paths.hpp"
+#include "minimal/common/env.hpp"
 
 namespace minimal::mcp {
 namespace {
