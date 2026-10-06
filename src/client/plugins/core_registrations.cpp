@@ -580,19 +580,6 @@ private:
     const MarkdownEngine& engine_;
 };
 
-// --- Core grammar registration -------------------------------------------------
-
-class VendoredGrammar final : public SyntaxGrammar {
-public:
-    explicit VendoredGrammar(const LanguageDefinition& definition) : definition_(definition) {}
-    std::string_view Language() const override { return definition_.name; }
-    LanguageFnPtr LanguageFn() const override { return definition_.language_fn; }
-    std::span<const SyntaxRule> Rules() const override { return definition_.rules; }
-
-private:
-    LanguageDefinition definition_;
-};
-
 }  // namespace
 
 void RegisterCoreMessageRenderers(MessageRendererRegistry& registry) {
@@ -625,12 +612,6 @@ void RegisterCoreAgentMarkdownRenderer(MessageRendererRegistry& registry,
     if (registry.Find(ChatRowKind::AgentMarkdown) != nullptr) return;
     registry.Register(ChatRowKind::AgentMarkdown,
                       std::make_unique<CoreAgentMarkdownRenderer>(engine));
-}
-
-void RegisterCoreSyntaxGrammars(SyntaxGrammarRegistry& registry) {
-    for (const LanguageDefinition& definition : VendoredLanguages()) {
-        registry.Register(std::make_unique<VendoredGrammar>(definition));
-    }
 }
 
 void RegisterDefaultMarkdownEngine(MarkdownEngineRegistry& registry,

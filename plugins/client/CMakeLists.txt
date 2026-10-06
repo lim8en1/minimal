@@ -73,3 +73,8 @@ add_subdirectory(session-status)
 # model selector, modal chrome): the required widget-kit slot's default.
 
 add_subdirectory(ui-kit)
+
+# syntax-grammars is the bundled tree-sitter grammar set code blocks are
+# highlighted with.
+
+add_subdirectory(syntax-grammars)

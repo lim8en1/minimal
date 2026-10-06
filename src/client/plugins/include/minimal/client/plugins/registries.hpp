@@ -409,15 +409,20 @@ public:
 class SyntaxGrammar {
 public:
     virtual ~SyntaxGrammar() = default;
-    // Canonical language key ("python") -- the fenced-code info string is
-    // matched through the core alias table, which consults registered
-    // languages too.
+    // Canonical language key ("python"), matched against a fence label
+    // before any language's Aliases().
     virtual std::string_view Language() const = 0;
     // The tree-sitter parse function itself (tree_sitter_python and friends) --
     // the raw symbol, not a called result, so the highlighter's parser setup
     // treats registered and vendored grammars identically.
     virtual minimal::client::LanguageFnPtr LanguageFn() const = 0;
     virtual std::span<const SyntaxRule> Rules() const = 0;
+    // Positions that name a function (a call target, a declaration's name),
+    // which the node-type table alone cannot tell from other identifiers.
+    virtual std::span<const FunctionFieldRule> FunctionFields() const { return {}; }
+    // Other fence labels that mean this language ("py" for "python"). A
+    // language's own name always wins over another's alias.
+    virtual std::span<const std::string_view> Aliases() const { return {}; }
 };
 
 // --- Markdown engine (EXCLUSIVE) --------------------------------------------

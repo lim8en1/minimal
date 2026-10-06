@@ -1164,7 +1164,7 @@ Core never names a plugin, a plugin's tool, or a plugin's directory layout: a pl
 | Skills (`skills`: the `skill` tool, its permission model, the listing and preloads) | **Bundled plugin** | Prompt content a preset opts into; its gate is a plugin permission model, its listing and preloads are preset extensions. Disabled, no skill concept remains. |
 | `PrefixMentionResolver` | **Core default**, plugin-overridable | The minimum default needed to function. |
 | Themes, skills, agent presets, prompts | **Not plugins — config** | Pure data; a plugin would add ABI/build complexity for something that is already just a file. |
-| Syntax-highlighting grammars | **Client slot**, vendored set as the default | Additive and language-keyed (EXTENSIBILITY.md §4.2); the vendored set moves to a bundled plugin. |
+| Syntax-highlighting grammars | **Client slot**, bundled `syntax-grammars` plugin | Additive and language-keyed (EXTENSIBILITY.md §4.2): each grammar carries its node-type table, function-name positions and fence aliases; core keeps the highlighter. |
 
 `ask_user` (`tool-ask`) is also a bundled plugin, not listed as its own row — see *Asking the user* above for its rationale.
 

@@ -40,7 +40,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     //
     // ORDER MATTERS, and each step is load-bearing for a later one:
     //   1. ui.json (status format -- it selects plugin segments by id)
-    //   2. vendored grammars registered as the additive registry's defaults
+    //   2. (the grammars are plugins' too: the bundled syntax-grammars)
     //   3. PLUGIN LOAD (contexts carry the attention sink and the data path;
     //      registries record what each plugin claimed)
     //   4. Name resolution: collisions fatal, dangling/slot aliases warned
@@ -66,7 +66,6 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     out.host_widget_kit = plugins::MakeHostWidgetKit(out.registries.widget_kit);
     out.host_actions = std::make_unique<plugins::HostActionQueue>(out.host_focus_provider.get());
 
-    plugins::RegisterCoreSyntaxGrammars(out.registries.grammars);
 
     // Discovery + load. The config file is the client's own (client-plugins.json);
     // the server owns plugins.json, so neither writer can stomp the other's
@@ -332,16 +331,17 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         }
     }
 
-    // The highlighter consults the assembled grammar table (vendored defaults
-    // plus plugin additions), so a plugin's language highlights like a vendored
-    // one. The renderer owns it; the engine routes fenced code through it.
+    // The highlighter consults the assembled grammar table (every
+    // registered grammar -- the bundled syntax-grammars plugin's and
+    // any other plugin's alike). The renderer owns it; the engine routes fenced code through it.
     // Built INTO out.languages, not a local: SyntaxHighlighter stores a raw
     // pointer to this vector (see the address-stability contract in the
     // header), so its storage must outlive the highlighter, not just this
     // function call.
     for (const auto& grammar : out.registries.grammars.All()) {
         out.languages.push_back(minimal::client::LanguageDefinition{
-            grammar->Language(), grammar->LanguageFn(), grammar->Rules()});
+            grammar->Language(), grammar->LanguageFn(), grammar->Rules(),
+            grammar->FunctionFields(), grammar->Aliases()});
     }
     // emplace, not assignment: SyntaxHighlighter stores `const Theme&`, so it
     // has no default constructor and no operator= -- it can only ever be

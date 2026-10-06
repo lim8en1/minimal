@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include "ftxui_harness.hpp"
+#include "syntax_grammars.hpp"
 
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
@@ -1098,7 +1099,8 @@ TEST_CASE("chat view: a throwing or unclaimed display kind falls back to the tex
 
 TEST_CASE("chat view: the core diff and process renderers draw their payloads") {
     DisplayHarness h;
-    const minimal::client::SyntaxHighlighter highlighter(h.theme);
+    static const auto languages = minimal::client::syntax_grammars::Definitions();
+    const minimal::client::SyntaxHighlighter highlighter(h.theme, languages);
     plugins::RegisterCoreDisplayRenderers(h.display_renderers, *h.engine_registry.get(),
                                           highlighter);
 

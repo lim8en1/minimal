@@ -45,20 +45,30 @@ struct SyntaxRule {
 std::vector<HighlightSpan> ApplySpanOverrides(std::string_view code,
                                               const std::vector<HighlightSpan>& spans);
 
-// One language: canonical key, its parser, and its node-type table. The E5
-// grammar registry hands these to the highlighter; the vendored set is the
-// default resident.
+// A function name/call-target position, identified by (parent node type,
+// field name) rather than by node type alone: tree-sitter grammars use the
+// SAME node type ("identifier") for a function name as for any other
+// identifier, so the flat SyntaxRule table (type -> category) can't tell
+// `foo` in `foo()` from `foo` in `x = foo`. The traversal already tracks the
+// current node's field name and its parent's type, so matching is exact.
+struct FunctionFieldRule {
+    std::string_view parent_type;
+    std::string_view field_name;
+};
+
+// One language: canonical key, its parser, its node-type table, its
+// function-name positions and the fence labels that also mean it. The
+// grammar registry hands these to the highlighter (the bundled
+// syntax-grammars plugin registers the usual set).
 using LanguageFnPtr = const TSLanguage* (*)(void);
 
 struct LanguageDefinition {
     std::string_view name;
     LanguageFnPtr language_fn;
     std::span<const SyntaxRule> rules;
+    std::span<const FunctionFieldRule> function_fields = {};
+    std::span<const std::string_view> aliases = {};
 };
-
-// The vendored grammar set, as injectable definitions -- what the host
-// registers into the grammar registry as the defaults.
-std::vector<LanguageDefinition> VendoredLanguages();
 
 // tree-sitter core plus a curated, vendored grammar set. A regex tokenizer was
 // considered and rejected: nested/context-free constructs (Rust nested block
@@ -68,9 +78,8 @@ std::vector<LanguageDefinition> VendoredLanguages();
 // The highlighter never hardcodes a color; the theme supplies one per category.
 class SyntaxHighlighter {
 public:
-    explicit SyntaxHighlighter(const Theme& theme);
-    // `languages` is the injected table (the E5 grammar registry's contents,
-    // assembled by the host); the single-argument form uses the vendored set.
+    // `languages` is the grammar registry's contents, assembled by the host;
+    // it must outlive the highlighter.
     explicit SyntaxHighlighter(const Theme& theme,
                                const std::vector<LanguageDefinition>& languages);
     ~SyntaxHighlighter();
@@ -101,14 +110,10 @@ public:
     ftxui::Elements Highlight(std::string_view code, std::string_view language,
                               std::size_t block_id = 0) const;
 
-    // Whether `language` resolves to a grammar in the active set (aliases
-    // applied). With no table injected, the vendored set.
+    // Whether `language` resolves to a registered grammar (aliases applied).
     bool Supports(std::string_view language) const;
 
-    // CanonicalLanguage(language, this highlighter's own injected table).
-    // markdown_renderer calls this instead of the free function with no table
-    // so a plugin-registered (non-vendored) grammar's fence label resolves --
-    // the free function with no table only ever matches the vendored aliases.
+    // CanonicalLanguage(language, this highlighter's own table).
     std::string CanonicalLanguageFor(std::string_view language) const;
 
     // The Theme the highlighter holds is a REFERENCE whose contents may be
@@ -126,7 +131,7 @@ public:
 
 private:
     const Theme& theme_;
-    const std::vector<LanguageDefinition>* languages_ = nullptr;  // null = vendored
+    const std::vector<LanguageDefinition>* languages_ = nullptr;  // never null
 
     // -- Render-path caches (track R3). The highlighter is used from the FTXUI
     // render loop ONLY (single-threaded); Highlight()/HighlightCode() are const
@@ -160,9 +165,10 @@ private:
     mutable std::list<HighlightCacheEntry> highlight_cache_;   // MRU at front
 };
 
-// Normalizes markdown fence aliases ("c++", "py", "sh", ...) to the canonical
-// language name, or empty if unsupported. Exposed for the markdown renderer.
-// With a table injected, plugin languages resolve exactly (no aliases).
+// Normalizes a markdown fence label to a registered language's canonical
+// name: a language's own name first (exactly, over every alias), then the
+// aliases each declares ("c++", "py", "sh"); empty if none matches or there
+// is no table.
 std::string CanonicalLanguage(std::string_view info_string_language,
                               const std::vector<LanguageDefinition>* languages = nullptr);
 

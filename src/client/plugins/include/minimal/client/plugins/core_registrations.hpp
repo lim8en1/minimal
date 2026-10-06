@@ -25,11 +25,6 @@ void RegisterCoreAgentMarkdownRenderer(MessageRendererRegistry& registry,
 void RegisterCoreDisplayRenderers(DisplayRendererRegistry& registry, const MarkdownEngine& engine,
                                   const SyntaxHighlighter& highlighter);
 
-// The vendored grammars as the additive registry's defaults. Always runs --
-// the grammar slot has no "core default" concept beyond the vendored set; a
-// plugin may only ADD a language (claiming an existing one is a fatal
-// collision).
-void RegisterCoreSyntaxGrammars(SyntaxGrammarRegistry& registry);
 
 // Registers the md4c engine when no plugin claimed the exclusive slot.
 void RegisterDefaultMarkdownEngine(MarkdownEngineRegistry& registry,

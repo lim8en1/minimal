@@ -59,13 +59,13 @@ target_include_directories(minimal_client_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/include")
 
-# The vendored grammar set for the syntax highlighter. Populates and compiles
-# one static library per grammar; see the module header for why this is not
-# the grammar repos' own CMake.
+# The vendored grammar set (the bundled syntax-grammars plugin links it).
+# Populates and compiles one static library per grammar; see the module
+# header for why this is not the grammar repos' own CMake.
 include("${CMAKE_SOURCE_DIR}/cmake/TreeSitterGrammars.cmake")
 
-# tree-sitter core is normalized at the top level as minimal_tree_sitter; the
-# grammar set below supplies the per-language parsers.
+# tree-sitter core is normalized at the top level as minimal_tree_sitter;
+# the per-language parsers are the grammar plugins'.
 target_link_libraries(minimal_client_core
     PUBLIC
         minimal::common
@@ -78,15 +78,6 @@ target_link_libraries(minimal_client_core
         md4c::md4c
         minimal_tree_sitter
     PRIVATE
-        tsgrammar_cpp
-        tsgrammar_python
-        tsgrammar_javascript
-        tsgrammar_typescript
-        tsgrammar_bash
-        tsgrammar_json
-        tsgrammar_yaml
-        tsgrammar_rust
-        tsgrammar_go
         spdlog::spdlog)
 
 set_target_properties(minimal_client_core PROPERTIES

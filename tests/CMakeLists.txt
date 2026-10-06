@@ -383,6 +383,8 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/model_picker.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/model_picker_model.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/model_selector.cpp"
+    # syntax-grammars: the bundled grammar set the highlighter tests use.
+    "${CMAKE_SOURCE_DIR}/plugins/client/syntax-grammars/syntax_grammars.cpp"
     task_worker_test.cpp
     model_selector_test.cpp
     mcp_view_test.cpp)
@@ -398,6 +400,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/client/session-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/session-status"
     "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit"
+    "${CMAKE_SOURCE_DIR}/plugins/client/syntax-grammars"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")
 
 target_include_directories(minimal_tests PRIVATE
@@ -526,6 +529,10 @@ target_compile_definitions(minimal_tests PRIVATE
 # fixture (support/fake_http_mcp_server.hpp).
 find_package(httplib CONFIG REQUIRED)
 target_link_libraries(minimal_tests PRIVATE httplib::httplib)
+# The bundled grammar set's parsers (syntax_grammars.cpp is compiled in).
+target_link_libraries(minimal_tests PRIVATE
+    tsgrammar_cpp tsgrammar_python tsgrammar_javascript tsgrammar_typescript tsgrammar_bash
+    tsgrammar_json tsgrammar_yaml tsgrammar_rust tsgrammar_go)
 
 # TSAN_OPTIONS suppresses the uninstrumented system-libsqlite3 races the
 # multi-process E2E tests trigger (see tests/tsan.supp); ignored by non-TSan
