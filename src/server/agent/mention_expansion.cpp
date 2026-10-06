@@ -9,6 +9,7 @@
 
 #include "minimal/tools/file_access.hpp"
 #include "minimal/tools/path_confinement.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::agent {
 
@@ -34,7 +35,7 @@ constexpr std::string_view kTreePathNote =
 // in one turn. Both ceilings leave the mention verbatim -- the model can
 // still read the file itself through the gated read tool.
 constexpr int kMaxMentionsPerMessage = 32;
-constexpr std::size_t kMaxMentionBytesPerMessage = 8u << 20;  // 8 MiB of blocks
+constexpr std::size_t kMaxMentionBytesPerMessage = 8 * common::kMiB;  // of blocks
 
 bool IsWhitespace(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 

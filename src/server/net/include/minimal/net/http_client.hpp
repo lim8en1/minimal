@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "minimal/common/units.hpp"
 
 namespace minimal::net {
 
@@ -57,7 +58,7 @@ enum class HttpErrorKind { ConnectFailed, TlsError, Timeout, Cancelled, Other };
 // it aborts with HttpError{Other} rather than buffering unboundedly. Post()
 // carries a larger internal cap (see http_client.cpp) because legitimate
 // completions can be large.
-inline constexpr std::size_t kMaxResponseBodyBytes = 8u << 20;  // 8 MiB
+inline constexpr std::size_t kMaxResponseBodyBytes = 8 * common::kMiB;
 
 // Transport-level failure only -- a non-2xx status is NOT an error here. It
 // comes back via HttpResponse::status so the caller can classify it against

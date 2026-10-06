@@ -65,6 +65,7 @@
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/v1/session_service.pb.h"
+#include "minimal/common/units.hpp"
 
 namespace minimal::client {
 
@@ -185,7 +186,7 @@ struct PromptHistory {
     // (the default): memory only, the test/private-history case. A missing
     // or unreadable file starts empty; a failed write is logged, not fatal.
     void PersistTo(std::filesystem::path path);
-    static constexpr std::size_t kPersistMaxBytes = 1024 * 1024;
+    static constexpr std::size_t kPersistMaxBytes = common::kMiB;
 
     // A live browse position (PromptEditorState::history_cursor) registers
     // its address here for as long as its editor is alive, while `entries`

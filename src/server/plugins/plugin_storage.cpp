@@ -12,6 +12,7 @@
 #include "minimal/store/file_lock.hpp"
 #include "minimal/common/clock.hpp"
 #include "minimal/store/sqlite_util.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::plugins {
 namespace {
@@ -166,7 +167,7 @@ void PluginStorage::Set(std::string_view plugin, std::string_view key, std::stri
     // unbounded scratch space -- one buggy or hostile plugin could otherwise
     // grow the host's plugin database without limit. 1 MiB per value is far
     // above any legitimate state blob (checklist/cost rows are kilobytes).
-    constexpr std::size_t kMaxValueBytes = 1u << 20;
+    constexpr std::size_t kMaxValueBytes = common::kMiB;
     if (value.size() > kMaxValueBytes) {
         throw std::runtime_error("plugin storage: value exceeds the 1 MiB quota (plugin '" +
                                  std::string(plugin) + "', key '" + std::string(key) + "')");

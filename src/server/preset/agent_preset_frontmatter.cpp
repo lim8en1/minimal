@@ -11,6 +11,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/common/read_file.hpp"
 #include "minimal/config/permission_codec.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::agent {
 
@@ -23,7 +24,7 @@ namespace {
 // and yaml-cpp's recursive-descent parser has no built-in depth or size
 // limit. An oversized file is refused after reading at most one byte past
 // the cap, before any parse, on every ListAvailable() scan and Resolve().
-constexpr std::uintmax_t kMaxPresetFileBytes = 1 << 20;  // 1 MiB
+constexpr std::uintmax_t kMaxPresetFileBytes = common::kMiB;
 
 std::string RequireString(const YAML::Node& node, const std::string& key) {
     const YAML::Node value = node[key];

@@ -15,6 +15,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/sidecar/process.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::memory {
 namespace {
@@ -89,10 +90,10 @@ _main()
 )PY";
 
 constexpr int kProtoOutFd = 3;
-constexpr std::size_t kMaxDiagBytes = 16 * 1024;
+constexpr std::size_t kMaxDiagBytes = 16 * common::kKiB;
 // A generously large single protocol line: a big reindex batch's embeddings
 // serialized as JSON. Above this is corruption, not a legitimate response.
-constexpr std::size_t kMaxLineBytes = 256ULL * 1024 * 1024;
+constexpr std::size_t kMaxLineBytes = 256 * common::kMiB;
 
 class SidecarEmbeddingFunction final : public EmbeddingFunction {
 public:

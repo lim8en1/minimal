@@ -1,4 +1,5 @@
 #include "minimal/net/sse_parser.hpp"
+#include "minimal/common/units.hpp"
 
 #include <stdexcept>
 
@@ -16,7 +17,7 @@ std::string_view strip_cr(std::string_view line) {
 // objects); past it the stream is broken, and the failure is thrown so the
 // provider's existing catch-and-classify machinery turns it into an LlmError
 // rather than letting a wedged proxy consume memory until the idle timeout.
-constexpr std::size_t kMaxPendingBytes = 1ull << 20;
+constexpr std::size_t kMaxPendingBytes = common::kMiB;
 
 }  // namespace
 

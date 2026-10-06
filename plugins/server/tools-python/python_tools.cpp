@@ -10,6 +10,7 @@
 #include <re2/re2.h>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/common/units.hpp"
 
 #include "json_fields.hpp"
 #include "python_env.hpp"
@@ -20,7 +21,7 @@ namespace {
 using tools::PermissionDisclosure;
 using tools::ToolResult;
 
-constexpr std::size_t kMaxCodeBytes = 1024 * 1024;
+constexpr std::size_t kMaxCodeBytes = common::kMiB;
 
 std::string FirstLine(const std::string& text, std::size_t max) {
     auto end = text.find('\n');
@@ -646,10 +647,12 @@ private:
     }
     static std::string Bytes(std::uint64_t n) {
         std::ostringstream out;
-        if (n >= 1024 * 1024) {
-            out << std::fixed << std::setprecision(1) << (n / (1024.0 * 1024.0)) << " MiB";
-        } else if (n >= 1024) {
-            out << std::fixed << std::setprecision(1) << (n / 1024.0) << " KiB";
+        if (n >= common::kMiB) {
+            out << std::fixed << std::setprecision(1)
+                << (static_cast<double>(n) / static_cast<double>(common::kMiB)) << " MiB";
+        } else if (n >= common::kKiB) {
+            out << std::fixed << std::setprecision(1)
+                << (static_cast<double>(n) / static_cast<double>(common::kKiB)) << " KiB";
         } else {
             out << n << " B";
         }

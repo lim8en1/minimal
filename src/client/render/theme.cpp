@@ -11,6 +11,7 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/common/read_file.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::client {
 
@@ -180,7 +181,7 @@ Theme Theme::Parse(std::string_view json, ColorDepth depth,
 Theme Theme::Load(const std::filesystem::path& themes_dir, const std::string& name,
                   ColorDepth depth, const std::vector<std::string>* known_plugins) {
     const std::filesystem::path file = themes_dir / (name + ".json");
-    const common::ReadFileResult read = common::ReadFile(file, 1u << 20);
+    const common::ReadFileResult read = common::ReadFile(file, common::kMiB);
     if (!read.ok()) throw std::runtime_error("theme: " + read.error);
     try {
         return Parse(read.contents, depth, known_plugins);

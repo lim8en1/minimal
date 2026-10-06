@@ -5,6 +5,7 @@
 #include <optional>
 
 #include <nlohmann/json.hpp>
+#include "minimal/common/units.hpp"
 
 namespace minimal::provider_openai {
 
@@ -14,7 +15,7 @@ namespace {
 // be as large as the HTTP client's 64 MiB cap; handing all of it to nlohmann
 // to extract one string is a self-inflicted stall on a hostile (or merely
 // absurd) error body. 64 KiB is the same bound the streaming path applies.
-constexpr std::size_t kMaxErrorBodyParse = 64 * 1024;
+constexpr std::size_t kMaxErrorBodyParse = 64 * common::kKiB;
 // And no extracted/embedded message grows beyond this either.
 constexpr std::size_t kMaxErrorMessage = 2000;
 

@@ -21,6 +21,7 @@
 
 #include "minimal/sidecar/capped_buffer.hpp"
 #include "minimal/sidecar/process.hpp"
+#include "minimal/common/units.hpp"
 
 #include "bash_settings.hpp"
 #include "bash_session_state.hpp"
@@ -42,7 +43,7 @@ constexpr int kStateFd = 9;
 // whole timeout; on overflow the payload is discarded WHOLESALE, preserving the
 // all-or-nothing rule: adopting a truncated prefix would silently apply partial
 // environment state.
-constexpr std::size_t kMaxStatePayloadBytes = 1 << 20;  // 1 MiB
+constexpr std::size_t kMaxStatePayloadBytes = common::kMiB;
 
 // Fail-fast window for a detached grandchild (DrainOptions::idle_after_reap_ms):
 // after the shell is reaped, output pipes still open mean a grandchild inherited

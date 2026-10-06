@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <sys/stat.h>
+#include "minimal/common/units.hpp"
 
 namespace minimal::tools_search {
 namespace {
@@ -46,7 +47,7 @@ constexpr int kMaxDirEntries = 10000;
 // istreambuf_iterator slurp: a generated ignore file of arbitrary size was
 // materialized whole before parsing. Rules past the cap simply do not apply
 // (the same degradation as one untranslatable line), never a walk failure.
-constexpr std::streamoff kMaxGitignoreBytes = 1024 * 1024;
+constexpr std::streamoff kMaxGitignoreBytes = common::kMiB;
 
 // The walk state. Three conditions stop a walk -- cancellation, timeout, and
 // the callback's own "I have enough" -- and they are kept apart only so the

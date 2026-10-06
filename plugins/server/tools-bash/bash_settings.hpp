@@ -4,6 +4,7 @@
 #include <string>
 
 #include <nlohmann/json.hpp>
+#include "minimal/common/units.hpp"
 
 namespace minimal::tools_bash {
 
@@ -37,9 +38,9 @@ struct BashSettings {
     // Bounds the PERSISTED result (the ToolResultBlock the model sees). Live
     // streaming through emit_output is uncapped -- that channel is lossy by
     // design, this one is the record.
-    std::int64_t max_output_bytes = 1024 * 1024;
+    std::int64_t max_output_bytes = common::kMiB;
     // RLIMIT_FSIZE backstop, reachable now that redirection works (`cmd > big`).
-    std::int64_t max_file_size_bytes = 1024LL * 1024 * 1024;
+    std::int64_t max_file_size_bytes = common::kGiB;
     // Operator-swappable, like everything else here: a different POSIX shell, or
     // a wrapper that enters a container, needs no code change.
     std::string shell = "/bin/sh";

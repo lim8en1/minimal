@@ -1,4 +1,5 @@
 #include "minimal/tools/file_access.hpp"
+#include "minimal/common/units.hpp"
 
 #include <algorithm>
 #include <array>
@@ -16,7 +17,7 @@ constexpr const char* kNulMarker =
 // promise this function makes is that memory tracks `limit`, and "no configured
 // truncation" is not the same as "willing to allocate a whole file for one
 // line". Generous enough that no real source line reaches it.
-constexpr std::size_t kHardLineCap = 1 << 20;  // 1 MiB
+constexpr std::size_t kHardLineCap = common::kMiB;
 
 bool LooksBinary(std::ifstream& in) {
     std::array<char, kBinarySniffBytes> buffer{};

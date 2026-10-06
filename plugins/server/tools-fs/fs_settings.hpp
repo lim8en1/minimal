@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include <nlohmann/json.hpp>
+#include "minimal/common/units.hpp"
 
 namespace minimal::tools_fs {
 
@@ -23,7 +24,7 @@ struct FsSettings {
     // read) must hold the whole file to rewrite it. Past this, the model is told
     // to use a different approach rather than the server quietly allocating a
     // gigabyte.
-    std::int64_t edit_max_editable_file_bytes = 5 * 1024 * 1024;
+    std::int64_t edit_max_editable_file_bytes = 5 * common::kMiB;
 };
 
 // Every field optional; a missing field keeps the struct's default. A present

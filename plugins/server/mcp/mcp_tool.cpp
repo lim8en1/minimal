@@ -3,6 +3,7 @@
 #include <chrono>
 
 #include "minimal/mcp/naming.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::mcp {
 
@@ -58,7 +59,7 @@ tools::ToolResult McpResultToToolResult(const nlohmann::json& call_result) {
     // afterward and is the real model-facing bound; this just keeps a
     // hostile response from forcing a huge transient allocation/copy before
     // that ceiling ever gets a chance to apply.
-    constexpr std::size_t kMaxContentText = 1 << 20;  // 1 MiB
+    constexpr std::size_t kMaxContentText = common::kMiB;
     std::string text;
     for (const auto& item : call_result.at("content")) {
         if (text.size() >= kMaxContentText) break;

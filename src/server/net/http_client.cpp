@@ -1,4 +1,5 @@
 #include "minimal/net/http_client.hpp"
+#include "minimal/common/units.hpp"
 
 #include <cctype>
 #include <chrono>
@@ -72,7 +73,7 @@ enum class Mode { Blocking, Streaming, Get, Delete };
 // could OOM the process. Enforced in WriteCallback rather than only via
 // CURLOPT_MAXFILESIZE_LARGE, because the libcurl option is advisory unless the
 // server states a Content-Length -- a chunked response would sail past it.
-constexpr std::size_t kMaxBodyBytes = 64ull << 20;
+constexpr std::size_t kMaxBodyBytes = 64 * common::kMiB;
 
 struct TransferState {
     Mode mode = Mode::Blocking;
@@ -128,7 +129,7 @@ void MaybeFireHeadersReady(TransferState& state) {
 
 // 64 KiB of response headers is orders above any legitimate completion
 // response (status, content-type, request ids, rate-limit buckets).
-constexpr std::size_t kMaxHeaderBytes = 64ull << 10;
+constexpr std::size_t kMaxHeaderBytes = 64 * common::kKiB;
 
 std::size_t HeaderCallback(char* buffer, std::size_t size, std::size_t nitems, void* userdata) {
     auto& state = *static_cast<TransferState*>(userdata);

@@ -19,6 +19,7 @@
 #include "minimal/client/rpc_queue.hpp"
 #include "minimal/client/session_components.hpp"
 #include "minimal/client/session_client.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::client::plugins {
 class AttentionState;
@@ -39,7 +40,7 @@ public:
     // Memory bounds (track R2). Defaults; AppState applies ui.json's values
     // right after construction, before any event can arrive.
     static constexpr int kDefaultScrollbackWindowMaxMessages = 2000;
-    static constexpr int kDefaultToolOutputBufferBytes = 64 * 1024;
+    static constexpr int kDefaultToolOutputBufferBytes = 64 * common::kKiB;
 
     // Streaming caps (see the members below). 2 MiB of live text is far past
     // what a human reads mid-turn; the transcript is authoritative -- the

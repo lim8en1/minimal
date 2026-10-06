@@ -11,6 +11,7 @@
 #include "minimal/client/view/tool_status.hpp"
 #include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::client {
 
@@ -51,7 +52,7 @@ private:
 // presentation only (the segment-count cap's notice lives in the status
 // bar's {activity} suffix; this one is an in-row "[...]").
 constexpr std::size_t kMaxLiveThinkingLines = 300;
-constexpr std::size_t kMaxLiveThinkingTailBytes = 64 * 1024;
+constexpr std::size_t kMaxLiveThinkingTailBytes = 64 * common::kKiB;
 
 // The row kinds a click may collapse: exactly those whose core renderers
 // draw a distinct collapsed form (ctx.collapsed is otherwise ignored, so a

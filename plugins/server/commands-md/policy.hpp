@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include "minimal/common/units.hpp"
 
 namespace minimal::commands_md {
 
@@ -35,6 +36,6 @@ inline constexpr std::int64_t kCpuBackstopGraceSeconds = 30;
 // startup and listing: past this a file is a broken command, skipped with a
 // warning. A command file is a prompt plus frontmatter; 1 MiB is orders of
 // magnitude above any real one.
-inline constexpr std::size_t kMaxCommandFileBytes = std::size_t{1} << 20;
+inline constexpr std::size_t kMaxCommandFileBytes = common::kMiB;
 
 }  // namespace minimal::commands_md

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "minimal/common/units.hpp"
 
 namespace minimal::tools_python {
 
@@ -38,23 +39,23 @@ struct PythonSettings {
     // reporting "no reaction".
     std::int64_t grace_seconds = 2;
     // Bounds the PERSISTED result text per request (the transcript's copy).
-    std::int64_t max_output_bytes = 1024 * 1024;
+    std::int64_t max_output_bytes = common::kMiB;
     // Driver-side per-stream capture cap (stdout/stderr inside the
     // interpreter), communicated via _MINIMAL_PY_CAPTURE at spawn. Bounds the
     // protocol line size; max_output_bytes bounds what is persisted.
-    std::int64_t max_capture_bytes = 1024 * 1024;
+    std::int64_t max_capture_bytes = common::kMiB;
     // RLIMIT_CPU backstop for the interpreter process, seconds. 0 = disabled:
     // the interpreter's clock is the session's clock, and a CPU-spinning live
     // session is the model's/user's to interrupt -- the default stance is
     // "timeouts demote, never destroy".
     std::int64_t rlimit_cpu_seconds = 0;
     // RLIMIT_FSIZE backstop for files the executed code writes.
-    std::int64_t max_file_size_bytes = 1024LL * 1024 * 1024;
+    std::int64_t max_file_size_bytes = common::kGiB;
     // The live-output ring for python_output polling (head+tail windows over
     // the running request's stdout stream; see stream_ring.hpp). The ring
     // exists only while a request is running and is discarded on completion.
-    std::int64_t stream_head_bytes = 256 * 1024;
-    std::int64_t stream_tail_bytes = 768 * 1024;
+    std::int64_t stream_head_bytes = 256 * common::kKiB;
+    std::int64_t stream_tail_bytes = 768 * common::kKiB;
     // Default deadline for background requests (seconds; 0 = unlimited, the
     // stance "timeouts demote, never destroy"). A per-call python_exec
     // max_runtime overrides it; on expiry the reader soft-interrupts and --

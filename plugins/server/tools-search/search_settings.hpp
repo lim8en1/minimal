@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include <nlohmann/json.hpp>
+#include "minimal/common/units.hpp"
 
 namespace minimal::tools_search {
 
@@ -21,7 +22,7 @@ struct SearchSettings {
     // itself cannot wedge the worker; the timeout bounds the WALK.)
     int grep_default_head_limit = 250;
     int grep_max_results = 1000;
-    std::int64_t grep_max_file_bytes = 1024 * 1024;
+    std::int64_t grep_max_file_bytes = common::kMiB;
     int grep_timeout_ms = 10000;
     int grep_max_context_lines = 10;
     int grep_max_line_length = 2000;

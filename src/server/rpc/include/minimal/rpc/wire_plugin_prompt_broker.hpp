@@ -13,6 +13,7 @@
 #include "minimal/rpc/wire_prompt.hpp"
 #include "minimal/tools/prompt.hpp"
 #include "minimal/v1/session_service.pb.h"
+#include "minimal/common/units.hpp"
 
 namespace minimal::rpc {
 
@@ -32,7 +33,7 @@ public:
     // as an answer the tool would have to second-guess.
     tools::PromptResult Prompt(const tools::PromptRequest& request) override;
 
-    static constexpr std::size_t kMaxAnswerBytes = 256 * 1024;
+    static constexpr std::size_t kMaxAnswerBytes = 256 * common::kKiB;
 
 private:
     WirePrompt prompt_;

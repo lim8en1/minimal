@@ -8,6 +8,7 @@
 #include "anthropic_stream_reassembler.hpp"
 #include "minimal/llm/json_depth.hpp"
 #include "minimal/net/sse_parser.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::provider_anthropic {
 
@@ -138,7 +139,7 @@ llm::ChatResponse AnthropicProvider::StreamComplete(const llm::ChatRequest& requ
             // The append allocates too -- the barrier covers the whole
             // error-body branch, not just the parse path below.
             try {
-                constexpr std::size_t kMaxErrorBody = 64 * 1024;
+                constexpr std::size_t kMaxErrorBody = 64 * common::kKiB;
                 if (error_body.size() < kMaxErrorBody) {
                     error_body.append(chunk.substr(0, kMaxErrorBody - error_body.size()));
                     return true;

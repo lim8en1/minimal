@@ -3,6 +3,7 @@
 #include <string>
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::memory {
 
@@ -41,7 +42,7 @@ MemorySettings ParseMemorySettings(const nlohmann::json& config) {
         reader.Double("tag_merge_similarity", out.tag_merge_similarity, 0.5, 1.0);
 
     out.allow_inline = reader.Bool("allow_inline", out.allow_inline);
-    int_in("max_text_bytes", out.max_text_bytes, 256, 1 << 20);
+    int_in("max_text_bytes", out.max_text_bytes, 256, common::kMiB);
     int_in("batch_size", out.batch_size, 1, 256);
     int_in("default_limit", out.default_limit, 1, 64);
     out.writes_prompt = reader.Bool("writes_prompt", out.writes_prompt);

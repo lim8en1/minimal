@@ -1,4 +1,5 @@
 #include "minimal/client/session_client.hpp"
+#include "minimal/common/units.hpp"
 
 #include <chrono>
 #include <utility>
@@ -41,7 +42,7 @@ inline constexpr std::chrono::seconds kDetachJoinTimeout = std::chrono::seconds(
 // tool-output cap every producer applies.
 std::shared_ptr<grpc::Channel> MakeChannel(const std::string& target) {
     grpc::ChannelArguments args;
-    constexpr int kMaxMessageBytes = 64 * 1024 * 1024;
+    constexpr int kMaxMessageBytes = 64 * common::kMiB;
     args.SetMaxReceiveMessageSize(kMaxMessageBytes);
     args.SetMaxSendMessageSize(kMaxMessageBytes);
     return grpc::CreateCustomChannel(target, grpc::InsecureChannelCredentials(), args);

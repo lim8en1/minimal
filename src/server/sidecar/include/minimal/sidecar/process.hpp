@@ -33,6 +33,7 @@
 
 #include <sys/resource.h>
 #include <sys/types.h>
+#include "minimal/common/units.hpp"
 
 namespace minimal::sidecar {
 
@@ -89,7 +90,7 @@ struct LaunchSpec {
     // this, a child inherits the server's stdin and any command that reads
     // fd 0 blocks until the deadline.
     std::int64_t cpu_seconds = 0;  // 0 = unlimited; clamped to the host's hard cap by Launch()
-    std::int64_t file_size_bytes = 1LL << 30;  // RLIMIT_FSIZE backstop, 0 = unlimited; clamped likewise
+    std::int64_t file_size_bytes = common::kGiB;  // RLIMIT_FSIZE backstop, 0 = unlimited; clamped likewise
 };
 
 // The parent-side handles of a launched process. All fds are O_CLOEXEC and

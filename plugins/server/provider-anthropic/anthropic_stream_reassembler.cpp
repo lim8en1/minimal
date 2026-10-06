@@ -4,6 +4,7 @@
 
 #include "anthropic_response.hpp"
 #include "minimal/llm/json_depth.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::provider_anthropic {
 namespace {
@@ -13,7 +14,7 @@ namespace {
 // parser bounds individual LINES, nothing bounds the TOTAL, and a server
 // drip-feeding just under the idle timeout would otherwise grow this
 // forever while the session worker hangs.
-constexpr std::size_t kMaxAccumulatedBytes = 64ull << 20;
+constexpr std::size_t kMaxAccumulatedBytes = 64 * common::kMiB;
 
 void Accumulate(std::size_t& total, std::size_t bytes) {
     total += bytes;

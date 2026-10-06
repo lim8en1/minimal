@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "minimal/sidecar/drain.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::tools_python {
 
@@ -71,7 +72,7 @@ CapturedRun RunCaptured(const std::vector<std::string>& argv, const std::filesys
     // RLIMIT_CPU backstop: the wall-clock deadline normally fires first; the
     // grace keeps the two from racing on a slow-but-healthy install.
     spec.cpu_seconds = timeout_seconds + 30;
-    spec.file_size_bytes = 1024LL * 1024 * 1024;
+    spec.file_size_bytes = common::kGiB;
 
     auto launched = minimal::sidecar::Launch(spec);
     if (!launched.ok) {

@@ -56,6 +56,7 @@
 #include <vector>
 
 #include "minimal/v1/session_service.pb.h"
+#include "minimal/common/units.hpp"
 
 namespace minimal::rpc {
 
@@ -69,13 +70,13 @@ public:
     // The old EventQueue's bounds, unchanged: a ceiling that catches a runaway
     // producer, not a tuning knob (see event_queue.hpp for the arithmetic).
     static constexpr std::size_t kDefaultMaxEvents = 65536;
-    static constexpr std::size_t kDefaultMaxBytes = 64ull << 20;
+    static constexpr std::size_t kDefaultMaxBytes = 64 * common::kMiB;
     // The zero-subscriber backlog's byte bound, deliberately far below a live
     // subscriber's: nobody is reading it, so it is pure resident memory per
     // detached session (a background subagent streaming tool output filled
     // 64 MiB each). Overflow is the same drop-oldest + resync latch as
     // everywhere else -- the transcript, not the backlog, is the durable log.
-    static constexpr std::size_t kDefaultBacklogMaxBytes = 8ull << 20;
+    static constexpr std::size_t kDefaultBacklogMaxBytes = 8 * common::kMiB;
 
     // session_id is stamped onto the ResyncRequiredEvents this broadcaster
     // synthesizes -- they must be wire-valid ServerEvents like any other.

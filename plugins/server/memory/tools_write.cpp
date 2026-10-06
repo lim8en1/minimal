@@ -10,6 +10,7 @@
 
 #include "minimal/common/utf8.hpp"
 #include "minimal/tools/path_confinement.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::memory {
 namespace {
@@ -24,7 +25,7 @@ constexpr double kSimilarThreshold = 0.92;
 // A memory file is notes, not a corpus: checked BEFORE reading, so a huge or
 // wrong file is refused without being loaded (and without flooding the store
 // with thousands of chunks).
-constexpr std::uintmax_t kMaxIngestFileBytes = 2u << 20;
+constexpr std::uintmax_t kMaxIngestFileBytes = 2 * common::kMiB;
 
 // Titles and descriptions are single lines: they render in lists and in the
 // context index.

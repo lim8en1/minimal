@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "minimal/common/units.hpp"
 
 namespace minimal::config {
 
@@ -71,7 +72,7 @@ struct ToolsSettings {
     // lifecycle events, permission requests and hook payloads -- was bounded
     // only by the model's output budget. Over the cap is an error result the
     // model adapts to, like every other refusal. 0 disables.
-    std::int64_t max_input_bytes = 10 * 1024 * 1024;
+    std::int64_t max_input_bytes = 10 * common::kMiB;
     // THE global ceiling on one tool call's RESULT, checked once after
     // execution regardless of which tool produced it. A core tool like bash
     // caps its own output (bash.max_output_bytes), but that cap is the
@@ -81,11 +82,11 @@ struct ToolsSettings {
     // request, into SQLite, and into every later turn's prefix until
     // compaction. Truncated over the cap, with a visible marker, never an
     // error result -- a large result is not a refusal. 0 disables.
-    std::int64_t max_result_bytes = 10 * 1024 * 1024;
+    std::int64_t max_result_bytes = 10 * common::kMiB;
     // Ceiling on one result's client-only display payload (serialized JSON).
     // Over it the payload is DROPPED, never truncated -- a cut diff misleads --
     // and the client falls back to the text. 0 disables.
-    std::int64_t max_display_bytes = 128 * 1024;
+    std::int64_t max_display_bytes = 128 * common::kKiB;
 };
 
 struct ToolsViewSettings {

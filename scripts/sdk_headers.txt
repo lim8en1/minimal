@@ -68,6 +68,7 @@ minimal/common/json_config_loader.hpp
 minimal/common/model_ref.hpp
 minimal/common/read_file.hpp
 minimal/common/utf8.hpp
+minimal/common/units.hpp
 minimal/config/frontmatter.hpp
 minimal/config/parse_util.hpp
 minimal/config/permission_codec.hpp

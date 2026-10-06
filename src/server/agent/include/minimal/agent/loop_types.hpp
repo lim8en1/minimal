@@ -39,6 +39,7 @@
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_pool.hpp"
 #include "minimal/tools/tool_registry.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::agent {
 
@@ -83,7 +84,7 @@ struct LoopConfig {
     // The global tool-input ceiling (settings.json tools.max_input_bytes).
     // Checked at the gate, before Prepare: no hook payload, no permission
     // request, no execution -- one error result the model adapts to.
-    std::int64_t max_tool_input_bytes = 10 * 1024 * 1024;
+    std::int64_t max_tool_input_bytes = 10 * common::kMiB;
 
     // The global tool-RESULT ceiling (settings.json tools.max_result_bytes).
     // Mirrors max_tool_input_bytes on the output side: a core tool like bash
@@ -91,11 +92,11 @@ struct LoopConfig {
     // -- an MCP tool or a third-party plugin tool has no ceiling at all
     // short of this one. Checked once, right after Execute() returns, so it
     // applies uniformly to every tool regardless of who wrote it. 0 disables.
-    std::int64_t max_tool_result_bytes = 10 * 1024 * 1024;
+    std::int64_t max_tool_result_bytes = 10 * common::kMiB;
 
     // Ceiling on a result's display payload (settings.json
     // tools.max_display_bytes). Over it the payload is dropped whole. 0 disables.
-    std::int64_t max_tool_display_bytes = 128 * 1024;
+    std::int64_t max_tool_display_bytes = 128 * common::kKiB;
 
     // Exponential-with-EQUAL-jitter backoff between retries: half the ceiling
     // is a fixed floor, the other half random. Full jitter can legally draw

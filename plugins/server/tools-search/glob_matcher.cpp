@@ -1,4 +1,5 @@
 #include "glob_matcher.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::tools_search {
 namespace {
@@ -153,7 +154,7 @@ namespace {
 // translation are far above every legitimate glob; past either the pattern is
 // refused (nullopt -> the tool's error result), not matched.
 constexpr int kMaxBraceDepth = 16;
-constexpr std::size_t kMaxTranslatedBytes = 64ull << 10;
+constexpr std::size_t kMaxTranslatedBytes = 64 * common::kKiB;
 
 bool GlobToRegexImpl(std::string_view glob, GlobFlags flags, int depth, std::string& out) {
     if (depth > kMaxBraceDepth) return false;

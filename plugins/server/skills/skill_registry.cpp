@@ -12,6 +12,7 @@
 #include "minimal/config/project_dirs.hpp"
 #include "minimal/config/project_trust.hpp"
 #include "minimal/config/project_trust.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::skills {
 namespace {
@@ -22,7 +23,7 @@ namespace {
 // skill's body is inlined verbatim into the system prompt on every session
 // start, so an oversized file is not just a slow parse -- it is unbounded
 // prompt-cache-busting content shipped to the model on every turn.
-constexpr std::uintmax_t kMaxSkillFileBytes = 1 << 20;  // 1 MiB
+constexpr std::uintmax_t kMaxSkillFileBytes = common::kMiB;
 
 // nullopt distinguishes "could not read" from "read an empty file". Collapsing
 // the two made an unreadable SKILL.md report "missing frontmatter block", which

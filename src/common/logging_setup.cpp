@@ -1,4 +1,5 @@
 #include "minimal/common/logging_setup.hpp"
+#include "minimal/common/units.hpp"
 
 #include <spdlog/spdlog.h>
 #include <spdlog/logger.h>
@@ -53,7 +54,7 @@ std::string ConfigureLogging(const LoggingOptions& options) {
             // max_size_mb: 0 would make every message rotate.
             const std::size_t max_bytes =
                 static_cast<std::size_t>(options.max_size_mb > 0 ? options.max_size_mb : 10) *
-                1024 * 1024;
+                common::kMiB;
             const std::size_t max_files =
                 static_cast<std::size_t>(options.max_files > 0 ? options.max_files : 5);
             sinks.push_back(std::make_shared<spdlog::sinks::rotating_file_sink_mt>(

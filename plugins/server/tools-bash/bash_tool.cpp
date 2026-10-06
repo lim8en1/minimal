@@ -20,6 +20,7 @@
 #include "stage_normalize.hpp"
 #include "minimal/common/utf8.hpp"
 #include "minimal/sidecar/drain.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::tools_bash {
 namespace {
@@ -37,7 +38,7 @@ ToolResult Error(std::string message) { return ToolResult{true, std::move(messag
 // already holds the whole capped output for the model, a client renders a
 // tail anyway, and a full copy would blow tools.max_display_bytes (dropping
 // the payload) for exactly the long runs where the exit badge matters most.
-constexpr std::size_t kDisplayOutputTailBytes = 16 * 1024;
+constexpr std::size_t kDisplayOutputTailBytes = 16 * common::kKiB;
 
 nlohmann::json ProcessDisplay(const std::string& command, const std::filesystem::path& cwd,
                               std::int64_t duration_ms, const std::string& output) {

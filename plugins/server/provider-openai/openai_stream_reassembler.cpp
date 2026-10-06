@@ -4,6 +4,7 @@
 
 #include "openai_response.hpp"
 #include "minimal/llm/json_depth.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::provider_openai {
 namespace {
@@ -13,7 +14,7 @@ namespace {
 // to bound the TOTAL, so a server dripping one small frame just under every
 // idle timeout grew these strings at its drip rate forever while the session
 // worker hung. 64 MiB is ~16x a legitimate 1M-token text response.
-constexpr std::size_t kMaxAccumulatedBytes = 64ull << 20;
+constexpr std::size_t kMaxAccumulatedBytes = 64 * common::kMiB;
 
 void Accumulate(std::size_t& total, std::size_t bytes) {
     total += bytes;

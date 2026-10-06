@@ -14,6 +14,7 @@
 
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::rpc {
 namespace {
@@ -66,7 +67,7 @@ Server::Server(SessionServiceImpl& service, std::filesystem::path socket_path,
     // and implicit: receive capped at 4 MB (a large tool_use input or a fat
     // rewind payload failed with an opaque RESOURCE_EXHAUSTED), send
     // unlimited (a runaway response was bounded by nothing on the wire).
-    constexpr int kMaxMessageBytes = 64 * 1024 * 1024;
+    constexpr int kMaxMessageBytes = 64 * common::kMiB;
     builder.SetMaxReceiveMessageSize(kMaxMessageBytes);
     builder.SetMaxSendMessageSize(kMaxMessageBytes);
     int selected_port = 0;

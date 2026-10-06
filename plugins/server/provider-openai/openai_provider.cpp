@@ -4,6 +4,7 @@
 
 #include "minimal/llm/json_depth.hpp"
 #include "minimal/net/sse_parser.hpp"
+#include "minimal/common/units.hpp"
 #include "openai_error_mapping.hpp"
 #include "openai_request.hpp"
 #include "openai_response.hpp"
@@ -134,7 +135,7 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
                 // reading). Aborting lands in the catch below, which classifies by
                 // the STATUS -- the one fact that matters -- with the body we
                 // already hold.
-                constexpr std::size_t kMaxErrorBody = 64 * 1024;
+                constexpr std::size_t kMaxErrorBody = 64 * common::kKiB;
                 if (error_body.size() < kMaxErrorBody) {
                     error_body.append(chunk.substr(0, kMaxErrorBody - error_body.size()));
                     return true;

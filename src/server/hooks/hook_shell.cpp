@@ -13,6 +13,7 @@
 #include "minimal/common/utf8.hpp"
 #include "minimal/sidecar/drain.hpp"
 #include "minimal/sidecar/process.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::hooks {
 namespace {
@@ -21,12 +22,12 @@ namespace {
 // line ever becomes a block reason, and a hook piping a build log must not
 // grow a string without limit on the caller's thread. Past the cap the output
 // is still drained (head and tail kept), so the child never blocks writing.
-constexpr std::int64_t kMaxCapturedBytes = 1 << 20;  // 1 MiB
+constexpr std::int64_t kMaxCapturedBytes = common::kMiB;
 constexpr std::size_t kMaxBlockReasonBytes = 500;
 // Matches the bash tool's default filesize backstop (bash_settings.hpp): a
 // hook script redirecting to a file is bounded the same way its model-driven
 // cousin is.
-constexpr std::int64_t kMaxHookFileSizeBytes = 1024LL * 1024 * 1024;  // 1 GiB
+constexpr std::int64_t kMaxHookFileSizeBytes = common::kGiB;
 
 std::string FirstLine(std::string_view captured) {
     std::string_view line;

@@ -4,6 +4,7 @@
 #include <optional>
 
 #include <nlohmann/json.hpp>
+#include "minimal/common/units.hpp"
 
 namespace minimal::provider_anthropic {
 
@@ -27,7 +28,7 @@ struct ParsedError {
 // version of this comment claimed), so handing all of it to nlohmann to
 // extract one string is a self-inflicted stall on a hostile (or merely
 // absurd) error body. Same bound as provider-openai's HeadOf.
-constexpr std::size_t kMaxErrorBodyParse = 64 * 1024;
+constexpr std::size_t kMaxErrorBodyParse = 64 * common::kKiB;
 
 std::string_view HeadOf(const std::string& body) {
     std::string_view slice(body);

@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "minimal/common/utf8.hpp"
+#include "minimal/common/units.hpp"
 
 #include "driver_source.hpp"
 #include "json_fields.hpp"
@@ -29,8 +30,8 @@ using tools::BackgroundTaskEvent;
 // is noticed through session_lifetime -- OnSessionEnded's Erase already
 // kills, so this is the backstop, not the mechanism.
 constexpr int kPollSliceMs = 500;
-constexpr std::size_t kMaxDiagBytes = 64 * 1024;
-constexpr std::size_t kReadChunk = 16 * 1024;  // stack buffers; the reader nests three
+constexpr std::size_t kMaxDiagBytes = 64 * common::kKiB;
+constexpr std::size_t kReadChunk = 16 * common::kKiB;  // stack buffers; the reader nests three
 // How long DeliverResponse waits for live-stream bytes the driver reports
 // having written but the reader has not read yet. They are already in the
 // pipe (the driver writes them before the response line), so this only
@@ -57,10 +58,10 @@ int BoundedSlice(int slice_ms, std::chrono::steady_clock::duration until) {
 // escapes). A fixed limit let a raised max_capture_bytes turn ordinary
 // output into "corruption"; this derives it from the same knob.
 std::size_t MaxLineBytes(std::int64_t max_capture_bytes) {
-    constexpr std::size_t kFloor = 64ULL * 1024 * 1024;
+    constexpr std::size_t kFloor = 64 * common::kMiB;
     constexpr std::size_t kFields = 4, kBytesPerChar = 12, kMarkerSlack = 64;
     const auto cap = static_cast<std::size_t>(std::max<std::int64_t>(max_capture_bytes, 0));
-    return std::max(kFloor, kFields * kBytesPerChar * (cap + kMarkerSlack) + 64 * 1024);
+    return std::max(kFloor, kFields * kBytesPerChar * (cap + kMarkerSlack) + 64 * common::kKiB);
 }
 
 void SetNonBlocking(int fd) {

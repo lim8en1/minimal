@@ -27,6 +27,7 @@
 #include "minimal/sidecar/process.hpp"
 #include "minimal/net/http_client.hpp"
 #include "minimal/net/sse_parser.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::mcp {
 
@@ -299,7 +300,7 @@ private:
 // An unterminated line can only be a misbehaving or hostile child: a
 // conforming message is newline-framed. Past this, the connection is dropped
 // rather than growing the buffer without bound.
-constexpr std::size_t kMaxLineBytes = 16 * 1024 * 1024;
+constexpr std::size_t kMaxLineBytes = 16 * common::kMiB;
 
 // The reader's poll slice: how long ~StdioTransport can wait for its join.
 constexpr int kReaderSliceMs = 100;
