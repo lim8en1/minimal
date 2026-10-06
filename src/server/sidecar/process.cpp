@@ -5,6 +5,7 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -333,8 +334,21 @@ Launched Launch(const LaunchSpec& spec) {
         // checked setrlimit remains the last line of defense.
     }
 
+    // Every signal blocked across fork: until the child resets them, its
+    // handlers are the host's (Catch2's fatal-signal reporter, under test), and
+    // a Child::Signal landing in that pre-exec window would run host code in
+    // the child -- a fake failure report printed into the shared stdout. The
+    // child resets dispositions first and only then unblocks, so a signal sent
+    // early stays pending and takes its default action.
+    sigset_t all_signals;
+    sigset_t parent_mask;
+    sigfillset(&all_signals);
+    pthread_sigmask(SIG_SETMASK, &all_signals, &parent_mask);
     const pid_t pid = fork();
-    if (pid != 0) spawn_lock.unlock();
+    if (pid != 0) {
+        pthread_sigmask(SIG_SETMASK, &parent_mask, nullptr);
+        spawn_lock.unlock();
+    }
     if (pid < 0) {
         proc.spawn_error = std::string("fork: ") + std::strerror(errno);
         return proc;
@@ -345,6 +359,17 @@ Launched Launch(const LaunchSpec& spec) {
         // failure is _exit.
         setsid();  // Own session + process group (pgid == pid): killpg reaches
                    // the whole tree, since group membership is inherited by fork.
+
+        // The host's caught signals back to default before anything unblocks
+        // (exec would reset them anyway; this closes the window before it).
+        // Ignored dispositions are left alone -- they survive exec by design.
+        for (int sig = 1; sig < NSIG; ++sig) {
+            struct sigaction current {};
+            if (sigaction(sig, nullptr, &current) != 0) continue;
+            const bool caught = (current.sa_flags & SA_SIGINFO) != 0 ||
+                                (current.sa_handler != SIG_DFL && current.sa_handler != SIG_IGN);
+            if (caught) signal(sig, SIG_DFL);
+        }
 
         // The host ignores SIGPIPE (a dead gRPC peer must not kill it). An
         // ignored disposition survives exec and cannot be trapped back by sh,
