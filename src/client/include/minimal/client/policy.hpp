@@ -7,6 +7,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
+#include <utility>
 
 #include "minimal/common/units.hpp"
 
@@ -123,5 +125,111 @@ inline constexpr std::chrono::milliseconds kUiTick{50};
 // the turn's start), and the poll inside that wait.
 inline constexpr std::chrono::milliseconds kHeadlessCancelWait = std::chrono::seconds(5);
 inline constexpr std::chrono::milliseconds kHeadlessCancelPoll{5};
+
+// --- chat view ---------------------------------------------------------------------
+
+// Live thinking text kept on screen while it streams: settled lines, and the
+// trailing partial line's bytes ever re-wrapped. Presentation only; the
+// transcript is authoritative.
+inline constexpr std::size_t kMaxLiveThinkingLines = 300;
+inline constexpr std::size_t kMaxLiveThinkingTailBytes = 64 * common::kKiB;
+// Mouse wheel: events closer than the gate are dropped (about one step per
+// two frames at a ~60 Hz repaint), and each accepted tick moves a few lines --
+// small enough to read, large enough that a trackpad flick travels.
+inline constexpr std::chrono::milliseconds kWheelGate{30};
+inline constexpr int kWheelLinesPerTick = 3;
+// Keyboard scroll step before the first layout pass has measured the viewport.
+inline constexpr int kFallbackViewportLines = 20;
+// Long row content renders in chunks of at most this many source lines, so a
+// streamed delta re-renders one small chunk, not the whole row.
+inline constexpr std::size_t kMaxAnchorLines = 20;
+// An expanded attachment renders at most this much: an accidentally expanded
+// huge file must not wedge the renderer.
+inline constexpr std::size_t kAttachmentExpandedRenderCapChars = 200'000;
+// A tool result's body shown on its row (the tail window): orientation, not
+// an archive -- the persisted result is the record.
+inline constexpr std::size_t kToolResultBodyPreviewBytes = 4000;
+
+// Markdown of a streaming message is reparsed whole (md4c has no incremental
+// API), at most this often; past the threshold the interval grows with the
+// buffer up to the ceiling, so a long reply's tail still updates without the
+// reparse eating every frame.
+inline constexpr std::chrono::milliseconds kMarkdownReparseDebounce{120};
+inline constexpr std::chrono::milliseconds kMaxMarkdownReparseDebounce{500};
+inline constexpr std::size_t kMarkdownReparseScaleThresholdBytes = 8 * common::kKiB;
+// Past the threshold the interval grows by a millisecond per this many bytes.
+inline constexpr std::size_t kMarkdownReparseBytesPerExtraMs = 64;
+// Highlighted code blocks cached (MRU): a screenful of blocks and some
+// scrollback.
+inline constexpr std::size_t kHighlightCacheCap = 64;
+
+// A running tool's spinner advances one frame per interval: visibly alive,
+// calm enough not to distract.
+inline constexpr std::chrono::milliseconds kSpinnerFrameInterval{120};
+
+// --- prompt editor -------------------------------------------------------------------
+
+// @-mention suggestions: asked for after this pause in typing, and this many.
+inline constexpr std::chrono::milliseconds kSuggestDebounce{120};
+inline constexpr int kMentionSuggestionCount = 20;
+// Undo: steps kept, and keystrokes closer than the gap coalesce into one step.
+inline constexpr std::size_t kMaxUndoSteps = 100;
+inline constexpr std::chrono::milliseconds kUndoCoalesceGap = std::chrono::seconds(1);
+// Prompt history: entries kept (far past what arrow-up recall is used for),
+// and the persisted file's cap (a pasted log must not make every submit
+// rewrite megabytes).
+inline constexpr std::size_t kMaxPromptHistoryEntries = 500;
+inline constexpr std::size_t kMaxPromptHistoryFileBytes = common::kMiB;
+// The prompt grows to half the terminal, but never below this many rows.
+inline constexpr std::size_t kMinPromptRows = 4;
+
+// --- layout -----------------------------------------------------------------------------
+
+// Below this terminal height only the critical rows (editor, status bar) are
+// kept, so a fixed-size row is never squeezed to nothing and overdrawn.
+inline constexpr int kCriticalTerminalHeight = 8;
+// Height caps for scrolling regions: a picker's menu, a notice, the
+// suggestion list under the prompt.
+inline constexpr int kMenuMaxHeight = 20;
+inline constexpr int kNoticeMaxHeight = 6;
+inline constexpr int kSuggestionListMaxHeight = 8;
+// Modals: the default width (the body's hints get 78 columns inside a
+// 2-column margin) and the confirm modal's narrower one; rows reserved around
+// a modal body (borders and the pinned hint line, plus slack for the tab bar
+// and editor it overlays); a body always gets at least the minimum.
+inline constexpr int kModalMaxWidth = 82;
+inline constexpr int kConfirmModalMaxWidth = 72;
+inline constexpr int kModalFrameRows = 3;
+inline constexpr int kModalOverlaySlackRows = 3;
+inline constexpr int kMinModalBodyRows = 2;
+// Status bar / tools panel / tab bar columns.
+inline constexpr std::size_t kStatusSessionColumnCap = 24;
+inline constexpr std::size_t kToolsPanelSessionColumn = 16;
+inline constexpr int kTabOverflowMarkerWidth = 5;
+
+// Context occupancy that tints the token segment: attention as compaction
+// nears, error when the window is all but full.
+inline constexpr std::int64_t kContextAttentionPercent = 80;
+inline constexpr std::int64_t kContextErrorPercent = 95;
+
+// Which status segment gives way first when the bar overflows: lowest first.
+// The live, decision-relevant state (mode, activity, model, context, a paused
+// session) outranks reference detail the user can get elsewhere (the tab
+// bar's own session name, the version). A plugin segment ranks by its own
+// priority, kPluginStatusSegmentPriority unless it says otherwise: below live
+// core state, above pure reference.
+inline constexpr std::pair<std::string_view, int> kStatusSegmentPriorities[] = {
+    {"permission_mode", 100}, {"activity", 90}, {"model", 80},        {"tokens", 70},
+    {"agent", 60},            {"paused", 50},   {"session", 20},      {"token_detail", 15},
+    {"version", 10},
+};
+inline constexpr int kPluginStatusSegmentPriority = 30;
+
+// --- plugins -------------------------------------------------------------------------
+
+// Consecutive throws from one plugin surface (a status segment, an observer)
+// before it is skipped for the rest of the session: a broken plugin must not
+// log an error per repaint, and one transient failure is forgiven.
+inline constexpr int kMaxPluginThrows = 3;
 
 }  // namespace minimal::client

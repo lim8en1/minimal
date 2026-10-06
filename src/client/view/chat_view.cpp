@@ -12,6 +12,7 @@
 #include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/units.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -45,14 +46,10 @@ private:
     std::shared_ptr<ftxui::Box> slot_;
 };
 
-
-// The live thinking render's bounds (see RenderLiveThinking): how many
-// settled lines are kept/ drawn, and how many bytes of the trailing partial
-// line are ever re-wrapped. The transcript is authoritative -- these cap
-// presentation only (the segment-count cap's notice lives in the status
-// bar's {activity} suffix; this one is an in-row "[...]").
-constexpr std::size_t kMaxLiveThinkingLines = 300;
-constexpr std::size_t kMaxLiveThinkingTailBytes = 64 * common::kKiB;
+// The live thinking render's bounds (kMaxLiveThinkingLines,
+// kMaxLiveThinkingTailBytes) cap presentation only; their truncation shows as
+// an in-row "[...]" (the segment-count cap's notice lives in the status bar's
+// {activity} suffix).
 
 // The row kinds a click may collapse: exactly those whose core renderers
 // draw a distinct collapsed form (ctx.collapsed is otherwise ignored, so a
@@ -112,21 +109,9 @@ bool IsCompact(ChatRowKind kind) {
     return kind == ChatRowKind::ToolActivity || kind == ChatRowKind::Thinking;
 }
 
-// ScrollWheelBy's gate: wheel events closer together than this are dropped.
-// Roughly one anchor step per two frame-loop ticks at the ~60 Hz repaint pace;
-// still fast when flung, but each step is a small, readable distance.
-constexpr auto kWheelGateMs = std::chrono::milliseconds(30);
-
-// Lines one accepted wheel tick scrolls. Small enough that a multi-line
-// thinking block moves past a few lines at a time (the old chunk-anchor
-// scheme could leap a whole wrapped chunk -- several viewports -- per tick);
-// large enough that a trackpad flick still travels. The gate bounds the
-// RATE; this bounds the DISTANCE per accepted event.
-constexpr int kWheelLinesPerTick = 3;
-
-// Keyboard scroll step (chat.scroll_up/chat.scroll_down are half-viewport
-// presses) before the first layout pass has measured the real viewport.
-constexpr int kFallbackViewportLines = 20;
+// Wheel gate and step, and the keyboard step before the first layout pass:
+// kWheelGate, kWheelLinesPerTick, kFallbackViewportLines (client/policy.hpp).
+// The gate bounds the RATE; the step bounds the DISTANCE per accepted event.
 
 }  // namespace
 
@@ -1222,7 +1207,7 @@ void ChatView::ScrollBy(int delta_steps) {
 
 void ChatView::ScrollWheelBy(int delta_ticks) {
     const auto now = std::chrono::steady_clock::now();
-    if (now - last_wheel_step_ < kWheelGateMs) return;   // momentum burst: dropped
+    if (now - last_wheel_step_ < kWheelGate) return;   // momentum burst: dropped
     last_wheel_step_ = now;
     AdoptAnchoredOffset();
     anchor_suspended_ = true;

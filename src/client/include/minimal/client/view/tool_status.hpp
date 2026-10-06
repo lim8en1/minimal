@@ -16,6 +16,7 @@
 
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/theme.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -35,7 +36,7 @@ inline std::string SpinnerFrame() {
                                                           "⠼", "⠴", "⠦", "⠧"};
     using namespace std::chrono;
     const auto ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch());
-    return kFrames[static_cast<std::size_t>(ms.count() / 120) % kFrames.size()];
+    return kFrames[static_cast<std::size_t>(ms / kSpinnerFrameInterval) % kFrames.size()];
 }
 
 inline std::string ToolStatusGlyph(ToolStatus status) {
@@ -79,7 +80,9 @@ inline std::string FormatDuration(std::int64_t ms) {
     if (elapsed < std::chrono::minutes(1)) {
         using Tenths = std::chrono::duration<std::int64_t, std::deci>;
         const auto tenths = duration_cast<Tenths>(elapsed).count();
-        return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + "s";
+        constexpr std::int64_t kTenthsPerSecond = 10;  // NOLINT(readability-magic-numbers): deci
+        return std::to_string(tenths / kTenthsPerSecond) + "." +
+               std::to_string(tenths % kTenthsPerSecond) + "s";
     }
     const auto minutes = duration_cast<std::chrono::minutes>(elapsed);
     return std::to_string(minutes.count()) + "m " +

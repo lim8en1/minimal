@@ -22,6 +22,11 @@ constexpr std::int64_t PercentOf(std::int64_t total, std::int64_t percent) {
     return total * percent / 100;
 }
 
+// `part` as a percentage of `total` (> 0), rounding toward zero.
+constexpr std::int64_t AsPercent(std::int64_t part, std::int64_t total) {
+    return part * 100 / total;
+}
+
 }  // namespace minimal::common
 
 // NOLINTEND(readability-magic-numbers)

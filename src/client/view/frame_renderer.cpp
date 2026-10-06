@@ -11,6 +11,8 @@
 #include "minimal/client/view/tools_panel.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/client/policy.hpp"
+#include "minimal/common/units.hpp"
 
 #include <ftxui/screen/terminal.hpp>
 
@@ -74,9 +76,9 @@ bool FrameRenderer::GuardPluginCall(const std::string& key, const std::string& w
     } catch (...) {
         error = "a non-standard exception";
     }
-    if (++throws >= kPluginThrowLimit) {
+    if (++throws >= kMaxPluginThrows) {
         common::DefaultLogger().error("{} threw {} times in a row ({}); disabled for this session",
-                                      what, kPluginThrowLimit, error);
+                                      what, kMaxPluginThrows, error);
         throws = -1;
     } else if (throws == 1) {
         common::DefaultLogger().error("{} threw: {}", what, error);
@@ -128,9 +130,8 @@ ftxui::Element FrameRenderer::Render() {
     // always keep their rows instead of the vbox shrink pass squeezing a
     // fixed-size row to 0/negative height and drawing the next row on top of
     // it.
-    constexpr int kCriticalHeight = 8;
     const int term_height = ftxui::Terminal::Size().dimy;
-    const bool space_critical = term_height > 0 && term_height < kCriticalHeight;
+    const bool space_critical = term_height > 0 && term_height < kCriticalTerminalHeight;
 
     Elements rows;
     // One tab: the bar would only repeat what the status bar and the chat
@@ -298,7 +299,7 @@ ftxui::Element FrameRenderer::Render() {
                 // showed only its head. yframe-first keeps the full height
                 // inside the frame, so the cap is a viewport, not a guillotine.
                 rows.push_back(vbox(std::move(notice_lines)) | yframe |
-                               size(HEIGHT, LESS_THAN, 6) | vscroll_indicator |
+                               size(HEIGHT, LESS_THAN, kNoticeMaxHeight) | vscroll_indicator |
                                bgcolor(deps_.theme.ColorFor("status_bar_bg")) |
                                color(notice.is_error ? deps_.theme.ColorFor("error")
                                                      : deps_.theme.ColorFor("system_message")));
@@ -441,13 +442,13 @@ ftxui::Element FrameRenderer::Render() {
         if (used > 0) {
             const int64_t window = focused_details.context_window_tokens;
             values["tokens"] = FormatTokenUsage(used, window);
-            // Tinted as the window fills: attention from 80% (compaction is
-            // near), error from 95%.
+            // Tinted as the window fills (kContextAttentionPercent,
+            // kContextErrorPercent).
             if (window > 0) {
-                const int64_t percent = used * 100 / window;
-                if (percent >= 95) {
+                const int64_t percent = common::AsPercent(used, window);
+                if (percent >= kContextErrorPercent) {
                     emphasis["tokens"] = deps_.theme.ColorFor("error");
-                } else if (percent >= 80) {
+                } else if (percent >= kContextAttentionPercent) {
                     emphasis["tokens"] = deps_.theme.ColorFor("attention");
                 }
             }

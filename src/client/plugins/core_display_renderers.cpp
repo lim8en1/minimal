@@ -12,6 +12,7 @@
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/tool_status.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client::plugins {
 namespace {
@@ -19,8 +20,6 @@ namespace {
 using ftxui::Element;
 using ftxui::Elements;
 
-constexpr std::size_t kOutputTailBytes = 4000;   // the default row's own bound
-constexpr std::size_t kCommandHeaderChars = 120;
 
 
 // The path's extension when a grammar supports it. The highlighter's alias
@@ -234,8 +233,8 @@ public:
         const auto newline = command.find('\n');
         const bool multiline = newline != std::string::npos;
         if (multiline) command.resize(newline);
-        if (command.size() > kCommandHeaderChars) {
-            command = TruncateUtf8(command, kCommandHeaderChars) + "…";
+        if (command.size() > kToolInputSummaryBytes) {
+            command = TruncateUtf8(command, kToolInputSummaryBytes) + "…";
         } else if (multiline) {
             command += " …";
         }
@@ -251,10 +250,10 @@ public:
 
         std::string output = display.value("output", std::string{});
         bool cut = display.value("output_truncated", false);
-        if (output.size() > kOutputTailBytes) {
+        if (output.size() > kToolResultBodyPreviewBytes) {
             // Forward from the window's start, never backward (see the default
             // row's identical rule): the kept slice stays bounded.
-            const std::size_t tail_start = output.size() - kOutputTailBytes;
+            const std::size_t tail_start = output.size() - kToolResultBodyPreviewBytes;
             const auto line_start = output.find('\n', tail_start);
             output = line_start != std::string::npos
                          ? output.substr(line_start + 1)

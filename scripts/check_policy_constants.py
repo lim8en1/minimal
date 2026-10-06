@@ -120,7 +120,7 @@ def is_derivation(initializer):
 def named_pass(files):
     hits = set()
     for rel in files:
-        if os.path.basename(rel) == "policy.hpp":
+        if os.path.basename(rel).endswith("policy.hpp"):
             continue
         with open(os.path.join(ROOT, rel), errors="replace") as handle:
             exempt = False  # inside NOLINTBEGIN(readability-magic-numbers)

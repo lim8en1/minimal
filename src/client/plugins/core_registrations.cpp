@@ -11,6 +11,7 @@
 #include "minimal/client/render/streaming_markdown_view.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/tool_status.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client::plugins {
 
@@ -65,7 +66,6 @@ using ftxui::Elements;
 // a streamed delta re-renders one small piece, not the whole row, and
 // markdown re-parses stay bounded. Decompose long content into chunks of at
 // most kMaxAnchorLines source lines.
-constexpr std::size_t kMaxAnchorLines = 20;
 
 std::vector<std::string> SplitLines(std::string_view body) {
     std::vector<std::string> lines;
@@ -230,7 +230,6 @@ Element RenderUserText(const ChatRow& row, const Theme& theme) {
 // huge file cannot wedge the renderer (distinct from -- and much larger than
 // -- chat_model.hpp's CollapsedByDefault threshold, which only decides
 // whether a row STARTS collapsed).
-constexpr std::size_t kAttachmentExpandedRenderCapChars = 200'000;
 
 Elements RenderUserAttachmentBlocks(const ChatRow& row, const Theme& theme,
                                     const RowRenderContext& ctx) {
@@ -334,15 +333,15 @@ Elements RenderToolActivityBlocks(const ChatRow& row, const Theme& theme,
         // Bounded body: the capped persisted ToolResultBlock is the
         // authoritative record; this is orientation, not an archive.
         std::string body = row.text;
-        if (body.size() > 4000) {
+        if (body.size() > kToolResultBodyPreviewBytes) {
             // FORWARD from the tail window's start, not backward from it:
             // rfind(pos) searches toward index 0 and returns the nearest '\n'
             // at-or-before pos, which can sit anywhere earlier in the string
             // (e.g. "exit\n" + a 1 MB line -- the sole '\n' at index 4 kept
-            // ~1 MB, not ~4000 bytes). find(pos) only ever returns an index
+            // ~1 MB, not a preview's worth). find(pos) only ever returns an index
             // >= pos, so the kept slice is bounded no matter where newlines
             // fall; no newline inside the window hard-truncates, as before.
-            const std::size_t tail_start = body.size() - 4000;
+            const std::size_t tail_start = body.size() - kToolResultBodyPreviewBytes;
             const auto newline = body.find('\n', tail_start);
             body = "... " + (newline != std::string::npos
                                   ? body.substr(newline + 1)
