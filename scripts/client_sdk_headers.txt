@@ -5,6 +5,7 @@
 minimal/client/plugins/client_plugin_abi.h
 minimal/client/plugins/registries.hpp
 minimal/client/plugins/background_poller.hpp
+minimal/client/plugins/task_worker.hpp
 
 # Rendering and UI building blocks a plugin composes with.
 minimal/client/render/theme.hpp

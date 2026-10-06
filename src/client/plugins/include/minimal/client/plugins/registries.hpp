@@ -519,6 +519,15 @@ public:
                                                   const std::string& method,
                                                   const std::string& json_payload) = 0;
 
+    // The models the server can run: every configured or discovered
+    // `<provider>/<model>` ref, and the default when there is one.
+    // `refresh_discovery` re-fetches every discovering provider's catalog
+    // first -- seconds, not milliseconds. Blocking: call it from a worker
+    // (TaskWorker), never the UI thread. nullopt: the call failed, and
+    // `error` (when given) says why, for the plugin to show.
+    virtual std::optional<v1::ListModelsResponse> ListModels(bool refresh_discovery,
+                                                             std::string* error) = 0;
+
     // Streams the subscription to `on_payload` on the CALLING thread (blocking
     // until the server closes the stream or the callback returns false).
     // Tri-state outcome: kCancelled = the subscriber stopped; kEnded = the

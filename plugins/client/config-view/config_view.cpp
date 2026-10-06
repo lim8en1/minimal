@@ -155,43 +155,9 @@ private:
 }  // namespace
 
 ConfigFeed::ConfigFeed(plugins::ClientApi* api, plugins::HostUi* ui)
-    : api_(api), ui_(ui), worker_([this] { Run(); }) {}
-
-ConfigFeed::~ConfigFeed() {
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        stop_ = true;
-    }
-    cv_.notify_all();
-    if (worker_.joinable()) worker_.join();
-}
-
-void ConfigFeed::Post(std::function<void()> task) {
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        tasks_.push_back(std::move(task));
-    }
-    cv_.notify_one();
-}
-
-void ConfigFeed::Run() {
-    for (;;) {
-        std::function<void()> task;
-        {
-            std::unique_lock<std::mutex> lock(mu_);
-            cv_.wait(lock, [this] { return stop_ || !tasks_.empty(); });
-            if (stop_) return;
-            task = std::move(tasks_.front());
-            tasks_.pop_front();
-        }
-        try {
-            task();
-        } catch (const std::exception& e) {
-            common::DefaultLogger().warn("config-view: {}", e.what());
-        }
-        if (ui_ != nullptr) ui_->RequestRedraw();  // outside mu_: host code
-    }
-}
+    : api_(api), worker_("config-view", [ui] {
+          if (ui != nullptr) ui->RequestRedraw();
+      }) {}
 
 json ConfigFeed::Call(const std::string& method, const json& request) {
     const auto answer = api_->PluginCall(kServerEndpoint, method, request.dump());
@@ -207,7 +173,7 @@ void ConfigFeed::RefreshList() {
         if (list_.rows.empty()) list_.status = "loading";
         ++list_.generation;
     }
-    Post([this] { FetchList(); });
+    worker_.Post([this] { FetchList(); });
 }
 
 void ConfigFeed::FetchList() {
@@ -241,7 +207,7 @@ void ConfigFeed::Open(const std::string& name) {
         form_.title = name;
         form_.generation = generation;
     }
-    Post([this, name] { FetchDescribe(name, "", ""); });
+    worker_.Post([this, name] { FetchDescribe(name, "", ""); });
 }
 
 void ConfigFeed::Back() {
@@ -286,7 +252,7 @@ void ConfigFeed::Edit(const std::string& method, json request) {
     if (name.empty()) return;
     request["name"] = name;
     const std::string path = request.value("key", "");
-    Post([this, method, request, name, path] {
+    worker_.Post([this, method, request, name, path] {
         const auto [status, is_error] = Outcome(path, Call(method, request));
         // The new values, and what happened.
         FetchDescribe(name, status, is_error ? path : std::string());

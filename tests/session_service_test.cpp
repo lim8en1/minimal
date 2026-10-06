@@ -31,6 +31,7 @@
 #include "../../plugins/server/commands-core/core_commands.hpp"
 #include "minimal/rpc/session_wiring.hpp"
 #include "minimal/agent/signal_router.hpp"
+#include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/rpc/server.hpp"
@@ -2162,6 +2163,26 @@ TEST_CASE("ListModels lists static refs cold and discovered refs after refresh",
         REQUIRE(warm.status.ok());
         CHECK(warm.response.models().size() == 2);
     }
+}
+
+TEST_CASE("a client plugin lists the server's models through ClientApi",
+          "[session_service][models][client_plugins]") {
+    ServiceFixture fixture;
+    fixture.Start();
+    minimal::client::SessionClient client(rpc::SocketTarget(fixture.socket));
+    const auto api = minimal::client::plugins::MakeHostClientApi(&client);
+    std::string error;
+    const auto models = api->ListModels(/*refresh_discovery=*/false, &error);
+    REQUIRE(models.has_value());
+    CHECK(error.empty());
+    REQUIRE(models->models().size() == 1);
+    CHECK(models->models(0).ref() == "main/test-model");
+
+    // No server: nullopt, and a reason to show.
+    const auto offline = minimal::client::plugins::MakeHostClientApi(nullptr);
+    CHECK_FALSE(offline->ListModels(false, &error).has_value());
+    CHECK(error == "not connected to a server");
+    CHECK_FALSE(offline->ListModels(false, nullptr).has_value());  // error is optional
 }
 
 TEST_CASE("a second client on the same session is served the same events",

@@ -68,6 +68,20 @@ public:
         return result.json_payload;
     }
 
+    std::optional<v1::ListModelsResponse> ListModels(bool refresh_discovery,
+                                                     std::string* error) override {
+        if (client_ == nullptr) {
+            if (error != nullptr) *error = "not connected to a server";
+            return std::nullopt;
+        }
+        auto result = client_->ListModels({.refresh_discovery = refresh_discovery});
+        if (!result.status.ok()) {
+            if (error != nullptr) *error = result.status.error_message();
+            return std::nullopt;
+        }
+        return std::move(result.response);
+    }
+
     SubscribeOutcome PluginSubscribe(const std::string& plugin_name, const std::string& method,
                                      const std::string& json_payload,
                                      const std::function<bool(const std::string&)>& on_payload) override {
