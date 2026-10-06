@@ -25,6 +25,7 @@ add_library(minimal_client_core SHARED
     status_format.cpp
     ui_config.cpp
     config_file_io.cpp
+    last_selection.cpp
     chat_model.cpp
     scrollback_refresh.cpp
     tui_bootstrap.cpp

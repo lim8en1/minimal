@@ -92,7 +92,8 @@ struct HeadlessFixture {
                                  {"url", "http://localhost/v1"},
                                  {"models", {{"test-model", nlohmann::json::object()}}}}}}}}
                   .dump());
-        Write("settings.json", nlohmann::json{{"default_agent_preset", "main"}}.dump());
+        Write("settings.json", nlohmann::json{{"default_agent_preset", "main"},
+                                              {"default_model", "main/test-model"}}.dump());
         // execute is Ask, so AllowOnly has something to auto-deny.
         Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
         Write("agents/main.md",

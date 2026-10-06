@@ -63,7 +63,7 @@ void SeedConfig(const std::filesystem::path& dir) {
     write("providers.json",
           R"({"providers": {"main": {"backend": "openai", "url": "http://127.0.0.1:9/v1",)"
           R"( "api_key": "test", "models": {"test-model": {}}}}})");
-    write("settings.json", R"({"default_agent_preset": "main"})");
+    write("settings.json", R"({"default_agent_preset": "main", "default_model": "main/test-model"})");
     write("permissions.json", R"({"fallback": {"execute": "ask"}})");
     write("agents/main.md",
           "---\nname: main\nmodel: main/test-model\n---\nYou help.\n");
@@ -214,4 +214,37 @@ TEST_CASE("a client with no server spawns one, uses it, and the server exits on 
     ::unsetenv("MINIMAL_SERVER_BIN");
     ::unsetenv("XDG_DATA_HOME");
     ::unsetenv("MINIMAL_CONFIG_DIR");
+}
+
+TEST_CASE("a spawned server that fails at startup is reported at once, with its reason",
+          "[server_spawn][e2e]") {
+    // The server is double-forked, so its exit used to be invisible: the
+    // client polled the socket for the whole startup timeout and only then
+    // pointed at the log. The liveness pipe makes the exit an EOF.
+    minimal::testing::TempDir dir;
+    const auto config_dir = dir.path() / "config";
+    SeedConfig(config_dir);
+    std::ofstream(config_dir / "settings.json") << R"({"memory": "oops"})";
+    ::setenv("MINIMAL_CONFIG_DIR", config_dir.string().c_str(), 1);
+    ::setenv("XDG_DATA_HOME", dir.path().string().c_str(), 1);
+    ::setenv("MINIMAL_SERVER_BIN", MINIMAL_SPAWN_TEST_SERVER, 1);
+    const std::string target =
+        "unix://" + (minimal::common::DataDir() / "spawn-fail.sock").string();
+
+    std::vector<std::string> progress;
+    SpawnOptions options;
+    bool spawned = false;
+    const auto started = std::chrono::steady_clock::now();
+    const bool up = EnsureServerRunning(
+        target, options, [&](const std::string& line) { progress.push_back(line); }, &spawned);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    for (const auto& line : progress) UNSCOPED_INFO("progress: " << line);
+
+    CHECK_FALSE(up);
+    CHECK(spawned);
+    CHECK(elapsed < options.startup_timeout / 2);
+    std::string all;
+    for (const auto& line : progress) all += line + "\n";
+    CHECK(all.find("exited during startup") != std::string::npos);
+    CHECK(all.find("settings.json: memory: must be an object") != std::string::npos);
 }

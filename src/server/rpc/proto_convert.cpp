@@ -543,6 +543,7 @@ v1::SessionSummary ToProto(const session::SessionSummary& summary) {
     out.set_updated_at_unix_ms(summary.updated_at_unix_ms);
     out.set_message_count(summary.message_count);
     out.set_forked_from_session_id(summary.forked_from_session_id);
+    out.set_model(summary.model.value_or(""));
     return out;
 }
 

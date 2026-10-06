@@ -26,8 +26,9 @@ struct FsSettings {
     std::int64_t edit_max_editable_file_bytes = 5 * 1024 * 1024;
 };
 
-// Every field optional; missing values keep the struct's defaults, so an absent
-// or partial config object is normal rather than an error.
+// Every field optional; a missing field keeps the struct's default. A present
+// field of the wrong type or out of range, or an unknown field, throws
+// config::ConfigError naming it -- the plugin then fails to load, loudly.
 FsSettings ParseFsSettings(const nlohmann::json& config);
 
 }  // namespace minimal::tools_fs

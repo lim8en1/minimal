@@ -32,6 +32,7 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 
+#include "minimal/client/last_selection.hpp"
 #include "minimal/client/cli_args.hpp"
 #include "minimal/client/command_catalog.hpp"
 #include "minimal/client/command_router.hpp"
@@ -101,6 +102,10 @@ private:
     AppState::CommandScope CommandScope() const;
     void CloseTab(const std::string& id);
     std::string FocusedOrNewTab();
+    // The create options every new tab starts from: the cwd's project root,
+    // plus --agent/--model when given, else this project's remembered last
+    // pick (a soft preference the server may fall back from).
+    SessionClient::CreateOptions NewTabOptions() const;
     void SubmitChat(const std::string& text);
     void SubmitCommand(const std::string& line);
     void ApplyTheme(const std::string& name);
@@ -139,6 +144,10 @@ private:
     // --- frame state (loop thread only) ---
     PerTabPromptEditors prompt_editors_;
     PromptHistory prompt_history_;
+    // The last agent/model picked per project (data dir); unset when the data
+    // dir cannot be resolved -- picks are then not remembered.
+    // Shared: AppState's hooks (run on the RPC worker too) keep it alive.
+    std::shared_ptr<const LastSelectionStore> last_selection_;
     MentionQuerySlots mention_slots_;
     bool show_panel_ = false;
     // Every modal's visibility flag lives in the stack (view/modal_stack.hpp);

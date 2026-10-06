@@ -113,7 +113,7 @@ void TuiApp::RegisterClientCommands() {
     // Always a NEW sessionless tab -- a sibling workspace, not a reuse of the
     // focused one. Nothing is created server-side until its first message.
     router.Add({"new", "start a new session", false, false, [this](const CommandInvocationText&) {
-        app_->SetFocusedTab(app_->OpenTab(DefaultCreateOptions()));
+        app_->SetFocusedTab(app_->OpenTab(NewTabOptions()));
         return true;
     }});
     // A TAB operation: end the group's streams with EndSession{DETACH} and
@@ -168,14 +168,24 @@ void TuiApp::RegisterClientCommands() {
             if (tab.empty()) return true;
             if (is_agent) {
                 app_->StageAgentPreset(tab, value);
+            } else if (value == "default") {
+                // Back to settings.json default_model. A live session is
+                // switched by the server (the ref is its to know); a
+                // sessionless tab is created without a model choice.
+                // Either way any earlier staged choice is dropped, so the
+                // next turn does not converge back to it.
+                app_->StageModel(tab, "", /*is_default=*/true);
+                if (!app_->FocusedSessionId().empty()) return false;
+                app_->TabNotice(tab, "the default model will be used on your next message");
+                return true;
             } else {
                 // Shape-checked here (the parser the headless --model flag
                 // uses) so a typo stages nothing; whether it RESOLVES is
                 // still the server's call.
                 if (!common::SplitModelRef(value)) {
                     app_->TabNotice(tab, "'" + value +
-                                             "' must be <provider>/<model>, e.g. local/qwen4 (or "
-                                             "run /model with no arguments)");
+                                             "' must be <provider>/<model> (e.g. local/qwen4) or "
+                                             "'default' (or run /model with no arguments)");
                     return true;
                 }
                 app_->StageModel(tab, value);

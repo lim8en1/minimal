@@ -69,7 +69,8 @@ TEST_CASE("ParseChannelsConfig: per-entry errors degrade, never throw", "[channe
     auto config = ParseChannelsConfig(nlohmann::json{
         {"bad-signal",
          {{"mode", "restricted"}, {"signals", {"BUILD"}}, {"command", "c"}}},  // charset
-        {"empty-signals", {{"mode", "restricted"}, {"signals", {}}, {"command", "c"}}},
+        {"empty-signals",
+         {{"mode", "restricted"}, {"signals", nlohmann::json::array()}, {"command", "c"}}},
         {"extended-with-signals",
          {{"mode", "extended"}, {"signals", {"x"}}, {"command", "c"}}},
         {"no-command", {{"mode", "extended"}}},
@@ -113,7 +114,7 @@ TEST_CASE("ParseChannelsConfig: file-level problems throw, per-entry ones never 
     // A non-object ENTRY is per-entry: recorded, named, others unaffected.
     auto config = ParseChannelsConfig(nlohmann::json{{"ci", "not an object"}, {"ok", ExtendedEntry()}});
     REQUIRE(config.errors.size() == 1);
-    CHECK(config.errors.front().find("'ci'") != std::string::npos);
+    CHECK(config.errors.front().find("channels.json: ci: must be an object") != std::string::npos);
     REQUIRE(config.entries.size() == 1);
     CHECK(config.entries.front().name == "ok");
 }

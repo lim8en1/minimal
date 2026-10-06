@@ -222,24 +222,17 @@ public:
         try {
             // The session's root anchors project-local discovery: /agent into a
             // project preset works exactly like the session's own creation did.
-            // The session's existing model_override rides straight into Resolve()
-            // (not just into the precedence re-apply below) so switching to a
-            // preset with a bad `model:` -- or a bad settings.default_model --
-            // cannot fail the switch when the session already has a working
-            // override in force; see AgentPresetRegistry::Resolve's model_override
-            // doc.
-            resolved = context.presets().Resolve(wanted, context.session().project_root(),
-                                                 nullptr, context.session().model_override());
+            // Switching agents never switches models: the session's chosen
+            // model (or settings.default_model) carries over -- a preset's own
+            // `model:` applies only when it is spawned as a subagent.
+            const auto& chosen = context.session().model_override();
+            resolved = context.presets().Resolve(
+                wanted, context.session().project_root(), nullptr,
+                chosen ? chosen
+                       : std::optional<minimal::common::ModelRef>(
+                             context.session().preset().model_ref));
         } catch (const std::exception& error) {
             return CommandResult::Error(error.what());
-        }
-
-        // THE PRECEDENCE RULE. A preset supplies a default model; a model the
-        // user chose is a decision and survives the switch. Without this,
-        // /agent would silently undo /model.
-        if (const auto& override_ref = context.session().model_override()) {
-            const auto model = context.providers().Resolve(*override_ref);
-            if (model != nullptr) minimal::agent::ApplyModel(resolved, *model);
         }
 
         context.session().ApplyPreset(std::move(resolved));
@@ -263,7 +256,7 @@ public:
     std::string_view Summary() const override {
         return "Switch model, or open the model picker";
     }
-    std::string_view Usage() const override { return "/model [provider/model]"; }
+    std::string_view Usage() const override { return "/model [provider/model|default]"; }
     std::string_view PickerView() const override { return "models"; }
 
     CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
@@ -271,14 +264,31 @@ public:
             return CommandResult::Ok("model list requested");
         }
         if (args.positional.size() > 1) {
-            return CommandResult::Error("usage: /model [provider/model]");
+            return CommandResult::Error("usage: /model [provider/model|default]");
         }
         const std::string& text = args.positional.front();
+        if (text == "default") {
+            // Back to settings.json default_model: the session's own choice is
+            // cleared, so a later /agent keeps following the default.
+            const auto ref = context.presets().DefaultModel();
+            const auto model = ref ? context.providers().Resolve(*ref) : nullptr;
+            if (model == nullptr) {
+                return CommandResult::Error(
+                    "there is no default model (settings.json default_model is unset or does "
+                    "not resolve, and several models are configured) -- pick one with /model");
+            }
+            const std::string fallback = ref->str();
+            context.session().set_model_override(std::nullopt);
+            auto preset = context.session().preset();
+            minimal::agent::ApplyModel(preset, *model);
+            context.session().ApplyPreset(std::move(preset));
+            return CommandResult::Ok("model: default (" + fallback + ")");
+        }
         const auto ref = minimal::common::SplitModelRef(text);
         if (!ref) {
             return CommandResult::Error("'" + text +
-                                        "' must be <provider>/<model>, e.g. local/qwen4 "
-                                        "(or run /model with no arguments)");
+                                        "' must be <provider>/<model> (e.g. local/qwen4) or "
+                                        "'default' (or run /model with no arguments)");
         }
         return SwitchModel(context, *ref, text, "model: " + text);
     }

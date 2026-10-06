@@ -25,14 +25,6 @@ std::optional<std::string> TurnBorrow::Begin(const QueuedTurn* overrides) {
         // half-applied borrow behind. On a fully-failed borrow the restore is a
         // harmless no-op rebind.
         active_ = true;
-        AgentPreset transient = deps_.session_preset;
-        if (!overrides->agent_preset.empty()) {
-            if (deps_.presets == nullptr) {
-                throw std::runtime_error("no preset registry wired; cannot resolve agent '" +
-                                         overrides->agent_preset + "'");
-            }
-            transient = deps_.presets->Resolve(overrides->agent_preset, deps_.project_root);
-        }
         // The ref is split here (pop time), so a malformed one fails the turn by
         // name instead of being dropped reader-side.
         std::optional<common::ModelRef> model;
@@ -44,6 +36,18 @@ std::optional<std::string> TurnBorrow::Begin(const QueuedTurn* overrides) {
             }
         } else {
             model = deps_.model_override;
+        }
+        AgentPreset transient = deps_.session_preset;
+        if (!overrides->agent_preset.empty()) {
+            if (deps_.presets == nullptr) {
+                throw std::runtime_error("no preset registry wired; cannot resolve agent '" +
+                                         overrides->agent_preset + "'");
+            }
+            // A borrowed preset brings its prompt and policy, not a model: the
+            // turn stays on the session's model unless it borrows one too.
+            transient = deps_.presets->Resolve(
+                overrides->agent_preset, deps_.project_root, nullptr,
+                model ? model : std::optional<common::ModelRef>(deps_.session_preset.model_ref));
         }
         if (model) {
             if (deps_.provider_resolver == nullptr) {

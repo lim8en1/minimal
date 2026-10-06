@@ -10,7 +10,6 @@ minimal_server_module(config
         settings_config.cpp
         permissions_config.cpp
         hooks_config.cpp
-        parse_util.cpp
         config_bundle.cpp
         project_dirs.cpp
         project_trust.cpp

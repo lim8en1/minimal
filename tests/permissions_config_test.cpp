@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <fstream>
 
@@ -60,9 +61,9 @@ TEST_CASE("ParsePermissionsConfig: all three default_run_mode values decode", "[
 }
 
 TEST_CASE("ParsePermissionsConfig: mcp_default_mode is an unknown key", "[permissions_config]") {
-    const auto config = ParsePermissionsConfig({{"mcp_default_mode", "deny"}});
-    CHECK(config.plugin_slices.empty());
-    CHECK(config.unknown_keys == std::vector<std::string>{"mcp_default_mode"});
+    CHECK_THROWS_WITH(ParsePermissionsConfig({{"mcp_default_mode", "deny"}}),
+                      Catch::Matchers::ContainsSubstring(
+                          "permissions.json: mcp_default_mode: unknown field"));
 }
 
 TEST_CASE("LoadPermissionsConfig: reads and parses a real file", "[permissions_config]") {
@@ -154,14 +155,30 @@ TEST_CASE("ParsePermissionsConfig: malformed pattern shapes throw", "[permission
                     std::runtime_error);
 }
 
-TEST_CASE("ParsePermissionsConfig: unknown keys are collected, not silently dropped",
+TEST_CASE("ParsePermissionsConfig: unknown keys are fatal and named by path",
           "[permissions_config]") {
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(
+        ParsePermissionsConfig(nlohmann::json{{"fallback", {{"file_writes", "deny"}}}}),
+        ContainsSubstring("permissions.json: fallback.file_writes: unknown field"));
+    CHECK_THROWS_WITH(ParsePermissionsConfig(nlohmann::json{{"pattern", nlohmann::json::object()}}),
+                      ContainsSubstring("permissions.json: pattern: unknown field"));
     const auto config = ParsePermissionsConfig(nlohmann::json{
-        {"fallback", {{"file_writes", "deny"}, {"execute", "ask"}}},
-        {"pattern", {{"bash", {{"rm *", "deny"}}}}},
-        {"_comment", "ignored by convention"},
-        {"pattern_precedence", "specific"}});
-    CHECK(config.unknown_keys == std::vector<std::string>{"pattern", "fallback.file_writes"});
+        {"// note", "comments are allowed"}, {"pattern_precedence", "specific"}});
     CHECK(config.global_layer.pattern_precedence == minimal::tools::PatternPrecedence::Specific);
     CHECK_THROWS(ParsePermissionsConfig(nlohmann::json{{"pattern_precedence", "loose"}}));
+}
+
+TEST_CASE("ParsePermissionsConfig: wrong shapes are refused, not ignored", "[permissions_config]") {
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(ParsePermissionsConfig(nlohmann::json{{"fallback", "deny"}}),
+                      ContainsSubstring("permissions.json: fallback: must be an object"));
+    CHECK_THROWS_WITH(
+        ParsePermissionsConfig(nlohmann::json{{"per_tool_overrides", {{"bash", "Allow"}}}}),
+        ContainsSubstring("permissions.json: per_tool_overrides.bash: invalid permission mode"));
+    CHECK_THROWS_WITH(
+        ParsePermissionsConfig(nlohmann::json{{"per_tool_overrides", {{"bash", true}}}}),
+        ContainsSubstring("per_tool_overrides.bash: must be \"allow\", \"ask\" or \"deny\""));
+    CHECK_THROWS_WITH(ParsePermissionsConfig(nlohmann::json{{"advisor_timeout_ms", 1.5}}),
+                      ContainsSubstring("advisor_timeout_ms: must be an integer"));
 }

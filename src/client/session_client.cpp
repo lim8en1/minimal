@@ -646,6 +646,7 @@ std::optional<std::string> SessionClient::Stream::Open(const CreateOptions& opts
     for (const auto& selector : opts.signals) {
         request.add_signals(selector);
     }
+    request.set_remembered_selection(opts.remembered_selection);
 
     v1::CreateSessionResponse response;
     SetStatus(stub_->CreateSession(&context, request, &response));
@@ -653,6 +654,7 @@ std::optional<std::string> SessionClient::Stream::Open(const CreateOptions& opts
         return std::nullopt;
     }
     session_id_ = response.session().session_id();
+    created_ = response.session();
 
     // Name the stream with an Attach{} payload (see EnqueueNamingEvent):
     // server attaches the bidi to this session without firing a turn/command.

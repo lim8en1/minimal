@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/client/config_file_io.hpp"
+#include "minimal/common/config_reader.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::client {
@@ -34,25 +35,24 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
             "ui.json is malformed (not a JSON object) -- using default UI settings");
         return config;
     }
-    if (auto it = parsed.find("status_format"); it != parsed.end() && it->is_string()) {
-        config.status_format = it->get<std::string>();
-    } else if (it != parsed.end()) {
-        common::DefaultLogger().warn("ui.json: \"status_format\" must be a string -- ignored");
-    }
-    if (auto it = parsed.find("theme"); it != parsed.end() && it->is_string()) {
-        config.theme = it->get<std::string>();
-    } else if (it != parsed.end()) {
-        common::DefaultLogger().warn("ui.json: \"theme\" must be a string -- ignored");
-    }
-    const auto bounded_int = [&parsed](const char* key, int& out, int floor) {
-        if (auto it = parsed.find(key); it != parsed.end()) {
-            if (it->is_number_integer() && it->get<int>() >= floor) {
-                out = it->get<int>();
-            } else {
-                common::DefaultLogger().warn(
-                    "ui.json: \"{}\" must be an integer >= {} -- ignored", key, floor);
-            }
+    // The UI file degrades instead of refusing: each bad field is warned and
+    // keeps its default, through the same strict reader every config uses --
+    // so an unknown or misspelled key is named rather than silently ignored.
+    const auto warn = [](const std::string& message) {
+        common::DefaultLogger().warn("{} -- ignored", message);
+    };
+    config::Reader reader(parsed, "ui.json", "", warn);
+    const auto lenient = [&warn](const std::function<void()>& read) {
+        try {
+            read();
+        } catch (const config::ConfigError& error) {
+            warn(error.what());
         }
+    };
+    lenient([&] { config.status_format = reader.String("status_format", config.status_format); });
+    lenient([&] { config.theme = reader.String("theme", config.theme); });
+    const auto bounded_int = [&](const char* key, int& out, int floor) {
+        lenient([&] { out = static_cast<int>(reader.Int(key, out, floor, 1 << 30)); });
     };
     bounded_int("scrollback_window_max_messages", config.scrollback_window_max_messages, 1);
     // A floor well above the head+marker+tail split's fixed overhead
@@ -64,31 +64,20 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
     bounded_int("tools_panel_stdout_buffer_lines", config.tools_panel_stdout_buffer_lines, 1);
     bounded_int("panel_height", config.panel_height, 3);
 
-    // The fold defaults: an enum-as-string ("auto"/"expanded"/"collapsed"),
-    // not a bare int -- users hand-edit this file, and "expanded" is
-    // self-describing where 1 is not. Unparsable values are warned and left
-    // at auto, the same degrade rule as every other bad value here.
-    const auto fold_value = [&parsed](const char* key, int& out) {
-        if (auto it = parsed.find(key); it != parsed.end()) {
-            if (it->is_string()) {
-                const auto name = it->get<std::string>();
-                if (name == "auto") out = kFoldDefaultAuto;
-                else if (name == "expanded") out = kFoldExpanded;
-                else if (name == "collapsed") out = kFoldCollapsed;
-                else {
-                    common::DefaultLogger().warn(
-                        "ui.json: \"{}\" must be \"auto\", \"expanded\" or "
-                        "\"collapsed\" -- ignored", key);
-                }
-            } else {
-                common::DefaultLogger().warn(
-                    "ui.json: \"{}\" must be a string (\"auto\", \"expanded\" or "
-                    "\"collapsed\") -- ignored", key);
-            }
-        }
+    // The fold defaults: an enum-as-string, not a bare int -- users hand-edit
+    // this file, and "expanded" is self-describing where 1 is not.
+    const auto fold_value = [&](const char* key, int& out) {
+        lenient([&] {
+            const auto name = reader.MaybeEnum(key, {"auto", "expanded", "collapsed"});
+            if (!name) return;
+            if (*name == "auto") out = kFoldDefaultAuto;
+            else if (*name == "expanded") out = kFoldExpanded;
+            else out = kFoldCollapsed;
+        });
     };
     fold_value("fold_thinking", config.fold_thinking);
     fold_value("fold_tools", config.fold_tools);
+    reader.Finish(config::UnknownKeys::kWarn);
     return config;
 }
 

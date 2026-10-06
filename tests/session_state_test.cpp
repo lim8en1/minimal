@@ -2206,6 +2206,35 @@ TEST_CASE("convergence commands: /agent before /model, guarded on unknown effect
     CHECK(cmds[1] == "/model main/other-model");
 }
 
+TEST_CASE("convergence commands: \"default\" clears the choice instead of pinning the ref",
+          "[session_state][desired]") {
+    SessionState state("s-1");
+    v1::SessionMetadataEvent meta;
+    meta.set_agent_preset("main");
+    meta.set_model("main/pinned");
+    state.OnSessionMetadata(meta);
+
+    // The picker's default row: the default's ref is known (display), but the
+    // command clears the session's choice rather than pinning that ref.
+    state.SetDesiredModel("main/default-model", /*is_default=*/true);
+    CHECK(state.DesiredModelIsDefault());
+    const auto cmds = state.ConvergenceCommands();
+    REQUIRE(cmds.size() == 1);
+    CHECK(cmds[0] == "/model default");
+
+    // Once the session runs the default, converged.
+    meta.set_model("main/default-model");
+    state.OnSessionMetadata(meta);
+    CHECK(state.ConvergenceCommands().empty());
+
+    // A typed `/model default` on a sessionless tab stages no ref: nothing to
+    // converge (the create carried "no model"), never a repeated command.
+    SessionState fresh("s-2");
+    fresh.SetDesiredModel("", /*is_default=*/true);
+    fresh.OnSessionMetadata(meta);
+    CHECK(fresh.ConvergenceCommands().empty());
+}
+
 TEST_CASE("convergence commands: a desired value equal to effective is a no-op",
           "[session_state][desired]") {
     SessionState state("s-1");

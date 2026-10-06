@@ -42,9 +42,12 @@ std::string LocateServerBinary();
 // Ensures something is listening on `target`. Spawns a detached server when
 // enabled, the target is spawnable, and no server binary was overridden away.
 // `progress` receives human-readable status lines (stderr material); it may be
-// empty. Returns whether the target is reachable on return.
+// empty. Returns whether the target is reachable on return. `spawned`, when
+// given, is set to whether a server was started (a failure after a spawn has
+// already been explained through `progress`).
 bool EnsureServerRunning(const std::string& target, const SpawnOptions& options,
-                         const std::function<void(const std::string&)>& progress = {});
+                         const std::function<void(const std::string&)>& progress = {},
+                         bool* spawned = nullptr);
 
 // The log a spawned server's stdout/stderr lands in.
 std::string SpawnedServerLogPath();

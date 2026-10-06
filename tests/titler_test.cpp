@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "minimal/agent/session_support_service.hpp"
 #include "minimal/common/logger.hpp"
@@ -172,7 +173,7 @@ void WaitForRenames(const FakeSupportService& support, std::size_t n) {
 
 }  // namespace
 
-TEST_CASE("ParseTitlerConfig is lenient and honors sane overrides", "[titler]") {
+TEST_CASE("ParseTitlerConfig honors overrides and refuses junk by name", "[titler]") {
     // Missing config: every default stands.
     const auto defaults = session_titler::ParseTitlerConfig(nlohmann::json::object());
     CHECK(defaults.model.empty());
@@ -191,15 +192,13 @@ TEST_CASE("ParseTitlerConfig is lenient and honors sane overrides", "[titler]") 
     CHECK(configured.input_char_budget == 500);
     CHECK(configured.prompt == "Title it.");
 
-    // Junk values fall back to defaults rather than disabling the plugin.
-    const auto junk = session_titler::ParseTitlerConfig(nlohmann::json{
-        {"max_tokens", -5}, {"input_char_budget", "lots"}, {"model", 7}});
-    CHECK(junk.model.empty());
-    CHECK(junk.max_tokens == 64);
-    CHECK(junk.input_char_budget == 2000);
-
-    // A non-object config degrades to defaults.
-    CHECK(session_titler::ParseTitlerConfig(nlohmann::json::array()).max_tokens == 64);
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(session_titler::ParseTitlerConfig({{"max_tokens", -5}}),
+                      ContainsSubstring("session-titler.config.max_tokens: must be at least 1"));
+    CHECK_THROWS_WITH(session_titler::ParseTitlerConfig({{"input_char_budget", "lots"}}),
+                      ContainsSubstring("input_char_budget: must be an integer"));
+    CHECK_THROWS_WITH(session_titler::ParseTitlerConfig({{"model", "cheap"}}),
+                      ContainsSubstring("model: must be <provider>/<model>"));
 }
 
 TEST_CASE("CleanTitle produces a tab-label-shaped title", "[titler]") {

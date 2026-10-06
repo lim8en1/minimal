@@ -109,7 +109,13 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         const auto candidates = plugins::DiscoverClientPlugins(
             minimal::common::BundledClientPluginDir(), out.config_dir / "client-plugins",
             plugin_config);
-        if (!plugin_config.malformed) {
+        // An entry with a problem was dropped from the parsed config: warn,
+        // and never rewrite (the rewrite would delete the user's entry).
+        for (const auto& problem : plugin_config.problems) {
+            std::fprintf(stderr, "minimal: warning: %s (the file was not rewritten)\n",
+                         problem.c_str());
+        }
+        if (!plugin_config.malformed && plugin_config.problems.empty()) {
             // Same discipline as the server's WriteConfigIfChanged: create the
             // parent dir, skip the write when nothing changed, report errors.
             std::filesystem::create_directories(out.config_dir, ec);

@@ -34,15 +34,31 @@ std::string RequireString(const YAML::Node& node, const std::string& key) {
 
 std::string OptionalString(const YAML::Node& node, const std::string& key, std::string fallback = "") {
     const YAML::Node value = node[key];
-    if (!value || !value.IsScalar()) return fallback;
+    if (!value) return fallback;
+    if (!value.IsScalar()) {
+        throw std::runtime_error("agent preset: field '" + key + "' must be a single value");
+    }
     return value.as<std::string>();
 }
 
+// A present non-list is an error, not "no entries": `allowed_tools: "*"` or
+// `allowed_tools: read, grep` used to read as an empty list -- a preset that
+// silently served zero tools.
 std::vector<std::string> OptionalStringList(const YAML::Node& node, const std::string& key) {
     std::vector<std::string> result;
     const YAML::Node value = node[key];
-    if (!value || !value.IsSequence()) return result;
-    for (const auto& item : value) result.push_back(item.as<std::string>());
+    if (!value) return result;
+    if (!value.IsSequence()) {
+        throw std::runtime_error("agent preset: field '" + key +
+                                 "' must be a list (e.g. " + key + ": [a, b])");
+    }
+    for (const auto& item : value) {
+        if (!item.IsScalar() || item.as<std::string>().empty()) {
+            throw std::runtime_error("agent preset: field '" + key +
+                                     "' must contain non-empty names");
+        }
+        result.push_back(item.as<std::string>());
+    }
     return result;
 }
 
@@ -274,8 +290,7 @@ AgentMode DecodeMode(const YAML::Node& node) {
                              text + "'");
 }
 
-// Structural keys this parser consumes itself. EVERYTHING else (scalars, maps,
-// whatever) is passthrough provider-parameter material -- see the class comment.
+// Structural keys this parser consumes itself.
 bool IsKnownKey(const std::string& key) {
     static const std::unordered_map<std::string, char> kKnown{
         {"name", 0},          {"description", 0},   {"model", 0},
@@ -285,15 +300,23 @@ bool IsKnownKey(const std::string& key) {
         {"compression_prompt", 0}, {"compaction_strategy", 0},
         {"mode", 0},          {"disable", 0},       {"hidden", 0},
         {"color", 0},         {"steps", 0},         {"tool_config", 0},
-        {"plugin_permissions", 0},
+        {"plugin_permissions", 0}, {"parameters", 0},
     };
     return kKnown.count(key) != 0;
 }
 
+// Provider parameters an opencode agent file writes at the top level. Kept so
+// those files load unchanged; every other provider parameter goes under
+// `parameters:`, and any other key is an error -- a typo'd structural key
+// (`allowed-tools`) must not ride to the provider as a request field.
+bool IsTopLevelParameter(const std::string& key) {
+    return key == "temperature" || key == "top_p" || key == "reasoningEffort";
+}
+
 // Lowering for passthrough parameter values: typed scalars where the YAML type
-// survives the trip (bool / int / double), everything else as string. A map or
-// sequence lowers recursively. Anything lowerable is carried verbatim, so
-// `reasoningEffort: high` arrives as the string the provider expects.
+// survives the trip (bool / int / double), everything else as string. A
+// QUOTED scalar always stays a string (`user: "007"` is not 7). A map or
+// sequence lowers recursively.
 nlohmann::json YamlToJson(const YAML::Node& node) {
     if (node.IsNull()) return nullptr;
     if (node.IsSequence()) {
@@ -308,12 +331,13 @@ nlohmann::json YamlToJson(const YAML::Node& node) {
         }
         return object;
     }
-    // Scalar. Try typed lowerings in strictness order; each throws
-    // BadConversion when the text does not parse as that type.
-    try {
-        return node.as<bool>();
-    } catch (const YAML::BadConversion&) {
-    }
+    // yaml-cpp tags a quoted scalar "!" and a plain one "?".
+    if (node.Tag() == "!") return node.as<std::string>();
+    // Plain scalar: YAML 1.2 core booleans only (yaml-cpp's as<bool> also
+    // takes yes/no/on/off/y/n, which turned `stop: no` into false).
+    const std::string text = node.as<std::string>();
+    if (text == "true") return true;
+    if (text == "false") return false;
     try {
         return static_cast<std::int64_t>(node.as<std::int64_t>());
     } catch (const YAML::BadConversion&) {
@@ -322,34 +346,49 @@ nlohmann::json YamlToJson(const YAML::Node& node) {
         return node.as<double>();
     } catch (const YAML::BadConversion&) {
     }
-    return node.as<std::string>();
+    return text;
 }
 
-// Request fields the provider builders own: a frontmatter key spelled like one
-// is never passed through (it would fight the structural field it names).
-bool IsRequestStructural(const std::string& key) {
-    return key == "tools" || key == "tool_choice" || key == "messages" || key == "stream";
+// Every frontmatter key is known, an allowlisted top-level parameter, or an
+// error naming the fix.
+void RejectUnknownKeys(const YAML::Node& node) {
+    if (!node || !node.IsMap()) return;
+    for (const auto& entry : node) {
+        const std::string key = entry.first.as<std::string>();
+        if (IsKnownKey(key) || IsTopLevelParameter(key)) continue;
+        if (key == "tools") {
+            throw std::runtime_error(
+                "agent preset: unknown field 'tools' -- list the tools in allowed_tools: [...] "
+                "and gate them with permission_mode / permission");
+        }
+        throw std::runtime_error("agent preset: unknown field '" + key +
+                                 "' (provider request parameters go under parameters:)");
+    }
 }
 
+// The provider parameters this preset sets: the allowlisted top-level keys,
+// then the `parameters:` map over them.
 nlohmann::json DecodeExtraParameters(const YAML::Node& node) {
     nlohmann::json extras = nlohmann::json::object();
     if (!node || !node.IsMap()) return extras;
     for (const auto& entry : node) {
         const std::string key = entry.first.as<std::string>();
-        if (IsKnownKey(key)) continue;
-        if (IsRequestStructural(key)) {
-            common::DefaultLogger().warn(
-                "agent preset: frontmatter key '{}' names a request field the harness owns; "
-                "ignored",
-                key);
-            continue;
+        if (IsTopLevelParameter(key)) extras[key] = YamlToJson(entry.second);
+    }
+    if (const YAML::Node parameters = node["parameters"]) {
+        if (!parameters.IsMap()) {
+            throw std::runtime_error("agent preset: parameters must be a map of request fields");
         }
-        try {
+        for (const auto& entry : parameters) {
+            const std::string key = entry.first.as<std::string>();
+            // Request fields the provider builders own: a parameter spelled
+            // like one would fight the structural field it names.
+            if (key == "tools" || key == "tool_choice" || key == "messages" || key == "stream" ||
+                key == "model") {
+                throw std::runtime_error("agent preset: parameters." + key +
+                                         " is a request field the harness owns");
+            }
             extras[key] = YamlToJson(entry.second);
-        } catch (const std::exception& error) {
-            common::DefaultLogger().warn("agent preset: frontmatter key '{}' not carried to "
-                                         "provider parameters: {}",
-                                         key, error.what());
         }
     }
     return extras;
@@ -435,6 +474,7 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
     const YAML::Node& node = parsed.frontmatter;
 
     AgentPresetFrontmatter result;
+    RejectUnknownKeys(node);
     result.name = RequireString(node, "name");
     result.description = OptionalString(node, "description");
     result.model = OptionalString(node, "model");
@@ -485,9 +525,14 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
             const std::string key = entry.first.as<std::string>();
             if (std::find(kKnownPermissionKeys.begin(), kKnownPermissionKeys.end(), key) ==
                 kKnownPermissionKeys.end()) {
-                result.unknown_permission_keys.push_back(key);
+                // A typo'd permission rule silently ignored is less
+                // protection than written.
+                throw std::runtime_error("agent preset: unknown permission_mode field '" + key +
+                                         "'");
             }
         }
+    } else if (block) {
+        throw std::runtime_error("agent preset: permission_mode must be a map");
     }
     result.plugin_permissions = DecodePluginPermissions(node);
     result.compression_prompt = OptionalString(node, "compression_prompt");

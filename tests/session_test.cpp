@@ -1311,7 +1311,7 @@ TEST_CASE("two sessions do not share bash state", "[session]") {
                    const std::string& command) {
         SessionFixture fixture(root);
         fixture.tools_registry.Register(
-            tools_bash::MakeBashTool(tools_bash::ParseBashSettings({}), store, background));
+            tools_bash::MakeBashTool(tools_bash::ParseBashSettings(nlohmann::json::object()), store, background));
         fixture.Script(testing::ToolUseResponse("c1", "bash", {{"command", command}}));
         fixture.Script(testing::TextResponse("done"));
         fixture.Start(session_id);

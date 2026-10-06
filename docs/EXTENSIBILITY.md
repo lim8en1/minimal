@@ -114,7 +114,7 @@ The first consumer justifies the pattern: `/restart-shell` lives in `tools-bash`
 
 ### 2.3 No per-plugin config beyond one verbatim blob
 
-**Status: landed.** Implemented as specified below, with one deviation: the bundled plugins' knobs did **not** stay in `tools_settings` — `tools-bash` and `tools-fs` moved their knobs to their own `plugins.json` `config` objects with no `tools.*` fallback (the "optional per plugin" migration exercised immediately, strict rather than backward-compatible). The `tools_settings` channel itself is unchanged and still carries the whole verbatim `tools` object.
+**Status: landed.** Implemented as specified below, with one deviation: the bundled plugins' knobs did **not** stay in `tools_settings` — `tools-bash` and `tools-fs` moved their knobs to their own `plugins.json` `config` objects with no `tools.*` fallback (the "optional per plugin" migration exercised immediately, strict rather than backward-compatible). The `tools_settings` channel was later removed: no plugin read it, and it was the one thing keeping `settings.json`'s `tools` section from being strict. A plugin's only configuration channel is its own `config` object.
 
 **Hole.** Only tool-registering plugins receive configuration: `ToolRegistrationContext::tools_settings` is the verbatim `tools` object from `settings.json`, and it reaches only `minimal_plugin_register_tools`. A provider, observer, or command plugin has no sanctioned way to read its own settings, and a tool plugin cannot get anything but the `tools.*` slice.
 
@@ -126,7 +126,7 @@ struct PluginRegistrationContext {
     // This plugin's own config, verbatim. Source: an optional "config" object
     // on the plugin's plugins.json entry:
     //   {"plugins": [{"file": "tools-bash.so", "config": {"timeout_s": 30}}]}
-    // Core imposes no schema -- the same rule as tools_settings today.
+    // Core imposes no schema -- the plugin owns its slice's shape.
     nlohmann::json config = nlohmann::json::object();
 };
 void minimal_plugin_register_tools(ToolRegistry&, const PluginRegistrationContext&);

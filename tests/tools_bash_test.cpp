@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -640,7 +641,8 @@ TEST_CASE("a deny rule catches the respellings of its program through the real g
     CHECK(verdict("rmdir x") == tools::PermissionMode::AlwaysAllow);  // not `rm *`
 }
 
-TEST_CASE("bash settings take defaults when absent or nonsensical", "[tools_bash][settings]") {
+TEST_CASE("bash settings: defaults, seconds-keyed overrides, and named refusals",
+          "[tools_bash][settings]") {
     const auto defaults = tools_bash::ParseBashSettings(nlohmann::json::object());
     CHECK(defaults.timeout_ms == 120000);
     CHECK(defaults.max_output_bytes == 1024 * 1024);
@@ -655,15 +657,18 @@ TEST_CASE("bash settings take defaults when absent or nonsensical", "[tools_bash
     CHECK(settings.max_output_bytes == 64);
     CHECK(settings.shell == "/bin/dash");
 
-    const nlohmann::json nonsense = {{"timeout_s", 0}, {"max_output_bytes", -1}};
-    const auto fallback = tools_bash::ParseBashSettings(nonsense);
-    CHECK(fallback.timeout_ms == 120000);
-    CHECK(fallback.max_output_bytes == 1024 * 1024);
-
-    // A ceiling below the default would silently shorten every command that did
-    // not ask for a timeout, which is not what configuring a maximum means.
-    const nlohmann::json inverted = {{"timeout_s", 90}, {"max_timeout_s", 1}};
-    CHECK(tools_bash::ParseBashSettings(inverted).max_timeout_ms == 90000);
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(tools_bash::ParseBashSettings({{"timeout_s", 0}}),
+                      ContainsSubstring("tools-bash.config.timeout_s: must be at least 1"));
+    CHECK_THROWS_WITH(tools_bash::ParseBashSettings({{"max_output_bytes", -1}}),
+                      ContainsSubstring("max_output_bytes: must be at least 1"));
+    // The documented-elsewhere millisecond spelling is not silently ignored.
+    CHECK_THROWS_WITH(tools_bash::ParseBashSettings({{"timeout_ms", 5000}}),
+                      ContainsSubstring("timeout_ms: unknown field"));
+    // A ceiling below the default would silently shorten every command that
+    // did not ask for a timeout: the configuration contradicting itself.
+    CHECK_THROWS_WITH(tools_bash::ParseBashSettings({{"timeout_s", 90}, {"max_timeout_s", 1}}),
+                      ContainsSubstring("max_timeout_s: must not be below timeout_s"));
 }
 
 // --- execution: the capability this rework exists for -------------------------------

@@ -1,9 +1,7 @@
 #include "settings.hpp"
 
-#include <cstdlib>
-#include <stdexcept>
 
-#include "minimal/config/parse_util.hpp"
+#include "minimal/common/config_reader.hpp"
 
 namespace minimal::typesafe_advisor {
 namespace {
@@ -12,44 +10,6 @@ constexpr const char* kTypesafeEndpoint = "https://api.typesafe.ai/v1/systemone"
 constexpr const char* kTypesafeModel = "jev-latest";
 constexpr const char* kOpenRouterEndpoint = "https://openrouter.ai/api/alpha/decisions";
 constexpr const char* kOpenRouterModel = "~typesafe/jev-latest";
-
-template <typename T>
-T ValueOr(const nlohmann::json& parent, const char* key, T fallback) {
-    auto it = parent.find(key);
-    if (it == parent.end() || it->is_null()) return fallback;
-    if constexpr (std::is_same_v<T, std::string>) {
-        if (!it->is_string()) return fallback;
-    } else if constexpr (std::is_same_v<T, double>) {
-        if (!it->is_number()) return fallback;
-    } else {
-        if (!it->is_number()) return fallback;
-    }
-    return it->get<T>();
-}
-
-// Nested "retry" object.
-int RetryIntOr(const nlohmann::json& parent, const char* key, int fallback) {
-    auto retry = parent.find("retry");
-    if (retry == parent.end() || !retry->is_object()) return fallback;
-    auto it = retry->find(key);
-    if (it == retry->end() || !it->is_number()) return fallback;
-    return it->get<int>();
-}
-
-double RetryDoubleOr(const nlohmann::json& parent, const char* key, double fallback) {
-    auto retry = parent.find("retry");
-    if (retry == parent.end() || !retry->is_object()) return fallback;
-    auto it = retry->find(key);
-    if (it == retry->end() || !it->is_number()) return fallback;
-    return it->get<double>();
-}
-
-double ClampedProbabilityOr(const nlohmann::json& parent, const char* key, double fallback) {
-    const double value = ValueOr(parent, key, fallback);
-    if (value < 0.0) return 0.0;
-    if (value > 1.0) return 1.0;
-    return value;
-}
 
 }  // namespace
 
@@ -65,74 +25,49 @@ std::string Settings::EffectiveModel() const {
 
 Settings ParseSettings(const nlohmann::json& config) {
     Settings settings;
-    if (!config.is_object()) return settings;
-    config::RejectUnknownKeys(
-        config,
-        {"backend", "api_key", "endpoint", "model", "request_timeout_ms", "budget_ms", "retry",
-         "min_probability_allow", "min_probability_deny", "min_margin", "questions",
-         "extra_questions"},
-        "typesafe-advisor: config");
-    if (const auto it = config.find("retry"); it != config.end()) {
-        config::RejectUnknownKeys(*it,
-                                  {"max_retries", "backoff_initial_ms", "backoff_max_ms", "jitter",
-                                   "retry_after_cap_ms"},
-                                  "typesafe-advisor: config.retry");
-    }
+    constexpr std::int64_t kMaxMs = 600000;
+    config::Reader reader(config, "plugins.json", "typesafe-advisor.config");
+    settings.backend = reader.Enum("backend", "typesafe", {"typesafe", "openrouter"}) == "openrouter"
+                           ? Backend::OpenRouter
+                           : Backend::Typesafe;
+    // Required, never defaulted: a key is only ever sent where it is named,
+    // and a backend typo must not route one service's key to the other.
+    settings.api_key = reader.RequireString("api_key");
+    settings.endpoint = reader.String("endpoint", settings.endpoint);
+    settings.model = reader.String("model", settings.model);
 
-    const std::string backend_name = ValueOr(config, "backend", std::string("typesafe"));
-    settings.backend = backend_name == "openrouter" ? Backend::OpenRouter : Backend::Typesafe;
-
-    // The backend default only applies when the entry names NO key at all;
-    // an explicit api_key is honored verbatim on either backend.
-    if (config.contains("api_key") && config.at("api_key").is_string()) {
-        settings.api_key = config.at("api_key").get<std::string>();
-    } else if (settings.backend == Backend::OpenRouter) {
-        settings.api_key = "env:OPENROUTER_API_KEY";
-    }
-
-    settings.endpoint = ValueOr(config, "endpoint", settings.endpoint);
-    settings.model = ValueOr(config, "model", settings.model);
-
-    settings.request_timeout_ms =
-        ValueOr(config, "request_timeout_ms", settings.request_timeout_ms);
-    settings.budget_ms = ValueOr(config, "budget_ms", settings.budget_ms);
-    if (settings.request_timeout_ms <= 0) settings.request_timeout_ms = 2000;
-    if (settings.budget_ms <= 0) settings.budget_ms = 2000;
+    settings.request_timeout_ms = static_cast<int>(
+        reader.Int("request_timeout_ms", settings.request_timeout_ms, 1, kMaxMs));
+    settings.budget_ms = static_cast<int>(reader.Int("budget_ms", settings.budget_ms, 1, kMaxMs));
     // A per-attempt cap above the total budget can only mean "budget wins";
-    // clamp it so the first attempt cannot silently outlive the loop.
+    // the first attempt must not be able to outlive the loop.
     if (settings.request_timeout_ms > settings.budget_ms) {
-        settings.request_timeout_ms = settings.budget_ms;
+        reader.Fail("request_timeout_ms", "must not exceed budget_ms");
     }
 
-    settings.max_retries = RetryIntOr(config, "max_retries", settings.max_retries);
-    settings.backoff_initial_ms =
-        RetryIntOr(config, "backoff_initial_ms", settings.backoff_initial_ms);
-    settings.backoff_max_ms = RetryIntOr(config, "backoff_max_ms", settings.backoff_max_ms);
-    settings.jitter = RetryDoubleOr(config, "jitter", settings.jitter);
-    settings.retry_after_cap_ms =
-        RetryIntOr(config, "retry_after_cap_ms", settings.retry_after_cap_ms);
-    if (settings.max_retries < 0) settings.max_retries = 0;
-    if (settings.backoff_initial_ms <= 0) settings.backoff_initial_ms = 1;
+    config::Reader retry = reader.Object("retry");
+    settings.max_retries =
+        static_cast<int>(retry.Int("max_retries", settings.max_retries, 0, 100));
+    settings.backoff_initial_ms = static_cast<int>(
+        retry.Int("backoff_initial_ms", settings.backoff_initial_ms, 1, kMaxMs));
+    settings.backoff_max_ms =
+        static_cast<int>(retry.Int("backoff_max_ms", settings.backoff_max_ms, 1, kMaxMs));
+    settings.jitter = retry.Double("jitter", settings.jitter, 0.0, 1.0);
+    settings.retry_after_cap_ms = static_cast<int>(
+        retry.Int("retry_after_cap_ms", settings.retry_after_cap_ms, 1, kMaxMs));
+    retry.Finish();
     if (settings.backoff_max_ms < settings.backoff_initial_ms) {
-        settings.backoff_max_ms = settings.backoff_initial_ms;
+        reader.Fail("retry.backoff_max_ms", "must not be below retry.backoff_initial_ms");
     }
-    if (settings.jitter < 0.0) settings.jitter = 0.0;
-    if (settings.jitter > 1.0) settings.jitter = 1.0;
-    if (settings.retry_after_cap_ms <= 0) settings.retry_after_cap_ms = 1000;
 
     settings.min_probability_allow =
-        ClampedProbabilityOr(config, "min_probability_allow", settings.min_probability_allow);
+        reader.Double("min_probability_allow", settings.min_probability_allow, 0.0, 1.0);
     settings.min_probability_deny =
-        ClampedProbabilityOr(config, "min_probability_deny", settings.min_probability_deny);
-    settings.min_margin = ClampedProbabilityOr(config, "min_margin", settings.min_margin);
-
-    if (auto it = config.find("questions"); it != config.end() && it->is_object()) {
-        settings.questions = *it;
-    }
-    if (auto it = config.find("extra_questions"); it != config.end() && it->is_object()) {
-        settings.extra_questions = *it;
-    }
-
+        reader.Double("min_probability_deny", settings.min_probability_deny, 0.0, 1.0);
+    settings.min_margin = reader.Double("min_margin", settings.min_margin, 0.0, 1.0);
+    if (auto questions = reader.MaybeObject("questions")) settings.questions = questions->node();
+    if (auto extra = reader.MaybeObject("extra_questions")) settings.extra_questions = extra->node();
+    reader.Finish();
     return settings;
 }
 

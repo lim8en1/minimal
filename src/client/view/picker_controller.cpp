@@ -289,8 +289,13 @@ void PickerController::RebuildAgentPickerComponent() {
                                                    "' will be used on your next message");
                   }
                   deps_.show_agent_picker = false;
+                  ContinuePendingSelection(/*chosen=*/true);
               },
-          .on_close = [this] { deps_.show_agent_picker = false; }},
+          .on_close =
+              [this] {
+                  deps_.show_agent_picker = false;
+                  ContinuePendingSelection(/*chosen=*/false);
+              }},
         agent_fetch_.Status());
 }
 
@@ -350,18 +355,20 @@ void PickerController::OpenModelPickerFetch(bool refresh) {
     RebuildModelPickerComponent();
     SessionClient::ListModelsOptions opts;
     opts.refresh_discovery = refresh;
-    RunFetch<std::vector<v1::ModelSummary>>(
+    RunFetch<v1::ListModelsResponse>(
         model_fetch_,
-        [this, opts](std::string& error) -> std::optional<std::vector<v1::ModelSummary>> {
-            const auto result = deps_.client.ListModels(opts);
+        [this, opts](std::string& error) -> std::optional<v1::ListModelsResponse> {
+            auto result = deps_.client.ListModels(opts);
             if (!result.status.ok()) {
                 error = result.status.error_message();
                 return std::nullopt;
             }
-            return std::vector<v1::ModelSummary>(result.response.models().begin(),
-                                                 result.response.models().end());
+            return std::move(result.response);
         },
-        [this](std::vector<v1::ModelSummary>&& models) { model_picker_models_ = std::move(models); },
+        [this](v1::ListModelsResponse&& response) {
+            model_picker_models_.assign(response.models().begin(), response.models().end());
+            model_picker_default_ = response.default_model();
+        },
         [this] { RebuildModelPickerComponent(); }, "model picker");
 }
 
@@ -370,6 +377,11 @@ void PickerController::RebuildModelPickerComponent() {
     if (model_picker_subagent_) {
         callbacks.leading_row_label = "same as parent";
         callbacks.leading_row_id = kSameAsParentRowId;
+    } else if (!model_picker_default_.empty()) {
+        // Back to the default model (settings.json default_model, or the only
+        // model): clears the tab's own choice. No row when there is none.
+        callbacks.leading_row_label = "default (" + model_picker_default_ + ")";
+        callbacks.leading_row_id = kDefaultModelRowId;
     }
     callbacks.on_select =
         [this](const std::string& ref) {
@@ -398,14 +410,23 @@ void PickerController::RebuildModelPickerComponent() {
             // reason the agent picker stages through it.
             const std::string tab = deps_.focused_or_new_tab();
             if (!tab.empty()) {
-                deps_.app.StageModel(tab, ref);
-                deps_.app.TabNotice(tab, "model '" + ref +
-                                              "' will be used on your next message");
+                if (ref == kDefaultModelRowId) {
+                    deps_.app.StageModel(tab, model_picker_default_, /*is_default=*/true);
+                    deps_.app.TabNotice(tab, "the default model will be used on your next message");
+                } else {
+                    deps_.app.StageModel(tab, ref);
+                    deps_.app.TabNotice(tab, "model '" + ref +
+                                                  "' will be used on your next message");
+                }
             }
             deps_.show_model_picker = false;
+            ContinuePendingSelection(/*chosen=*/true);
         };
     callbacks.on_refresh_discovery = [this] { OpenModelPicker(/*refresh=*/true); };
-    callbacks.on_close = [this] { deps_.show_model_picker = false; };
+    callbacks.on_close = [this] {
+        deps_.show_model_picker = false;
+        if (!model_picker_subagent_) ContinuePendingSelection(/*chosen=*/false);
+    };
     *deps_.model_picker_slot = MakeModelPicker(model_picker_models_, deps_.theme,
                                                std::move(callbacks), model_fetch_.Status());
 }
@@ -508,6 +529,82 @@ void PickerController::RebuildSubagentPickerComponent() {
                                     RebuildSubagentPickerComponent();
                                 }},
                            subagent_fetch_.Status());
+}
+
+void PickerController::EnsureSelectionThen(const std::string& tab, std::function<void()> send,
+                                           std::function<void()> cancel) {
+    const auto selection = deps_.app.SelectionFor(tab);
+    const bool has_agent = !selection.agent.empty();
+    const bool has_model = !selection.model.empty() && !selection.model_default;
+    if (!selection.exists || selection.sessioned || (has_agent && has_model)) {
+        send();
+        return;
+    }
+    // Whether the server has a default is its answer (settings, or the only
+    // option), asked fresh: discovery may have filled the model list since.
+    const std::string root = selection.project_root;
+    deps_.app.RunOnRpcQueue(
+        [this, tab, root, has_agent, has_model, send = std::move(send),
+         cancel = std::move(cancel)]() mutable {
+            std::optional<v1::ListAgentPresetsResponse> agents;
+            std::optional<v1::ListModelsResponse> models;
+            if (!has_agent) {
+                auto result = deps_.client.ListAgentPresets(root);
+                if (result.status.ok()) agents = std::move(result.response);
+            }
+            if (!has_model) {
+                auto result = deps_.client.ListModels({});
+                if (result.status.ok()) models = std::move(result.response);
+            }
+            QueueApply([this, tab, agents = std::move(agents), models = std::move(models),
+                        send = std::move(send), cancel = std::move(cancel)]() mutable {
+                PendingSelection pending{tab, std::move(send), std::move(cancel)};
+                // Ask only when there is a choice and no default. A failed
+                // listing, or nothing to choose from, is left to the create's
+                // own error, which names the fix.
+                pending.need_agent =
+                    agents && agents->default_agent_preset().empty() && agents->presets_size() > 0;
+                pending.need_model =
+                    models && models->default_model().empty() && models->models_size() > 0;
+                if (!pending.need_agent && !pending.need_model) {
+                    pending.send();
+                    return;
+                }
+                if (pending_selection_ && pending_selection_->cancel) pending_selection_->cancel();
+                pending_selection_ = std::move(pending);
+                ContinuePendingSelection(/*chosen=*/true);
+            });
+        },
+        /*must_run=*/true, AppState::RpcLane::kBulk);
+}
+
+void PickerController::ContinuePendingSelection(bool chosen) {
+    if (!pending_selection_) return;
+    if (!chosen) {
+        auto cancel = std::move(pending_selection_->cancel);
+        pending_selection_.reset();
+        if (cancel) cancel();
+        return;
+    }
+    const auto& pending = *pending_selection_;
+    const auto selection = deps_.app.SelectionFor(pending.tab);
+    if (pending.need_agent && selection.agent.empty()) {
+        deps_.app.TabNotice(pending.tab,
+                            "choose an agent for this project (remembered for next time) -- "
+                            "your message is sent once you have");
+        OpenAgentPicker();
+        return;
+    }
+    if (pending.need_model && (selection.model.empty() || selection.model_default)) {
+        deps_.app.TabNotice(pending.tab,
+                            "choose a model for this project (remembered for next time) -- "
+                            "your message is sent once you have");
+        OpenModelPicker(/*refresh=*/false);
+        return;
+    }
+    auto send = std::move(pending_selection_->send);
+    pending_selection_.reset();
+    send();
 }
 
 }  // namespace minimal::client

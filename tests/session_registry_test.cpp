@@ -63,7 +63,7 @@ struct TempConfigDir {
                                  {"url", "http://localhost:8080/v1"},
                                  {"models", {{"test-model", nlohmann::json::object()}}}}}}}}
                   .dump());
-        Write("settings.json", "{}");
+        Write("settings.json", R"({"default_model": "main/test-model"})");
         Write("permissions.json", "{}");
         Write("agents/build.md",
               "---\nname: build\nmodel: main/test-model\n---\nYou are a build agent.\n");
@@ -156,7 +156,7 @@ TEST_CASE("a user-chosen model outranks the preset's", "[session_registry][invar
                                              {{"test-model", nlohmann::json::object()},
                                               {"other-model", {{"max_tokens", 512}}}}}}}}}}
                              .dump());
-    fixture.config.Write("settings.json", "{}");
+    fixture.config.Write("settings.json", R"({"default_model": "main/test-model"})");
     fixture.config.Write("permissions.json", "{}");
     fixture.config.Write("agents/build.md",
                          "---\nname: build\nmodel: main/test-model\n---\nbody\n");
@@ -854,7 +854,7 @@ TEST_CASE("ForkSession persists an explicit model override to the child's row",
                            {"models", {{"test-model", nlohmann::json::object()},
                                        {"other-model", nlohmann::json::object()}}}}}}}}
             .dump());
-    fixture.config.Write("settings.json", "{}");
+    fixture.config.Write("settings.json", R"({"default_model": "main/test-model"})");
     fixture.config.Write("permissions.json", "{}");
     fixture.config.Write("agents/build.md",
                          "---\nname: build\nmodel: main/test-model\n---\nYou are a build agent.\n");

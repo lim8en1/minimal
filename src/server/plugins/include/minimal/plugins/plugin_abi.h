@@ -88,18 +88,11 @@ namespace minimal::plugins {
 // plugin author. (Per-invocation needs like the Logger travel in ToolContext,
 // not here.)
 struct PluginRegistrationContext {
-    // The `tools` object from settings.json, verbatim. Core deliberately does
-    // not impose a schema on it: each plugin owns the shape of its own slice,
-    // which is why config::ToolsSettings keeps it as raw JSON. Carried on the
-    // shared context rather than only at tool registration so a plugin that
-    // registers several seam kinds sees the same world at each.
-    nlohmann::json tools_settings = nlohmann::json::object();
-
     // This plugin's own configuration, verbatim: the optional "config" object
     // on the plugin's plugins.json entry --
     //   {"plugins": [{"file": "tools-bash.so", "config": {"timeout_s": 30}}]}
-    // -- and only this plugin's. Core imposes no schema here either; the same
-    // rule as tools_settings. Empty when the entry carries none (a runtime
+    // -- and only this plugin's. Core imposes no schema here; the plugin owns
+    // its slice's shape. Empty when the entry carries none (a runtime
     // condition, not an error). Configure a plugin where you enable it:
     // plugins.json is the one file a user already edits for that purpose.
     nlohmann::json config = nlohmann::json::object();

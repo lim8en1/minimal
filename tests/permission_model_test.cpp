@@ -401,7 +401,6 @@ TEST_CASE("permissions.json: plugins carries model slices verbatim", "[permissio
     const auto config = config::ParsePermissionsConfig(
         {{"plugins", {{"tools-web", {{"hosts", {{"*.internal", "deny"}}}}}}}});
     CHECK(config.plugin_slices["tools-web"]["hosts"]["*.internal"] == "deny");
-    CHECK(config.unknown_keys.empty());
     CHECK_THROWS(config::ParsePermissionsConfig({{"plugins", "tools-web"}}));
 }
 

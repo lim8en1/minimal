@@ -128,9 +128,14 @@ session::SessionSummary Create(const LaunchContext& context, const LaunchRequest
     // message, guarded by `name = ''`, and a placeholder would satisfy that
     // guard and permanently suppress the default naming.
     params.name = request.name;
-    params.agent_preset = request.agent_preset.empty() ? context.settings.default_agent_preset
-                                                       : request.agent_preset;
     params.project_root = request.project_root;
+    // No preset named: settings.json default_agent_preset when it resolves,
+    // else the only one there is; several and no usable setting, the user
+    // picks.
+    params.agent_preset =
+        request.agent_preset.empty()
+            ? context.sessions.presets().DefaultAgentPreset(params.project_root).value_or("")
+            : request.agent_preset;
     // Unset means "the client did not ask": the run-mode default is applied
     // with the rest of permissions.json, in AgentPresetRegistry.
     params.run_mode_override = request.run_mode;
@@ -139,7 +144,10 @@ session::SessionSummary Create(const LaunchContext& context, const LaunchRequest
 
     if (params.agent_preset.empty()) {
         throw LaunchError(Code::kFailedPrecondition,
-                          "no agent_preset given and settings.json sets no default_agent_preset");
+                          "no agent preset chosen: available are " +
+                              context.sessions.presets().DescribeAgentPresets(params.project_root) +
+                              " -- pick one (/agent, --agent) or set settings.json "
+                              "default_agent_preset");
     }
     ValidateProjectRoot(params.project_root);
 

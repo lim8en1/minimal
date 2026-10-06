@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <fstream>
 #include <limits>
@@ -710,9 +711,8 @@ TEST_CASE("read returns a file payload with raw, unnumbered lines", "[tools_fs][
 
 // --- settings ----------------------------------------------------------------
 
-TEST_CASE("fs settings take defaults when absent or nonsensical", "[tools_fs][settings]") {
+TEST_CASE("fs settings: defaults, overrides, and named refusals", "[tools_fs][settings]") {
     CHECK(tools_fs::ParseFsSettings(nlohmann::json::object()).read_default_limit_lines == 2000);
-    CHECK(tools_fs::ParseFsSettings(nlohmann::json("not an object")).read_max_line_length == 2000);
 
     const nlohmann::json configured = {{"read", {{"default_limit_lines", 50}}},
                                        {"edit", {{"max_editable_file_bytes", 1024}}}};
@@ -721,10 +721,15 @@ TEST_CASE("fs settings take defaults when absent or nonsensical", "[tools_fs][se
     CHECK(settings.edit_max_editable_file_bytes == 1024);
     CHECK(settings.read_max_line_length == 2000);  // untouched key keeps its default
 
-    // A non-positive limit would mean "read nothing", which nobody configures on
-    // purpose.
-    const nlohmann::json nonsense = {{"read", {{"default_limit_lines", 0}}}};
-    CHECK(tools_fs::ParseFsSettings(nonsense).read_default_limit_lines == 2000);
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(tools_fs::ParseFsSettings(nlohmann::json("not an object")),
+                      ContainsSubstring("tools-fs.config: must be an object"));
+    // A non-positive limit would mean "read nothing", which nobody configures
+    // on purpose.
+    CHECK_THROWS_WITH(tools_fs::ParseFsSettings({{"read", {{"default_limit_lines", 0}}}}),
+                      ContainsSubstring("read.default_limit_lines: must be at least 1"));
+    CHECK_THROWS_WITH(tools_fs::ParseFsSettings({{"read", {{"max_line", 10}}}}),
+                      ContainsSubstring("read.max_line: unknown field"));
 }
 
 TEST_CASE("reading one enormous line does not allocate the whole file",
@@ -928,17 +933,16 @@ TEST_CASE("a default read under a smaller ceiling is not reported as clipped",
     CHECK(result.content_text.find("Pass offset=3") != std::string::npos);
 }
 
-TEST_CASE("fs settings clamp huge values and keep the default under the ceiling",
+TEST_CASE("fs settings refuse huge, fractional and contradictory values",
           "[tools_fs][settings]") {
-    const nlohmann::json huge = {{"read", {{"max_lines", 5000000000LL}}}};
-    CHECK(tools_fs::ParseFsSettings(huge).read_max_lines == std::numeric_limits<int>::max());
-
-    const nlohmann::json contradictory = {
-        {"read", {{"default_limit_lines", 500}, {"max_lines", 100}}}};
-    CHECK(tools_fs::ParseFsSettings(contradictory).read_default_limit_lines == 100);
-
-    const nlohmann::json fractional = {{"read", {{"max_lines", 99.5}}}};
-    CHECK(tools_fs::ParseFsSettings(fractional).read_max_lines == 2000);
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(tools_fs::ParseFsSettings({{"read", {{"max_lines", 5000000000LL}}}}),
+                      ContainsSubstring("read.max_lines: must be at most"));
+    CHECK_THROWS_WITH(
+        tools_fs::ParseFsSettings({{"read", {{"default_limit_lines", 500}, {"max_lines", 100}}}}),
+        ContainsSubstring("read.default_limit_lines: must not exceed read.max_lines"));
+    CHECK_THROWS_WITH(tools_fs::ParseFsSettings({{"read", {{"max_lines", 99.5}}}}),
+                      ContainsSubstring("read.max_lines: must be an integer"));
 }
 
 TEST_CASE("write and edit results name the path as typed", "[tools_fs][write][edit]") {

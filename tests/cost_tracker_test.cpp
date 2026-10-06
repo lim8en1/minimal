@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <nlohmann/json.hpp>
 
 #include "commands_core_fixture.hpp"
@@ -598,12 +599,14 @@ TEST_CASE("plugin settings parse from the config slice with defaults",
     CHECK(custom.openrouter_rates_fetch_url == "http://mirror/or.json");
     CHECK(custom.rates_fetch_timeout_ms == 5);
 
-    // Junk values keep defaults rather than poisoning the fetch.
-    const auto junk = ParseCostSettings(nlohmann::json::parse(
-        R"({"rates_fetch_url": 3, "openrouter_rates_fetch_url": [], "rates_fetch_timeout_ms": -1})"));
-    CHECK(junk.rates_fetch_url == defaults.rates_fetch_url);
-    CHECK(junk.openrouter_rates_fetch_url == defaults.openrouter_rates_fetch_url);
-    CHECK(junk.rates_fetch_timeout_ms == 30000);
+    // Junk is refused by name rather than silently replaced by a default.
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(ParseCostSettings({{"rates_fetch_url", 3}}),
+                      ContainsSubstring("cost-tracker.config.rates_fetch_url: must be a string"));
+    CHECK_THROWS_WITH(ParseCostSettings({{"rates_fetch_timeout_ms", -1}}),
+                      ContainsSubstring("rates_fetch_timeout_ms: must be at least 1"));
+    CHECK_THROWS_WITH(ParseCostSettings({{"rates_url", "x"}}),
+                      ContainsSubstring("rates_url: unknown field"));
 }
 
 TEST_CASE("/cost reports a session's totals and its unpriced turns",

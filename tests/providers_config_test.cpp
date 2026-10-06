@@ -89,6 +89,8 @@ VariantParamsHook AnthropicVariantParamsHookFixture() {
         if (effort_word == "low") budget = 4096;
         else if (effort_word == "medium") budget = 8192;
         else if (effort_word == "high") budget = 16384;
+        else if (effort_word == "xhigh") budget = 32768;
+        else if (effort_word == "max") budget = 65536;
         if (!budget) {
             throw std::runtime_error(
                 "providers.json: effort '" + effort_word +
@@ -223,9 +225,8 @@ TEST_CASE("the old flat array is refused by name", "[providers][invariant]") {
         FAIL("expected the legacy array to be refused");
     } catch (const std::runtime_error& error) {
         const std::string message = error.what();
-        CHECK(message.find("old format") != std::string::npos);
-        CHECK(message.find("<provider>/<model>") != std::string::npos);
-        CHECK(message.find("providers.example.json") != std::string::npos);
+        CHECK(message.find("providers.json: the top level: must be an object") !=
+              std::string::npos);
     }
 }
 
@@ -371,7 +372,7 @@ TEST_CASE("a fractional numeric field is refused by name, not truncated", "[prov
         const std::string message = error.what();
         CHECK(message.find("max_tokens") != std::string::npos);
         CHECK(message.find("integer") != std::string::npos);
-        CHECK(message.find("p/m") != std::string::npos);
+        CHECK(message.find("providers.p.models.m.max_tokens") != std::string::npos);
     }
 }
 
@@ -386,8 +387,8 @@ TEST_CASE("a typo'd top-level key is refused where the mistake is", "[providers]
         FAIL("expected the typo'd key to be refused");
     } catch (const std::runtime_error& error) {
         const std::string message = error.what();
-        CHECK(message.find("\"providers\"") != std::string::npos);
-        CHECK(message.find("provider") != std::string::npos);
+        CHECK(message.find("providers.json: provider: unknown field (known: providers)") !=
+              std::string::npos);
     }
 }
 
@@ -415,12 +416,16 @@ TEST_CASE("an env: api_key resolves at load", "[providers]") {
     CHECK(key.source == "env MINIMAL_TEST_PROVIDER_KEY");
 }
 
-TEST_CASE("an unset env: api_key fails at startup, not at the first request", "[providers]") {
+TEST_CASE("an unset env: api_key loads, and each use fails naming the variable",
+          "[providers]") {
+    // One provider's missing key must not abort startup for every other one:
+    // the same degrade a not-yet-stored secret: reference already has.
     ScopedEnv env("MINIMAL_TEST_PROVIDER_KEY", nullptr);
-    CHECK_THROWS_AS(ParseProvidersConfig(nlohmann::json::parse(R"({
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
                         "providers": {"p": {"backend":"openai","url":"http://x",
-                          "api_key":"env:MINIMAL_TEST_PROVIDER_KEY","models":{"m":{}}}}})")),
-                    std::runtime_error);
+                          "api_key":"env:MINIMAL_TEST_PROVIDER_KEY","models":{"m":{}}}}})"));
+    CHECK_THROWS_WITH(Require(config, "p/m").provider.api_key.Get(),
+                      Catch::Matchers::ContainsSubstring("MINIMAL_TEST_PROVIDER_KEY"));
 }
 
 TEST_CASE("a malformed secret: api_key fails at startup", "[providers]") {
@@ -1373,8 +1378,8 @@ TEST_CASE("a variants value that is neither array nor object is refused by name"
         })"));
         FAIL("expected the boolean variants to be refused");
     } catch (const std::runtime_error& error) {
-        CHECK(std::string(error.what()).find("\"variants\" must be an array of effort names "
-                                             "or an object") != std::string::npos);
+        CHECK(std::string(error.what()).find("providers.p.variants: must be a list of effort "
+                                             "names or an object") != std::string::npos);
     }
 }
 
@@ -1408,9 +1413,10 @@ TEST_CASE("list-form variants synthesize addressable siblings with backend-deriv
     REQUIRE(low.max_tokens.has_value());
     CHECK(*low.max_tokens == 32000);
 
-    // xhigh maps to the top budget tier of the anthropic scale.
+    // xhigh has its own rung above high (32768), clamped here to fit the
+    // model's max_tokens of 32000 with 1k of visible output left.
     const auto& xhigh = Require(config, "anthropic/claude@xhigh");
-    CHECK(xhigh.parameters.at("thinking").at("budget_tokens") == 16384);
+    CHECK(xhigh.parameters.at("thinking").at("budget_tokens") == 32000 - 1024);
 
     // The openai backend derives the effort word; xhigh/max normalize to high.
     const auto& medium = Require(config, "openai/gpt@medium");
@@ -1454,13 +1460,14 @@ TEST_CASE("VariantParametersFor: a registered hook produces identical output to 
         CHECK(params.at("thinking").at("budget_tokens") == 16384);
     }
     {
-        // xhigh/max fold to "high" before the hook is ever consulted.
-        const auto [params, clamped] = VariantParametersFor("anthropic", "xhigh", 32000, hook);
-        CHECK(params.at("thinking").at("budget_tokens") == 16384);
+        // The hook sees xhigh/max verbatim: each has its own budget, clamped
+        // to the model's max_tokens like any other.
+        const auto [params, clamped] = VariantParametersFor("anthropic", "xhigh", 64000, hook);
+        CHECK(params.at("thinking").at("budget_tokens") == 32768);
+        CHECK_FALSE(clamped);
         const auto [params2, clamped2] = VariantParametersFor("anthropic", "max", 32000, hook);
-        CHECK(params2.at("thinking").at("budget_tokens") == 16384);
-        (void)clamped;
-        (void)clamped2;
+        CHECK(params2.at("thinking").at("budget_tokens") == 32000 - 1024);
+        CHECK(clamped2);
     }
     {
         // Anthropic: thinking omitted entirely IS off.
@@ -2145,21 +2152,18 @@ TEST_CASE("unknown fields are named parse errors at every level", "[providers]")
     };
     CHECK_THROWS_WITH(parse(R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
                                     "credentials": "secret:p", "models": {"m": {}}}}})"),
-                      ContainsSubstring("\"credentials\" was removed"));
-    CHECK_THROWS_WITH(parse(R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
-                                    "api_key_env": "K", "models": {"m": {}}}}})"),
-                      ContainsSubstring("\"api_key_env\" was removed"));
+                      ContainsSubstring("providers.p.credentials: unknown field"));
     CHECK_THROWS_WITH(parse(R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
                                     "apikey": "k", "models": {"m": {}}}}})"),
-                      ContainsSubstring("provider 'p' has unknown field \"apikey\""));
+                      ContainsSubstring("providers.p.apikey: unknown field"));
     CHECK_THROWS_WITH(parse(R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
                                     "models": {"m": {"max_token": 5}}}}})"),
-                      ContainsSubstring("model 'p/m' has unknown field \"max_token\""));
+                      ContainsSubstring("providers.p.models.m.max_token: unknown field"));
     CHECK_THROWS_WITH(parse(R"({"providers": {"p": {"backend": "openai", "url": "http://x/v1",
                                     "timeouts": {"connect": 5}, "models": {"m": {}}}}})"),
-                      ContainsSubstring("timeouts has unknown field \"connect\""));
+                      ContainsSubstring("providers.p.timeouts.connect: unknown field"));
     CHECK_THROWS_WITH(parse(R"({"providers": {}, "provider": {}})"),
-                      ContainsSubstring("unknown field \"provider\""));
+                      ContainsSubstring("providers.json: provider: unknown field"));
 }
 
 TEST_CASE("comment keys are allowed wherever fields are", "[providers]") {

@@ -70,7 +70,8 @@ struct ClientFixture {
                                  {"models", {{"test-model", nlohmann::json::object()},
                                              {"other-model", nlohmann::json::object()}}}}}}}}
                   .dump());
-        Write("settings.json", nlohmann::json{{"default_agent_preset", "main"}}.dump());
+        Write("settings.json", nlohmann::json{{"default_agent_preset", "main"},
+                                              {"default_model", "main/test-model"}}.dump());
         Write("permissions.json", "{}");
         Write("agents/main.md", "---\nname: main\nmodel: main/test-model\nallowed_tools: [\"*\"]\n---\nYou help.\n");
 
