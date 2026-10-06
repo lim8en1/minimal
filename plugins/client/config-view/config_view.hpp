@@ -10,19 +10,17 @@
 // Every PluginCall runs on the feed's worker thread; the UI thread only reads
 // snapshots. `/config <plugin>` opens straight onto that plugin's form.
 
-#include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 
 #include <ftxui/component/component.hpp>
 #include <nlohmann/json.hpp>
 
 #include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/plugins/task_worker.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/view/schema_form.hpp"
 
@@ -36,7 +34,6 @@ inline constexpr const char* kViewId = "config";
 class ConfigFeed {
 public:
     ConfigFeed(plugins::ClientApi* api, plugins::HostUi* ui);
-    ~ConfigFeed();
 
     void RefreshList();
     // Shows `name`'s form (fetching its description).
@@ -56,8 +53,6 @@ public:
     std::string open_plugin() const;
 
 private:
-    void Post(std::function<void()> task);
-    void Run();
     void FetchList();
     // Fetches `name`'s description; `status` is the outcome to show with it,
     // an error for `error_path` when that is not "".
@@ -67,15 +62,12 @@ private:
     nlohmann::json Call(const std::string& method, const nlohmann::json& request);
 
     plugins::ClientApi* api_;
-    plugins::HostUi* ui_;
     mutable std::mutex mu_;
-    std::condition_variable cv_;
-    std::deque<std::function<void()>> tasks_;
-    bool stop_ = false;
     ListState list_;
     std::string open_;
     client::SchemaFormState form_;
-    std::thread worker_;  // last: starts after every member above exists
+    // Last: destroyed first, so no task outlives the state above.
+    plugins::TaskWorker worker_;
 };
 
 class ConfigView final : public plugins::View {

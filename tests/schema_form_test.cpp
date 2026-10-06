@@ -367,6 +367,9 @@ public:
         if (method == "set") return json{{"applied", "live"}, {"changed", {"net.timeout_ms"}}}.dump();
         return std::nullopt;
     }
+    std::optional<minimal::v1::ListModelsResponse> ListModels(bool, std::string*) override {
+        return std::nullopt;
+    }
     client::SubscribeOutcome PluginSubscribe(const std::string&, const std::string&,
                                              const std::string&,
                                              const std::function<bool(const std::string&)>&) override {

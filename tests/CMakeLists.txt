@@ -360,6 +360,7 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     # config-view: its feed and component, over a fake endpoint.
     "${CMAKE_SOURCE_DIR}/plugins/client/config-view/config_view.cpp"
     schema_form_test.cpp
+    task_worker_test.cpp
     mcp_view_test.cpp)
 
 target_include_directories(minimal_tests PRIVATE
