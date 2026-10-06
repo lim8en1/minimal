@@ -70,7 +70,8 @@ std::string DisplayValue(const nlohmann::json& field, const nlohmann::json& valu
 // The file: {} when it does not exist; throws config::ConfigError when it
 // cannot be read or is not a JSON object.
 nlohmann::json ReadPluginConfigFile(const std::filesystem::path& path, const std::string& label);
-// Atomic, creating the directory. An empty object removes the file instead
+// Atomic, creating the directory; a new file is owner-only (0600) since a
+// secret field may hold a literal key. An empty object removes the file instead
 // (nothing configured is the same as no file). "" on success, else the error.
 std::string WritePluginConfigFile(const std::filesystem::path& path, const nlohmann::json& config);
 

@@ -257,7 +257,12 @@ std::string WritePluginConfigFile(const std::filesystem::path& path, const json&
     }
     std::filesystem::create_directories(path.parent_path(), ec);
     if (ec) return "could not create " + path.parent_path().string() + ": " + ec.message();
-    const WriteOutcome outcome = write_file(path, config.dump(2) + "\n");
+    // Owner-only when created: a secret field may hold a literal key (only a
+    // "secret:"/"env:" reference is safe to share). An existing file keeps the
+    // mode its owner gave it.
+    const WriteOutcome outcome =
+        write_file(path, config.dump(2) + "\n",
+                   std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
     return outcome.ok ? "" : "could not write " + path.string() + ": " + outcome.error;
 }
 

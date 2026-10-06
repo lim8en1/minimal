@@ -153,6 +153,10 @@ TEST_CASE("the file: missing reads as {}, an empty config removes it", "[plugin_
 
     CHECK(common::WritePluginConfigFile(path, json{{"limit", 9}}).empty());  // creates the dir
     CHECK(common::ReadPluginConfigFile(path, "plugins.d/sample.json") == json{{"limit", 9}});
+    // A new file may hold a literal key: owner-only.
+    const auto perms = std::filesystem::status(path).permissions();
+    CHECK((perms & (std::filesystem::perms::group_all | std::filesystem::perms::others_all)) ==
+          std::filesystem::perms::none);
     CHECK(common::WritePluginConfigFile(path, json::object()).empty());
     CHECK_FALSE(std::filesystem::exists(path));
 
