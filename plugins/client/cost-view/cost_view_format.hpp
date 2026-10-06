@@ -21,6 +21,7 @@
 #include <type_traits>
 
 #include <nlohmann/json.hpp>
+#include "minimal/common/count_format.hpp"
 
 namespace minimal::client::cost_view {
 
@@ -55,21 +56,6 @@ T SafeValue(const nlohmann::json& j, const char* key, T fallback) {
     }
     if (!compatible) return fallback;
     return it->get<T>();
-}
-
-// "1234567" -> "1.2M", "12345" -> "12.3k", "123" -> "123", >=1e9 -> G tier.
-// The tier is picked by the ROUNDED value: 999'950 rounds to "1.0M", never
-// "1000.0k" (and 999'950'000 to "1.0G").
-inline std::string FormatTokens(std::int64_t tokens) {
-    const auto scaled = [](std::int64_t value, double scale, char suffix) {
-        char buf[32];
-        std::snprintf(buf, sizeof(buf), "%.1f%c", static_cast<double>(value) / scale, suffix);
-        return std::string(buf);
-    };
-    if (tokens >= 999'950'000) return scaled(tokens, 1e9, 'G');
-    if (tokens >= 999'950) return scaled(tokens, 1e6, 'M');
-    if (tokens >= 1'000) return scaled(tokens, 1e3, 'k');
-    return std::to_string(tokens);
 }
 
 // Sub-cent totals are common early in a session; four decimals avoids "$0.00"
@@ -141,7 +127,7 @@ inline std::optional<std::string> FormatTotals(const nlohmann::json& totals) {
     } else {
         text = "cost?";
     }
-    text += " · " + FormatTokens(tokens.input_tokens) + "/" + FormatTokens(tokens.output_tokens) +
+    text += " · " + common::CompactCount(tokens.input_tokens) + "/" + common::CompactCount(tokens.output_tokens) +
            " tok";
     if (SafeValue<int>(totals, "unpriced_turns", 0) > 0) text += " (+unpriced)";
     return text;
@@ -166,7 +152,7 @@ inline std::optional<std::string> FormatTokenDetail(const nlohmann::json& totals
         if (!text.empty()) text += " · ";
         text += label;
         text += ' ';
-        text += FormatTokens(count);
+        text += common::CompactCount(count);
     };
     append("i", tokens.input_tokens);
     append("o", tokens.output_tokens);

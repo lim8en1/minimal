@@ -1,12 +1,13 @@
 #pragma once
 
-// The client's one compact count format, for token counts in the status bar
-// and row headlines: "950", "4.2k", "62k", "1.3M", "2M".
+// The one compact count format for token counts on screen (status bar, row
+// headlines, the cost segment): "950", "4.2k", "62k", "1.3M", "2M", "1.2G".
+// Exact counts (a table's "1,234,567") are a different format, not this one.
 
 #include <cstdint>
 #include <string>
 
-namespace minimal::client {
+namespace minimal::common {
 
 // One decimal below ten of a unit ("4.2k"), none above ("62k"); a trailing
 // ".0" is dropped ("2M", not "2.0M"). Truncates, never rounds up into the
@@ -24,8 +25,9 @@ inline std::string CompactCount(std::int64_t n) {
     };
     if (n < 1'000) return std::to_string(n);
     if (n < 1'000'000) return scaled(n, 1'000, "k");
-    return scaled(n, 1'000'000, "M");
+    if (n < 1'000'000'000) return scaled(n, 1'000'000, "M");
+    return scaled(n, 1'000'000'000, "G");
 }
 // NOLINTEND(readability-magic-numbers)
 
-}  // namespace minimal::client
+}  // namespace minimal::common

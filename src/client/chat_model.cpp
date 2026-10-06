@@ -15,7 +15,7 @@
 #include "minimal/common/clock.hpp"
 #include "minimal/proto/struct_json.hpp"
 #include "minimal/client/policy.hpp"
-#include "minimal/client/count_format.hpp"
+#include "minimal/common/count_format.hpp"
 
 namespace minimal::client {
 
@@ -201,7 +201,7 @@ std::string AssistantLabel(const std::string& agent, const std::string& model) {
 }
 
 std::string CompactionHeadline(const ChatRow& row) {
-    const auto tokens = [](int64_t n) { return CompactCount(n); };
+    const auto tokens = [](int64_t n) { return common::CompactCount(n); };
     std::string out = row.compaction_skipped ? "compaction skipped" : "context compacted";
     if (!row.compaction_trigger.empty()) out += " (" + row.compaction_trigger + ")";
     if (row.compaction_skipped) return out;

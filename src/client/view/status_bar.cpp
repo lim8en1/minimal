@@ -3,7 +3,7 @@
 #include <algorithm>
 
 #include "minimal/client/utf8.hpp"
-#include "minimal/client/count_format.hpp"
+#include "minimal/common/count_format.hpp"
 #include "minimal/client/policy.hpp"
 #include "minimal/common/units.hpp"
 
@@ -66,8 +66,8 @@ std::vector<std::string> UnknownStatusSegments(const std::string& format) {
 
 std::string FormatTokenUsage(std::int64_t used, std::int64_t max) {
     if (used < 0) used = 0;
-    if (max <= 0) return CompactCount(used) + " tok";
-    return CompactCount(used) + "/" + CompactCount(max) + " · " +
+    if (max <= 0) return common::CompactCount(used) + " tok";
+    return common::CompactCount(used) + "/" + common::CompactCount(max) + " · " +
            std::to_string(common::AsPercent(used, max)) + "%";
 }
 
