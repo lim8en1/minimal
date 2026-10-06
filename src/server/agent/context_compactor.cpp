@@ -6,6 +6,7 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/chat.hpp"
+#include "minimal/agent/policy.hpp"
 
 namespace minimal::agent {
 
@@ -30,11 +31,12 @@ std::int64_t JsonSizeEstimate(const nlohmann::json& value) {
             return total;
         }
         case nlohmann::json::value_t::null:
-            return 4;
+            return static_cast<std::int64_t>(std::string_view("null").size());
         case nlohmann::json::value_t::boolean:
-            return value.get<bool>() ? 4 : 5;
+            return static_cast<std::int64_t>(
+                std::string_view(value.get<bool>() ? "true" : "false").size());
         default:
-            return 8;  // numbers, binary: a fixed guess is within the noise of bytes/4
+            return kEstimatedJsonNumberBytes;  // numbers, binary
     }
 }
 

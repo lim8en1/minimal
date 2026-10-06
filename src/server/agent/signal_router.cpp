@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <string_view>
 #include <utility>
 
@@ -71,7 +72,7 @@ std::string EscapeAttrValue(const std::string& value) {
     for (const char c : value) {
         if (c == '\\') out += "\\\\";
         else if (c == '"') out += "\\\"";
-        else if (static_cast<unsigned char>(c) < 0x20) continue;  // control chars: dropped
+        else if (std::iscntrl(static_cast<unsigned char>(c))) continue;  // control chars: dropped
         else out += c;
     }
     return out;
@@ -209,7 +210,7 @@ SignalDelivery SignalRouter::DeliverExternal(const std::string& channel, const s
     // didn't my signal fire". kNoSubscriber and kDropped are different
     // causes -- no matching subscription at all, versus a subscribed
     // session whose InjectionQueue refused every delivery attempt (it is
-    // terminating, or already staged kMaxPending messages) -- so they get
+    // terminating, or already staged kMaxPendingInjections messages) -- so they get
     // distinct messages rather than one that fits neither.
     const Delivery delivery = Deliver(channel, signal, wrapped, gate);
     switch (delivery) {

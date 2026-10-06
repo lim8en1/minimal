@@ -15,6 +15,7 @@
 #include "minimal/llm/chat.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
+#include "minimal/agent/policy.hpp"
 
 namespace minimal::agent {
 
@@ -132,12 +133,6 @@ struct CompactionRequest {
 std::optional<CompactionResult> compact_messages(
     std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
     const CompactionRequest& request);
-
-// The bytes-per-token ratio behind every token ESTIMATE in the tree (this
-// fallback, plugins sizing a cap in tokens). A convenience heuristic, not a
-// tokenizer: real counts vary by model and content, and anything that has a
-// backend-reported count uses that instead.
-inline constexpr std::int64_t kEstimatedBytesPerToken = 4;
 
 // Rough size of a message range in tokens: serialized bytes /
 // kEstimatedBytesPerToken. The fallback

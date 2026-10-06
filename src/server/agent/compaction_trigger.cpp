@@ -1,4 +1,5 @@
 #include "minimal/agent/compaction_trigger.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::agent {
 
@@ -12,7 +13,7 @@ std::int64_t resolve_compaction_trigger(const config::CompactionTriggerSettings&
             return trigger.tokens;
         case Kind::PercentOfWindow:
             if (!context_window_tokens) return 0;
-            return *context_window_tokens * trigger.percent / 100;
+            return common::PercentOf(*context_window_tokens, trigger.percent);
         case Kind::WindowBuffer: {
             if (!context_window_tokens) return 0;
             const std::int64_t threshold = *context_window_tokens - trigger.buffer_tokens;

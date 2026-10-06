@@ -1,5 +1,6 @@
 #include "minimal/agent/session_naming.hpp"
 #include "minimal/common/utf8.hpp"
+#include "minimal/agent/policy.hpp"
 
 #include <cctype>
 
@@ -26,12 +27,10 @@ std::string CollapseWhitespace(std::string_view text) {
     return out;
 }
 
-constexpr int kDefaultNameMaxChars = 60;
-
 }  // namespace
 
 std::string DefaultSessionName(std::string_view text) {
-    return common::TruncateCodePoints(CollapseWhitespace(text), kDefaultNameMaxChars);
+    return common::TruncateCodePoints(CollapseWhitespace(text), kDefaultSessionNameMaxChars);
 }
 
 }  // namespace minimal::agent

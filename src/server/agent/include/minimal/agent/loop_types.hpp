@@ -40,6 +40,8 @@
 #include "minimal/tools/tool_pool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 #include "minimal/common/units.hpp"
+#include "minimal/agent/policy.hpp"
+#include "minimal/config/policy.hpp"
 
 namespace minimal::agent {
 
@@ -79,12 +81,12 @@ struct LoopConfig {
     // sequential behavior -- the ToolPool degenerates to inline execution and
     // starts no threads. Sourced from settings.json's
     // tools.max_parallel_tool_calls.
-    int max_parallel_tool_calls = 4;
+    int max_parallel_tool_calls = config::kDefaultMaxParallelToolCalls;
 
     // The global tool-input ceiling (settings.json tools.max_input_bytes).
     // Checked at the gate, before Prepare: no hook payload, no permission
     // request, no execution -- one error result the model adapts to.
-    std::int64_t max_tool_input_bytes = 10 * common::kMiB;
+    std::int64_t max_tool_input_bytes = config::kDefaultMaxToolInputBytes;
 
     // The global tool-RESULT ceiling (settings.json tools.max_result_bytes).
     // Mirrors max_tool_input_bytes on the output side: a core tool like bash
@@ -92,11 +94,11 @@ struct LoopConfig {
     // -- an MCP tool or a third-party plugin tool has no ceiling at all
     // short of this one. Checked once, right after Execute() returns, so it
     // applies uniformly to every tool regardless of who wrote it. 0 disables.
-    std::int64_t max_tool_result_bytes = 10 * common::kMiB;
+    std::int64_t max_tool_result_bytes = config::kDefaultMaxToolResultBytes;
 
     // Ceiling on a result's display payload (settings.json
     // tools.max_display_bytes). Over it the payload is dropped whole. 0 disables.
-    std::int64_t max_tool_display_bytes = 128 * common::kKiB;
+    std::int64_t max_tool_display_bytes = config::kDefaultMaxToolDisplayBytes;
 
     // Exponential-with-EQUAL-jitter backoff between retries: half the ceiling
     // is a fixed floor, the other half random. Full jitter can legally draw
@@ -104,8 +106,8 @@ struct LoopConfig {
     // unassertable. Zero base delay disables the wait, which is what the tests
     // that assert on attempt COUNTS want -- they would otherwise pay the delay
     // for nothing.
-    std::chrono::milliseconds retry_base_delay{500};
-    std::chrono::milliseconds retry_max_delay{8000};
+    std::chrono::milliseconds retry_base_delay = kRetryBaseDelay;
+    std::chrono::milliseconds retry_max_delay = kRetryMaxDelay;
 
     // The process-wide hook dispatcher (track O). Borrowed; null in tests that
     // do not exercise hooks -- both compaction emissions are observe-only

@@ -83,10 +83,10 @@ TEST_CASE("an owed continuation wakes the idle unpaused worker", "[session][wake
 
 TEST_CASE("WorkQueue is bounded and refuses without queueing", "[session][work_queue]") {
     WorkQueue queue;
-    for (std::size_t i = 0; i < WorkQueue::kMaxItems; ++i) REQUIRE(queue.TryPush(QueuedCommand{}));
+    for (std::size_t i = 0; i < minimal::agent::kMaxQueuedWorkItems; ++i) REQUIRE(queue.TryPush(QueuedCommand{}));
     CHECK(queue.full());
     CHECK_FALSE(queue.TryPush(QueuedCommand{}));
-    CHECK(queue.size() == WorkQueue::kMaxItems);
+    CHECK(queue.size() == minimal::agent::kMaxQueuedWorkItems);
 }
 
 TEST_CASE("WorkQueue pause hold leaves turns in place and runs non-turn work",

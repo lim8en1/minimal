@@ -11,6 +11,7 @@ minimal/agent/compaction_boundary.hpp
 minimal/agent/compaction_strategy.hpp
 minimal/agent/context_compactor.hpp
 minimal/agent/context_contributor.hpp
+minimal/agent/policy.hpp
 minimal/agent/mention_resolver.hpp
 minimal/agent/session_observer_registry.hpp
 minimal/agent/session_observer.hpp

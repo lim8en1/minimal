@@ -1,4 +1,5 @@
 #include "minimal/agent/retry_policy.hpp"
+#include "minimal/agent/policy.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -35,10 +36,9 @@ bool RetryPolicy::SleepForBackoff(int attempt,
     // Slept in slices, polling cancellation. Sleeping the whole delay would
     // make CancelTurn wait out a backoff the user just asked to abandon --
     // the same argument that put a cancel-polling sink in the compactor.
-    constexpr std::chrono::milliseconds kSlice{25};
-    for (std::chrono::milliseconds slept{0}; slept < delay; slept += kSlice) {
+    for (std::chrono::milliseconds slept{0}; slept < delay; slept += kCancelPollSlice) {
         if (Cancelled()) return false;
-        std::this_thread::sleep_for(std::min(kSlice, delay - slept));
+        std::this_thread::sleep_for(std::min(kCancelPollSlice, delay - slept));
     }
     return !Cancelled();
 }
@@ -50,7 +50,10 @@ bool RetryPolicy::SleepForBackoff(int attempt,
 // the old behaviour (the turn fails).
 bool RetryPolicy::IsContextOverflow(const llm::LlmError& error) {
     if (error.category() != llm::LlmErrorCategory::RequestError) return false;
-    if (error.http_status() && *error.http_status() != 400 && *error.http_status() != 413) {
+    constexpr int kHttpBadRequest = 400;       // NOLINT(readability-magic-numbers): RFC 9110
+    constexpr int kHttpContentTooLarge = 413;  // NOLINT(readability-magic-numbers): RFC 9110
+    if (error.http_status() && *error.http_status() != kHttpBadRequest &&
+        *error.http_status() != kHttpContentTooLarge) {
         return false;
     }
     std::string message = error.what();

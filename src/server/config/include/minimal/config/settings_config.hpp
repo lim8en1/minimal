@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 #include "minimal/common/units.hpp"
 #include "minimal/common/policy.hpp"
+#include "minimal/config/policy.hpp"
 
 namespace minimal::config {
 
@@ -67,13 +68,13 @@ struct ToolsSettings {
     // (parallel dispatch -- see ARCHITECTURE.md "Tool dispatch"). 1 reproduces
     // the sequential behavior exactly. This is a WIDTH, not a thread-pool size:
     // the per-session pool is built from it, so 1 allocates no extra threads.
-    int max_parallel_tool_calls = 4;
+    int max_parallel_tool_calls = kDefaultMaxParallelToolCalls;
     // THE global ceiling on one tool call's serialized input. Every other
     // model-authored allocation has a bound; the input itself -- copied into
     // lifecycle events, permission requests and hook payloads -- was bounded
     // only by the model's output budget. Over the cap is an error result the
     // model adapts to, like every other refusal. 0 disables.
-    std::int64_t max_input_bytes = 10 * common::kMiB;
+    std::int64_t max_input_bytes = kDefaultMaxToolInputBytes;
     // THE global ceiling on one tool call's RESULT, checked once after
     // execution regardless of which tool produced it. A core tool like bash
     // caps its own output (bash.max_output_bytes), but that cap is the
@@ -83,11 +84,11 @@ struct ToolsSettings {
     // request, into SQLite, and into every later turn's prefix until
     // compaction. Truncated over the cap, with a visible marker, never an
     // error result -- a large result is not a refusal. 0 disables.
-    std::int64_t max_result_bytes = 10 * common::kMiB;
+    std::int64_t max_result_bytes = kDefaultMaxToolResultBytes;
     // Ceiling on one result's client-only display payload (serialized JSON).
     // Over it the payload is DROPPED, never truncated -- a cut diff misleads --
     // and the client falls back to the text. 0 disables.
-    std::int64_t max_display_bytes = 128 * common::kKiB;
+    std::int64_t max_display_bytes = kDefaultMaxToolDisplayBytes;
 };
 
 struct ToolsViewSettings {

@@ -18,13 +18,10 @@
 #include "minimal/agent/transcript_rewinder.hpp"
 #include "minimal/config/permission_codec.hpp"
 #include "minimal/common/utf8.hpp"
+#include "minimal/agent/policy.hpp"
 
 namespace minimal::agent {
 namespace {
-
-// Overall budget for activating a preset's tool-source members (MCP connect +
-// tools/list), shared by all members.
-constexpr std::chrono::seconds kToolSourceStartupBudget{5};
 
 // Fails construction loudly, before any member is built, rather than letting
 // a missing wiring field surface later as a silently-dropped event. Every

@@ -15,7 +15,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "minimal/agent/context_compactor.hpp"
+#include "minimal/agent/policy.hpp"
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/confirmation_broker.hpp"
 #include "minimal/common/logger.hpp"

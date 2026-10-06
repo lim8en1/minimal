@@ -27,6 +27,13 @@ inline constexpr std::size_t kReadChunkBytes = 16 * kKiB;
 // blocks its producer instead of growing without limit.
 inline constexpr std::size_t kDefaultEventQueueMaxSize = 65536;
 
+// A SerialExecutor's queue for notification-style tasks (session observers,
+// async hook actions). Each task holds a copy of its payload, so EventQueue's
+// stream-sized default would reserve tens of MB for a backlog that means "the
+// consumer stopped" long before it fills; a few hundred pending is already
+// pathological.
+inline constexpr std::size_t kDefaultNotificationQueueCapacity = 1024;
+
 // Log rotation defaults (settings.json logging.max_size_mb / max_files): disk
 // use is bounded by their product, and a few rotated files keep the
 // history before a problem without anyone pruning by hand.

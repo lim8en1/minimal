@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "minimal/hooks/hook_shell.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::hooks {
 namespace {
@@ -21,7 +22,7 @@ std::int64_t NowUnixMs() {
 }  // namespace
 
 HookDispatcher::HookDispatcher(common::Logger& logger)
-    : logger_(logger), executor_("hook action", kDefaultTaskQueueSize, logger) {
+    : logger_(logger), executor_("hook action", common::kDefaultNotificationQueueCapacity, logger) {
     // The harness's own points. Reserved here, before any plugin loads, so a
     // plugin claiming a core.* name is an ordinary fatal collision (the
     // empty attribution marks these as built-ins, like core tools).

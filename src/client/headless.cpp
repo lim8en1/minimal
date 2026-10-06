@@ -203,7 +203,8 @@ int RunHeadless(const HeadlessOptions& options) {
     } else {
         create.project_root = minimal::client::CurrentProjectRootOrEmpty();
         create.agent_preset = options.agent_preset;
-        create.name = TruncateUtf8(options.prompt, 60);
+        // No name: the server names the session from its first turn
+        // (agent::DefaultSessionName), which this prompt is.
     }
     // OUTSIDE the branch, like run_mode: a model named on THIS invocation
     // outranks whatever the stored session was created with. Omitting it (the

@@ -229,8 +229,6 @@ public:
     // Testing seam. Blocks until every queued async task has run.
     void WaitForIdleForTesting();
 
-    static constexpr std::size_t kDefaultTaskQueueSize = 1024;
-
 private:
     struct Action {
         std::string command;
