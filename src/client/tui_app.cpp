@@ -20,6 +20,7 @@
 #include "minimal/client/render/streaming_markdown_view.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/ui_config.hpp"
+#include "minimal/client/keymap_help_model.hpp"
 #include "minimal/client/view/commands_help.hpp"
 #include "minimal/client/view/keymap_help.hpp"
 #include "minimal/client/view/modal_host.hpp"
@@ -236,6 +237,11 @@ void TuiApp::BuildState() {
     // Plugins captured the provider POINTER at registration; anything they
     // read through it happens later, so the attach is never raced.
     env_.host_focus_provider->Attach(app_.get());
+    // Its reads too: they answer from TUI state built from here on, and are
+    // only ever called on the UI thread.
+    env_.host_focus_provider->AttachReads(
+        {.key_bindings = [this] { return KeyBindingsForPlugins(); },
+         .command_catalog = [this] { return CatalogForPlugins(); }});
     // Memory bounds (track R2): ui.json's values, or the built-in defaults
     // (SetUiBounds treats 0 as "keep the default"). Applied before any tab can
     // open, so every SessionState starts bounded.
@@ -540,6 +546,7 @@ void TuiApp::BuildFrame() {
         // observers' events.
         [this] {
             picker_controller_->Poll();
+            for (auto& action : env_.host_actions->Take()) action(*this);
             for (const auto& request : env_.host_focus_provider->TakeViewRequests()) {
                 ApplyViewRequest(env_.plugin_views, request, *plugin_modal_child_,
                                  show_plugin_modal_);
@@ -860,6 +867,43 @@ AppState::CommandScope TuiApp::CommandScope() const {
         scope.project_root = CurrentProjectRootOrEmpty();
     }
     return scope;
+}
+
+void TuiApp::InsertPrompt(const std::string& text) {
+    // The focused tab's editor (CurrentState("") on an empty app = the
+    // pre-tab editor, the same resolution the host itself uses).
+    PromptEditorState& state = prompt_editors_.CurrentState(app_->FocusedTabId());
+    state.content = text;
+    state.cursor_position = static_cast<int>(state.content.size());
+}
+
+std::vector<plugins::KeyBindingInfo> TuiApp::KeyBindingsForPlugins() const {
+    std::vector<plugins::KeyBindingInfo> out;
+    for (const auto& [id, key] : env_.keybindings.all()) {
+        KeyActionInfo info = DescribeKeyAction(id);
+        // A plugin view's toggle: its own title says what it opens.
+        for (const auto& entry : env_.plugin_views) {
+            if (entry.surface_id == id) info.description = "open " + entry.view->spec().title;
+        }
+        out.push_back({id, key, std::move(info.description), std::move(info.group), info.order});
+    }
+    return out;
+}
+
+std::vector<CommandCatalogEntry> TuiApp::CatalogForPlugins() {
+    // The autocomplete's own filter: without a session only what runs
+    // without one, on a subagent only what is read-only there.
+    const bool sessioned = !app_->FocusedSessionId().empty();
+    const bool subagent = app_->FocusedTabIsSubagent();
+    std::vector<CommandCatalogEntry> out;
+    if (const auto catalog = CurrentCatalog()) {
+        for (const auto& entry : *catalog) {
+            if (!sessioned && !UsableWithoutSession(entry)) continue;
+            if (subagent && !UsableOnSubagent(entry)) continue;
+            out.push_back(entry);
+        }
+    }
+    return out;
 }
 
 CommandCatalogCache::Snapshot TuiApp::CurrentCatalog() {

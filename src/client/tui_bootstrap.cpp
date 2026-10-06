@@ -64,6 +64,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         plugins::MakeHostAttentionSink(&out.attention_state, out.host_focus_provider.get());
     out.host_client_api = plugins::MakeHostClientApi(&client);
     out.host_widget_kit = plugins::MakeHostWidgetKit(out.registries.widget_kit);
+    out.host_actions = std::make_unique<plugins::HostActionQueue>(out.host_focus_provider.get());
 
     plugins::RegisterCoreSyntaxGrammars(out.registries.grammars);
 
@@ -137,6 +138,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                              .focus = out.host_focus_provider.get(),
                              .ui = out.host_focus_provider.get(),
                              .widgets = out.host_widget_kit.get(),
+                             .actions = out.host_actions.get(),
                              .ui_for_plugin = [provider = out.host_focus_provider.get()](
                                                   const std::string& plugin_name) {
                                  return provider->UiFor(plugin_name);

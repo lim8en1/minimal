@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -94,6 +95,16 @@ public:
     void CloseView(const std::string& view_id) override;
     void SetPanelVisible(const std::string& view_id, bool visible) override;
     void FocusPanel(const std::string& view_id) override;
+    std::vector<KeyBindingInfo> KeyBindings() const override;
+    std::vector<CommandCatalogEntry> CommandCatalog() const override;
+
+    // The TUI's half of the reads, once it is built (after Attach); until
+    // then both answer empty. UI thread, like the reads themselves.
+    struct UiReads {
+        std::function<std::vector<KeyBindingInfo>()> key_bindings;
+        std::function<std::vector<CommandCatalogEntry>()> command_catalog;
+    };
+    void AttachReads(UiReads reads);
 
     // The HostUi handed to one plugin: the same seam, with that plugin's name
     // stamped on its view requests. Owned here, stable for this provider's
@@ -111,6 +122,7 @@ private:
     std::mutex bound_mtx_;
     std::map<std::string, std::unique_ptr<BoundUi>> bound_;  // by plugin name
 
+    UiReads reads_;  // set once before the UI loop; read on the UI thread only
     mutable std::mutex mtx_;
     AppState* app_ = nullptr;  // guarded by mtx_; host-owned, null until Attach/after Detach
     // Its own lock, never held together with mtx_ (Enqueue releases it
@@ -120,6 +132,26 @@ private:
 };
 
 std::unique_ptr<HostFocusProvider> MakeHostFocusProvider();
+
+// The HostActions handed to plugins: queues each verb (any thread) for the
+// TUI to apply on the UI thread (Take, in the pump), and asks for the frame
+// that will. `ui` (optional) is that redraw.
+class HostActionQueue final : public HostActions {
+public:
+    explicit HostActionQueue(HostUi* ui) : ui_(ui) {}
+    void InsertPrompt(const std::string& text) override;
+
+    // The UI thread's half: every verb queued since the last call, oldest
+    // first, each to be applied to the TUI's own HostActions.
+    std::vector<std::function<void(HostActions&)>> Take();
+
+private:
+    void Enqueue(std::function<void(HostActions&)> action);
+
+    HostUi* ui_;
+    std::mutex mtx_;
+    std::vector<std::function<void(HostActions&)>> queued_;
+};
 
 }  // namespace plugins
 

@@ -73,3 +73,21 @@ TEST_CASE("keymap help rows: an unknown (plugin) action is listed under plugins 
     CHECK(rows[0].label == " plugins");
     CHECK(rows[1].label == "ctrl+k  checklist.toggle");
 }
+
+TEST_CASE("core describes its key actions for plugins: words, group, and the listing order",
+          "[keymap_help]") {
+    using minimal::client::DescribeKeyAction;
+    const auto next = DescribeKeyAction("tab.next");
+    CHECK(next.description == "next tab");
+    CHECK(next.group == "tabs");
+    // Groups in display order, and the curated order within one -- not the alphabet.
+    CHECK(next.order < DescribeKeyAction("tab.previous").order);
+    CHECK(DescribeKeyAction("tab.goto.9").order < DescribeKeyAction("tab.close").order);
+    CHECK(DescribeKeyAction("tab.close").order < DescribeKeyAction("chat.scroll_up").order);
+    CHECK(DescribeKeyAction("chat.scroll_up").group == "chat");
+    // Unknown to core (a plugin view's toggle): grouped last, named by its id.
+    const auto view = DescribeKeyAction("config");
+    CHECK(view.group == "views");
+    CHECK(view.description == "config");
+    CHECK(DescribeKeyAction("app.quit").order < view.order);
+}

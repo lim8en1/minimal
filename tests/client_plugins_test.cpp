@@ -368,6 +368,59 @@ TEST_CASE("the widget kit: a plugin's kit draws for every view; core's fills an 
               .find("core frame") != std::string::npos);
 }
 
+namespace {
+
+// The TUI's half of HostActions, recording what was applied to it.
+class RecordingActions final : public HostActions {
+public:
+    void InsertPrompt(const std::string& text) override { inserted.push_back(text); }
+    std::vector<std::string> inserted;
+};
+
+class CountingUi final : public HostUi {
+public:
+    void RequestRedraw() override { ++redraws; }
+    void ShowView(const std::string&) override {}
+    void CloseView(const std::string&) override {}
+    void SetPanelVisible(const std::string&, bool) override {}
+    void FocusPanel(const std::string&) override {}
+    std::vector<KeyBindingInfo> KeyBindings() const override { return {}; }
+    std::vector<CommandCatalogEntry> CommandCatalog() const override { return {}; }
+    int redraws = 0;
+};
+
+}  // namespace
+
+TEST_CASE("host actions: queued from any thread, applied to the TUI in order, with a redraw",
+          "[client_plugins][host_actions]") {
+    CountingUi ui;
+    HostActionQueue queue(&ui);
+    std::thread worker([&] { queue.InsertPrompt("/first "); });
+    worker.join();
+    queue.InsertPrompt("/second ");
+    CHECK(ui.redraws == 2);  // one frame asked for per verb
+
+    RecordingActions tui;
+    for (auto& action : queue.Take()) action(tui);
+    CHECK(tui.inserted == std::vector<std::string>{"/first ", "/second "});
+    CHECK(queue.Take().empty());  // drained
+}
+
+TEST_CASE("host reads answer empty until the TUI attaches them, then through every plugin's ui",
+          "[client_plugins][host_actions]") {
+    auto provider = MakeHostFocusProvider();
+    HostUi* bound = provider->UiFor("some-plugin");
+    CHECK(bound->KeyBindings().empty());
+    CHECK(bound->CommandCatalog().empty());
+    provider->AttachReads(
+        {.key_bindings = [] { return std::vector<KeyBindingInfo>{{"tab.next", "alt+down", "next tab", "tabs", 0}}; },
+         .command_catalog = [] { return std::vector<CommandCatalogEntry>{{.name = "cost"}}; }});
+    REQUIRE(bound->KeyBindings().size() == 1);
+    CHECK(bound->KeyBindings()[0].key == "alt+down");
+    REQUIRE(provider->CommandCatalog().size() == 1);
+    CHECK(provider->CommandCatalog()[0].name == "cost");
+}
+
 TEST_CASE("attention state: plugin raise wins until cleared", "[client_plugins]") {
     AttentionState attention;
     CHECK_FALSE(attention.TabRaised("s1"));

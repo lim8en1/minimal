@@ -98,7 +98,7 @@ public:
     std::string_view summary() const override {
         return "plugin configuration (/config <plugin> to open one)";
     }
-    void Run(const std::vector<std::string>& positional, const std::string& raw) override;
+    bool Run(const std::vector<std::string>& positional, const std::string& raw) override;
 
 private:
     ConfigView* view_;

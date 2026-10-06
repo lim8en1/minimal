@@ -112,6 +112,16 @@ void HostFocusProvider::Attach(AppState* app) {
     app_ = app;
 }
 
+void HostFocusProvider::AttachReads(UiReads reads) { reads_ = std::move(reads); }
+
+std::vector<KeyBindingInfo> HostFocusProvider::KeyBindings() const {
+    return reads_.key_bindings ? reads_.key_bindings() : std::vector<KeyBindingInfo>{};
+}
+
+std::vector<CommandCatalogEntry> HostFocusProvider::CommandCatalog() const {
+    return reads_.command_catalog ? reads_.command_catalog() : std::vector<CommandCatalogEntry>{};
+}
+
 void HostFocusProvider::Detach() {
     std::lock_guard lk(mtx_);
     app_ = nullptr;
@@ -193,6 +203,10 @@ public:
     void FocusPanel(const std::string& view_id) override {
         host_.Enqueue({ViewRequest::Op::kFocusPanel, view_id, true, plugin_});
     }
+    std::vector<KeyBindingInfo> KeyBindings() const override { return host_.KeyBindings(); }
+    std::vector<CommandCatalogEntry> CommandCatalog() const override {
+        return host_.CommandCatalog();
+    }
 
 private:
     HostFocusProvider& host_;
@@ -271,6 +285,25 @@ std::unique_ptr<WidgetKit> MakeHostWidgetKit(const WidgetKitRegistry& registry) 
 
 std::unique_ptr<HostFocusProvider> MakeHostFocusProvider() {
     return std::make_unique<HostFocusProvider>();
+}
+
+void HostActionQueue::InsertPrompt(const std::string& text) {
+    Enqueue([text](HostActions& host) { host.InsertPrompt(text); });
+}
+
+void HostActionQueue::Enqueue(std::function<void(HostActions&)> action) {
+    {
+        std::lock_guard lk(mtx_);
+        queued_.push_back(std::move(action));
+    }
+    if (ui_ != nullptr) ui_->RequestRedraw();  // the frame that applies it
+}
+
+std::vector<std::function<void(HostActions&)>> HostActionQueue::Take() {
+    std::lock_guard lk(mtx_);
+    std::vector<std::function<void(HostActions&)>> out;
+    out.swap(queued_);
+    return out;
 }
 
 }  // namespace minimal::client::plugins

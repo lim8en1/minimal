@@ -228,7 +228,11 @@ void TuiApp::RegisterClientCommands() {
             continue;
         }
         const bool needs_session = plugin_command->requires_session();
-        router.Add({name, std::string(plugin_command->summary()), false, needs_session,
+        // An unlisted command intercepts a server command's forms: no
+        // summary, so the catalog keeps the server's entry for the name.
+        const std::string summary =
+            plugin_command->listed() ? std::string(plugin_command->summary()) : std::string();
+        router.Add({name, summary, false, needs_session,
                     [this, command = plugin_command.get(), name,
                      needs_session](const CommandInvocationText& parsed) {
             if (needs_session && app_->FocusedSessionId().empty()) {
@@ -236,7 +240,7 @@ void TuiApp::RegisterClientCommands() {
                 return true;
             }
             try {
-                command->Run(parsed.positional, parsed.raw);
+                return command->Run(parsed.positional, parsed.raw);
             } catch (const std::exception& error) {
                 FocusedNotice("/" + name + " failed: " + error.what());
             } catch (...) {

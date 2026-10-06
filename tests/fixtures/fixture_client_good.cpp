@@ -123,7 +123,10 @@ class FixtureClientCommand final : public plugins::ClientCommand {
 public:
     std::string_view name() const override { return "fixture-cmd"; }
     std::string_view summary() const override { return "fixture client command"; }
-    void Run(const std::vector<std::string>&, const std::string& raw) override { last_raw = raw; }
+    bool Run(const std::vector<std::string>&, const std::string& raw) override {
+        last_raw = raw;
+        return true;
+    }
     std::string last_raw;
 };
 

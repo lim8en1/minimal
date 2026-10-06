@@ -121,6 +121,14 @@ std::string ActionDescription(std::string_view action) {
     return std::string(action);
 }
 
+KeyActionInfo DescribeKeyAction(std::string_view action) {
+    const std::string id(action);
+    const std::size_t group = GroupOf(id);
+    return {ActionDescription(action),
+            group < kGroups.size() ? kGroups[group].name : "views",
+            static_cast<int>(group * (kUnknownOrder + 1) + OrderOf(action))};
+}
+
 std::vector<KeymapHelpRow> BuildKeymapHelpRows(
     const std::unordered_map<std::string, std::string>& bindings, const std::string& filter) {
     const std::string lowered_filter = ToLower(filter);

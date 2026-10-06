@@ -34,23 +34,10 @@
 #include <string>
 #include <vector>
 
+#include "minimal/client/command_catalog_entry.hpp"
+
 
 namespace minimal::client {
-
-// One /-command the editor may offer. From ListCommands, pulled per tab
-// scope by the host (CommandCatalogCache), plus client-intercepted entries.
-struct CommandCatalogEntry {
-    std::string name;
-    std::string summary;
-    bool read_only = false;
-    bool submits_prompt = false;  // PromptShorthand: the one kind that submits a turn
-    // Command::RequiresSession: excluded from /-autocomplete (and the /help
-    // overlay) while the focused tab has no session -- a command that cannot
-    // run without one is never offered as one.
-    bool requires_session = true;
-    // Command::SensitiveArgs: the line is kept out of the persisted history.
-    bool sensitive_args = false;
-};
 
 // True when the command is usable on a tab with NO session: either the
 // server marks it requires_session=false, it submits a prompt (a PromptShorthand

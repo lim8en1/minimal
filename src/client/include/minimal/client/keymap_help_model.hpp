@@ -22,6 +22,17 @@ struct KeymapHelpRow {
 // no description for (a plugin view's toggle) is described by its own id.
 std::string ActionDescription(std::string_view action);
 
+// Core's word on one key action, for HostUi::KeyBindings: what it does, the
+// group it is listed under ("tabs", "chat", ...; "views" for anything core
+// does not know -- a plugin view's toggle) and a sort key that orders the
+// groups, and the actions within one, as they read best.
+struct KeyActionInfo {
+    std::string description;
+    std::string group;
+    int order = 0;
+};
+KeyActionInfo DescribeKeyAction(std::string_view action);
+
 // Every binding whose action id, key, or description contains `filter`
 // case-insensitively, grouped by area (tabs, chat, turn, open, panels, app,
 // then plugin actions) under a header row per non-empty group, sorted by

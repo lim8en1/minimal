@@ -64,6 +64,11 @@ struct ClientPluginRegistrationContext {
     // loads after this one. Not during registration: the slot is filled
     // after every plugin has registered. Null on the same terms as `ui`.
     WidgetKit* widgets = nullptr;
+
+    // What the plugin asks the TUI to do (registries.hpp HostActions):
+    // queued from any thread, applied on the UI thread. Null on the same
+    // terms as `ui`.
+    HostActions* actions = nullptr;
 };
 
 }  // namespace minimal::client::plugins

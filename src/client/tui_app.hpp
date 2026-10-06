@@ -49,7 +49,9 @@
 
 namespace minimal::client::app {
 
-class TuiApp {
+// Also the TUI's own HostActions: what plugins queue (HostActionQueue) is
+// applied to it on the UI thread.
+class TuiApp final : private plugins::HostActions {
 public:
     explicit TuiApp(const ParsedArgs& args) : args_(args) {}
     ~TuiApp() { Shutdown(); }
@@ -99,6 +101,12 @@ private:
 
     // --- operations (what RunTui's lambdas were) ---
     CommandCatalogCache::Snapshot CurrentCatalog();
+
+    // HostActions, applied on the UI thread.
+    void InsertPrompt(const std::string& text) override;
+    // HostUi's reads (HostFocusProvider::AttachReads).
+    std::vector<plugins::KeyBindingInfo> KeyBindingsForPlugins() const;
+    std::vector<CommandCatalogEntry> CatalogForPlugins();
     AppState::CommandScope CommandScope() const;
     void CloseTab(const std::string& id);
     std::string FocusedOrNewTab();
