@@ -1,4 +1,5 @@
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/policy.hpp"
 
 #include <cmath>
 
@@ -10,8 +11,9 @@ namespace {
 
 std::string Quoted(const nlohmann::json& value) {
     std::string text = value.dump();
-    constexpr std::size_t kMax = 80;
-    if (text.size() > kMax) text = text.substr(0, kMax) + "...";
+    if (text.size() > common::kConfigErrorValuePreviewChars) {
+        text = text.substr(0, common::kConfigErrorValuePreviewChars) + "...";
+    }
     return text;
 }
 

@@ -7,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 #include "minimal/common/units.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::config {
 
@@ -120,8 +121,8 @@ struct ContextContributorSettings {
 struct LoggingSettings {
     std::string level = "info";
     std::string path;
-    std::int64_t max_size_mb = 10;
-    std::int64_t max_files = 5;
+    std::int64_t max_size_mb = common::kDefaultLogMaxSizeMb;
+    std::int64_t max_files = common::kDefaultLogMaxFiles;
 };
 
 // Session lifetime policy (S5). Every timeout is a settings.json key with a

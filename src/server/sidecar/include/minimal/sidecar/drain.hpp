@@ -73,9 +73,6 @@ struct PipeSink {
 
 struct DrainOptions {
     std::int64_t timeout_ms = 0;   // 0 = no deadline (cancellation still applies)
-    int slice_ms = 50;             // drain-poll slice: the cancel-latency bound
-    int reap_slice_ms = 10;        // WNOHANG poll slice after EOF
-    int post_kill_reap_ms = 5000;  // ceiling on the post-kill reap (D-state bound)
     // Fail-fast for a detached grandchild: once the direct child IS reaped, a
     // pipe still open means some grandchild inherited it. 0 (default) keeps
     // today's semantics -- wait for EOF or the deadline. A positive value

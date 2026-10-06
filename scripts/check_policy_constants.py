@@ -9,6 +9,10 @@ Two passes over src/ and plugins/ (tests excluded):
               policy.hpp. clang-tidy exempts these by design, which is exactly
               how a judgment call hides behind a name.
 
+Both passes honor NOLINT(readability-magic-numbers), on the line or as a
+NOLINTBEGIN/NOLINTEND region: the marker for an external fact, whose comment
+cites its source.
+
 Every hit must end up as an external fact (named or cited where used), a
 derivation written as one, or a policy.hpp entry. Until the sweep is finished
 this is an inventory tool, not a gate: it exits 1 whenever anything is listed.
@@ -96,7 +100,14 @@ def named_pass(files):
         if os.path.basename(rel) == "policy.hpp":
             continue
         with open(os.path.join(ROOT, rel), errors="replace") as handle:
+            exempt = False  # inside NOLINTBEGIN(readability-magic-numbers)
             for number, line in enumerate(handle, 1):
+                if "NOLINTBEGIN(readability-magic-numbers)" in line:
+                    exempt = True
+                elif "NOLINTEND(readability-magic-numbers)" in line:
+                    exempt = False
+                if exempt or "NOLINT(readability-magic-numbers)" in line:
+                    continue
                 # Strings first: a ';' or '//' inside one is not code.
                 code = STRING_LITERAL.sub('""', line).split("//", 1)[0]
                 match = NAMED_RE.search(code)

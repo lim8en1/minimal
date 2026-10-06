@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "minimal/sidecar/capped_buffer.hpp"
+#include "minimal/sidecar/policy.hpp"
 
 namespace minimal::sidecar {
 namespace {
@@ -187,7 +188,8 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
         }
         if (!any_open) break;
 
-        const int rc = poll(poll_fds.data(), static_cast<nfds_t>(poll_fds.size()), options.slice_ms);
+        const int rc = poll(poll_fds.data(), static_cast<nfds_t>(poll_fds.size()),
+                            static_cast<int>(kDrainSlice.count()));
         if (rc < 0) {
             if (errno == EINTR) continue;
             outcome.io_error = true;
@@ -197,7 +199,7 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
 
         bool got_data = false;
         if (rc > 0) {
-            char chunk[8192];
+            char chunk[kPipeReadChunkBytes];
             for (std::size_t slot = 0; slot < poll_fds.size(); ++slot) {
                 const std::size_t i = static_cast<std::size_t>(index_by_slot[slot]);
                 if (outcome.sinks[i].mode == PipeSink::Mode::kSource) {
@@ -318,7 +320,7 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
                 outcome.timed_out = true;
                 break;
             }
-            poll(nullptr, 0, options.reap_slice_ms);
+            poll(nullptr, 0, static_cast<int>(kReapPollInterval.count()));
         }
     }
 
@@ -333,8 +335,7 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
         KillProcessGroup(proc.pid);
     }
     if (!reaped && !outcome.reap_error) {
-        const auto kill_deadline = std::chrono::steady_clock::now() +
-                                   std::chrono::milliseconds(options.post_kill_reap_ms);
+        const auto kill_deadline = std::chrono::steady_clock::now() + kPostKillReapCeiling;
         while (std::chrono::steady_clock::now() < kill_deadline) {
             const pid_t rc = waitpid(proc.pid, &status, WNOHANG);
             if (rc == proc.pid) {
@@ -346,7 +347,7 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
                 outcome.reap_error = true;  // nothing left to reap; status meaningless
                 break;
             }
-            poll(nullptr, 0, options.reap_slice_ms);
+            poll(nullptr, 0, static_cast<int>(kReapPollInterval.count()));
         }
         if (!reaped && !outcome.reap_error) {
             // The kill did not land within the ceiling (D state): report the

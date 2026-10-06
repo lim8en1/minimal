@@ -1,5 +1,6 @@
 #include "minimal/common/logging_setup.hpp"
 #include "minimal/common/units.hpp"
+#include "minimal/common/policy.hpp"
 
 #include <spdlog/spdlog.h>
 #include <spdlog/logger.h>
@@ -53,10 +54,11 @@ std::string ConfigureLogging(const LoggingOptions& options) {
             // code". Sizes are clamped to something sane rather than trusted --
             // max_size_mb: 0 would make every message rotate.
             const std::size_t max_bytes =
-                static_cast<std::size_t>(options.max_size_mb > 0 ? options.max_size_mb : 10) *
+                static_cast<std::size_t>(options.max_size_mb > 0 ? options.max_size_mb
+                                                                : kDefaultLogMaxSizeMb) *
                 common::kMiB;
             const std::size_t max_files =
-                static_cast<std::size_t>(options.max_files > 0 ? options.max_files : 5);
+                static_cast<std::size_t>(options.max_files > 0 ? options.max_files : kDefaultLogMaxFiles);
             sinks.push_back(std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
                 options.path, max_bytes, max_files));
         } catch (const std::exception& e) {

@@ -7,6 +7,8 @@
 
 #include <cstddef>
 
+// NOLINTBEGIN(readability-magic-numbers) -- the units themselves.
+
 namespace minimal::common {
 
 inline constexpr std::size_t kKiB = std::size_t{1} << 10;
@@ -14,3 +16,5 @@ inline constexpr std::size_t kMiB = std::size_t{1} << 20;
 inline constexpr std::size_t kGiB = std::size_t{1} << 30;
 
 }  // namespace minimal::common
+
+// NOLINTEND(readability-magic-numbers)

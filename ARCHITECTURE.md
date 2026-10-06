@@ -105,7 +105,7 @@ Not unit-tested: FTXUI render output (visual, low yield) and live provider calls
 
 **No literal hides a judgment call.** Every number in the code is one of:
 
-1. **An external fact** — a protocol value, POSIX convention, file mode, exit code (`127`, `0600`, `$1..$9`). Stays where it is used, with its source named.
+1. **An external fact** — a protocol value, POSIX convention, file mode, exit code (`127`, `0600`, `$1..$9`). Stays where it is used, marked `// NOLINT(readability-magic-numbers): <source>` — the marker is the citation. A header that is the home of a whole encoding (`utf8.hpp`, `units.hpp`) wraps it in `NOLINTBEGIN`/`NOLINTEND` instead.
 2. **A derivation** — written as the derivation (`kArguments.size()`, `std::numeric_limits<int>::max() / 1000`), next to what it derives from. The expression is the justification. Units are never bare: sizes are `count * common::kMiB` (`minimal/common/units.hpp`), durations are `std::chrono` or `common::MillisToSeconds`/`SecondsToMillis` (`minimal/common/clock.hpp`) — the count stays visible as the judgment call it is.
 3. **A policy choice** — a default, cap, timeout, grace, budget: a value someone picked. Lives in the unit's `policy.hpp` (`plugins/<side>/<plugin>/policy.hpp`; a core subsystem's own), never inline.
 4. **A "none" sentinel** — not a big number standing in for infinity. Model "no limit" explicitly (`0` where the consumer defines it, `std::optional`).

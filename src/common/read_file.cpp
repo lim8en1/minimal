@@ -1,5 +1,5 @@
 #include "minimal/common/read_file.hpp"
-#include "minimal/common/units.hpp"
+#include "minimal/common/policy.hpp"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -59,7 +59,7 @@ ReadFileResult ReadFile(const std::filesystem::path& path, std::size_t max_bytes
     // big" from "exactly at the cap". st_size only sizes the first allocation;
     // the file may change size while being read.
     result.contents.reserve(std::min<std::size_t>(static_cast<std::size_t>(st.st_size), max_bytes) + 1);
-    char chunk[16 * common::kKiB];
+    char chunk[kReadChunkBytes];
     while (result.contents.size() <= max_bytes) {
         const auto want = std::min(sizeof(chunk), max_bytes + 1 - result.contents.size());
         const ssize_t got = ::read(file.fd, chunk, want);
