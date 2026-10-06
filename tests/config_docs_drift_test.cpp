@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 
+#include "minimal/agent/agent_preset_frontmatter.hpp"
 #include "minimal/config/hooks_config.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/providers_config.hpp"
@@ -76,4 +77,27 @@ TEST_CASE("the CONFIGURATION.md examples parse through the real parsers",
     CHECK_NOTHROW(ParseProvidersConfig(DocExample("providers.json")));
     CHECK_NOTHROW(ParsePermissionsConfig(DocExample("permissions.json")));
     CHECK_NOTHROW(ParseHooksConfig(DocExample("hooks.json")));
+}
+
+TEST_CASE("bundled and example agent presets parse through the real frontmatter parser",
+          "[config_docs_drift]") {
+    // The tool vocabulary of a build with every bundled plugin enabled, so a
+    // `permission:` key naming a tool resolves as it would at startup.
+    const minimal::agent::ToolVocabulary tools(std::vector<std::string>{
+        "read", "write", "edit", "grep", "glob", "bash", "web_fetch", "web_search",
+        "python_exec", "python_input", "python_interrupt", "python_output", "checklist",
+        "ask_user", "message_session", "skill", "spawn_subagent", "memory_search",
+        "memory_get", "memory_store", "memory_update", "memory_delete"});
+    std::size_t parsed = 0;
+    for (const char* dir : {MINIMAL_BUNDLED_DIR "/agents", MINIMAL_EXAMPLES_DIR "/agents"}) {
+        for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+            if (entry.path().extension() != ".md" || entry.path().filename() == "README.md") {
+                continue;
+            }
+            CAPTURE(entry.path().string());
+            CHECK_NOTHROW(minimal::agent::LoadAgentPresetFrontmatter(entry.path(), tools));
+            ++parsed;
+        }
+    }
+    CHECK(parsed >= 10);  // both directories were actually found
 }

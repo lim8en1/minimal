@@ -657,3 +657,45 @@ TEST_CASE("ParseAgentPresetFrontmatter: unknown permission_mode keys are errors"
     // A wrong-SHAPED known block is an error, not a silent no-op.
     CHECK_THROWS(Parse("---\nname: p\npermission_mode:\n  patterns: nope\n---\nb\n"));
 }
+
+TEST_CASE("ParseAgentPresetFrontmatter: removed fields name their replacement, all at once",
+          "[agent_preset_frontmatter]") {
+    using Catch::Matchers::ContainsSubstring;
+    const std::string preset =
+        "---\nname: a\n"
+        "allowed_mcp_servers: [ida]\n"
+        "mcp_permissions: {ida: allow}\n"
+        "allowed_skills: {x: allow}\n"
+        "---\nb\n";
+    CHECK_THROWS_WITH(Parse(preset), ContainsSubstring("'allowed_mcp_servers' was removed -- use "
+                                                       "tool_sources: {mcp:"));
+    CHECK_THROWS_WITH(Parse(preset), ContainsSubstring("'mcp_permissions' was removed -- use "
+                                                       "plugin_permissions: {mcp:"));
+    CHECK_THROWS_WITH(Parse(preset), ContainsSubstring("'allowed_skills' was removed -- use "
+                                                       "plugin_permissions: {skills:"));
+    // Only removed fields: no hint about provider parameters.
+    CHECK_THROWS_WITH(Parse(preset), !ContainsSubstring("parameters:"));
+    // A plain unknown key still gets it.
+    CHECK_THROWS_WITH(Parse("---\nname: a\ntemprature: 1\n---\nb\n"),
+                      ContainsSubstring("unknown field 'temprature'") &&
+                          ContainsSubstring("parameters:"));
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: permission_mode shape errors name the field",
+          "[agent_preset_frontmatter]") {
+    using Catch::Matchers::ContainsSubstring;
+    // Globs under overrides: point at patterns.
+    CHECK_THROWS_WITH(Parse("---\nname: a\npermission_mode:\n  overrides:\n"
+                            "    bash: {\"git *\": allow}\n---\nb\n"),
+                      ContainsSubstring("permission_mode.overrides.bash must be allow, ask or "
+                                        "deny; {glob: mode} rules go under "
+                                        "permission_mode.patterns.bash"));
+    CHECK_THROWS_WITH(Parse("---\nname: a\npermission_mode:\n  execute: [ask]\n---\nb\n"),
+                      ContainsSubstring("permission_mode.execute must be allow, ask or deny, "
+                                        "got a list"));
+    CHECK_THROWS_WITH(Parse("---\nname: a\npermission_mode:\n  patterns:\n    bash:\n"
+                            "      \"rm *\": {x: 1}\n---\nb\n"),
+                      ContainsSubstring("permission_mode.patterns.bash[\"rm *\"] must be"));
+    CHECK_THROWS_WITH(Parse("---\nname: a\npermission_mode: ask\n---\nb\n"),
+                      ContainsSubstring("permission_mode must be a map"));
+}

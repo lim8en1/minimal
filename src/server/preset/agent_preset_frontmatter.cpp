@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <system_error>
+#include <unordered_map>
 
 #include "minimal/common/logger.hpp"
 #include "minimal/common/read_file.hpp"
@@ -76,20 +77,38 @@ std::optional<bool> OptionalBool(const YAML::Node& node, const std::string& key)
     throw std::runtime_error("agent preset: field '" + key + "' must be a boolean");
 }
 
+// A scalar at `path` (a mode name, a precedence name), or a named error: yaml-cpp's
+// own "bad conversion" names neither the field nor the expected shape.
+std::string ScalarAt(const YAML::Node& value, const std::string& path, const char* expected) {
+    if (!value.IsScalar()) {
+        throw std::runtime_error("agent preset: " + path + " must be " + expected + ", got a " +
+                                 (value.IsMap() ? "map" : value.IsSequence() ? "list" : "null"));
+    }
+    return value.as<std::string>();
+}
+
+constexpr const char* kModeShape = "allow, ask or deny";
+
 tools::PermissionOverrideLayer DecodePermissionModeBlock(const YAML::Node& node,
                                                          tools::PermissionOverrideLayer layer) {
     const YAML::Node block = node["permission_mode"];
-    if (!block || !block.IsMap()) return layer;
+    if (!block) return layer;
+    if (!block.IsMap()) {
+        throw std::runtime_error("agent preset: permission_mode must be a map");
+    }
+    const auto mode_at = [&](const char* key) {
+        return config::ParsePermissionMode(
+            ScalarAt(block[key], std::string("permission_mode.") + key, kModeShape));
+    };
 
-    if (block["read_only"]) layer.read_only = config::ParsePermissionMode(block["read_only"].as<std::string>());
-    if (block["file_write"]) layer.file_write = config::ParsePermissionMode(block["file_write"].as<std::string>());
-    if (block["execute"]) layer.execute = config::ParsePermissionMode(block["execute"].as<std::string>());
-    if (block["out_of_workdir"])
-        layer.out_of_workdir = config::ParsePermissionMode(block["out_of_workdir"].as<std::string>());
-    if (block["network"]) layer.network = config::ParsePermissionMode(block["network"].as<std::string>());
+    if (block["read_only"]) layer.read_only = mode_at("read_only");
+    if (block["file_write"]) layer.file_write = mode_at("file_write");
+    if (block["execute"]) layer.execute = mode_at("execute");
+    if (block["out_of_workdir"]) layer.out_of_workdir = mode_at("out_of_workdir");
+    if (block["network"]) layer.network = mode_at("network");
     if (block["pattern_precedence"]) {
-        layer.pattern_precedence =
-            config::ParsePatternPrecedence(block["pattern_precedence"].as<std::string>());
+        layer.pattern_precedence = config::ParsePatternPrecedence(ScalarAt(
+            block["pattern_precedence"], "permission_mode.pattern_precedence", "a string"));
     }
 
     const YAML::Node overrides = block["overrides"];
@@ -102,7 +121,14 @@ tools::PermissionOverrideLayer DecodePermissionModeBlock(const YAML::Node& node,
             if (tool_name.empty()) {
                 throw std::runtime_error("agent preset: permission_mode.overrides has an empty-string key");
             }
-            layer.per_tool_overrides[tool_name] = config::ParsePermissionMode(entry.second.as<std::string>());
+            if (entry.second.IsMap()) {
+                throw std::runtime_error(
+                    "agent preset: permission_mode.overrides." + tool_name +
+                    " must be allow, ask or deny; {glob: mode} rules go under "
+                    "permission_mode.patterns." + tool_name);
+            }
+            layer.per_tool_overrides[tool_name] = config::ParsePermissionMode(
+                ScalarAt(entry.second, "permission_mode.overrides." + tool_name, kModeShape));
         }
     }
 
@@ -131,7 +157,11 @@ tools::PermissionOverrideLayer DecodePermissionModeBlock(const YAML::Node& node,
                     throw std::runtime_error("agent preset: permission_mode.patterns." +
                                              tool_name + " has an empty glob");
                 }
-                rules.push_back({glob, config::ParsePermissionMode(rule.second.as<std::string>())});
+                rules.push_back({glob, config::ParsePermissionMode(ScalarAt(
+                                           rule.second,
+                                           "permission_mode.patterns." + tool_name + "[\"" +
+                                               glob + "\"]",
+                                           kModeShape))});
             }
         }
     }
@@ -349,21 +379,41 @@ nlohmann::json YamlToJson(const YAML::Node& node) {
     return text;
 }
 
+// Fields earlier formats used, with what replaced them: a file written for
+// that format gets the migration in the error, not a hint about parameters:.
+const char* ReplacementFor(const std::string& key) {
+    static const std::unordered_map<std::string, const char*> kReplaced{
+        {"tools", "list the tools in allowed_tools: [...] and gate them with permission_mode"},
+        {"allowed_mcp_servers", "use tool_sources: {mcp: [<server>, ...]}"},
+        {"mcp_servers", "use tool_sources: {mcp: [<server>, ...]}"},
+        {"mcp_permissions", "use plugin_permissions: {mcp: {servers: {<server>: <mode>}}}"},
+        {"allowed_skills", "use plugin_permissions: {skills: [...] or {<skill>: <mode>}}"},
+        {"skills", "use plugin_permissions: {skills: [...] or {<skill>: <mode>}}"},
+    };
+    const auto it = kReplaced.find(key);
+    return it == kReplaced.end() ? nullptr : it->second;
+}
+
 // Every frontmatter key is known, an allowlisted top-level parameter, or an
-// error naming the fix.
+// error naming the fix. All unknown keys are reported at once.
 void RejectUnknownKeys(const YAML::Node& node) {
     if (!node || !node.IsMap()) return;
+    std::string problems;
+    bool any_plain = false;
     for (const auto& entry : node) {
         const std::string key = entry.first.as<std::string>();
-        if (IsKnownKey(key) || IsTopLevelParameter(key)) continue;
-        if (key == "tools") {
-            throw std::runtime_error(
-                "agent preset: unknown field 'tools' -- list the tools in allowed_tools: [...] "
-                "and gate them with permission_mode / permission");
+        if (IsKnownKey(key) || IsTopLevelParameter(key) || key.rfind("//", 0) == 0) continue;
+        problems += problems.empty() ? "" : "; ";
+        if (const char* replacement = ReplacementFor(key)) {
+            problems += "'" + key + "' was removed -- " + replacement;
+        } else {
+            problems += "unknown field '" + key + "'";
+            any_plain = true;
         }
-        throw std::runtime_error("agent preset: unknown field '" + key +
-                                 "' (provider request parameters go under parameters:)");
     }
+    if (problems.empty()) return;
+    if (any_plain) problems += " (provider request parameters go under parameters:)";
+    throw std::runtime_error("agent preset: " + problems);
 }
 
 // The provider parameters this preset sets: the allowlisted top-level keys,
