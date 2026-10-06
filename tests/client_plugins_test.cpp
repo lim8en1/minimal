@@ -818,6 +818,31 @@ TEST_CASE("the bundled logo plugin loads through the real loader and renders art
     CHECK(first != second);
 }
 
+#ifndef MINIMAL_CONFIG_VIEW_PLUGIN
+#error "MINIMAL_CONFIG_VIEW_PLUGIN must name the built config-view plugin"
+#endif
+
+// config-view as the real artifact, through the real loader: the "config"
+// modal and the /config command both register. Its sources are also compiled
+// into the test binary (schema_form_test), which proves the logic but not
+// that the bundled module registers anything.
+TEST_CASE("the bundled config-view plugin registers its view and /config",
+          "[client_plugins][config_view]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_CONFIG_VIEW_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    const auto& record = fixtures->records.front();
+    INFO(record.error);
+    REQUIRE(record.ok());
+    CHECK(record.name == "config-view");
+    CHECK(fixtures->registries.views.Find("config") != nullptr);
+    bool found = false;
+    for (const auto& command : fixtures->registries.client_commands.All()) {
+        found = found || command->name() == "config";
+    }
+    CHECK(found);
+}
+
 // regenerate_per_session=false must share one banner across every session
 // EVEN WHEN the app-level empty state (session id "") is never rendered --
 // that used to be the only path that populated the shared cache slot, so a

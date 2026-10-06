@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <random>
 #include <thread>
 
 #include "config_view.hpp"
@@ -178,9 +179,16 @@ public:
         calls_.push_back(plugin + " " + method + " " + payload);
         cv_.notify_all();
         if (method == "list") {
-            return json::array({{{"name", "sample"}, {"configurable", true}, {"enabled", true}},
-                                {{"name", "plain"}, {"configurable", false}}})
-                .dump();
+            json rows = json::array({{{"name", "sample"}, {"configurable", true}, {"enabled", true}},
+                                     {{"name", "plain"}, {"configurable", false}}});
+            // Every other list grows: a rebuilt menu with more rows than the
+            // last frame drew.
+            if (++lists_ % 2 == 0) {
+                for (const char* name : {"extra-a", "extra-b", "extra-c"}) {
+                    rows.push_back({{"name", name}, {"configurable", true}, {"enabled", true}});
+                }
+            }
+            return rows.dump();
         }
         if (method == "describe") return kDescribe.dump();
         if (method == "set") return json{{"applied", "live"}, {"changed", {"net.timeout_ms"}}}.dump();
@@ -203,6 +211,7 @@ private:
     std::mutex mtx_;
     std::condition_variable cv_;
     std::vector<std::string> calls_;
+    int lists_ = 0;
 };
 
 template <typename Pred>
@@ -239,4 +248,45 @@ TEST_CASE("config-view's feed: lists configurable plugins, opens one, sets throu
 
     feed.Back();
     CHECK(feed.open_plugin().empty());
+}
+
+// A user reported a segfault while moving around /config. This drives the
+// whole view -- list and form, through the feed's worker -- with random keys
+// and mouse events, rendering only some of the time (a terminal batches
+// input: several events can land between two frames). Run it under ASan.
+TEST_CASE("config-view survives random navigation, keys and mouse", "[schema_form][config_view]") {
+    EndpointApi api;
+    config_view::ConfigView view(&api, nullptr);
+    view.OnTheme(TestTheme());
+    auto component = view.component();
+    view.OnShow();
+
+    std::mt19937 rng(1234);
+    const auto pick = [&](int n) { return static_cast<int>(rng() % static_cast<unsigned>(n)); };
+    const auto mouse = [&] {
+        ftxui::Mouse m;
+        const ftxui::Mouse::Button buttons[] = {ftxui::Mouse::Left, ftxui::Mouse::None,
+                                                ftxui::Mouse::WheelUp, ftxui::Mouse::WheelDown};
+        const ftxui::Mouse::Motion motions[] = {ftxui::Mouse::Pressed, ftxui::Mouse::Released,
+                                                ftxui::Mouse::Moved};
+        m.button = buttons[pick(4)];
+        m.motion = motions[pick(3)];
+        m.x = pick(100);
+        m.y = pick(30);
+        return ftxui::Event::Mouse("", m);
+    };
+    const ftxui::Event keys[] = {
+        ftxui::Event::ArrowUp,   ftxui::Event::ArrowDown, ftxui::Event::ArrowDown,
+        ftxui::Event::Return,    ftxui::Event::Return,    ftxui::Event::ArrowLeft,
+        ftxui::Event::Backspace, ftxui::Event::Escape,    ftxui::Event::Character('d'),
+        ftxui::Event::Character('s'), ftxui::Event::Character('7'), ftxui::Event::PageDown,
+        ftxui::Event::Home,      ftxui::Event::End,       ftxui::Event::Tab,
+    };
+    for (int i = 0; i < 3000; ++i) {
+        const ftxui::Event event = pick(3) == 0 ? mouse() : keys[pick(15)];
+        minimal_test::SendEvent(component, event);
+        if (pick(3) == 0) (void)minimal_test::RenderFrame(component, 100, 30);
+        if (pick(50) == 0) std::this_thread::sleep_for(2ms);  // let answers land
+    }
+    SUCCEED("no crash");
 }

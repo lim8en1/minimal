@@ -71,16 +71,35 @@ public:
     }
 
 private:
-    ftxui::Component Current() {
-        if (!feed_->open_plugin().empty()) return form_;
+    // Picks the screen (rebuilding the list if a newer one landed) -- at the
+    // START of a render or an event, and nowhere else. ftxui asks
+    // ActiveChild() while it is drawing, and the feed's worker can land a new
+    // list at any moment: a rebuild there freed the very list being drawn,
+    // and the frame then wrote its layout into freed memory (a crash on "<-",
+    // whose refresh answer tends to land mid-frame). `shown_` holds the
+    // component until the next Sync, so whatever a frame or an event started
+    // on outlives it.
+    void Sync() {
+        if (!feed_->open_plugin().empty()) {
+            shown_ = form_;
+            return;
+        }
         RebuildListIfStale();
-        return list_;
+        shown_ = list_;
     }
 
-    ftxui::Element OnRender() override { return Current()->Render(); }
-    bool OnEvent(ftxui::Event event) override { return Current()->OnEvent(std::move(event)); }
+    ftxui::Element OnRender() override {
+        Sync();
+        return shown_->Render();
+    }
+    bool OnEvent(ftxui::Event event) override {
+        Sync();
+        const ftxui::Component target = shown_;  // a callback may switch screens
+        return target->OnEvent(std::move(event));
+    }
     bool Focusable() const override { return true; }
-    ftxui::Component ActiveChild() override { return Current(); }
+    // No side effects: called mid-frame.
+    ftxui::Component ActiveChild() override { return shown_; }
 
     void RebuildListIfStale() {
         const auto state = feed_->list();
@@ -123,6 +142,7 @@ private:
     plugins::HostUi* ui_;
     ftxui::Component form_;
     ftxui::Component list_;
+    ftxui::Component shown_;  // form_ or list_, as of the last Sync
     std::uint64_t built_generation_ = 0;
 };
 
@@ -203,9 +223,13 @@ void ConfigFeed::Open(const std::string& name) {
     {
         std::lock_guard<std::mutex> lock(mu_);
         open_ = name;
+        // The generation keeps counting across plugins: reset to 1, the
+        // next plugin's description could land at the generation the form
+        // last built at, and the form kept the previous plugin's rows.
+        const std::uint64_t generation = form_.generation + 1;
         form_ = client::SchemaFormState{};
         form_.title = name;
-        form_.generation = 1;
+        form_.generation = generation;
     }
     Post([this, name] { FetchDescribe(name, "", false); });
 }
