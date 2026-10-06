@@ -1,6 +1,7 @@
 #include "minimal/client/server_spawn.hpp"
 
 #include <fcntl.h>
+#include <limits>
 #include <poll.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -19,6 +20,7 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/env.hpp"
 #include "minimal/common/fd_hygiene.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 namespace {
@@ -26,9 +28,8 @@ namespace {
 // The server socket path a unix:// target names -- the same string --listen
 // takes (rpc::SocketTarget is this function's inverse).
 std::optional<std::filesystem::path> SocketPathOf(const std::string& target) {
-    constexpr std::string_view scheme = "unix://";
-    if (target.rfind(scheme, 0) != 0) return std::nullopt;
-    const std::string path = target.substr(scheme.size());
+    if (!target.starts_with(common::kUnixSocketScheme)) return std::nullopt;
+    const std::string path = target.substr(common::kUnixSocketScheme.size());
     if (path.empty()) return std::nullopt;
     std::filesystem::path socket(path);
     // The spawned child chdir's to "/" before exec: a RELATIVE socket path
@@ -50,7 +51,7 @@ bool ExecutableFile(const std::filesystem::path& path) {
 // The fd number the server's liveness pipe end is placed at in the child
 // (passed as --spawn-status-fd). Any fd above stderr works; a fixed one keeps
 // the post-fork code allocation-free.
-constexpr int kStatusFd = 3;
+constexpr int kStatusFd = STDERR_FILENO + 1;
 
 // Double fork: the intermediate child exits immediately (the client's waitpid
 // below never blocks), the real server is orphaned into init's care and holds
@@ -84,9 +85,12 @@ int SpawnDetached(const std::filesystem::path& binary, const std::filesystem::pa
     }
     if (middle == 0) {
         ::signal(SIGHUP, SIG_IGN);
-        if (::setsid() < 0) _exit(126);
+        // sh's statuses: 126 "could not run", 127 "could not execute".
+        constexpr int kCouldNotRun = 126;      // NOLINT(readability-magic-numbers): sh
+        constexpr int kCouldNotExecute = 127;  // NOLINT(readability-magic-numbers): sh
+        if (::setsid() < 0) _exit(kCouldNotRun);
         const pid_t server = ::fork();
-        if (server < 0) _exit(126);
+        if (server < 0) _exit(kCouldNotRun);
         if (server == 0) {
             const int log_fd = ::open(log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
             if (log_fd >= 0) {
@@ -112,27 +116,28 @@ int SpawnDetached(const std::filesystem::path& binary, const std::filesystem::pa
                     socket_path.c_str(), "--spawn-status-fd", "3",
                     static_cast<char*>(nullptr));
             // execl failed. stderr IS the log (redirected above), so one
-            // line here turns "25 s of silence, empty log" into a diagnosis.
+            // line here turns "a startup timeout of silence, empty log" into a diagnosis.
             // Plain write() + manual formatting only: post-fork in a
             // multithreaded process, malloc (std::string) can deadlock on a
             // lock another thread held at fork time.
-            char buf[64];
+            constexpr std::string_view kPrefix = "minimal-server: failed to exec (errno=";
+            constexpr int kDecimal = 10;  // NOLINT(readability-magic-numbers): base ten
+            constexpr std::size_t kMaxDigits = std::numeric_limits<int>::digits10 + 1;
+            char buf[kPrefix.size() + kMaxDigits + sizeof(")\n")];
             std::size_t len = 0;
-            for (const char c : std::string_view{"minimal-server: failed to exec (errno="}) {
-                buf[len++] = c;
-            }
+            for (const char c : kPrefix) buf[len++] = c;
             int err = errno;
-            char digits[12];
-            int dlen = 0;
+            char digits[kMaxDigits];
+            std::size_t dlen = 0;
             do {
-                digits[dlen++] = static_cast<char>('0' + err % 10);
-                err /= 10;
-            } while (err > 0 && dlen < 11);
-            while (dlen > 0 && len < sizeof(buf) - 2) buf[len++] = digits[--dlen];
+                digits[dlen++] = static_cast<char>('0' + err % kDecimal);
+                err /= kDecimal;
+            } while (err > 0 && dlen < kMaxDigits);
+            while (dlen > 0) buf[len++] = digits[--dlen];
             buf[len++] = ')';
             buf[len++] = '\n';
             [[maybe_unused]] const ssize_t write_rc = ::write(STDERR_FILENO, buf, len);
-            _exit(127);
+            _exit(kCouldNotExecute);
         }
         _exit(0);
     }
@@ -221,7 +226,7 @@ bool EnsureServerRunning(const std::string& target, const SpawnOptions& options,
 
     // First probe, with a short timeout: the common case is a server already
     // running, and no spawn machinery should run on its behalf.
-    if (Reachable(target, std::chrono::milliseconds(2000))) return true;
+    if (Reachable(target, kServerProbeTimeout)) return true;
     if (!options.enabled) return false;
     if (!IsSpawnableTarget(target)) return false;
 
@@ -263,7 +268,7 @@ bool EnsureServerRunning(const std::string& target, const SpawnOptions& options,
     const auto deadline = std::chrono::steady_clock::now() + options.startup_timeout;
     for (;;) {
         if (poll_channel->WaitForConnected(std::chrono::system_clock::now() +
-                                            std::chrono::milliseconds(250))) {
+                                            kServerStartupPoll)) {
             return true;
         }
         if (ServerExited(status_fd)) {

@@ -159,7 +159,7 @@ static int RunServer(int argc, char** argv) {
     std::signal(SIGINT, OnShutdownSignal);
     std::signal(SIGTERM, OnShutdownSignal);
 
-    std::filesystem::path socket_path = minimal::rpc::DefaultSocketPath();
+    std::filesystem::path socket_path = minimal::common::DefaultSocketPath();
     // --plugin-call <plugin> <method> [<json-args>]: a one-shot call into a
     // plugin's "<plugin>.rpc" handler (plugin_rpc.hpp), run after plugins load
     // and before listening -- e.g. `--plugin-call cost-tracker refresh_rates`.

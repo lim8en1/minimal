@@ -8,6 +8,7 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/common/utf8.hpp"
+#include "minimal/common/numeric.hpp"
 
 namespace minimal::rpc {
 namespace {
@@ -17,24 +18,6 @@ namespace {
 // text comes from places no one validated -- subprocess output, provider error
 // bodies, plugin messages, a tool's display JSON.
 std::string Clean(std::string_view text) { return common::ScrubUtf8(text); }
-
-// An integral double is narrowed back to a JSON integer -- see the header for
-// why. Guarded on range as well as integrality: a double past int64's limits
-// would be UB to cast, and is not an integer anyone meant to send.
-bool IsExactInteger(double value) {
-    if (!std::isfinite(value)) return false;
-    if (value != std::trunc(value)) return false;
-    // STRICTLY LESS at the top, and the asymmetry is the point.
-    // static_cast<double>(INT64_MAX) is not INT64_MAX: 2^63-1 is not
-    // representable, so the conversion rounds UP to exactly 2^63 -- and a `<=`
-    // against that admitted 9223372036854775808.0, whose cast to int64_t is the
-    // precise UB this guard was written to prevent. INT64_MIN is exactly -2^63
-    // and needs no such care, so the bounds are deliberately not symmetric.
-    // Reachable from the wire: any tool_use input carrying a number that large.
-    constexpr double kTwoToThe63 = -static_cast<double>(std::numeric_limits<std::int64_t>::min());
-    return value >= static_cast<double>(std::numeric_limits<std::int64_t>::min()) &&
-           value < kTwoToThe63;
-}
 
 // Makes the terminal `else` of an if-constexpr chain a COMPILE ERROR rather than
 // a silent no-op. Dependent on T so it only fires when that branch is actually
@@ -97,7 +80,7 @@ nlohmann::json ValueToJson(const google::protobuf::Value& value) {
             return nullptr;
         case google::protobuf::Value::kNumberValue: {
             const double number = value.number_value();
-            if (IsExactInteger(number)) return static_cast<std::int64_t>(number);
+            if (common::IsExactInt64(number)) return static_cast<std::int64_t>(number);
             return number;
         }
         case google::protobuf::Value::kStringValue:

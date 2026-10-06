@@ -5,6 +5,7 @@
 
 #include "minimal/client/picker_model.hpp"
 #include "minimal/client/utf8.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -17,7 +18,7 @@ std::string DisplayName(const v1::SessionSummary& session) {
     std::string name = StripControlChars(session.name());
     if (name.empty()) {
         name = session.session_id();
-        if (name.size() > 12) name = name.substr(0, 12);
+        if (name.size() > kUnnamedSessionIdPrefixChars) name.resize(kUnnamedSessionIdPrefixChars);
         return name;
     }
     if (Utf8ColumnWidth(name) > kNameColumnCap) name = TruncateUtf8Columns(name, kNameColumnCap);

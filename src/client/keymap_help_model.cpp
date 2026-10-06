@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "minimal/client/utf8.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -28,8 +29,6 @@ constexpr std::array<Group, 7> kGroups = {{
     {"app", {"app.", nullptr, nullptr, nullptr}},
 }};
 constexpr std::size_t kPluginGroup = kGroups.size();
-// A key spec longer than this does not widen the column for everyone.
-constexpr std::size_t kKeyColumnCap = 18;
 
 // Every core action, in the order it reads best within its group (next
 // before previous, the everyday keys before the rare ones) -- alphabetical

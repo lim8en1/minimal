@@ -101,6 +101,22 @@ def literal_pass(build_dir, unit, jobs):
     return hits
 
 
+NUMBER = re.compile(r"(?<![\w.])\d[\w.']*")
+IDENTIFIER = re.compile(r"[A-Za-z_]\w*")
+
+
+ADJUSTMENT = re.compile(r"[+-]\s*([0-4])[uUlL]*(?![\w.'])")
+CHAR_LITERAL = re.compile(r"'(?:[^'\\]|\\.)*'")
+
+
+def is_derivation(initializer):
+    """`STDERR_FILENO + 1`, `digits10 + 1`: an expression over names whose only
+    numbers are small +/- adjustments (the ones clang-tidy ignores too). A small
+    number in any other role -- `seconds(2)`, `2 * kMiB` -- is still a count."""
+    rest = ADJUSTMENT.sub("", CHAR_LITERAL.sub("''", initializer))
+    return not NUMBER.search(rest) and bool(IDENTIFIER.search(rest))
+
+
 def named_pass(files):
     hits = set()
     for rel in files:
@@ -116,9 +132,9 @@ def named_pass(files):
                 if exempt or "NOLINT(readability-magic-numbers)" in line:
                     continue
                 # Strings first: a ';' or '//' inside one is not code.
-                code = STRING_LITERAL.sub('""', line).split("//", 1)[0]
+                code = CHAR_LITERAL.sub("''", STRING_LITERAL.sub('""', line)).split("//", 1)[0]
                 match = NAMED_RE.search(code)
-                if match and HAS_NUMBER.search(match.group(2)):
+                if match and HAS_NUMBER.search(match.group(2)) and not is_derivation(match.group(2)):
                     hits.add((rel, number, "named", match.group(1)))
                 elif os.path.basename(rel) != "units.hpp":
                     unit = BARE_UNIT.search(code)

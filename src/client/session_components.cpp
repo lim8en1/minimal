@@ -10,7 +10,7 @@ namespace minimal::client {
 
 namespace {
 // Appended ONCE when a streaming buffer (flat accumulation or a single live
-// segment) hits LiveTurnBuffer::kTextCapBytes; further deltas are dropped
+// segment) hits kLiveTextCapBytes; further deltas are dropped
 // after it -- the transcript is authoritative, the turn-end refresh
 // re-fetches the full persisted text.
 constexpr std::string_view kStreamingTruncationMarker =
@@ -21,8 +21,8 @@ constexpr std::string_view kStreamingTruncationMarker =
 void AppendFlatCapped(std::string& buffer, bool& truncated, std::string_view text) {
     if (truncated) return;
     buffer.append(text);
-    if (buffer.size() > LiveTurnBuffer::kTextCapBytes) {
-        buffer = TruncateUtf8(buffer, LiveTurnBuffer::kTextCapBytes);
+    if (buffer.size() > kLiveTextCapBytes) {
+        buffer = TruncateUtf8(buffer, kLiveTextCapBytes);
         buffer.append(kStreamingTruncationMarker);
         truncated = true;
     }
@@ -614,8 +614,8 @@ void LiveTurnBuffer::PushSegment(LiveTurnSegment::Kind kind, std::uint64_t turn,
 void LiveTurnBuffer::AppendCapped(LiveTurnSegment& segment, std::string_view text) {
     if (segment.text_truncated) return;
     segment.text.append(text);
-    if (segment.text.size() > kTextCapBytes) {
-        segment.text = TruncateUtf8(segment.text, kTextCapBytes);
+    if (segment.text.size() > kLiveTextCapBytes) {
+        segment.text = TruncateUtf8(segment.text, kLiveTextCapBytes);
         segment.text.append(kStreamingTruncationMarker);
         segment.text_truncated = true;
     }
@@ -687,9 +687,9 @@ void LiveTurnBuffer::PushToolMarker(const std::string& tool_use_id) {
 // entirely tool calls. The cut itself is never rendered as a segment: the
 // latch it sets is what the status bar's {activity} suffix reports.
 void LiveTurnBuffer::Trim() {
-    if (segments_.size() <= kMaxSegments) return;
+    if (segments_.size() <= kMaxLiveSegments) return;
     view_truncated_ = true;
-    while (segments_.size() > kMaxSegments) {
+    while (segments_.size() > kMaxLiveSegments) {
         auto victim = std::find_if(segments_.begin(), segments_.end(), [](const LiveTurnSegment& s) {
             return s.kind != LiveTurnSegment::Kind::Tool;
         });
@@ -765,7 +765,7 @@ void LiveTurnBuffer::ClearIfTurn(std::uint64_t turn_seq) {
     text_ = std::move(rebuilt);
     // The rebuild drops whatever pushed the old buffer past the cap (retired
     // segments go with their turn), so the budget is fresh.
-    text_truncated_ = text_.size() > kTextCapBytes;
+    text_truncated_ = text_.size() > kLiveTextCapBytes;
     segments_.erase(keep_end, segments_.end());
     // The retired segments are exactly what a count-cap overflow would have
     // dropped; once the page covering them landed, the latch no longer holds.
@@ -828,9 +828,9 @@ void LiveTurnBuffer::Retire(const std::set<std::string>& answered_tool_ids,
         }
     }
     text_ = std::move(rebuilt_text);
-    text_truncated_ = text_.size() > kTextCapBytes;
+    text_truncated_ = text_.size() > kLiveTextCapBytes;
     thinking_ = std::move(rebuilt_thinking);
-    thinking_truncated_ = thinking_.size() > kTextCapBytes;
+    thinking_truncated_ = thinking_.size() > kLiveTextCapBytes;
     // is_streaming_ describes the OPEN block, which is by construction the
     // LAST segment (a tool marker is only pushed after its block closed). If
     // the surviving tail ends on a Tool marker, the open-block notion goes

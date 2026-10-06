@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "minimal/client/utf8.hpp"
+#include "minimal/client/count_format.hpp"
 
 namespace minimal::client {
 
@@ -53,22 +54,6 @@ void DropSegment(std::vector<StatusBarPart>& parts, std::size_t index) {
                 parts.begin() + static_cast<std::ptrdiff_t>(last) + 1);
 }
 
-std::string CompactCount(std::int64_t n) {
-    // One decimal below 10 of a unit ("4.2k"), none above ("62k"); a
-    // trailing ".0" is dropped ("2M", not "2.0M").
-    const auto scaled = [](std::int64_t value, std::int64_t unit, const char* suffix) {
-        if (value < 10 * unit) {
-            const std::int64_t tenths = value * 10 / unit;
-            std::string out = std::to_string(tenths / 10);
-            if (tenths % 10 != 0) out += "." + std::to_string(tenths % 10);
-            return out + suffix;
-        }
-        return std::to_string(value / unit) + suffix;
-    };
-    if (n < 1000) return std::to_string(n);
-    if (n < 1'000'000) return scaled(n, 1000, "k");
-    return scaled(n, 1'000'000, "M");
-}
 }  // namespace
 
 bool IsKnownStatusSegment(std::string_view id) {

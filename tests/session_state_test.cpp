@@ -1146,14 +1146,14 @@ TEST_CASE("the segment count cap trims text/thinking BEFORE tool markers",
     // trim now spends the budget on the (typically larger) text/thinking
     // segments first.
     SessionState state("s-1");
-    const std::size_t rounds = SessionState::kMaxLiveSegments + 40;
+    const std::size_t rounds = minimal::client::kMaxLiveSegments + 40;
     for (std::size_t i = 0; i < rounds; ++i) {
         state.OnToolStarted(ToolStart("t" + std::to_string(i)));
         state.AppendStreamingText("text " + std::to_string(i));
         state.FinalizeStreamingText();
     }
     const auto snap = state.TakeSnapshot();
-    REQUIRE(snap.live_segments.size() == SessionState::kMaxLiveSegments);
+    REQUIRE(snap.live_segments.size() == minimal::client::kMaxLiveSegments);
     // The cut is visible, never silent -- but in CHROME, not the stream: no
     // synthetic segment exists; the status bar's {activity} suffix reports
     // the latch instead (light snapshot carries it to GetAllTabs).
@@ -1173,7 +1173,7 @@ TEST_CASE("the segment count cap trims text/thinking BEFORE tool markers",
             ++text_besides_tools;
         }
     }
-    CHECK(tool_markers == SessionState::kMaxLiveSegments);
+    CHECK(tool_markers == minimal::client::kMaxLiveSegments);
     CHECK(text_besides_tools == 0);
     // The newest marker survives, whatever else was trimmed.
     const auto newest = std::find_if(snap.live_segments.begin(), snap.live_segments.end(),
@@ -1860,9 +1860,9 @@ TEST_CASE("live_segments clears alongside streaming_text, not before",
 TEST_CASE("a streaming-text truncation at the cap boundary never splits a UTF-8 codepoint",
           "[session_state][live_segments][utf8]") {
     SessionState state("s-1");
-    // kStreamingTextCapBytes-1 ASCII bytes, then a 3-byte CJK codepoint
+    // kLiveTextCapBytes-1 ASCII bytes, then a 3-byte CJK codepoint
     // straddling the cap by 2 bytes.
-    state.AppendStreamingText(std::string(SessionState::kStreamingTextCapBytes - 1, 'a'));
+    state.AppendStreamingText(std::string(kLiveTextCapBytes - 1, 'a'));
     state.AppendStreamingText("\xE6\x97\xA5");   // U+65E5, 3 bytes
     const auto snap = state.TakeSnapshot();
     REQUIRE(snap.live_segments.size() == 1);
@@ -1871,18 +1871,18 @@ TEST_CASE("a streaming-text truncation at the cap boundary never splits a UTF-8 
 }
 
 // The bug: only the resize-and-mark step was guarded by text_truncated, not
-// the append itself -- a segment kept growing past kStreamingTextCapBytes
+// the append itself -- a segment kept growing past kLiveTextCapBytes
 // indefinitely (deep-copied every frame) even though text_truncated was
 // already true and the visible text could never grow past the cap.
 TEST_CASE("a truncated live segment drops further deltas instead of still growing",
           "[session_state][live_segments]") {
     SessionState state("s-1");
-    state.AppendStreamingText(std::string(SessionState::kStreamingTextCapBytes + 100, 'a'));
+    state.AppendStreamingText(std::string(kLiveTextCapBytes + 100, 'a'));
     const auto first = state.TakeSnapshot();
     REQUIRE(first.live_segments.size() == 1);
     CHECK(first.live_segments[0].text_truncated);
     const std::size_t capped_size = first.live_segments[0].Text().size();
-    CHECK(capped_size <= SessionState::kStreamingTextCapBytes + 200);   // cap + marker
+    CHECK(capped_size <= kLiveTextCapBytes + 200);   // cap + marker
 
     state.AppendStreamingText(std::string(10000, 'b'));
     const auto second = state.TakeSnapshot();
@@ -1900,7 +1900,7 @@ TEST_CASE("the live-view truncation latch survives repeated overflows and resets
     SessionState state("s-1");
     // Two full overflow cycles: the cap plus enough more tool starts to
     // overflow a second time.
-    for (std::size_t i = 0; i < SessionState::kMaxLiveSegments + 50; ++i) {
+    for (std::size_t i = 0; i < minimal::client::kMaxLiveSegments + 50; ++i) {
         state.OnToolStarted(StartTool("t-" + std::to_string(i)));
     }
     const auto snap = state.TakeSnapshot();
@@ -1911,7 +1911,7 @@ TEST_CASE("the live-view truncation latch survives repeated overflows and resets
         }
         CHECK_FALSE(segment.Text() == "[...truncated]");   // no synthetic row, ever
     }
-    CHECK(snap.live_segments.size() == SessionState::kMaxLiveSegments);
+    CHECK(snap.live_segments.size() == minimal::client::kMaxLiveSegments);
     CHECK(state.TakeLightSnapshot().live_view_truncated);
     // The turn-end refresh's coarse clear is what clears it.
     state.ClearStreamingIfCurrentTurn(state.CurrentTurnSeq());
@@ -1922,14 +1922,14 @@ TEST_CASE("the live-view truncation latch survives repeated overflows and resets
     // empties the live view and resets the latch the same way. The tools
     // must be FINISHED first -- a still-running tool never retires even
     // though its result row reached the page.
-    for (std::size_t i = 0; i < SessionState::kMaxLiveSegments + 10; ++i) {
+    for (std::size_t i = 0; i < minimal::client::kMaxLiveSegments + 10; ++i) {
         const std::string id = "u-" + std::to_string(i);
         state.OnToolStarted(StartTool(id));
         state.OnToolFinished(id, FinishTool());
     }
     REQUIRE(state.TakeLightSnapshot().live_view_truncated);
     v1::GetMessagesResponse covered;
-    for (std::size_t i = 0; i < SessionState::kMaxLiveSegments + 10; ++i) {
+    for (std::size_t i = 0; i < minimal::client::kMaxLiveSegments + 10; ++i) {
         auto* stored = covered.add_messages();
         stored->set_seq(static_cast<int64_t>(i) + 1);
         auto* block = stored->mutable_message()->add_content();
@@ -1947,20 +1947,20 @@ TEST_CASE("the live-view truncation latch survives repeated overflows and resets
 TEST_CASE("OnToolStarted alone (no text/thinking deltas) stays within the count cap",
           "[session_state][live_segments]") {
     SessionState state("s-1");
-    for (std::size_t i = 0; i < SessionState::kMaxLiveSegments + 50; ++i) {
+    for (std::size_t i = 0; i < minimal::client::kMaxLiveSegments + 50; ++i) {
         state.OnToolStarted(StartTool("t-" + std::to_string(i)));
     }
-    CHECK(state.TakeSnapshot().live_segments.size() <= SessionState::kMaxLiveSegments);
+    CHECK(state.TakeSnapshot().live_segments.size() <= minimal::client::kMaxLiveSegments);
 }
 
 TEST_CASE("OnBackgroundTask reopen alone (no text/thinking deltas) stays within the count cap",
           "[session_state][live_segments]") {
     SessionState state("s-1");
-    for (std::size_t i = 0; i < SessionState::kMaxLiveSegments + 50; ++i) {
+    for (std::size_t i = 0; i < minimal::client::kMaxLiveSegments + 50; ++i) {
         state.OnBackgroundTask(
             BackgroundEvent("bg-" + std::to_string(i), v1::BackgroundTaskEvent::STARTED));
     }
-    CHECK(state.TakeSnapshot().live_segments.size() <= SessionState::kMaxLiveSegments);
+    CHECK(state.TakeSnapshot().live_segments.size() <= minimal::client::kMaxLiveSegments);
 }
 
 TEST_CASE("OnResyncRequired drops a stale foreground tool row and re-derives state_",

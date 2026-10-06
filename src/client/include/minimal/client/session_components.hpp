@@ -20,6 +20,7 @@
 
 #include "minimal/client/session_types.hpp"
 #include "minimal/common/units.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -98,7 +99,7 @@ public:
 private:
     std::vector<ToolExecutionState> rows_;
     std::atomic<std::uint64_t> version_{0};
-    int output_cap_bytes_ = 64 * common::kKiB;
+    int output_cap_bytes_ = kDefaultToolOutputBufferBytes;
 };
 
 // The transcript window: keyset pages of persisted rows (descending by seq,
@@ -192,7 +193,7 @@ private:
     bool has_earlier_ = false;
     bool trimmed_ = false;
     bool gap_ = false;
-    int max_messages_ = 2000;
+    int max_messages_ = kDefaultScrollbackWindowMaxMessages;
     bool older_fetch_pending_ = false;
     std::uint64_t refresh_seq_ = 0;
     bool refresh_succeeded_ = false;
@@ -209,13 +210,9 @@ private:
 // the idle derivation).
 class LiveTurnBuffer {
 public:
-    // 2 MiB of live text is far past what a human reads mid-turn; the
-    // transcript is authoritative -- the turn-end refresh re-fetches the full
-    // persisted text.
-    static constexpr std::size_t kTextCapBytes = 2 * common::kMiB;
-    // The NEWEST segments are kept; on overflow the live_view_truncated latch
+    // Caps: kLiveTextCapBytes and kMaxLiveSegments (client/policy.hpp). The
+    // NEWEST segments are kept; on overflow the live_view_truncated latch
     // stands (the status bar reports it) -- never a synthetic row.
-    static constexpr std::size_t kMaxSegments = 100;
 
     // Consumes the "last turn ended" flag: true when this starts a new turn
     // (turn_seq bumped, both flat accumulations cleared).
@@ -266,7 +263,7 @@ private:
                      const std::string& tool_use_id = {});
     void AppendCapped(LiveTurnSegment& segment, std::string_view text);
 
-    // The flat accumulations: CAPPED at kTextCapBytes (track R2) -- further
+    // The flat accumulations: CAPPED at kLiveTextCapBytes (track R2) -- further
     // deltas are dropped once the truncation marker is appended.
     std::string text_;
     bool text_truncated_ = false;

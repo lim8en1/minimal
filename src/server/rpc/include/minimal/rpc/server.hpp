@@ -26,8 +26,8 @@
 
 namespace minimal::rpc {
 
-// The default endpoint: <data dir>/server.sock, as a gRPC "unix://" target.
-std::filesystem::path DefaultSocketPath();
+// A socket path as a gRPC target (common::kUnixSocketScheme + path); the
+// default path is common::DefaultSocketPath().
 std::string SocketTarget(const std::filesystem::path& socket_path);
 
 class Server {

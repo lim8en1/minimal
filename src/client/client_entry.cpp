@@ -4,6 +4,8 @@
 #include <cstdio>
 
 #include "minimal/client/server_spawn.hpp"
+#include "minimal/client/policy.hpp"
+#include "minimal/common/config_paths.hpp"
 
 namespace minimal::client::app {
 
@@ -22,13 +24,15 @@ std::shared_ptr<SessionClient> ConnectOrReport(const std::string& target, bool a
         [](const std::string& line) { std::fprintf(stderr, "minimal: %s\n", line.c_str()); },
         &spawned);
     auto client = std::make_shared<SessionClient>(target);
-    if (reachable && client->WaitForConnected(std::chrono::seconds(5))) return client;
+    if (reachable && client->WaitForConnected(kChannelConnectTimeout)) return client;
     // A spawned server that failed has already said why (its fatal lines, or
     // the log to read); "start one yourself" would only bury that.
     if (spawned && !reachable) return nullptr;
     std::fprintf(stderr, "cannot reach a minimal-server at %s\n", target.c_str());
     std::fprintf(stderr, "start one with: minimal-server --listen %s\n",
-                 target.rfind("unix://", 0) == 0 ? target.c_str() + 7 : "<socket path>");
+                 target.starts_with(common::kUnixSocketScheme)
+                     ? target.c_str() + common::kUnixSocketScheme.size()
+                                                 : "<socket path>");
     return nullptr;
 }
 

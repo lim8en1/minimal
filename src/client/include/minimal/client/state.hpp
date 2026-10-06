@@ -20,6 +20,7 @@
 #include "minimal/client/session_components.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/common/units.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client::plugins {
 class AttentionState;
@@ -37,25 +38,14 @@ class SessionState {
 public:
     explicit SessionState(std::string session_id, std::string name = "");
 
-    // Memory bounds (track R2). Defaults; AppState applies ui.json's values
-    // right after construction, before any event can arrive.
-    static constexpr int kDefaultScrollbackWindowMaxMessages = 2000;
-    static constexpr int kDefaultToolOutputBufferBytes = 64 * common::kKiB;
-
-    // Streaming caps (see the members below). 2 MiB of live text is far past
-    // what a human reads mid-turn; the transcript is authoritative -- the
-    // turn-end refresh re-fetches the full persisted text.
-    static constexpr std::size_t kStreamingTextCapBytes = LiveTurnBuffer::kTextCapBytes;
-    // Live-segment count cap: the NEWEST segments are kept; on overflow the
-    // truncation latch stands and the status bar's {activity}
-    // segment carries an "earlier rows hidden" suffix while it does -- the
-    // cut is visible in chrome, never as a synthetic row in the stream.
-    static constexpr std::size_t kMaxLiveSegments = LiveTurnBuffer::kMaxSegments;
-    // Consecutive scrollback-refresh failures after which the tab surfaces a
-    // visible error notice (see NoteRefreshFailed). Below this the existing
-    // frame-pass backoff (scrollback_refresh.hpp) handles the quiet retry;
-    // the notice exists so a stuck transcript is not a silent one.
-    static constexpr int kScrollbackFailureNoticeAfter = 3;
+    // Memory bounds (track R2): kDefaultScrollbackWindowMaxMessages and
+    // kDefaultToolOutputBufferBytes (client/policy.hpp) until AppState applies
+    // ui.json's values, right after construction, before any event arrives.
+    // Streaming caps: kLiveTextCapBytes, kMaxLiveSegments -- on overflow the
+    // truncation latch stands and the status bar's {activity} segment says
+    // "earlier rows hidden", never a synthetic row. After
+    // kScrollbackFailureNoticeAfter consecutive refresh failures the tab shows
+    // an error notice, so a stuck transcript is not a silent one.
     void SetBounds(int scrollback_max_messages, int tool_output_buffer_bytes);
 
     // Renderable copy taken under a short lock held minimally (no blocking I/O).
@@ -1377,7 +1367,7 @@ private:
     // whole TUI froze for seconds per stream in a group. The tab leaves the
     // model at once; its stream closes here, in FIFO order (a group's
     // Detach runs before its Close). Drained, not discarded, on stop.
-    RpcQueue closer_{1024, /*drain_on_stop=*/true};
+    RpcQueue closer_{kStreamCloserQueueCapacity, /*drain_on_stop=*/true};
     std::vector<std::pair<std::string, v1::SubagentStartedEvent>> pending_subagents_;   // deferred
     // Fast-path skip for DispatchToTab's drain step (see .cpp): true only
     // while pending_subagents_ actually holds something. Every call to

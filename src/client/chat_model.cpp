@@ -13,6 +13,9 @@
 #include "minimal/client/utf8.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/clock.hpp"
+#include "minimal/common/numeric.hpp"
+#include "minimal/client/policy.hpp"
+#include "minimal/client/count_format.hpp"
 
 namespace minimal::client {
 
@@ -25,7 +28,7 @@ std::string FormatClockTime(int64_t unix_ms) {
 #else
     localtime_r(&seconds, &local);
 #endif
-    char buf[16];
+    char buf[sizeof("HH:MM:SS")];
     const int written = std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", local.tm_hour,
                                       local.tm_min, local.tm_sec);
     if (written <= 0) return "";
@@ -65,22 +68,12 @@ std::string JoinResultText(const v1::ToolResultBlock& block) {
 // narrowed back to integers so a `3` sent as 3.0 renders as `3`, not "3.0".
 namespace {
 
-bool IsExactInteger(double value) {
-    if (!std::isfinite(value)) return false;
-    if (value != std::trunc(value)) return false;
-    // STRICTLY LESS at the top: static_cast<double>(INT64_MAX) rounds UP to
-    // 2^63, and a `<=` against it admits a value whose cast to int64_t is UB.
-    constexpr double kTwoToThe63 = 9223372036854775808.0;
-    return value >= static_cast<double>(std::numeric_limits<std::int64_t>::min()) &&
-           value < kTwoToThe63;
-}
-
 nlohmann::json ValueToJson(const google::protobuf::Value& value) {
     switch (value.kind_case()) {
         case google::protobuf::Value::kNullValue: return nullptr;
         case google::protobuf::Value::kNumberValue: {
             const double number = value.number_value();
-            if (IsExactInteger(number)) return static_cast<std::int64_t>(number);
+            if (common::IsExactInt64(number)) return static_cast<std::int64_t>(number);
             return number;
         }
         case google::protobuf::Value::kStringValue: return value.string_value();
@@ -130,7 +123,9 @@ std::string InputSummary(const nlohmann::json& input) {
     if (input.is_null() || input.empty()) return "";
     try {
         std::string summary = input.dump();
-        if (summary.size() > 120) summary = TruncateUtf8(summary, 120) + "…";
+        if (summary.size() > kToolInputSummaryBytes) {
+            summary = TruncateUtf8(summary, kToolInputSummaryBytes) + "…";
+        }
         return summary;
     } catch (const std::exception&) {
         return "";   // a non-serializable input degrades to no summary
@@ -158,9 +153,8 @@ std::string OneLineSummary(std::string summary) {
         }
         summary = std::move(joined);
     }
-    constexpr std::size_t kMaxLiveSummaryBytes = 200;
-    if (summary.size() > kMaxLiveSummaryBytes) {
-        summary = TruncateUtf8(summary, kMaxLiveSummaryBytes) + "…";
+    if (summary.size() > kLiveToolSummaryBytes) {
+        summary = TruncateUtf8(summary, kLiveToolSummaryBytes) + "…";
     }
     return summary;
 }
@@ -254,15 +248,7 @@ std::string AssistantLabel(const std::string& agent, const std::string& model) {
 }
 
 std::string CompactionHeadline(const ChatRow& row) {
-    const auto tokens = [](int64_t n) -> std::string {
-        if (n >= 1'000'000) {
-            char buf[32];
-            std::snprintf(buf, sizeof(buf), "%.1fM", static_cast<double>(n) / 1'000'000.0);
-            return buf;
-        }
-        if (n >= 1'000) return std::to_string((n + 500) / 1'000) + "k";
-        return std::to_string(n);
-    };
+    const auto tokens = [](int64_t n) { return CompactCount(n); };
     std::string out = row.compaction_skipped ? "compaction skipped" : "context compacted";
     if (!row.compaction_trigger.empty()) out += " (" + row.compaction_trigger + ")";
     if (row.compaction_skipped) return out;
@@ -465,12 +451,13 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                     // The E3 frame: <file path="..."> / <file-tree path="...">.
                     const std::string& framed = block.text().text();
                     const auto open = framed.find("<file");
-                    const auto path_key = framed.find("path=\"", open);
+                    constexpr std::string_view kPathKey = "path=\"";
+                    const auto path_key = framed.find(kPathKey, open);
                     if (path_key != std::string::npos) {
-                        const auto end = framed.find('"', path_key + 6);
+                        const auto value = path_key + kPathKey.size();
+                        const auto end = framed.find('"', value);
                         if (end != std::string::npos) {
-                            row.attachment_path =
-                                framed.substr(path_key + 6, end - (path_key + 6));
+                            row.attachment_path = framed.substr(value, end - value);
                         }
                     }
                     rows.push_back(std::move(row));
@@ -546,7 +533,6 @@ std::vector<bool> LabelContinuations(const std::vector<ChatRow>& rows) {
 }
 
 bool CollapsedByDefault(const ChatRow& row) {
-    constexpr std::size_t kAttachmentCollapseThresholdChars = 2000;
     switch (row.kind) {
         case ChatRowKind::Thinking:
         case ChatRowKind::Compaction:

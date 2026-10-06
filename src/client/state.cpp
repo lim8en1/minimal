@@ -6,12 +6,14 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <iterator>
 #include <utility>
 
 #include "minimal/client/command_line.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -942,9 +944,9 @@ void AppState::DisableChatSurface(const char* reason) {
 void AppState::ApplyUiBounds(SessionState& state) const {
     state.SetBounds(
         scrollback_max_messages_ > 0 ? scrollback_max_messages_
-                                     : SessionState::kDefaultScrollbackWindowMaxMessages,
+                                     : minimal::client::kDefaultScrollbackWindowMaxMessages,
         tool_output_buffer_bytes_ > 0 ? tool_output_buffer_bytes_
-                                      : SessionState::kDefaultToolOutputBufferBytes);
+                                      : minimal::client::kDefaultToolOutputBufferBytes);
 }
 
 void AppState::WireOnClosed(SessionClient::Stream& stream, const std::string& session_id) {
@@ -1190,7 +1192,6 @@ std::string AppState::AttachSessionGroup(const std::string& session_id) {
     SessionClient::ListSessionsOptions opts;
     opts.include_all_dirs = true;
     opts.include_subagents = true;
-    opts.limit = 200;
     const auto listed = client_->ListAllSessions(opts, [&](const v1::SessionSummary& row) {
         return row.parent_session_id() == session_id && row.is_live();
     });
@@ -2361,7 +2362,7 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
         // the live ones are in the window -- clearing after a failed fetch
         // blanked the turn's live rows until a retry happened to succeed.
         bool applied_all = true;
-        for (int page = 0; page < 50; ++page) {
+        for (int page = 0; page < kMaxScrollbackPagesPerRefresh; ++page) {
             // Bounded (GetMessagesPage's deadline): a wedged server must not
             // wedge the worker, and every OTHER queued request with it.
             v1::GetMessagesRequest request;
@@ -2371,7 +2372,7 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
             } else if (delta) {
                 request.set_after_seq(after);
             }
-            request.set_limit(100);
+            request.set_limit(kScrollbackPageSize);
             auto fetched = client_->GetMessagesPage(request);
             const v1::GetMessagesResponse& resp = fetched.response;
             if (const grpc::Status& status = fetched.status; !status.ok()) {
@@ -2422,13 +2423,16 @@ uint64_t AppState::ToolsVersion() const {
     // the survivors' bumps could walk a sum back to a value the panel cache
     // already holds (same tab count too), and the cache served a stale panel.
     std::lock_guard lk(mtx_);
-    uint64_t h = 14695981039346656037ull;   // FNV-1a
+    // NOLINTBEGIN(readability-magic-numbers) -- 64-bit FNV-1a's offset basis
+    // and prime (the FNV spec), applied byte by byte.
+    uint64_t h = 14695981039346656037ull;
     const auto mix = [&h](uint64_t v) {
-        for (int i = 0; i < 8; ++i) {
-            h ^= (v >> (i * 8)) & 0xff;
+        for (std::size_t i = 0; i < sizeof(v); ++i) {
+            h ^= (v >> (i * CHAR_BIT)) & 0xff;
             h *= 1099511628211ull;
         }
     };
+    // NOLINTEND(readability-magic-numbers)
     for (const auto& tab : tabs_) {
         mix(std::hash<std::string>{}(tab.info.tab_id));
         mix(tab.info.state->ToolsVersion());

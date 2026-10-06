@@ -19,6 +19,7 @@
 
 #include "minimal/client/subscribe_outcome.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -229,11 +230,9 @@ public:
         std::atomic<bool> closing_{false};
         std::atomic<bool> received_any_{false};   // reader: first event delivered (see received_any())
 
-        // Bounded like the server's outbound EventQueue (65k) -- a stream whose
-        // server side stopped reading must not grow client memory without
-        // limit. 256 events ≈ an entire turn's control traffic several times
-        // over; beyond that the stream is stalled and Send() refuses.
-        static constexpr std::size_t kSendQueueCap = 256;
+        // Bounded (kStreamSendQueueCap) like the server's outbound queue: a
+        // stream whose server side stopped reading must not grow client memory
+        // without limit.
 
         // Guards status_: written by Open/Attach (constructor thread), the
         // reader thread (its own Finish), and Close(); read via status() from
@@ -347,7 +346,7 @@ public:
         // Subagent rows (parent_session_id set) are hidden unless set -- the
         // startup group-attach scan is the caller that needs them.
         bool include_subagents = false;
-        int32_t limit = 100;
+        int32_t limit = kSessionListPageSize;
         // Keyset cursor (exclusive upper bound on updated_at, tie-broken by
         // id), mirroring ListSessionsRequest's before_updated_at/before_id --
         // both empty/nullopt means "first page". The picker's "load more"

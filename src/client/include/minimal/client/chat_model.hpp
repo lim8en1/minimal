@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/v1/session_service.pb.h"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -46,8 +47,8 @@ enum class ChatRowKind {
 // name kinds by it.
 std::string_view ToString(ChatRowKind kind);
 
-inline constexpr int kSwitchSlot = -1;
-inline constexpr int kCompactionSlotBase = 1 << 20;
+inline constexpr int kSwitchSlot = -1;  // NOLINT(readability-magic-numbers): a sentinel slot
+// Compaction rows' slots start at kCompactionSlotBase (client/policy.hpp).
 
 struct ChatRow {
     // The transcript row this view row came from (first member: designated
@@ -251,13 +252,9 @@ RowWindowSelection SelectRowWindow(const std::vector<RowSpan>& spans,
 // repaint, so a notice on an otherwise-idle screen stays put (there is
 // nothing to wake the tick), and fades once the user resumes actually doing
 // something -- which is when a stale "/theme x" or "/cost" line stops being
-// useful anyway. Picked by feel; tune if it reads as too eager or too sticky.
-inline constexpr int kNoticeTicksDefault = 20;
-// ...and never before it has been on screen this long. The ticks count
-// app-wide UI activity, and a background tab streaming deltas is activity
-// too: 20 ticks alone could clear a notice in well under a second, before
-// anyone read it.
-inline constexpr std::chrono::milliseconds kNoticeMinVisible{4000};
+// useful anyway. kNoticeTicksDefault / kNoticeMinVisible (client/policy.hpp):
+// the ticks count app-wide UI activity, and a background tab streaming deltas
+// is activity too, so a minimum visible time backs the tick count.
 
 // CommandResult -> transient notice line. The return type is deliberately not
 // a ChatRow and not convertible to one: a command result has no path into the

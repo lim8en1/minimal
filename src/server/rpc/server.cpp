@@ -46,10 +46,8 @@ bool SocketIsDead(const std::filesystem::path& path) {
 
 }  // namespace
 
-std::filesystem::path DefaultSocketPath() { return common::DataDir() / "server.sock"; }
-
 std::string SocketTarget(const std::filesystem::path& socket_path) {
-    return "unix://" + socket_path.string();
+    return std::string(common::kUnixSocketScheme) + socket_path.string();
 }
 
 Server::Server(SessionServiceImpl& service, std::filesystem::path socket_path,
