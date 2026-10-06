@@ -13,7 +13,10 @@ minimal/client/session_client.hpp
 minimal/client/render/theme.hpp
 minimal/client/utf8.hpp
 minimal/client/view/filterable_menu.hpp
+minimal/client/view/modal_host.hpp
 minimal/client/view/prompt_modal.hpp
+minimal/client/view/schema_form.hpp
+minimal/client/view/schema_form_model.hpp
 minimal/client/view/tool_status.hpp
 
 # Shared utilities.

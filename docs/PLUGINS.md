@@ -44,6 +44,7 @@ Installed to `<libdir>/minimal/plugins/client/`.
 | `logo` | The ASCII-banner start view (random banner per session) |
 | `cost-view` | The `{cost}` and `{token_detail}` status-bar segments (subscribe to `cost-tracker.endpoint`'s totals stream, polling only as a fallback; render cumulative $ and the token breakdown) |
 | `ask-view` | The client half of `tool-ask`: the `ask` prompt renderer (the question modal) and the `ask` display renderer (the transcript row, expanded by default). Disabled, every ask is answered "unavailable" |
+| `config-view` | `/config [plugin]`: the `config` modal view over core's `plugins` endpoint — the configurable plugins, then a plugin's schema form (values, defaults, live/restart, restart pending), edited in place and validated by the plugin. The form is client core's reusable `client::MakeSchemaForm` |
 | `mcp-view` | The `/mcp` picker: the `mcp` modal view (`view_hint` "mcp") over the `mcp` plugin's `mcp.endpoint` — lists servers with live status, Enter toggles one |
 | `checklist-view` | The `{todo}` status-bar segment + the `checklist.panel` view (both fed by one shared worker holding `checklist.endpoint`'s change stream, polling only as a fallback; the panel toggles between a focused-tab tasklist and a per-tab summary; default binding `alt+l`) |
 

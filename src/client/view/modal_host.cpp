@@ -76,8 +76,14 @@ private:
     bool OnEvent(Event event) override {
         if (!*show_ || !*slot_) return false;
         if (event == Event::Escape) {
-            if (close_) close_();
-            return true;
+            // dynamic_cast across the plugin boundary is sound: EscapeAware's
+            // key function (its destructor) lives in client core, so there
+            // is one typeinfo however many plugins implement it.
+            const auto* aware = dynamic_cast<const EscapeAware*>(slot_->get());
+            if (aware == nullptr || !aware->WantsEscape()) {
+                if (close_) close_();
+                return true;
+            }
         }
         // Plugin component code: a throw escaping into the ftxui loop would
         // std::terminate the process. Logged, and the event treated as
@@ -100,6 +106,8 @@ private:
 };
 
 }  // namespace
+
+EscapeAware::~EscapeAware() = default;
 
 ftxui::Component MakePluginModalHost(const std::shared_ptr<ftxui::Component>& child,
                                      const bool& show, std::function<void()> close) {

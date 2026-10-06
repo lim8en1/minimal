@@ -35,7 +35,19 @@ ftxui::Component MakeModalHost(const std::shared_ptr<ftxui::Component>& child,
 // the key, because Modal() gives the layer exclusive input while it is shown,
 // so a plugin that never handles Escape would otherwise trap every key until
 // the terminal is killed.
+//
+// The one exception is opt-in and momentary: a plugin modal's root component
+// that also implements EscapeAware gets Escape while WantsEscape() says so --
+// to cancel an inline edit -- and the host closes on Escape otherwise.
 ftxui::Component MakePluginModalHost(const std::shared_ptr<ftxui::Component>& child,
                                      const bool& show, std::function<void()> close);
+
+// Implemented by a plugin modal's root component that has a use for Escape
+// of its own while some state lasts (an open inline editor). Asked per key.
+class EscapeAware {
+public:
+    virtual ~EscapeAware();
+    virtual bool WantsEscape() const = 0;
+};
 
 }  // namespace minimal::client

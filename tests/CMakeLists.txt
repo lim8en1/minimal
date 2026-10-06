@@ -356,12 +356,16 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     mcp_plugin_test.cpp
     # The client half of the pair: the picker's pure row model.
     "${CMAKE_SOURCE_DIR}/plugins/client/mcp-view/mcp_picker_model.cpp"
+    # config-view: its feed and component, over a fake endpoint.
+    "${CMAKE_SOURCE_DIR}/plugins/client/config-view/config_view.cpp"
+    schema_form_test.cpp
     mcp_view_test.cpp)
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/mcp/include"
     "${CMAKE_SOURCE_DIR}/plugins/server/mcp"
     "${CMAKE_SOURCE_DIR}/plugins/client/mcp-view"
+    "${CMAKE_SOURCE_DIR}/plugins/client/config-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")
 
 target_include_directories(minimal_tests PRIVATE
