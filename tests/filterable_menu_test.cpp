@@ -14,9 +14,9 @@
 
 #include "ftxui_harness.hpp"
 #include "minimal/client/render/theme.hpp"
-#include "minimal/client/view/filterable_menu.hpp"
+#include "filterable_menu.hpp"
 
-namespace minimal::client {
+namespace minimal::client::ui_kit {
 namespace {
 
 MenuRow Header(const char* label) {
@@ -186,4 +186,4 @@ TEST_CASE("filterable menu: an empty list says loading, or why the fetch failed"
     CHECK(minimal_test::RenderFrame(failed).find("deadline exceeded") != std::string::npos);
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::ui_kit

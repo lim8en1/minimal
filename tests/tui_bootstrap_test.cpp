@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include <ftxui/component/component.hpp>
@@ -49,9 +51,52 @@ private:
 // lets BuildTuiEnvironment return, and then exercises the exact crash path
 // (Highlight on a cpp code block) against `env` well after that return. Under
 // build-asan this reliably use-after-free's without the fix.
+#ifndef MINIMAL_UI_KIT_PLUGIN
+#error "MINIMAL_UI_KIT_PLUGIN must name the built ui-kit plugin"
+#endif
+
+namespace {
+
+// The widget-kit slot is required, and from the test binary the bundled
+// plugin dir is not the build's (it probes relative to the executable): the
+// built ui-kit goes in as a user plugin, enabled.
+void SeedWidgetKit(const std::filesystem::path& config_dir) {
+    const std::filesystem::path kit(MINIMAL_UI_KIT_PLUGIN);
+    std::filesystem::create_directories(config_dir / "client-plugins");
+    std::filesystem::copy_file(kit, config_dir / "client-plugins" / kit.filename());
+    std::ofstream(config_dir / "client-plugins.json")
+        << R"({"plugins": [{"file": ")" << kit.filename().string()
+        << R"(", "provenance": "user", "enabled": true}]})";
+}
+
+}  // namespace
+
+// The client side of the server's plugin_matrix: with no client plugin at
+// all the TUI refuses to start -- nothing fills the required widget-kit slot
+// -- and with only the kit it starts.
+TEST_CASE("the TUI refuses to start with no widget kit, and starts with only the kit",
+          "[tui_bootstrap][widget_kit]") {
+    SessionClient client("unix:///nonexistent/minimal-tui-bootstrap-test.sock");
+    {
+        minimal::testing::TempDir config_dir;
+        ScopedEnv config_override("MINIMAL_CONFIG_DIR", config_dir.path().c_str());
+        TuiEnvironment env;
+        CHECK_FALSE(BuildTuiEnvironment(client, env));
+    }
+    {
+        minimal::testing::TempDir config_dir;
+        SeedWidgetKit(config_dir.path());
+        ScopedEnv config_override("MINIMAL_CONFIG_DIR", config_dir.path().c_str());
+        TuiEnvironment env;
+        REQUIRE(BuildTuiEnvironment(client, env));
+        CHECK(env.registries.widget_kit.holder() == "ui-kit");
+    }
+}
+
 TEST_CASE("BuildTuiEnvironment's highlighter outlives the call and highlights code",
           "[tui_bootstrap]") {
     minimal::testing::TempDir config_dir;
+    SeedWidgetKit(config_dir.path());
     ScopedEnv config_override("MINIMAL_CONFIG_DIR", config_dir.path().c_str());
 
     // The channel is lazy (grpc::CreateChannel does not connect eagerly), and

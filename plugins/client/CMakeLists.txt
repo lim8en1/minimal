@@ -68,3 +68,8 @@ add_subdirectory(session-view)
 # the focused tab's state the host hands every segment.
 
 add_subdirectory(session-status)
+
+# ui-kit is the widget kit every view builds on (menus, the schema form, the
+# model selector, modal chrome): the required widget-kit slot's default.
+
+add_subdirectory(ui-kit)

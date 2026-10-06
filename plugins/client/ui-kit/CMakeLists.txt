@@ -1,0 +1,9 @@
+minimal_add_client_plugin(minimal_ui_kit
+    ui_kit_plugin.cpp
+    ui_kit.cpp
+    modal_chrome.cpp
+    filterable_menu.cpp
+    schema_form.cpp
+    model_picker.cpp
+    model_picker_model.cpp
+    model_selector.cpp)

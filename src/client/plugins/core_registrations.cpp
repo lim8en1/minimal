@@ -10,10 +10,7 @@
 
 #include "minimal/client/render/streaming_markdown_view.hpp"
 #include "minimal/client/utf8.hpp"
-#include "minimal/client/view/filterable_menu.hpp"
-#include "minimal/client/view/model_selector.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
-#include "minimal/client/view/schema_form.hpp"
 #include "minimal/client/view/tool_status.hpp"
 #include "minimal/client/policy.hpp"
 
@@ -634,39 +631,6 @@ void RegisterCoreSyntaxGrammars(SyntaxGrammarRegistry& registry) {
     for (const LanguageDefinition& definition : VendoredLanguages()) {
         registry.Register(std::make_unique<VendoredGrammar>(definition));
     }
-}
-
-namespace {
-
-// Core's widget kit: the functions core's own views call, behind the slot.
-class CoreWidgetKit final : public WidgetKit {
-public:
-    ftxui::Component FilterableMenuModal(
-        std::function<std::vector<MenuRow>(const std::string& filter)> build_rows,
-        const FilterableMenuSpec& spec, FilterableMenuCallbacks callbacks,
-        const Theme& theme) const override {
-        return MakeFilterableMenuModal(std::move(build_rows), spec, std::move(callbacks), theme);
-    }
-    ftxui::Component SchemaForm(std::function<SchemaFormState()> source,
-                                SchemaFormCallbacks callbacks, const Theme& theme) const override {
-        return MakeSchemaForm(std::move(source), std::move(callbacks), theme);
-    }
-    Element ModalFrame(const Theme& theme, const std::string& title, Elements rows,
-                       Elements pinned, const std::string& footer) const override {
-        return client::ModalFrame(theme, title, std::move(rows), std::move(pinned), footer);
-    }
-    Element ModalRule(const Theme& theme) const override { return client::ModalRule(theme); }
-    ftxui::Component ModelSelector(ModelSelectorSpec spec, ModelSelectorCallbacks callbacks,
-                                   const Theme& theme) const override {
-        return MakeModelSelector(std::move(spec), std::move(callbacks), theme);
-    }
-};
-
-}  // namespace
-
-void RegisterDefaultWidgetKit(WidgetKitRegistry& registry) {
-    if (registry.held()) return;  // a plugin owns the slot
-    registry.Register(std::make_unique<CoreWidgetKit>());  // outside any window: core's
 }
 
 void RegisterDefaultMarkdownEngine(MarkdownEngineRegistry& registry,

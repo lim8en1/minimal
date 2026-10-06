@@ -1,4 +1,4 @@
-#include "minimal/client/model_picker_model.hpp"
+#include "model_picker_model.hpp"
 
 #include <algorithm>
 
@@ -6,7 +6,7 @@
 #include "minimal/client/utf8.hpp"
 #include "minimal/common/model_ref.hpp"
 
-namespace minimal::client {
+namespace minimal::client::ui_kit {
 
 std::vector<ModelPickerRow> BuildModelPickerRows(
     const std::vector<v1::ModelSummary>& models, const std::string& filter) {
@@ -51,4 +51,4 @@ std::vector<ModelPickerRow> BuildModelPickerRows(
     return rows;
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::ui_kit

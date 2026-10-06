@@ -22,6 +22,7 @@
 #include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
+#include "ui_kit.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/plugins/plugin_discovery.hpp"
 #include "minimal/client/plugins/registries.hpp"
@@ -96,8 +97,13 @@ struct LoadedFixtures {
                                                   .widgets = f->widgets.get(),
                                                   .actions = f->actions.get()});
         f->records = loader.LoadAll(candidates);
-        // As the bootstrap does once names resolve: core's kit, if unclaimed.
-        RegisterDefaultWidgetKit(f->registries.widget_kit);
+        // The kit slot is required (the bundled ui-kit fills it in a real
+        // TUI): a test loading other plugins fills it the same way.
+        if (f->registries.widget_kit.empty()) {
+            f->registries.widget_kit.SetAttribution("ui-kit");
+            f->registries.widget_kit.Register(std::make_unique<minimal::client::ui_kit::UiKit>());
+            f->registries.widget_kit.ClearAttribution();
+        }
         return f;
     }
 };
@@ -348,7 +354,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("the widget kit: a plugin's kit draws for every view; core's fills an empty slot",
+TEST_CASE("the widget kit: whichever plugin holds the slot draws for every view; it is required",
           "[client_plugins][widget_kit]") {
     const Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
     WidgetKitRegistry slot;
@@ -360,18 +366,36 @@ TEST_CASE("the widget kit: a plugin's kit draws for every view; core's fills an 
     slot.SetAttribution("my-kit");
     slot.Register(std::make_unique<StubKit>());
     slot.ClearAttribution();
-    RegisterDefaultWidgetKit(slot);  // claimed: core's default stays out
     CHECK(slot.holder() == "my-kit");
     CHECK(ToText(widgets->ModalRule(theme)) == "stub rule");
     CHECK(ToText(widgets->ModalFrame(theme, "t", {}, {}, "")) == "stub frame");
 
-    WidgetKitRegistry unclaimed;
-    RegisterDefaultWidgetKit(unclaimed);
-    REQUIRE(unclaimed.held());
-    CHECK(unclaimed.holder().empty());  // core's
-    const auto core_widgets = MakeHostWidgetKit(unclaimed);
-    CHECK(ToText(core_widgets->ModalFrame(theme, "core frame", {ftxui::text("row")}, {}, ""))
-              .find("core frame") != std::string::npos);
+    // Core has no kit of its own any more: the slot is one the TUI cannot
+    // start without.
+    ClientRegistries registries;
+    bool kit_required = false;
+    for (const auto& hook : RegistryHooks(registries)) {
+        if (hook.label == "widget_kit") kit_required = hook.required;
+        if (hook.label != "widget_kit") CHECK_FALSE(hook.required);
+    }
+    CHECK(kit_required);
+    CHECK(registries.widget_kit.empty());
+}
+
+#ifndef MINIMAL_UI_KIT_PLUGIN
+#error "MINIMAL_UI_KIT_PLUGIN must name the built ui-kit plugin"
+#endif
+
+TEST_CASE("the bundled ui-kit plugin fills the widget-kit slot", "[client_plugins][widget_kit]") {
+    const auto fixtures = LoadedFixtures::Load(
+        {PluginCandidate{MINIMAL_UI_KIT_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    INFO(fixtures->records.front().error);
+    REQUIRE(fixtures->records.front().ok());
+    CHECK(fixtures->registries.widget_kit.holder() == "ui-kit");
+    const Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
+    CHECK(ToText(fixtures->widgets->ModalFrame(theme, "kit frame", {ftxui::text("row")}, {}, ""))
+              .find("kit frame") != std::string::npos);
 }
 
 namespace {

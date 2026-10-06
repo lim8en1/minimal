@@ -11,10 +11,10 @@
 #include <ftxui/component/component.hpp>
 
 #include "minimal/client/render/theme.hpp"
-#include "minimal/client/view/filterable_menu.hpp"
+#include "filterable_menu.hpp"
 #include "minimal/v1/session_service.pb.h"
 
-namespace minimal::client {
+namespace minimal::client::ui_kit {
 
 // The /subagent-model picker's prepended row. Selection means "clear the
 // session's subagent-model override -- spawned children run the parent's
@@ -51,4 +51,4 @@ ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
                                  const Theme& theme, ModelPickerCallbacks callbacks,
     MenuStatus status = {});
 
-}  // namespace minimal::client
+}  // namespace minimal::client::ui_kit

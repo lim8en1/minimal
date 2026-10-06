@@ -30,8 +30,15 @@ void InvokeHook(void* hook, RegistryBase& registry, const ClientPluginRegistrati
 template <typename Registry>
 RegistryHook Hook(std::string_view label, const char* symbol, Registry& registry,
                   std::string_view name_space = {},
-                  minimal::plugins::NameTable::Policy policy = minimal::plugins::NameTable::Policy::kSlot) {
-    return {label, symbol, &registry, name_space, policy, &InvokeHook<Registry>};
+                  minimal::plugins::NameTable::Policy policy = minimal::plugins::NameTable::Policy::kSlot,
+                  bool required = false) {
+    return {.label = label,
+            .symbol = symbol,
+            .registry = &registry,
+            .name_space = name_space,
+            .policy = policy,
+            .required = required,
+            .invoke = &InvokeHook<Registry>};
 }
 
 template <typename Fn>
@@ -130,8 +137,9 @@ std::vector<RegistryHook> RegistryHooks(ClientRegistries& r) {
              "exclusive slot", Policy::kSlot),
         Hook("markdown_engine", "minimal_client_plugin_register_markdown_engine",
              r.markdown_engine, "exclusive slot", Policy::kSlot),
+        // Required: every view draws with it.
         Hook("widget_kit", "minimal_client_plugin_register_widget_kit", r.widget_kit,
-             "exclusive slot", Policy::kSlot),
+             "exclusive slot", Policy::kSlot, /*required=*/true),
     };
 }
 

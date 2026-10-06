@@ -11,7 +11,7 @@
 
 #include "minimal/v1/session_service.pb.h"
 
-namespace minimal::client {
+namespace minimal::client::ui_kit {
 
 struct ModelPickerRow {
     std::string label;
@@ -33,4 +33,4 @@ struct ModelPickerRow {
 std::vector<ModelPickerRow> BuildModelPickerRows(
     const std::vector<v1::ModelSummary>& models, const std::string& filter);
 
-}  // namespace minimal::client
+}  // namespace minimal::client::ui_kit

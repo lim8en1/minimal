@@ -18,7 +18,7 @@
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/view/widget_types.hpp"
 
-namespace minimal::client {
+namespace minimal::client::ui_kit {
 
 // The index the cursor should occupy, given `from` and the direction the user
 // last moved (+1 down, -1 up): `from` itself when it is selectable (in bounds,
@@ -36,4 +36,4 @@ ftxui::Component MakeFilterableMenuModal(
     std::function<std::vector<MenuRow>(const std::string& filter)> build_rows,
     const FilterableMenuSpec& spec, FilterableMenuCallbacks callbacks, const Theme& theme);
 
-}  // namespace minimal::client
+}  // namespace minimal::client::ui_kit

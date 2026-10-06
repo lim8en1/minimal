@@ -870,6 +870,8 @@ public:
     // NAME namespaces, after the collision check passed; a slot registry is
     // never renamed. Default: nothing to rename.
     virtual void ApplyAliases(const std::map<std::string, std::string>& aliases) { (void)aliases; }
+    // Nothing registered (a required slot left empty refuses startup).
+    virtual bool empty() const = 0;
 
 protected:
     // False, with a warning, once sealed.
@@ -901,6 +903,7 @@ public:
 
     // In registration order.
     const std::vector<std::unique_ptr<T>>& All() const { return entries_; }
+    bool empty() const override { return entries_.empty(); }
     // Index-aligned with All(): the name each entry answers to.
     const std::vector<std::string>& surfaces() const { return surfaces_; }
 
@@ -968,6 +971,7 @@ public:
 
     T* get() const { return entry_.get(); }
     bool held() const { return held_; }
+    bool empty() const override { return !held_; }
     // Who holds the slot: a plugin's name, or "" for core.
     const std::string& holder() const { return holder_; }
 
@@ -1052,6 +1056,7 @@ using WidgetKitRegistry = ExclusiveSlot<WidgetKit, WidgetKitKey>;
 // fatal, like every additive key.
 class MessageRendererRegistry : public RegistryBase {
 public:
+    bool empty() const override { return renderers_.empty(); }
     void Register(ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer);
     // The renderer for a kind, or null -- the caller falls back to the core
     // default (which is itself registered here once core fills it).

@@ -44,8 +44,8 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     //   3. PLUGIN LOAD (contexts carry the attention sink and the data path;
     //      registries record what each plugin claimed)
     //   4. Name resolution: collisions fatal, dangling/slot aliases warned
-    //      -- then the widget kit's core default, if unclaimed (step 6 builds
-    //      plugin view components, which may use it)
+    //      -- then required slots must be filled (step 6 builds plugin view
+    //      components, which may use the widget kit)
     //   5. THEME (sections may reference loaded plugin names)
     //   6. keybindings (+ plugin view defaults, only where nothing binds)
     //   7. core defaults fill every unclaimed slot, then the frame is assembled
@@ -200,11 +200,22 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         }
     }
 
-    // The widget kit before anything can ask for it: the plugin views'
-    // component()s, built with the keybindings below, may already build
-    // their widgets. Core's own kit when no plugin claimed the slot; the
-    // theme travels with every call, so it need not be loaded yet.
-    plugins::RegisterDefaultWidgetKit(out.registries.widget_kit);
+    // A required slot no plugin filled: the TUI cannot run without it (the
+    // server's "no provider" rule). Checked here, before anything -- the
+    // plugin views' component()s, built with the keybindings below -- can
+    // ask for what it would have provided.
+    {
+        bool missing = false;
+        for (const auto& hook : plugins::RegistryHooks(out.registries)) {
+            if (!hook.required || !hook.registry->empty()) continue;
+            std::fprintf(stderr,
+                         "minimal: FATAL: no client plugin fills the required '%s' slot -- is "
+                         "the bundled plugin that provides it disabled in client-plugins.json?\n",
+                         std::string(hook.label).c_str());
+            missing = true;
+        }
+        if (missing) return false;
+    }
 
     // ui.json's "theme" selects the file (themes/<name>.json); empty means
     // the built-in default. Previously hardcoded to "dark" regardless of

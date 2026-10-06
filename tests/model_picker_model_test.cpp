@@ -6,10 +6,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "minimal/client/model_picker_model.hpp"
+#include "model_picker_model.hpp"
 
-using minimal::client::BuildModelPickerRows;
-using minimal::client::ModelPickerRow;
+using minimal::client::ui_kit::BuildModelPickerRows;
+using minimal::client::ui_kit::ModelPickerRow;
 using minimal::v1::ModelSummary;
 
 namespace {
