@@ -231,6 +231,8 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_stream_reassembler.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_error_mapping.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_variant_params.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_model_catalog.cpp"
+    anthropic_model_catalog_test.cpp
     anthropic_request_test.cpp
     anthropic_response_test.cpp
     anthropic_stream_test.cpp
@@ -404,7 +406,7 @@ add_dependencies(minimal_tests
     fixture-hook
     fixture-lifecycle
     fixture-client fixture-client-exclusive fixture-client-partial-throw fixture-endpoint
-    fixture-client-bad-abi fixture-user)
+    fixture-client-bad-abi fixture-user fixture-project-commands)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"
     MINIMAL_USER_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures-deployed"

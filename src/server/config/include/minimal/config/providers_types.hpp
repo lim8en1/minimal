@@ -74,8 +74,11 @@ struct ModelVariant {
 // nullopt return means "no plugin-registered mapping for this kind" -- the
 // generic reasoning_effort fallback applies, same as any backend that never
 // had one.
+// `metadata` is the model's discovery metadata (DiscoveredModel::metadata), an
+// empty object for a model discovery never touched.
 using VariantParamsHook = std::function<std::optional<std::pair<nlohmann::json, bool>>(
-    const std::string& backend_kind, const std::string& effort_word, std::optional<int> max_tokens)>;
+    const std::string& backend_kind, const std::string& effort_word, std::optional<int> max_tokens,
+    const nlohmann::json& metadata)>;
 
 // Translates a registry pointer into a VariantParamsHook -- the Find-then-
 // invoke glue shared by every call site that owns a VariantParamsRegistry
@@ -107,10 +110,10 @@ VariantParamsHook MakeVariantParamsHook(const llm::VariantParamsRegistry* regist
 // forwarded to the hook for backends whose wire shape needs it (Anthropic's
 // budget clamp). The second element of the returned pair is false when a
 // value was clamped, so the caller can warn.
-std::pair<nlohmann::json, bool> VariantParametersFor(const std::string& backend,
-                                                     const std::string& effort,
-                                                     std::optional<int> max_tokens,
-                                                     const VariantParamsHook& hook = {});
+std::pair<nlohmann::json, bool> VariantParametersFor(
+    const std::string& backend, const std::string& effort, std::optional<int> max_tokens,
+    const VariantParamsHook& hook = {},
+    const nlohmann::json& metadata = nlohmann::json::object());
 
 // The known effort names, for validation and error messages. Sorted.
 const std::vector<std::string>& KnownEffortNames();

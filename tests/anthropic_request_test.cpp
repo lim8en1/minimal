@@ -89,6 +89,9 @@ TEST_CASE("BuildRequestBody: cache_ttl in parameters sets the system block's ttl
     const nlohmann::json body = ParseBody(fixture.request);
 
     CHECK(body["system"][0]["cache_control"]["ttl"] == "1h");
+    // The conversation-tail breakpoint carries it too: a 5m tail would expire
+    // across exactly the long gaps a 1h setting exists for.
+    CHECK(body["cache_control"]["ttl"] == "1h");
     CHECK_FALSE(body.contains("cache_ttl"));   // never a real top-level Anthropic field
 }
 
@@ -97,6 +100,36 @@ TEST_CASE("BuildRequestBody: top-level automatic cache_control is always attache
     Fixture fixture = BaseRequest();
     const nlohmann::json body = ParseBody(fixture.request);
     CHECK(body["cache_control"]["type"] == "ephemeral");
+    CHECK_FALSE(body["cache_control"].contains("ttl"));  // default 5-minute TTL
+}
+
+TEST_CASE("BuildRequestBody: a thinking budget is refit to this request's max_tokens",
+          "[anthropic_request]") {
+    // The variant's budget was derived against the model's full cap; the
+    // request builder shrinks max_tokens as the context fills, and the API
+    // rejects budget_tokens >= max_tokens.
+    Fixture fixture = BaseRequest();
+    fixture.request.parameters = {{"thinking", {{"type", "enabled"}, {"budget_tokens", 16384}}}};
+
+    fixture.request.max_tokens = 64000;
+    CHECK(ParseBody(fixture.request)["thinking"]["budget_tokens"] == 16384);  // fits: untouched
+
+    fixture.request.max_tokens = 8000;
+    CHECK(ParseBody(fixture.request)["thinking"]["budget_tokens"] == 8000 - 1024);
+
+    fixture.request.max_tokens = 2047;  // not even the 1024 minimum fits
+    CHECK_FALSE(ParseBody(fixture.request).contains("thinking"));
+}
+
+TEST_CASE("BuildRequestBody: adaptive thinking passes through whatever max_tokens is",
+          "[anthropic_request]") {
+    Fixture fixture = BaseRequest();
+    fixture.request.max_tokens = 1500;
+    fixture.request.parameters = {{"thinking", {{"type", "adaptive"}}},
+                                  {"output_config", {{"effort", "high"}}}};
+    const nlohmann::json body = ParseBody(fixture.request);
+    CHECK(body["thinking"]["type"] == "adaptive");
+    CHECK(body["output_config"]["effort"] == "high");
 }
 
 TEST_CASE("BuildRequestBody: consecutive same-role messages are merged into one wire message",

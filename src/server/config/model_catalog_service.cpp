@@ -418,7 +418,10 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolution::ResolveVar
     // static sibling matched `variant_name`, so an opted-out base must answer
     // "undeclared" rather than falling through to the autodetected ladder.
     if (base->variants_declared) return nullptr;
-    if (const auto record = runtime_.discovery_record(entry.name); record && record->ok) {
+    // The record is held for the metadata read below: the variant's wire
+    // shape may depend on what the backend reported about the base model.
+    const auto record = runtime_.discovery_record(entry.name);
+    if (record && record->ok) {
         const auto variants_it = record->variants_by_model.find(base_id);
         if (variants_it != record->variants_by_model.end()) {
             const auto name_it = std::find_if(variants_it->second.begin(),
@@ -431,9 +434,14 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolution::ResolveVar
     }
     if (!declared) return nullptr;  // undeclared (or the model advertises no efforts)
 
+    static const nlohmann::json kNoMetadata = nlohmann::json::object();
+    const nlohmann::json* metadata = &kNoMetadata;
+    if (const auto model_it = record->models.find(base_id); model_it != record->models.end()) {
+        metadata = &model_it->second.metadata;
+    }
     return runtime_
         .overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(MakeVariantResolved(
-                                       *base, *declared, runtime_.variant_params_hook_)))
+                                       *base, *declared, runtime_.variant_params_hook_, *metadata)))
         .first->second;
 }
 

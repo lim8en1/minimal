@@ -49,8 +49,15 @@ public:
     // (Anthropic's "minimal" has no budget reading) -- the caller does not
     // catch it, so the error surfaces exactly as it did when this lived in
     // core.
+    //
+    // `metadata` is the model's DiscoveredModel::metadata when the model came
+    // from (or was enriched by) discovery, an empty object otherwise -- what
+    // the backend said about the model, so a backend whose wire shape differs
+    // per model (Anthropic: adaptive thinking vs a token budget) can read it
+    // from the backend's own capability report instead of a per-model table.
     virtual std::pair<nlohmann::json, bool> DeriveParameters(
-        const std::string& effort_word, std::optional<int> max_tokens) const = 0;
+        const std::string& effort_word, std::optional<int> max_tokens,
+        const nlohmann::json& metadata) const = 0;
 };
 
 // Kind-string -> provider. Mirrors ModelCatalogRegistry: no closed enum, the

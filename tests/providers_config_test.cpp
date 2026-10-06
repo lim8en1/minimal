@@ -74,15 +74,17 @@ nlohmann::json TwoModelsOnOneProvider() {
     })");
 }
 
-// A test-local fixture replicating provider-anthropic's AnthropicVariantParams
-// (plugins/server/provider-anthropic/anthropic_variant_params.cpp) -- plugin
-// code is not linked into this test binary, so the mapping is duplicated
-// here rather than shared, the same way every other plugin-relocated
-// behavior in this tree gets its own test-side fixture. Kept in exact sync
-// with the plugin: any change to one should be mirrored in the other.
+// A test-local, budget-shaped stand-in for provider-anthropic's
+// AnthropicVariantParams -- its path for a model that takes only budgeted
+// thinking (plugins/server/provider-anthropic/anthropic_variant_params.cpp;
+// the per-model capability choice is tested there). These tests exercise
+// CORE's plumbing -- the hook sees the base's resolved max_tokens, a clamp is
+// reported -- so the fixture keeps the one shape whose output depends on
+// max_tokens.
 VariantParamsHook AnthropicVariantParamsHookFixture() {
     return [](const std::string& backend, const std::string& effort_word,
-              std::optional<int> max_tokens) -> std::optional<std::pair<nlohmann::json, bool>> {
+              std::optional<int> max_tokens,
+              const nlohmann::json&) -> std::optional<std::pair<nlohmann::json, bool>> {
         if (backend != "anthropic") return std::nullopt;
         if (effort_word == "none") return std::pair{nlohmann::json::object(), false};
         std::optional<int> budget;
@@ -1505,8 +1507,8 @@ TEST_CASE("VariantParametersFor: an unregistered kind (no hook, or a hook that a
     // fallback as no hook at all.
     {
         const VariantParamsHook empty_hook =
-            [](const std::string&, const std::string&,
-              std::optional<int>) -> std::optional<std::pair<nlohmann::json, bool>> {
+            [](const std::string&, const std::string&, std::optional<int>,
+               const nlohmann::json&) -> std::optional<std::pair<nlohmann::json, bool>> {
             return std::nullopt;
         };
         const auto [params, clamped] = VariantParametersFor("anthropic", "high", 32000, empty_hook);
@@ -1669,6 +1671,46 @@ TEST_CASE("discovery applies the entry recipe to models that advertise an effort
     CHECK(names[1] == "high");
     CHECK(names[2] == "low");
     CHECK(config.VariantsOf(ModelRef{"local", "no-reasoning"}).empty());
+}
+
+TEST_CASE("an Anthropic capabilities tree is the ladder, and the variant hook sees the metadata",
+          "[providers][variants][discover]") {
+    // Anthropic's /v1/models shape: capabilities.effort holds one
+    // {"supported": bool} leaf per word. xhigh is unsupported here, so it is
+    // no rung; the hook receives the model's metadata to pick a wire shape.
+    const auto metadata = nlohmann::json::parse(R"({"capabilities": {
+        "thinking": {"supported": true, "types": {"adaptive": {"supported": true}}},
+        "effort": {"supported": true, "low": {"supported": true}, "medium": {"supported": true},
+                   "high": {"supported": true}, "xhigh": {"supported": false},
+                   "max": {"supported": true}}}})");
+    CountingHook hook;
+    hook.models = {{"claude-x", 1000000, metadata, 128000}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+    nlohmann::json seen;
+    config.SetVariantParamsHook(
+        [&seen](const std::string&, const std::string& effort, std::optional<int>,
+                const nlohmann::json& model_metadata)
+            -> std::optional<std::pair<nlohmann::json, bool>> {
+            seen = model_metadata;
+            return std::pair{nlohmann::json{{"effort_seen", effort}}, false};
+        });
+
+    REQUIRE(config.Resolve(ModelRef{"local", "claude-x"}) != nullptr);
+    const auto names = config.VariantsOf(ModelRef{"local", "claude-x"});
+    REQUIRE(names.size() == 4);
+    CHECK(names[0] == "low");
+    CHECK(names[1] == "medium");
+    CHECK(names[2] == "high");
+    CHECK(names[3] == "max");
+    CHECK(config.Resolve(ModelRef{"local", "claude-x@xhigh"}) == nullptr);
+
+    const auto& high = config.Resolve(ModelRef{"local", "claude-x@high"});
+    REQUIRE(high != nullptr);
+    CHECK(high->parameters.at("effort_seen") == "high");
+    CHECK(seen == metadata);
 }
 
 TEST_CASE(
@@ -2438,7 +2480,7 @@ TEST_CASE("a discovered variant is derived through the injected variant-params h
     std::atomic<int> hook_calls{0};
     config.SetVariantParamsHook([&hook_calls](const std::string& backend,
                                               const std::string& effort,
-                                              std::optional<int>)
+                                              std::optional<int>, const nlohmann::json&)
                                     -> std::optional<std::pair<nlohmann::json, bool>> {
         ++hook_calls;
         return std::make_pair(nlohmann::json{{"custom_effort", backend + ":" + effort}}, false);

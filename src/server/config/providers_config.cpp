@@ -155,10 +155,11 @@ common::SecretHandle BindApiKey(Reader& provider, const std::string& url,
 VariantParamsHook MakeVariantParamsHook(const llm::VariantParamsRegistry* registry) {
     if (registry == nullptr) return {};
     return [registry](const std::string& kind, const std::string& effort_word,
-                      std::optional<int> max_tokens) -> std::optional<std::pair<nlohmann::json, bool>> {
+                      std::optional<int> max_tokens, const nlohmann::json& metadata)
+               -> std::optional<std::pair<nlohmann::json, bool>> {
         auto* provider = registry->Find(kind);
         if (provider == nullptr) return std::nullopt;
-        return provider->DeriveParameters(effort_word, max_tokens);
+        return provider->DeriveParameters(effort_word, max_tokens, metadata);
     };
 }
 
@@ -180,11 +181,12 @@ bool IsKnownEffortName(const std::string& name) {
 std::pair<nlohmann::json, bool> VariantParametersFor(const std::string& backend,
                                                      const std::string& effort,
                                                      std::optional<int> max_tokens,
-                                                     const VariantParamsHook& hook) {
+                                                     const VariantParamsHook& hook,
+                                                     const nlohmann::json& metadata) {
     // A plugin-registered mapping sees the effort name verbatim, so a backend
     // with a longer ladder (anthropic's thinking budgets) keeps every rung.
     if (hook) {
-        if (auto derived = hook(backend, effort, max_tokens)) return *derived;
+        if (auto derived = hook(backend, effort, max_tokens, metadata)) return *derived;
         // No mapping registered for `backend`: the generic shape below.
     }
     // The generic reasoning_effort ladder tops out at "high", and has no "off"
@@ -230,7 +232,8 @@ ResolvedModel EnrichFromDiscovery(const ResolvedModel& static_model,
 }
 
 ResolvedModel MakeVariantResolved(const ResolvedModel& base, const ModelVariant& variant,
-                                  const VariantParamsHook& variant_params_hook) {
+                                  const VariantParamsHook& variant_params_hook,
+                                  const nlohmann::json& metadata) {
     ResolvedModel sibling = base;
     sibling.ref = ModelRef{base.ref.provider, base.ref.model + "@" + variant.name};
     // THE WIRE ID STAYS THE BASE'S. agent_loop sends provider.model_name
@@ -238,8 +241,8 @@ ResolvedModel MakeVariantResolved(const ResolvedModel& base, const ModelVariant&
     sibling.provider.model_name = base.provider.model_name;
     nlohmann::json parameters = variant.parameters;
     if (parameters.empty() && IsKnownEffortName(variant.name)) {
-        const auto [derived, clamped] = VariantParametersFor(base.backend, variant.name,
-                                                             base.max_tokens, variant_params_hook);
+        const auto [derived, clamped] = VariantParametersFor(
+            base.backend, variant.name, base.max_tokens, variant_params_hook, metadata);
         parameters = derived;
         if (clamped) {
             common::DefaultLogger().warn(

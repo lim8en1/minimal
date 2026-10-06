@@ -18,6 +18,7 @@
 
 #include <memory>
 
+#include "anthropic_model_catalog.hpp"
 #include "anthropic_provider.hpp"
 #include "anthropic_variant_params.hpp"
 
@@ -31,6 +32,17 @@ void minimal_plugin_register_provider_factories(
     registry.Register("anthropic", [](const minimal::llm::ProviderConfig& config) {
         return std::make_unique<minimal::provider_anthropic::AnthropicProvider>(config);
     });
+}
+
+// GET /v1/models: per-model context window, output cap and capabilities, so
+// a `"discover": true` entry needs no per-model config. Same kind string as
+// the factory above; stateless, so one shared instance serves every resolver.
+void minimal_plugin_register_model_catalogs(
+    minimal::llm::ModelCatalogRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
+    registry.Register("anthropic",
+                      std::make_shared<minimal::provider_anthropic::AnthropicModelCatalog>(
+                          minimal::net::HttpClient{}));
 }
 
 // The "@effort" variant wire-shape provider (ARCHITECTURE.md, "Core vs.
