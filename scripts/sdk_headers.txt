@@ -26,6 +26,7 @@ minimal/common/logger.hpp
 minimal/common/secret_handle.hpp
 minimal/config/project_trust.hpp
 minimal/config/provider_config_extensions.hpp
+minimal/config/policy.hpp
 minimal/config/secrets.hpp
 minimal/hooks/hook_dispatcher.hpp
 minimal/llm/metadata_catalog.hpp

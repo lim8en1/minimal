@@ -79,8 +79,9 @@ def find_tool(name):
 
 def literal_pass(build_dir, unit, jobs):
     runner, tidy = find_tool("run-clang-tidy"), find_tool("clang-tidy")
-    files = r"^" + re.escape(ROOT) + "/" + (re.escape(unit) if unit else r"(src|plugins)/") \
-        + r".*\.(cpp|cc)$"
+    # Every translation unit, whatever --unit says: a header's literals are
+    # reported only from TUs that instantiate them, which may live elsewhere.
+    files = r"^" + re.escape(ROOT) + r"/(src|plugins)/.*\.(cpp|cc)$"
     cmd = [sys.executable, runner, "-p", build_dir, "-quiet", "-j", str(jobs),
            "-clang-tidy-binary", tidy, files]
     if platform.system() == "Darwin":

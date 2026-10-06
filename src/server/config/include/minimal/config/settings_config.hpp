@@ -41,7 +41,7 @@ struct MemorySettings {
     // replaces everything but the newest message (always kept whole, and the
     // cut never splits a tool call from its result). Ignored when
     // compaction_keep_recent_tokens is set (an absolute budget wins).
-    int compaction_replace_percent = 80;
+    int compaction_replace_percent = kDefaultCompactionReplacePercent;
     std::int64_t scrollback_page_size = 0;
     // S4: selects a CompactionStrategyRegistry entry by name. "summarize"
     // (free-text summary head) is core's own built-in and the default, so
@@ -92,7 +92,7 @@ struct ToolsSettings {
 };
 
 struct ToolsViewSettings {
-    std::int64_t stdout_buffer_lines = 100;
+    std::int64_t stdout_buffer_lines = kDefaultToolsViewStdoutBufferLines;
 };
 
 // Whether the project's own agents/, skills/ and commands/ directories (found by
@@ -116,7 +116,7 @@ struct ContextContributorSettings {
     // switch that does not require disabling the whole plugin.
     std::vector<std::string> disabled;
     // Per-section body cap in bytes. 0 = uncapped.
-    std::int64_t max_bytes_per_section = 16384;
+    std::int64_t max_bytes_per_section = kDefaultContextSectionMaxBytes;
 };
 
 struct LoggingSettings {
@@ -136,7 +136,7 @@ struct SessionSettings {
     // reaper terminates it. Collecting a quiescent session is lossless: the
     // transcript stays in SQLite and re-attach becomes resume. 0 = never reap
     // (sessions live until explicitly terminated or deleted).
-    std::int64_t detached_idle_ttl_seconds = 1800;
+    std::int64_t detached_idle_ttl_seconds = kDefaultDetachedIdleTtl.count();
     // An unanswered permission/confirmation prompt is denied after this long.
     // 0 (the default) waits forever: a human may simply be away, and
     // auto-denying their work is worse than waiting (ARCHITECTURE.md).
@@ -144,7 +144,7 @@ struct SessionSettings {
     // The never-attached guard: a session no client attaches to is terminated
     // after this grace period. Purely a safety net against a non-conforming
     // client; surfacing it here replaced a hardcoded constructor default.
-    std::int64_t initial_attach_guard_seconds = 10;
+    std::int64_t initial_attach_guard_seconds = kDefaultInitialAttachGuard.count();
 };
 
 // Server process lifetime. With detach, the server legitimately outlives its
@@ -152,13 +152,13 @@ struct SessionSettings {
 struct ServerSettings {
     // Once there are zero attached clients AND zero live sessions, exit after
     // this linger. 0 = never exit (true daemon deployment).
-    std::int64_t idle_shutdown_seconds = 5;
+    std::int64_t idle_shutdown_seconds = kDefaultIdleShutdown.count();
     // Wall-clock budget for the post-listen background warm-up of providers.json
     // "discover": true entries, so the /model picker lists discovered models on a
     // freshly started server without a manual refresh. The fetch runs on its own
     // thread (startup never waits on it); this bounds only that thread. 0 =
     // disabled (static models only until ctrl+r or first resolve).
-    std::int64_t discovery_warmup_timeout_seconds = 15;
+    std::int64_t discovery_warmup_timeout_seconds = kDefaultDiscoveryWarmupTimeout.count();
 };
 
 struct SettingsConfig {

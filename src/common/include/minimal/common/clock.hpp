@@ -25,6 +25,14 @@ constexpr std::int64_t SecondsToMillis(std::int64_t seconds) {
     return std::chrono::milliseconds(std::chrono::seconds(seconds)).count();
 }
 
+// The longest wait a configured timeout may ask for: `steady_clock::now() +
+// timeout` must not overflow the clock's representation. Half the clock's
+// range, because now() (time since boot) is far below the other half -- in
+// practice centuries, so this rejects only values no one means.
+inline constexpr std::chrono::milliseconds kMaxDeadline =
+    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::duration::max() /
+                                                          2);
+
 // A Unix-epoch millisecond timestamp (NowMillis' unit) as a time_t, for
 // gmtime_r/localtime_r.
 inline std::time_t UnixMillisToTimeT(std::int64_t ms) {

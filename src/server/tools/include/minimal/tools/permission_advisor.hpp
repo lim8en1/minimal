@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "minimal/tools/permission_checker.hpp"
+#include "minimal/config/policy.hpp"
 
 namespace minimal::tools {
 
@@ -70,23 +71,18 @@ public:
 // session setup.
 class AdvisedPermissionChecker : public PermissionChecker {
 public:
-    // Default advisor budget, used when permissions.json does not name one:
-    // long enough for a real policy decision, short enough that a wedged
-    // external decider converts into a human prompt within a minute.
-    static constexpr std::chrono::milliseconds kDefaultTimeout{30000};
-
     // Owns its cancel source; use when the holder need not be shared (tests).
     // timeout <= 0 disables the budget: Advise runs synchronously, bounded only
     // by the cancellation contract (the pre-timeout behavior, kept for tests).
     AdvisedPermissionChecker(std::shared_ptr<PermissionAdvisor> advisor,
                              std::unique_ptr<PermissionChecker> inner,
                              std::function<bool()> is_cancelled,
-                             std::chrono::milliseconds timeout = kDefaultTimeout);
+                             std::chrono::milliseconds timeout = config::kDefaultAdvisorTimeout);
     // Shares the holder with the Session, whose Cancel/Terminate set the flag.
     AdvisedPermissionChecker(std::shared_ptr<PermissionAdvisor> advisor,
                              std::unique_ptr<PermissionChecker> inner,
                              std::shared_ptr<AdvisorCancelSource> cancel_source,
-                             std::chrono::milliseconds timeout = kDefaultTimeout);
+                             std::chrono::milliseconds timeout = config::kDefaultAdvisorTimeout);
 
     // try advisor; abstain (nullopt) or throw both fall through to the inner
     // checker -- one plugin's failure is not a lost turn. An advisor's answer

@@ -3,12 +3,13 @@
 #include <chrono>
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/clock.hpp"
 
 namespace minimal::mcp {
 
 McpLimits ParseMcpLimits(const nlohmann::json& config) {
     McpLimits limits;
-    constexpr std::int64_t kMaxMs = std::chrono::milliseconds(std::chrono::hours(24)).count();
+    constexpr std::int64_t kMaxMs = common::kMaxDeadline.count();
     config::Reader reader(config, "plugins.json", "mcp.config");
     limits.connect = std::chrono::milliseconds(
         reader.Int("connect_timeout_ms", limits.connect.count(), 1, kMaxMs));

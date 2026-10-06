@@ -34,6 +34,7 @@
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_source.hpp"
+#include "minimal/config/policy.hpp"
 
 namespace minimal::agent {
 
@@ -50,7 +51,7 @@ public:
                     const tools::ToolSourceRegistry* tool_sources = nullptr,
                     std::shared_ptr<tools::PermissionAdvisor> advisor = nullptr,
                     bool advisor_inherit = false,
-                    std::chrono::milliseconds advisor_timeout = tools::AdvisedPermissionChecker::kDefaultTimeout,
+                    std::chrono::milliseconds advisor_timeout = config::kDefaultAdvisorTimeout,
                     hooks::HookDispatcher* hooks = nullptr);
 
     // Runs where blocking is allowed -- the parent's worker, or a tool-pool
