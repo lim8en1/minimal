@@ -29,6 +29,14 @@ PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
         entry.enabled = record.status != LoadStatus::Disabled;
         entry.loaded = record.ok();
         entry.symbols = record.config;
+        // A disabled plugin was never opened, so the loader resolved nothing:
+        // open it for its config symbols alone, so it can be configured
+        // before it is enabled. (Its reconfigure is never called: it is not
+        // running.)
+        if (entry.symbols.schema == nullptr && record.status == LoadStatus::Disabled) {
+            const auto inspected = InspectPluginConfig(record.file);
+            if (inspected.error.empty()) entry.symbols = inspected.config;
+        }
         if (entry.symbols.schema != nullptr) {
             try {
                 entry.symbols.schema(entry.schema);
@@ -79,10 +87,23 @@ json PluginConfigEndpoint::Describe(const Entry& entry) const {
             {"config", file},
             {"effective", std::move(effective)},
             {"unused", std::move(unused)},
-            {"pending", common::DiffConfig(entry.schema, entry.applied, file).paths}};
+            {"pending", Pending(entry, file)}};
+}
+
+json PluginConfigEndpoint::Pending(const Entry& entry, const json& file) const {
+    // A plugin that is not running (disabled, or it failed to load) has
+    // nothing pending: it reads its file whenever it does start. Diffing it
+    // against the {} it never ran with reported every set field as "restart
+    // pending" through any number of restarts.
+    if (!entry.loaded) return json::array();
+    return common::DiffConfig(entry.schema, entry.applied, file).paths;
 }
 
 json PluginConfigEndpoint::Apply(Entry& entry, const json& file) {
+    if (!entry.loaded) {
+        return {{"applied", "not_running"},
+                {"reason", entry.enabled ? "the plugin failed to load" : "the plugin is disabled"}};
+    }
     const auto change = common::DiffConfig(entry.schema, entry.applied, file);
     if (change.paths.empty()) {
         // Nothing the running plugin uses changed. A field saved while its
@@ -144,7 +165,7 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
                     try {
                         const json file = ReadFile(entry);
                         row["set"] = file.empty() ? 0 : file.flatten().size();
-                        row["pending"] = common::DiffConfig(entry.schema, entry.applied, file).paths;
+                        row["pending"] = Pending(entry, file);
                     } catch (const std::exception& e) {
                         row["error"] = e.what();
                     }

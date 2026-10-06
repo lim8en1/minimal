@@ -1218,6 +1218,61 @@ TEST_CASE("the plugins endpoint: a field unused in the current mode has no effec
     CHECK(described.at("pending").empty());
 }
 
+TEST_CASE("the plugins endpoint after a restart: what the file says is what runs",
+          "[plugin_loader][config_endpoint]") {
+    // main()'s path: discovery reads plugins.d, the loader registers each
+    // plugin with it, the endpoint compares the file to that. Nothing may be
+    // pending right after a start.
+    TempDir root;
+    const auto bundled = root.path() / "bundled";
+    const auto plugins_d = root.path() / "plugins.d";
+    std::filesystem::create_directories(bundled);
+    std::filesystem::create_directories(plugins_d);
+    std::filesystem::copy_file(FixturePath(SharedLibName("fixture-config")),
+                               bundled / SharedLibName("fixture-config"));
+    std::ofstream(plugins_d / "fixture-config.json") << R"({"limit": 42, "mode": "slow"})";
+
+    plugins::PluginConfig list;
+    const auto candidates = plugins::DiscoverPlugins(bundled, {}, list, plugins_d);
+    REQUIRE(candidates.size() == 1);
+    CHECK(candidates[0].config == nlohmann::json{{"limit", 42}, {"mode", "slow"}});
+    Harness h;
+    const auto records = h.loader.LoadAll(candidates);
+    REQUIRE(records[0].ok());
+    plugins::PluginConfigEndpoint endpoint(root.path(), records, candidates);
+
+    const auto described = CallJson(endpoint, "describe", {{"name", "fixture-config"}});
+    INFO(described.dump());
+    CHECK(described.at("pending").empty());
+    CHECK(CallJson(endpoint, "list", {})[0].at("pending").empty());
+}
+
+TEST_CASE("the plugins endpoint: a plugin that is not running has nothing pending",
+          "[plugin_loader][config_endpoint]") {
+    // Regression: a disabled plugin was diffed against the {} it never ran
+    // with, so every field in its file read "restart pending" through any
+    // number of restarts.
+    TempDir config_dir;
+    std::filesystem::create_directories(config_dir.path() / "plugins.d");
+    std::ofstream(config_dir.path() / "plugins.d" / "fixture-config.json")
+        << R"({"limit": 42, "mode": "slow"})";
+    Harness h;
+    PluginCandidate disabled = Enabled("fixture-config");
+    disabled.enabled = false;
+    const auto records = h.loader.LoadAll({disabled});
+    REQUIRE(records[0].status == LoadStatus::Disabled);
+    // The schema still comes from the module: the endpoint inspects it.
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, {disabled});
+
+    const auto list = CallJson(endpoint, "list", {});
+    for (const auto& row : list) CHECK(row.at("pending").empty());
+
+    const auto answer = CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "limit"},
+                                                   {"value", 7}});
+    CHECK(answer.at("applied") == "not_running");
+    CHECK(answer.at("reason") == "the plugin is disabled");
+}
+
 TEST_CASE("the plugins endpoint applies an edit made elsewhere (the CLI)",
           "[plugin_loader][config_endpoint]") {
     TempDir config_dir;

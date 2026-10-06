@@ -21,6 +21,11 @@ std::pair<std::string, bool> Outcome(const std::string& path, const json& answer
     if (answer.contains("error")) return {answer.value("error", std::string()), true};
     const std::string applied = answer.value("applied", "");
     if (applied == "live") return {path + " saved -- applied, no restart needed", false};
+    if (applied == "not_running") {
+        return {path + " saved -- " + answer.value("reason", std::string("not running")) +
+                    "; it takes effect when it starts",
+                false};
+    }
     if (applied == "restart") {
         std::string text = path + " saved -- restart the server to apply";
         if (answer.contains("reconfigure_error")) {
@@ -214,6 +219,10 @@ void ConfigFeed::FetchList() {
         }
         list_.status.clear();
     } else {
+        // The previous answer is dropped, not kept beside the error: rows
+        // from before a server restart showed "restart pending" for changes
+        // the new server had already applied.
+        list_.rows = json::array();
         list_.status = answer.value("error", std::string("unavailable"));
     }
     ++list_.generation;
@@ -247,6 +256,9 @@ void ConfigFeed::FetchDescribe(const std::string& name, std::string status, bool
     std::lock_guard<std::mutex> lock(mu_);
     if (open_ != name) return;  // the user went back meanwhile
     if (answer.contains("error")) {
+        // Dropped for the same reason as a failed list: stale values and
+        // pending marks must not outlive the server that reported them.
+        form_.describe = nullptr;
         form_.status = answer.value("error", std::string());
         form_.status_is_error = true;
     } else {

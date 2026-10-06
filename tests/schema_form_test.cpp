@@ -3,6 +3,7 @@
 // `plugins` endpoint.
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -178,6 +179,7 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
         calls_.push_back(plugin + " " + method + " " + payload);
         cv_.notify_all();
+        if (down_) return std::nullopt;  // the server restarting: no answer
         if (method == "list") {
             json rows = json::array({{{"name", "sample"}, {"configurable", true}, {"enabled", true}},
                                      {{"name", "plain"}, {"configurable", false}}});
@@ -212,6 +214,9 @@ private:
     std::condition_variable cv_;
     std::vector<std::string> calls_;
     int lists_ = 0;
+
+public:
+    std::atomic<bool> down_{false};
 };
 
 template <typename Pred>
@@ -248,6 +253,26 @@ TEST_CASE("config-view's feed: lists configurable plugins, opens one, sets throu
 
     feed.Back();
     CHECK(feed.open_plugin().empty());
+}
+
+TEST_CASE("config-view drops what it showed when a refetch fails", "[schema_form][config_view]") {
+    // Regression: across a server restart the first fetch can fail, and the
+    // feed kept the old server's rows ("6 set · restart pending") beside the
+    // error -- changes the new server had already applied read as pending.
+    EndpointApi api;
+    config_view::ConfigFeed feed(&api, nullptr);
+    feed.RefreshList();
+    REQUIRE(Eventually([&] { return !feed.list().rows.empty(); }));
+    feed.Open("sample");
+    REQUIRE(Eventually([&] { return !feed.form().describe.is_null(); }));
+
+    api.down_ = true;
+    feed.Open("sample");
+    REQUIRE(Eventually([&] { return feed.form().status_is_error; }));
+    CHECK(feed.form().describe.is_null());
+    feed.Back();
+    REQUIRE(Eventually([&] { return !feed.list().status.empty() && feed.list().status != "loading"; }));
+    CHECK(feed.list().rows.empty());
 }
 
 // A user reported a segfault while moving around /config. This drives the
