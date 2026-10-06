@@ -415,23 +415,21 @@ void TuiApp::BuildModals() {
     // The theme picker reads themes from disk per open, so a theme dropped
     // into the themes dir shows up without a restart.
     modals_.Set(ModalId::kSessionPicker, MakeModalHost(picker_child_, show_picker_));
-    modals_.Set(ModalId::kAgentPicker, MakeModalHost(agent_picker_child_, show_agent_picker_));
-    modals_.Set(ModalId::kModelPicker, MakeModalHost(model_picker_child_, show_model_picker_));
     modals_.Set(ModalId::kSubagentPicker,
                 MakeModalHost(subagent_picker_child_, show_subagent_picker_));
 
     // Owns picker_data/agent_picker_presets and the fetch/rebuild/open flows
     // privately; writes rebuilt components into the picker slots above.
     picker_controller_.emplace(PickerController::Dependencies{
-        *client_, *app_, theme, picker_child_, agent_picker_child_, model_picker_child_,
-        subagent_picker_child_, show_picker_, show_agent_picker_, show_model_picker_,
+        *client_, *app_, theme, picker_child_, subagent_picker_child_, show_picker_,
         show_subagent_picker_, staged_delete_id_, show_delete_confirm_,
         [this] { OpenNewSession(); },
         // The desired-state pickers stage onto this -- the focused tab, or
         // (the empty startup app, zero tabs) a fresh sessionless one, so a
         // /agent //model choice made before any tab exists lands on the tab
         // the first message will use.
-        [this] { return FocusedOrNewTab(); }});
+        [this] { return FocusedOrNewTab(); },
+        [this](const std::string& role) { return OpenRoleView(role); }});
 
     // --- plugin views (panel region + modal layer) -----------------------------
     // Panels: rendered in the frame beside the tools panel; one shared
@@ -503,9 +501,6 @@ void TuiApp::BuildFrame() {
     tab_maintenance_.emplace(TabMaintenance::Dependencies{
         *app_, *env_.engine, registries.views, env_.plugin_views, plugin_modal_child_,
         show_plugin_modal_, [this] { picker_controller_->OpenSessionPicker(); },
-        [this] { picker_controller_->OpenAgentPicker(); },
-        [this] { picker_controller_->OpenModelPicker(/*refresh=*/false); },
-        [this] { picker_controller_->OpenSubagentModelPicker(); },
         [this](const std::string& parent) { picker_controller_->OpenSubagentsPicker(parent); },
         // Loop-thread work queued from other threads: picker fetch results,
         // plugins' HostUi view requests (show/close/focus), and the plugin
@@ -517,6 +512,7 @@ void TuiApp::BuildFrame() {
                 ApplyViewRequest(env_.plugin_views, request, *plugin_modal_child_,
                                  show_plugin_modal_);
             }
+            picker_controller_->WatchPendingView(ShownPluginModal());
             observer_pump_->Run();
         },
         tab_ui_, theme, registries.message_renderers, registries.tool_renderers,
@@ -612,7 +608,7 @@ KeyContext TuiApp::MakeKeyContext() {
         env_.plugin_views, plugin_modal_child_,
         [this] { picker_controller_->OpenSessionPicker(); },
         [this] { picker_controller_->OpenAgentPicker(); },
-        [this] { picker_controller_->OpenModelPicker(/*refresh=*/false); },
+        [this] { picker_controller_->OpenModelPicker(); },
         [this] { RequestQuit(); },
         [this](const std::string& id) { CloseTab(id); },
         // ChatView::ScrollBy, if the tab has one yet (a ChatView is built
@@ -834,6 +830,34 @@ AppState::CommandScope TuiApp::CommandScope() const {
     }
     return scope;
 }
+
+bool TuiApp::OpenRoleView(const std::string& role) {
+    for (auto& entry : env_.plugin_views) {
+        if (entry.surface_id != role) continue;
+        ShowPluginView(env_.plugin_views, entry, *plugin_modal_child_, show_plugin_modal_);
+        return true;
+    }
+    FocusedNotice("nothing to choose with: no view is registered as '" + role +
+                  "' (a bundled plugin provides it -- is it disabled in client-plugins.json?)");
+    return false;
+}
+
+std::string TuiApp::ShownPluginModal() const {
+    if (!show_plugin_modal_) return {};
+    for (const auto& entry : env_.plugin_views) {
+        if (entry.visible && entry.view->spec().placement == plugins::ViewPlacement::Modal) {
+            return entry.surface_id;
+        }
+    }
+    return {};
+}
+
+void TuiApp::ChooseAgent(const std::string& name) { picker_controller_->ChooseAgent(name); }
+void TuiApp::ChooseModel(const std::string& ref) { picker_controller_->ChooseModel(ref); }
+void TuiApp::ChooseDefaultModel(const std::string& default_ref) {
+    picker_controller_->ChooseDefaultModel(default_ref);
+}
+void TuiApp::SetSubagentModel(const std::string& ref) { picker_controller_->SetSubagentModel(ref); }
 
 void TuiApp::InsertPrompt(const std::string& text) {
     // The focused tab's editor (CurrentState("") on an empty app = the

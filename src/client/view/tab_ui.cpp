@@ -241,12 +241,6 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
     }
     if (notice.view_hint == "sessions") {
         deps_.open_picker();   // core mapping: the picker modal
-    } else if (notice.view_hint == "agents") {
-        deps_.open_agent_picker();   // core mapping: bare `/agent`
-    } else if (notice.view_hint == "models") {
-        deps_.open_model_picker();   // core mapping: bare `/model`
-    } else if (notice.view_hint == "subagent-models") {
-        deps_.open_subagent_model_picker();   // core mapping: bare `/subagent-model`
     } else if (notice.view_hint == "subagents") {
         // core mapping: `/subagents` -- the picker lists the FOCUSED
         // session's own children (a read-only command, so it fires just as

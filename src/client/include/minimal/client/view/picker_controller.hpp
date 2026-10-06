@@ -60,13 +60,9 @@ public:
         // every other "modal over a shared_ptr<Component> slot" in RunTui
         // (permission_child, confirmation_child, ...).
         std::shared_ptr<ftxui::Component>& picker_slot;
-        std::shared_ptr<ftxui::Component>& agent_picker_slot;
-        std::shared_ptr<ftxui::Component>& model_picker_slot;
         std::shared_ptr<ftxui::Component>& subagent_picker_slot;
 
         bool& show_picker;
-        bool& show_agent_picker;
-        bool& show_model_picker;
         bool& show_subagent_picker;
 
         // The session picker's delete flow stages its OWN confirmation
@@ -89,6 +85,10 @@ public:
         // sessionless one (OpenTab focuses an empty app on its first tab).
         // Callback for the same reason open_new_session is.
         std::function<std::string()> focused_or_new_tab;
+        // Shows the view registered under a role id ("agents", "models":
+        // the server's view_hint names) -- a plugin's picker. False, with a
+        // notice saying so, when no view answers to it.
+        std::function<bool(const std::string& role)> open_role_view;
     };
 
     explicit PickerController(Dependencies deps);
@@ -109,22 +109,25 @@ public:
     // directory.
     void OpenSessionPicker();
 
-    // Shared by the keybinding and by the bare `/agent` view_hint. One
-    // fresh fetch each time: the preset list is small, no pagination state
-    // to preserve across opens.
+    // The bare /agent and /model (and their keys): the "agents" / "models"
+    // role views. A first message waiting on a choice (EnsureSelectionThen)
+    // opens them the same way.
     void OpenAgentPicker();
+    void OpenModelPicker();
 
-    // Shared by the bare `/model` view_hint and the picker's own ctrl+r.
-    // The bare open lists what the server already knows (static models plus
-    // any cached discovery); `refresh` re-fetches every discover-entry's
-    // catalog first, which can take seconds -- runs on AppState's RPC worker,
-    // never the loop thread (see the file comment).
-    void OpenModelPicker(bool refresh);
+    // HostActions, from the role views: stage the tab's desired agent or
+    // model (with the tab notice), then continue a waiting first message.
+    void ChooseAgent(const std::string& name);
+    void ChooseModel(const std::string& ref);
+    void ChooseDefaultModel(const std::string& default_ref);
+    // `/subagent-model <ref|inherit>` on the focused tab.
+    void SetSubagentModel(const std::string& ref);
 
-    // The bare `/subagent-model` picker: the same model list with one
-    // prepended "same as parent" row (kSameAsParentRowId); selection sends
-    // /subagent-model <ref|inherit> instead of staging a desired model.
-    void OpenSubagentModelPicker();
+    // Every pump pass, with the plugin modal showing ("" = none): a waiting
+    // first message whose role view is gone without a choice is cancelled
+    // (Escape closes a plugin modal in the host, unseen by the plugin).
+    void WatchPendingView(const std::string& shown_modal);
+
 
     // The bare `/subagents` picker: one parent session's children, fetched
     // whole (ListSessions include_subagents, filtered to the parent) and
@@ -149,11 +152,7 @@ public:
 private:
     void FetchPickerPage(bool reset);
     void RebuildPickerComponent();
-    void RebuildAgentPickerComponent();
-    void RebuildModelPickerComponent();
     void RebuildSubagentPickerComponent();
-    // OpenModelPicker/OpenSubagentModelPicker's shared fetch-and-rebuild body.
-    void OpenModelPickerFetch(bool refresh);
 
     // Queues `apply` to run on the LOOP THREAD from the next Poll(), and
     // wakes the pump so that Poll() actually gets called. The caller (an
@@ -207,8 +206,6 @@ private:
     // cleared and re-paginated picker_data_), so the closure no-ops rather
     // than appending stale rows or releasing a latch a newer fetch now owns.
     uint64_t picker_fetch_generation_ = 0;
-    // The agent picker's list: fetched whole on each open (no pagination,
-    // no sort -- agents/*.md is small and has no "recent" axis).
     // Per picker: what its fetch is doing (rendered in the menu instead of
     // its empty message) and the menu input carried across the component
     // rebuilds each data arrival causes (filterable_menu.hpp's MenuMemory).
@@ -235,21 +232,8 @@ private:
                   const char* what);
 
     FetchState session_fetch_;
-    FetchState agent_fetch_;
-    FetchState model_fetch_;
     FetchState subagent_fetch_;
 
-    std::vector<v1::AgentPresetSummary> agent_picker_presets_;
-    // The model picker's list: fetched whole on each open (refs are sorted
-    // server-side; grouping is a pure display transform). No pagination --
-    // even a large discovered catalog is one response of small rows.
-    std::vector<v1::ModelSummary> model_picker_models_;
-    std::string model_picker_default_;  // settings.json default_model, for the default row
-    // True while the model picker is open in its /subagent-model form: the
-    // same list and fetch, but the rebuild prepends the "same as parent" row
-    // and selection routes to the /subagent-model command rather than
-    // StageModel. Set by OpenSubagentModelPicker, cleared by OpenModelPicker.
-    bool model_picker_subagent_ = false;
 
     // A first message waiting on EnsureSelectionThen's pickers.
     struct PendingSelection {
@@ -258,11 +242,13 @@ private:
         std::function<void()> cancel;
         bool need_agent = false;
         bool need_model = false;
+        std::string awaiting;  // the role view it waits on ("" = none open)
     };
     std::optional<PendingSelection> pending_selection_;
     // After a desired-state picker closes: `chosen` = a selection was made.
     // Opens the next picker still needed, or sends / cancels the message.
     void ContinuePendingSelection(bool chosen);
+    void OpenRole(const std::string& role);
     // The /subagents picker's list: ONE parent's children (filtered from the
     // include_subagents page at apply time), fetched whole on each open.
     // Spawns per session are bounded server-side (the concurrency cap), so a

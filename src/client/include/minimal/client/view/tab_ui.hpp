@@ -119,9 +119,6 @@ public:
         std::shared_ptr<ftxui::Component>& plugin_modal_child;
         bool& show_plugin_modal;
         std::function<void()> open_picker;
-        std::function<void()> open_agent_picker;
-        std::function<void()> open_model_picker;
-        std::function<void()> open_subagent_model_picker;
         // The `/subagents` view_hint: opens the focused session's subagent
         // picker. Takes the parent session id (the focused tab's session) --
         // the picker filters ListSessions to that parent's children.

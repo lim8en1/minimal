@@ -143,6 +143,10 @@ public:
     explicit HostActionQueue(HostUi* ui) : ui_(ui) {}
     void InsertPrompt(const std::string& text) override;
     void SetTheme(const std::string& name) override;
+    void ChooseAgent(const std::string& name) override;
+    void ChooseModel(const std::string& ref) override;
+    void ChooseDefaultModel(const std::string& default_ref) override;
+    void SetSubagentModel(const std::string& ref) override;
 
     // The UI thread's half: every verb queued since the last call, oldest
     // first, each to be applied to the TUI's own HostActions.

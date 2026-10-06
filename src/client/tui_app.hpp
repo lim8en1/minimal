@@ -105,6 +105,15 @@ private:
     // HostActions, applied on the UI thread.
     void InsertPrompt(const std::string& text) override;
     void SetTheme(const std::string& name) override { ApplyTheme(name); }
+    void ChooseAgent(const std::string& name) override;
+    void ChooseModel(const std::string& ref) override;
+    void ChooseDefaultModel(const std::string& default_ref) override;
+    void SetSubagentModel(const std::string& ref) override;
+    // Shows the plugin view registered as `role` ("agents", ...); false, with
+    // a notice, when none is.
+    bool OpenRoleView(const std::string& role);
+    // The surface id of the plugin modal showing, "" for none.
+    std::string ShownPluginModal() const;
     // HostUi's reads (HostFocusProvider::AttachReads).
     std::vector<plugins::KeyBindingInfo> KeyBindingsForPlugins() const;
     std::vector<CommandCatalogEntry> CatalogForPlugins();
@@ -161,8 +170,6 @@ private:
     // these names are references into it.
     ModalStack modals_;
     bool& show_picker_ = modals_.Flag(ModalId::kSessionPicker);
-    bool& show_agent_picker_ = modals_.Flag(ModalId::kAgentPicker);
-    bool& show_model_picker_ = modals_.Flag(ModalId::kModelPicker);
     bool& show_subagent_picker_ = modals_.Flag(ModalId::kSubagentPicker);
     bool& show_quit_confirm_ = modals_.Flag(ModalId::kQuitConfirm);
     bool& show_permission_ = modals_.Flag(ModalId::kPermission);
@@ -191,8 +198,6 @@ private:
     std::shared_ptr<ftxui::Component> confirmation_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> prompt_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> picker_child_ = std::make_shared<ftxui::Component>();
-    std::shared_ptr<ftxui::Component> agent_picker_child_ = std::make_shared<ftxui::Component>();
-    std::shared_ptr<ftxui::Component> model_picker_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> subagent_picker_child_ =
         std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> plugin_modal_child_ = std::make_shared<ftxui::Component>();

@@ -45,6 +45,10 @@ public:
     std::vector<std::string> ThemeNames() const override { return {}; }
     void InsertPrompt(const std::string& text) override { inserted.push_back(text); }
     void SetTheme(const std::string&) override {}
+    void ChooseAgent(const std::string&) override {}
+    void ChooseModel(const std::string&) override {}
+    void ChooseDefaultModel(const std::string&) override {}
+    void SetSubagentModel(const std::string&) override {}
 
     std::unordered_map<std::string, std::string> keys = kKeys;
     std::vector<client::CommandCatalogEntry> catalog;

@@ -140,6 +140,9 @@ public:
     std::optional<minimal::v1::ListModelsResponse> ListModels(bool, std::string*) override {
         return std::nullopt;
     }
+    std::optional<minimal::v1::ListAgentPresetsResponse> ListAgentPresets(std::string*) override {
+        return std::nullopt;
+    }
     minimal::client::SubscribeOutcome PluginSubscribe(
         const std::string&, const std::string& method, const std::string&,
         const std::function<bool(const std::string&)>& on_payload) override {

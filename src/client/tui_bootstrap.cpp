@@ -259,8 +259,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         // A command's view_hint resolves the core overlays first
         // (TabMaintenance::HandleNotice), so a plugin view with one of their
         // names can never be opened by a hint.
-        for (const char* core_view : {"sessions", "agents", "models", "subagent-models",
-                                      "subagents"}) {
+        for (const char* core_view : {"sessions", "subagents"}) {
             if (surface == core_view) {
                 std::fprintf(stderr,
                              "minimal: warning: plugin view '%s' shares a core view name; "

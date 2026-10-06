@@ -50,3 +50,9 @@ add_subdirectory(help-view)
 # and SetTheme action.
 
 add_subdirectory(theme-view)
+
+# selection-view is the agent, model and subagent-model choosers: the views
+# core's /agent, /model and /subagent-model (and the first message, when it
+# needs a choice) open by role.
+
+add_subdirectory(selection-view)

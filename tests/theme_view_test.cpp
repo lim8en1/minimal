@@ -26,6 +26,10 @@ public:
     std::vector<std::string> ThemeNames() const override { return names; }
     void InsertPrompt(const std::string&) override {}
     void SetTheme(const std::string& name) override { switched.push_back(name); }
+    void ChooseAgent(const std::string&) override {}
+    void ChooseModel(const std::string&) override {}
+    void ChooseDefaultModel(const std::string&) override {}
+    void SetSubagentModel(const std::string&) override {}
 
     std::vector<std::string> names = {"dark", "light", "solarized"};
     std::vector<std::string> shown, closed, switched;

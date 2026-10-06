@@ -380,6 +380,10 @@ class RecordingActions final : public HostActions {
 public:
     void InsertPrompt(const std::string& text) override { inserted.push_back(text); }
     void SetTheme(const std::string& name) override { themes.push_back(name); }
+    void ChooseAgent(const std::string&) override {}
+    void ChooseModel(const std::string&) override {}
+    void ChooseDefaultModel(const std::string&) override {}
+    void SetSubagentModel(const std::string&) override {}
     std::vector<std::string> inserted;
     std::vector<std::string> themes;
 };
@@ -1006,6 +1010,25 @@ TEST_CASE("the bundled theme-view plugin registers its picker and a read-only /t
     CHECK(fixtures->registries.views.Find("theme") != nullptr);
     REQUIRE(fixtures->registries.client_commands.Find("theme") != nullptr);
     CHECK(fixtures->registries.client_commands.Find("theme")->read_only());
+}
+
+#ifndef MINIMAL_SELECTION_VIEW_PLUGIN
+#error "MINIMAL_SELECTION_VIEW_PLUGIN must name the built selection-view plugin"
+#endif
+
+// The view ids are the server's view_hint names: a hint opens them with no
+// core mapping.
+TEST_CASE("the bundled selection-view plugin registers the agents, models and subagent-models views",
+          "[client_plugins][selection_view]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_SELECTION_VIEW_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    INFO(fixtures->records.front().error);
+    REQUIRE(fixtures->records.front().ok());
+    for (const char* id : {"agents", "models", "subagent-models"}) {
+        INFO(id);
+        CHECK(fixtures->registries.views.Find(id) != nullptr);
+    }
 }
 
 // regenerate_per_session=false must share one banner across every session

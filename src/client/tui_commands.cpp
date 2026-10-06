@@ -130,7 +130,7 @@ void TuiApp::RegisterClientCommands() {
                 if (is_agent) {
                     picker_controller_->OpenAgentPicker();
                 } else {
-                    picker_controller_->OpenModelPicker(/*refresh=*/false);
+                    picker_controller_->OpenModelPicker();
                 }
                 return true;
             }
@@ -173,7 +173,7 @@ void TuiApp::RegisterClientCommands() {
     router.Add({"subagent-model", "", false, true, [this](const CommandInvocationText& parsed) {
         if (!parsed.positional.empty() || app_->FocusedSessionId().empty()) return false;
         ClearFocusedNotice();
-        picker_controller_->OpenSubagentModelPicker();
+        OpenRoleView("subagent-models");
         return true;
     }});
     // Bare /sessions on a SESSIONLESS tab opens the picker outright: the

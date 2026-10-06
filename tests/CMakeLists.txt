@@ -200,7 +200,6 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     key_event_parser_test.cpp
     rpc_queue_test.cpp
     picker_model_test.cpp
-    agent_picker_model_test.cpp
     subagent_picker_model_test.cpp
     keymap_help_model_test.cpp
     model_picker_model_test.cpp
@@ -366,6 +365,9 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     # theme-view: the picker and /theme, over a fake host.
     "${CMAKE_SOURCE_DIR}/plugins/client/theme-view/theme_view.cpp"
     theme_view_test.cpp
+    # selection-view: the agent/model/subagent-model choosers, over a fake host.
+    "${CMAKE_SOURCE_DIR}/plugins/client/selection-view/selection_view.cpp"
+    selection_view_test.cpp
     task_worker_test.cpp
     model_selector_test.cpp
     mcp_view_test.cpp)
@@ -377,6 +379,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/client/config-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/help-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/theme-view"
+    "${CMAKE_SOURCE_DIR}/plugins/client/selection-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")
 
 target_include_directories(minimal_tests PRIVATE
@@ -435,6 +438,7 @@ target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_CONFIG_VIEW_PLUGIN="$<TARGET_FILE:minimal_config_view>"
     MINIMAL_HELP_VIEW_PLUGIN="$<TARGET_FILE:minimal_help_view>"
     MINIMAL_THEME_VIEW_PLUGIN="$<TARGET_FILE:minimal_theme_view>"
+    MINIMAL_SELECTION_VIEW_PLUGIN="$<TARGET_FILE:minimal_selection_view>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto"
     # The captured live Jev responses (fixtures/decision-advisor/): the
     # response-shape contract the advisor parses, kept as data not literals.

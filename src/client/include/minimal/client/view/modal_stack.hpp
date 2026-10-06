@@ -22,8 +22,6 @@ enum class ModalId : std::size_t {
     kPluginModal,      // a plugin view with placement Modal (one slot)
     kDeleteConfirm,    // the session picker's delete confirmation
     kSessionPicker,
-    kAgentPicker,
-    kModelPicker,
     kSubagentPicker,
     kQuitConfirm,      // quit / tab-close while work is in flight
     kPluginPrompt,     // a server tool's plugin prompt (the pending kinds are

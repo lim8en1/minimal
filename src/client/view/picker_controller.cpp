@@ -6,8 +6,6 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/client/command_line.hpp"
-#include "minimal/client/view/agent_picker.hpp"
-#include "minimal/client/view/model_picker.hpp"
 #include "minimal/client/view/session_picker.hpp"
 #include "minimal/client/view/subagent_picker.hpp"
 #include "minimal/client/policy.hpp"
@@ -263,170 +261,71 @@ void PickerController::OpenSessionPicker() {
     RebuildPickerComponent();
 }
 
-// Mirrors RebuildPickerComponent, minus everything that doesn't apply to a
-// small, unpaginated, unsorted list.
-void PickerController::RebuildAgentPickerComponent() {
-    *deps_.agent_picker_slot = MakeAgentPresetPicker(
-        agent_picker_presets_, deps_.theme,
-        {.on_select =
-              [this](const std::string& name) {
-                  // The DESIRED-STATE path, identical on every tab: the
-                  // selection sets the tab's desired preset -- it rides
-                  // CreateSessionRequest on a sessionless tab (the first
-                  // message creates the session on it) and converges at the
-                  // next turn start on a sessioned one. No command is sent,
-                  // and no session is minted just to switch presets on it.
-                  // focused_or_new_tab, not FocusedTabId: on the empty
-                  // startup app (zero tabs -- how a bare /agent gets here)
-                  // there is nothing focused, and the choice must land on
-                  // the tab the user's first message will create.
-                  const std::string tab = deps_.focused_or_new_tab();
-                  if (!tab.empty()) {
-                      deps_.app.StageAgentPreset(tab, name);
-                      deps_.app.TabNotice(tab, "agent '" + name +
-                                                   "' will be used on your next message");
-                  }
-                  deps_.show_agent_picker = false;
-                  ContinuePendingSelection(/*chosen=*/true);
-              },
-          .on_close =
-              [this] {
-                  deps_.show_agent_picker = false;
-                  ContinuePendingSelection(/*chosen=*/false);
-              }},
-        agent_fetch_.Status());
-}
-
-void PickerController::OpenAgentPicker() {
-    // One fresh fetch each time, like OpenSessionPicker: the preset list is
-    // small, so there is no pagination state to preserve across opens. The
-    // fetch itself runs on AppState's RPC worker (see the file comment); the
-    // picker opens showing whatever agent_picker_presets_ already holds
-    // (empty on a fresh open) and repopulates the moment the fetch resolves.
-    deps_.show_agent_picker = true;
-    agent_picker_presets_.clear();
-    agent_fetch_.Begin();
-    RebuildAgentPickerComponent();
-    // The client's cwd is the same project root session creation sends, so
-    // the picker's project scope matches the sessions this client creates. A
-    // resumed session whose stored root differs still resolves correctly
-    // server-side: /agent re-resolves against the SESSION's root.
-    RunFetch<std::vector<v1::AgentPresetSummary>>(
-        agent_fetch_,
-        [this](std::string& error) -> std::optional<std::vector<v1::AgentPresetSummary>> {
-            const auto result = deps_.client.ListAgentPresets(CurrentProjectRootOrEmpty());
-            if (!result.status.ok()) {
-                error = result.status.error_message();
-                return std::nullopt;
-            }
-            return std::vector<v1::AgentPresetSummary>(result.response.presets().begin(),
-                                                       result.response.presets().end());
-        },
-        [this](std::vector<v1::AgentPresetSummary>&& presets) {
-            agent_picker_presets_ = std::move(presets);
-        },
-        [this] { RebuildAgentPickerComponent(); }, "agent picker");
-}
-
-// The model picker: bare /model opens with what the server already knows;
-// ctrl:r from inside re-opens with discovery refreshed. `refresh_discovery`
-// waits on every discover-entry's own catalog fetch (parallel server-side,
-// bounded by the slowest provider's own timeout -- up to 15 s,
-// session_client.cpp's own ListModels deadline), which is exactly why this
-// runs on AppState's RPC worker rather than the loop thread: a 15 s stall
-// used to freeze the whole TUI -- no redraw, no keystroke, no streaming
-// progress -- for the duration.
-void PickerController::OpenModelPicker(bool refresh) {
-    model_picker_subagent_ = false;
-    OpenModelPickerFetch(refresh);
-}
-
-void PickerController::OpenSubagentModelPicker() {
-    model_picker_subagent_ = true;
-    OpenModelPickerFetch(/*refresh=*/false);
-}
-
-void PickerController::OpenModelPickerFetch(bool refresh) {
-    deps_.show_model_picker = true;
-    model_picker_models_.clear();
-    model_fetch_.Begin(/*keep_input=*/refresh);   // ctrl+r keeps what was typed
-    RebuildModelPickerComponent();
-    SessionClient::ListModelsOptions opts;
-    opts.refresh_discovery = refresh;
-    RunFetch<v1::ListModelsResponse>(
-        model_fetch_,
-        [this, opts](std::string& error) -> std::optional<v1::ListModelsResponse> {
-            auto result = deps_.client.ListModels(opts);
-            if (!result.status.ok()) {
-                error = result.status.error_message();
-                return std::nullopt;
-            }
-            return std::move(result.response);
-        },
-        [this](v1::ListModelsResponse&& response) {
-            model_picker_models_.assign(response.models().begin(), response.models().end());
-            model_picker_default_ = response.default_model();
-        },
-        [this] { RebuildModelPickerComponent(); }, "model picker");
-}
-
-void PickerController::RebuildModelPickerComponent() {
-    ModelPickerCallbacks callbacks;
-    if (model_picker_subagent_) {
-        callbacks.leading_row_label = "same as parent";
-        callbacks.leading_row_id = kSameAsParentRowId;
-    } else if (!model_picker_default_.empty()) {
-        // Back to the default model (settings.json default_model, or the only
-        // model): clears the tab's own choice. No row when there is none.
-        callbacks.leading_row_label = "default (" + model_picker_default_ + ")";
-        callbacks.leading_row_id = kDefaultModelRowId;
+// The desired-state choices -- the view registered as "agents" / "models"
+// (a plugin's) calls these through HostActions. The DESIRED-STATE path,
+// identical on every tab: the choice sets the tab's desired preset or model,
+// which rides CreateSessionRequest on a sessionless tab (the first message
+// creates the session on it) and converges at the next turn start on a
+// sessioned one. No command is sent, and no session is minted just to
+// switch. focused_or_new_tab, not FocusedTabId: on the empty startup app
+// (zero tabs -- how a bare /agent gets here) there is nothing focused, and
+// the choice must land on the tab the user's first message will create.
+void PickerController::ChooseAgent(const std::string& name) {
+    if (const std::string tab = deps_.focused_or_new_tab(); !tab.empty()) {
+        deps_.app.StageAgentPreset(tab, name);
+        deps_.app.TabNotice(tab, "agent '" + name + "' will be used on your next message");
     }
-    callbacks.on_select =
-        [this](const std::string& ref) {
-            if (model_picker_subagent_) {
-                // The DIRECT-COMMAND path: the subagent-model choice is a
-                // session property, not desired state -- there is nothing to
-                // stage (a sessionless tab has no session to set it on; the
-                // picker only opens from a session's notice or a sessioned
-                // tab's bare /subagent-model). The command's own result
-                // surfaces as the tab notice.
-                deps_.show_model_picker = false;
-                if (const std::string tab = deps_.focused_or_new_tab(); !tab.empty()) {
-                    deps_.app.SubmitCommand(tab,
-                                            ref == kSameAsParentRowId
-                                                ? std::string("/subagent-model inherit")
-                                                : "/subagent-model " + ref);
-                }
-                return;
-            }
-            // The DESIRED-STATE path, identical on every tab (see the
-            // agent picker above): the selection sets the tab's
-            // desired model -- it rides CreateSessionRequest on a
-            // sessionless tab and converges at the next turn start on
-            // a sessioned one. No command, no direct switch.
-            // focused_or_new_tab for the same empty-startup-app
-            // reason the agent picker stages through it.
-            const std::string tab = deps_.focused_or_new_tab();
-            if (!tab.empty()) {
-                if (ref == kDefaultModelRowId) {
-                    deps_.app.StageModel(tab, model_picker_default_, /*is_default=*/true);
-                    deps_.app.TabNotice(tab, "the default model will be used on your next message");
-                } else {
-                    deps_.app.StageModel(tab, ref);
-                    deps_.app.TabNotice(tab, "model '" + ref +
-                                                  "' will be used on your next message");
-                }
-            }
-            deps_.show_model_picker = false;
-            ContinuePendingSelection(/*chosen=*/true);
-        };
-    callbacks.on_refresh_discovery = [this] { OpenModelPicker(/*refresh=*/true); };
-    callbacks.on_close = [this] {
-        deps_.show_model_picker = false;
-        if (!model_picker_subagent_) ContinuePendingSelection(/*chosen=*/false);
-    };
-    *deps_.model_picker_slot = MakeModelPicker(model_picker_models_, deps_.theme,
-                                               std::move(callbacks), model_fetch_.Status());
+    ContinuePendingSelection(/*chosen=*/true);
+}
+
+void PickerController::ChooseModel(const std::string& ref) {
+    if (const std::string tab = deps_.focused_or_new_tab(); !tab.empty()) {
+        deps_.app.StageModel(tab, ref);
+        deps_.app.TabNotice(tab, "model '" + ref + "' will be used on your next message");
+    }
+    ContinuePendingSelection(/*chosen=*/true);
+}
+
+// Back to the default model (settings.json default_model, or the only
+// model): clears the tab's own choice. `default_ref` is what the server
+// named the default, for the status bar until the session confirms it.
+void PickerController::ChooseDefaultModel(const std::string& default_ref) {
+    if (const std::string tab = deps_.focused_or_new_tab(); !tab.empty()) {
+        deps_.app.StageModel(tab, default_ref, /*is_default=*/true);
+        deps_.app.TabNotice(tab, "the default model will be used on your next message");
+    }
+    ContinuePendingSelection(/*chosen=*/true);
+}
+
+// NOT desired state: the subagent model is a session's own setting, so it
+// is the /subagent-model command (whose result surfaces as the tab notice).
+void PickerController::SetSubagentModel(const std::string& ref) {
+    if (const std::string tab = deps_.focused_or_new_tab(); !tab.empty()) {
+        deps_.app.SubmitCommand(tab, "/subagent-model " + ref);
+    }
+}
+
+void PickerController::OpenAgentPicker() { OpenRole("agents"); }
+
+void PickerController::OpenModelPicker() { OpenRole("models"); }
+
+void PickerController::OpenRole(const std::string& role) {
+    if (!deps_.open_role_view(role)) {
+        // Nothing to choose with (open_role_view said so in a notice): a
+        // first message waiting on a choice cannot proceed.
+        if (pending_selection_) ContinuePendingSelection(/*chosen=*/false);
+        return;
+    }
+    if (pending_selection_) pending_selection_->awaiting = role;
+}
+
+void PickerController::WatchPendingView(const std::string& shown_modal) {
+    // The awaited view went away -- Escape (the host's), or another modal
+    // replaced it -- with no choice having moved the selection on: the
+    // message is not sent.
+    if (!pending_selection_ || pending_selection_->awaiting.empty()) return;
+    if (shown_modal == pending_selection_->awaiting) return;
+    ContinuePendingSelection(/*chosen=*/false);
 }
 
 // The /subagents picker (see the header). One full listing per open, filtered
@@ -577,6 +476,7 @@ void PickerController::EnsureSelectionThen(const std::string& tab, std::function
 
 void PickerController::ContinuePendingSelection(bool chosen) {
     if (!pending_selection_) return;
+    pending_selection_->awaiting.clear();
     if (!chosen) {
         auto cancel = std::move(pending_selection_->cancel);
         pending_selection_.reset();
@@ -589,14 +489,14 @@ void PickerController::ContinuePendingSelection(bool chosen) {
         deps_.app.TabNotice(pending.tab,
                             "choose an agent for this project (remembered for next time) -- "
                             "your message is sent once you have");
-        OpenAgentPicker();
+        OpenRole("agents");
         return;
     }
     if (pending.need_model && (selection.model.empty() || selection.model_default)) {
         deps_.app.TabNotice(pending.tab,
                             "choose a model for this project (remembered for next time) -- "
                             "your message is sent once you have");
-        OpenModelPicker(/*refresh=*/false);
+        OpenRole("models");
         return;
     }
     auto send = std::move(pending_selection_->send);

@@ -6,6 +6,7 @@
 
 #include <grpcpp/client_context.h>
 
+#include "minimal/client/command_line.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/common/logger.hpp"
 
@@ -76,6 +77,20 @@ public:
             return std::nullopt;
         }
         auto result = client_->ListModels({.refresh_discovery = refresh_discovery});
+        if (!result.status.ok()) {
+            if (error != nullptr) *error = result.status.error_message();
+            return std::nullopt;
+        }
+        return std::move(result.response);
+    }
+
+    std::optional<v1::ListAgentPresetsResponse> ListAgentPresets(std::string* error) override {
+        if (client_ == nullptr) {
+            if (error != nullptr) *error = "not connected to a server";
+            return std::nullopt;
+        }
+        // The client's cwd: the same project root session creation sends.
+        auto result = client_->ListAgentPresets(CurrentProjectRootOrEmpty());
         if (!result.status.ok()) {
             if (error != nullptr) *error = result.status.error_message();
             return std::nullopt;
@@ -298,6 +313,22 @@ void HostActionQueue::InsertPrompt(const std::string& text) {
 
 void HostActionQueue::SetTheme(const std::string& name) {
     Enqueue([name](HostActions& host) { host.SetTheme(name); });
+}
+
+void HostActionQueue::ChooseAgent(const std::string& name) {
+    Enqueue([name](HostActions& host) { host.ChooseAgent(name); });
+}
+
+void HostActionQueue::ChooseModel(const std::string& ref) {
+    Enqueue([ref](HostActions& host) { host.ChooseModel(ref); });
+}
+
+void HostActionQueue::ChooseDefaultModel(const std::string& default_ref) {
+    Enqueue([default_ref](HostActions& host) { host.ChooseDefaultModel(default_ref); });
+}
+
+void HostActionQueue::SetSubagentModel(const std::string& ref) {
+    Enqueue([ref](HostActions& host) { host.SetSubagentModel(ref); });
 }
 
 void HostActionQueue::Enqueue(std::function<void(HostActions&)> action) {

@@ -135,6 +135,21 @@ public:
     // for the next start; a theme that fails to load changes nothing and
     // says why in the focused tab's notice.
     virtual void SetTheme(const std::string& name) = 0;
+
+    // The tab's desired agent preset / model -- what its next message runs
+    // with (a sessionless tab's session is created on it; a sessioned one
+    // converges at the next turn), with the tab notice saying so. Lands on
+    // the focused tab, or a fresh one on the empty app. Each also continues
+    // a first message that was waiting on the choice ("agents" / "models"
+    // views opened for it).
+    virtual void ChooseAgent(const std::string& name) = 0;
+    virtual void ChooseModel(const std::string& ref) = 0;
+    // Back to the default model; `default_ref` is the server's name for it
+    // (ListModelsResponse::default_model), shown until the session confirms.
+    virtual void ChooseDefaultModel(const std::string& default_ref) = 0;
+    // The focused session's subagent model: a `<provider>/<model>` ref, or
+    // "inherit" (children run the parent's model).
+    virtual void SetSubagentModel(const std::string& ref) = 0;
 };
 
 class AttentionSink {
@@ -618,6 +633,10 @@ public:
     // `error` (when given) says why, for the plugin to show.
     virtual std::optional<v1::ListModelsResponse> ListModels(bool refresh_discovery,
                                                              std::string* error) = 0;
+
+    // The agent presets for this client's project, and the default when
+    // there is one. Blocking, like ListModels.
+    virtual std::optional<v1::ListAgentPresetsResponse> ListAgentPresets(std::string* error) = 0;
 
     // Streams the subscription to `on_payload` on the CALLING thread (blocking
     // until the server closes the stream or the callback returns false).

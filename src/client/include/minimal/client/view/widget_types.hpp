@@ -163,6 +163,9 @@ struct ModelSelectorSpec {
     // Empty id: no such row.
     std::string leading_row_label;
     std::string leading_row_id;
+    // The leading row stands for the server's default model: shown only
+    // when the answer names one, and labelled "default (<its ref>)".
+    bool leading_row_is_default = false;
     // Offer the typed `<provider>/<model>` itself when the list does not
     // have it (discovery offline, a provider not configured yet).
     bool allow_custom = false;
