@@ -4,10 +4,7 @@
 # The ABI and the registries its hooks fill.
 minimal/client/plugins/client_plugin_abi.h
 minimal/client/plugins/registries.hpp
-minimal/client/plugins/host_seams.hpp
-minimal/client/plugins/observer_events.hpp
 minimal/client/plugins/background_poller.hpp
-minimal/client/session_client.hpp
 
 # Rendering and UI building blocks a plugin composes with.
 minimal/client/render/theme.hpp
