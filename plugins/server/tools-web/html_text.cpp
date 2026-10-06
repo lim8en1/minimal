@@ -1,6 +1,7 @@
 #include "html_text.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cstdint>
 #include <unordered_map>
@@ -110,27 +111,21 @@ std::size_t DecodeEntity(std::string_view html, std::size_t pos, std::string& ou
             out += '&';
             return 1;
         }
-        try {
-            // `pos` (the consumed-length out-param), not nullptr: stoul does
-            // not throw for a PARTIAL parse ("12abc" -> 12, silently
-            // swallowing "abc" into the entity's consumed span instead of
-            // leaving it as literal text) -- consumed must cover the whole
-            // digit run. The value is also bounds-checked before narrowing:
-            // "&#x100000041;" fits in stoul's own (wider) return type without
-            // throwing, but static_cast<uint32_t> used to wrap it to 'A'
-            // instead of rejecting a codepoint past the valid Unicode range.
-            std::size_t consumed = 0;
-            const unsigned long value = std::stoul(std::string(digits), &consumed, hex ? 16 : 10);
-            if (consumed != digits.size() || value > 0x10FFFFUL) {
-                out += '&';
-                return 1;
-            }
-            AppendEntityCodepoint(out, static_cast<std::uint32_t>(value));
-            return semi - pos + 1;
-        } catch (const std::exception&) {
+        // from_chars must consume the whole digit run (a partial parse would
+        // swallow trailing text into the entity) and reports overflow; the
+        // value is range-checked before narrowing, so a codepoint past
+        // Unicode's range is rejected rather than wrapped.
+        constexpr int kHex = 16;      // NOLINT(readability-magic-numbers): &#x...; is hexadecimal
+        constexpr int kDecimal = 10;  // NOLINT(readability-magic-numbers): &#...; is decimal
+        std::uint32_t value = 0;
+        const char* const last = digits.data() + digits.size();
+        const auto [end, error] = std::from_chars(digits.data(), last, value, hex ? kHex : kDecimal);
+        if (error != std::errc{} || end != last || value > common::kMaxCodePoint) {
             out += '&';
             return 1;
         }
+        AppendEntityCodepoint(out, value);
+        return semi - pos + 1;
     }
     const auto it = NamedEntities().find(ToLowerCopy(body));
     if (it == NamedEntities().end()) {

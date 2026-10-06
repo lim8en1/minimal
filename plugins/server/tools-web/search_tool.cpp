@@ -43,8 +43,9 @@ std::string PercentEncode(std::string_view text) {
             out += static_cast<char>(c);
         } else {
             out += '%';
+            // NOLINTNEXTLINE(readability-magic-numbers): a byte's two nibbles
             out += kHex[c >> 4];
-            out += kHex[c & 0x0F];
+            out += kHex[c & 0x0F];  // NOLINT(readability-magic-numbers)
         }
     }
     return out;

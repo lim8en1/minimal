@@ -17,6 +17,9 @@
 
 namespace minimal::common {
 
+// The last Unicode code point.
+inline constexpr char32_t kMaxCodePoint = U'\U0010FFFF';
+
 // U+FEFF BYTE ORDER MARK, encoded: what a UTF-8 stream may start with.
 inline constexpr std::string_view kUtf8Bom = "\xEF\xBB\xBF";
 
@@ -63,7 +66,7 @@ inline std::size_t CountCodePoints(std::string_view text) {
 // has no encoding: nothing is appended and false is returned, so the caller
 // decides between dropping it and keeping its source text.
 inline bool AppendUtf8(std::string& out, char32_t cp) {
-    if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) return false;
+    if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > kMaxCodePoint) return false;
     if (cp < 0x80) {
         out += static_cast<char>(cp);
     } else if (cp < 0x800) {

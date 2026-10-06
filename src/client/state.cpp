@@ -14,6 +14,7 @@
 #include "minimal/client/utf8.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/client/policy.hpp"
+#include "minimal/common/fnv.hpp"
 
 namespace minimal::client {
 
@@ -2423,16 +2424,10 @@ uint64_t AppState::ToolsVersion() const {
     // the survivors' bumps could walk a sum back to a value the panel cache
     // already holds (same tab count too), and the cache served a stale panel.
     std::lock_guard lk(mtx_);
-    // NOLINTBEGIN(readability-magic-numbers) -- 64-bit FNV-1a's offset basis
-    // and prime (the FNV spec), applied byte by byte.
-    uint64_t h = 14695981039346656037ull;
+    uint64_t h = common::kFnv1a64OffsetBasis;
     const auto mix = [&h](uint64_t v) {
-        for (std::size_t i = 0; i < sizeof(v); ++i) {
-            h ^= (v >> (i * CHAR_BIT)) & 0xff;
-            h *= 1099511628211ull;
-        }
+        h = common::Fnv1a64(std::string_view(reinterpret_cast<const char*>(&v), sizeof(v)), h);
     };
-    // NOLINTEND(readability-magic-numbers)
     for (const auto& tab : tabs_) {
         mix(std::hash<std::string>{}(tab.info.tab_id));
         mix(tab.info.state->ToolsVersion());

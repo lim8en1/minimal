@@ -22,6 +22,7 @@ minimal/commands/command.hpp
 minimal/common/abi_tag.hpp
 minimal/common/config_paths.hpp
 minimal/common/env.hpp
+minimal/common/fnv.hpp
 minimal/common/http_status.hpp
 minimal/common/logger.hpp
 minimal/common/policy.hpp
