@@ -334,6 +334,10 @@ public:
         return ftxui::text("stub frame");
     }
     ftxui::Element ModalRule(const Theme&) const override { return ftxui::text("stub rule"); }
+    ftxui::Component ModelSelector(ModelSelectorSpec, ModelSelectorCallbacks,
+                                   const Theme&) const override {
+        return ftxui::Renderer([] { return ftxui::text("stub selector"); });
+    }
 };
 
 }  // namespace

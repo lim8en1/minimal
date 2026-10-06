@@ -10,11 +10,14 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <ftxui/component/event.hpp>
 #include <nlohmann/json.hpp>
+
+#include "minimal/v1/session_service.pb.h"
 
 namespace minimal::client {
 
@@ -133,6 +136,36 @@ struct SchemaFormCallbacks {
     std::function<void(const std::string& path, const std::string& text)> on_set;
     std::function<void(const std::string& path)> on_unset;
     std::function<void()> on_back;  // optional
+};
+
+// --- The model selector --------------------------------------------------------
+
+// A chooser over the server's models, which it fetches itself -- through the
+// function the view hands it, so a plugin's ClientApi and core's own client
+// feed the same widget.
+struct ModelSelectorSpec {
+    std::string window_title = "choose a model";
+    std::string select_hint = "choose";  // what Enter does, for the hint line
+    // Answers the model list, on the selector's own worker thread -- never
+    // the UI thread. `refresh` (ctrl+r) re-runs every provider's discovery
+    // first and can take seconds. nullopt: it failed, and `error` says why
+    // (shown in place of the list).
+    std::function<std::optional<v1::ListModelsResponse>(bool refresh, std::string& error)> fetch;
+    // Called from the worker after each answer lands (HostUi::RequestRedraw).
+    std::function<void()> redraw;
+    // A row above the models that is not one ("off (untagged)", "the
+    // session's own model"); on_select receives `leading_row_id` for it.
+    // Empty id: no such row.
+    std::string leading_row_label;
+    std::string leading_row_id;
+    // Offer the typed `<provider>/<model>` itself when the list does not
+    // have it (discovery offline, a provider not configured yet).
+    bool allow_custom = false;
+};
+
+struct ModelSelectorCallbacks {
+    std::function<void(const std::string& ref)> on_select;  // a ref, or leading_row_id
+    std::function<void()> on_close;                         // Escape
 };
 
 // --- Escape ownership ----------------------------------------------------------

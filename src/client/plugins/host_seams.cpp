@@ -246,6 +246,10 @@ public:
         return Kit().ModalFrame(theme, title, std::move(rows), std::move(pinned), footer);
     }
     ftxui::Element ModalRule(const Theme& theme) const override { return Kit().ModalRule(theme); }
+    ftxui::Component ModelSelector(ModelSelectorSpec spec, ModelSelectorCallbacks callbacks,
+                                   const Theme& theme) const override {
+        return Kit().ModelSelector(std::move(spec), std::move(callbacks), theme);
+    }
 
 private:
     // Throws while the slot is empty -- only during registration, where the

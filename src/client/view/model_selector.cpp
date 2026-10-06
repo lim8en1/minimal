@@ -1,0 +1,127 @@
+#include "minimal/client/view/model_selector.hpp"
+
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <ftxui/component/component_base.hpp>
+
+#include "minimal/client/plugins/task_worker.hpp"
+#include "minimal/client/view/model_picker.hpp"
+
+namespace minimal::client {
+namespace {
+
+// What the worker publishes and the component reads; shared, so a task
+// still running when the component goes away writes into something alive.
+struct SelectorState {
+    std::mutex mtx;
+    std::vector<v1::ModelSummary> models;
+    bool loading = true;
+    std::string error;
+    std::uint64_t generation = 1;  // bumped by every change
+};
+
+class ModelSelectorComponent final : public ftxui::ComponentBase {
+public:
+    ModelSelectorComponent(ModelSelectorSpec spec, ModelSelectorCallbacks callbacks,
+                           const Theme& theme)
+        : spec_(std::move(spec)),
+          callbacks_(std::move(callbacks)),
+          theme_(theme),
+          worker_("model selector", spec_.redraw) {
+        Fetch(/*refresh=*/false);
+    }
+
+private:
+    void Fetch(bool refresh) {
+        {
+            std::lock_guard<std::mutex> lock(state_->mtx);
+            state_->loading = true;
+            state_->error.clear();
+            ++state_->generation;
+        }
+        worker_.Post([state = state_, fetch = spec_.fetch, refresh] {
+            std::string error;
+            std::optional<v1::ListModelsResponse> answer;
+            if (fetch) {
+                answer = fetch(refresh, error);
+            } else {
+                error = "no model source";
+            }
+            std::lock_guard<std::mutex> lock(state->mtx);
+            if (answer) {
+                state->models.assign(answer->models().begin(), answer->models().end());
+                state->error.clear();
+            } else {
+                state->error = error.empty() ? "the model list is unavailable" : error;
+            }
+            state->loading = false;
+            ++state->generation;
+        });
+    }
+
+    // Rebuilds the picker if a newer answer landed -- at the start of a
+    // render or an event only, never from ActiveChild() (called mid-frame:
+    // a rebuild there would free the component being drawn).
+    void Sync() {
+        std::vector<v1::ModelSummary> models;
+        MenuStatus status;
+        {
+            std::lock_guard<std::mutex> lock(state_->mtx);
+            if (shown_ && state_->generation == built_generation_) return;
+            built_generation_ = state_->generation;
+            models = state_->models;
+            status.loading = state_->loading;
+            status.error = state_->error;
+        }
+        status.memory = memory_;
+        ModelPickerCallbacks picker{
+            .on_select = callbacks_.on_select,
+            .on_refresh_discovery = [this] { Fetch(/*refresh=*/true); },
+            .on_close = callbacks_.on_close,
+            .leading_row_label = spec_.leading_row_label,
+            .leading_row_id = spec_.leading_row_id,
+            .allow_custom = spec_.allow_custom,
+            .window_title = spec_.window_title,
+            .select_hint = spec_.select_hint,
+        };
+        if (shown_) DetachAllChildren();
+        shown_ = MakeModelPicker(models, theme_, std::move(picker), std::move(status));
+        Add(shown_);
+    }
+
+    ftxui::Element OnRender() override {
+        Sync();
+        return shown_->Render();
+    }
+    bool OnEvent(ftxui::Event event) override {
+        Sync();
+        const ftxui::Component target = shown_;  // a callback may rebuild
+        return target->OnEvent(std::move(event));
+    }
+    bool Focusable() const override { return true; }
+    ftxui::Component ActiveChild() override { return shown_; }
+
+    ModelSelectorSpec spec_;
+    ModelSelectorCallbacks callbacks_;
+    const Theme& theme_;
+    std::shared_ptr<SelectorState> state_ = std::make_shared<SelectorState>();
+    std::shared_ptr<MenuMemory> memory_ = std::make_shared<MenuMemory>();
+    ftxui::Component shown_;
+    std::uint64_t built_generation_ = 0;
+    // Last: destroyed first, joined before anything above goes.
+    plugins::TaskWorker worker_;
+};
+
+}  // namespace
+
+ftxui::Component MakeModelSelector(ModelSelectorSpec spec, ModelSelectorCallbacks callbacks,
+                                   const Theme& theme) {
+    return ftxui::Make<ModelSelectorComponent>(std::move(spec), std::move(callbacks), theme);
+}
+
+}  // namespace minimal::client

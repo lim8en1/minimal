@@ -11,6 +11,7 @@
 #include "minimal/client/render/streaming_markdown_view.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/filterable_menu.hpp"
+#include "minimal/client/view/model_selector.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/schema_form.hpp"
 #include "minimal/client/view/tool_status.hpp"
@@ -655,6 +656,10 @@ public:
         return client::ModalFrame(theme, title, std::move(rows), std::move(pinned), footer);
     }
     Element ModalRule(const Theme& theme) const override { return client::ModalRule(theme); }
+    ftxui::Component ModelSelector(ModelSelectorSpec spec, ModelSelectorCallbacks callbacks,
+                                   const Theme& theme) const override {
+        return MakeModelSelector(std::move(spec), std::move(callbacks), theme);
+    }
 };
 
 }  // namespace
