@@ -6,12 +6,13 @@
 #include <string_view>
 
 #include "minimal/common/utf8.hpp"
+#include "policy.hpp"
 
 namespace minimal::memory {
 namespace {
 
-constexpr std::size_t kTitleMaxChars = 80;
-constexpr std::size_t kDescriptionMaxChars = 200;
+// ATX headings run from # to ###### (CommonMark).
+constexpr int kMaxHeadingLevel = 6;  // NOLINT(readability-magic-numbers): CommonMark
 
 std::string Trim(std::string_view text) {
     std::size_t start = 0, end = text.size();
@@ -55,7 +56,7 @@ int HeadingLevel(const std::string& line, std::string& text) {
     std::size_t j = i;
     while (j < line.size() && line[j] == '#') ++j;
     const int level = static_cast<int>(j - i);
-    if (level < 1 || level > 6) return 0;
+    if (level < 1 || level > kMaxHeadingLevel) return 0;
     if (j < line.size() && line[j] != ' ' && line[j] != '\t') return 0;
     std::string rest = Trim(std::string_view(line).substr(j));
     // Optional closing sequence: "## Title ##".
@@ -234,7 +235,7 @@ std::vector<IngestChunk> ChunkMarkdown(const std::string& content, const std::st
 
     std::vector<Section> sections;
     sections.push_back({doc_title, {}});  // preamble
-    std::vector<std::string> stack(6);
+    std::vector<std::string> stack(kMaxHeadingLevel);
     std::string fence;
     for (const auto& line : lines) {
         const std::string marker = FenceMarker(line);
@@ -275,11 +276,11 @@ std::vector<IngestChunk> ChunkMarkdown(const std::string& content, const std::st
 
     for (auto& chunk : chunks) {
         chunk.title = common::TruncateCodePoints(chunk.title.empty() ? "(untitled)" : chunk.title,
-                                                 kTitleMaxChars);
-        chunk.description = FirstSentence(chunk.body, kDescriptionMaxChars);
+                                                 kIngestTitleChars);
+        chunk.description = FirstSentence(chunk.body, kIngestDescriptionChars);
         if (chunk.description.empty() || (chunks.size() == 1 && !front.description.empty())) {
             chunk.description = !front.description.empty()
-                                    ? common::TruncateCodePoints(front.description, kDescriptionMaxChars)
+                                    ? common::TruncateCodePoints(front.description, kIngestDescriptionChars)
                                     : chunk.title;
         }
     }

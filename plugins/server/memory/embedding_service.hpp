@@ -26,6 +26,7 @@
 #include "embedding.hpp"
 #include "memory_settings.hpp"
 #include "minimal/config/secrets.hpp"
+#include "policy.hpp"
 
 namespace minimal::common {
 class Logger;
@@ -39,8 +40,7 @@ class CircuitBreaker {
 public:
     using Clock = std::chrono::steady_clock;
 
-    explicit CircuitBreaker(Clock::duration base = std::chrono::seconds(30),
-                            Clock::duration max = std::chrono::minutes(5))
+    explicit CircuitBreaker(Clock::duration base = kBreakerBase, Clock::duration max = kBreakerMax)
         : base_(base), max_(max) {}
 
     // Closed, or open but past its cooldown (one probe allowed through).
@@ -86,10 +86,10 @@ EmbeddingPlan MakeEmbeddingPlan(const MemorySettings& settings,
 class EmbeddingService {
 public:
     struct Options {
-        int batch_size = 32;
-        std::chrono::milliseconds idle_poll{60000};
-        CircuitBreaker::Clock::duration breaker_base = std::chrono::seconds(30);
-        CircuitBreaker::Clock::duration breaker_max = std::chrono::minutes(5);
+        int batch_size = kReindexBatchRows;
+        std::chrono::milliseconds idle_poll = kWorkerIdlePoll;
+        CircuitBreaker::Clock::duration breaker_base = kBreakerBase;
+        CircuitBreaker::Clock::duration breaker_max = kBreakerMax;
     };
 
     EmbeddingService(MemoryStore* store, EmbeddingPlan plan, common::Logger& logger,

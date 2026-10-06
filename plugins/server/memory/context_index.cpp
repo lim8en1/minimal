@@ -18,13 +18,11 @@
 #include <map>
 
 #include "memory_runtime.hpp"
+#include "policy.hpp"
 
 namespace minimal::memory {
 namespace {
 
-// Recent candidates fetched per render: comfortably more one-liners than any
-// sane budget fits (~100 bytes each), so the budget -- not this -- binds.
-constexpr int kRecentCandidates = 200;
 
 std::string OneLiner(const EntryRow& row) {
     return "- " + row.title + " -- " + row.description +
@@ -124,7 +122,7 @@ std::string RenderMemoryIndex(MemoryRuntime& rt, const std::filesystem::path& se
         int shown = 0;
         for (const auto& row : rt.store->Recent(filter, kRecentCandidates)) {
             const std::string line = OneLiner(row);
-            if (out.size() + lines.size() + line.size() + 80 > budget) break;  // 80: header room
+            if (out.size() + lines.size() + line.size() + kIndexHeaderRoomBytes > budget) break;
             lines += line;
             ++shown;
         }

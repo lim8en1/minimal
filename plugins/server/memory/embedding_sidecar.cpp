@@ -16,6 +16,8 @@
 
 #include "minimal/sidecar/process.hpp"
 #include "minimal/common/units.hpp"
+#include "policy.hpp"
+#include "minimal/sidecar/policy.hpp"
 
 namespace minimal::memory {
 namespace {
@@ -89,11 +91,7 @@ def _main():
 _main()
 )PY";
 
-constexpr int kProtoOutFd = 3;
-constexpr std::size_t kMaxDiagBytes = 16 * common::kKiB;
-// A generously large single protocol line: a big reindex batch's embeddings
-// serialized as JSON. Above this is corruption, not a legitimate response.
-constexpr std::size_t kMaxLineBytes = 256 * common::kMiB;
+constexpr int kProtoOutFd = STDERR_FILENO + 1;  // the first fd after stdio
 
 class SidecarEmbeddingFunction final : public EmbeddingFunction {
 public:
@@ -282,12 +280,12 @@ private:
                 death_reason_ = "poll error";
                 return std::nullopt;
             }
-            char chunk[8192];
+            char chunk[sidecar::kPipeReadChunkBytes];
             if (fds[out_slot].revents & (POLLIN | POLLHUP | POLLERR)) {
                 const ssize_t n = read(out_fd_.get(), chunk, sizeof(chunk));
                 if (n > 0) {
                     line_buffer_.append(chunk, static_cast<std::size_t>(n));
-                    if (line_buffer_.size() > kMaxLineBytes) {
+                    if (line_buffer_.size() > kSidecarMaxLineBytes) {
                         death_reason_ = "sidecar produced an oversized protocol line";
                         return std::nullopt;
                     }
@@ -300,8 +298,8 @@ private:
                 const ssize_t n = read(diag_fd_.get(), chunk, sizeof(chunk));
                 if (n > 0) {
                     diag_tail_.append(chunk, static_cast<std::size_t>(n));
-                    if (diag_tail_.size() > kMaxDiagBytes) {
-                        diag_tail_.erase(0, diag_tail_.size() - kMaxDiagBytes);
+                    if (diag_tail_.size() > kSidecarMaxDiagBytes) {
+                        diag_tail_.erase(0, diag_tail_.size() - kSidecarMaxDiagBytes);
                     }
                 } else if (n == 0 || errno != EINTR) {
                     diag_open = false;  // diagnostics closed; the protocol side keeps this alive
