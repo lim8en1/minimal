@@ -133,13 +133,21 @@ std::optional<CompactionResult> compact_messages(
     std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
     const CompactionRequest& request);
 
-// Rough size of a message range in tokens: serialized bytes / 4. The fallback
+// The bytes-per-token ratio behind every token ESTIMATE in the tree (this
+// fallback, plugins sizing a cap in tokens). A convenience heuristic, not a
+// tokenizer: real counts vary by model and content, and anything that has a
+// backend-reported count uses that instead.
+inline constexpr std::int64_t kEstimatedBytesPerToken = 4;
+
+// Rough size of a message range in tokens: serialized bytes /
+// kEstimatedBytesPerToken. The fallback
 // for context_tokens_before when the backend reported no usage -- an estimate
 // that says so on its sleeve beats a precise number computed from nothing.
 // Exposed beyond the compactor because resume has the same problem: it seeds
 // the compaction trigger with a loaded transcript and no backend count either.
 std::int64_t estimate_tokens(std::span<const llm::Message> messages);
-// The byte count behind estimate_tokens (estimate_tokens == this / 4). Sums
+// The byte count behind estimate_tokens (estimate_tokens == this /
+// kEstimatedBytesPerToken). Sums
 // across ranges, so WorkingHistory can keep a running total and divide once.
 std::int64_t estimate_bytes(std::span<const llm::Message> messages);
 

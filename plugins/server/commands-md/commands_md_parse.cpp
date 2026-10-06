@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 #include "minimal/common/logger.hpp"
@@ -30,11 +31,12 @@ std::string DesugarPositionalTokens(const std::string& body) {
     const auto word_char = [](char c) {
         return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
     };
+    constexpr std::string_view kArguments = "$ARGUMENTS";
     std::string out;
     out.reserve(body.size());
     for (std::size_t i = 0; i < body.size();) {
-        if (body[i] == '$' && body.compare(i, 10, "$ARGUMENTS") == 0) {
-            const std::size_t after = i + 10;
+        if (body.compare(i, kArguments.size(), kArguments) == 0) {
+            const std::size_t after = i + kArguments.size();
             const bool boundary = after >= body.size() || !word_char(body[after]);
             if (boundary) {
                 out += "{args}";
@@ -174,14 +176,10 @@ Source DecodeSource(const std::string& name, const YAML::Node& node) {
         if (value < 0) {
             throw std::runtime_error("command file: source '" + name + "' timeout must be >= 0");
         }
-        // Clamped, not just floored: RunProcess's remaining_ms() narrows
-        // timeout_seconds*1000 milliseconds into an `int` for poll()'s
-        // deadline, and a value near INT_MAX overflowed that cast to a
-        // negative int -- which poll() reads as "wait forever", the exact
-        // opposite of a declared timeout. 86400s (24h) is generous for a
-        // command generator and comfortably inside the safe range.
-        constexpr int kMaxTimeoutSeconds = 86400;
-        source.timeout_seconds = std::min(value, kMaxTimeoutSeconds);
+        // Taken as declared, no ceiling: `0` already means no deadline, so
+        // capping a finite one below that would be incoherent. Any int is safe
+        // downstream (RunProcess widens to int64 before scaling).
+        source.timeout_seconds = value;
     }
 
     // Truncated JSON never parses, so "submit the capped output anyway" has
@@ -325,11 +323,6 @@ MdCommandSpec DecodeSpec(const std::string& stem, const config::ParsedFrontmatte
 }  // namespace
 
 MdCommandSpec ParseCommandFile(const std::filesystem::path& path, bool trusted) {
-    // Unbounded read: the command dirs include PROJECT-LOCAL content (a
-    // cloned repo), and a multi-gigabyte `.md` would be slurped whole at
-    // every startup and listing. Anything past the cap is a broken command
-    // file, skipped with a warning like any other.
-    constexpr std::size_t kMaxCommandFileBytes = 1u << 20;  // 1 MiB
     common::ReadFileResult file = common::ReadFile(path, kMaxCommandFileBytes);
     if (!file.ok()) throw std::runtime_error(file.error);
 

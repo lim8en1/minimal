@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -14,6 +15,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "minimal/agent/context_compactor.hpp"
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/confirmation_broker.hpp"
 #include "minimal/common/logger.hpp"
@@ -83,14 +85,6 @@ struct RunOutcome {
     bool cancelled = false;   // `cancelled` fired: the user cancelled, or the session ended
 };
 
-// stderr is only ever an error narrative: head+tail is plenty, and a chatty
-// generator's final lines (where the actual failure usually is) survive.
-constexpr std::int64_t kStderrCapBytes = 4000;
-
-// DrainOptions has no "no deadline"; `timeout: 0` (documented as infinite)
-// maps to a deadline no generator run will meet.
-constexpr std::int64_t kNoTimeoutMs = 30LL * 24 * 3600 * 1000;
-
 RunOutcome RunProcess(const std::vector<std::string>& argv, const std::filesystem::path& cwd,
                       int timeout_seconds, std::size_t cap_bytes,
                       const std::function<bool()>& cancelled) {
@@ -104,9 +98,11 @@ RunOutcome RunProcess(const std::vector<std::string>& argv, const std::filesyste
         sidecar::PipePlan{sidecar::PipePlan::ChildEnd::kWrite, {{STDOUT_FILENO, false}}},
         sidecar::PipePlan{sidecar::PipePlan::ChildEnd::kWrite, {{STDERR_FILENO, false}}},
     };
-    // RLIMIT_CPU backstop; the wall-clock deadline normally fires first, and
-    // the grace keeps the two from racing on a generator that uses its budget.
-    if (timeout_seconds > 0) spec.cpu_seconds = timeout_seconds + 30;
+    // int64 throughout: a declared timeout near INT_MAX must not overflow on
+    // its way to seconds-plus-grace or milliseconds.
+    if (timeout_seconds > 0) {
+        spec.cpu_seconds = std::int64_t{timeout_seconds} + kCpuBackstopGraceSeconds;
+    }
 
     auto launched = sidecar::Launch(spec);
     if (!launched.ok) {
@@ -118,7 +114,7 @@ RunOutcome RunProcess(const std::vector<std::string>& argv, const std::filesyste
     // stdout accumulates HERE, through the kCapped sink's live tap, so the cap
     // can stop the run: the tap latches the overrun and StopCheck -- polled at
     // the top of every drain slice -- ends the drain, which kills the group.
-    // The sink's own buffer is unused, hence the token cap of 1.
+    // The sink's own buffer is unused, hence its 1-byte cap.
     std::string out_buf;
     bool exceeded_cap = false;
     std::vector<sidecar::PipeSink> sinks(2);
@@ -135,13 +131,15 @@ RunOutcome RunProcess(const std::vector<std::string>& argv, const std::filesyste
     sinks[1].mode = sidecar::PipeSink::Mode::kCapped;
     sinks[1].cap = kStderrCapBytes;
 
+    // `timeout: 0` is "no deadline", which is DrainOptions' own 0.
     sidecar::DrainOptions options;
     options.timeout_ms =
-        timeout_seconds > 0 ? static_cast<std::int64_t>(timeout_seconds) * 1000 : kNoTimeoutMs;
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::seconds(timeout_seconds))
+            .count();
 
-    // Polled every drain slice (50 ms): a cancel kills the generator's group
-    // within one slice instead of leaving the session worker parked until the
-    // source's timeout (600 s by default).
+    // Polled every drain slice (DrainOptions::slice_ms): a cancel kills the
+    // generator's group within one slice instead of leaving the session worker
+    // parked until the source's timeout.
     const auto drained = sidecar::DrainAndReap(
         std::move(launched), std::move(sinks), options,
         [&exceeded_cap, &cancelled] { return exceeded_cap || (cancelled && cancelled()); });
@@ -538,7 +536,8 @@ public:
                     }
                 }
 
-                const std::size_t cap_bytes = source.cap_tokens * 4;
+                const std::size_t cap_bytes =
+                    source.cap_tokens * static_cast<std::size_t>(agent::kEstimatedBytesPerToken);
                 RunOutcome run =
                     RunProcess(argv, cwd, source.timeout_seconds, cap_bytes, cancelled);
                 if (run.cancelled) {
@@ -546,11 +545,11 @@ public:
                                                 source.name + "' ran; nothing was submitted");
                 }
                 if (run.exceeded_cap) {
-                    const std::size_t estimated = cap_bytes / 4;
                     if (source.on_exceed == CapAction::Fail) {
                         return CommandResult::Error(
                             "source '" + source.name + "' output exceeded the cap (~" +
-                            std::to_string(estimated) + " tokens); nothing was submitted");
+                            std::to_string(source.cap_tokens) +
+                            " tokens); nothing was submitted");
                     }
                     // Ask the operator. Over the cap there is no honest default:
                     // proceeding costs real tokens, aborting costs a keystroke.
@@ -558,7 +557,7 @@ public:
                     request.kind = "command_confirmation";
                     request.title = "output cap exceeded";
                     request.detail = "Source '" + source.name + "' produced more than ~" +
-                                     std::to_string(estimated) +
+                                     std::to_string(source.cap_tokens) +
                                      " tokens. Submit the composed prompt anyway?";
                     request.options = {"submit", "cancel"};
                     const auto answer = context.confirmations().RequestConfirmation(request);

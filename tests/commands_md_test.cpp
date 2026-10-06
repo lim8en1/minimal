@@ -644,22 +644,33 @@ TEST_CASE("commands-md: output_cap max:0 means zero tolerance, not uncapped",
     CHECK(fixture.submitted_turns().empty());
 }
 
-TEST_CASE("ParseCommandFile: an absurd timeout is clamped at parse time",
+TEST_CASE("ParseCommandFile: a large timeout is kept as declared",
           "[commands_md]") {
-    // Regression: RunProcess's remaining_ms() narrows timeout_seconds*1000
-    // milliseconds into an `int` for poll()'s deadline; a value near
-    // INT_MAX overflowed that cast to a negative int, which poll() reads as
-    // "wait forever" -- the opposite of a declared timeout. Checked at parse
-    // time directly: an execution-level test can't tell "clamped correctly"
-    // from "still broken" for a fast-finishing source, since both finish
-    // before either deadline is reached.
+    // No silent ceiling: an earlier 24h clamp guarded an int narrowing that
+    // no longer exists, and contradicted `timeout: 0` meaning no deadline.
     testing::TempDir dir;
     std::filesystem::create_directories(dir.path());
     std::ofstream(dir.path() / "big.md")
-        << "---\nsources:\n  x:\n    run: [\"echo\"]\n    timeout: 999999999\n---\n{x}\n";
+        << "---\nsources:\n  x:\n    run: [\"echo\"]\n    timeout: 2147483647\n---\n{x}\n";
     const auto spec = ParseCommandFile(dir.path() / "big.md", /*trusted=*/true);
     REQUIRE(spec.sources.size() == 1);
-    CHECK(spec.sources[0].timeout_seconds <= 86400);
+    CHECK(spec.sources[0].timeout_seconds == 2147483647);
+}
+
+TEST_CASE("commands-md: an INT_MAX timeout runs as a real deadline", "[commands_md]") {
+    // The widened arithmetic in RunProcess: seconds + CPU grace and seconds
+    // * 1000 must not overflow into a negative or zero (= no deadline) value.
+    testing::CommandFixture fixture;
+    commands::CommandRegistry registry;
+    testing::TempDir files;
+    auto commands = WriteAndLoad(
+        files.path(), "big.md",
+        "---\nsources:\n  x:\n    sh: \"echo ok\"\n    timeout: 2147483647\n---\n{x}\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "big", {});
+    CHECK(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE(fixture.submitted_turns().size() == 1);
 }
 
 TEST_CASE("commands-md: a timed-out source errors and submits nothing", "[commands_md]") {
@@ -907,7 +918,7 @@ TEST_CASE("/help lists the effective catalog: project commands in, non-shadowabl
 TEST_CASE("commands-md: cancelling kills a running generator and submits nothing",
           "[commands_md]") {
     // Regression: generators ran on the session worker with only their own
-    // timeout (600 s by default) to end them; a cancel did nothing.
+    // timeout to end them; a cancel did nothing.
     testing::CommandFixture fixture;
     testing::TempDir files;
     commands::CommandRegistry registry;

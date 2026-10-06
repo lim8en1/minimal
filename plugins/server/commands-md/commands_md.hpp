@@ -25,6 +25,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/commands/command.hpp"
+#include "policy.hpp"
 
 namespace minimal::commands_md {
 
@@ -32,9 +33,10 @@ namespace minimal::commands_md {
 // fields are addressable as {output:name.field}.
 enum class SourceOutput { kText, kJson };
 
-// output_cap behavior: pause and ask the operator (with a bytes/4 token
-// estimate), or fail outright. Truncation is deliberately absent -- half a
-// prompt costs the same as a whole one and does half the job.
+// output_cap behavior: pause and ask the operator (with a token estimate,
+// agent::kEstimatedBytesPerToken), or fail outright. Truncation is
+// deliberately absent -- half a prompt costs the same as a whole one and does
+// half the job.
 enum class CapAction { Confirm, Fail };
 
 struct Source {
@@ -44,8 +46,8 @@ struct Source {
     std::string script;             // sh form (/bin/sh -c)
     SourceOutput output = SourceOutput::kText;
     std::vector<std::string> fields;   // expected JSON fields when kJson
-    int timeout_seconds = 600;         // 0 = infinite
-    std::size_t cap_tokens = 50000;    // output cap, token estimate (bytes/4)
+    int timeout_seconds = kDefaultTimeoutSeconds;  // 0 = no deadline
+    std::size_t cap_tokens = kDefaultCapTokens;    // output cap, estimated tokens
     CapAction on_exceed = CapAction::Confirm;
 };
 
