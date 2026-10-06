@@ -297,41 +297,56 @@ Depends on nothing unbuilt.
 
 ## 4. TUI: core vs. pluggable
 
-This section is the spec the client leaves its seams against. It revises the `ARCHITECTURE.md` § *Client plugins* table in one direction: **more of the TUI is pluggable than that table allowed.** The principle is unchanged — the frame, the state machine, and the transport are the client's equivalent of core tools, and presentation is plugin surface — but presentation is most of the TUI, and most of it is now slotted.
+This section is the spec the client leaves its seams against; `ARCHITECTURE.md` § *Client plugins* defers to it. The client follows the same placement test as the server (`ARCHITECTURE.md` § *Core vs. plugin surface*): (1) can core run without it? yes → plugin; (2) if not, is it interchangeable — could a user write their own? yes → a slot with a bundled default; no → core. Plugins are trusted in-process code, so core enforces robustness and ordering, never distrust: "a plugin could misrender X" is no reason to keep X in core.
+
+The result: **client core is the machinery that hosts plugin-registered views.** All presentation is plugin surface. The split is being reached in phases; §4.2 gives each slot's status, and a default marked *moving* still lives in core.
 
 ### 4.1 What stays core
 
-- **Frame + shell**: `app.cpp` assembly, `ResizableSplit` proportions, the modal stack, the tab model, tab states/attention *derivation from wire events*, ordering key, group lifecycle, navigation.
-- **Transport + state**: `SessionClient` (demux by `session_id`, drain-before-`Finish`, attach obligations), `SessionState`/`AppState`, scrollback virtualization against `GetMessages`, the streaming buffer lifecycle.
-- **Input**: the prompt-editor shell (multiline input, keyboard-protocol handling). Completion content comes from the server (the command catalog, `@`-mention resolution through the server's `MentionResolver` slot); there is no client-side completion registry, and the editor itself is not pluggable.
-- **Security UI**: the permission/confirmation modal — never pluggable, under any circumstance. The consent-scoping wording obligations are core-owned.
-- **The plugin host**: registries, slot routing, fallback rendering when a slot's plugin is disabled.
+- **State + transport**: `SessionClient` (demux by `session_id`, drain-before-`Finish`, attach obligations), `SessionState`/`AppState`, the tab model, tab states/attention *derivation from wire events*, ordering key, group lifecycle, scrollback virtualization against `GetMessages`, the streaming buffer lifecycle.
+- **Composition**: the frame layout (`app.cpp`, `ResizableSplit` proportions), one modal stack with fixed layering (the prompt layer topmost, §4.3), panel focus and Escape routing (`EscapeAware`), keybinding dispatch (`keybindings.json` → core actions and view ids).
+- **Orchestration**: the verbs a plugin invokes instead of touching state — new/open/close tab, set a tab's model or agent (the staging for a tab without a session stays inside), delete a session, switch theme (`HostActions`, planned) — and the reads behind them (`ClientApi`: models, agents, sessions, subagents — planned beside today's `GetMessages` and the plugin channel).
+- **The plugin host**: registries, name resolution and collisions, required-slot checks at startup, `OnShow`/`OnTheme`, redraw requests from worker threads, throw containment.
+- **The prompt mechanism**, not its rendering: register-before-publish, first answer wins, timeout, cancel, the tab's Waiting state, fail-closed when nothing renders a prompt.
+- **Shared vocabulary**: theme roles and loading; the SDK contracts plugins render against (widget specs and callbacks, and the pure models beside them — `schema_form_model`, `model_picker_model`).
 
-The "write a different frontend" tier shrinks to exactly this list.
+The "write a different frontend" tier shrinks to exactly this list. Not on it, unlike earlier revisions of this section: the prompt editor and the permission/confirmation modal — both now slots (§4.2).
 
 ### 4.2 The slot surface
 
-| Slot | Kind | Default |
-|---|---|---|
-| Tool-result renderer (keyed by tool name) | additive | generic collapsible row |
-| Display-kind renderer (keyed by display-payload kind) | additive | core renderers for the core kinds |
-| Message-kind presentation (agent/thinking/tool-activity/system) | additive | core defaults (§ *Message-kind rendering*) |
-| Chat surface (the whole chat view) | **exclusive**, first registration wins | core chat view |
-| Status-bar segments (keyed by segment id) | additive; **format string orders/selects** | core segments |
-| Markdown engine | **exclusive** | md4c adapter |
-| Syntax-highlight languages (keyed by language) | additive, collisions fatal | vendored grammars |
-| Views (Panel/Modal) | additive | — |
-| MentionResolver (server-side) | exclusive | `PrefixMentionResolver` — live: `SessionServiceImpl` resolves through `MentionResolverRegistry::Active()` |
-| Attention source | additive | core event derivation |
-| Theme sections (config) | namespaced roles | core roles |
+| Slot | Kind | Default | Status |
+|---|---|---|---|
+| Tool-result renderer (keyed by tool name) | additive | generic collapsible row | live |
+| Display-kind renderer (keyed by display-payload kind) | additive | core renderers for the core kinds | live; default moving to a bundled plugin |
+| Message-kind presentation (agent/thinking/tool-activity/system) | additive | core defaults (§ *Message-kind rendering*) | live; default moving |
+| Chat surface (the whole chat view) | **exclusive, required** | core chat view | live; default moving |
+| Markdown engine | **exclusive**; absent → plain text | md4c adapter | live; default moving |
+| Syntax-highlight languages (keyed by language) | additive, collisions fatal | vendored grammars | live; default moving |
+| Prompt renderers (keyed by prompt kind) | additive; `permission` and `confirmation` **required** | plugin kinds: their pair's view; core kinds: core modals | live for plugin kinds; core kinds planned |
+| Widget kit (menus, modal chrome, schema form, model selector, confirm dialog) | **exclusive, required** | bundled `ui-kit` | planned |
+| Prompt editor | **exclusive, required** | core prompt editor | planned — its own design pass |
+| Tab bar | **exclusive** | core tab bar | planned |
+| Status-bar segments (keyed by segment id) | additive; **format string orders/selects** | core segments | live; default moving |
+| Views (Panel/Modal) | additive | — | live; the core pickers (session, model, agent, subagent, theme) and help overlays move here as bundled views |
+| MentionResolver (server-side) | exclusive | `PrefixMentionResolver` — live: `SessionServiceImpl` resolves through `MentionResolverRegistry::Active()` | live |
+| Attention source | additive | core event derivation | live |
+| Theme sections (config) | namespaced roles | core roles | live |
 
-Details for the new slots:
+**Slot semantics (planned).** Today an exclusive slot is first-registration-wins with a warning, and core registers its default only into an empty slot. With the defaults in bundled plugins — which load first — that would make every default unbeatable, so: two plugins claiming an exclusive slot is **fatal at startup, naming both** (the additive collision rule), and replacing a bundled default means disabling it in `client-plugins.json` (the server's tool-replacement path). A **required** slot left empty after load refuses startup, naming the slot and the bundled plugin that fills it — the server's "no provider" rule. An optional slot left empty degrades: no tab bar, plain-text markdown.
+
+**Widget kit.** The SDK defines the contracts — `FilterableMenuSpec`/callbacks and `MenuRow`, `SchemaFormState`/callbacks, the model selector's spec, modal chrome, the confirm dialog — with the pure models beside them; the kit implements the factories. A consumer calls the slot, never another plugin, so no plugin depends on another, and replacing the kit restyles every view built on it at once. The kit holds no data path: a consumer injects its fetch (the model selector takes a function answering the model list, so core's own uses and a plugin's `ClientApi` feed the same widget).
+
+**Prompts, permission included.** `PermissionRequest` and `ConfirmationRequest` stay core's own questions on the wire (`ARCHITECTURE.md` § *Asking the user*); only their rendering moves, as two more prompt-renderer kinds a bundled plugin fills. The renderer's obligations are part of the slot's contract, like the markdown engine's streaming one: show the grant labels verbatim (they carry the blanket wording, § *Consent scoping*), never answer on the user's behalf. Core keeps the layering (the prompt layer is topmost, §4.3), the timeout and first-answer-wins, and fails closed: a `permission` renderer that throws answers deny.
+
+**Prompt editor.** The largest interface in the TUI — keyboard-protocol handling, bracketed paste, completion over the server's command catalog and `@`-mentions. Interchangeable (a vim mode is the obvious replacement), so a slot; its contract gets its own design pass before it is cut.
+
+Details for the other slots:
 
 **Message-kind presentation.** Renderers keyed by message kind, same shape as `ToolResultRenderer`; core supplies the defaults the message-kind table already specifies. A plugin that claims `Thinking` or `ToolActivity` also draws the current turn's LIVE rows of that kind (`RowRenderContext::live` set: the text may be a partial prefix, and the row re-renders as it grows); live assistant text stays core's, which streams it through the markdown engine. The data plane — event demux, virtualization, streaming buffering — stays core regardless of who renders a row.
 
 Rows from an assistant message carry `ChatRow::agent` / `ChatRow::model` — the agent preset and `<provider>/<model>` that produced it, persisted per message (`StoredMessage.agent_preset`/`model`, schema v9; empty = unknown). `AssistantLabel()` formats the core speaker label (`build (sonnet-4-5)`). The synthetic `ChatRowKind::Switch` row sits before the first assistant message whose agent or model differs from the previous one's (`switch_from_agent`/`switch_from_model` hold the old pair); it is never collapsible, and a plugin may claim it like any other kind.
 
-**Chat surface — the one exclusive client slot.**
+**Chat surface.**
 
 ```cpp
 // src/client/plugins/include/minimal/client/plugins/registries.hpp
@@ -350,7 +365,7 @@ public:
 };
 ```
 
-Exclusive because the interface is deliberately big — streaming lifecycle, scrollback, focus and attention integration — and this repo's rule is that an interface which grew that big needs a reason; a wholesale chat replacement is the reason, taken once. Message-kind slots cover the common case; this covers "a whole different chat UI". Second registration warns and is ignored (the `MentionResolver`/`AuthProvider` pattern); with none registered, the core chat view stands.
+Exclusive because the interface is deliberately big — streaming lifecycle, scrollback, focus and attention integration — and this repo's rule is that an interface which grew that big needs a reason; a wholesale chat replacement is the reason. The prompt editor is the only other slot expected to grow this big, and gets the same scrutiny (§4.2). Message-kind slots cover the common case; this covers "a whole different chat UI". Today a second registration warns and is ignored and, with none registered, the core chat view stands; planned: the default moves to a bundled plugin under the slot semantics above.
 
 **Status-bar segments.**
 
@@ -412,7 +427,7 @@ A `diff` row starts expanded (it is the review surface for a change the model ju
 1. **Command enumeration is a wire gap.** `ListCommands` — unary, returning name/summary/usage/kind/display/read-only per live command. The global half cannot change mid-connection (plugins load at startup), but project commands can (edited `commands/*.md`), and tabs can sit in different projects: the TUI pulls it per tab scope (`session_id`, or a sessionless tab's `project_root`) through `CommandCatalogCache` -- answering from the last known list and refetching in the background at most every 2 s while autocomplete or `/help` is open. Without it, plugin commands are invisible to `/`-autocomplete.
 2. **Redefining bundled tools is allowed, and rendering core tools is allowed.** Bundled tools are themselves plugins — disabling and replacing via `plugins.json` is the designed path — and a third-party renderer for a *core* tool (a diff view for `edit`) is as legitimate as one for a plugin tool. Duplicate registrations are fatal; a renderer's key is a slot (it names the tool it draws), so a duplicate is resolved by disabling one plugin rather than by an alias.
 3. **Client plugins own their data path.** A plugin view wanting live data subscribes itself through the generic `PluginCall`/`PluginSubscribe` channel; core transports and never interprets plugin payloads.
-4. **Plugin modals never preempt the permission modal.** Permission/confirmation prompts are always topmost; a plugin modal cannot mask one or steal its input. Invariant, tested.
+4. **The prompt layer is topmost.** Permission, confirmation and plugin prompts render above every view; no view can mask one or steal its input. A layering rule the host enforces whoever renders the prompt -- not a trust boundary against plugins (§4 preamble). Invariant, tested.
 
 ### 4.4 Command results never enter the chat
 
