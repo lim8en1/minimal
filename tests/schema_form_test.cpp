@@ -137,6 +137,30 @@ TEST_CASE("the form: toggle, cycle, edit, reset; the editor claims Escape", "[sc
     CHECK(back);
 }
 
+TEST_CASE("Enter on an untouched secret does not erase it", "[schema_form][regression]") {
+    // The bug: the editor starts a secret empty (its literal is never put
+    // back on screen), so Enter without typing saved "" over the stored key.
+    const auto rows = client::BuildFormRows(kDescribe);
+    CHECK_FALSE(client::SubmitSaves(rows[4], ""));
+    CHECK(client::SubmitSaves(rows[4], "sk-new"));
+    CHECK(client::SubmitSaves(rows[3], ""));  // a non-secret's empty text is a value
+
+    std::vector<std::pair<std::string, std::string>> sets;
+    client::SchemaFormState state{"plugins.d/sample.json", kDescribe, "", false, 1};
+    const auto theme = TestTheme();
+    auto form = client::MakeSchemaForm(
+        [&] { return state; },
+        {.on_set = [&](const std::string& p, const std::string& t) { sets.emplace_back(p, t); }},
+        theme);
+    for (int i = 0; i < 3; ++i) minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
+    minimal_test::SendEvent(form, ftxui::Event::Return);  // net.api_key: the editor, empty
+    minimal_test::SendEvent(form, ftxui::Event::Return);  // nothing typed
+    CHECK(sets.empty());
+    const auto* aware = dynamic_cast<const client::EscapeAware*>(form.get());
+    REQUIRE(aware != nullptr);
+    CHECK_FALSE(aware->WantsEscape());  // the editor closed all the same
+}
+
 TEST_CASE("the plugin modal host gives Escape to an editor that wants it, else closes",
           "[schema_form][modal_host]") {
     client::SchemaFormState state{"t", kDescribe, "", false, 1};

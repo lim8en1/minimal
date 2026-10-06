@@ -134,7 +134,9 @@ private:
         if (editing_) {
             if (event == Event::Return) {
                 editing_ = false;
-                if (row != nullptr && callbacks_.on_set) callbacks_.on_set(row->path, edit_text_);
+                if (row != nullptr && callbacks_.on_set && SubmitSaves(*row, edit_text_)) {
+                    callbacks_.on_set(row->path, edit_text_);
+                }
                 return true;
             }
             if (event == Event::Escape) {

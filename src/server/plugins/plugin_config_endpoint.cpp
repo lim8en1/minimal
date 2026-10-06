@@ -29,6 +29,13 @@ PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
         entry.enabled = record.status != LoadStatus::Disabled;
         entry.loaded = record.ok();
         entry.symbols = record.config;
+        // A disabled plugin was never opened, so its record has no symbols.
+        // Opened here for them alone (no registration runs), so its config
+        // can be edited before it is switched on -- as the CLI can.
+        if (record.status == LoadStatus::Disabled) {
+            const auto inspected = InspectPluginConfig(record.file);
+            if (inspected.error.empty()) entry.symbols = inspected.config;
+        }
         if (entry.symbols.schema != nullptr) {
             try {
                 entry.symbols.schema(entry.schema);
@@ -42,6 +49,13 @@ PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
         }
         entries_[entry.name] = std::move(entry);
     }
+}
+
+json PluginConfigEndpoint::Pending(const Entry& entry, const json& file) {
+    // A disabled plugin runs nothing: its whole file applies when it is
+    // switched on, so nothing is "waiting for a restart".
+    if (!entry.enabled) return json::array();
+    return common::DiffConfig(entry.schema, entry.applied, file).paths;
 }
 
 PluginConfigEndpoint::Entry& PluginConfigEndpoint::Require(const json& request) {
@@ -79,7 +93,7 @@ json PluginConfigEndpoint::Describe(const Entry& entry) const {
             {"config", file},
             {"effective", std::move(effective)},
             {"unused", std::move(unused)},
-            {"pending", common::DiffConfig(entry.schema, entry.applied, file).paths}};
+            {"pending", Pending(entry, file)}};
 }
 
 json PluginConfigEndpoint::Apply(Entry& entry, const json& file) {
@@ -97,6 +111,8 @@ json PluginConfigEndpoint::Apply(Entry& entry, const json& file) {
         entry.applied = file;
         return {{"applied", "none"}, {"changed", json::array()}, {"unused", std::move(unused)}};
     }
+    // A disabled plugin takes the file as it is when it is switched on.
+    if (!entry.enabled) return {{"applied", "disabled"}, {"changed", change.paths}};
     // Live only when the plugin is running, every changed field is live, and
     // it takes the new config; anything else waits for a restart.
     if (entry.loaded && change.all_live && entry.symbols.reconfigure != nullptr) {
@@ -144,7 +160,7 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
                     try {
                         const json file = ReadFile(entry);
                         row["set"] = file.empty() ? 0 : file.flatten().size();
-                        row["pending"] = common::DiffConfig(entry.schema, entry.applied, file).paths;
+                        row["pending"] = Pending(entry, file);
                     } catch (const std::exception& e) {
                         row["error"] = e.what();
                     }

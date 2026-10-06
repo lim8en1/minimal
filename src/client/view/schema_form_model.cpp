@@ -90,6 +90,10 @@ std::string EditText(const FormRow& row) {
     return row.value.dump();
 }
 
+bool SubmitSaves(const FormRow& row, const std::string& text) {
+    return !(row.field.value("secret", false) && text.empty());
+}
+
 int NextFieldRow(const std::vector<FormRow>& rows, int from, int step) {
     for (int i = from + step; i >= 0 && i < static_cast<int>(rows.size()); i += step) {
         if (!rows[i].header) return i;

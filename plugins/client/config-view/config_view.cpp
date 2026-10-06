@@ -21,6 +21,7 @@ std::pair<std::string, bool> Outcome(const std::string& path, const json& answer
     if (answer.contains("error")) return {answer.value("error", std::string()), true};
     const std::string applied = answer.value("applied", "");
     if (applied == "live") return {path + " saved -- applied, no restart needed", false};
+    if (applied == "disabled") return {path + " saved -- applies when the plugin is enabled", false};
     if (applied == "restart") {
         std::string text = path + " saved -- restart the server to apply";
         if (answer.contains("reconfigure_error")) {

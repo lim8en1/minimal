@@ -17,10 +17,11 @@
 //   unset {name, key}
 //   apply {name}              re-read the file (after an edit elsewhere -- the
 //                             CLI) and apply it
-// set/unset/apply answer {applied: "live" | "restart" | "none", changed: [...]}
-// -- "live" when every changed field is live and the plugin took it
-// (minimal_plugin_reconfigure); "restart" when the change waits for one;
-// "none" when nothing the plugin uses changed (with "unused": {path: why}
+// set/unset/apply answer {applied: "live" | "restart" | "disabled" | "none",
+// changed: [...]} -- "live" when every changed field is live and the plugin
+// took it (minimal_plugin_reconfigure); "restart" when the change waits for
+// one; "disabled" when the plugin is switched off (it takes the file as it is
+// when enabled, so its "pending" is always empty); "none" when nothing the plugin uses changed (with "unused": {path: why}
 // for a field saved while its condition is unmet).
 // A refusal answers {error: "..."}.
 //
@@ -65,6 +66,8 @@ private:
     };
 
     Entry& Require(const nlohmann::json& request);
+    // The paths whose file value the running plugin does not have yet.
+    static nlohmann::json Pending(const Entry& entry, const nlohmann::json& file);
     std::filesystem::path PathOf(const Entry& entry) const;
     nlohmann::json ReadFile(const Entry& entry) const;
     nlohmann::json Describe(const Entry& entry) const;

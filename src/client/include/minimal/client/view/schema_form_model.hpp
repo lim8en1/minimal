@@ -48,6 +48,11 @@ std::string NextValueText(const FormRow& row);
 // A secret starts empty: its literal is never put back on screen.
 std::string EditText(const FormRow& row);
 
+// Whether Enter in the editor saves `text`. An empty secret is a cancel, not
+// a save: the editor starts a secret empty, so saving "" would erase the
+// configured key ('d' is how a secret goes back to its default).
+bool SubmitSaves(const FormRow& row, const std::string& text);
+
 // The next selectable (non-header) row from `from` moving by `step`; `from`
 // when there is none that way.
 int NextFieldRow(const std::vector<FormRow>& rows, int from, int step);

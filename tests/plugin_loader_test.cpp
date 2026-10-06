@@ -1218,6 +1218,36 @@ TEST_CASE("the plugins endpoint: a field unused in the current mode has no effec
     CHECK(described.at("pending").empty());
 }
 
+TEST_CASE("the plugins endpoint configures a disabled plugin without running it",
+          "[plugin_loader][config_endpoint][regression]") {
+    // The bug: a disabled plugin is never opened, so its record had no config
+    // symbols and the endpoint called it unconfigurable -- /config hid it.
+    TempDir config_dir;
+    Harness h;
+    PluginCandidate disabled = Enabled("fixture-config");
+    disabled.enabled = false;
+    const std::vector<PluginCandidate> candidates = {disabled};
+    const auto records = h.loader.LoadAll(candidates);
+    REQUIRE(records[0].status == LoadStatus::Disabled);
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, candidates);
+
+    const auto list = CallJson(endpoint, "list", {});
+    REQUIRE(list.size() == 1);
+    CHECK(list[0].at("configurable") == true);
+    CHECK(list[0].at("enabled") == false);
+
+    // Saved and validated by the plugin's own parser; nothing is pending,
+    // since nothing runs -- the file applies when the plugin is enabled.
+    auto answer = CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "mode"},
+                                             {"text", "slow"}});
+    CHECK(answer.at("applied") == "disabled");
+    CHECK(CallJson(endpoint, "describe", {{"name", "fixture-config"}}).at("pending").empty());
+    answer = CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "limit"},
+                                        {"value", 0}});
+    CHECK(answer.contains("error"));
+    CHECK(h.tool_registry.size() == 0);  // inspected, never registered
+}
+
 TEST_CASE("the plugins endpoint applies an edit made elsewhere (the CLI)",
           "[plugin_loader][config_endpoint]") {
     TempDir config_dir;
