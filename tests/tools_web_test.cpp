@@ -1,16 +1,10 @@
 // tools-web: URL policy (SSRF guard), HTML->text extraction, and the two
 // tools (web_fetch, web_search). The tool tests run against a real loopback
-// HTTP server (same pattern as http_client_test.cpp's LoopbackServer) --
-// exactly the layer a fake would paper over.
+// HTTP server (support/loopback_http_server.hpp) -- exactly the layer a fake
+// would paper over.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <unistd.h>
 
 #include <chrono>
 #include <cstring>
@@ -22,6 +16,7 @@
 
 #include "fetch_tool.hpp"
 #include "html_text.hpp"
+#include "loopback_http_server.hpp"
 #include "search_tool.hpp"
 #include "url_policy.hpp"
 #include "web_settings.hpp"
@@ -31,86 +26,8 @@ using namespace minimal::tools_web;
 
 namespace {
 
-// One-shot loopback HTTP server, one response per accepted connection --
-// mirrors http_client_test.cpp's LoopbackServer.
-class LoopbackServer {
-public:
-    explicit LoopbackServer(std::vector<std::string> responses) : responses_(std::move(responses)) {
-        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        REQUIRE(listen_fd_ >= 0);
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        address.sin_port = 0;
-        REQUIRE(::bind(listen_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
-        REQUIRE(::listen(listen_fd_, 1) == 0);
-        socklen_t length = sizeof(address);
-        REQUIRE(::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&address), &length) == 0);
-        port_ = ntohs(address.sin_port);
-        thread_ = std::thread([this] { Serve(); });
-    }
-
-    ~LoopbackServer() {
-        if (listen_fd_ >= 0) ::close(listen_fd_);
-        if (thread_.joinable()) thread_.join();
-    }
-
-    std::string url(std::string_view path = "/") const {
-        return "http://127.0.0.1:" + std::to_string(port_) + std::string(path);
-    }
-
-private:
-    static void SendAll(int fd, const std::string& bytes) {
-#ifdef SO_NOSIGPIPE
-        int one = 1;
-        (void)::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
-#endif
-        std::size_t sent = 0;
-        while (sent < bytes.size()) {
-#ifdef MSG_NOSIGNAL
-            ssize_t n = ::send(fd, bytes.data() + sent, bytes.size() - sent, MSG_NOSIGNAL);
-#else
-            ssize_t n = ::write(fd, bytes.data() + sent, bytes.size() - sent);
-#endif
-            if (n <= 0) return;
-            sent += static_cast<std::size_t>(n);
-        }
-    }
-
-    void Serve() {
-        timeval tv{5, 0};
-        (void)::setsockopt(listen_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        for (const auto& response : responses_) {
-            int fd = ::accept(listen_fd_, nullptr, nullptr);
-            if (fd < 0) return;
-            std::string request;
-            char buffer[4096];
-            while (request.find("\r\n\r\n") == std::string::npos) {
-                ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
-                if (n <= 0) break;
-                request.append(buffer, static_cast<std::size_t>(n));
-            }
-            SendAll(fd, response);
-            ::close(fd);
-        }
-    }
-
-    int listen_fd_ = -1;
-    int port_ = 0;
-    std::vector<std::string> responses_;
-    std::thread thread_;
-};
-
-std::string HttpResponseOf(int status, std::string_view status_text, std::string_view content_type,
-                           std::string_view body, std::vector<std::string> extra_headers = {}) {
-    std::string out = "HTTP/1.1 " + std::to_string(status) + " " + std::string(status_text) + "\r\n";
-    if (!content_type.empty()) out += "Content-Type: " + std::string(content_type) + "\r\n";
-    out += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-    for (const auto& header : extra_headers) out += header + "\r\n";
-    out += "Connection: close\r\n\r\n";
-    out += std::string(body);
-    return out;
-}
+using LoopbackServer = minimal::test::LoopbackHttpServer;
+using minimal::test::HttpResponseOf;
 
 tools::ToolContext Context() {
     tools::ToolContext ctx{common::DefaultLogger()};
@@ -653,6 +570,26 @@ TEST_CASE("web_search: a configured backend's results are formatted", "[tools_we
     CHECK(result.content_text.find("Example") != std::string::npos);
     CHECK(result.content_text.find("https://example.com") != std::string::npos);
     CHECK(result.content_text.find("a page") != std::string::npos);
+}
+
+TEST_CASE("web_search: SearXNG's 'content' is the snippet; 'snippet' wins when both are present",
+         "[tools_web][search]") {
+    LoopbackServer server({HttpResponseOf(
+        200, "OK", "application/json",
+        R"({"query":"test","number_of_results":2,"results":[
+              {"title":"Searx","url":"https://example.com/a","content":"from content","engine":"ddg"},
+              {"title":"Both","url":"https://example.com/b","content":"loser","snippet":"winner"}
+            ]})")});
+
+    WebSettings settings;
+    settings.search_api_url = server.url() + "?format=json";
+    auto tool = MakeWebSearchTool(settings, net::HttpClient{});
+    auto ctx = Context();
+    const auto result = tool->execute({{"query", "test"}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.find("from content") != std::string::npos);
+    CHECK(result.content_text.find("winner") != std::string::npos);
+    CHECK(result.content_text.find("loser") == std::string::npos);
 }
 
 TEST_CASE("web_search: a row with a wrong-typed field degrades, not fails the whole search",

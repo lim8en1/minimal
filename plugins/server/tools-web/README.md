@@ -52,11 +52,36 @@ per tool. Every field is optional; an unknown field (top level, `fetch` or
 | `fetch.default_max_bytes` | `262144` (256 KiB) | Text returned when the model supplies no `max_bytes`. |
 | `fetch.max_bytes` | `2097152` (2 MiB) | Absolute ceiling on the model-supplied `max_bytes`; a ceiling below the default is raised, not honoured. |
 | `fetch.allow_private_hosts` | `false` | Loopback/private/link-local hosts (including the cloud-metadata address `169.254.169.254`) are refused by default — the URL comes from the MODEL. Set true only for a trusted internal network. |
-| `search.api_url` | *(empty = unconfigured)* | Queried as `GET <url>?q=<query>&count=<n>`; must return `{"results": [{"title", "url", "snippet"}, ...]}`. SearXNG's JSON API is close to this shape; a vendor whose API differs needs a thin adapter in front of it. |
+| `search.api_url` | *(empty = unconfigured)* | Queried as `GET <url>?q=<query>&count=<n>` (`&q=` when the URL already has a query string); must return `{"results": [{"title", "url", "snippet"}, ...]}`, with `content` accepted in place of `snippet`. SearXNG works directly (below); a vendor whose API differs needs a thin adapter in front of it. |
 | `search.api_key` | *(unset)* | A key reference (docs/CONFIGURATION.md § Secrets: `"secret:NAME"`, `"env:NAME"`, or a literal), sent as `Authorization: Bearer <key>`. A stored secret is read per search; an `"env:"` variable that is UNSET is a fail-loud startup error. Unset = no header (a local SearXNG needs none). |
 | `search.default_max_results` | `5` | Result count when the model supplies none. |
 | `search.max_results` | `20` | Absolute ceiling. |
 | `search.timeout_ms` | `10000` | Hard wall-clock bound. |
+
+### SearXNG
+
+[SearXNG](https://docs.searxng.org) is a self-hosted metasearch engine (it
+queries Google, Bing, DuckDuckGo, ... and merges the results); no API key.
+
+```sh
+docker run -d -p 8888:8080 -v ./searxng:/etc/searxng searxng/searxng
+```
+
+Its JSON output is off by default — every query is a 403 until
+`./searxng/settings.yml` enables it (restart the container after):
+
+```yaml
+search:
+  formats: [html, json]
+```
+
+Then point `api_url` at it with `format=json` in the URL:
+
+```json
+"search": { "api_url": "http://localhost:8888/search?format=json" }
+```
+
+SearXNG ignores `count`; the result list is capped on this side instead.
 
 ### Per-host permissions
 

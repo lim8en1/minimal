@@ -170,7 +170,8 @@ public:
             if (!result.is_object()) continue;
             const std::string title = SafeString(result, "title", "");
             const std::string result_url = SafeString(result, "url", "");
-            const std::string snippet = SafeString(result, "snippet", "");
+            // SearXNG names the snippet "content"; "snippet" wins when both are present.
+            const std::string snippet = SafeString(result, "snippet", SafeString(result, "content", ""));
             if (result_url.empty()) continue;   // a result naming no URL is useless to the model
             out << (count + 1) << ". " << (title.empty() ? result_url : title) << "\n" << result_url;
             if (!snippet.empty()) out << "\n" << snippet;
