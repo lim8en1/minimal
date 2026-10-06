@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "url_policy.hpp"
+#include "minimal/common/http_status.hpp"
 
 namespace minimal::tools_web {
 namespace {
@@ -143,7 +144,7 @@ public:
         } catch (const net::HttpError& error) {
             return Error(std::string("web_search: ") + error.what());
         }
-        if (response.status < 200 || response.status >= 300) {
+        if (!common::IsSuccessStatus(response.status)) {
             return Error("web_search: backend returned HTTP " + std::to_string(response.status));
         }
 

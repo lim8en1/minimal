@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 #include "minimal/common/units.hpp"
 #include "minimal/common/clock.hpp"
+#include "minimal/common/http_status.hpp"
 
 namespace minimal::provider_openai {
 
@@ -89,20 +90,20 @@ llm::LlmError ClassifyHttpFailure(int status, const std::string& body, const std
     std::string message = ExtractMessage(body, status);
     std::optional<std::chrono::milliseconds> retry_after = ParseRetryAfter(headers);
 
-    if (status == 429) {
+    if (status == common::kHttpTooManyRequests) {
         return llm::LlmError(llm::LlmErrorCategory::RateLimit, message, status, retry_after);
     }
-    if (status == 401 || status == 403) {
+    if (status == common::kHttpUnauthorized || status == common::kHttpForbidden) {
         return llm::LlmError(llm::LlmErrorCategory::AuthError, message, status);
     }
-    if (status == 408) {
+    if (status == common::kHttpRequestTimeout) {
         // Request Timeout is the HTTP analogue of the transport timeouts the
         // loop retries -- Azure-fronted gateways emit it routinely -- and used
         // to fall to RequestError, non-retryable, failing a whole turn on one
         // transient gateway timeout.
         return llm::LlmError(llm::LlmErrorCategory::Transport, message, status, retry_after);
     }
-    if (status >= 500) {
+    if (status >= common::kHttpInternalServerError) {
         return llm::LlmError(llm::LlmErrorCategory::ServerError, message, status, retry_after);
     }
     return llm::LlmError(llm::LlmErrorCategory::RequestError, message, status);

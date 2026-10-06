@@ -8,6 +8,7 @@
 #include <string>
 
 #include <nlohmann/json.hpp>
+#include "minimal/common/http_status.hpp"
 
 
 namespace minimal::memory {
@@ -72,7 +73,7 @@ std::vector<Embedding> HttpEmbeddingFunction::EmbedChunk(const std::vector<std::
     request.connect_timeout = std::chrono::milliseconds(5000);
 
     const net::HttpResponse response = http_.Post(request);
-    if (response.status < 200 || response.status >= 300) {
+    if (!common::IsSuccessStatus(response.status)) {
         throw std::runtime_error("embedding backend HTTP " + std::to_string(response.status) +
                                  " from " + settings_.api_base + ": " +
                                  (response.body.size() > 256

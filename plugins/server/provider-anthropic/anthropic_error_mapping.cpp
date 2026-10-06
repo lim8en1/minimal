@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 #include "minimal/common/units.hpp"
+#include "minimal/common/http_status.hpp"
 
 namespace minimal::provider_anthropic {
 
@@ -77,10 +78,10 @@ std::optional<llm::LlmErrorCategory> CategoryForErrorType(const std::string& typ
 }
 
 llm::LlmErrorCategory CategoryForStatus(int status) {
-    if (status == 429) return llm::LlmErrorCategory::RateLimit;
-    if (status == 401 || status == 403) return llm::LlmErrorCategory::AuthError;
-    if (status == 408) return llm::LlmErrorCategory::Transport;   // gateway timeout analogue
-    if (status >= 500) return llm::LlmErrorCategory::ServerError;
+    if (status == common::kHttpTooManyRequests) return llm::LlmErrorCategory::RateLimit;
+    if (status == common::kHttpUnauthorized || status == common::kHttpForbidden) return llm::LlmErrorCategory::AuthError;
+    if (status == common::kHttpRequestTimeout) return llm::LlmErrorCategory::Transport;   // gateway timeout analogue
+    if (status >= common::kHttpInternalServerError) return llm::LlmErrorCategory::ServerError;
     return llm::LlmErrorCategory::RequestError;
 }
 

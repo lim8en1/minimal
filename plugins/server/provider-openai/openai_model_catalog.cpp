@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "openai_error_mapping.hpp"
+#include "minimal/common/http_status.hpp"
 
 namespace minimal::provider_openai {
 namespace {
@@ -130,7 +131,7 @@ std::vector<llm::DiscoveredModel> OpenAiModelCatalog::List(const llm::ProviderCo
     }
 
     const net::HttpResponse response = http_.Get(request);
-    if (response.status < 200 || response.status >= 300) {
+    if (!common::IsSuccessStatus(response.status)) {
         // Classified the same way a chat call against the same backend would
         // be, so a 401 from a stale key reads as an auth error, not "catalog
         // failed" -- and Retry-After on a 429 survives into the message.

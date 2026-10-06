@@ -28,6 +28,7 @@
 #include "minimal/net/http_client.hpp"
 #include "minimal/net/sse_parser.hpp"
 #include "minimal/common/units.hpp"
+#include "minimal/common/http_status.hpp"
 
 namespace minimal::mcp {
 
@@ -746,7 +747,7 @@ private:
             std::lock_guard<std::mutex> lock(slot->mu);
             if (slot->done) {
                 message = *slot->value;
-            } else if (*status < 200 || *status >= 300) {
+            } else if (!common::IsSuccessStatus(*status)) {
                 *error = "MCP server returned HTTP " + std::to_string(*status) +
                          (buffer->empty() ? std::string() : ": " + buffer->substr(0, 200));
                 return false;
@@ -777,7 +778,7 @@ private:
                                     .dump();
         try {
             const net::HttpResponse response = session_.Post(BuildRequest(body));
-            if (response.status < 200 || response.status >= 300) {
+            if (!common::IsSuccessStatus(response.status)) {
                 error = "MCP server returned HTTP " + std::to_string(response.status) +
                         " for " + method;
                 return false;

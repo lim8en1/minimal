@@ -5,6 +5,7 @@
 #include "minimal/llm/json_depth.hpp"
 #include "minimal/net/sse_parser.hpp"
 #include "minimal/common/units.hpp"
+#include "minimal/common/http_status.hpp"
 #include "openai_error_mapping.hpp"
 #include "openai_request.hpp"
 #include "openai_response.hpp"
@@ -72,7 +73,7 @@ llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
         throw ClassifyTransportFailure(error);
     }
 
-    if (http_response.status < 200 || http_response.status >= 300) {
+    if (!common::IsSuccessStatus(http_response.status)) {
         throw ClassifyHttpFailure(http_response.status, http_response.body, http_response.headers);
     }
 
@@ -111,7 +112,7 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
     // even if the header-vector copy throws) for rethrow_pending_if_any()
     // once StreamPost unwinds.
     auto on_headers = [&](int status, const std::vector<net::HttpHeader>& headers) {
-        is_error_status = status < 200 || status >= 300;
+        is_error_status = !common::IsSuccessStatus(status);
         response_status = status;
         try {
             response_headers = headers;  // vector copy -- allocation can throw

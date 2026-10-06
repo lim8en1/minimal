@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/net/http_client.hpp"
+#include "minimal/common/http_status.hpp"
 
 namespace minimal::cost_tracker {
 namespace {
@@ -41,7 +42,7 @@ std::map<std::string, Rate> FetchSource(
         error = label + " fetch failed: " + err.what();
         return {};
     }
-    if (response.status < 200 || response.status >= 300) {
+    if (!common::IsSuccessStatus(response.status)) {
         error = label + " fetch failed: HTTP " + std::to_string(response.status);
         return {};
     }

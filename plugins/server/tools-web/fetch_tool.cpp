@@ -9,6 +9,7 @@
 #include "html_text.hpp"
 #include "minimal/common/utf8.hpp"
 #include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/http_status.hpp"
 #include "url_policy.hpp"
 
 namespace minimal::tools_web {
@@ -160,7 +161,7 @@ public:
                 return Error(std::string("web_fetch: ") + error.what());
             }
 
-            if (response.status >= 300 && response.status < 400) {
+            if (common::IsRedirectStatus(response.status)) {
                 const auto next = AbsoluteRedirectTarget(response.headers);
                 if (!next) {
                     return Error("web_fetch: redirect (HTTP " + std::to_string(response.status) +
@@ -179,7 +180,7 @@ public:
                 continue;
             }
 
-            if (response.status < 200 || response.status >= 300) {
+            if (!common::IsSuccessStatus(response.status)) {
                 return Error("web_fetch: HTTP " + std::to_string(response.status));
             }
 

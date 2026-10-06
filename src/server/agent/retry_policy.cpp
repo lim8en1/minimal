@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "minimal/common/policy.hpp"
+#include "minimal/common/http_status.hpp"
 
 namespace minimal::agent {
 
@@ -51,10 +52,8 @@ bool RetryPolicy::SleepForBackoff(int attempt,
 // the old behaviour (the turn fails).
 bool RetryPolicy::IsContextOverflow(const llm::LlmError& error) {
     if (error.category() != llm::LlmErrorCategory::RequestError) return false;
-    constexpr int kHttpBadRequest = 400;       // NOLINT(readability-magic-numbers): RFC 9110
-    constexpr int kHttpContentTooLarge = 413;  // NOLINT(readability-magic-numbers): RFC 9110
-    if (error.http_status() && *error.http_status() != kHttpBadRequest &&
-        *error.http_status() != kHttpContentTooLarge) {
+    if (error.http_status() && *error.http_status() != common::kHttpBadRequest &&
+        *error.http_status() != common::kHttpContentTooLarge) {
         return false;
     }
     std::string message = error.what();

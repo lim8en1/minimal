@@ -10,6 +10,7 @@
 
 #include "decision.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/http_status.hpp"
 
 namespace minimal::decision_advisor {
 namespace {
@@ -27,7 +28,8 @@ constexpr auto kSleepSlice = 25ms;
 // docs actually predict. Minus 501: llama-server's answer for a model that is
 // not a decision model, which no retry can change.
 bool IsRetryableStatus(int status) {
-    return status == 408 || status == 429 || (status >= 500 && status <= 599 && status != 501);
+    return status == common::kHttpRequestTimeout || status == common::kHttpTooManyRequests ||
+           (common::IsServerErrorStatus(status) && status != common::kHttpNotImplemented);
 }
 
 bool IsRetryableTransport(net::HttpErrorKind kind) {
@@ -210,7 +212,7 @@ SystemOneOutcome AskSystemOne(const net::HttpClient& http, const Settings& setti
         }
 
         status = response->status;
-        if (status >= 200 && status < 300) {
+        if (common::IsSuccessStatus(response->status)) {
             auto parsed = nlohmann::json::parse(response->body, nullptr,
                                                 /*allow_exceptions=*/false);
             if (parsed.is_discarded()) {
