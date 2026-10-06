@@ -204,11 +204,6 @@ struct KeyContext {
     // model.picker: previously reachable only via /model -- session.picker
     // and agent.picker each had a default binding, this did not.
     std::function<void()> open_model_picker;
-    // help.overlay: the keymap help overlay. Unlike the pickers above, this
-    // one is built once (not staged through a modal host) -- app.cpp's
-    // comment on keymap_help_view explains why (no async fetch to rebind
-    // for).
-    std::function<void()> open_keymap_help;
     std::function<void()> request_quit;         // ctrl+q / idle ctrl+c: app.cpp owns the confirm-if-busy logic
     std::function<void(const std::string&)> close_tab;
     std::function<void(const std::string& tab_id, int delta_rows)> scroll_chat;   // ChatView::ScrollBy, if that tab has one

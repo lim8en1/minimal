@@ -26,8 +26,6 @@ enum class ModalId : std::size_t {
     kModelPicker,
     kSubagentPicker,
     kThemePicker,
-    kKeymapHelp,
-    kCommandsHelp,
     kQuitConfirm,      // quit / tab-close while work is in flight
     kPluginPrompt,     // a server tool's plugin prompt (the pending kinds are
     kConfirmation,     // mutually exclusive in SessionState)

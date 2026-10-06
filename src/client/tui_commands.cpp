@@ -23,23 +23,6 @@ namespace minimal::client::app {
 void TuiApp::RegisterClientCommands() {
     CommandRouter& router = command_router_;
 
-    // "/help <command>" still goes to the server: one command's usage is a
-    // short notice. The bare listing is the filterable overlay -- the notice
-    // line's handful of rows could not hold it.
-    router.Add({"help", "", true, false, [this](const CommandInvocationText& parsed) {
-        if (!parsed.positional.empty()) return false;
-        ClearFocusedNotice();   // an overlay sets no notice; drop a stale one
-        if (commands_help_reset_) commands_help_reset_();
-        show_commands_help_ = true;
-        return true;
-    }});
-    // Arguments are accepted and ignored: there is no per-binding detail.
-    router.Add({"keymap", "show all configured key bindings", true, false,
-                [this](const CommandInvocationText&) {
-        ClearFocusedNotice();
-        OpenKeymapHelp();
-        return true;
-    }});
     for (const bool pause : {true, false}) {
         router.Add({pause ? "pause" : "resume",
                     pause ? "pause the agent (stops after its current tool call)"

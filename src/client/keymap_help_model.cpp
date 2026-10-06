@@ -1,12 +1,7 @@
 #include "minimal/client/keymap_help_model.hpp"
 
-#include <algorithm>
 #include <array>
-#include <tuple>
-#include <utility>
 
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -24,7 +19,7 @@ constexpr std::array<Group, 7> kGroups = {{
     {"chat", {"chat.", nullptr, nullptr, nullptr}},
     {"prompt", {"prompt.", nullptr, nullptr, nullptr}},
     {"turn", {"turn.", "permission.", "session.pause", nullptr}},
-    {"open", {"session.picker", "agent.picker", "model.picker", "help.overlay"}},
+    {"open", {"session.picker", "agent.picker", "model.picker", nullptr}},
     {"panels", {"panel.", nullptr, nullptr, nullptr}},
     {"app", {"app.", nullptr, nullptr, nullptr}},
 }};
@@ -76,7 +71,6 @@ constexpr KnownAction kKnown[] = {
     {"session.picker", "open or resume a session"},
     {"agent.picker", "switch agent"},
     {"model.picker", "switch model"},
-    {"help.overlay", "show this list"},
     {"panel.toggle", "show / hide the tools panel"},
     {"panel.focus.next", "focus the next panel"},
     {"panel.focus.prev", "focus the previous panel"},
@@ -100,14 +94,6 @@ std::size_t GroupOf(const std::string& action) {
     return kPluginGroup;
 }
 
-bool MatchesFilter(const std::string& action, const std::string& key,
-                   const std::string& description, const std::string& lowered_filter) {
-    if (lowered_filter.empty()) return true;
-    return ToLower(action).find(lowered_filter) != std::string::npos ||
-           ToLower(key).find(lowered_filter) != std::string::npos ||
-           ToLower(description).find(lowered_filter) != std::string::npos;
-}
-
 }  // namespace
 
 std::string ActionDescription(std::string_view action) {
@@ -127,51 +113,6 @@ KeyActionInfo DescribeKeyAction(std::string_view action) {
     return {ActionDescription(action),
             group < kGroups.size() ? kGroups[group].name : "views",
             static_cast<int>(group * (kUnknownOrder + 1) + OrderOf(action))};
-}
-
-std::vector<KeymapHelpRow> BuildKeymapHelpRows(
-    const std::unordered_map<std::string, std::string>& bindings, const std::string& filter) {
-    const std::string lowered_filter = ToLower(filter);
-
-    struct Match {
-        std::size_t group;
-        std::size_t order;
-        std::string action;
-        std::string key;
-        std::string description;
-    };
-    std::vector<Match> matches;
-    std::size_t key_width = 0;
-    for (const auto& [action, key] : bindings) {
-        std::string description = ActionDescription(action);
-        if (!MatchesFilter(action, key, description, lowered_filter)) continue;
-        key_width = std::max(key_width, Utf8ColumnWidth(key));
-        matches.push_back(
-            {GroupOf(action), OrderOf(action), action, key, std::move(description)});
-    }
-    key_width = std::min(key_width, kKeyColumnCap);
-    std::sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) {
-        return std::tie(a.group, a.order, a.action) < std::tie(b.group, b.order, b.action);
-    });
-
-    std::vector<KeymapHelpRow> rows;
-    std::size_t current_group = kPluginGroup + 1;   // no header emitted yet
-    for (auto& match : matches) {
-        if (match.group != current_group) {
-            current_group = match.group;
-            // One space in from the frame; the menu indents the rows under it.
-            rows.push_back({.label = std::string(" ") + (current_group < kGroups.size()
-                                                             ? kGroups[current_group].name
-                                                             : "plugins"),
-                            .header = true});
-        }
-        std::string key = Utf8ColumnWidth(match.key) > key_width
-                              ? TruncateUtf8Columns(match.key, key_width)
-                              : match.key;
-        key += std::string(key_width - std::min(key_width, Utf8ColumnWidth(key)), ' ');
-        rows.push_back({.label = key + "  " + match.description, .action = std::move(match.action)});
-    }
-    return rows;
 }
 
 }  // namespace minimal::client

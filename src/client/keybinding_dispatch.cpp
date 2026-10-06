@@ -560,10 +560,6 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         ctx.open_model_picker();
         return true;
     }
-    if (ctx.keymap.Matches("help.overlay", event)) {
-        ctx.open_keymap_help();
-        return true;
-    }
     if (ctx.keymap.Matches("permission.cycle", event)) {
         // shift+tab cycles normal -> bypass -> allow-only -> normal as a
         // DIRECT wire event (SendSetRunMode) -- no command, no confirmation

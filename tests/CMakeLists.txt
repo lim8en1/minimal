@@ -360,6 +360,9 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     # config-view: its feed and component, over a fake endpoint.
     "${CMAKE_SOURCE_DIR}/plugins/client/config-view/config_view.cpp"
     schema_form_test.cpp
+    # help-view: its row builders, views and commands, over a fake host.
+    "${CMAKE_SOURCE_DIR}/plugins/client/help-view/help_view.cpp"
+    help_view_test.cpp
     task_worker_test.cpp
     model_selector_test.cpp
     mcp_view_test.cpp)
@@ -369,6 +372,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/mcp"
     "${CMAKE_SOURCE_DIR}/plugins/client/mcp-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/config-view"
+    "${CMAKE_SOURCE_DIR}/plugins/client/help-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")
 
 target_include_directories(minimal_tests PRIVATE
@@ -425,6 +429,7 @@ target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_DOCS_DIR="${CMAKE_SOURCE_DIR}/docs"
     MINIMAL_LOGO_PLUGIN="$<TARGET_FILE:minimal_logo>"
     MINIMAL_CONFIG_VIEW_PLUGIN="$<TARGET_FILE:minimal_config_view>"
+    MINIMAL_HELP_VIEW_PLUGIN="$<TARGET_FILE:minimal_help_view>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto"
     # The captured live Jev responses (fixtures/decision-advisor/): the
     # response-shape contract the advisor parses, kept as data not literals.

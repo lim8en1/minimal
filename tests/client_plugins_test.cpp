@@ -75,6 +75,7 @@ struct LoadedFixtures {
     std::unique_ptr<ClientApi> client_api;
     std::unique_ptr<FocusProvider> focus_provider;
     std::unique_ptr<WidgetKit> widgets;  // the host's proxy over registries.widget_kit
+    std::unique_ptr<HostActionQueue> actions;
 
     // `candidates` loaded against fresh registries. unique_ptr, not a value:
     // AttentionState holds a mutex, so the struct cannot move, and NRVO still
@@ -85,10 +86,14 @@ struct LoadedFixtures {
         f->client_api = MakeHostClientApi(nullptr);
         f->focus_provider = MakeHostFocusProvider();
         f->widgets = MakeHostWidgetKit(f->registries.widget_kit);
+        auto* host_ui = static_cast<HostFocusProvider*>(f->focus_provider.get());
+        f->actions = std::make_unique<HostActionQueue>(host_ui);
         ClientPluginLoader loader(f->registries, {.attention = f->attention_sink.get(),
                                                   .client_api = f->client_api.get(),
                                                   .focus = f->focus_provider.get(),
-                                                  .widgets = f->widgets.get()});
+                                                  .ui = host_ui,
+                                                  .widgets = f->widgets.get(),
+                                                  .actions = f->actions.get()});
         f->records = loader.LoadAll(candidates);
         // As the bootstrap does once names resolve: core's kit, if unclaimed.
         RegisterDefaultWidgetKit(f->registries.widget_kit);
@@ -955,6 +960,31 @@ TEST_CASE("the bundled config-view plugin registers its view and /config",
         found = found || command->name() == "config";
     }
     CHECK(found);
+}
+
+#ifndef MINIMAL_HELP_VIEW_PLUGIN
+#error "MINIMAL_HELP_VIEW_PLUGIN must name the built help-view plugin"
+#endif
+
+// help-view as the real artifact: both overlays and both commands register,
+// the keymap under core's old action id with its default key.
+TEST_CASE("the bundled help-view plugin registers its overlays, /keymap and /help",
+          "[client_plugins][help_view]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_HELP_VIEW_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    INFO(fixtures->records.front().error);
+    REQUIRE(fixtures->records.front().ok());
+    const View* keymap = fixtures->registries.views.Find("help.overlay");
+    REQUIRE(keymap != nullptr);
+    CHECK(keymap->spec().default_keybinding == "alt+h");
+    CHECK(fixtures->registries.views.Find("help.commands") != nullptr);
+    std::vector<std::string> commands;
+    for (const auto& command : fixtures->registries.client_commands.All()) {
+        commands.emplace_back(command->name());
+    }
+    std::sort(commands.begin(), commands.end());
+    CHECK(commands == std::vector<std::string>{"help", "keymap"});
 }
 
 // regenerate_per_session=false must share one banner across every session

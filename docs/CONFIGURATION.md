@@ -638,7 +638,7 @@ register runtime ids (a view's id, or its `client-plugins.json` alias when one
 renames it). Bundled actions (see `bundled/keybindings.json`):
 `tab.next`, `tab.previous`, `tab.goto.1` … `tab.goto.9` (`alt+1` … `alt+9`, the
 number the tab bar shows), `group.previous`, `group.next`, `jump.attention`,
-`session.picker`, `agent.picker`, `model.picker`, `help.overlay`,
+`session.picker`, `agent.picker`, `model.picker`,
 `permission.cycle`, `panel.toggle`, `panel.focus.next`, `panel.focus.prev`,
 `tab.close`, `chat.load_older`,
 `chat.scroll_up`, `chat.scroll_down`, `chat.scroll_bottom`, `chat.row_up`,
@@ -665,12 +665,14 @@ Keyboard → Keyboard Shortcuts → Mission Control), so `chat.scroll_up`/
 `chat.scroll_down` default to `ctrl+alt+k`/`ctrl+alt+j` instead of
 `ctrl+up`/`ctrl+down`. `F1` is a hardware brightness key on Mac keyboards
 unless Fn is held or "Use F1, F2, etc. keys as standard function keys" is
-enabled, so `help.overlay` defaults to `alt+h` instead of `f1`. Both old
+enabled, so the key-bindings overlay (the bundled `help-view` plugin's
+`help.overlay` view) defaults to `alt+h` instead of `f1`. Both old
 specs still parse and can be rebound in `keybindings.json` — e.g. after
 disabling the relevant System Settings shortcut — they're just no longer
 the shipped defaults.
 The `/keymap` command opens the same overlay as the `help.overlay` binding:
-a filterable listing of every configured action → key pair.
+a filterable listing of every configured action → key pair, each described
+in core's words (a plugin view by its title).
 
 Prompt newline (`prompt.newline`, default `alt+enter`): Enter submits;
 Alt+Enter inserts a newline (the prompt soft-wraps to the terminal width, at

@@ -21,8 +21,6 @@
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/keymap_help_model.hpp"
-#include "minimal/client/view/commands_help.hpp"
-#include "minimal/client/view/keymap_help.hpp"
 #include "minimal/client/view/modal_host.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/theme_picker.hpp"
@@ -436,37 +434,6 @@ void TuiApp::BuildModals() {
         // the first message will use.
         [this] { return FocusedOrNewTab(); }});
 
-    // --- help overlays -------------------------------------------------------------
-    // Built once, unlike the pickers: env_.keybindings is already final by
-    // now (BuildTuiEnvironment folds in the user's file and every plugin
-    // view's EnsureDefault before returning).
-    keymap_help_view_ = MakeKeymapHelpView(
-        env_.keybindings.all(), theme, [this] { show_keymap_help_ = false; }, &keymap_help_reset_);
-    modals_.Set(ModalId::kKeymapHelp, keymap_help_view_);
-
-    // The rows are rebuilt from the catalog on every open, so it lists the
-    // current snapshot. Opened by bare `/help` -- the notice line's handful
-    // of rows could not hold the full command listing.
-    commands_help_view_ = MakeCommandsHelpView(
-        [this] { return CurrentCatalog(); }, theme, [this] { show_commands_help_ = false; },
-        // Same requires_session exclusion the autocomplete applies: while the
-        // focused tab has no session, the overlay lists only sessionless
-        // commands (the overlay rebuilds its rows on every open, so the probe
-        // is fresh each time). The subagent probe likewise: on a child tab,
-        // only read-only commands are listed.
-        [this] { return !app_->FocusedSessionId().empty(); },
-        [this] { return app_->FocusedTabIsSubagent(); }, &commands_help_reset_,
-        // Enter inserts "/name " with the caret after it, ready for args. The
-        // overlay is app-wide; the insert lands in whatever tab is focused
-        // when the user picks a command (CurrentState("") on an empty app =
-        // the pre-tab editor, the same resolution the host itself uses).
-        [this](const std::string& name) {
-            PromptEditorState& state = prompt_editors_.CurrentState(app_->FocusedTabId());
-            state.content = "/" + name + " ";
-            state.cursor_position = static_cast<int>(state.content.size());
-        });
-    modals_.Set(ModalId::kCommandsHelp, commands_help_view_);
-
     // --- plugin views (panel region + modal layer) -----------------------------
     // Panels: rendered in the frame beside the tools panel; one shared
     // CatchEvent (over the frame) routes events to visible ones. Modals: one
@@ -647,7 +614,7 @@ KeyContext TuiApp::MakeKeyContext() {
         [this] { picker_controller_->OpenSessionPicker(); },
         [this] { picker_controller_->OpenAgentPicker(); },
         [this] { picker_controller_->OpenModelPicker(/*refresh=*/false); },
-        [this] { OpenKeymapHelp(); }, [this] { RequestQuit(); },
+        [this] { RequestQuit(); },
         [this](const std::string& id) { CloseTab(id); },
         // ChatView::ScrollBy, if the tab has one yet (a ChatView is built
         // lazily by the frame, so it may not exist on the very first frame of
@@ -1085,11 +1052,6 @@ void TuiApp::OpenThemePicker() {
                              },
                              [this] { show_theme_picker_ = false; }});
     show_theme_picker_ = true;
-}
-
-void TuiApp::OpenKeymapHelp() {
-    if (keymap_help_reset_) keymap_help_reset_();
-    show_keymap_help_ = true;
 }
 
 // Quit = close every tab, with ONE confirmation if any work is in flight
