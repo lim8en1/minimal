@@ -15,9 +15,9 @@ FsSettings ParseFsSettings(const nlohmann::json& config) {
     config::Reader read = root.Object("read");
     read.Describe("default_limit_lines",
                   {"Window size the model sees when it supplies no limit (capped at "
-                   "read.max_lines)."});
-    read.Describe("max_line_length", {"Per-line truncation length."});
-    read.Describe("max_lines", {"Hard ceiling on any read window."});
+                   "read.max_lines).", config::ApplyPolicy::kLive});
+    read.Describe("max_line_length", {"Per-line truncation length.", config::ApplyPolicy::kLive});
+    read.Describe("max_lines", {"Hard ceiling on any read window.", config::ApplyPolicy::kLive});
     settings.read_default_limit_lines = static_cast<decltype(settings.read_default_limit_lines)>(
         read.Int("default_limit_lines", settings.read_default_limit_lines, 1, kIntMax));
     settings.read_max_line_length = static_cast<decltype(settings.read_max_line_length)>(
@@ -27,7 +27,7 @@ FsSettings ParseFsSettings(const nlohmann::json& config) {
     read.Finish();
     config::Reader edit = root.Object("edit");
     edit.Describe("max_editable_file_bytes",
-                  {"Largest file write/edit will rewrite (they hold the whole file)."});
+                  {"Largest file write/edit will rewrite (they hold the whole file).", config::ApplyPolicy::kLive});
     settings.edit_max_editable_file_bytes =
         static_cast<decltype(settings.edit_max_editable_file_bytes)>(edit.Int(
             "max_editable_file_bytes", settings.edit_max_editable_file_bytes, 1));

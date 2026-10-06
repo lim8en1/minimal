@@ -84,13 +84,18 @@ private:
                                 : text(Clip(row.shown, kMaxValueWidth)) |
                                       size(WIDTH, EQUAL, kMaxValueWidth);
             if (!row.overridden && !(editing_ && i == selected_)) value = value | Muted(theme_);
+            Element name = text(label) | size(WIDTH, EQUAL, static_cast<int>(label_width));
+            // An unused field: dimmed, and its tag says why instead of how
+            // it would apply.
+            if (!row.unused.empty()) name = name | Muted(theme_);
             Elements cells{
                 text(row.overridden ? "* " : "  "),
-                text(label) | size(WIDTH, EQUAL, static_cast<int>(label_width)),
+                std::move(name),
                 text("  "),
                 std::move(value),
                 text("  "),
-                text(row.live ? "live" : "restart") | Muted(theme_),
+                text(!row.unused.empty() ? "not used" : row.live ? "live" : "restart") |
+                    Muted(theme_),
             };
             if (row.pending) cells.push_back(text("  restart pending") | color(theme_.ColorFor("attention")));
             Element line = hbox(std::move(cells));
@@ -107,6 +112,10 @@ private:
             if (row->field.contains("choices")) about += ", one of " + row->field["choices"].dump();
             about += ")";
             lines.push_back(text(about) | Muted(theme_));
+            if (!row->unused.empty()) {
+                lines.push_back(paragraph("Not used while " + row->unused + ".") |
+                                color(theme_.ColorFor("attention")));
+            }
             if (!row->doc.empty()) lines.push_back(paragraph(row->doc));
         }
         if (!state.status.empty()) {

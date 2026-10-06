@@ -22,8 +22,11 @@ Settings Parse(const nlohmann::json& config) {
                                                    "fixture-config"));
     reader.Describe("limit", {"A live number.", minimal::config::ApplyPolicy::kLive});
     reader.Describe("mode", {"A restart choice."});
+    reader.Describe("detail", {"Only matters in slow mode.", minimal::config::ApplyPolicy::kLive});
     settings.limit = reader.Int("limit", settings.limit, 1, 100);
     settings.mode = reader.Enum("mode", settings.mode, {"fast", "slow"});
+    (void)reader.Int("detail", 0, 0, 10);
+    reader.RelevantWhen("detail", "mode", {"slow"});
     reader.Finish();
     return settings;
 }

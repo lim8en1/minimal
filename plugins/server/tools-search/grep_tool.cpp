@@ -250,7 +250,7 @@ struct GrepRun {
 
 class GrepTool : public tools::Tool {
 public:
-    explicit GrepTool(SearchSettings settings) : settings_(std::move(settings)) {
+    explicit GrepTool(std::shared_ptr<const common::LiveValue<SearchSettings>> live) : live_(std::move(live)) {
         spec_.name = "grep";
         spec_.category = ToolCategory::ReadOnly;
         spec_.definition.name = spec_.name;
@@ -358,14 +358,14 @@ public:
                 return Error("context_before must be an integer");
             }
             context_before =
-                ClampedInt(input.at("context_before"), 0, settings_.grep_max_context_lines);
+                ClampedInt(input.at("context_before"), 0, S().grep_max_context_lines);
         }
         if (input.contains("context_after")) {
             if (!input.at("context_after").is_number_integer()) {
                 return Error("context_after must be an integer");
             }
             context_after =
-                ClampedInt(input.at("context_after"), 0, settings_.grep_max_context_lines);
+                ClampedInt(input.at("context_after"), 0, S().grep_max_context_lines);
         }
         if ((context_before > 0 || context_after > 0) && mode != OutputMode::kContent) {
             return Error("context_before/context_after require output_mode: content");
@@ -379,15 +379,15 @@ public:
         // results", search_settings.hpp). It was parsed, tested -- and read by
         // nothing, so `head_limit: 2000000000` in content mode accumulated
         // unboundedly, bounded only by the walk timeout.
-        int head_limit = settings_.grep_default_head_limit;
+        int head_limit = S().grep_default_head_limit;
         bool clamped = false;
         if (input.contains("head_limit")) {
             const int requested =
                 ClampedInt(input.at("head_limit"), 0, std::numeric_limits<int>::max());
             if (requested > 0) head_limit = requested;
         }
-        if (head_limit > settings_.grep_max_results) {
-            head_limit = settings_.grep_max_results;
+        if (head_limit > S().grep_max_results) {
+            head_limit = S().grep_max_results;
             clamped = true;
         }
 
@@ -454,8 +454,8 @@ public:
 
         WalkOptions options;
         options.timeout = std::chrono::steady_clock::duration{
-            std::chrono::milliseconds(settings_.grep_timeout_ms)};
-        options.max_file_bytes = settings_.grep_max_file_bytes;
+            std::chrono::milliseconds(S().grep_timeout_ms)};
+        options.max_file_bytes = S().grep_max_file_bytes;
         options.is_cancelled = ctx.is_cancelled;
         // A `path` scoped to a subdirectory must still honor the project
         // root's .gitignore, or `grep(path="src")` returns hits inside
@@ -533,7 +533,7 @@ public:
         if (skipped_oversize > 0) {
             run.Append("(" + std::to_string(skipped_oversize) +
                        " file(s) skipped: larger than " +
-                       std::to_string(settings_.grep_max_file_bytes) + " bytes)\n");
+                       std::to_string(S().grep_max_file_bytes) + " bytes)\n");
         }
         if (run.skipped_by_rules > 0) {
             run.Append("(" + std::to_string(run.skipped_by_rules) +
@@ -542,7 +542,7 @@ public:
         }
         if (clamped) {
             run.Append("(head_limit clipped to the configured grep_max_results=" +
-                       std::to_string(settings_.grep_max_results) + ")\n");
+                       std::to_string(S().grep_max_results) + ")\n");
         }
         if (stats.skipped_entries > 0) {
             run.Append("(" + std::to_string(stats.skipped_entries) +
@@ -597,7 +597,7 @@ private:
         // were the file would hide its tail without saying so. The binary
         // sniff runs as soon as its window is in, so a large binary is not
         // read in full just to be discarded.
-        const std::int64_t cap = settings_.grep_max_file_bytes;
+        const std::int64_t cap = S().grep_max_file_bytes;
         std::string text;
         char chunk[65536];
         bool sniffed = false;
@@ -668,19 +668,24 @@ private:
                 BuildBlocks(match_lines, static_cast<int>(lines.size()),
                             run.context_before, run.context_after);
             return run.ReportBlocks(entry.rel_path, lines, blocks,
-                                    settings_.grep_max_line_length);
+                                    S().grep_max_line_length);
         }
         return run.ReportFile(entry.rel_path, static_cast<int>(match_lines.size()));
     }
 
     ToolSpec spec_;
-    SearchSettings settings_;
+    // The current settings: a reconfigure swaps them between calls.
+    SearchSettings S() const { return *live_->Get(); }
+    std::shared_ptr<const common::LiveValue<SearchSettings>> live_;
 };
 
 }  // namespace
 
+std::unique_ptr<tools::Tool> MakeGrepTool(LiveSearchSettings live) {
+    return std::make_unique<GrepTool>(std::move(live));
+}
 std::unique_ptr<tools::Tool> MakeGrepTool(SearchSettings settings) {
-    return std::make_unique<GrepTool>(std::move(settings));
+    return MakeGrepTool(std::make_shared<common::LiveValue<SearchSettings>>(std::move(settings)));
 }
 
 }  // namespace minimal::tools_search

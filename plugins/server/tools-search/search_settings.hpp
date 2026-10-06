@@ -4,6 +4,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/common/live_value.hpp"
+
 namespace minimal::tools_search {
 
 // This plugin's own config, the "config" object on its plugins.json entry,
@@ -35,5 +37,8 @@ struct SearchSettings {
 };
 
 SearchSettings ParseSearchSettings(const nlohmann::json& config);
+
+// What grep and glob read per call; a reconfigure swaps it.
+using LiveSearchSettings = std::shared_ptr<const common::LiveValue<SearchSettings>>;
 
 }  // namespace minimal::tools_search

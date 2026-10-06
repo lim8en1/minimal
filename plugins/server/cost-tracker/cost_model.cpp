@@ -239,6 +239,12 @@ RateTable::RateTable(RateSources sources, plugins::PluginStorage* storage)
                                                      : std::map<std::string, Rate>{}),
       storage_(storage) {}
 
+void RateTable::SetConfigRates(const nlohmann::json& config_rates) {
+    auto parsed = ParseRateTable(config_rates);
+    std::lock_guard<std::mutex> lock(mu_);
+    config_ = std::move(parsed);
+}
+
 void RateTable::RefreshFetched() {
     std::map<std::string, Rate> fetched;
     std::map<std::string, Rate> openrouter;

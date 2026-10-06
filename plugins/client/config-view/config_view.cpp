@@ -29,6 +29,9 @@ std::pair<std::string, bool> Outcome(const std::string& path, const json& answer
         }
         return {text, false};
     }
+    if (const auto unused = answer.value("unused", json::object()); unused.contains(path)) {
+        return {path + " saved -- not used while " + unused.at(path).get<std::string>(), false};
+    }
     return {path + ": no change", false};
 }
 

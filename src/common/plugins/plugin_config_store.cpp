@@ -144,6 +144,29 @@ json ParseFieldValue(const json& field, std::string_view text) {
     return parsed;
 }
 
+std::optional<std::string> UnusedReason(const json& schema, const json& field,
+                                        const json& config) {
+    if (!field.is_object() || !field.contains("when") || !field.at("when").is_object()) {
+        return std::nullopt;
+    }
+    const json& when = field.at("when");
+    const std::string on = when.value("field", "");
+    const json* condition_field = SchemaField(schema, on);
+    const json* configured = ConfigGet(config, on);
+    const json value = configured != nullptr ? *configured
+                       : condition_field != nullptr ? condition_field->value("default", json())
+                                                    : json();
+    if (when.value("set", false)) {
+        const bool set = !(value.is_null() || (value.is_string() && value.get<std::string>().empty()));
+        if (set) return std::nullopt;
+        return on + " is not set";
+    }
+    for (const auto& allowed : when.value("in", json::array())) {
+        if (allowed == value) return std::nullopt;
+    }
+    return on + " is " + (value.is_string() ? value.get<std::string>() : value.dump());
+}
+
 std::vector<EffectiveField> EffectiveConfig(const json& schema, const json& config) {
     std::vector<EffectiveField> out;
     if (!schema.is_object() || !schema.contains("fields")) return out;
@@ -157,6 +180,7 @@ std::vector<EffectiveField> EffectiveConfig(const json& schema, const json& conf
         } else {
             row.value = field.value("default", json());
         }
+        row.unused = UnusedReason(schema, field, config);
         out.push_back(std::move(row));
     }
     return out;
@@ -168,6 +192,10 @@ ConfigChange DiffConfig(const json& schema, const json& before, const json& afte
     const auto new_rows = EffectiveConfig(schema, after);
     for (std::size_t i = 0; i < old_rows.size(); ++i) {
         if (old_rows[i].value == new_rows[i].value) continue;
+        if (old_rows[i].unused && new_rows[i].unused) {
+            change.unused.push_back(old_rows[i].path);
+            continue;
+        }
         change.paths.push_back(old_rows[i].path);
         if (old_rows[i].field->value("apply", "restart") != "live") change.all_live = false;
     }

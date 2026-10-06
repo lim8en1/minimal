@@ -32,22 +32,33 @@ const nlohmann::json* SchemaField(const nlohmann::json& schema, std::string_view
 // parses as JSON. Throws std::invalid_argument with a printable message.
 nlohmann::json ParseFieldValue(const nlohmann::json& field, std::string_view text);
 
+// Why `field` does nothing under `config` -- its "when" condition is not met
+// ("strategy is sidecar", "tagger_model is not set") -- or nullopt when it
+// applies (or has no condition). The condition field's effective value
+// decides: the configured one, else its default.
+std::optional<std::string> UnusedReason(const nlohmann::json& schema, const nlohmann::json& field,
+                                        const nlohmann::json& config);
+
 // One row per schema field: what a user who wrote `config` effectively has.
 struct EffectiveField {
     std::string path;
     nlohmann::json value;  // the configured value, else the default (null when neither)
     bool overridden = false;
     const nlohmann::json* field = nullptr;  // into the schema
+    std::optional<std::string> unused;      // UnusedReason
 };
 std::vector<EffectiveField> EffectiveConfig(const nlohmann::json& schema,
                                             const nlohmann::json& config);
 
 // Schema paths whose effective value differs between `before` and `after`,
 // and whether every one of them is "apply": "live". A path the schema does
-// not know counts as not live.
+// not know counts as not live. A field unused both before and after the
+// change (its "when" unmet in both) has no effect on the running plugin: it
+// is listed in `unused`, not `paths`.
 struct ConfigChange {
     std::vector<std::string> paths;
     bool all_live = true;
+    std::vector<std::string> unused;
 };
 ConfigChange DiffConfig(const nlohmann::json& schema, const nlohmann::json& before,
                         const nlohmann::json& after);

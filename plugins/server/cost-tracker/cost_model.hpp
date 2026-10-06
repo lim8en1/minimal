@@ -189,6 +189,10 @@ public:
     // must not lose the other.
     void RefreshFetched();
 
+    // Replaces the config tier (the plugin's `rates`): a live reconfigure.
+    // Costs are priced when reported, so it reprices past usage too.
+    void SetConfigRates(const nlohmann::json& config_rates);
+
 private:
     mutable std::mutex mu_;
     std::map<std::string, Rate> bundled_;

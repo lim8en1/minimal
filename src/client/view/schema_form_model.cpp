@@ -32,6 +32,9 @@ FormRow FieldRow(const json& field, const json& describe, const std::string& lab
     }
     const json pending = describe.value("pending", json::array());
     row.pending = std::find(pending.begin(), pending.end(), row.path) != pending.end();
+    if (describe.contains("unused") && describe.at("unused").contains(row.path)) {
+        row.unused = describe.at("unused").at(row.path).get<std::string>();
+    }
     return row;
 }
 

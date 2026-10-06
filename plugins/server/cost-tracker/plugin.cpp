@@ -184,6 +184,23 @@ extern "C" {
 
 MINIMAL_PLUGIN_ABI_SYMBOLS(minimal::cost_tracker::kPluginName)
 
+// Only `rates` is live: the price table's config tier swaps under its own
+// lock. The rest of CostSettings is held by reference elsewhere and stays as
+// registered.
+bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error) {
+    if (!SharedRates()) {
+        error = "cost-tracker is not registered";
+        return false;
+    }
+    try {
+        SharedRates()->SetConfigRates(minimal::cost_tracker::ParseCostSettings(config).rates);
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
 void minimal_plugin_register_commands(
     minimal::commands::CommandRegistry& registry,
     const minimal::plugins::PluginRegistrationContext& context) {

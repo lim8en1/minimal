@@ -277,7 +277,11 @@ object code.
   context (the `minimal plugin` CLI, the config view), so the parser must
   be side-effect free. Describe mode records every field the parser reads
   through `config::Reader` (path, type, default, range, choices);
-  `reader.Describe(key, {doc, apply, secret})` adds the rest
+  `reader.Describe(key, {doc, apply, secret})` adds the rest, and
+  `reader.RelevantWhen(key, field, {values})` / `RelevantWhenSet(key, field)`
+  say a field matters only in some modes (memory's http fields under
+  `strategy` http/auto). The CLI and `/config` show an unused field as such,
+  and changing one has no effect on the running plugin
 - `minimal_plugin_reconfigure` — take a changed config without a restart.
   Only fields declared `ApplyPolicy::kLive` change this way; the host calls
   it only when every changed field is live. Keep the settings in a

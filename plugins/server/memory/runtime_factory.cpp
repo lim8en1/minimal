@@ -14,7 +14,7 @@ std::shared_ptr<MemoryRuntime> BuildMemoryRuntime(const nlohmann::json& config,
                                                   std::string& error) {
     try {
         auto runtime = std::make_shared<MemoryRuntime>();
-        runtime->settings = ParseMemorySettings(config);
+        runtime->live = std::make_shared<common::LiveValue<MemorySettings>>(ParseMemorySettings(config));
         runtime->store = std::make_unique<MemoryStore>(data_dir / "memory.sqlite3");
 
         // core.secrets is core-provided before any plugin loads.
@@ -22,7 +22,7 @@ std::shared_ptr<MemoryRuntime> BuildMemoryRuntime(const nlohmann::json& config,
             services != nullptr ? static_cast<const config::SecretResolver*>(
                                       services->Find(config::kSecretsServiceName))
                                 : nullptr;
-        auto plan = MakeEmbeddingPlan(runtime->settings, data_dir, secrets);
+        auto plan = MakeEmbeddingPlan(*runtime->Settings(), data_dir, secrets);
         // The one re-embed trigger: rows embedded by a different backend or
         // model go back to pending. With no backend configured, vectors are
         // left alone -- re-enabling the same backend later finds them intact.
@@ -32,7 +32,7 @@ std::shared_ptr<MemoryRuntime> BuildMemoryRuntime(const nlohmann::json& config,
 
         // Resolved lazily on the tagger's worker, by which time core services
         // are wired (the worker starts on first use, never at registration).
-        const std::string model_ref = runtime->settings.tagger_model;
+        const std::string model_ref = runtime->Settings()->tagger_model;
         Tagger::Resolver resolver = [services, model_ref]() -> std::optional<TaggerLlm> {
             if (services == nullptr) return std::nullopt;
             void* raw = services->Find(agent::kSessionSupportServiceName);
@@ -42,7 +42,7 @@ std::shared_ptr<MemoryRuntime> BuildMemoryRuntime(const nlohmann::json& config,
             if (!resolved) return std::nullopt;
             return TaggerLlm{resolved->provider, resolved->model};
         };
-        runtime->tagger = std::make_unique<Tagger>(runtime->settings, runtime->store.get(),
+        runtime->tagger = std::make_unique<Tagger>(runtime->live, runtime->store.get(),
                                                    runtime->embeddings.get(), std::move(resolver),
                                                    common::DefaultLogger());
         return runtime;

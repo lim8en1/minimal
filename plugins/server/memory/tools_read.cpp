@@ -94,7 +94,7 @@ public:
             else if (scope == "global") request.filters.scope.include_project = false;
             else if (scope != "all") return Error("scope must be \"all\", \"project\" or \"global\"");
             request.filters.tags = StringArray(input, "tags");
-            request.limit = std::clamp(input.value("limit", rt.settings.default_limit), 1, kLimitCeiling);
+            request.limit = std::clamp(input.value("limit", rt.Settings()->default_limit), 1, kLimitCeiling);
 
             const auto results = HybridSearch(*rt.store, rt.embeddings.get(), request);
             nlohmann::json list = nlohmann::json::array();

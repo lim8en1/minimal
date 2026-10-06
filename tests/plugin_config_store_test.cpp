@@ -101,6 +101,44 @@ TEST_CASE("a change is live only when every changed field is", "[plugin_config_s
     CHECK_FALSE(change.all_live);
 }
 
+TEST_CASE("a field whose condition is unmet is unused, and changing it has no effect",
+          "[plugin_config_store]") {
+    const json schema = json::parse(R"({"fields": [
+        {"path": "strategy", "type": "enum", "choices": ["http", "sidecar", "auto"],
+         "default": "auto", "apply": "restart"},
+        {"path": "api_base", "type": "string", "default": "", "apply": "restart",
+         "when": {"field": "strategy", "in": ["http", "auto"]}},
+        {"path": "tagger_model", "type": "string", "default": "", "apply": "restart"},
+        {"path": "max_tags", "type": "integer", "default": 100, "apply": "live",
+         "when": {"field": "tagger_model", "set": true}}
+    ]})");
+    const json& api_base = *common::SchemaField(schema, "api_base");
+    const json& max_tags = *common::SchemaField(schema, "max_tags");
+
+    CHECK_FALSE(common::UnusedReason(schema, api_base, json::object()));  // auto: used
+    CHECK(common::UnusedReason(schema, api_base, json{{"strategy", "sidecar"}}) ==
+          "strategy is sidecar");
+    CHECK(common::UnusedReason(schema, max_tags, json::object()) == "tagger_model is not set");
+    CHECK_FALSE(common::UnusedReason(schema, max_tags, json{{"tagger_model", "local/m"}}));
+
+    // Unused before and after: no effect on the running plugin.
+    const json sidecar = {{"strategy", "sidecar"}};
+    auto change = common::DiffConfig(schema, sidecar,
+                                     json{{"strategy", "sidecar"}, {"api_base", "http://x"}});
+    CHECK(change.paths.empty());
+    CHECK(change.unused == std::vector<std::string>{"api_base"});
+
+    // The condition changing is itself a change -- and brings the field in.
+    change = common::DiffConfig(schema, json{{"strategy", "sidecar"}, {"api_base", "http://x"}},
+                                json{{"strategy", "http"}, {"api_base", "http://x"}});
+    CHECK(change.paths == std::vector<std::string>{"strategy"});
+    CHECK_FALSE(change.all_live);
+
+    const auto rows = common::EffectiveConfig(schema, sidecar);
+    CHECK(rows[1].unused == std::optional<std::string>("strategy is sidecar"));
+    CHECK_FALSE(rows[0].unused);
+}
+
 TEST_CASE("a secret's literal is masked; a reference is shown", "[plugin_config_store]") {
     CHECK(common::DisplayValue(Field("key"), "sk-live-123") == "\"****\"");
     CHECK(common::DisplayValue(Field("key"), "secret:openai") == "\"secret:openai\"");
@@ -194,6 +232,26 @@ TEST_CASE("minimal-server plugin: set, get, unset, and refusals", "[plugin_cli]"
     CHECK(result.output.find("has no configuration") != std::string::npos);
     result = RunCli(dir.path(), "set tools-web");
     CHECK(result.code == 2);
+}
+
+TEST_CASE("minimal-server plugin: a field that does nothing in the current mode says so",
+          "[plugin_cli]") {
+    TempDir dir;
+    REQUIRE(RunCli(dir.path(), "set memory strategy sidecar").code == 0);
+
+    auto result = RunCli(dir.path(), "set memory api_base http://localhost:8080/v1");
+    INFO(result.output);
+    CHECK(result.code == 0);
+    CHECK(result.output.find("not used while strategy is sidecar") != std::string::npos);
+
+    result = RunCli(dir.path(), "memory");
+    CHECK(result.output.find("(not used: strategy is sidecar)") != std::string::npos);
+    CHECK(result.output.find("(not used: tagger_model is not set)") != std::string::npos);
+
+    result = RunCli(dir.path(), "memory --json");
+    const json show = json::parse(result.output);
+    CHECK(show.at("unused").at("api_base") == "strategy is sidecar");
+    CHECK_FALSE(show.at("unused").contains("sidecar_model"));
 }
 
 TEST_CASE("minimal-server plugin --json: list and show are machine-readable", "[plugin_cli]") {

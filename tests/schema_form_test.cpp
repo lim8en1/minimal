@@ -73,6 +73,23 @@ TEST_CASE("form rows: top-level fields first, then groups; set, default, pending
     CHECK(client::NextFieldRow(rows, 0, -1) == 0);
 }
 
+TEST_CASE("form rows carry why a field is unused, and the form says it", "[schema_form]") {
+    json describe = kDescribe;
+    describe["unused"] = {{"net.api_key", "mode is slow"}};
+    const auto rows = client::BuildFormRows(describe);
+    CHECK(rows[4].unused == "mode is slow");
+    CHECK(rows[3].unused.empty());
+
+    client::SchemaFormState state{"t", describe, "", false, 1};
+    const auto theme = TestTheme();
+    auto form = client::MakeSchemaForm([&] { return state; }, {}, theme);
+    std::string frame = minimal_test::RenderFrame(form, 100, 24);
+    CHECK(frame.find("not used") != std::string::npos);
+    for (int i = 0; i < 3; ++i) minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
+    frame = minimal_test::RenderFrame(form, 100, 24);
+    CHECK(frame.find("Not used while mode is slow.") != std::string::npos);
+}
+
 TEST_CASE("the form: toggle, cycle, edit, reset; the editor claims Escape", "[schema_form]") {
     std::vector<std::pair<std::string, std::string>> sets;
     std::vector<std::string> unsets;

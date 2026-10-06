@@ -8,7 +8,9 @@ Plugin configuration in the TUI: `/config`.
   plugin's form — every field with its value (`*` = set in the file, the rest
   are defaults), whether it applies **live** or on **restart**, and
   **restart pending** where the file differs from what the running plugin
-  uses. The selected field's type, default, range and doc show below.
+  uses; a field the current mode does not use (memory's http fields under
+  `strategy: sidecar`) is dimmed and tagged **not used**, still editable. The
+  selected field's type, default, range, doc and, when unused, why show below.
 - **Command** `/config [plugin]` — opens the list, or straight onto a
   plugin's form.
 

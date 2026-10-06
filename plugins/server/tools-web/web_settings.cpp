@@ -56,6 +56,11 @@ WebSettings ParseWebSettings(const nlohmann::json& config,
     search.Describe("max_results", {"Ceiling on the result count.", config::ApplyPolicy::kLive});
     search.Describe("timeout_ms", {"Hard wall-clock bound on one search.",
                                    config::ApplyPolicy::kLive});
+    // Without a backend, web_search answers "not configured": nothing else
+    // under search does anything.
+    for (const char* key : {"api_key", "default_max_results", "max_results", "timeout_ms"}) {
+        search.RelevantWhenSet(key, "api_url");
+    }
     settings.search_api_url = search.String("api_url", settings.search_api_url);
     settings.search_api_key_ref = search.String("api_key", settings.search_api_key_ref);
     positive_int(search, "default_max_results", settings.search_default_max_results);

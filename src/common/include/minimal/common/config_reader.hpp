@@ -172,6 +172,15 @@ public:
     // through a Maybe* call (whose fallback the reader never sees).
     void Describe(std::string_view key, FieldMeta meta);
     void Default(std::string_view key, nlohmann::json value);
+    // Describe mode only: `key` matters only while sibling field `field` is
+    // one of `values` (RelevantWhen), or is set to something non-empty
+    // (RelevantWhenSet) -- memory's http fields under strategy http/auto.
+    // Recorded as "when": {"field": <path>, "in": [...]} / {"field", "set":
+    // true}. A UI shows an unused field as such; a change to one has no
+    // effect on the running plugin.
+    void RelevantWhen(std::string_view key, std::string_view field,
+                      std::initializer_list<std::string_view> values);
+    void RelevantWhenSet(std::string_view key, std::string_view field);
 
 private:
     const nlohmann::json* Find(std::string_view key);

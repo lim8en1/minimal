@@ -66,8 +66,10 @@ json PluginConfigEndpoint::ReadFile(const Entry& entry) const {
 json PluginConfigEndpoint::Describe(const Entry& entry) const {
     const json file = ReadFile(entry);
     json effective = json::object();
+    json unused = json::object();
     for (const auto& row : common::EffectiveConfig(entry.schema, file)) {
         effective[row.path] = row.value;
+        if (row.unused) unused[row.path] = *row.unused;
     }
     return {{"name", entry.name},
             {"file", common::PluginConfigLabel(common::kPluginConfigDirName, entry.name)},
@@ -76,12 +78,25 @@ json PluginConfigEndpoint::Describe(const Entry& entry) const {
             {"schema", entry.schema},
             {"config", file},
             {"effective", std::move(effective)},
+            {"unused", std::move(unused)},
             {"pending", common::DiffConfig(entry.schema, entry.applied, file).paths}};
 }
 
 json PluginConfigEndpoint::Apply(Entry& entry, const json& file) {
     const auto change = common::DiffConfig(entry.schema, entry.applied, file);
-    if (change.paths.empty()) return {{"applied", "none"}, {"changed", json::array()}};
+    if (change.paths.empty()) {
+        // Nothing the running plugin uses changed. A field saved while its
+        // condition is unmet takes effect when it is met.
+        json unused = json::object();
+        for (const auto& path : change.unused) {
+            if (const json* field = common::SchemaField(entry.schema, path)) {
+                unused[path] = common::UnusedReason(entry.schema, *field, file).value_or("");
+            }
+        }
+        // Recorded as applied: nothing about these differs for the plugin.
+        entry.applied = file;
+        return {{"applied", "none"}, {"changed", json::array()}, {"unused", std::move(unused)}};
+    }
     // Live only when the plugin is running, every changed field is live, and
     // it takes the new config; anything else waits for a restart.
     if (entry.loaded && change.all_live && entry.symbols.reconfigure != nullptr) {

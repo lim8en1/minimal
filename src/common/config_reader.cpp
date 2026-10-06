@@ -100,6 +100,19 @@ void Reader::Describe(std::string_view key, FieldMeta meta) {
     if (meta.secret) field["secret"] = true;
 }
 
+void Reader::RelevantWhen(std::string_view key, std::string_view field,
+                          std::initializer_list<std::string_view> values) {
+    if (!recorder_) return;
+    nlohmann::json in = nlohmann::json::array();
+    for (const auto value : values) in.push_back(std::string(value));
+    recorder_->Field(Join(key))["when"] = {{"field", Join(field)}, {"in", std::move(in)}};
+}
+
+void Reader::RelevantWhenSet(std::string_view key, std::string_view field) {
+    if (!recorder_) return;
+    recorder_->Field(Join(key))["when"] = {{"field", Join(field)}, {"set", true}};
+}
+
 void Reader::Default(std::string_view key, nlohmann::json value) {
     if (!recorder_) return;
     recorder_->Field(Join(key))["default"] = std::move(value);

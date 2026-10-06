@@ -110,7 +110,7 @@ private:
             const auto tags = rt.store->Tags(scope, root);
             if (tags.empty()) return commands::CommandResult::Ok("no " + label + " tags");
             std::ostringstream out;
-            out << label << " tags (" << tags.size() << "/" << rt.settings.max_tags << "):";
+            out << label << " tags (" << tags.size() << "/" << rt.Settings()->max_tags << "):";
             for (const auto& tag : tags) {
                 out << "\n  " << tag.name << " (" << tag.count << ")";
                 if (!tag.description.empty()) out << " -- " << tag.description;

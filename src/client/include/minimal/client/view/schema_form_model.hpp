@@ -25,6 +25,9 @@ struct FormRow {
     bool live = false;        // "apply": "live"
     bool overridden = false;  // set in the file, not a default
     bool pending = false;     // differs from what the running plugin uses
+    // Why the field does nothing right now (its "when" unmet: "strategy is
+    // sidecar"); "" when it applies. Shown dimmed, still editable.
+    std::string unused;
     nlohmann::json value;     // the effective value
     nlohmann::json field;     // the schema field
 };

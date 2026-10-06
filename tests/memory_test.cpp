@@ -790,11 +790,11 @@ struct RuntimeFixture {
         : fx(name), project(fx.dir / "project") {
         fs::create_directories(project / ".git");
         fs::create_directories(project / "sub");
-        rt->settings = settings;
+        rt->live = std::make_shared<minimal::common::LiveValue<MemorySettings>>(settings);
         rt->store = std::move(fx.store);
         rt->embeddings = std::make_unique<EmbeddingService>(rt->store.get(), EmbeddingPlan{},
                                                             minimal::common::DefaultLogger());
-        rt->tagger = std::make_unique<Tagger>(rt->settings, rt->store.get(), rt->embeddings.get(),
+        rt->tagger = std::make_unique<Tagger>(rt->live, rt->store.get(), rt->embeddings.get(),
                                               Tagger::Resolver{}, minimal::common::DefaultLogger());
         std::call_once(rt->workers_started, [] {});  // tests drive workers by hand
     }

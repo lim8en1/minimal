@@ -11,6 +11,7 @@
 
 #include "embedding_service.hpp"
 #include "memory_settings.hpp"
+#include "minimal/common/live_value.hpp"
 #include "memory_store.hpp"
 #include "tagger.hpp"
 
@@ -27,9 +28,14 @@ class ServiceRegistry;
 namespace minimal::memory {
 
 struct MemoryRuntime {
+    // The settings, swapped by minimal_plugin_reconfigure (live fields only;
+    // the embedding backend and the tools' shape are restart). Read through
+    // Settings() at the point of use, never cached across calls.
+    std::shared_ptr<common::LiveValue<MemorySettings>> live;
+    std::shared_ptr<const MemorySettings> Settings() const { return live->Get(); }
+
     // Declaration order is destruction order reversed: the tagger (which
     // uses both) stops first, then the embedding worker, then the store.
-    MemorySettings settings;
     std::unique_ptr<MemoryStore> store;
     std::unique_ptr<EmbeddingService> embeddings;  // non-null
     std::unique_ptr<Tagger> tagger;                // non-null; inert when disabled

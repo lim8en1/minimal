@@ -15,8 +15,13 @@ CostSettings ParseCostSettings(const nlohmann::json& config) {
     reader.Describe("rates_fetch_timeout_ms", {"Bound on one pricing fetch."});
     reader.Describe("rates_refresh_days",
                     {"Snapshot age that triggers a refetch at startup; 0 = every start."});
+    // Live: rates (the price lookup is per report). Restart: the fetch
+    // settings (held by the refresher and the RPC service) and
+    // rates_refresh_days, which only a startup consults.
     reader.Describe("rates", {"Per-model rate overrides, keyed by model id: {\"input\", "
-                              "\"output\", \"cache_read\"} per million tokens."});
+                              "\"output\", \"cache_read\"} per million tokens. Costs are priced "
+                              "when reported, so a change reprices past usage too.",
+                              config::ApplyPolicy::kLive});
     reader.Default("rates", nlohmann::json::object());
     settings.rates_fetch_url =
         reader.String("rates_fetch_url", settings.rates_fetch_url, /*allow_empty=*/false);

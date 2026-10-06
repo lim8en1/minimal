@@ -323,6 +323,20 @@ TEST_CASE("switching models mid-session sums re-visited and distinct models corr
     CHECK_FALSE(two_cloud_totals.total_cost_known);
 }
 
+TEST_CASE("the config tier swaps live; the other tiers stay", "[cost_tracker]") {
+    Harness harness;
+    RateSources sources;
+    sources.bundled_models = nlohmann::json::parse(R"({"m": {"input": 1.0, "output": 1.0}})");
+    sources.config_rates = nlohmann::json::parse(R"({"m": {"input": 100.0, "output": 100.0}})");
+    RateTable table(sources, &harness.storage);
+    REQUIRE(table.Resolve("m")->input_per_mtok == 100.0);
+
+    table.SetConfigRates(nlohmann::json::parse(R"({"m": {"input": 50.0, "output": 50.0}})"));
+    CHECK(table.Resolve("m")->input_per_mtok == 50.0);
+    table.SetConfigRates(nlohmann::json::object());  // the override removed
+    CHECK(table.Resolve("m")->input_per_mtok == 1.0);  // the bundled tier shows through
+}
+
 TEST_CASE("rate resolution is config > openrouter > litellm > bundled",
           "[cost_tracker][invariant]") {
     Harness harness;

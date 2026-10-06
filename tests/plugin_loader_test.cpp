@@ -1197,6 +1197,27 @@ TEST_CASE("the plugins endpoint applies a live change at once and holds a restar
     CHECK(CallJson(endpoint, "describe", {{"name", "fixture-config"}}).at("pending").empty());
 }
 
+TEST_CASE("the plugins endpoint: a field unused in the current mode has no effect",
+          "[plugin_loader][config_endpoint]") {
+    TempDir config_dir;
+    Harness h;
+    const std::vector<PluginCandidate> candidates = {Enabled("fixture-config")};
+    const auto records = h.loader.LoadAll(candidates);
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, candidates);
+
+    auto described = CallJson(endpoint, "describe", {{"name", "fixture-config"}});
+    CHECK(described.at("unused").at("detail") == "mode is fast");
+
+    const auto answer = CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "detail"},
+                                                   {"value", 3}});
+    CHECK(answer.at("applied") == "none");
+    CHECK(answer.at("unused").at("detail") == "mode is fast");
+    // Saved, and nothing pending: a restart would change nothing either.
+    described = CallJson(endpoint, "describe", {{"name", "fixture-config"}});
+    CHECK(described.at("config").at("detail") == 3);
+    CHECK(described.at("pending").empty());
+}
+
 TEST_CASE("the plugins endpoint applies an edit made elsewhere (the CLI)",
           "[plugin_loader][config_endpoint]") {
     TempDir config_dir;

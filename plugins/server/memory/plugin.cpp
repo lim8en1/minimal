@@ -58,6 +58,28 @@ extern "C" {
 
 MINIMAL_PLUGIN_ABI_SYMBOLS("memory")
 
+// Only "live" fields reach here -- limits read per use by the tools, the
+// tagger and the context index -- so swapping the whole parsed struct leaves
+// the embedding backend and the tools' shape as they were built.
+bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error) {
+    std::shared_ptr<minimal::memory::MemoryRuntime> runtime;
+    {
+        std::lock_guard<std::mutex> lock(g_runtime_mu);
+        runtime = g_runtime;
+    }
+    if (runtime == nullptr) {
+        error = g_error.empty() ? "memory is not running" : "memory is disabled: " + g_error;
+        return false;
+    }
+    try {
+        runtime->live->Set(minimal::memory::ParseMemorySettings(config));
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+}
+
 void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
                                    const minimal::plugins::PluginRegistrationContext& context) {
     auto runtime = Runtime(context);

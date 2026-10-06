@@ -159,8 +159,13 @@ int Show(const Target& target, bool as_json) {
     const auto rows = common::EffectiveConfig(target.schema, target.config);
     if (as_json) {
         json values = json::object();
-        for (const auto& row : rows) values[row.path] = row.value;
+        json unused = json::object();
+        for (const auto& row : rows) {
+            values[row.path] = row.value;
+            if (row.unused) unused[row.path] = *row.unused;
+        }
         std::printf("%s\n", json{{"file", target.label},
+                                 {"unused", unused},
                                  {"enabled", target.plugin.enabled},
                                  {"schema", target.schema},
                                  {"config", target.config},
@@ -180,10 +185,16 @@ int Show(const Target& target, bool as_json) {
     std::printf("%s%s\n", target.label.c_str(), target.plugin.enabled ? "" : "  (plugin disabled)");
     for (std::size_t i = 0; i < rows.size(); ++i) {
         const auto& row = rows[i];
+        // An unused field (its "when" unmet) says why instead of its apply
+        // policy: what it would take to matter is the useful fact.
+        const std::string apply =
+            row.unused ? "-" : row.field->value("apply", "restart");
+        const std::string doc =
+            row.unused ? "(not used: " + *row.unused + ") " + row.field->value("doc", "")
+                       : row.field->value("doc", "");
         std::printf("  %c %-*s  %-*s  %-7s  %s\n", row.overridden ? '*' : ' ',
                     static_cast<int>(path_width), row.path.c_str(), static_cast<int>(value_width),
-                    shown[i].c_str(), row.field->value("apply", "restart").c_str(),
-                    row.field->value("doc", "").c_str());
+                    shown[i].c_str(), apply.c_str(), doc.c_str());
     }
     std::printf("\n  * set in the file; the rest are defaults\n");
     return 0;
@@ -219,7 +230,13 @@ int Save(const Target& target, const json& next, const std::string& what) {
         std::fprintf(stderr, "minimal: %s\n", failed.c_str());
         return 1;
     }
-    if (change.paths.empty()) {
+    if (change.paths.empty() && !change.unused.empty()) {
+        const json* field = common::SchemaField(target.schema, change.unused.front());
+        const auto reason = field != nullptr ? common::UnusedReason(target.schema, *field, next)
+                                             : std::nullopt;
+        std::printf("%s: %s (saved; not used while %s)\n", target.label.c_str(), what.c_str(),
+                    reason ? reason->c_str() : "its condition is unmet");
+    } else if (change.paths.empty()) {
         std::printf("%s: %s (no change)\n", target.label.c_str(), what.c_str());
     } else if (!target.plugin.enabled) {
         std::printf("%s: %s (the plugin is disabled; applies when it is enabled)\n",

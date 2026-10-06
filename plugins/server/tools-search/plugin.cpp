@@ -24,6 +24,16 @@
 #include "grep_tool.hpp"
 #include "search_settings.hpp"
 
+namespace {
+
+// What grep and glob read per call; swapped by minimal_plugin_reconfigure.
+std::shared_ptr<minimal::common::LiveValue<minimal::tools_search::SearchSettings>>& Live() {
+    static std::shared_ptr<minimal::common::LiveValue<minimal::tools_search::SearchSettings>> live;
+    return live;
+}
+
+}  // namespace
+
 MINIMAL_PLUGIN_CONFIG_SCHEMA(
     minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "tools-search"),
     [](const nlohmann::json& config) {
@@ -37,12 +47,29 @@ MINIMAL_PLUGIN_ABI_SYMBOLS("tools-search")
 void minimal_plugin_register_tools(
     minimal::tools::ToolRegistry& registry,
     const minimal::plugins::PluginRegistrationContext& context) {
-    // The plugin's own `config` object from its plugins.json entry, verbatim;
-    // core imposes no schema, this plugin owns the shape of its own slice.
-    const auto settings = minimal::tools_search::ParseSearchSettings(context.config);
+    // The plugin's own plugins.d/tools-search.json, verbatim; core imposes no
+    // schema, this plugin owns the shape of its own file.
+    Live() = std::make_shared<minimal::common::LiveValue<minimal::tools_search::SearchSettings>>(
+        minimal::tools_search::ParseSearchSettings(context.config));
 
-    registry.Register(minimal::tools_search::MakeGrepTool(settings));
-    registry.Register(minimal::tools_search::MakeGlobTool(settings));
+    registry.Register(minimal::tools_search::MakeGrepTool(Live()));
+    registry.Register(minimal::tools_search::MakeGlobTool(Live()));
+}
+
+// Every field is live: both tools read the limits per call and their
+// definitions quote none of them.
+bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error) {
+    if (!Live()) {
+        error = "tools-search is not registered";
+        return false;
+    }
+    try {
+        Live()->Set(minimal::tools_search::ParseSearchSettings(config));
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
 }
 
 }  // extern "C"

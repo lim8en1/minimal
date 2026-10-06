@@ -9,7 +9,9 @@
 // Methods (payloads and answers are JSON):
 //   list                      [{name, enabled, loaded, configurable, set, pending}]
 //   describe {name}           {name, file, enabled, loaded, schema, config,
-//                              effective: {path: value}, pending: [paths]}
+//                              effective: {path: value}, pending: [paths],
+//                              unused: {path: why}} -- fields whose "when" is
+//                              unmet, so they do nothing right now
 //   set {name, key, value}    or {name, key, text} (text parsed by the field's
 //                             type); validated by the plugin, written, applied
 //   unset {name, key}
@@ -17,7 +19,9 @@
 //                             CLI) and apply it
 // set/unset/apply answer {applied: "live" | "restart" | "none", changed: [...]}
 // -- "live" when every changed field is live and the plugin took it
-// (minimal_plugin_reconfigure); "restart" when the change waits for one.
+// (minimal_plugin_reconfigure); "restart" when the change waits for one;
+// "none" when nothing the plugin uses changed (with "unused": {path: why}
+// for a field saved while its condition is unmet).
 // A refusal answers {error: "..."}.
 //
 // "pending" lists the fields whose file value differs from what the plugin

@@ -41,6 +41,7 @@
 
 #include "embedding_service.hpp"
 #include "memory_settings.hpp"
+#include "minimal/common/live_value.hpp"
 #include "memory_store.hpp"
 
 namespace minimal::common {
@@ -64,6 +65,10 @@ public:
     // after plugins load). nullopt = cannot resolve right now.
     using Resolver = std::function<std::optional<TaggerLlm>()>;
 
+    // `settings` is read per use: a reconfigure swaps it while the worker
+    // runs. The MemorySettings overload is a fixed configuration (tests).
+    Tagger(std::shared_ptr<const common::LiveValue<MemorySettings>> settings, MemoryStore* store,
+           EmbeddingService* embeddings, Resolver resolver, common::Logger& logger);
     Tagger(MemorySettings settings, MemoryStore* store, EmbeddingService* embeddings,
            Resolver resolver, common::Logger& logger);
     ~Tagger();
@@ -71,7 +76,7 @@ public:
     Tagger(const Tagger&) = delete;
     Tagger& operator=(const Tagger&) = delete;
 
-    bool enabled() const { return !settings_.tagger_model.empty(); }
+    bool enabled() const { return !Settings()->tagger_model.empty(); }
     void Start();
     void Notify();
 
@@ -99,7 +104,9 @@ private:
                                               const std::string& description);
     std::optional<std::vector<float>> TagVector(std::int64_t tag_id, const std::string& text);
 
-    MemorySettings settings_;
+    std::shared_ptr<const MemorySettings> Settings() const { return settings_->Get(); }
+
+    std::shared_ptr<const common::LiveValue<MemorySettings>> settings_;
     MemoryStore* store_;
     EmbeddingService* embeddings_;  // may be null
     Resolver resolver_;

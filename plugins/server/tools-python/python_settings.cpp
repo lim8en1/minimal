@@ -10,13 +10,17 @@ PythonSettings ParsePythonSettings(const nlohmann::json& config) {
     config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "tools-python"));
     reader.Describe("python", {"Fallback interpreter (bare python and venv creation), "
                                "resolved on PATH."});
+    // Live: what python_exec reads per call. Restart: what an interpreter
+    // copies at spawn (a change would reach only interpreters started later).
     reader.Describe("sync_wait_ceiling_s", {"Ceiling on a model-supplied sync timeout; reaching "
-                                            "it demotes the wait to async. 0 = unlimited."});
+                                            "it demotes the wait to async. 0 = unlimited.",
+                                            config::ApplyPolicy::kLive});
     reader.Describe("startup_timeout_s", {"Spawn + handshake window for a new interpreter."});
     reader.Describe("install_timeout_s", {"Bound on venv creation / package installation."});
     reader.Describe("grace_s", {"How long an interrupt waits before escalating to a kill."});
     reader.Describe("background_max_runtime_s",
-                    {"Default deadline for background requests. 0 = off."});
+                    {"Default deadline for background requests. 0 = off.",
+                     config::ApplyPolicy::kLive});
     reader.Describe("rlimit_cpu_s", {"RLIMIT_CPU backstop for the interpreter. 0 = off."});
     reader.Describe("max_output_bytes", {"Bounds the persisted result text per request."});
     reader.Describe("max_capture_bytes", {"Per-field capture cap (stdout, stderr, result, ...)."});

@@ -54,6 +54,7 @@ void ParseSample(const json& config) {
     (void)root.Enum("mode", "fast", {"fast", "slow"});
     root.Describe("api_key", {"Key reference.", config::ApplyPolicy::kRestart, true});
     (void)root.String("api_key", "");
+    root.RelevantWhen("api_key", "mode", {"slow"});
     (void)root.MaybeDouble("ratio", 0.0, 1.0);
     root.Default("ratio", 0.5);
     config::Reader nested = root.Object("nested");
@@ -88,6 +89,8 @@ TEST_CASE("describe mode records each field the parser reads", "[config_schema]"
 
     CHECK(FieldAt(schema, "flag")->at("default") == true);
     CHECK(FieldAt(schema, "api_key")->at("secret") == true);
+    CHECK(FieldAt(schema, "api_key")->at("when") ==
+          json{{"field", "mode"}, {"in", json::array({"slow"})}});
     CHECK(FieldAt(schema, "ratio")->at("default") == 0.5);  // Maybe* + Default()
     CHECK(FieldAt(schema, "ratio")->at("maximum") == 1.0);
     CHECK(FieldAt(schema, "nested.names")->at("type") == "string_list");
@@ -156,6 +159,10 @@ TEST_CASE("every bundled plugin's schema agrees with its own parser", "[config_s
             CHECK(field.contains("default"));
             if (inspected.name != "decision-advisor") CHECK(field.contains("doc"));
             any_live = any_live || field.at("apply") == "live";
+            // A condition names a real field of the same plugin.
+            if (field.contains("when")) {
+                CHECK(FieldAt(schema, field.at("when").at("field").get<std::string>()) != nullptr);
+            }
         }
         // A plugin that declares a live field must be able to take one.
         if (any_live) CHECK(inspected.config.reconfigure != nullptr);
