@@ -20,7 +20,7 @@ public:
     FixtureSegment(std::string echo, plugins::AttentionSink* attention, std::string raise_tab)
         : echo_(std::move(echo)), attention_(attention), raise_tab_(std::move(raise_tab)) {}
     std::string_view id() const override { return "fixture_seg"; }
-    std::string Render(const std::string&) const override {
+    plugins::StatusValue Render(const plugins::TabStatus&) const override {
         // POST-LOAD seam use: the sink pointer was captured from the
         // registration context; Render is where a real plugin would use it
         // (attention raises happen while the TUI runs, long after LoadAll).
@@ -29,7 +29,7 @@ public:
         // never lands. Opt-in via the "raise_tab" config key so the loader
         // tests using a default config stay unaffected.
         if (attention_ != nullptr && !raise_tab_.empty()) attention_->RaiseTab(raise_tab_);
-        return echo_;
+        return {echo_, ""};
     }
 
 private:

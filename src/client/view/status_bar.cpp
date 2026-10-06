@@ -14,13 +14,10 @@ namespace {
 // (kStatusSessionColumnCap) even when the terminal has room to spare, so it
 // never dominates the bar.
 
-// Which segment gives way first when the bar overflows: lowest first
-// (kStatusSegmentPriorities). A plugin segment ranks by its own priority.
+// Which segment gives way first when the bar overflows: lowest first, each
+// by its own declared priority.
 int SegmentPriority(std::string_view id, const std::map<std::string, int>& priorities) {
     if (const auto it = priorities.find(std::string(id)); it != priorities.end()) return it->second;
-    for (const auto& [core_id, priority] : kStatusSegmentPriorities) {
-        if (id == core_id) return priority;
-    }
     return kPluginStatusSegmentPriority;
 }
 
@@ -48,58 +45,19 @@ void DropSegment(std::vector<StatusBarPart>& parts, std::size_t index) {
 
 }  // namespace
 
-bool IsKnownStatusSegment(std::string_view id) {
-    return id == "version" || id == "model" || id == "tokens" || id == "agent" ||
-           id == "permission_mode" || id == "session" || id == "activity" ||
-           id == "paused" || id == kStatusSplitId;
-}
-
-std::vector<std::string> UnknownStatusSegments(const std::string& format) {
-    std::vector<std::string> unknown;
+std::vector<std::string> FormatSegmentIds(const std::string& format) {
+    std::vector<std::string> ids;
     for (const auto& part : ParseStatusFormat(format)) {
-        if (part.is_segment && !part.optional && !IsKnownStatusSegment(part.text)) {
-            unknown.push_back(part.text);   // registry (E5) or typo -- named either way
+        if (part.is_segment && !part.optional && part.text != kStatusSplitId) {
+            ids.push_back(part.text);
         }
     }
-    return unknown;
-}
-
-std::string FormatTokenUsage(std::int64_t used, std::int64_t max) {
-    if (used < 0) used = 0;
-    if (max <= 0) return common::CompactCount(used) + " tok";
-    return common::CompactCount(used) + "/" + common::CompactCount(max) + " · " +
-           std::to_string(common::AsPercent(used, max)) + "%";
-}
-
-std::string PermissionModeSegmentValue(const std::string& applied,
-                                       const std::string& desired, bool has_session) {
-    // The applied value is wire truth and renders alone unless a queued
-    // switch is pending. A sessionless tab has nothing to apply into (the
-    // create carries no run mode), so there is no pending state to show --
-    // same rule the {model}/{agent} markers follow.
-    if (desired.empty() || !has_session || desired == applied) return applied;
-    return "→ " + desired;
-}
-
-std::string WithHiddenRowsSuffix(std::string activity) {
-    // The literal is the same " · " spelling the bar renders between
-    // segments, so the suffix reads as one composed value.
-    constexpr std::string_view kSeparator = " · ";
-    constexpr std::string_view kSuffix = "earlier rows hidden";
-    if (activity.size() >= kSuffix.size() &&
-        activity.compare(activity.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0) {
-        return activity;   // already suffixed -- never double-append
-    }
-    if (activity.empty()) return std::string(kSuffix);
-    activity += kSeparator;
-    activity += kSuffix;
-    return activity;
+    return ids;
 }
 
 std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& format,
                                             const std::map<std::string, std::string>& values,
-                                            int max_width,
-                                            const std::map<std::string, int>& priorities) {
+                                            int max_width, const StatusLayout& layout) {
     std::vector<StatusBarPart> parts;
     std::string pending_literal;
     bool group_empty = true;   // no value yet in the current (left or right) group
@@ -139,30 +97,34 @@ std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& fo
     if (max_width <= 0) return parts;
     const std::size_t max_width_u = static_cast<std::size_t>(max_width);
 
-    const auto session = std::find_if(parts.begin(), parts.end(), [](const StatusBarPart& p) {
-        return p.segment_id == "session";
-    });
-    if (session != parts.end()) {
-        const std::size_t index = static_cast<std::size_t>(session - parts.begin());
-        const std::size_t own = Utf8ColumnWidth(session->text);
+    // The capped segments first, in bar order: each is cut to its cap and to
+    // what the rest leaves it, or dropped when the rest alone overflows.
+    for (std::size_t index = 0; index < parts.size();) {
+        const auto cap = layout.caps.find(parts[index].segment_id);
+        if (parts[index].segment_id.empty() || cap == layout.caps.end() || cap->second == 0) {
+            ++index;
+            continue;
+        }
+        StatusBarPart& part = parts[index];
+        const std::size_t own = Utf8ColumnWidth(part.text);
         const std::size_t others = PartsWidth(parts) - own;
         const std::size_t budget =
-            others < max_width_u ? std::min(kStatusSessionColumnCap, max_width_u - others) : 0;
+            others < max_width_u ? std::min(cap->second, max_width_u - others) : 0;
         if (budget == 0) {
-            DropSegment(parts, index);
-        } else if (own > budget) {
-            session->text = TruncateUtf8Columns(session->text, budget);
-        } else if (own > kStatusSessionColumnCap) {
-            session->text = TruncateUtf8Columns(session->text, kStatusSessionColumnCap);
+            DropSegment(parts, index);  // may take the literal before it too
+            index = 0;                  // so rescan: a cut value re-checks as within budget
+            continue;
         }
+        if (own > budget) part.text = TruncateUtf8Columns(part.text, budget);
+        ++index;
     }
 
     while (PartsWidth(parts) > max_width_u) {
         std::optional<std::size_t> victim;
         for (std::size_t i = 0; i < parts.size(); ++i) {
             if (parts[i].is_literal || parts[i].is_split) continue;
-            if (!victim || SegmentPriority(parts[i].segment_id, priorities) <
-                               SegmentPriority(parts[*victim].segment_id, priorities)) {
+            if (!victim || SegmentPriority(parts[i].segment_id, layout.priorities) <
+                               SegmentPriority(parts[*victim].segment_id, layout.priorities)) {
                 victim = i;
             }
         }
@@ -176,11 +138,11 @@ ftxui::Element RenderStatusBar(const std::vector<StatusSegment>& format,
                                const std::map<std::string, std::string>& values,
                                const Theme& theme, int max_width,
                                const std::map<std::string, ftxui::Color>& emphasis,
-                               const std::map<std::string, int>& priorities) {
+                               const StatusLayout& layout) {
     using namespace ftxui;
     // One column of padding at each edge, so values never touch the frame.
     const auto parts =
-        ResolveStatusBar(format, values, max_width > 2 ? max_width - 2 : max_width, priorities);
+        ResolveStatusBar(format, values, max_width > 2 ? max_width - 2 : max_width, layout);
     if (parts.empty()) return emptyElement();
     const Color literal_color = MutedColor(theme);
     const Color value_color = theme.ColorFor("assistant_message");

@@ -36,8 +36,8 @@ public:
 
     // Keyed by the frame's own session id, so the label can never show the
     // previous tab's checklist; the call doubles as the feed's focus hint.
-    std::string Render(const std::string& focused_session_id) const override {
-        return feed_->SegmentText(focused_session_id);
+    plugins::StatusValue Render(const plugins::TabStatus& focused) const override {
+        return {feed_->SegmentText(focused.session_id), ""};
     }
 
 private:

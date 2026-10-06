@@ -128,7 +128,7 @@ TEST_CASE("status format: {id?} marks a segment optional -- no unknown-id warnin
     CHECK(parts[2].text == "cost");   // the marker is not part of the id
     CHECK(parts[2].optional);
     CHECK_FALSE(parts[0].optional);
-    CHECK(client::UnknownStatusSegments("{cost?} {todo}") == std::vector<std::string>{"todo"});
+    CHECK(client::FormatSegmentIds("{cost?} {todo}") == std::vector<std::string>{"todo"});
 }
 
 TEST_CASE("status format splits literals from segments", "[status_format]") {
