@@ -204,8 +204,11 @@ minimal: plugins.d/tools-web.json: fetch.max_bytes: must not be below fetch.defa
 ```
 
 `set` says how the change applies: **live** (every changed field is `live`:
-a running server takes it without a restart) or **restart**. Unsetting
-the last key removes the file. The work runs in `minimal-server plugin ...`,
+a running server takes it without a restart) or **restart**. When a server
+is running, `minimal plugin set`/`unset` then asks it to apply the change
+(the `plugins` endpoint's `apply`) and reports the outcome; a restart change
+stays listed as pending there until the server restarts. Unsetting the last
+key removes the file. The work runs in `minimal-server plugin ...`,
 which opens plugins for their config symbols only — no registration, no
 storage — so it is safe beside a running server. A secret field's literal
 value is shown as `****`; a `secret:`/`env:` reference is shown as written.

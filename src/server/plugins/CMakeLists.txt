@@ -6,4 +6,5 @@ minimal_server_module(plugins
         plugin_rpc.cpp
         plugin_storage.cpp
         plugin_discovery.cpp
+        plugin_config_endpoint.cpp
 )

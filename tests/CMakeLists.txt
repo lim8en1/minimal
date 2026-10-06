@@ -408,7 +408,7 @@ add_dependencies(minimal_tests
     fixture-hook
     fixture-lifecycle
     fixture-client fixture-client-exclusive fixture-client-partial-throw fixture-endpoint
-    fixture-client-bad-abi fixture-user fixture-project-commands)
+    fixture-client-bad-abi fixture-user fixture-project-commands fixture-config)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"
     MINIMAL_USER_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures-deployed"

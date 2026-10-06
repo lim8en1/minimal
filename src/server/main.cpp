@@ -51,6 +51,7 @@
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/plugins/name_resolution.hpp"
+#include "minimal/plugins/plugin_config_endpoint.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/agent/host_registries.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
@@ -518,6 +519,14 @@ static int RunServer(int argc, char** argv) {
     // trust prompt. The loader is declared after project_trust, so it is gone
     // first -- but only after every session (the sole Inspect callers) ended.
     project_trust.SetContentProvider(&loader);
+    // Plugin configuration for the running server (`/config`, `minimal plugin`
+    // after an edit): core's, because it needs every plugin's record and the
+    // config each one registered with. Provided after the plugins, so no
+    // plugin can claim the name.
+    minimal::plugins::PluginConfigEndpoint plugin_config_endpoint(config_dir, records, candidates);
+    services.Provide(minimal::plugins::PluginEndpointServiceName(
+                         minimal::plugins::kPluginConfigEndpointName),
+                     &plugin_config_endpoint);
     // The load thread is the only writer; from here the map is read-only, which
     // is what makes unguarded Find from session workers and the command pool
     // safe. A runtime Provide is logged and ignored (the registry's own rule).
