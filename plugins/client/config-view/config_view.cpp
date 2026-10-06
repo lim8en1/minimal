@@ -42,9 +42,10 @@ std::pair<std::string, bool> Outcome(const std::string& path, const json& answer
 
 // The list screen's label for one plugin.
 std::string ListLabel(const json& row) {
+    // Only what needs attention: how many keys a file sets is the steady
+    // state, not news (the form's * marks show them per field).
     std::string label = row.value("name", "");
     if (!row.value("enabled", false)) label += "  (disabled)";
-    if (const auto set = row.value("set", 0); set > 0) label += "  " + std::to_string(set) + " set";
     if (const auto pending = row.value("pending", json::array()); !pending.empty()) {
         label += "  · restart pending";
     }
