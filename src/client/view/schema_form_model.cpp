@@ -67,8 +67,9 @@ std::vector<FormRow> BuildFormRows(const json& describe) {
     return rows;
 }
 
-FormAction ActionFor(const FormRow& row) {
+FormAction ActionFor(const FormRow& row, bool can_pick) {
     if (row.type == "boolean") return FormAction::kToggle;
+    if (can_pick && (row.type == "enum" || row.field.contains("format"))) return FormAction::kPick;
     if (row.type == "enum") return FormAction::kCycle;
     return FormAction::kEdit;
 }

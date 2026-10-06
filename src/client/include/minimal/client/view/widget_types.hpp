@@ -136,6 +136,11 @@ struct SchemaFormCallbacks {
     std::function<void(const std::string& path, const std::string& text)> on_set;
     std::function<void(const std::string& path)> on_unset;
     std::function<void()> on_back;  // optional
+    // Optional. Enter on an enum, or on a field with a "format" (a model
+    // ref): the owner shows a chooser and sends what is chosen through its
+    // own set/unset. Unset: an enum steps to its next choice and a formatted
+    // field opens the text editor, as before.
+    std::function<void(const std::string& path, const nlohmann::json& field)> on_pick;
 };
 
 // --- The model selector --------------------------------------------------------

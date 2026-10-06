@@ -40,11 +40,22 @@ enum class ApplyPolicy { kRestart, kLive };
 
 // What describe mode records about one field beyond what the read itself
 // says (type, default, range, choices). See Reader::Describe.
+// What a string field's value names, beyond being a string -- so a form can
+// offer a chooser rather than free text. The vocabulary is core's.
+enum class FieldFormat {
+    kNone,
+    kModelRef,  // "<provider>/<model>": a form offers the server's models
+};
+
 struct FieldMeta {
     std::string doc;
     ApplyPolicy apply = ApplyPolicy::kRestart;
     // A key reference ("secret:NAME", "env:NAME", or a literal): shown masked.
     bool secret = false;
+    FieldFormat format = FieldFormat::kNone;
+    // What leaving the field empty means ("the session's own model"), for a
+    // chooser's "unset" row; "" when empty means nothing special.
+    std::string empty_label = {};
 };
 
 class SchemaRecorder;

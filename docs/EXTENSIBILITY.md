@@ -323,7 +323,7 @@ The "write a different frontend" tier shrinks to exactly this list. Not on it, u
 | Markdown engine | **exclusive**; absent → plain text | md4c adapter | live; default moving |
 | Syntax-highlight languages (keyed by language) | additive, collisions fatal | vendored grammars | live; default moving |
 | Prompt renderers (keyed by prompt kind) | additive; `permission` and `confirmation` **required** | plugin kinds: their pair's view; core kinds: core modals | live for plugin kinds; core kinds planned |
-| Widget kit (filterable menu, schema form, modal chrome; model selector and confirm dialog to come) | **exclusive** (required once the default leaves core) | core kit | live: config-view, mcp-view and ask-view build on it; core's own pickers move onto it with Phase 6, the default to a bundled `ui-kit` after |
+| Widget kit (filterable menu, schema form, model selector, modal chrome; a confirm dialog to come) | **exclusive** (required once the default leaves core) | core kit | live: config-view, mcp-view and ask-view build on it; core's own pickers move onto it with Phase 6, the default to a bundled `ui-kit` after |
 | Prompt editor | **exclusive, required** | core prompt editor | planned — its own design pass |
 | Tab bar | **exclusive** | core tab bar | planned |
 | Status-bar segments (keyed by segment id) | additive; **format string orders/selects** | core segments | live; default moving |

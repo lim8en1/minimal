@@ -14,9 +14,13 @@ Plugin configuration in the TUI: `/config`.
 - **Command** `/config [plugin]` — opens the list, or straight onto a
   plugin's form.
 
-Keys in the form: up/down (`k`/`j`) select; enter toggles a boolean, steps
-an enum, or edits a value inline (enter saves, esc cancels); `d` resets a
-field to its default; left/backspace goes back to the list; esc closes.
+Keys in the form: up/down (`k`/`j`) select; enter toggles a boolean, opens a
+chooser for an enum (its choices) or a model ref (the server's models, an
+"empty" row that unsets it, and any typed `<provider>/<model>` the list does
+not have), or edits a value inline (enter saves, esc cancels; a secret is
+typed masked); `d` resets a field to its default (a set secret asks twice);
+left/backspace goes back to the list; esc closes -- or, in a chooser or the
+editor, goes back to the form.
 
 Edits go to core's `plugins` endpoint: the plugin's own parser checks the
 value (a refusal shows in red, nothing is written), the file

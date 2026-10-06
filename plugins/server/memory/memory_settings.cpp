@@ -49,8 +49,10 @@ MemorySettings ParseMemorySettings(const nlohmann::json& config) {
                                       "it invalidates stored vectors."});
     reader.Describe("sidecar_startup_timeout_ms", {"Sidecar spawn + model load window."});
     reader.Describe("sidecar_request_timeout_ms", {"One sidecar embedding request's bound."});
-    reader.Describe("tagger_model", {"<provider>/<model> that files entries under tags; empty = "
-                                     "entries stay untagged."});
+    reader.Describe("tagger_model", {.doc = "<provider>/<model> that files entries under tags; "
+                                            "empty = entries stay untagged.",
+                                     .format = config::FieldFormat::kModelRef,
+                                     .empty_label = "off -- entries stay untagged"});
     reader.Describe("tagger_max_tokens", {"Output cap for one tagging request.", kLive});
     reader.Describe("tagger_timeout_ms", {"One tagging request's bound.", kLive});
     reader.Describe("max_tags", {"Tag vocabulary cap per scope.", kLive});

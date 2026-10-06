@@ -37,9 +37,12 @@ struct FormRow {
 std::vector<FormRow> BuildFormRows(const nlohmann::json& describe);
 
 // What Enter does on a field row: flip a boolean, step an enum to its next
-// choice, or open the text editor (everything else).
-enum class FormAction { kToggle, kCycle, kEdit };
-FormAction ActionFor(const FormRow& row);
+// choice, open the text editor (everything else) -- or, when the form's owner
+// can show a chooser (`can_pick`), hand it an enum or a field whose
+// "format" names what it holds (a model ref): stepping an enum wrote every
+// choice it passed through, and a typed model ref was a guess.
+enum class FormAction { kToggle, kCycle, kEdit, kPick };
+FormAction ActionFor(const FormRow& row, bool can_pick = false);
 
 // kToggle / kCycle: the text that applies the change ("false", "slow").
 std::string NextValueText(const FormRow& row);

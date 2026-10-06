@@ -9,7 +9,8 @@
 // sends the text to whoever owns the schema and reports the answer back
 // through the state's status line.
 //
-// Keys: up/down (k/j) select; enter toggles a boolean, steps an enum, or
+// Keys: up/down (k/j) select; enter toggles a boolean, hands an enum or a
+// model ref to the owner's chooser (on_pick; without one an enum steps), or
 // opens the inline editor (enter saves, esc cancels; a secret is typed
 // masked); d / delete resets the field to its default (a set secret asks for
 // a second d); left / backspace goes back (on_back). While `busy` the edit

@@ -100,6 +100,8 @@ void Reader::Describe(std::string_view key, FieldMeta meta) {
     if (!meta.doc.empty()) field["doc"] = std::move(meta.doc);
     field["apply"] = meta.apply == ApplyPolicy::kLive ? "live" : "restart";
     if (meta.secret) field["secret"] = true;
+    if (meta.format == FieldFormat::kModelRef) field["format"] = "model_ref";
+    if (!meta.empty_label.empty()) field["empty_label"] = std::move(meta.empty_label);
 }
 
 void Reader::RelevantWhen(std::string_view key, std::string_view field,

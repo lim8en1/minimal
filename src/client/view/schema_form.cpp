@@ -151,7 +151,7 @@ private:
             pinned.push_back(state.status_is_error ? status | color(theme_.ColorFor("error")) : status);
         }
 
-        std::string hints = "enter: edit/toggle  ·  d: default  ·  ←: back  ·  esc: close  ·  * = set";
+        std::string hints = "enter: edit/toggle/choose  ·  d: default  ·  ←: back  ·  esc: close  ·  * = set";
         if (editing_) {
             hints = secret_edit_ ? "enter: save (empty keeps the current key)  ·  esc: cancel"
                                  : "enter: save  ·  esc: cancel";
@@ -201,13 +201,16 @@ private:
         // a toggle now would send the value the previous one already sent.
         if (edit_key && state.busy) return true;
         if (event == Event::Return || event == Event::Character(' ')) {
-            switch (ActionFor(*row)) {
+            switch (ActionFor(*row, static_cast<bool>(callbacks_.on_pick))) {
                 case FormAction::kToggle:
                 case FormAction::kCycle:
                     if (callbacks_.on_set) callbacks_.on_set(row->path, NextValueText(*row));
                     return true;
                 case FormAction::kEdit:
                     OpenEditor(*row, EditText(*row));
+                    return true;
+                case FormAction::kPick:
+                    callbacks_.on_pick(row->path, row->field);
                     return true;
             }
         }

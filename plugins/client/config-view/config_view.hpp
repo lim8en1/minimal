@@ -84,6 +84,7 @@ public:
 
 private:
     std::shared_ptr<ConfigFeed> feed_;
+    plugins::ClientApi* api_;  // the model chooser's list
     const plugins::WidgetKit* widgets_;
     plugins::HostUi* ui_;
     client::Theme theme_;
