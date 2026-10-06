@@ -14,6 +14,9 @@
 
 #include "json_fields.hpp"
 #include "python_env.hpp"
+#include "policy.hpp"
+#include "minimal/agent/policy.hpp"
+#include "minimal/common/utf8.hpp"
 
 namespace minimal::tools_python {
 namespace {
@@ -21,12 +24,13 @@ namespace {
 using tools::PermissionDisclosure;
 using tools::ToolResult;
 
-constexpr std::size_t kMaxCodeBytes = common::kMiB;
+
+constexpr std::string_view kReadScope = "read:";
 
 std::string FirstLine(const std::string& text, std::size_t max) {
     auto end = text.find('\n');
     std::string line = text.substr(0, end == std::string::npos ? text.size() : end);
-    if (line.size() > max) line = line.substr(0, max) + "...";
+    if (line.size() > max) line = common::TruncateCodePoints(line, max) + "...";
     return line;
 }
 
@@ -34,7 +38,7 @@ RequestHandles BuildHandles(const std::string& tool_use_id, const std::string& c
                             tools::ToolContext& ctx) {
     RequestHandles handles;
     handles.tool_use_id = tool_use_id;
-    handles.label = FirstLine(code, 80);
+    handles.label = FirstLine(code, kTaskLabelChars);
     handles.schedule_injection = ctx.schedule_injection;
     handles.emit_task_event = ctx.emit_task_event;
     handles.emit_output = ctx.emit_output;
@@ -117,13 +121,14 @@ public:
     bool parallel_safe() const override { return false; }
 
     std::string Summary(const nlohmann::json& input) const override {
-        return ">>> " + FirstLine(StringField(input, "code"), 200);
+        return ">>> " + FirstLine(StringField(input, "code"), kSummaryChars);
     }
 
     PermissionDisclosure Disclose(const nlohmann::json& input,
                                   const tools::ToolContext& ctx) const override {
         PermissionDisclosure disclosure;
-        disclosure.summary = "python_exec: " + FirstLine(StringField(input, "code"), 100);
+        disclosure.summary =
+            "python_exec: " + FirstLine(StringField(input, "code"), agent::kPermissionPreviewChars);
         // The interpreter the invocation would run in, resolved without I/O
         // side effects beyond an exists() probe -- the same lower-bound rule
         // as bash's disclosure: it names what will run.
@@ -518,8 +523,8 @@ public:
             for (const auto& t : tasks) {
                 if (t.state != TaskStatus::State::kRunning) continue;
                 const auto tail = interp->ReadTaskOutput(
-                    t.id, t.stream_total > kListTailBytes ? t.stream_total - kListTailBytes : 0,
-                    kListTailBytes);
+                    t.id, t.stream_total > kListOutputTailBytes ? t.stream_total - kListOutputTailBytes : 0,
+                    kListOutputTailBytes);
                 if (!tail.slice.text.empty()) {
                     text += "\n--- " + t.id + " output (tail) ---\n" + tail.slice.text;
                 }
@@ -534,26 +539,26 @@ public:
 
         // One task's output, sliced by absolute byte offset.
         std::uint64_t offset = 0;
-        std::size_t length = kDefaultTailBytes;
+        std::size_t length = kDefaultOutputTailBytes;
         std::string scope_note = "tail 8192";
         if (scope.empty() || scope.rfind("tail:", 0) == 0) {
             const auto total = interp->ReadTaskOutput(task_id, 0, 0).slice.total;
-            const auto n = ParseCount(scope, kDefaultTailBytes);
+            const auto n = ParseCount(scope, kDefaultOutputTailBytes);
             const auto begin = total > n ? total - n : 0;
             offset = begin;
             length = static_cast<std::size_t>(total - begin);
             scope_note = "tail " + std::to_string(n);
         } else if (scope.rfind("top:", 0) == 0) {
-            length = static_cast<std::size_t>(ParseCount(scope, kDefaultTailBytes));
+            length = static_cast<std::size_t>(ParseCount(scope, kDefaultOutputTailBytes));
             scope_note = "top " + std::to_string(length);
-        } else if (scope.rfind("read:", 0) == 0) {
+        } else if (scope.starts_with(kReadScope)) {
             // 'read:OFFSET,LENGTH' is documented; 'read:OFFSET:LENGTH' is the
             // obvious misspelling and means the same thing.
-            const auto sep = scope.find_first_of(",:", 5);
+            const auto sep = scope.find_first_of(",:", kReadScope.size());
             if (sep == std::string::npos) {
                 return Error("scope 'read:' takes 'read:<offset>,<length>'");
             }
-            offset = ParseCount(scope.substr(5, sep - 5), 0);
+            offset = ParseCount(scope.substr(kReadScope.size(), sep - kReadScope.size()), 0);
             length = static_cast<std::size_t>(ParseCount(scope.substr(sep + 1), 0));
             scope_note = "read " + std::to_string(offset) + "+" + std::to_string(length);
         } else {
@@ -630,7 +635,7 @@ public:
         if (body.empty()) body = "(no output in this range)";
         text += "\n" + body;
         if (read.slice.next < read.slice.total) {
-            const auto page = length > 0 ? length : kDefaultTailBytes;
+            const auto page = length > 0 ? length : kDefaultOutputTailBytes;
             text += "\n[next: read:" + std::to_string(read.slice.next) + "," +
                     std::to_string(page) + "]";
         }
@@ -669,8 +674,6 @@ private:
         }
     }
 
-    static constexpr std::size_t kDefaultTailBytes = 8192;
-    static constexpr std::size_t kListTailBytes = 2048;
     PythonSettings settings_;
     InterpreterStore& store_;
     tools::ToolSpec spec_;

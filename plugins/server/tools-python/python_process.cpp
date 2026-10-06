@@ -41,13 +41,14 @@ LaunchedInterpreter LaunchInterpreter(const std::vector<std::string>& argv,
     spec.cpu_seconds = cpu_seconds;
     spec.file_size_bytes = file_size_bytes;
 
+    const std::size_t pipe_count = spec.pipes.size();
     auto launched = minimal::sidecar::Launch(spec);
     LaunchedInterpreter proc;
     proc.ok = launched.ok;
     proc.spawn_error = std::move(launched.spawn_error);
     proc.pid = launched.pid;
     proc.warnings = std::move(launched.warnings);
-    if (launched.ok && launched.parent_fds.size() == 5) {
+    if (launched.ok && launched.parent_fds.size() == pipe_count) {
         proc.in_fd = launched.parent_fds[0].release();
         proc.diag_fd = launched.parent_fds[1].release();
         proc.out_fd = launched.parent_fds[2].release();

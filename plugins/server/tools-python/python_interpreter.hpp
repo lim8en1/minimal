@@ -26,6 +26,7 @@
 #include "python_process.hpp"
 #include "python_settings.hpp"
 #include "stream_ring.hpp"
+#include "policy.hpp"
 
 namespace minimal::tools_python {
 
@@ -369,8 +370,7 @@ private:
 // The finished-completions ring depth: how far back `python_output` can see a
 // completed task before its entry is forgotten. Completion records are tiny
 // (the capped capture already rode the response line), so this bounds only
-// metadata, not the output text.
-inline constexpr std::size_t kFinishedRing = 8;
+// metadata, not the output text (kFinishedRing).
 
 // Formats one completed request into the text the model sees (shared by the
 // sync result and the async injection, so both audiences read the same shape).

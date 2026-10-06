@@ -7,6 +7,8 @@
 #include <nlohmann/json.hpp>
 #include "minimal/common/units.hpp"
 #include "minimal/sidecar/policy.hpp"
+#include "policy.hpp"
+#include "minimal/common/clock.hpp"
 
 namespace minimal::tools_python {
 
@@ -14,9 +16,10 @@ namespace minimal::tools_python {
 // (request timeouts, max_runtime, background_max_runtime): converting to a
 // nanosecond-resolution duration overflows a 64-bit rep above ~9.2e9 seconds
 // (~292 years) and wraps to a deadline in the PAST -- a request would be
-// SIGINT'd and hard-killed at once despite asking for more time. Far past any
-// real deadline.
-inline constexpr std::int64_t kMaxSaneRuntimeSeconds = 100'000'000;  // ~3.2 years
+// SIGINT'd and hard-killed at once despite asking for more time. The longest
+// deadline the clock can represent (common::kMaxDeadline).
+inline constexpr std::int64_t kMaxSaneRuntimeSeconds =
+    common::MillisToSeconds(common::kMaxDeadline.count());
 
 // This plugin's config, the "config" object on its plugins.json entry. Core
 // keeps it raw precisely so each plugin owns its schema -- this is that schema.
@@ -30,21 +33,21 @@ struct PythonSettings {
     // sync wait that reaches the ceiling DEMOTES to async -- it never kills
     // anything -- so the ceiling bounds the session worker without ever
     // destroying state.
-    std::int64_t sync_wait_ceiling = 300;
+    std::int64_t sync_wait_ceiling = kDefaultSyncWaitCeilingSeconds;
     // Bounded spawn+handshake window for a new interpreter (a broken venv is
     // caught here, not mid-use).
-    std::int64_t startup_timeout = 10;
+    std::int64_t startup_timeout = kDefaultStartupTimeoutSeconds;
     // Bounded venv creation / package installation.
-    std::int64_t install_timeout = 300;
+    std::int64_t install_timeout = kDefaultInstallTimeoutSeconds;
     // How long python_interrupt waits for evidence the SIGINT landed before
     // reporting "no reaction".
     std::int64_t grace_seconds = 2;
     // Bounds the PERSISTED result text per request (the transcript's copy).
-    std::int64_t max_output_bytes = common::kMiB;
+    std::int64_t max_output_bytes = kDefaultMaxOutputBytes;
     // Driver-side per-stream capture cap (stdout/stderr inside the
     // interpreter), communicated via _MINIMAL_PY_CAPTURE at spawn. Bounds the
     // protocol line size; max_output_bytes bounds what is persisted.
-    std::int64_t max_capture_bytes = common::kMiB;
+    std::int64_t max_capture_bytes = kDefaultMaxCaptureBytes;
     // RLIMIT_CPU backstop for the interpreter process, seconds. 0 = disabled:
     // the interpreter's clock is the session's clock, and a CPU-spinning live
     // session is the model's/user's to interrupt -- the default stance is
@@ -55,8 +58,8 @@ struct PythonSettings {
     // The live-output ring for python_output polling (head+tail windows over
     // the running request's stdout stream; see stream_ring.hpp). The ring
     // exists only while a request is running and is discarded on completion.
-    std::int64_t stream_head_bytes = 256 * common::kKiB;
-    std::int64_t stream_tail_bytes = 768 * common::kKiB;
+    std::int64_t stream_head_bytes = kDefaultStreamHeadBytes;
+    std::int64_t stream_tail_bytes = kDefaultStreamTailBytes;
     // Default deadline for background requests (seconds; 0 = unlimited, the
     // stance "timeouts demote, never destroy"). A per-call python_exec
     // max_runtime overrides it; on expiry the reader soft-interrupts and --
