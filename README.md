@@ -95,7 +95,8 @@ and never overwritten afterward.
 | `mcps.json` | optional | MCP servers (stdio/http) |
 | `cost-rates.json` | optional | cost-tracker's fallback price table |
 | `channels.json` | optional | external signal channels |
-| `plugins.json` | optional | plugin enable/disable, per-plugin config, aliases |
+| `plugins.json` | optional | plugin enable/disable, aliases |
+| `plugins.d/<name>.json` | optional | one plugin's own settings |
 | `agents/*.md` | ≥ 1 required | agent presets (frontmatter + markdown) |
 | `prompts/*.md` | optional | system prompt fragments |
 | `keybindings.json`, `ui.json`, `themes/` | optional (client) | keymap, status bar, theme |
@@ -115,8 +116,9 @@ Everything interesting ships as a plugin: `tools-fs`, `tools-search`,
 `decision-advisor` sends tool input to a decision-model endpoint to auto-answer
 permission prompts, so enabling it takes two deliberate edits (see its
 [README](plugins/server/decision-advisor/README.md)). Drop your own
-into `<config>/plugins/`, enable/disable or reconfigure any plugin in
-`plugins.json`, and rename tools/commands via its `"aliases"` map — see
+into `<config>/plugins/`, enable/disable any plugin in `plugins.json`,
+configure it in `plugins.d/<name>.json`, and rename tools/commands via
+`plugins.json`'s `"aliases"` map — see
 **[docs/PLUGINS.md](docs/PLUGINS.md)**.
 
 Markdown-defined `/`-commands work zero-copy with opencode's layout: put

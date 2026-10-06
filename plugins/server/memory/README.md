@@ -149,25 +149,23 @@ written by a newer binary), the plugin disables itself for that run and
 Installs that already have a `plugins.json` keep their existing
 `"enabled": false` entry, so there memory has to be switched on by hand.
 An unknown field disables the plugin for that run, naming the field.
-Full config:
+Full config, in `plugins.d/memory.json`:
 
 ```json
-{ "file": "memory.so", "enabled": true,
-  "config": {
-    "strategy": "auto",
-    "sidecar_python_path": "/usr/bin/python3",
-    "sidecar_model": "BAAI/bge-small-en-v1.5",
-    "api_base": "http://127.0.0.1:8080/v1",
-    "api_key": "secret:embeddings",
-    "model": "nomic-embed-text",
-    "tagger_model": "llamacpp-local/qwen3-4b-instruct",
-    "max_tags": 100,
-    "allow_inline": true,
-    "max_text_bytes": 8192,
-    "writes_prompt": true,
-    "index_budget_bytes": 4000,
-    "index_in_subagents": false
-  }
+{
+  "strategy": "auto",
+  "sidecar_python_path": "/usr/bin/python3",
+  "sidecar_model": "BAAI/bge-small-en-v1.5",
+  "api_base": "http://127.0.0.1:8080/v1",
+  "api_key": "secret:embeddings",
+  "model": "nomic-embed-text",
+  "tagger_model": "llamacpp-local/qwen3-4b-instruct",
+  "max_tags": 100,
+  "allow_inline": true,
+  "max_text_bytes": 8192,
+  "writes_prompt": true,
+  "index_budget_bytes": 4000,
+  "index_in_subagents": false
 }
 ```
 

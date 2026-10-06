@@ -44,23 +44,21 @@ the pipe and outlives the session).
 
 ## Configuration
 
-The plugin's own `config` object in its `plugins.json` entry, flat keys. Every
+The plugin's own file, `plugins.d/<name>.json` (one per plugin, beside `plugins.json`), flat keys. Every
 field is optional; non-positive values fall back to defaults.
+
+`plugins.d/tools-bash.json`:
 
 ```json
 {
-  "file": "tools-bash.so",
-  "enabled": true,
-  "config": {
-    "timeout_s": 120,
-    "max_timeout_s": 600,
-    "background_max_timeout_s": 600,
-    "max_background_tasks": 4,
-    "max_output_bytes": 1048576,
-    "max_file_size_bytes": 1073741824,
-    "shell": "/bin/sh",
-    "inherit_env": "allowlist"
-  }
+  "timeout_s": 120,
+  "max_timeout_s": 600,
+  "background_max_timeout_s": 600,
+  "max_background_tasks": 4,
+  "max_output_bytes": 1048576,
+  "max_file_size_bytes": 1073741824,
+  "shell": "/bin/sh",
+  "inherit_env": "allowlist"
 }
 ```
 

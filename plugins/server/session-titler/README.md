@@ -19,20 +19,18 @@ plugin replaces it with a generated title once, asynchronously, after turn 1.
 
 ## Configuration
 
-The plugin's own `config` object in its `plugins.json` entry. Parsed leniently:
+The plugin's own file, `plugins.d/<name>.json` (one per plugin, beside `plugins.json`). Parsed leniently:
 a malformed or missing value falls back to the default — a bad number in an
 optional cosmetic plugin must not disable it.
 
+`plugins.d/session-titler.json`:
+
 ```json
 {
-  "file": "session-titler.so",
-  "enabled": true,
-  "config": {
-    "model": "openrouter/openai/gpt-5-mini",
-    "max_tokens": 1024,
-    "input_char_budget": 2000,
-    "prompt": ""
-  }
+  "model": "openrouter/openai/gpt-5-mini",
+  "max_tokens": 1024,
+  "input_char_budget": 2000,
+  "prompt": ""
 }
 ```
 

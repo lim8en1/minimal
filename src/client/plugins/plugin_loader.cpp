@@ -209,9 +209,18 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         return record;
     }
 
-    // Everything the registration hooks see: this plugin's own config slice,
-    // plus the host-owned seams the context carries. Built once per plugin,
-    // before any hook runs.
+    // A client-plugins.d file that exists but cannot be read fails the plugin
+    // (the server loader's rule): running it with {} would silently drop
+    // every setting the user wrote.
+    if (candidate.config_error) {
+        record.status = LoadStatus::RegistrationThrew;
+        record.error = *candidate.config_error;
+        return record;
+    }
+
+    // Everything the registration hooks see: this plugin's own
+    // client-plugins.d file, plus the host-owned seams the context carries.
+    // Built once per plugin, before any hook runs.
     ClientPluginRegistrationContext context;
     // Always an object: "no config" is {}, never null, so every plugin parser
     // sees one shape.

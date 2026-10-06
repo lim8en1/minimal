@@ -1,13 +1,14 @@
 #include "mcp_settings.hpp"
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 namespace minimal::mcp {
 
 McpLimits ParseMcpLimits(const nlohmann::json& config) {
     McpLimits limits;
     constexpr std::int64_t kMaxMs = 24LL * 3600 * 1000;
-    config::Reader reader(config, "plugins.json", "mcp.config");
+    config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "mcp"));
     limits.connect = std::chrono::milliseconds(
         reader.Int("connect_timeout_ms", limits.connect.count(), 1, kMaxMs));
     limits.request = std::chrono::milliseconds(

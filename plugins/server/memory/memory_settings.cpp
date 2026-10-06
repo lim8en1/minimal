@@ -3,12 +3,13 @@
 #include <string>
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 namespace minimal::memory {
 
 MemorySettings ParseMemorySettings(const nlohmann::json& config) {
     MemorySettings out;
-    config::Reader reader(config, "plugins.json", "memory.config");
+    config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "memory"));
     // Bounds: a huge (or negative) value must not mean unbounded, nor wrap
     // when cast to an unsigned size elsewhere -- out of range is an error.
     const auto int_in = [&](const char* key, int& target, int lo, int hi) {

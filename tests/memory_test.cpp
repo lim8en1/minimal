@@ -177,7 +177,7 @@ TEST_CASE("memory settings: defaults, and out-of-range values are refused", "[me
     CHECK(tuned.tag_merge_similarity == 1.0);
 
     CHECK_THROWS_WITH(ParseMemorySettings({{"batch_size", -3}}),
-                      ContainsSubstring("memory.config.batch_size: must be at least 1"));
+                      ContainsSubstring("plugins.d/memory.json: batch_size: must be at least 1"));
     CHECK_THROWS_WITH(ParseMemorySettings({{"default_limit", 1000}}),
                       ContainsSubstring("default_limit: must be at most 64"));
     CHECK_THROWS_WITH(ParseMemorySettings({{"tag_merge_similarity", 5.0}}),
@@ -188,7 +188,7 @@ TEST_CASE("memory settings: defaults, and out-of-range values are refused", "[me
 
 TEST_CASE("memory settings: an unknown field is a named error", "[memory][settings]") {
     CHECK_THROWS_WITH(ParseMemorySettings({{"api_key_env", "K"}}),
-                      ContainsSubstring("memory.config.api_key_env: unknown field"));
+                      ContainsSubstring("plugins.d/memory.json: api_key_env: unknown field"));
     CHECK_NOTHROW(ParseMemorySettings({{"//", "comment"}, {"api_key", "secret:embeddings"}}));
 }
 

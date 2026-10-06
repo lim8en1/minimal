@@ -112,12 +112,10 @@ class Arena:
         offline = {"rates_fetch_url": "http://127.0.0.1:9/x",
                    "openrouter_rates_fetch_url": "http://127.0.0.1:9/x",
                    "rates_fetch_timeout_ms": 200}
-        entries = []
-        for name, on in sorted(enabled.items()):
-            entry = {"file": name, "provenance": "bundled", "enabled": on}
-            if name.startswith("cost-tracker"):
-                entry["config"] = offline
-            entries.append(entry)
+        os.makedirs(os.path.join(self.config, "plugins.d"), exist_ok=True)
+        self.write(os.path.join("plugins.d", "cost-tracker.json"), offline)
+        entries = [{"file": name, "provenance": "bundled", "enabled": on}
+                   for name, on in sorted(enabled.items())]
         self.write("plugins.json", {"plugins": entries})
 
     def check(self):

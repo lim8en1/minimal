@@ -4,6 +4,7 @@
 #include <iterator>
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/json_config_loader.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::common {
@@ -15,6 +16,28 @@ constexpr const char* kUser = "user";
 bool IsPluginFile(const std::filesystem::path& path) {
     const auto ext = path.extension().string();
     return ext == ".so" || ext == ".dylib";
+}
+
+// One plugin's config file: {} when it does not exist (or is empty), the
+// object when it parses, an error otherwise.
+void LoadPluginConfig(const PluginConfigFormat& format, const std::filesystem::path& module,
+                      PluginFileCandidate& candidate) {
+    if (format.config_dir.empty()) return;
+    const std::string stem = module.stem().string();
+    const std::string label = PluginConfigLabel(format.config_dir_label, stem);
+    try {
+        nlohmann::json loaded = config::LoadJsonConfig<nlohmann::json>(
+            format.config_dir / (stem + ".json"), label, config::AbsencePolicy::kDefaultOnMissing,
+            config::EmptyFilePolicy::kTreatAsAbsent, [&](const nlohmann::json& doc) {
+                if (!doc.is_object()) {
+                    throw config::ConfigError(label + ": must be a JSON object");
+                }
+                return doc;
+            });
+        if (loaded.is_object()) candidate.config = std::move(loaded);  // absent: null -> {}
+    } catch (const config::ConfigError& error) {
+        candidate.config_error = error.what();
+    }
 }
 
 }  // namespace
@@ -53,8 +76,11 @@ PluginConfigFile ParsePluginConfigFile(const std::string& json_text,
                                                                    : PluginProvenance::User;
                     }
                     entry.enabled = reader.MaybeBool("enabled");
-                    if (auto plugin_config = reader.MaybeObject("config")) {
-                        entry.config = plugin_config->node();
+                    if (reader.Has("config")) {
+                        const auto stem = std::filesystem::path(entry.file).stem().string();
+                        reader.Fail("config", "per-plugin config moved to its own file, " +
+                                                  PluginConfigLabel(format.config_dir_label, stem) +
+                                                  " -- put this object there");
                     }
                     reader.Finish();
                     config.plugins.push_back(std::move(entry));
@@ -97,11 +123,6 @@ std::string SerializePluginConfigFile(const PluginConfigFile& config) {
             item["provenance"] = *entry.provenance == PluginProvenance::Bundled ? kBundled : kUser;
         }
         if (entry.enabled) item["enabled"] = *entry.enabled;
-        // User config must survive the load->save cycle: the file is rewritten on
-        // every startup, so dropping config here would silently erase it. Emitted
-        // unconditionally (object or not) so what round-trips is what was parsed
-        // -- a malformed value was already flattened to {} at parse.
-        item["config"] = entry.config;
         out["plugins"].push_back(std::move(item));
     }
     // Only when non-empty: an always-present empty key is noise in a file the
@@ -254,8 +275,12 @@ std::vector<PluginFileCandidate> DiscoverPluginFiles(const std::filesystem::path
                 item.path.string(), format.file_label);
         }
 
-        candidates.push_back(PluginFileCandidate{item.path, item.provenance, *existing->enabled,
-                                                 existing->config});
+        PluginFileCandidate candidate{item.path, item.provenance, *existing->enabled};
+        // Only for a plugin that will load: a disabled plugin's file is not
+        // its host's business, and a broken one must not fail a plugin the
+        // user switched off.
+        if (candidate.enabled) LoadPluginConfig(format, item.path, candidate);
+        candidates.push_back(std::move(candidate));
     }
 
     return candidates;

@@ -398,9 +398,18 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         }
     }
 
+    // A plugins.d file that exists but cannot be read fails the plugin the
+    // same way its own parser refusing a value does: running it with {}
+    // would silently drop every setting the user wrote.
+    if (candidate.config_error) {
+        record.status = LoadStatus::RegistrationThrew;
+        record.error = *candidate.config_error;
+        return record;
+    }
+
     // Everything the registration hooks see: the shared settings.json `tools`
-    // object plus THIS plugin's own plugins.json `config` slice. Built once per
-    // plugin, before any hook runs.
+    // object plus THIS plugin's own plugins.d file. Built once per plugin,
+    // before any hook runs.
     PluginRegistrationContext context;
     // Always an object: "no config" is {}, never null, so every plugin parser
     // sees one shape.

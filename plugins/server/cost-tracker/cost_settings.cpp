@@ -3,12 +3,13 @@
 #include <limits>
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 namespace minimal::cost_tracker {
 
 CostSettings ParseCostSettings(const nlohmann::json& config) {
     CostSettings settings;
-    config::Reader reader(config, "plugins.json", "cost-tracker.config");
+    config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "cost-tracker"));
     settings.rates_fetch_url =
         reader.String("rates_fetch_url", settings.rates_fetch_url, /*allow_empty=*/false);
     settings.openrouter_rates_fetch_url = reader.String(

@@ -313,7 +313,9 @@ static int RunServer(int argc, char** argv) {
 
     std::vector<minimal::plugins::PluginCandidate> candidates;
     if (plugin_config_problems.empty()) {
-        candidates = minimal::plugins::DiscoverPlugins(bundled_dir, user_dir, plugin_config);
+        candidates = minimal::plugins::DiscoverPlugins(
+            bundled_dir, user_dir, plugin_config,
+            config_dir / minimal::common::kPluginConfigDirName);
         // Discovery itself can find a problem (an entry whose provenance is
         // ambiguous); the same rule applies.
         for (const auto& problem : plugin_config.problems) plugin_config_problems.push_back(problem);

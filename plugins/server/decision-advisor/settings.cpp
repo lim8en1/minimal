@@ -8,6 +8,7 @@
 #include "decision.hpp"
 #include "minimal/common/config_reader.hpp"
 #include "minimal/common/json_config_loader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 namespace minimal::decision_advisor {
 namespace {
@@ -16,9 +17,9 @@ namespace {
 // max_retries + 1 attempts must still fit. Budget, not a cap here, is what
 // bounds a call; the host's advisor_timeout_ms is the outer ceiling.
 constexpr std::int64_t kIntMax = std::numeric_limits<int>::max();
-// Names for error messages only: the registration context carries no path.
-constexpr const char* kPluginsFile = "plugins.json";
-constexpr const char* kPluginPath = "decision-advisor.config";
+// The operator layer's file, for error messages only.
+const std::string kPluginsFile =
+    common::PluginConfigLabel(common::kPluginConfigDirName, "decision-advisor");
 
 // Reads one layer's settings keys through the strict reader -- type and range
 // checked, unknown keys refused by the caller's Finish() -- and returns the
@@ -86,9 +87,9 @@ Settings ParseSettings(const nlohmann::json& bundled, const nlohmann::json& conf
     }
     file.Finish();
 
-    // Layer 3: the plugins.json entry.
+    // Layer 3: the operator's plugins.d file.
     const nlohmann::json empty = nlohmann::json::object();
-    config::Reader entry(config.is_null() ? empty : config, kPluginsFile, kPluginPath);
+    config::Reader entry(config.is_null() ? empty : config, kPluginsFile);
     const auto entry_backend = entry.MaybeString("backend", /*allow_empty=*/false);
     const nlohmann::json overrides = ReadLayer(entry);
     entry.Finish();
@@ -96,7 +97,7 @@ Settings ParseSettings(const nlohmann::json& bundled, const nlohmann::json& conf
     Settings settings;
     settings.backend = entry_backend.value_or(file_backend);
     if (settings.backend.empty()) {
-        file.Fail("backend", "is required: the profile used when the plugins.json entry names none");
+        file.Fail("backend", "is required: the profile used when " + kPluginsFile + " names none");
     }
     const auto profile = profiles.find(settings.backend);
     if (profile == profiles.end()) {
@@ -115,7 +116,7 @@ Settings ParseSettings(const nlohmann::json& bundled, const nlohmann::json& conf
     if (!merged.contains("retry")) merged["retry"] = nlohmann::json::object();
     config::Reader resolved(merged, std::string(kBundledSettingsFile) + " + " + kPluginsFile);
     const std::string unset = "is not set for backend \"" + settings.backend + "\" (set it in " +
-                              kBundledSettingsFile + " or the plugins.json entry)";
+                              kBundledSettingsFile + " or " + kPluginsFile + ")";
     const auto require_string = [&](config::Reader& reader, std::string_view key) {
         auto value = reader.MaybeString(key);  // "" is meaningful: api_key "" = no header
         if (!value) reader.Fail(key, unset);

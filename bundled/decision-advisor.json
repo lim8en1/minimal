@@ -1,5 +1,5 @@
 {
-  "//": "decision-advisor's settings. Layered, later wins: this top level, then backends.<backend>, then the plugin's plugins.json \"config\" object. Every value the plugin uses is here -- the code has none of its own. See plugins/server/decision-advisor/README.md.",
+  "//": "decision-advisor's settings. Layered, later wins: this top level, then backends.<backend>, then the operator's plugins.d/decision-advisor.json. Every value the plugin uses is here -- the code has none of its own. See plugins/server/decision-advisor/README.md.",
 
   "backend": "typesafe",
 

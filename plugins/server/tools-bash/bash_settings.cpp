@@ -1,6 +1,7 @@
 #include "bash_settings.hpp"
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 namespace minimal::tools_bash {
 
@@ -9,7 +10,7 @@ BashSettings ParseBashSettings(const nlohmann::json& config) {
     // The plugin's own plugins.json "config" object -- flat, because every
     // knob belongs to this one tool. Timeouts are configured in SECONDS (the
     // unit the model-facing tool input uses) and stored in ms.
-    config::Reader reader(config, "plugins.json", "tools-bash.config");
+    config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "tools-bash"));
     constexpr std::int64_t kMaxSeconds = 7LL * 24 * 3600;
     settings.timeout_ms = reader.Int("timeout_s", settings.timeout_ms / 1000, 1, kMaxSeconds) * 1000;
     settings.max_timeout_ms =

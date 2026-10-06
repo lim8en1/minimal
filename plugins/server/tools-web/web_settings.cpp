@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 namespace minimal::tools_web {
 
@@ -12,7 +13,7 @@ WebSettings ParseWebSettings(const nlohmann::json& config,
                              const config::SecretResolver* secrets) {
     WebSettings settings;
     constexpr std::int64_t kIntMax = std::numeric_limits<int>::max();
-    config::Reader root(config, "plugins.json", "tools-web.config");
+    config::Reader root(config, common::PluginConfigLabel(common::kPluginConfigDirName, "tools-web"));
     const auto positive_int = [&](config::Reader& section, const char* key, int& target) {
         target = static_cast<int>(section.Int(key, target, 1, kIntMax));
     };

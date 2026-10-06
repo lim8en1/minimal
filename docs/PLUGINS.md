@@ -136,7 +136,7 @@ Enablement is recorded in `<config>/plugins.json` (client:
 ```json
 {
   "plugins": [
-    { "file": "tools-fs.so", "provenance": "bundled", "enabled": true, "config": {} }
+    { "file": "tools-fs.so", "provenance": "bundled", "enabled": true }
   ],
   "aliases": { "bash_over_ssh.bash": "ssh_bash" }
 }
@@ -154,14 +154,23 @@ Enablement is recorded in `<config>/plugins.json` (client:
 - A hand-written entry may omit `provenance` (the file name picks the
   plugin; an error when both directories ship that name) and `enabled` (the
   default above). Both are written back once resolved.
-- **`config`** is a per-plugin JSON object forwarded verbatim to the plugin
-  (e.g. the `logo` plugin's `text`/`styles`/`charset` options). Every bundled
-  plugin parses its `config` strictly: an unknown field or a bad value is a
-  startup error naming `plugins.json: <plugin>.config.<field>`. A third-party
-  plugin gets the same behaviour from the SDK's `config::Reader`
-  (`minimal/common/config_reader.hpp`; files of its own through
-  `minimal/common/json_config_loader.hpp`), which names the file and full
-  path in every error and treats `"//"` keys as comments.
+- **A plugin's own settings** live in their own file, one per plugin:
+  `<config>/plugins.d/<stem>.json` (client: `<config>/client-plugins.d/`),
+  where `<stem>` is the module's file name without its extension — the
+  plugin's name for every bundled plugin. The object is forwarded verbatim
+  (e.g. `client-plugins.d/logo.json` holds the `logo` plugin's
+  `text`/`styles`/`charset` options); no file means `{}`. Only enabled
+  plugins' files are read. A file that is not a JSON object fails its plugin,
+  naming the file. A leftover `config` key on a `plugins.json` entry is a
+  startup error naming the file it moved to.
+- Every bundled plugin parses its file strictly: an unknown field or a bad
+  value is a startup error naming `plugins.d/<plugin>.json: <field>`. A
+  third-party plugin gets the same behaviour from the SDK's `config::Reader`
+  (`minimal/common/config_reader.hpp`), labelled with
+  `common::PluginConfigLabel` (`minimal/common/plugin_config_label.hpp`;
+  further files of its own through `minimal/common/json_config_loader.hpp`),
+  which names the file and full path in every error and treats `"//"` keys as
+  comments.
 - **The file is strict.** Invalid JSON, or any entry with a wrong type or an
   unknown field, is fatal on the server (no plugin loads, the file is not
   rewritten) and a warning on the client (that entry is skipped, the file is
@@ -259,7 +268,7 @@ The pattern ("per-preset tool config"):
    resolved fresh each call from the active preset, so `/agent` switches take
    effect at the next tool call.
 3. Own your schema and merge: core never interprets a slice; the plugin decides
-   how it combines with its own `plugins.json` `config` object (tools-python
+   how it combines with its own `plugins.d` file (tools-python
    merges per-key, preset wins). Bundled example: `tools-python` keys the
    declared package contract under `python`.
 
@@ -323,17 +332,16 @@ whose watcher streams the job transcript and injects the verdict.
 
 It used to be bundled; it now lives in its own user plugin repo, registered
 through the `user-plugins/` tree (see "User plugins" above) — the reference
-example of the user plugin workflow, tests included. Configure via the
-plugin's `config` object in `plugins.json` (provenance `user`, so enable the
-entry once discovery records it):
+example of the user plugin workflow, tests included. Enable its
+`plugins.json` entry once discovery records it (provenance `user`, so it
+starts disabled), and configure it in `plugins.d/tools-windbg.json`:
 
 ```json
-{ "file": "tools-windbg.so", "enabled": true,
-  "config": {
-    "base_url": "http://debugger-host:8477",
-    "bearer_token": "<token from dbgd configure>",
-    "default_target": { "kind": "exec", "server": "tcp:server=10.0.0.9,port=5555" }
-  } }
+{
+  "base_url": "http://debugger-host:8477",
+  "bearer_token": "<token from dbgd configure>",
+  "default_target": { "kind": "exec", "server": "tcp:server=10.0.0.9,port=5555" }
+}
 ```
 
 `default_target` is a dbgd `TargetSpec` passed through verbatim (`exec`, `pid`,

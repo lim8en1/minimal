@@ -1,6 +1,7 @@
 #include "project_context.hpp"
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 #include "minimal/common/logger.hpp"
 
@@ -130,7 +131,7 @@ std::string RenderProjectContextSection(const ProjectContext& context) {
 
 ProjectContextSettings ParseProjectContextSettings(const nlohmann::json& config) {
     ProjectContextSettings result;
-    config::Reader reader(config, "plugins.json", "project-context.config");
+    config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "project-context"));
     result.search_ancestors = reader.Bool("search_ancestors", result.search_ancestors);
     result.max_bytes = reader.Int("max_bytes", result.max_bytes, 0);
     if (auto files = reader.MaybeStringList("files")) {

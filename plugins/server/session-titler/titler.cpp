@@ -1,6 +1,7 @@
 #include "titler.hpp"
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 #include "minimal/common/model_ref.hpp"
 
 #include <cctype>
@@ -109,7 +110,7 @@ std::string_view DefaultPrompt() { return kDefaultPrompt; }
 
 TitlerConfig ParseTitlerConfig(const nlohmann::json& config) {
     TitlerConfig out;
-    config::Reader reader(config, "plugins.json", "session-titler.config");
+    config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "session-titler"));
     out.model = reader.String("model", out.model);
     if (!out.model.empty() && !common::SplitModelRef(out.model)) {
         reader.Fail("model", "must be <provider>/<model>, got \"" + out.model + "\"");

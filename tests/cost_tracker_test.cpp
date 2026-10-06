@@ -602,7 +602,7 @@ TEST_CASE("plugin settings parse from the config slice with defaults",
     // Junk is refused by name rather than silently replaced by a default.
     using Catch::Matchers::ContainsSubstring;
     CHECK_THROWS_WITH(ParseCostSettings({{"rates_fetch_url", 3}}),
-                      ContainsSubstring("cost-tracker.config.rates_fetch_url: must be a string"));
+                      ContainsSubstring("plugins.d/cost-tracker.json: rates_fetch_url: must be a string"));
     CHECK_THROWS_WITH(ParseCostSettings({{"rates_fetch_timeout_ms", -1}}),
                       ContainsSubstring("rates_fetch_timeout_ms: must be at least 1"));
     CHECK_THROWS_WITH(ParseCostSettings({{"rates_url", "x"}}),

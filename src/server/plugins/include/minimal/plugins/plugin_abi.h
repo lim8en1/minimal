@@ -88,13 +88,13 @@ namespace minimal::plugins {
 // plugin author. (Per-invocation needs like the Logger travel in ToolContext,
 // not here.)
 struct PluginRegistrationContext {
-    // This plugin's own configuration, verbatim: the optional "config" object
-    // on the plugin's plugins.json entry --
-    //   {"plugins": [{"file": "tools-bash.so", "config": {"timeout_s": 30}}]}
+    // This plugin's own configuration, verbatim: the object in its own file,
+    // <config dir>/plugins.d/<stem>.json --
+    //   plugins.d/tools-bash.json:  {"timeout_s": 30}
     // -- and only this plugin's. Core imposes no schema here; the plugin owns
-    // its slice's shape. Empty when the entry carries none (a runtime
-    // condition, not an error). Configure a plugin where you enable it:
-    // plugins.json is the one file a user already edits for that purpose.
+    // its file's shape, and labels its messages with
+    // common::PluginConfigLabel(kPluginConfigDirName, "<name>"). Empty when the
+    // file does not exist (a runtime condition, not an error).
     nlohmann::json config = nlohmann::json::object();
 
     // The cross-plugin service registry, for plugins that CONSUME another

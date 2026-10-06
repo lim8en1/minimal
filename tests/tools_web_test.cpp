@@ -655,10 +655,10 @@ TEST_CASE("ParseWebSettings: defaults with an empty config", "[tools_web][settin
 TEST_CASE("ParseWebSettings: an unknown field is a named error at either level",
           "[tools_web][settings]") {
     CHECK_THROWS_WITH(ParseWebSettings({{"serch", nlohmann::json::object()}}),
-                      Catch::Matchers::ContainsSubstring("tools-web.config.serch: unknown field"));
+                      Catch::Matchers::ContainsSubstring("plugins.d/tools-web.json: serch: unknown field"));
     CHECK_THROWS_WITH(ParseWebSettings({{"search", {{"api_key_env", "K"}}}}),
                       Catch::Matchers::ContainsSubstring(
-                          "tools-web.config.search.api_key_env: unknown field"));
+                          "plugins.d/tools-web.json: search.api_key_env: unknown field"));
 }
 
 TEST_CASE("ParseWebSettings: a fetch.max_bytes below the default is refused",

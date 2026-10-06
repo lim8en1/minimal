@@ -33,6 +33,7 @@
 
 #include "logo_generator.hpp"
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 #include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/common/abi_tag.hpp"
 
@@ -90,7 +91,8 @@ bool IsPrintableUtf8Glyph(const std::string& glyph) {
 // non-printable charset byte or an unknown style name warns and is dropped.
 LogoConfig ParseConfig(const nlohmann::json& config) {
     LogoConfig out;
-    minimal::config::Reader reader(config, "client-plugins.json", "logo.config");
+    minimal::config::Reader reader(
+        config, minimal::common::PluginConfigLabel(minimal::common::kClientPluginConfigDirName, "logo"));
     out.text = reader.String("text", out.text);
     if (auto charset_value = reader.MaybeString("charset")) {
         std::string charset = std::move(*charset_value);

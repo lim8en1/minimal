@@ -1,12 +1,13 @@
 #include "python_settings.hpp"
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 namespace minimal::tools_python {
 
 PythonSettings ParsePythonSettings(const nlohmann::json& config) {
     PythonSettings settings;
-    config::Reader reader(config, "plugins.json", "tools-python.config");
+    config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "tools-python"));
     settings.python = reader.String("python", settings.python, /*allow_empty=*/false);
     // Every duration is in SECONDS and says so in its key.
     settings.sync_wait_ceiling =

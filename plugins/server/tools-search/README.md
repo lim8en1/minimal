@@ -34,27 +34,25 @@ point of the harness.
 
 ## Configuration
 
-The plugin's own `config` object in its `plugins.json` entry, one sub-object
+The plugin's own file, `plugins.d/<name>.json` (one per plugin, beside `plugins.json`), one sub-object
 per tool. Every field is optional; non-positive values fall back to defaults.
+
+`plugins.d/tools-search.json`:
 
 ```json
 {
-  "file": "tools-search.so",
-  "enabled": true,
-  "config": {
-    "grep": {
-      "default_head_limit": 250,
-      "max_results": 1000,
-      "max_file_bytes": 1048576,
-      "timeout_ms": 10000,
-      "max_context_lines": 10,
-      "max_line_length": 2000
-    },
-    "glob": {
-      "default_limit": 200,
-      "max_results": 2000,
-      "timeout_ms": 10000
-    }
+  "grep": {
+    "default_head_limit": 250,
+    "max_results": 1000,
+    "max_file_bytes": 1048576,
+    "timeout_ms": 10000,
+    "max_context_lines": 10,
+    "max_line_length": 2000
+  },
+  "glob": {
+    "default_limit": 200,
+    "max_results": 2000,
+    "timeout_ms": 10000
   }
 }
 ```

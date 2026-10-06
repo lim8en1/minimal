@@ -746,6 +746,21 @@ TEST_CASE("a plugin whose registration throws is reported, not fatal to the proc
     CHECK(records.front().error.find("registration is broken") != std::string::npos);
 }
 
+TEST_CASE("an unreadable plugins.d file fails its plugin, naming the file",
+          "[plugin_loader][config]") {
+    // Loading it with {} would silently drop every setting the user wrote.
+    Harness h;
+    PluginCandidate candidate = Enabled("fixture-good");
+    candidate.config_error = "plugins.d/fixture-good.json: invalid JSON: ...";
+    const auto records = h.loader.LoadAll({candidate});
+
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().status == LoadStatus::RegistrationThrew);
+    CHECK(records.front().name == "fixture-good");
+    CHECK(records.front().error.find("plugins.d/fixture-good.json") != std::string::npos);
+    CHECK(h.tool_registry.size() == 0);  // no hook ran
+}
+
 TEST_CASE("a throwing plugin's registrations are rolled back out of the registries",
           "[plugin_loader][invariant]") {
     // Rollback, not just reporting: a user plugin's failure is only a warning,

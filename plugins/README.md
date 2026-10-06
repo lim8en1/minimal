@@ -11,19 +11,16 @@ Entries are configured in `plugins.json` (see
 ```json
 {
   "plugins": [
-    {
-      "file": "tools-fs.so",
-      "provenance": "bundled",
-      "enabled": true,
-      "config": { "..." : "the plugin's own schema, documented in its README" }
-    }
+    { "file": "tools-fs.so", "provenance": "bundled", "enabled": true }
   ]
 }
 ```
 
-The `config` object is passed to the plugin verbatim — core imposes no schema;
-each plugin owns its own, and every one documented here treats missing or
-partial config as normal (defaults apply). `session-titler` and
+Each plugin's own settings live in their own file beside it,
+`plugins.d/<name>.json` (e.g. `plugins.d/tools-fs.json`), passed to the plugin
+verbatim — core imposes no schema; each plugin owns its own, documented in its
+README, and every one treats a missing file or partial config as normal
+(defaults apply). `session-titler` and
 `decision-advisor` ship disabled; everything else is load-bearing for the
 default harness.
 

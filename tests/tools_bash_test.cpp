@@ -648,7 +648,7 @@ TEST_CASE("bash settings: defaults, seconds-keyed overrides, and named refusals"
     CHECK(defaults.max_output_bytes == 1024 * 1024);
     CHECK(defaults.shell == "/bin/sh");
 
-    // The plugin's own plugins.json "config" object, verbatim -- flat keys,
+    // The plugin's own plugins.d/tools-bash.json, verbatim -- flat keys,
     // every one of them belonging to this tool.
     const nlohmann::json configured = {
         {"timeout_s", 5}, {"max_output_bytes", 64}, {"shell", "/bin/dash"}};
@@ -659,7 +659,7 @@ TEST_CASE("bash settings: defaults, seconds-keyed overrides, and named refusals"
 
     using Catch::Matchers::ContainsSubstring;
     CHECK_THROWS_WITH(tools_bash::ParseBashSettings({{"timeout_s", 0}}),
-                      ContainsSubstring("tools-bash.config.timeout_s: must be at least 1"));
+                      ContainsSubstring("plugins.d/tools-bash.json: timeout_s: must be at least 1"));
     CHECK_THROWS_WITH(tools_bash::ParseBashSettings({{"max_output_bytes", -1}}),
                       ContainsSubstring("max_output_bytes: must be at least 1"));
     // The documented-elsewhere millisecond spelling is not silently ignored.

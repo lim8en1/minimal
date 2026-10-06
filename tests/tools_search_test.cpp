@@ -870,7 +870,7 @@ TEST_CASE("search settings: absent values keep defaults, invalid ones are refuse
 
     using Catch::Matchers::ContainsSubstring;
     CHECK_THROWS_WITH(tools_search::ParseSearchSettings({{"grep", {{"max_results", -3}}}}),
-                      ContainsSubstring("tools-search.config.grep.max_results: must be at least 1"));
+                      ContainsSubstring("plugins.d/tools-search.json: grep.max_results: must be at least 1"));
     // A float is refused, never truncated (99.9 -> 99).
     CHECK_THROWS_WITH(
         tools_search::ParseSearchSettings({{"grep", {{"default_head_limit", 99.9}}}}),

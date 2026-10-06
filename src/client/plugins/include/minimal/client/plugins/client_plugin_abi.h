@@ -34,9 +34,10 @@ namespace minimal::client::plugins {
 
 // Everything a plugin needs at REGISTRATION time. A struct, per the rule above.
 struct ClientPluginRegistrationContext {
-    // This plugin's own configuration, verbatim: the optional "config" object
-    // on its client-plugins.json entry. Core imposes no schema; the same rule
-    // as the server's per-plugin config. Empty when the entry carries none.
+    // This plugin's own configuration, verbatim: the object in its own file,
+    // <config dir>/client-plugins.d/<stem>.json. Core imposes no schema; the
+    // same rule as the server's per-plugin config. Empty when the file does
+    // not exist.
     nlohmann::json config = nlohmann::json::object();
 
     // The attention sink (registries.hpp): raise/clear tab or global attention.

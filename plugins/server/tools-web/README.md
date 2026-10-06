@@ -18,29 +18,27 @@ client, settings parsing, URL policy, and truncation path.
 
 ## Configuration
 
-The plugin's own `config` object in its `plugins.json` entry, one sub-object
+The plugin's own file, `plugins.d/<name>.json` (one per plugin, beside `plugins.json`), one sub-object
 per tool. Every field is optional; an unknown field (top level, `fetch` or
 `search`) keeps the plugin from loading, naming the field.
 
+`plugins.d/tools-web.json`:
+
 ```json
 {
-  "file": "tools-web.so",
-  "enabled": true,
-  "config": {
-    "fetch": {
-      "timeout_ms": 15000,
-      "max_redirects": 5,
-      "default_max_bytes": 262144,
-      "max_bytes": 2097152,
-      "allow_private_hosts": false
-    },
-    "search": {
-      "api_url": "http://localhost:8888/search",
-      "api_key": "secret:searxng",
-      "default_max_results": 5,
-      "max_results": 20,
-      "timeout_ms": 10000
-    }
+  "fetch": {
+    "timeout_ms": 15000,
+    "max_redirects": 5,
+    "default_max_bytes": 262144,
+    "max_bytes": 2097152,
+    "allow_private_hosts": false
+  },
+  "search": {
+    "api_url": "http://localhost:8888/search",
+    "api_key": "secret:searxng",
+    "default_max_results": 5,
+    "max_results": 20,
+    "timeout_ms": 10000
   }
 }
 ```

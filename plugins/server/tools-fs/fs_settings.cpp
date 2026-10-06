@@ -4,13 +4,14 @@
 #include <limits>
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 namespace minimal::tools_fs {
 
 FsSettings ParseFsSettings(const nlohmann::json& config) {
     FsSettings settings;
     constexpr std::int64_t kIntMax = std::numeric_limits<int>::max();
-    config::Reader root(config, "plugins.json", "tools-fs.config");
+    config::Reader root(config, common::PluginConfigLabel(common::kPluginConfigDirName, "tools-fs"));
     config::Reader read = root.Object("read");
     settings.read_default_limit_lines = static_cast<decltype(settings.read_default_limit_lines)>(
         read.Int("default_limit_lines", settings.read_default_limit_lines, 1, kIntMax));

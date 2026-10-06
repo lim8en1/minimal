@@ -42,29 +42,27 @@ session-lifecycle observer.
 
 ## Configuration
 
-The plugin's own `config` object in its `plugins.json` entry. ALL times are
+The plugin's own file, `plugins.d/<name>.json` (one per plugin, beside `plugins.json`). ALL times are
 SECONDS. Every field is optional; non-positive values fall back to defaults
 (`sync_wait_ceiling`, `rlimit_cpu_seconds`, and `background_max_runtime` clamp
 to 0, which means disabled/unlimited).
 
+`plugins.d/tools-python.json`:
+
 ```json
 {
-  "file": "tools-python.so",
-  "enabled": true,
-  "config": {
-    "python": "python3",
-    "sync_wait_ceiling": 300,
-    "startup_timeout": 10,
-    "install_timeout": 300,
-    "grace_seconds": 2,
-    "max_output_bytes": 1048576,
-    "max_capture_bytes": 1048576,
-    "rlimit_cpu_seconds": 0,
-    "max_file_size_bytes": 1073741824,
-    "stream_head_bytes": 262144,
-    "stream_tail_bytes": 786432,
-    "background_max_runtime": 0
-  }
+  "python": "python3",
+  "sync_wait_ceiling": 300,
+  "startup_timeout": 10,
+  "install_timeout": 300,
+  "grace_seconds": 2,
+  "max_output_bytes": 1048576,
+  "max_capture_bytes": 1048576,
+  "rlimit_cpu_seconds": 0,
+  "max_file_size_bytes": 1073741824,
+  "stream_head_bytes": 262144,
+  "stream_tail_bytes": 786432,
+  "background_max_runtime": 0
 }
 ```
 
