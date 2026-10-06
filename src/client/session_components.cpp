@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "minimal/client/utf8.hpp"
+#include "minimal/proto/struct_json.hpp"
 
 namespace minimal::client {
 
@@ -123,7 +124,7 @@ void ToolRunTracker::Start(const v1::ToolExecutionEvent& evt) {
     tool.tool_use_id = evt.tool_use_id();
     tool.tool_name = evt.tool_name();
     tool.summary = evt.summary();
-    tool.input = std::make_shared<const nlohmann::json>(StructToJson(evt.input()));
+    tool.input = std::make_shared<const nlohmann::json>(proto::StructToJson(evt.input()));
     tool.started_at_unix_ms = std::chrono::milliseconds(evt.started_at_unix_ms());
     tool.started = true;
     rows_.push_back(std::move(tool));

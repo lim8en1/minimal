@@ -41,7 +41,8 @@ endif()
 
 # Generated headers are included as "minimal/v1/....pb.h", so the generation root
 # must be on the include path for anything that links this target.
-target_include_directories(minimal_proto PUBLIC "${CMAKE_CURRENT_BINARY_DIR}")
+target_include_directories(minimal_proto PUBLIC "${CMAKE_CURRENT_BINARY_DIR}"
+                                                "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 protobuf_generate(
     TARGET minimal_proto

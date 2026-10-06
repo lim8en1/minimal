@@ -156,15 +156,8 @@ std::string CompactionHeadline(const ChatRow& row);
 // neither label nor reset. Every other kind is false.
 std::vector<bool> LabelContinuations(const std::vector<ChatRow>& rows);
 
-// google.protobuf.Struct -> JSON, for a tool's input/args. Exposed here (the
-// definition lives in chat_model.cpp) so callers outside the transcript path
-// -- e.g. SessionState::OnToolStarted, which needs the SAME conversion for
-// the LIVE tool_use_id it just opened, not a persisted StoredMessage -- can
-// reuse it instead of re-deriving it from google::protobuf::Value by hand.
-nlohmann::json StructToJson(const google::protobuf::Struct& value);
-
-// A bounded one-line dump of a tool's raw input JSON (truncated at 120
-// chars). A tool that wants a better line sends ToolExecutionEvent.summary
+// A bounded one-line dump of a tool's raw input JSON (truncated at kToolInputSummaryBytes
+// bytes). A tool that wants a better line sends ToolExecutionEvent.summary
 // (Tool::Summary on the server); the client never special-cases tool names.
 std::string InputSummary(const nlohmann::json& input);
 

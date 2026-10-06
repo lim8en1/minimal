@@ -13,7 +13,7 @@
 #include "minimal/client/utf8.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/clock.hpp"
-#include "minimal/common/numeric.hpp"
+#include "minimal/proto/struct_json.hpp"
 #include "minimal/client/policy.hpp"
 #include "minimal/client/count_format.hpp"
 
@@ -59,45 +59,6 @@ std::string JoinResultText(const v1::ToolResultBlock& block) {
     return joined;
 }
 
-// google.protobuf.Struct -> JSON, for the tool_input a renderer renders FROM.
-// The server has the same conversion in proto_convert.cpp (ValueToJson); the
-// client cannot link server core, and the shape is fixed by protobuf's
-// Struct, so this is a twin. ALIGNED with the server's, verbatim semantics:
-// faithful recursion into lists (the old ShortDebugString degradation made
-// nested list items render as protobuf debug text), and integral doubles
-// narrowed back to integers so a `3` sent as 3.0 renders as `3`, not "3.0".
-namespace {
-
-nlohmann::json ValueToJson(const google::protobuf::Value& value) {
-    switch (value.kind_case()) {
-        case google::protobuf::Value::kNullValue: return nullptr;
-        case google::protobuf::Value::kNumberValue: {
-            const double number = value.number_value();
-            if (common::IsExactInt64(number)) return static_cast<std::int64_t>(number);
-            return number;
-        }
-        case google::protobuf::Value::kStringValue: return value.string_value();
-        case google::protobuf::Value::kBoolValue: return value.bool_value();
-        case google::protobuf::Value::kStructValue: {
-            nlohmann::json out = nlohmann::json::object();
-            for (const auto& [key, field] : value.struct_value().fields()) {
-                out[key] = ValueToJson(field);
-            }
-            return out;
-        }
-        case google::protobuf::Value::kListValue: {
-            nlohmann::json out = nlohmann::json::array();
-            for (const auto& element : value.list_value().values()) {
-                out.push_back(ValueToJson(element));
-            }
-            return out;
-        }
-        case google::protobuf::Value::KIND_NOT_SET: break;
-    }
-    return nullptr;
-}
-
-}  // namespace
 
 // The spawn tool's name is core surface (agent_preset.hpp) but the wire is
 // what a client sees: a ToolUseBlock named this, whose id a later
@@ -106,14 +67,6 @@ nlohmann::json ValueToJson(const google::protobuf::Value& value) {
 constexpr const char* kSpawnSubagentToolName = "spawn_subagent";
 
 }  // namespace
-
-nlohmann::json StructToJson(const google::protobuf::Struct& value) {
-    nlohmann::json out = nlohmann::json::object();
-    for (const auto& [key, field] : value.fields()) {
-        out[key] = ValueToJson(field);
-    }
-    return out;
-}
 
 // A bounded one-line summary of what the tool was asked to do, for the row
 // header: the model's input IS the orientation ("which file", "which
@@ -372,7 +325,7 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                         // vector::back() to share it; insert_or_assign here
                         // keeps that single computation without depending on
                         // "the last pushed entry" being expressible for a map).
-                        nlohmann::json input = StructToJson(block.tool_use().input());
+                        nlohmann::json input = proto::StructToJson(block.tool_use().input());
                         tool_calls.insert_or_assign(
                             block.tool_use().id(),
                             ToolCall{block.tool_use().name(), input});

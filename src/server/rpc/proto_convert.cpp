@@ -8,7 +8,7 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/common/utf8.hpp"
-#include "minimal/common/numeric.hpp"
+#include "minimal/proto/struct_json.hpp"
 
 namespace minimal::rpc {
 namespace {
@@ -26,104 +26,6 @@ template <typename>
 constexpr bool kAlwaysFalse = false;
 
 }  // namespace
-
-// --- JSON <-> Struct ---------------------------------------------------------
-
-google::protobuf::Value JsonToValue(const nlohmann::json& value) {
-    google::protobuf::Value out;
-    switch (value.type()) {
-        case nlohmann::json::value_t::null:
-            out.set_null_value(google::protobuf::NULL_VALUE);
-            break;
-        case nlohmann::json::value_t::boolean:
-            out.set_bool_value(value.get<bool>());
-            break;
-        case nlohmann::json::value_t::number_integer:
-            out.set_number_value(static_cast<double>(value.get<std::int64_t>()));
-            break;
-        case nlohmann::json::value_t::number_unsigned:
-            out.set_number_value(static_cast<double>(value.get<std::uint64_t>()));
-            break;
-        case nlohmann::json::value_t::number_float:
-            out.set_number_value(value.get<double>());
-            break;
-        case nlohmann::json::value_t::string:
-            out.set_string_value(Clean(value.get<std::string>()));
-            break;
-        case nlohmann::json::value_t::array: {
-            auto* list = out.mutable_list_value();
-            for (const auto& element : value) {
-                *list->add_values() = JsonToValue(element);
-            }
-            break;
-        }
-        case nlohmann::json::value_t::object: {
-            auto* fields = out.mutable_struct_value()->mutable_fields();
-            for (const auto& [key, element] : value.items()) {
-                (*fields)[Clean(key)] = JsonToValue(element);
-            }
-            break;
-        }
-        // Binary has no JSON (and so no Struct) representation at all; it cannot
-        // arrive from a parsed LLM response. Discarded rather than approximated.
-        case nlohmann::json::value_t::binary:
-        case nlohmann::json::value_t::discarded:
-            out.set_null_value(google::protobuf::NULL_VALUE);
-            break;
-    }
-    return out;
-}
-
-nlohmann::json ValueToJson(const google::protobuf::Value& value) {
-    switch (value.kind_case()) {
-        case google::protobuf::Value::kNullValue:
-            return nullptr;
-        case google::protobuf::Value::kNumberValue: {
-            const double number = value.number_value();
-            if (common::IsExactInt64(number)) return static_cast<std::int64_t>(number);
-            return number;
-        }
-        case google::protobuf::Value::kStringValue:
-            return value.string_value();
-        case google::protobuf::Value::kBoolValue:
-            return value.bool_value();
-        case google::protobuf::Value::kStructValue: {
-            nlohmann::json out = nlohmann::json::object();
-            for (const auto& [key, field] : value.struct_value().fields()) {
-                out[key] = ValueToJson(field);
-            }
-            return out;
-        }
-        case google::protobuf::Value::kListValue: {
-            nlohmann::json out = nlohmann::json::array();
-            for (const auto& element : value.list_value().values()) {
-                out.push_back(ValueToJson(element));
-            }
-            return out;
-        }
-        case google::protobuf::Value::KIND_NOT_SET:
-            break;
-    }
-    return nullptr;
-}
-
-google::protobuf::Struct JsonToStruct(const nlohmann::json& value) {
-    google::protobuf::Struct out;
-    if (!value.is_object()) return out;
-    auto* fields = out.mutable_fields();
-    for (const auto& [key, element] : value.items()) {
-        (*fields)[Clean(key)] = JsonToValue(element);
-    }
-    return out;
-}
-
-nlohmann::json StructToJson(const google::protobuf::Struct& value) {
-    nlohmann::json out = nlohmann::json::object();
-    for (const auto& [key, field] : value.fields()) {
-        out[key] = ValueToJson(field);
-    }
-    return out;
-}
 
 // --- Enums -------------------------------------------------------------------
 //
@@ -239,7 +141,7 @@ v1::ContentBlock ToProto(const llm::ContentBlock& block) {
                 auto* tool_use = out.mutable_tool_use();
                 tool_use->set_id(value.id);
                 tool_use->set_name(value.name);
-                *tool_use->mutable_input() = JsonToStruct(value.input);
+                *tool_use->mutable_input() = proto::JsonToStruct(value.input);
             } else if constexpr (std::is_same_v<T, llm::ToolResultBlock>) {
                 auto* result = out.mutable_tool_result();
                 result->set_tool_use_id(value.tool_use_id);
@@ -355,7 +257,7 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 auto* execution = out.mutable_tool_execution();
                 execution->set_tool_use_id(value.tool_use_id);
                 execution->set_tool_name(value.tool_name);
-                *execution->mutable_input() = JsonToStruct(value.input);
+                *execution->mutable_input() = proto::JsonToStruct(value.input);
                 execution->set_summary(Clean(value.summary));
                 execution->set_started(value.started);
                 if (!value.started) {

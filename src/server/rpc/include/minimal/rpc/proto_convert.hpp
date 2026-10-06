@@ -37,26 +37,7 @@
 
 namespace minimal::rpc {
 
-// --- JSON <-> google.protobuf.Struct -----------------------------------------
-//
-// Struct's number model is IEEE double -- it has no integer type. So a JSON
-// integer crosses as a double and comes back as an integer again (integral
-// doubles are narrowed on the way back), which keeps `{"offset": 3}` printing as
-// `3` rather than `3.0` in prompts and logs. The cost is the mirror case: a
-// deliberate float `3.0` also returns as `3`. That trade is right for this
-// payload -- tool input is overwhelmingly integers (offsets, limits, timeouts)
-// and every consumer reads it through nlohmann's numeric coercion.
-//
-// Only objects can be a Struct. A non-object json (an array or a bare scalar)
-// is not representable and yields an empty Struct; tool input is an object by
-// schema, so this is a wire-validation case, not a lossy path in practice.
-google::protobuf::Struct JsonToStruct(const nlohmann::json& value);
-nlohmann::json StructToJson(const google::protobuf::Struct& value);
-
-// The value-level pair, exposed because arrays and scalars nest inside a Struct
-// even though they cannot be one.
-google::protobuf::Value JsonToValue(const nlohmann::json& value);
-nlohmann::json ValueToJson(const google::protobuf::Value& value);
+// JSON <-> google.protobuf.Struct: minimal/proto/struct_json.hpp.
 
 // --- Enums -------------------------------------------------------------------
 

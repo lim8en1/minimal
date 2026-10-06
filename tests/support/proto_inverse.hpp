@@ -8,6 +8,7 @@
 #include <optional>
 
 #include "minimal/rpc/proto_convert.hpp"
+#include "minimal/proto/struct_json.hpp"
 
 namespace minimal::rpc {
 
@@ -81,7 +82,7 @@ inline std::optional<llm::ContentBlock> FromProto(const v1::ContentBlock& block)
         case v1::ContentBlock::kToolUse:
             return llm::ContentBlock{llm::ToolUseBlock{block.tool_use().id(),
                                                        block.tool_use().name(),
-                                                       StructToJson(block.tool_use().input())}};
+                                                       proto::StructToJson(block.tool_use().input())}};
         case v1::ContentBlock::kToolResult: {
             llm::ToolResultBlock result;
             result.tool_use_id = block.tool_result().tool_use_id();
