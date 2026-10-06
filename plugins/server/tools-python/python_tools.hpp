@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include "minimal/common/live_value.hpp"
 #include "minimal/tools/tool.hpp"
 
 #include "python_settings.hpp"
@@ -34,6 +35,12 @@ namespace minimal::tools_python {
 // package contract is diffed against the interpreter's on EVERY call:
 // additive entries are auto-installed; spec conflicts are reported loudly,
 // once, and left to the model.
+//
+// `live` is read per call: sync_wait_ceiling_s and background_max_runtime_s
+// apply from the next call after a reconfigure. Everything an interpreter
+// copies at spawn stays restart. The settings overload is fixed (tests).
+std::unique_ptr<tools::Tool> MakePythonExecTool(
+    std::shared_ptr<const common::LiveValue<PythonSettings>> live, InterpreterStore& store);
 std::unique_ptr<tools::Tool> MakePythonExecTool(PythonSettings settings,
                                                 InterpreterStore& store);
 

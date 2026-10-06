@@ -10,7 +10,7 @@
 
 #include "file_editor.hpp"
 #include "line_diff.hpp"
-#include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/atomic_write.hpp"
 #include "minimal/tools/path_confinement.hpp"
 
 namespace minimal::tools_fs {
@@ -189,7 +189,7 @@ ToolResult WriteWholeFile(const nlohmann::json& input, const std::filesystem::pa
     if (parents.is_error) return Error(parents.content_text);
 
     const auto previous = FileEditor::ReadForDiff(path, settings.edit_max_editable_file_bytes);
-    const auto outcome = tools::write_file(path, content);
+    const auto outcome = common::write_file(path, content);
     if (!outcome.ok) return Error(outcome.error);
     return ToolResult{false,
                       std::string(outcome.created ? "Created" : overwrite_verb) + " " +
@@ -202,7 +202,7 @@ ToolResult WriteWholeFile(const nlohmann::json& input, const std::filesystem::pa
 
 class ReadTool : public tools::Tool {
 public:
-    explicit ReadTool(FsSettings settings) : settings_(settings) {
+    explicit ReadTool(std::shared_ptr<const common::LiveValue<FsSettings>> live) : live_(std::move(live)) {
         spec_.name = "read";
         spec_.category = ToolCategory::ReadOnly;
         spec_.definition.name = spec_.name;
@@ -261,19 +261,21 @@ public:
         if (input.contains("limit")) limit = input.at("limit").get<std::int64_t>();
         return ReadWindowResult(input, resolved.absolute_path,
                                 input.value("offset", static_cast<std::int64_t>(1)), limit,
-                                settings_);
+                                S());
     }
 
 private:
     ToolSpec spec_;
-    FsSettings settings_;
+    // The current settings: a reconfigure swaps them between calls.
+    FsSettings S() const { return *live_->Get(); }
+    std::shared_ptr<const common::LiveValue<FsSettings>> live_;
 };
 
 // --- write ------------------------------------------------------------------
 
 class WriteTool : public tools::Tool {
 public:
-    explicit WriteTool(FsSettings settings) : settings_(settings) {
+    explicit WriteTool(std::shared_ptr<const common::LiveValue<FsSettings>> live) : live_(std::move(live)) {
         spec_.name = "write";
         spec_.category = ToolCategory::FileWrite;
         spec_.definition.name = spec_.name;
@@ -335,19 +337,21 @@ public:
         }
 
         return WriteWholeFile(input, resolved.absolute_path, input.at("content").get<std::string>(),
-                              "content", "Wrote", settings_);
+                              "content", "Wrote", S());
     }
 
 private:
     ToolSpec spec_;
-    FsSettings settings_;
+    // The current settings: a reconfigure swaps them between calls.
+    FsSettings S() const { return *live_->Get(); }
+    std::shared_ptr<const common::LiveValue<FsSettings>> live_;
 };
 
 // --- edit -------------------------------------------------------------------
 
 class EditTool : public tools::Tool {
 public:
-    explicit EditTool(FsSettings settings) : settings_(settings) {
+    explicit EditTool(std::shared_ptr<const common::LiveValue<FsSettings>> live) : live_(std::move(live)) {
         spec_.name = "edit";
         spec_.category = ToolCategory::FileWrite;
         spec_.definition.name = spec_.name;
@@ -496,7 +500,7 @@ private:
                 raw_limit = end - raw_offset + 1;
             }
         }
-        return ReadWindowResult(input, path, raw_offset, raw_limit, settings_);
+        return ReadWindowResult(input, path, raw_offset, raw_limit, S());
     }
 
     ToolResult Create(const nlohmann::json& input, const std::filesystem::path& path) {
@@ -508,7 +512,7 @@ private:
         // either way. Same body as `write` (WriteWholeFile): leaving this path
         // uncapped once let the model bypass write's limit through it.
         return WriteWholeFile(input, path, input.at("file_text").get<std::string>(), "file_text",
-                              "Overwrote", settings_);
+                              "Overwrote", S());
     }
 
     ToolResult StrReplace(const nlohmann::json& input, const std::filesystem::path& path) {
@@ -524,7 +528,7 @@ private:
         }
         const auto new_str = input.at("new_str").get<std::string>();
         const auto outcome =
-            FileEditor::StrReplace(path, old_str, new_str, settings_.edit_max_editable_file_bytes);
+            FileEditor::StrReplace(path, old_str, new_str, S().edit_max_editable_file_bytes);
         if (!outcome.ok) return Error(outcome.error);
         return ToolResult{false, outcome.summary + " in " + DisplayPath(input),
                           DiffDisplay(DisplayPath(input), outcome.before, outcome.after, false)};
@@ -549,14 +553,16 @@ private:
         const auto outcome =
             FileEditor::Insert(path, static_cast<int>(insert_line),
                                 input.at("insert_text").get<std::string>(),
-                                settings_.edit_max_editable_file_bytes);
+                                S().edit_max_editable_file_bytes);
         if (!outcome.ok) return Error(outcome.error);
         return ToolResult{false, outcome.summary + " in " + DisplayPath(input),
                           DiffDisplay(DisplayPath(input), outcome.before, outcome.after, false)};
     }
 
     ToolSpec spec_;
-    FsSettings settings_;
+    // The current settings: a reconfigure swaps them between calls.
+    FsSettings S() const { return *live_->Get(); }
+    std::shared_ptr<const common::LiveValue<FsSettings>> live_;
 };
 
 }  // namespace
@@ -582,14 +588,23 @@ std::string RenderWindow(const tools::FileWindow& window) {
     return out.str();
 }
 
+std::unique_ptr<tools::Tool> MakeReadTool(LiveFsSettings live) {
+    return std::make_unique<ReadTool>(std::move(live));
+}
+std::unique_ptr<tools::Tool> MakeWriteTool(LiveFsSettings live) {
+    return std::make_unique<WriteTool>(std::move(live));
+}
+std::unique_ptr<tools::Tool> MakeEditTool(LiveFsSettings live) {
+    return std::make_unique<EditTool>(std::move(live));
+}
 std::unique_ptr<tools::Tool> MakeReadTool(FsSettings settings) {
-    return std::make_unique<ReadTool>(settings);
+    return MakeReadTool(std::make_shared<common::LiveValue<FsSettings>>(settings));
 }
 std::unique_ptr<tools::Tool> MakeWriteTool(FsSettings settings) {
-    return std::make_unique<WriteTool>(settings);
+    return MakeWriteTool(std::make_shared<common::LiveValue<FsSettings>>(settings));
 }
 std::unique_ptr<tools::Tool> MakeEditTool(FsSettings settings) {
-    return std::make_unique<EditTool>(settings);
+    return MakeEditTool(std::make_shared<common::LiveValue<FsSettings>>(settings));
 }
 
 }  // namespace minimal::tools_fs

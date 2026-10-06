@@ -59,6 +59,8 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     aliased_tool_test.cpp
     provider_factory_registry_test.cpp
     model_catalog_test.cpp
+    config_schema_test.cpp
+    plugin_config_store_test.cpp
     model_catalog_live_test.cpp
     permission_codec_test.cpp
     providers_config_test.cpp
@@ -232,6 +234,8 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_stream_reassembler.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_error_mapping.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_variant_params.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_model_catalog.cpp"
+    anthropic_model_catalog_test.cpp
     anthropic_request_test.cpp
     anthropic_response_test.cpp
     anthropic_stream_test.cpp
@@ -353,12 +357,16 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     mcp_plugin_test.cpp
     # The client half of the pair: the picker's pure row model.
     "${CMAKE_SOURCE_DIR}/plugins/client/mcp-view/mcp_picker_model.cpp"
+    # config-view: its feed and component, over a fake endpoint.
+    "${CMAKE_SOURCE_DIR}/plugins/client/config-view/config_view.cpp"
+    schema_form_test.cpp
     mcp_view_test.cpp)
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/mcp/include"
     "${CMAKE_SOURCE_DIR}/plugins/server/mcp"
     "${CMAKE_SOURCE_DIR}/plugins/client/mcp-view"
+    "${CMAKE_SOURCE_DIR}/plugins/client/config-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")
 
 target_include_directories(minimal_tests PRIVATE
@@ -405,11 +413,12 @@ add_dependencies(minimal_tests
     fixture-hook
     fixture-lifecycle
     fixture-client fixture-client-exclusive fixture-client-partial-throw fixture-endpoint
-    fixture-client-bad-abi fixture-user)
+    fixture-client-bad-abi fixture-user fixture-project-commands fixture-config)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"
     MINIMAL_USER_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures-deployed"
     MINIMAL_BUNDLED_DIR="${CMAKE_SOURCE_DIR}/bundled"
+    MINIMAL_BUNDLED_SERVER_PLUGIN_DIR="${CMAKE_BINARY_DIR}/plugins/server"
     MINIMAL_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples"
     MINIMAL_DOCS_DIR="${CMAKE_SOURCE_DIR}/docs"
     MINIMAL_LOGO_PLUGIN="$<TARGET_FILE:minimal_logo>"

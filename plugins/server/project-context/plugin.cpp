@@ -8,10 +8,18 @@
 // Disabled, no instructions file is read.
 
 #include "minimal/agent/context_contributor.hpp"
+#include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/plugin_abi.h"
 
 #include "project_context.hpp"
 
+
+MINIMAL_PLUGIN_CONFIG_SCHEMA(
+    minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "project-context"),
+    [](const nlohmann::json& config) {
+        (void)minimal::project_context::ParseProjectContextSettings(config);
+    })
 
 extern "C" {
 

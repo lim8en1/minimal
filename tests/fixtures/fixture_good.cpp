@@ -63,7 +63,8 @@ public:
 class FixtureVariantParams : public minimal::llm::VariantParamsProvider {
 public:
     std::pair<nlohmann::json, bool> DeriveParameters(const std::string& effort_word,
-                                                     std::optional<int>) const override {
+                                                     std::optional<int>,
+                                                     const nlohmann::json&) const override {
         return {nlohmann::json{{"fixture_effort", effort_word}}, false};
     }
 };

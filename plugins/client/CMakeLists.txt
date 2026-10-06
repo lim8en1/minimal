@@ -35,3 +35,8 @@ add_subdirectory(mcp-view)
 # transcript row). Core has no ask UI.
 
 add_subdirectory(ask-view)
+
+# config-view is the TUI for plugin configuration: /config, a modal over core's
+# `plugins` endpoint, built on client core's reusable schema form.
+
+add_subdirectory(config-view)

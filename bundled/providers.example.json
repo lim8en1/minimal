@@ -50,21 +50,21 @@
     },
 
     "anthropic": {
-      "//": "The Anthropic Messages API. url is WITHOUT a /v1 suffix -- unlike the openai backend's convention, provider-anthropic appends /v1/messages itself. max_tokens is REQUIRED (not optional the way OpenAI treats it): set it here or per-model below, or every request fails.",
+      "//": "The Anthropic Messages API. url is WITHOUT a /v1 suffix -- unlike the openai backend's convention, provider-anthropic appends /v1/messages itself. discover lists /v1/models: every model's context window, output cap (the max_tokens the API requires on every request) and effort ladder come from there, so no per-model config is needed. Without discover, set max_tokens here or per model, or every request fails.",
       "backend": "anthropic",
       "url": "https://api.anthropic.com",
       "api_key": "secret:anthropic",
-      "max_tokens": 16000,
+      "discover": true,
 
-      "//2": "cache_ttl is \"5m\" (the default; omit it) or \"1h\" -- see ARCHITECTURE.md's prompt-caching notes on when the 1h write premium pays for itself.",
+      "//2": "cache_ttl is \"5m\" (the default; omit it) or \"1h\", applied to both breakpoints -- see ARCHITECTURE.md's prompt-caching notes on when the 1h write premium pays for itself.",
       "parameters": {
         "cache_ttl": "5m"
       },
 
       "models": {
-        "claude-opus-5": {
-          "//": "The model KEY is sent on the wire verbatim as the request's \"model\" field -- unlike the provider name, it is NOT yours to choose; it must be the backend's real model id. A key MAY contain '/' (split at the first one), so ids like \"anthropic/claude-opus-5\" are expressible -- see the openrouter block below.",
-          "context_window_tokens": 1000000
+        "claude-opus-5-5": {
+          "//": "Optional beside discover: a static model only to override something (its window and cap still come from the listing when omitted). The model KEY is sent on the wire verbatim as the request's \"model\" field -- unlike the provider name, it is NOT yours to choose; it must be the backend's real model id. A key MAY contain '/' (split at the first one), so ids like \"anthropic/claude-opus-5-5\" are expressible -- see the openrouter block below.",
+          "parameters": { "cache_ttl": "1h" }
         }
       }
     },
@@ -89,7 +89,7 @@
           }
         },
 
-        "//variants": "\"variants\" turns one model into several addressable effort variants: <model>@<name>. The LIST form names effort levels (known: low, medium, high, xhigh, max, minimal, none) and derives the wire parameters per backend -- anthropic entries get thinking:{type:enabled,budget_tokens:N} with a per-name budget (clamped to fit max_tokens), openai-shape entries get reasoning_effort. The MAP form (see below) writes the request fields explicitly instead. Variant refs appear in /model and --model like any model; the @suffix is never sent on the wire.",
+        "//variants": "\"variants\" turns one model into several addressable effort variants: <model>@<name>. The LIST form names effort levels (known: low, medium, high, xhigh, max, minimal, none) and derives the wire parameters per backend -- anthropic entries get adaptive thinking plus output_config.effort (or a token budget on models that only take one, per the model's /v1/models capabilities), openai-shape entries get reasoning_effort. The MAP form (see below) writes the request fields explicitly instead. Variant refs appear in /model and --model like any model; the @suffix is never sent on the wire.",
         "z-ai/glm-5.3-flash": {
           "//2": "The list form: three one-word variants. Wire ids stay 'z-ai/glm-5.3-flash'.",
           "context_window_tokens": 1310720,

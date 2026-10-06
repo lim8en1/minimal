@@ -28,8 +28,11 @@ std::filesystem::path BundledPluginDir() { return common::BundledPluginDir(); }
 
 std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundled_dir,
                                              const std::filesystem::path& user_dir,
-                                             PluginConfig& config) {
-    return common::DiscoverPluginFiles(bundled_dir, user_dir, config, Format());
+                                             PluginConfig& config,
+                                             const std::filesystem::path& plugin_config_dir) {
+    common::PluginConfigFormat format = Format();
+    format.config_dir = plugin_config_dir;
+    return common::DiscoverPluginFiles(bundled_dir, user_dir, config, format);
 }
 
 }  // namespace minimal::plugins

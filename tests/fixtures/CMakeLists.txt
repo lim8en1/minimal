@@ -45,6 +45,7 @@ minimal_add_fixture_plugin(fixture-hook       fixture_hook.cpp)
 minimal_add_fixture_plugin(fixture-lifecycle  fixture_lifecycle.cpp)
 minimal_add_fixture_plugin(fixture-endpoint   fixture_endpoint.cpp)
 minimal_add_fixture_plugin(fixture-project-commands fixture_project_commands.cpp)
+minimal_add_fixture_plugin(fixture-config     fixture_config.cpp)
 
 minimal_add_client_fixture_plugin(fixture-client           fixture_client_good.cpp)
 minimal_add_client_fixture_plugin(fixture-client-exclusive fixture_client_exclusive.cpp)

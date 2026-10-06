@@ -96,6 +96,11 @@ std::optional<std::string> ExtractJsonObjectText(std::string_view text) {
 
 Tagger::Tagger(MemorySettings settings, MemoryStore* store, EmbeddingService* embeddings,
                Resolver resolver, common::Logger& logger)
+    : Tagger(std::make_shared<common::LiveValue<MemorySettings>>(std::move(settings)), store,
+             embeddings, std::move(resolver), logger) {}
+
+Tagger::Tagger(std::shared_ptr<const common::LiveValue<MemorySettings>> settings, MemoryStore* store,
+               EmbeddingService* embeddings, Resolver resolver, common::Logger& logger)
     : settings_(std::move(settings)),
       store_(store),
       embeddings_(embeddings),
@@ -188,12 +193,12 @@ std::optional<std::int64_t> Tagger::ResolveNewTag(int scope, const std::string& 
                     best_id = tag.id;
                 }
             }
-            if (best_id != 0 && best >= settings_.tag_merge_similarity) return best_id;
+            if (best_id != 0 && best >= Settings()->tag_merge_similarity) return best_id;
         }
     }
 
     // 3. The cap.
-    if (static_cast<int>(vocabulary.size()) >= settings_.max_tags) return std::nullopt;
+    if (static_cast<int>(vocabulary.size()) >= Settings()->max_tags) return std::nullopt;
     return store_->CreateTag(scope, project_root, normalized, description);
 }
 
@@ -221,18 +226,18 @@ bool Tagger::RunOnce() {
     const auto llm = Llm();
     if (!llm || llm->provider == nullptr) {
         breaker_.RecordFailure(CircuitBreaker::Clock::now(),
-                               "cannot resolve tagger_model '" + settings_.tagger_model + "'");
+                               "cannot resolve tagger_model '" + Settings()->tagger_model + "'");
         logger_.warn("memory: tagging paused: cannot resolve tagger_model '{}'",
-                     settings_.tagger_model);
+                     Settings()->tagger_model);
         return false;
     }
 
     const auto vocabulary = store_->Tags(scope, root);
-    const bool full = static_cast<int>(vocabulary.size()) >= settings_.max_tags;
+    const bool full = static_cast<int>(vocabulary.size()) >= Settings()->max_tags;
     std::vector<std::vector<std::string>> neighbor_tags;
     neighbor_tags.reserve(rows.size());
     for (const auto& row : rows) neighbor_tags.push_back(NeighborTags(row));
-    const std::string prompt = BuildPrompt(settings_, vocabulary, full, rows, neighbor_tags);
+    const std::string prompt = BuildPrompt(*Settings(), vocabulary, full, rows, neighbor_tags);
 
     std::optional<nlohmann::json> answer;
     for (int attempt = 0; attempt < 2 && !answer; ++attempt) {
@@ -240,11 +245,11 @@ bool Tagger::RunOnce() {
         messages.push_back(llm::Message{llm::Role::User, {llm::TextBlock{prompt}}});
         llm::ChatRequest request;
         request.model = llm->model;
-        request.max_tokens = settings_.tagger_max_tokens;
+        request.max_tokens = Settings()->tagger_max_tokens;
         request.messages = messages;  // span; `messages` outlives the call
         request.stream = true;
         const auto deadline = std::chrono::steady_clock::now() +
-                              std::chrono::milliseconds(settings_.tagger_timeout_ms);
+                              std::chrono::milliseconds(Settings()->tagger_timeout_ms);
         try {
             // Streamed only so the sink can abort: on shutdown or past the
             // deadline, returning false cancels the transfer.
@@ -297,7 +302,7 @@ bool Tagger::RunOnce() {
         std::vector<std::int64_t> tag_ids;
         auto add = [&](std::optional<std::int64_t> id) {
             if (id && std::find(tag_ids.begin(), tag_ids.end(), *id) == tag_ids.end() &&
-                static_cast<int>(tag_ids.size()) < settings_.max_tags_per_entry) {
+                static_cast<int>(tag_ids.size()) < Settings()->max_tags_per_entry) {
                 tag_ids.push_back(*id);
             }
         };
@@ -337,7 +342,7 @@ std::vector<Tagger::MergeSuggestion> Tagger::SuggestMerges(int scope,
     if (vocabulary.size() < 2) return {};
     const auto llm = Llm();
     if (!llm || llm->provider == nullptr) {
-        throw std::runtime_error("cannot resolve tagger_model '" + settings_.tagger_model + "'");
+        throw std::runtime_error("cannot resolve tagger_model '" + Settings()->tagger_model + "'");
     }
     std::string prompt =
         "Below is a tag vocabulary for filing memory entries. Find tags that mean the same "
@@ -354,7 +359,7 @@ std::vector<Tagger::MergeSuggestion> Tagger::SuggestMerges(int scope,
     messages.push_back(llm::Message{llm::Role::User, {llm::TextBlock{prompt}}});
     llm::ChatRequest request;
     request.model = llm->model;
-    request.max_tokens = settings_.tagger_max_tokens;
+    request.max_tokens = Settings()->tagger_max_tokens;
     request.messages = messages;
     const auto response = llm->provider->Complete(request);
     const auto json = ExtractJsonObjectText(ResponseText(response));
@@ -407,7 +412,7 @@ void Tagger::WorkerLoop() {
 
 std::string Tagger::Describe() const {
     if (!enabled()) return "off (entries stay untagged)";
-    std::string out = "on (" + settings_.tagger_model + ")";
+    std::string out = "on (" + Settings()->tagger_model + ")";
     const auto state = breaker_.Snapshot(CircuitBreaker::Clock::now());
     if (state.open) {
         out += " -- paused, retry in " + std::to_string(state.retry_in.count()) + "s: " +

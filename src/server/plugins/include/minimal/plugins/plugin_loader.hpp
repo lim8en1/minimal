@@ -62,6 +62,28 @@ enum class LoadStatus {
 
 using PluginCandidate = common::PluginFileCandidate;
 
+// A plugin's optional config symbols (plugin_abi.h); null where it does not
+// define one. Plugins are never dlclosed, so they stay valid for the life of
+// the process.
+struct PluginConfigSymbols {
+    void (*schema)(nlohmann::json& out) = nullptr;
+    void (*validate)(const nlohmann::json& config, std::string& error) = nullptr;
+    bool (*reconfigure)(const nlohmann::json& config, std::string& error) = nullptr;
+};
+
+// What InspectPluginConfig found in one module.
+struct InspectedPlugin {
+    std::string name;
+    PluginConfigSymbols config;
+    std::string error;  // empty on success
+};
+
+// Opens `file` for its config symbols ONLY: the ABI gate, its name, the
+// three symbols -- no registration hook runs and no storage is opened, so it
+// is safe beside a running server (the `minimal plugin` CLI). The module stays
+// loaded for the life of the process, like every plugin.
+InspectedPlugin InspectPluginConfig(const std::filesystem::path& file);
+
 struct PluginRecord {
     std::filesystem::path file;
     std::string name;
@@ -85,6 +107,9 @@ struct PluginRecord {
     // Configuration problems the plugin reported through
     // PluginRegistrationContext::report_warning during registration.
     std::vector<std::string> warnings;
+
+    // Its optional config symbols, resolved once the ABI gate passed.
+    PluginConfigSymbols config;
 
     const std::vector<std::string>& Registered(std::string_view label) const {
         static const std::vector<std::string> kNone;

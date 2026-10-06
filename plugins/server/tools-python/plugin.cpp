@@ -36,6 +36,8 @@
 // "model error, not malice" threat model as bash applies: against an
 // adversarial model holding an interpreter, only a container helps.
 
+#include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/plugin_abi.h"
 
 #include "python_command.hpp"
@@ -67,7 +69,20 @@ public:
     }
 };
 
+// What python_exec reads per call; swapped by minimal_plugin_reconfigure.
+std::shared_ptr<minimal::common::LiveValue<minimal::tools_python::PythonSettings>>&
+LiveExecSettings() {
+    static std::shared_ptr<minimal::common::LiveValue<minimal::tools_python::PythonSettings>> live;
+    return live;
+}
+
 }  // namespace
+
+MINIMAL_PLUGIN_CONFIG_SCHEMA(
+    minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "tools-python"),
+    [](const nlohmann::json& config) {
+        (void)minimal::tools_python::ParsePythonSettings(config);
+    })
 
 extern "C" {
 
@@ -81,8 +96,11 @@ void minimal_plugin_register_tools(
     // Per-preset DECLARED package contracts arrive separately, per invocation,
     // on ToolContext::tool_config (the `tool_config.python` frontmatter slice).
     const auto settings = minimal::tools_python::ParsePythonSettings(context.config);
+    LiveExecSettings() =
+        std::make_shared<minimal::common::LiveValue<minimal::tools_python::PythonSettings>>(
+            settings);
     registry.Register(
-        minimal::tools_python::MakePythonExecTool(settings, Interpreters()));
+        minimal::tools_python::MakePythonExecTool(LiveExecSettings(), Interpreters()));
     registry.Register(
         minimal::tools_python::MakePythonOutputTool(settings, Interpreters()));
     registry.Register(
@@ -101,6 +119,22 @@ void minimal_plugin_register_session_observer(
     minimal::agent::SessionObserverRegistry& registry,
     const minimal::plugins::PluginRegistrationContext&) {
     registry.Register(std::make_shared<PythonSessionObserver>());
+}
+
+// Only "live" fields reach here (python_exec's per-call waits), so swapping
+// the whole parsed struct leaves what interpreters copied at spawn alone.
+bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error) {
+    if (!LiveExecSettings()) {
+        error = "tools-python is not registered";
+        return false;
+    }
+    try {
+        LiveExecSettings()->Set(minimal::tools_python::ParsePythonSettings(config));
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
 }
 
 }  // extern "C"

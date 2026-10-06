@@ -512,19 +512,23 @@ TEST_CASE("client plugin discovery: provenance defaults, merge, and round-trip",
           "[client_plugins][discovery]") {
     // Round-trip: unmodelled keys survive the rewrite.
     const std::string original = R"({
-        "plugins": [{"file": "todo.so", "provenance": "bundled", "enabled": true,
-                     "config": {"tick_ms": 500}}],
+        "plugins": [{"file": "todo.so", "provenance": "bundled", "enabled": true}],
         "aliases": {"myplugin.widget": "widget"},
         "future_key": {"anything": true}
     })";
     auto parsed = ParseClientPluginConfig(original);
     REQUIRE(parsed.plugins.size() == 1);
-    CHECK(parsed.plugins[0].config["tick_ms"] == 500);
     const auto rewritten = SerializeClientPluginConfig(parsed);
     auto reparsed = ParseClientPluginConfig(rewritten);
     REQUIRE(reparsed.plugins.size() == 1);
-    CHECK(reparsed.plugins[0].config["tick_ms"] == 500);
+    CHECK(reparsed.plugins[0].enabled == true);
     CHECK(reparsed.aliases.count("myplugin.widget") == 1);
+
+    // An inline config is refused, naming the client's own per-plugin file.
+    const auto inline_config = ParseClientPluginConfig(
+        R"({"plugins": [{"file": "todo.so", "config": {"tick_ms": 500}}]})");
+    REQUIRE(inline_config.problems.size() == 1);
+    CHECK(inline_config.problems[0].find("client-plugins.d/todo.json") != std::string::npos);
     CHECK(reparsed.preserved.contains("future_key"));
 
     // Discovery merges new entries in file order: bundled first (default

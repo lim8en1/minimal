@@ -108,7 +108,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         }
         const auto candidates = plugins::DiscoverClientPlugins(
             minimal::common::BundledClientPluginDir(), out.config_dir / "client-plugins",
-            plugin_config);
+            plugin_config, out.config_dir / minimal::common::kClientPluginConfigDirName);
         // An entry with a problem was dropped from the parsed config: warn,
         // and never rewrite (the rewrite would delete the user's entry).
         for (const auto& problem : plugin_config.problems) {

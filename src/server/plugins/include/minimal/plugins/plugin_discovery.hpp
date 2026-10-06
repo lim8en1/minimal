@@ -24,7 +24,7 @@ namespace minimal::plugins {
 //     "aliases": { "bash_over_ssh.bash": "ssh_bash" }
 //   }
 //
-// Each entry may also carry a "config" object -- the plugin's own settings,
+// A plugin's own settings are NOT here: they live in plugins.d/<stem>.json,
 // forwarded to it at registration.
 // The plugins.json document: entries keyed by (provenance, file), aliases, and
 // every other top-level key carried through untouched. The format and its
@@ -48,9 +48,11 @@ std::filesystem::path BundledPluginDir();
 // first, then user, each alphabetical) so load order is reproducible.
 //
 // `config` is updated in place with newly discovered entries so the caller can
-// write it back.
+// write it back. Each enabled candidate carries `plugin_config_dir`/<stem>.json
+// (the plugins.d dir; empty = no per-plugin files, every config {}).
 std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundled_dir,
                                               const std::filesystem::path& user_dir,
-                                              PluginConfig& config);
+                                              PluginConfig& config,
+                                              const std::filesystem::path& plugin_config_dir = {});
 
 }  // namespace minimal::plugins

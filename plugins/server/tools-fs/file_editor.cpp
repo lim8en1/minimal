@@ -5,7 +5,7 @@
 #include <sstream>
 #include <vector>
 
-#include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/atomic_write.hpp"
 #include "minimal/common/policy.hpp"
 
 namespace minimal::tools_fs {
@@ -174,7 +174,7 @@ EditOutcome FileEditor::StrReplace(const std::filesystem::path& path, std::strin
         return outcome;
     }
 
-    const auto written = tools::write_file(path, updated);
+    const auto written = common::write_file(path, updated);
     if (!written.ok) {
         outcome.error = written.error;
         return outcome;
@@ -256,7 +256,7 @@ EditOutcome FileEditor::Insert(const std::filesystem::path& path, int insert_lin
         return outcome;
     }
 
-    const auto written = tools::write_file(path, updated);
+    const auto written = common::write_file(path, updated);
     if (!written.ok) {
         outcome.error = written.error;
         return outcome;

@@ -10,7 +10,7 @@ namespace minimal::decision_advisor {
 // The bundled file every value below comes from: bundled/decision-advisor.json,
 // seeded into the config dir at install (never overwritten, user-editable --
 // the bundled/ contract). The code carries NO defaults: a value missing from
-// both that file and the plugins.json entry is a load error naming the field.
+// both that file and plugins.d/decision-advisor.json is a load error naming the field.
 //
 // The constants that remain in code are not tunables, and each says why where
 // it is defined: the System One wire format and the action options
@@ -23,7 +23,7 @@ inline constexpr const char* kBundledSettingsFile = "decision-advisor.json";
 //
 //   1. the bundled file's top level        (shared knobs: retry, thresholds, questions)
 //   2. bundled "backends"[<backend>]       (a profile: endpoint, model, key, its own thresholds)
-//   3. the plugins.json entry's "config"   (the operator's overrides)
+//   3. plugins.d/decision-advisor.json  (the operator's overrides)
 //
 // "backend" names the profile -- "typesafe", "openrouter", "llama" ship in the
 // bundled file, and an operator may add their own there. Every backend speaks
@@ -85,7 +85,7 @@ struct Settings {
     nlohmann::json extra_questions = nlohmann::json::object();
 };
 
-// Layers `config` (the plugins.json entry's object; null or empty = none) over
+// Layers `config` (plugins.d/decision-advisor.json; null or empty = none) over
 // `bundled` (the parsed bundled file) and validates the result through
 // config::Reader. Throws config::ConfigError naming file and path: an unknown
 // key at any layer (every profile is checked, not only the selected one), an

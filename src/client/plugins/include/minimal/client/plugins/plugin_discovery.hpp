@@ -17,10 +17,11 @@ namespace minimal::client::plugins {
 // entries):
 //
 //   {
-//     "plugins": [ {"file": "todo.so", "provenance": "bundled", "enabled": true,
-//                   "config": {...}} ],
+//     "plugins": [ {"file": "todo.so", "provenance": "bundled", "enabled": true} ],
 //     "aliases": { "myplugin.widget": "widget" }
 //   }
+//
+// A plugin's own settings live in client-plugins.d/<stem>.json.
 //
 // Everything unmodelled round-trips through `preserved`, because this file is
 // rewritten on every start -- the same rule the server file follows.
@@ -36,9 +37,10 @@ std::string SerializeClientPluginConfig(const ClientPluginConfig& config);
 // client-plugins.json (updated in place so the caller can write it back),
 // applies the provenance rule to new entries (bundled ENABLED, user DISABLED)
 // and returns candidates in stable load order (bundled first, then user, each
-// alphabetical).
+// alphabetical). Each enabled candidate carries `plugin_config_dir`/<stem>.json
+// (the client-plugins.d dir; empty = no per-plugin files, every config {}).
 std::vector<PluginCandidate> DiscoverClientPlugins(
     const std::filesystem::path& bundled_dir, const std::filesystem::path& user_dir,
-    ClientPluginConfig& config);
+    ClientPluginConfig& config, const std::filesystem::path& plugin_config_dir = {});
 
 }  // namespace minimal::client::plugins

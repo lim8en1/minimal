@@ -23,23 +23,21 @@ third-party plugin uses; the tools are not structurally privileged.
 
 ## Configuration
 
-The plugin's own `config` object in its `plugins.json` entry, one sub-object per
+The plugin's own file, `plugins.d/<name>.json` (one per plugin, beside `plugins.json`), one sub-object per
 tool. Every field is optional; missing values keep the defaults, and an absent
 or partial config object is normal rather than an error.
 
+`plugins.d/tools-fs.json`:
+
 ```json
 {
-  "file": "tools-fs.so",
-  "enabled": true,
-  "config": {
-    "read": {
-      "default_limit_lines": 2000,
-      "max_line_length": 2000,
-      "max_lines": 2000
-    },
-    "edit": {
-      "max_editable_file_bytes": 5242880
-    }
+  "read": {
+    "default_limit_lines": 2000,
+    "max_line_length": 2000,
+    "max_lines": 2000
+  },
+  "edit": {
+    "max_editable_file_bytes": 5242880
   }
 }
 ```

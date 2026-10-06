@@ -194,7 +194,7 @@ TEST_CASE("ParseTitlerConfig honors overrides and refuses junk by name", "[title
 
     using Catch::Matchers::ContainsSubstring;
     CHECK_THROWS_WITH(session_titler::ParseTitlerConfig({{"max_tokens", -5}}),
-                      ContainsSubstring("session-titler.config.max_tokens: must be at least 1"));
+                      ContainsSubstring("plugins.d/session-titler.json: max_tokens: must be at least 1"));
     CHECK_THROWS_WITH(session_titler::ParseTitlerConfig({{"input_char_budget", "lots"}}),
                       ContainsSubstring("input_char_budget: must be an integer"));
     CHECK_THROWS_WITH(session_titler::ParseTitlerConfig({{"model", "cheap"}}),

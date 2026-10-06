@@ -1,5 +1,8 @@
 #include "anthropic_request.hpp"
+#include "api_limits.hpp"
+#include "policy.hpp"
 
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string_view>
@@ -62,6 +65,31 @@ std::string CacheTtl(const nlohmann::json& parameters) {
     return "";  // "" means the default 5-minute TTL: omit the "ttl" key entirely
 }
 
+// A budgeted `thinking` object refit to THIS request's output cap. The variant
+// was derived against the model's full cap, but the request builder shrinks
+// max_tokens as the context fills (FitOutputCap), and the API rejects
+// budget_tokens >= max_tokens -- a long session would start 400ing late. Same
+// rule as AnthropicVariantParams: keep 1k of visible output, and drop thinking
+// when not even the 1024-token minimum budget fits. nullopt = omit the key.
+// Anything that is not a budgeted object passes through untouched.
+std::optional<nlohmann::json> FitThinking(const nlohmann::json& thinking, int max_tokens) {
+    // std::in_place: nlohmann::json's own conversions make a bare json ->
+    // optional<json> conversion ambiguous.
+    using Fitted = std::optional<nlohmann::json>;
+    if (!thinking.is_object() || thinking.value("type", "") != "enabled" ||
+        !thinking.contains("budget_tokens") || !thinking.at("budget_tokens").is_number_integer()) {
+        return Fitted(std::in_place, thinking);
+    }
+    if (max_tokens < kMinThinkingBudgetTokens + kReservedVisibleOutputTokens) return std::nullopt;
+    const int ceiling = max_tokens - kReservedVisibleOutputTokens;
+    if (thinking.at("budget_tokens").get<long long>() <= ceiling) {
+        return Fitted(std::in_place, thinking);
+    }
+    nlohmann::json fitted = thinking;
+    fitted["budget_tokens"] = ceiling;
+    return Fitted(std::in_place, std::move(fitted));
+}
+
 }  // namespace
 
 std::string SessionIdHeaderValue(const llm::ChatRequest& request) {
@@ -113,7 +141,9 @@ nlohmann::json ToAnthropicToolChoice(const llm::ToolChoiceSpec& choice) {
 std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
     if (!request.max_tokens) {
         throw std::invalid_argument(
-            "anthropic requires max_tokens; set it on the model or provider in providers.json");
+            "anthropic requires max_tokens; set \"discover\": true on the provider in "
+            "providers.json (each model's cap comes from /v1/models), or set max_tokens on the "
+            "model or provider");
     }
 
     std::string out;
@@ -132,11 +162,16 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
         for (const auto& [key, value] : request.parameters.items()) {
             if (StructuralKeys().count(key) != 0) continue;
             if (key == "session_id" && value.is_boolean()) continue;
+            std::optional<nlohmann::json> fitted;
+            if (key == "thinking") {
+                fitted = FitThinking(value, *request.max_tokens);
+                if (!fitted) continue;
+            }
             if (!first_key) out += ',';
             first_key = false;
             AppendStringValue(out, key);
             out += ':';
-            out += value.dump();
+            out += fitted ? fitted->dump() : value.dump();
         }
     }
 
@@ -281,10 +316,15 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
     // `messages` grows, which pairs with the explicit system-block breakpoint
     // above for agent loops (two of the four allowed breakpoints per request);
     // harmless (and simply unused) on the very first turn, when there is
-    // nothing yet worth caching here. NOTE: this field's acceptance by the
-    // live API is unverified from this repo -- if a gateway rejects it, this
-    // is the line to remove.
-    out += R"(,"cache_control":{"type":"ephemeral"})";
+    // nothing yet worth caching here. It carries the same ttl as the system
+    // breakpoint: a "1h" setting exists for sessions with long gaps between
+    // turns, and a tail left at 5m would expire across exactly those gaps.
+    out += R"(,"cache_control":{"type":"ephemeral")";
+    if (const std::string ttl = CacheTtl(request.parameters); !ttl.empty()) {
+        out += R"(,"ttl":)";
+        AppendStringValue(out, ttl);
+    }
+    out += '}';
 
     out += '}';
     return out;

@@ -184,7 +184,7 @@ TEST_CASE("python settings: defaults, seconds-suffixed keys, and named refusals"
 
     using Catch::Matchers::ContainsSubstring;
     CHECK_THROWS_WITH(ParsePythonSettings({{"sync_wait_ceiling_s", -3}}),
-                      ContainsSubstring("tools-python.config.sync_wait_ceiling_s: must be at least 0"));
+                      ContainsSubstring("plugins.d/tools-python.json: sync_wait_ceiling_s: must be at least 0"));
     CHECK_THROWS_WITH(ParsePythonSettings({{"python", ""}}),
                       ContainsSubstring("python: must not be empty"));
     // The pre-suffix spelling is an unknown field, not a silent no-op.

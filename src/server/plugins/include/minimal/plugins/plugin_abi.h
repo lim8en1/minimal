@@ -62,7 +62,7 @@
 #include "minimal/plugins/plugin_storage.hpp"
 #include "minimal/session/history_window.hpp"
 #include "minimal/session/session_reader.hpp"
-#include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/atomic_write.hpp"
 #include "minimal/tools/file_access.hpp"
 #include "minimal/tools/path_confinement.hpp"
 #include "minimal/tools/permission_advisor.hpp"
@@ -88,13 +88,13 @@ namespace minimal::plugins {
 // plugin author. (Per-invocation needs like the Logger travel in ToolContext,
 // not here.)
 struct PluginRegistrationContext {
-    // This plugin's own configuration, verbatim: the optional "config" object
-    // on the plugin's plugins.json entry --
-    //   {"plugins": [{"file": "tools-bash.so", "config": {"timeout_s": 30}}]}
+    // This plugin's own configuration, verbatim: the object in its own file,
+    // <config dir>/plugins.d/<stem>.json --
+    //   plugins.d/tools-bash.json:  {"timeout_s": 30}
     // -- and only this plugin's. Core imposes no schema here; the plugin owns
-    // its slice's shape. Empty when the entry carries none (a runtime
-    // condition, not an error). Configure a plugin where you enable it:
-    // plugins.json is the one file a user already edits for that purpose.
+    // its file's shape, and labels its messages with
+    // common::PluginConfigLabel(kPluginConfigDirName, "<name>"). Empty when the
+    // file does not exist (a runtime condition, not an error).
     nlohmann::json config = nlohmann::json::object();
 
     // The cross-plugin service registry, for plugins that CONSUME another
@@ -462,6 +462,27 @@ void minimal_plugin_register_compaction_strategies(
 // the worked example (tools-bash's before_command).
 void minimal_plugin_register_hook_points(minimal::hooks::HookDispatcher&,
                                           const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL: this plugin's config schema -- config::SchemaRecording's shape
+// ({"file", "fields": [{"path", "type", "default", ...}]}), recorded by
+// running its own parser against {}. Called WITHOUT registration (the
+// `minimal plugin` CLI, the config view): no context, no side effects.
+// Define both this and the next through MINIMAL_PLUGIN_CONFIG_SCHEMA
+// (minimal/common/plugin_config_schema.hpp).
+void minimal_plugin_config_schema(nlohmann::json& out);
+
+// OPTIONAL: parses `config` exactly as registration would, with no side
+// effects; leaves `error` empty when it is accepted, else sets the message.
+// What the CLI and the config view check a value with before saving it.
+void minimal_plugin_validate_config(const nlohmann::json& config, std::string& error);
+
+// OPTIONAL: take a changed config without a restart. The host calls it only
+// when every changed field is "apply": "live" in the schema, with the WHOLE
+// new config; a plugin with live fields must define it. Concurrent with
+// every other call into the plugin (tools mid-execution included): swap the
+// new settings in atomically. Return false with `error` set to keep the old
+// config -- the change then waits for a restart.
+bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error);
 
 // Frozen-surface note (track M): ToolContext::history is a
 // session::HistoryWindow -- a bound, windowed slice of SessionReader exposing

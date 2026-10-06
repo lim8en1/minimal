@@ -37,8 +37,8 @@ public:
     std::optional<agent::ContextSection> Contribute(const agent::ContextRequest& request) override {
         auto& rt = *runtime_;
         StartWorkers(rt);
-        if (!rt.settings.index_enabled) return std::nullopt;
-        if (request.is_subagent && !rt.settings.index_in_subagents) return std::nullopt;
+        if (!rt.Settings()->index_enabled) return std::nullopt;
+        if (request.is_subagent && !rt.Settings()->index_in_subagents) return std::nullopt;
         return agent::ContextSection{"Memory", RenderMemoryIndex(rt, request.project_root)};
     }
 
@@ -57,7 +57,7 @@ std::string RenderMemoryIndex(MemoryRuntime& rt, const std::filesystem::path& se
         stats.entries_by_scope.count("global") ? stats.entries_by_scope.at("global") : 0;
     if (project_count + global_count == 0) return "No memories stored yet.\n";
 
-    const std::size_t budget = static_cast<std::size_t>(rt.settings.index_budget_bytes);
+    const std::size_t budget = static_cast<std::size_t>(rt.Settings()->index_budget_bytes);
     std::string out = std::to_string(project_count) + " project and " +
                       std::to_string(global_count) + " global entries from earlier sessions.\n";
 

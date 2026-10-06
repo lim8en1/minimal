@@ -93,9 +93,9 @@ tools::ToolCategory WriteCategory(const MemorySettings& settings) {
 class MemoryStoreTool final : public tools::Tool {
 public:
     explicit MemoryStoreTool(std::shared_ptr<MemoryRuntime> runtime) : runtime_(std::move(runtime)) {
-        const bool inline_ok = runtime_->settings.allow_inline;
+        const bool inline_ok = runtime_->Settings()->allow_inline;
         spec_.name = "memory_store";
-        spec_.category = WriteCategory(runtime_->settings);
+        spec_.category = WriteCategory(*runtime_->Settings());
         spec_.definition.name = spec_.name;
         // Only what the model cannot infer: what is worth saving, that the
         // description drives retrieval, the cost of pinning, the replace-on-
@@ -156,7 +156,7 @@ public:
             }
             const bool pinned = input.value("pinned", false);
             if (path) return StorePath(ctx, scope, root, *path, pinned, input);
-            if (!rt.settings.allow_inline) {
+            if (!rt.Settings()->allow_inline) {
                 return Error("inline bodies are disabled (allow_inline=false): write the memory "
                              "as a markdown file with the file tools, then memory_store it by "
                              "\"path\"");
@@ -178,7 +178,7 @@ private:
         entry.origin = "model";
         entry.title = CheckedTitle(input.value("title", ""));
         entry.description = CheckedDescription(input.value("description", ""));
-        entry.body = CheckedBody(rt.settings, body);
+        entry.body = CheckedBody(*rt.Settings(), body);
         entry.pinned = pinned;
         const std::string id = rt.store->Insert(entry);
 
@@ -266,7 +266,7 @@ private:
             fallback_description = CheckedDescription(*description);
         }
         const auto chunks = ChunkMarkdown(content, fallback_title, fallback_description,
-                                          static_cast<std::size_t>(rt.settings.max_text_bytes));
+                                          static_cast<std::size_t>(rt.Settings()->max_text_bytes));
         std::vector<NewEntry> entries;
         for (const auto& chunk : chunks) {
             NewEntry entry;
@@ -301,7 +301,7 @@ class MemoryUpdateTool final : public tools::Tool {
 public:
     explicit MemoryUpdateTool(std::shared_ptr<MemoryRuntime> runtime) : runtime_(std::move(runtime)) {
         spec_.name = "memory_update";
-        spec_.category = WriteCategory(runtime_->settings);
+        spec_.category = WriteCategory(*runtime_->Settings());
         spec_.definition.name = spec_.name;
         spec_.definition.description = "Edit a memory entry in place. Pass only the fields to change.";
         spec_.definition.input_schema = {
@@ -328,7 +328,7 @@ public:
             if (auto description = OptionalString(input, "description")) {
                 patch.description = CheckedDescription(*description);
             }
-            if (auto body = OptionalString(input, "body")) patch.body = CheckedBody(rt.settings, *body);
+            if (auto body = OptionalString(input, "body")) patch.body = CheckedBody(*rt.Settings(), *body);
             if (auto it = input.find("pinned"); it != input.end() && it->is_boolean()) {
                 patch.pinned = it->get<bool>();
             }
@@ -367,7 +367,7 @@ class MemoryDeleteTool final : public tools::Tool {
 public:
     explicit MemoryDeleteTool(std::shared_ptr<MemoryRuntime> runtime) : runtime_(std::move(runtime)) {
         spec_.name = "memory_delete";
-        spec_.category = WriteCategory(runtime_->settings);
+        spec_.category = WriteCategory(*runtime_->Settings());
         spec_.definition.name = spec_.name;
         spec_.definition.description =
             "Delete a memory entry by `id`, or a whole file import by `group_id`.";

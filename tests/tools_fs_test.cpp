@@ -723,7 +723,7 @@ TEST_CASE("fs settings: defaults, overrides, and named refusals", "[tools_fs][se
 
     using Catch::Matchers::ContainsSubstring;
     CHECK_THROWS_WITH(tools_fs::ParseFsSettings(nlohmann::json("not an object")),
-                      ContainsSubstring("tools-fs.config: must be an object"));
+                      ContainsSubstring("plugins.d/tools-fs.json: the top level: must be an object"));
     // A non-positive limit would mean "read nothing", which nobody configures
     // on purpose.
     CHECK_THROWS_WITH(tools_fs::ParseFsSettings({{"read", {{"default_limit_lines", 0}}}}),

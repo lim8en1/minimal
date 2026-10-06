@@ -109,7 +109,7 @@ else()
         "$ORIGIN;$ORIGIN/${MINIMAL_LIBDIR_TO_RUNTIME_DEP_RPATH}")
 endif()
 
-add_executable(minimal-server main.cpp)
+add_executable(minimal-server main.cpp plugin_cli.cpp)
 target_link_libraries(minimal-server PRIVATE minimal::server_core)
 
 # The server loads its bundled plugins from the plugin DIRECTORY at startup,

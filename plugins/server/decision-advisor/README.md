@@ -27,12 +27,13 @@ sends tool input to an external endpoint and auto-answers
 permission prompts. Enabling it is two deliberate edits:
 
 ```json
-// plugins.json
-{
-  "file": "decision-advisor.so",
-  "enabled": true,
-  "config": { "api_key": "secret:typesafe" }
-}
+// plugins.json: the plugin's entry
+{ "file": "decision-advisor.so", "enabled": true }
+```
+
+```json
+// plugins.d/decision-advisor.json
+{ "api_key": "secret:typesafe" }
 ```
 
 ```json
@@ -72,7 +73,8 @@ llama-server -hf ggml-org/Clef-Flash-GGUF          # or ggml-org/Clef-GGUF (27B)
 ```
 
 ```json
-"config": { "backend": "llama" }
+// plugins.d/decision-advisor.json
+{ "backend": "llama" }
 ```
 
 - **Use the ggml-org GGUFs.** A conversion that lost Clef's decision head
@@ -112,7 +114,7 @@ layers, later wins:
 2. **`backends.<backend>`** in that file: the profile's `endpoint`, `model`,
    `api_key`, timeouts and thresholds. Add your own profile there (another
    self-hosted endpoint, a second model) and select it by name.
-3. **The plugin's `config` object** in its `plugins.json` entry: any key below,
+3. **The plugin's own file**, `plugins.d/decision-advisor.json`: any key below,
    plus `backend` — e.g. `{ "backend": "llama", "endpoint":
    "http://localhost:8000/v1/systemone" }`.
 

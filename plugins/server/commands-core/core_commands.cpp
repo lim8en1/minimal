@@ -21,7 +21,7 @@
 #include "minimal/config/project_trust.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/config/secrets.hpp"
-#include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/atomic_write.hpp"
 #include "minimal/tools/permission.hpp"
 
 namespace minimal::commands_core {
@@ -835,7 +835,7 @@ private:
             }
         }
         const std::string message = edit(doc);
-        const tools::WriteOutcome written = tools::write_file(
+        const common::WriteOutcome written = common::write_file(
             path, doc.dump() + "\n",
             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
         if (!written.ok) {

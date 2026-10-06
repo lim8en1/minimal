@@ -37,7 +37,7 @@ every completed turn (the only writer).
 Four tiers, config > openrouter-fetched > litellm-fetched > bundled, all
 resolved through ONE RateTable so a report can never disagree with itself:
 
-1. The user's `rates` slice in plugins.json (below).
+1. The user's `rates` in `plugins.d/cost-tracker.json` (below).
 2. The fetched OpenRouter snapshot, cached by the startup auto-refresh, the
    `--plugin-call cost-tracker refresh_rates` flag, or the `.rpc` service's `refresh_rates` method
    (keys are model ids — the ccusage convention; a cached snapshot from an
@@ -53,21 +53,19 @@ all zeros (the known proxy gap) — renders as "unknown", never as $0.00.
 
 ## Configuration
 
-The plugin's own `config` object in its `plugins.json` entry. Every field is
+The plugin's own file, `plugins.d/<name>.json` (one per plugin, beside `plugins.json`). Every field is
 optional; an absent or partial config object is normal rather than an error.
+
+`plugins.d/cost-tracker.json`:
 
 ```json
 {
-  "file": "cost-tracker.so",
-  "enabled": true,
-  "config": {
-    "rates": {
-      "claude-opus-5": { "input": 15.0, "output": 75.0, "cache_read": 1.5 }
-    },
-    "rates_fetch_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
-    "rates_fetch_timeout_ms": 30000,
-    "rates_refresh_days": 7
-  }
+  "rates": {
+    "claude-opus-5": { "input": 15.0, "output": 75.0, "cache_read": 1.5 }
+  },
+  "rates_fetch_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+  "rates_fetch_timeout_ms": 30000,
+  "rates_refresh_days": 7
 }
 ```
 

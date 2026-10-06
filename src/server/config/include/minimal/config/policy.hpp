@@ -71,6 +71,12 @@ inline constexpr std::chrono::seconds kDefaultIdleShutdown{5};
 // waits on it): a reachable backend lists its models well within it.
 inline constexpr std::chrono::seconds kDefaultDiscoveryWarmupTimeout{15};
 
+// --- `minimal plugin` CLI ---------------------------------------------------------------
+
+// The value column in `minimal plugin show`: a typical value fits; a long one
+// is printed whole after the column instead of widening it for every row.
+inline constexpr std::size_t kPluginCliValueColumnCap = 40;
+
 // --- permissions.json / hooks.json --------------------------------------------
 
 // The permission advisor's budget: long enough for a real policy decision,

@@ -80,6 +80,16 @@ Fn Lookup(void* handle, const char* symbol) {
     return fn;
 }
 
+PluginConfigSymbols ResolveConfigSymbols(void* handle) {
+    PluginConfigSymbols symbols;
+    symbols.schema = Lookup<decltype(symbols.schema)>(handle, "minimal_plugin_config_schema");
+    symbols.validate =
+        Lookup<decltype(symbols.validate)>(handle, "minimal_plugin_validate_config");
+    symbols.reconfigure =
+        Lookup<decltype(symbols.reconfigure)>(handle, "minimal_plugin_reconfigure");
+    return symbols;
+}
+
 // Runs a plugin's registration callback with the attribution window open,
 // closing it and reporting on either exit. On a throw, `rollback` runs after
 // the window closes: it strips what the plugin managed to register before
@@ -378,6 +388,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // Safe now: the ABI matched, so these run against compatible types.
     if (const char* name = name_fn(); name != nullptr) record.name = name;
     if (const char* version = version_fn(); version != nullptr) record.version = version;
+    record.config = ResolveConfigSymbols(handle);
 
     // An empty name is the sentinel core registrations attribute themselves
     // to: if this plugin registered something and a later hook threw,
@@ -398,9 +409,18 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         }
     }
 
+    // A plugins.d file that exists but cannot be read fails the plugin the
+    // same way its own parser refusing a value does: running it with {}
+    // would silently drop every setting the user wrote.
+    if (candidate.config_error) {
+        record.status = LoadStatus::RegistrationThrew;
+        record.error = *candidate.config_error;
+        return record;
+    }
+
     // Everything the registration hooks see: the shared settings.json `tools`
-    // object plus THIS plugin's own plugins.json `config` slice. Built once per
-    // plugin, before any hook runs.
+    // object plus THIS plugin's own plugins.d file. Built once per plugin,
+    // before any hook runs.
     PluginRegistrationContext context;
     // Always an object: "no config" is {}, never null, so every plugin parser
     // sees one shape.
@@ -560,6 +580,33 @@ void PluginLoader::DescribeProjectContent(const std::filesystem::path& project_r
         }
         out.insert(out.end(), found.begin(), found.end());
     }
+}
+
+InspectedPlugin InspectPluginConfig(const std::filesystem::path& file) {
+    InspectedPlugin out;
+    // The same open and ABI gate as LoadOne, and nothing after them: no
+    // registration hook, no context, no storage.
+    void* handle = dlopen(file.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (handle == nullptr) {
+        const char* message = dlerror();
+        out.error = message ? message : "dlopen failed";
+        return out;
+    }
+    auto abi_tag_fn = Lookup<AbiTagFn>(handle, "minimal_plugin_abi_tag");
+    auto name_fn = Lookup<NameFn>(handle, "minimal_plugin_name");
+    if (abi_tag_fn == nullptr || name_fn == nullptr) {
+        out.error = "not a minimal plugin: missing minimal_plugin_abi_tag/name";
+        return out;
+    }
+    const char* tag = abi_tag_fn();
+    if (tag == nullptr || std::string(tag) != common::AbiTag()) {
+        out.error = "built for '" + std::string(tag ? tag : "") + "', host is '" +
+                    std::string(common::AbiTag()) + "' -- rebuild the plugin";
+        return out;
+    }
+    if (const char* name = name_fn(); name != nullptr) out.name = name;
+    out.config = ResolveConfigSymbols(handle);
+    return out;
 }
 
 }  // namespace minimal::plugins

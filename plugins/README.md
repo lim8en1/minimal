@@ -11,19 +11,16 @@ Entries are configured in `plugins.json` (see
 ```json
 {
   "plugins": [
-    {
-      "file": "tools-fs.so",
-      "provenance": "bundled",
-      "enabled": true,
-      "config": { "..." : "the plugin's own schema, documented in its README" }
-    }
+    { "file": "tools-fs.so", "provenance": "bundled", "enabled": true }
   ]
 }
 ```
 
-The `config` object is passed to the plugin verbatim — core imposes no schema;
-each plugin owns its own, and every one documented here treats missing or
-partial config as normal (defaults apply). `session-titler` and
+Each plugin's own settings live in their own file beside it,
+`plugins.d/<name>.json` (e.g. `plugins.d/tools-fs.json`), passed to the plugin
+verbatim — core imposes no schema; each plugin owns its own, documented in its
+README, and every one treats a missing file or partial config as normal
+(defaults apply). `session-titler` and
 `decision-advisor` ship disabled; everything else is load-bearing for the
 default harness.
 
@@ -63,6 +60,7 @@ names. Configured in providers.json, not plugins.json
 | --- | --- | --- |
 | checklist | `checklist` tool + `checklist.endpoint` (per-session task list; get/list + `changes` push stream) | [README](server/checklist/README.md) |
 | checklist-view | `{todo}` status segment + `checklist.panel` view (focused tasklist / per-tab summary, `ctrl+k`) | [README](client/checklist-view/README.md) |
+| config-view | `/config [plugin]`: every plugin's `plugins.d` settings as an editable form (live/restart, pending changes), over core's `plugins` endpoint | [README](client/config-view/README.md) |
 | cost-tracker | `/cost`, startup auto-refresh + `--plugin-call cost-tracker refresh_rates` (pricing snapshots), `cost-tracker.rpc` (token usage and cost) | [README](server/cost-tracker/README.md) |
 | session-titler | LLM-generated session titles after turn 1. **Ships disabled** — enable in plugins.json | [README](server/session-titler/README.md) |
 | signals-message | `message_session` tool (cross-session messaging) | [README](server/signals-message/README.md) |

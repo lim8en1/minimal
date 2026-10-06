@@ -51,6 +51,7 @@
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/plugins/name_resolution.hpp"
+#include "minimal/plugins/plugin_config_endpoint.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/agent/host_registries.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
@@ -62,7 +63,8 @@
 #include "minimal/rpc/session_service.hpp"
 #include "minimal/session/session_database.hpp"
 #include "minimal/startup/sanity_check.hpp"
-#include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/atomic_write.hpp"
+#include "plugin_cli.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace {
@@ -84,7 +86,7 @@ void WriteConfigIfChanged(const std::filesystem::path& path, const std::string& 
     if (contents == previous) return;
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
-    const auto outcome = minimal::tools::write_file(path, contents);
+    const auto outcome = minimal::common::write_file(path, contents);
     if (!outcome.ok) {
         std::fprintf(stderr, "warning: could not update %s: %s\n", path.c_str(),
                      outcome.error.c_str());
@@ -313,7 +315,9 @@ static int RunServer(int argc, char** argv) {
 
     std::vector<minimal::plugins::PluginCandidate> candidates;
     if (plugin_config_problems.empty()) {
-        candidates = minimal::plugins::DiscoverPlugins(bundled_dir, user_dir, plugin_config);
+        candidates = minimal::plugins::DiscoverPlugins(
+            bundled_dir, user_dir, plugin_config,
+            config_dir / minimal::common::kPluginConfigDirName);
         // Discovery itself can find a problem (an entry whose provenance is
         // ambiguous); the same rule applies.
         for (const auto& problem : plugin_config.problems) plugin_config_problems.push_back(problem);
@@ -515,6 +519,14 @@ static int RunServer(int argc, char** argv) {
     // trust prompt. The loader is declared after project_trust, so it is gone
     // first -- but only after every session (the sole Inspect callers) ended.
     project_trust.SetContentProvider(&loader);
+    // Plugin configuration for the running server (`/config`, `minimal plugin`
+    // after an edit): core's, because it needs every plugin's record and the
+    // config each one registered with. Provided after the plugins, so no
+    // plugin can claim the name.
+    minimal::plugins::PluginConfigEndpoint plugin_config_endpoint(config_dir, records, candidates);
+    services.Provide(minimal::plugins::PluginEndpointServiceName(
+                         minimal::plugins::kPluginConfigEndpointName),
+                     &plugin_config_endpoint);
     // The load thread is the only writer; from here the map is read-only, which
     // is what makes unguarded Find from session workers and the command pool
     // safe. A runtime Provide is logged and ignored (the registry's own rule).
@@ -1013,6 +1025,12 @@ int main(int argc, char** argv) {
     // loading, registry construction): uncaught, that is std::terminate with
     // no message, and an operator staring at a dead server with an empty log.
     try {
+        // `plugin ...`: the config CLI (plugin_cli.hpp) -- no banner, no
+        // startup, nothing but the plugins.d file it was asked about.
+        if (argc >= 2 && std::strcmp(argv[1], "plugin") == 0) {
+            return minimal::server::RunPluginCli({argv + 2, argv + argc},
+                                                 minimal::common::ConfigDir());
+        }
         return RunServer(argc, argv);
     } catch (const std::exception& error) {
         std::fprintf(stderr, "minimal-server: fatal: %s\n", error.what());

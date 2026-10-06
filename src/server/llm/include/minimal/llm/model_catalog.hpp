@@ -60,6 +60,10 @@ struct DiscoveredModel {
 // degrading to empty -- the MaxCompletionTokens posture: a hostile or foreign
 // metadata body yields "no variants", never a guess.
 //
+// Anthropic's /v1/models `capabilities.effort` tree ({"low": {"supported":
+// true}, ...}) is read too, so a discovered Claude model gets exactly the
+// rungs the API says it accepts.
+//
 // models.dev's normalized `reasoning_options` spelling
 // ([{"type":"effort","values":[...]}]) is ALSO read, so a Models.dev-style
 // catalog plugin (docs/EXTENSIBILITY.md deferred table) feeds this unchanged.

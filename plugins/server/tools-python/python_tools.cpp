@@ -72,8 +72,8 @@ namespace {
 
 class PythonExecTool : public tools::Tool {
 public:
-    PythonExecTool(PythonSettings settings, InterpreterStore& store)
-        : settings_(std::move(settings)), store_(store) {
+    PythonExecTool(std::shared_ptr<const common::LiveValue<PythonSettings>> live, InterpreterStore& store)
+        : live_(std::move(live)), store_(store) {
         spec_.name = "python_exec";
         spec_.category = tools::ToolCategory::Execute;
         spec_.definition.name = "python_exec";
@@ -139,7 +139,7 @@ public:
             binary = interp->config().python_path;
         } else {
             const auto slice = ParseSlice(ctx.tool_config);
-            binary = ResolveInterpreterBinary(MakeEnvPlan(ctx.project_root, slice, settings_));
+            binary = ResolveInterpreterBinary(MakeEnvPlan(ctx.project_root, slice, S()));
         }
         disclosure.grants.push_back({"python_exec:" + binary, binary + " *"});
         disclosure.complete = true;
@@ -165,7 +165,7 @@ public:
         }
         // The request's own kill deadline: absent -> the operator's setting
         // (default unlimited); explicit 0 = unlimited; negative is ignored.
-        std::int64_t max_runtime = settings_.background_max_runtime;
+        std::int64_t max_runtime = S().background_max_runtime;
         if (auto it = input.find("max_runtime"); it != input.end() && it->is_number_integer() &&
                                                        it->get<std::int64_t>() >= 0) {
             max_runtime = std::min(it->get<std::int64_t>(), kMaxSaneRuntimeSeconds);
@@ -173,7 +173,7 @@ public:
         const bool clean = BoolField(input, "clean");
 
         const auto slice = ParseSlice(ctx.tool_config);
-        const auto plan = MakeEnvPlan(ctx.project_root, slice, settings_);
+        const auto plan = MakeEnvPlan(ctx.project_root, slice, S());
 
         if (clean) store_.Erase(ctx.session_id, "clean restart requested");
 
@@ -209,8 +209,8 @@ public:
         }
 
         std::int64_t wait = timeout;
-        if (settings_.sync_wait_ceiling > 0 && wait > settings_.sync_wait_ceiling) {
-            wait = settings_.sync_wait_ceiling;
+        if (S().sync_wait_ceiling > 0 && wait > S().sync_wait_ceiling) {
+            wait = S().sync_wait_ceiling;
         }
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(wait);
         RequestOutcome outcome;
@@ -219,7 +219,7 @@ public:
                 ToolResult result;
                 result.is_error = !outcome.ok;
                 result.content_text =
-                    FormatOutcome(*id, outcome, ahead, settings_.max_output_bytes) + advisory;
+                    FormatOutcome(*id, outcome, ahead, S().max_output_bytes) + advisory;
                 return result;
             }
             case Interpreter::WaitOutcome::kDemoted:
@@ -260,7 +260,7 @@ private:
             EnvPlan install_plan = plan;
             install_plan.declared = shared.install;
             std::string ensure_error;
-            note = EnsureEnvironment(install_plan, settings_, ctx.logger, &ensure_error);
+            note = EnsureEnvironment(install_plan, S(), ctx.logger, &ensure_error);
             if (!ensure_error.empty()) {
                 *error = "could not prepare the python environment: " + ensure_error +
                          "\nThe interpreter was not started; nothing was lost.";
@@ -274,10 +274,10 @@ private:
         config.cwd = ctx.project_root;
         config.venv = plan.wants_venv ? plan.venv : std::filesystem::path{};
         config.declared = record;
-        config.env = BuildChildEnv(plan, settings_);
+        config.env = BuildChildEnv(plan, S());
         config.session_lifetime = ctx.session_lifetime;
         std::string spawn_error;
-        auto interp = Interpreter::Spawn(config, settings_, ctx.logger, &spawn_error);
+        auto interp = Interpreter::Spawn(config, S(), ctx.logger, &spawn_error);
         if (!interp) {
             *error = "failed to start the python interpreter: " + spawn_error;
             return nullptr;
@@ -308,7 +308,7 @@ private:
                     diff.additive, store_.DeclaredInProject(plan.project_root, ctx.session_id));
                 std::string install_error;
                 const auto note = EnsurePackages(ctx.project_root, plan.venv_python,
-                                                 shared.install, settings_, ctx.logger,
+                                                 shared.install, S(), ctx.logger,
                                                  &install_error);
                 if (!install_error.empty()) {
                     return "installing the preset's newly declared packages failed: " +
@@ -335,7 +335,7 @@ private:
                 EnvPlan install_plan = plan;
                 install_plan.declared = shared.install;
                 std::string ensure_error;
-                EnsureEnvironment(install_plan, settings_, ctx.logger, &ensure_error);
+                EnsureEnvironment(install_plan, S(), ctx.logger, &ensure_error);
                 if (!ensure_error.empty()) {
                     ctx.logger.warn("python[{}]: venv materialization failed: {}", ctx.session_id,
                                     ensure_error);
@@ -348,7 +348,9 @@ private:
         return {};
     }
 
-    PythonSettings settings_;
+    // The current settings: a reconfigure swaps them between calls.
+    PythonSettings S() const { return *live_->Get(); }
+    std::shared_ptr<const common::LiveValue<PythonSettings>> live_;
     InterpreterStore& store_;
     tools::ToolSpec spec_;
 };
@@ -433,8 +435,14 @@ private:
 
 }  // namespace
 
+std::unique_ptr<tools::Tool> MakePythonExecTool(std::shared_ptr<const common::LiveValue<PythonSettings>> live,
+                                                InterpreterStore& store) {
+    return std::make_unique<PythonExecTool>(std::move(live), store);
+}
+
 std::unique_ptr<tools::Tool> MakePythonExecTool(PythonSettings settings, InterpreterStore& store) {
-    return std::make_unique<PythonExecTool>(std::move(settings), store);
+    return MakePythonExecTool(
+        std::make_shared<common::LiveValue<PythonSettings>>(std::move(settings)), store);
 }
 
 // --- python_output -----------------------------------------------------------------

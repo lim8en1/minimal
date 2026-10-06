@@ -12,8 +12,7 @@
 #include "minimal/common/read_file.hpp"
 #include "minimal/config/project_dirs.hpp"
 #include "minimal/store/file_lock.hpp"
-#include "minimal/tools/atomic_write.hpp"
-#include "minimal/common/units.hpp"
+#include "minimal/common/atomic_write.hpp"
 #include "minimal/common/policy.hpp"
 
 namespace minimal::config {
@@ -157,7 +156,7 @@ bool ProjectTrust::Update(const std::filesystem::path& project_root, bool trust,
     if (next != recorded) {
         nlohmann::json doc{{"version", 1}, {"trusted", nlohmann::json::array()}};
         for (const auto& entry : next) doc["trusted"].push_back(entry);
-        const auto outcome = tools::write_file(
+        const auto outcome = common::write_file(
             state_file_, doc.dump(2) + "\n",
             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
         if (!outcome.ok) {

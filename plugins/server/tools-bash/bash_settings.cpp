@@ -1,17 +1,35 @@
 #include "bash_settings.hpp"
+
 #include <limits>
 
-#include "minimal/common/config_reader.hpp"
 #include "minimal/common/clock.hpp"
+#include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 namespace minimal::tools_bash {
 
 BashSettings ParseBashSettings(const nlohmann::json& config) {
     BashSettings settings;
-    // The plugin's own plugins.json "config" object -- flat, because every
-    // knob belongs to this one tool. Timeouts are configured in SECONDS (the
-    // unit the model-facing tool input uses) and stored in ms.
-    config::Reader reader(config, "plugins.json", "tools-bash.config");
+    // The plugin's own plugins.d/tools-bash.json -- flat, because every knob
+    // belongs to this one tool. Timeouts are configured in SECONDS (the unit
+    // the model-facing tool input uses) and stored in ms. The limits are
+    // live: read per call, and never quoted in the tool's definition. The
+    // shell and inherit_env seed per-session state held for the process.
+    config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "tools-bash"));
+    constexpr auto kLive = config::ApplyPolicy::kLive;
+    reader.Describe("timeout_s", {"Default wall-clock cap per command, seconds; the whole "
+                                  "process group is killed at the deadline.",
+                                  kLive});
+    reader.Describe("max_timeout_s", {"Ceiling on a model-supplied timeout, seconds.", kLive});
+    reader.Describe("background_max_timeout_s",
+                    {"Ceiling for detached (background) commands, seconds.", kLive});
+    reader.Describe("max_background_tasks", {"Per-session cap on live background tasks.", kLive});
+    reader.Describe("max_output_bytes", {"Bounds the persisted result the model sees.", kLive});
+    reader.Describe("max_file_size_bytes",
+                    {"RLIMIT_FSIZE backstop for files a command writes.", kLive});
+    reader.Describe("shell", {"The POSIX shell (or a wrapper entering a container)."});
+    reader.Describe("inherit_env", {"How the session environment is seeded: \"allowlist\" "
+                                    "($HOME, $PATH, ...) or \"all\" (includes API keys)."});
     // The largest timeout a deadline can represent (common::kMaxDeadline).
     const std::int64_t kMaxSeconds = common::MillisToSeconds(common::kMaxDeadline.count());
     const auto seconds_key = [&reader](const char* key, std::int64_t default_ms) {

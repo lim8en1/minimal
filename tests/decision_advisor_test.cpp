@@ -222,7 +222,7 @@ TEST_CASE("decision-advisor every bundled profile resolves completely",
     CHECK(nlohmann::json(Parse(nlohmann::json()).backend) == Bundled().at("backend"));
 }
 
-TEST_CASE("decision-advisor the plugins.json entry overrides any layer",
+TEST_CASE("decision-advisor plugins.d/decision-advisor.json overrides any layer",
           "[decision_advisor][settings]") {
     const auto settings = Parse(nlohmann::json{{"backend", "openrouter"},
                                                {"api_key", "secret:typesafe"},
@@ -260,22 +260,22 @@ TEST_CASE("decision-advisor settings errors are named, never defaulted",
     // Errors name file and full path (config::Reader's format). Unknown
     // fields, at the entry and in retry:
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"apikey", "k"}}),
-                      ContainsSubstring("plugins.json: decision-advisor.config.apikey: unknown field"));
+                      ContainsSubstring("plugins.d/decision-advisor.json: apikey: unknown field"));
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"retry", {{"retries", 3}}}}),
-                      ContainsSubstring("decision-advisor.config.retry.retries: unknown field"));
+                      ContainsSubstring("plugins.d/decision-advisor.json: retry.retries: unknown field"));
     // A backend the bundled file does not define names the ones it does.
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"backend", "anthropic"}}),
-                      ContainsSubstring("config.backend: \"anthropic\" is not a profile in "
+                      ContainsSubstring("plugins.d/decision-advisor.json: backend: \"anthropic\" is not a profile in "
                                         "decision-advisor.json (backends: \"llama\""));
     // Wrong types and out-of-range values.
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"budget_ms", "soon"}}),
-                      ContainsSubstring("config.budget_ms: must be an integer"));
+                      ContainsSubstring("plugins.d/decision-advisor.json: budget_ms: must be an integer"));
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"budget_ms", 0}}),
-                      ContainsSubstring("config.budget_ms: must be at least 1"));
+                      ContainsSubstring("plugins.d/decision-advisor.json: budget_ms: must be at least 1"));
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"min_margin", 1.5}}),
-                      ContainsSubstring("config.min_margin: must be between 0.0 and 1.0"));
+                      ContainsSubstring("plugins.d/decision-advisor.json: min_margin: must be between 0.0 and 1.0"));
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"endpoint", ""}}),
-                      ContainsSubstring("config.endpoint: must not be empty"));
+                      ContainsSubstring("plugins.d/decision-advisor.json: endpoint: must not be empty"));
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"questions", {{"audit", nlohmann::json::object()}}}}),
                       ContainsSubstring("must define \"action\""));
     // The rubric's options are what the decision rule acts on: a renamed or
@@ -290,7 +290,7 @@ TEST_CASE("decision-advisor settings errors are named, never defaulted",
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"questions", not_choice}}),
                       ContainsSubstring("questions.action.type: must be \"choice\""));
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"deny_message", ""}}),
-                      ContainsSubstring("config.deny_message: must not be empty"));
+                      ContainsSubstring("plugins.d/decision-advisor.json: deny_message: must not be empty"));
     CHECK_THROWS_WITH(Parse(nlohmann::json::array()), ContainsSubstring("must be an object"));
     // A per-attempt cap above the total budget is refused, not clamped.
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"budget_ms", 500}, {"request_timeout_ms", 90000}}),

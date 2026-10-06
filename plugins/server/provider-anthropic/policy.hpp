@@ -9,10 +9,11 @@
 
 namespace minimal::provider_anthropic {
 
-// Thinking budget per effort word (`model@effort`). A scale, not data: no
-// catalog publishes per-model budgets, so each rung doubles the last, all
-// well under every thinking model's output cap (the caller clamps against
-// max_tokens when known). "minimal" has no rung: no thinking block at all.
+// The effort ladder, lowest first (the order step-down walks), with the
+// thinking budget each rung gets on models that only take a budget
+// (pre-adaptive: Haiku 4.5 and older). A scale, not data: each rung doubles
+// the last, all well under every such model's output cap (the caller clamps
+// against max_tokens when known). "minimal" has no rung: no thinking block.
 inline constexpr std::pair<std::string_view, int> kThinkingBudgets[] = {
     {"low", 4096}, {"medium", 8192}, {"high", 16384}, {"xhigh", 32768}, {"max", 65536},
 };
@@ -20,5 +21,10 @@ inline constexpr std::pair<std::string_view, int> kThinkingBudgets[] = {
 // Output kept for the visible answer when a thinking budget is clamped under
 // max_tokens: a thinking-heavy turn still has room to say something.
 inline constexpr int kReservedVisibleOutputTokens = 1024;
+
+// Model discovery pages followed: a runaway guard, not a real limit -- the
+// whole catalog is one page today, and a backend whose `has_more` never turns
+// false (or that repeats a cursor) must not loop forever.
+inline constexpr int kMaxModelPages = 50;
 
 }  // namespace minimal::provider_anthropic

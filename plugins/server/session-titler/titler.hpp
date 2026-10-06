@@ -25,6 +25,7 @@
 #include "minimal/agent/session_observer.hpp"
 #include "minimal/agent/session_support_service.hpp"
 #include "minimal/common/event_queue.hpp"
+#include "minimal/common/live_value.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/plugins/service_registry.hpp"
 #include "policy.hpp"
@@ -76,6 +77,11 @@ std::string CleanTitle(std::string_view text);
 // alive, which is what makes that join safe.
 class TitlerObserver final : public agent::SessionObserver {
 public:
+    // Reads `config` once per title: a reconfigure swaps it under a running
+    // server.
+    TitlerObserver(std::shared_ptr<const common::LiveValue<TitlerConfig>> config,
+                   plugins::ServiceRegistry* services, common::Logger& logger);
+    // A fixed configuration (tests).
     TitlerObserver(TitlerConfig config, plugins::ServiceRegistry* services,
                    common::Logger& logger);
     ~TitlerObserver() override;
@@ -104,7 +110,7 @@ public:
 private:
     void RunWorker();
 
-    const TitlerConfig config_;
+    const std::shared_ptr<const common::LiveValue<TitlerConfig>> config_;
     plugins::ServiceRegistry* const services_;  // null = no seam; degrade
     common::Logger& logger_;
     // Touched only on the observer registry's dispatch thread.

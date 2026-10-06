@@ -22,12 +22,23 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/net/http_client.hpp"
+#include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/plugin_abi.h"
 #include "minimal/plugins/service_registry.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 
 #include "advisor.hpp"
 #include "settings.hpp"
+
+MINIMAL_PLUGIN_CONFIG_SCHEMA(
+    minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "decision-advisor"),
+    [](const nlohmann::json& config) {
+        (void)minimal::decision_advisor::ParseSettings(
+            minimal::decision_advisor::LoadBundledSettings(
+                minimal::common::ConfigDir() / minimal::decision_advisor::kBundledSettingsFile),
+            config);
+    })
 
 extern "C" {
 

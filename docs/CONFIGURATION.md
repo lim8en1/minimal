@@ -27,12 +27,14 @@ runtime. Copyable example agents, prompts, skills, and commands live in
 | `mcps.json` | server (`mcp` plugin) | optional | read by the `mcp` plugin; missing → no MCP; an invalid entry (unknown field included) → warning naming it, that server is skipped, the others load |
 | `channels.json` | server (`mcp` plugin) | optional | same degrade-to-warning behavior as `mcps.json` |
 | `plugins.json` | server | optional | malformed, or any entry invalid → **fatal**, no plugin loads and the file is not rewritten (see docs/PLUGINS.md) |
+| `plugins.d/<name>.json` | server | optional | one per plugin: that plugin's own settings (its README documents them); read only for enabled plugins; missing → defaults; not a JSON object, an unknown field or a bad value → that plugin does not load (named field) |
 | `agents/<name>.md` | server | **at least one required** | none resolvable → **fatal** |
 | `prompts/<name>.md` | server | optional | missing `prompts/compression.md` → warning |
 | `cost-rates.json` | server | optional | cost-tracker's fallback price table |
 | `decision-advisor.json` | server (`decision-advisor` plugin) | required when the plugin is enabled | every advisor default: backend profiles, retry, thresholds, questions; missing, unknown key or bad value → the plugin does not load (named field) |
 | `plugins/` (dir) | server | optional | user plugins scanned here (docs/PLUGINS.md) |
 | `client-plugins.json` | client | optional | malformed or an invalid entry → warning; that entry is skipped and the file is not rewritten |
+| `client-plugins.d/<name>.json` | client | optional | one per client plugin, the same rules as `plugins.d/` (a bad file → that plugin does not load, with a warning) |
 | `client-plugins/` (dir) | client | optional | user client plugins scanned here |
 | `keybindings.json` | client | optional | missing → built-in defaults; malformed → load fails (named path) |
 | `ui.json` | client | optional | malformed → warning + all defaults; a bad or unknown field → warning, that field keeps its default |
@@ -48,11 +50,11 @@ error naming the file and the full path to the field:
 ```
 settings.json: memory.auto_compact: must be true or false, got "yes"
 providers.json: providers.local.models.qwen4.max_tokens: must be an integer, got 4096.5
-plugins.json: tools-bash.config.timeout_ms: unknown field (known: background_max_timeout_s, ...)
+plugins.d/tools-bash.json: timeout_ms: unknown field (known: background_max_timeout_s, ...)
 ```
 
 Nothing falls back to a default silently. This covers the server files,
-every plugin's `config` object in `plugins.json`, `secrets.json`, agent
+every plugin's own `plugins.d/<name>.json`, `secrets.json`, agent
 preset frontmatter, and (as warnings) the client files. Keys starting with
 `//` are comments, in every JSON file.
 
@@ -131,8 +133,8 @@ scrollback, and appear on the headless `compaction` JSONL line.
 ### `tools.*`
 
 Core's own limits on tool calls. Nothing else belongs here (an unknown key is
-an error): tool plugins take their knobs from their own `config` object in
-`plugins.json`.
+an error): tool plugins take their knobs from their own file,
+`plugins.d/<name>.json`.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
@@ -141,7 +143,7 @@ an error): tool plugins take their knobs from their own `config` object in
 | `max_result_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
 | `max_display_bytes` | int | `131072` | ≥ 0; a tool result's client-only display payload over this is dropped (the client shows the text); `0` disables the limit |
 
-### Per-plugin tool settings (`plugins.json` `config`)
+### Per-plugin tool settings (`plugins.d/<name>.json`)
 
 **`tools-fs`** — object with one sub-object per tool
 (`{"read": {...}, "edit": {...}}`; every field optional):

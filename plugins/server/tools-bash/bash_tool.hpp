@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include "minimal/common/live_value.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/tools/tool.hpp"
 
@@ -23,6 +24,12 @@ namespace minimal::tools_bash {
 // grain than core's pre_tool_use because the payload carries the RESOLVED
 // program path (disclosure-time resolution, session PATH included). Default
 // (disabled) for tests that build the tool directly.
+//
+// `live` is read once per call: a reconfigure swaps it under a running
+// server. The settings overload is a fixed configuration (tests).
+std::unique_ptr<tools::Tool> MakeBashTool(
+    std::shared_ptr<const common::LiveValue<BashSettings>> live, BashSessionStateStore& store,
+    BackgroundTaskRegistry& background, hooks::HookPoint before_command = hooks::HookPoint{});
 std::unique_ptr<tools::Tool> MakeBashTool(
     BashSettings settings, BashSessionStateStore& store,
     BackgroundTaskRegistry& background,

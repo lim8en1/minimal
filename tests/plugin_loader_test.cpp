@@ -15,6 +15,7 @@
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/plugins/name_resolution.hpp"
+#include "minimal/plugins/plugin_config_endpoint.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/tools/tool_executor.hpp"
@@ -104,7 +105,8 @@ TEST_CASE("a well-formed plugin loads and contributes its registrations", "[plug
     // surface" -- the relocated Anthropic-shape seam), same kind string.
     auto* variant_params = h.variant_params_registry.Find("fixture");
     REQUIRE(variant_params != nullptr);
-    const auto [params, clamped] = variant_params->DeriveParameters("high", std::nullopt);
+    const auto [params, clamped] =
+        variant_params->DeriveParameters("high", std::nullopt, nlohmann::json::object());
     CHECK_FALSE(clamped);
     CHECK(params.at("fixture_effort") == "high");
 }
@@ -745,6 +747,21 @@ TEST_CASE("a plugin whose registration throws is reported, not fatal to the proc
     CHECK(records.front().error.find("registration is broken") != std::string::npos);
 }
 
+TEST_CASE("an unreadable plugins.d file fails its plugin, naming the file",
+          "[plugin_loader][config]") {
+    // Loading it with {} would silently drop every setting the user wrote.
+    Harness h;
+    PluginCandidate candidate = Enabled("fixture-good");
+    candidate.config_error = "plugins.d/fixture-good.json: invalid JSON: ...";
+    const auto records = h.loader.LoadAll({candidate});
+
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().status == LoadStatus::RegistrationThrew);
+    CHECK(records.front().name == "fixture-good");
+    CHECK(records.front().error.find("plugins.d/fixture-good.json") != std::string::npos);
+    CHECK(h.tool_registry.size() == 0);  // no hook ran
+}
+
 TEST_CASE("a throwing plugin's registrations are rolled back out of the registries",
           "[plugin_loader][invariant]") {
     // Rollback, not just reporting: a user plugin's failure is only a warning,
@@ -1113,4 +1130,109 @@ TEST_CASE("ProjectCommandSource::For rebuilds a root when its fingerprint change
 
     // A holder of the old registry (a command still executing) keeps it.
     CHECK(first->Find("project-only") != nullptr);
+}
+
+// --- the `plugins` config endpoint (plugin_config_endpoint.hpp) ----------------
+
+namespace {
+
+nlohmann::json CallJson(plugins::PluginConfigEndpoint& endpoint, const std::string& method,
+                        const nlohmann::json& request) {
+    return nlohmann::json::parse(endpoint.Call(method, request.dump()));
+}
+
+}  // namespace
+
+TEST_CASE("the plugins endpoint applies a live change at once and holds a restart change",
+          "[plugin_loader][config_endpoint]") {
+    TempDir config_dir;
+    Harness h;
+    const std::vector<PluginCandidate> candidates = {Enabled("fixture-config"),
+                                                     Enabled("fixture-good")};
+    const auto records = h.loader.LoadAll(candidates);
+    REQUIRE(records[0].ok());
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, candidates);
+    tools::ToolContext ctx(common::DefaultLogger());
+    const auto running = [&] {
+        return h.tool_registry.Find("fixture_config_values")->execute({}, ctx).content_text;
+    };
+    REQUIRE(running() == "5 fast");
+
+    const auto list = CallJson(endpoint, "list", {});
+    REQUIRE(list.size() == 2);
+    CHECK(list[0].at("name") == "fixture-config");
+    CHECK(list[0].at("configurable") == true);
+    CHECK(list[1].at("configurable") == false);  // fixture-good exports no schema
+
+    // Live: written, and the running plugin has it -- no restart.
+    auto answer = CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "limit"},
+                                             {"value", 9}});
+    CHECK(answer.at("applied") == "live");
+    CHECK(running() == "9 fast");
+
+    // Restart: written, NOT running yet, and reported pending until then.
+    answer = CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "mode"},
+                                        {"text", "slow"}});
+    CHECK(answer.at("applied") == "restart");
+    CHECK(running() == "9 fast");
+    auto described = CallJson(endpoint, "describe", {{"name", "fixture-config"}});
+    CHECK(described.at("effective").at("mode") == "slow");
+    CHECK(described.at("pending") == nlohmann::json::array({"mode"}));
+    CHECK(described.at("config") == nlohmann::json{{"limit", 9}, {"mode", "slow"}});
+
+    // Refused by the plugin's own parser: an error, and nothing written.
+    answer = CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "limit"},
+                                        {"value", 0}});
+    CHECK(answer.at("error").get<std::string>().find("must be at least 1") != std::string::npos);
+    answer = CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "nope"},
+                                        {"value", 1}});
+    CHECK(answer.contains("error"));
+    CHECK(CallJson(endpoint, "describe", {{"name", "fixture-config"}}).at("config").at("limit") ==
+          9);
+
+    // Undoing the restart change clears the pending list: the plugin never
+    // stopped running "fast".
+    answer = CallJson(endpoint, "unset", {{"name", "fixture-config"}, {"key", "mode"}});
+    CHECK(answer.at("applied") == "none");
+    CHECK(CallJson(endpoint, "describe", {{"name", "fixture-config"}}).at("pending").empty());
+}
+
+TEST_CASE("the plugins endpoint: a field unused in the current mode has no effect",
+          "[plugin_loader][config_endpoint]") {
+    TempDir config_dir;
+    Harness h;
+    const std::vector<PluginCandidate> candidates = {Enabled("fixture-config")};
+    const auto records = h.loader.LoadAll(candidates);
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, candidates);
+
+    auto described = CallJson(endpoint, "describe", {{"name", "fixture-config"}});
+    CHECK(described.at("unused").at("detail") == "mode is fast");
+
+    const auto answer = CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "detail"},
+                                                   {"value", 3}});
+    CHECK(answer.at("applied") == "none");
+    CHECK(answer.at("unused").at("detail") == "mode is fast");
+    // Saved, and nothing pending: a restart would change nothing either.
+    described = CallJson(endpoint, "describe", {{"name", "fixture-config"}});
+    CHECK(described.at("config").at("detail") == 3);
+    CHECK(described.at("pending").empty());
+}
+
+TEST_CASE("the plugins endpoint applies an edit made elsewhere (the CLI)",
+          "[plugin_loader][config_endpoint]") {
+    TempDir config_dir;
+    Harness h;
+    const std::vector<PluginCandidate> candidates = {Enabled("fixture-config")};
+    const auto records = h.loader.LoadAll(candidates);
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, candidates);
+
+    std::filesystem::create_directories(config_dir.path() / "plugins.d");
+    std::ofstream(config_dir.path() / "plugins.d" / "fixture-config.json") << R"({"limit": 42})";
+    CHECK(CallJson(endpoint, "apply", {{"name", "fixture-config"}}).at("applied") == "live");
+    tools::ToolContext ctx(common::DefaultLogger());
+    CHECK(h.tool_registry.Find("fixture_config_values")->execute({}, ctx).content_text ==
+          "42 fast");
+    // Nothing new: nothing to do.
+    CHECK(CallJson(endpoint, "apply", {{"name", "fixture-config"}}).at("applied") == "none");
+    CHECK(CallJson(endpoint, "describe", {{"name", "nosuch"}}).contains("error"));
 }

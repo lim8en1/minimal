@@ -115,7 +115,7 @@ struct ServiceFixture {
 
     // Same, with a config slice for plugins whose registration reads one
     // (the decision-advisor E2E: the loopback stub URL rides the plugin's own
-    // "config" object, exactly as a real plugins.json entry would carry it).
+    // config, exactly as a real plugins.d/decision-advisor.json would carry it).
     void LoadAdvisorPlugin(const nlohmann::json& config, const std::string& file) {
         plugins::PluginCandidate candidate;
         candidate.file = std::filesystem::path(MINIMAL_FIXTURE_DIR) / file;
@@ -3384,7 +3384,7 @@ TEST_CASE("the decision-advisor answers a confident Ask and abstains below the m
                         JevFixtureBody("review-response.json")});
 
     // Load the REAL advisor through the REAL loader, with the stub URL riding
-    // the config slice -- a plugins.json entry in miniature.
+    // the config slice -- a plugins.d file in miniature.
     fixture.LoadAdvisorPlugin(nlohmann::json{{"endpoint", stub.url()}},
                               "decision-advisor-fixture.so");
     fixture.service_permissions.advisor = "decision-advisor-fixture";

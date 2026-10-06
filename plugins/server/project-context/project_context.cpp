@@ -1,6 +1,7 @@
 #include "project_context.hpp"
 
 #include "minimal/common/config_reader.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 #include "minimal/common/logger.hpp"
 #include "minimal/common/policy.hpp"
@@ -131,7 +132,12 @@ std::string RenderProjectContextSection(const ProjectContext& context) {
 
 ProjectContextSettings ParseProjectContextSettings(const nlohmann::json& config) {
     ProjectContextSettings result;
-    config::Reader reader(config, "plugins.json", "project-context.config");
+    config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "project-context"));
+    reader.Describe("search_ancestors",
+                    {"Also walk up from the project root, nearest directory first."});
+    reader.Describe("max_bytes", {"Longer files are cut with a marker; 0 = unlimited."});
+    reader.Describe("files", {"Plain file names tried in order within each directory."});
+    reader.Default("files", result.files);
     result.search_ancestors = reader.Bool("search_ancestors", result.search_ancestors);
     result.max_bytes = reader.Int("max_bytes", result.max_bytes, 0);
     if (auto files = reader.MaybeStringList("files")) {

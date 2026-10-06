@@ -1,6 +1,7 @@
 #pragma once
 
-// The plugins.json / client-plugins.json file format and plugin-file discovery,
+// The plugins.json / client-plugins.json file format, the per-plugin config
+// files beside them (plugins.d/, client-plugins.d/), and plugin-file discovery,
 // shared by the server and client plugin hosts. The two files are the same
 // document shape (an `enabled`-toggled list keyed by (provenance, file), aliases,
 // and any other top-level key carried through untouched), so there is one
@@ -14,9 +15,12 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "minimal/common/plugin_config_label.hpp"
 
 namespace minimal::common {
 
@@ -27,9 +31,14 @@ struct PluginFileCandidate {
     std::filesystem::path file;
     PluginProvenance provenance = PluginProvenance::User;
     bool enabled = false;
-    // The plugin's own configuration, verbatim from its entry's "config" object.
-    // Core imposes no schema -- each plugin owns the shape of its own slice.
+    // The plugin's own configuration, verbatim from its plugins.d file ({}
+    // when the file does not exist). Core imposes no schema -- each plugin
+    // owns the shape of its own file.
     nlohmann::json config = nlohmann::json::object();
+    // Set when the plugins.d file exists but could not be read (invalid JSON,
+    // not an object, unreadable), fully worded. The loader fails the plugin
+    // with it -- the same outcome as the plugin's own parser refusing a value.
+    std::optional<std::string> config_error;
 };
 
 struct PluginConfigFile {
@@ -41,7 +50,6 @@ struct PluginConfigFile {
         // Absent: the discovery default (bundled on unless marked
         // disabled-by-default, user off), persisted once resolved.
         std::optional<bool> enabled;
-        nlohmann::json config = nlohmann::json::object();
     };
     std::vector<Entry> plugins;
 
@@ -60,7 +68,7 @@ struct PluginConfigFile {
     // Set when the text could not be parsed at all (invalid JSON or a non-object
     // top level). The caller must warn and skip the rewrite: persisting the
     // degraded-to-empty default over the user's actual bytes would destroy every
-    // enablement decision and per-plugin config in a hand-edited file.
+    // enablement decision in a hand-edited file.
     bool malformed = false;
     // Per-entry problems (a wrong type, an unknown field, an ambiguous
     // provenance), fully worded. Never silently defaulted: a plugin the user
@@ -75,6 +83,11 @@ struct PluginConfigFormat {
     std::string file_label = "plugins.json";
     // "plugin" / "client plugin", for the discovery warnings.
     std::string noun = "plugin";
+    // The per-plugin config directory's name (kPluginConfigDirName /
+    // kClientPluginConfigDirName), for messages, and where it is. An empty
+    // path reads no per-plugin files: every candidate gets {}.
+    std::string config_dir_label = kPluginConfigDirName;
+    std::filesystem::path config_dir;
 };
 
 // A bundled plugin that ships present but DISABLED (it spends the user's
@@ -92,8 +105,9 @@ std::string SerializePluginConfigFile(const PluginConfigFile& config);
 // one-subdirectory-per-plugin layout works like the flat installed one) and
 // `user_dir` (flat), adds an entry to `config` for each one it has not seen
 // (bundled: enabled unless the format says otherwise; user: disabled), and
-// returns one candidate per file, bundled first. Never throws on a filesystem
-// error: a mid-scan failure just ends that scan early.
+// returns one candidate per file, bundled first, each carrying its
+// format.config_dir/<stem>.json. Never throws on a filesystem error: a
+// mid-scan failure just ends that scan early.
 std::vector<PluginFileCandidate> DiscoverPluginFiles(const std::filesystem::path& bundled_dir,
                                                      const std::filesystem::path& user_dir,
                                                      PluginConfigFile& config,

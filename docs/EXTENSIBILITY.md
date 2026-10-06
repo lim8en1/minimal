@@ -9,7 +9,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | Symbol | Status | What it grants |
 |---|---|---|
 | `minimal_plugin_abi_tag` / `_name` / `_version` | required | load gate -- define via `MINIMAL_PLUGIN_ABI_SYMBOLS(name)`, not by hand: a handwritten `minimal::common::AbiTag()` call binds to the host's copy at `dlopen` time, not the plugin's own build, so the rebuild guard always passes |
-| `minimal_plugin_register_tools(ToolRegistry&, const PluginRegistrationContext&)` | live | concrete tools; the context carries the verbatim `tools.*` JSON from `settings.json` plus the plugin's own `config` from `plugins.json` |
+| `minimal_plugin_register_tools(ToolRegistry&, const PluginRegistrationContext&)` | live | concrete tools; the context carries the verbatim `tools.*` JSON from `settings.json` plus the plugin's own `config` from `plugins.d/<name>.json` |
 | `minimal_plugin_register_provider_factories(ProviderFactoryRegistry&)` | live | provider kinds addressable from `providers.json` |
 | `minimal_plugin_register_session_observer(SessionObserverRegistry&)` | live | fire-and-forget lifecycle reactions; cannot veto anything |
 | `minimal_plugin_register_commands(CommandRegistry&)` | live | `/`-commands, registered once at startup into the process-wide registry |
@@ -29,6 +29,8 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `minimal_plugin_register_model_catalogs(ModelCatalogRegistry&)` | **live** | `"discover": true` providers list their models from the backend, lazily at first resolve; keyed by the same kind string as the provider factory |
 | `minimal_plugin_register_compaction_strategies(CompactionStrategyRegistry&)` | **live (S4)** | plugin compaction strategies keyed by name — `memory.compaction_strategy` in settings.json selects one. Core registers its built-in `"summarize"` strategy directly in `main.cpp` (never through this hook), and always snaps a strategy's proposed cut to a safe tool-call boundary before using it |
 | `minimal_plugin_register_hook_points(HookDispatcher&)` | **live** | named, veto-capable or observe-only events the plugin emits; hooks.json actions answer them — see §5 |
+| `minimal_plugin_config_schema(json&)` / `minimal_plugin_validate_config(const json&, string&)` | **live** | the plugin's `plugins.d/<name>.json` schema and a dry-run check, recorded from its own `config::Reader` parser (`MINIMAL_PLUGIN_CONFIG_SCHEMA`); called without registration, so the schema cannot drift from the code that reads the file |
+| `minimal_plugin_reconfigure(const json&, string&)` | **live** | takes a changed config without a restart; the host calls it only when every changed field is declared `live` |
 
 Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`, `ContextContributor`, `PermissionAdvisor` (composing above the wire checker — see §3), and the service interfaces a provider ships (abstract, header-only — see §2.2).
 
@@ -114,7 +116,7 @@ The first consumer justifies the pattern: `/restart-shell` lives in `tools-bash`
 
 ### 2.3 No per-plugin config beyond one verbatim blob
 
-**Status: landed.** Implemented as specified below, with one deviation: the bundled plugins' knobs did **not** stay in `tools_settings` — `tools-bash` and `tools-fs` moved their knobs to their own `plugins.json` `config` objects with no `tools.*` fallback (the "optional per plugin" migration exercised immediately, strict rather than backward-compatible). The `tools_settings` channel was later removed: no plugin read it, and it was the one thing keeping `settings.json`'s `tools` section from being strict. A plugin's only configuration channel is its own `config` object.
+**Status: landed.** Implemented as specified below, with one deviation: the bundled plugins' knobs did **not** stay in `tools_settings` — `tools-bash` and `tools-fs` moved their knobs to their own `plugins.json` `config` objects with no `tools.*` fallback (the "optional per plugin" migration exercised immediately, strict rather than backward-compatible). The `tools_settings` channel was later removed: no plugin read it, and it was the one thing keeping `settings.json`'s `tools` section from being strict. A plugin's only configuration channel is its own `config` object. **Later moved:** the blob left `plugins.json` for its own file, `plugins.d/<name>.json` (one per plugin) — one giant file of per-plugin blobs was painful to edit by hand or from a shell, and gave the planned per-plugin tooling (CLI, schema, config UI) nothing addressable. `plugins.json` now says only which plugins load; a leftover `config` key there is a startup error naming its new file. The ABI is unchanged: `context.config` still carries the object verbatim.
 
 **Hole.** Only tool-registering plugins receive configuration: `ToolRegistrationContext::tools_settings` is the verbatim `tools` object from `settings.json`, and it reaches only `minimal_plugin_register_tools`. A provider, observer, or command plugin has no sanctioned way to read its own settings, and a tool plugin cannot get anything but the `tools.*` slice.
 

@@ -33,7 +33,7 @@ struct MatchedPath {
 
 class GlobTool : public tools::Tool {
 public:
-    explicit GlobTool(SearchSettings settings) : settings_(settings) {
+    explicit GlobTool(std::shared_ptr<const common::LiveValue<SearchSettings>> live) : live_(std::move(live)) {
         spec_.name = "glob";
         spec_.category = ToolCategory::ReadOnly;
         spec_.definition.name = spec_.name;
@@ -122,7 +122,7 @@ public:
         // glob_max_results -- the ceiling on paths one call returns. A cap
         // the model asked past is disclosed; the configured default sitting
         // over the ceiling is configuration, applied silently.
-        int head_limit = std::min(settings_.glob_default_limit, settings_.glob_max_results);
+        int head_limit = std::min(S().glob_default_limit, S().glob_max_results);
         bool clamped = false;
         if (input.contains("head_limit")) {
             const auto& raw = input.at("head_limit");
@@ -132,8 +132,8 @@ public:
                           raw.get<std::uint64_t>(),
                           static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())))
                     : raw.get<std::int64_t>();
-            if (requested > settings_.glob_max_results) {
-                head_limit = settings_.glob_max_results;
+            if (requested > S().glob_max_results) {
+                head_limit = S().glob_max_results;
                 clamped = true;
             } else if (requested > 0) {
                 head_limit = static_cast<int>(requested);
@@ -202,7 +202,7 @@ public:
 
         WalkOptions options;
         options.timeout = std::chrono::steady_clock::duration{
-            std::chrono::milliseconds(settings_.glob_timeout_ms)};
+            std::chrono::milliseconds(S().glob_timeout_ms)};
         options.is_cancelled = ctx.is_cancelled;
         // No max_file_bytes: the walker only stats files; content is never
         // read, so size cannot bound memory here.
@@ -298,7 +298,7 @@ public:
         }
         if (clamped) {
             out += "(head_limit clipped to the configured glob max_results=" +
-                   std::to_string(settings_.glob_max_results) + ")\n";
+                   std::to_string(S().glob_max_results) + ")\n";
         }
         for (const auto& note : notes) out += "(" + note + ")\n";
         return ToolResult{false, out};
@@ -306,12 +306,17 @@ public:
 
 private:
     ToolSpec spec_;
-    SearchSettings settings_;
+    // The current settings: a reconfigure swaps them between calls.
+    SearchSettings S() const { return *live_->Get(); }
+    std::shared_ptr<const common::LiveValue<SearchSettings>> live_;
 };
 
 }  // namespace
 
+std::unique_ptr<tools::Tool> MakeGlobTool(LiveSearchSettings live) {
+    return std::make_unique<GlobTool>(std::move(live));
+}
 std::unique_ptr<tools::Tool> MakeGlobTool(SearchSettings settings) {
-    return std::make_unique<GlobTool>(std::move(settings));
+    return MakeGlobTool(std::make_shared<common::LiveValue<SearchSettings>>(std::move(settings)));
 }
 }  // namespace minimal::tools_search

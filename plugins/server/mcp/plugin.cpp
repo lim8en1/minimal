@@ -24,6 +24,8 @@
 // sanity check; they never fail registration. An invalid limit in this
 // plugin's own config does -- fatal, as a bundled plugin.
 
+#include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/plugin_abi.h"
 
 #include <memory>
@@ -81,6 +83,12 @@ Config LoadOrEmpty(const PluginRegistrationContext& context, const char* file, L
 }
 
 }  // namespace
+
+MINIMAL_PLUGIN_CONFIG_SCHEMA(
+    minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "mcp"),
+    [](const nlohmann::json& config) {
+        (void)minimal::mcp::ParseMcpLimits(config);
+    })
 
 extern "C" {
 

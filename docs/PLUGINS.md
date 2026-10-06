@@ -44,6 +44,7 @@ Installed to `<libdir>/minimal/plugins/client/`.
 | `logo` | The ASCII-banner start view (random banner per session) |
 | `cost-view` | The `{cost}` and `{token_detail}` status-bar segments (subscribe to `cost-tracker.endpoint`'s totals stream, polling only as a fallback; render cumulative $ and the token breakdown) |
 | `ask-view` | The client half of `tool-ask`: the `ask` prompt renderer (the question modal) and the `ask` display renderer (the transcript row, expanded by default). Disabled, every ask is answered "unavailable" |
+| `config-view` | `/config [plugin]`: the `config` modal view over core's `plugins` endpoint — the configurable plugins, then a plugin's schema form (values, defaults, live/restart, restart pending), edited in place and validated by the plugin. The form is client core's reusable `client::MakeSchemaForm` |
 | `mcp-view` | The `/mcp` picker: the `mcp` modal view (`view_hint` "mcp") over the `mcp` plugin's `mcp.endpoint` — lists servers with live status, Enter toggles one |
 | `checklist-view` | The `{todo}` status-bar segment + the `checklist.panel` view (both fed by one shared worker holding `checklist.endpoint`'s change stream, polling only as a fallback; the panel toggles between a focused-tab tasklist and a per-tab summary; default binding `alt+l`) |
 
@@ -136,7 +137,7 @@ Enablement is recorded in `<config>/plugins.json` (client:
 ```json
 {
   "plugins": [
-    { "file": "tools-fs.so", "provenance": "bundled", "enabled": true, "config": {} }
+    { "file": "tools-fs.so", "provenance": "bundled", "enabled": true }
   ],
   "aliases": { "bash_over_ssh.bash": "ssh_bash" }
 }
@@ -154,14 +155,23 @@ Enablement is recorded in `<config>/plugins.json` (client:
 - A hand-written entry may omit `provenance` (the file name picks the
   plugin; an error when both directories ship that name) and `enabled` (the
   default above). Both are written back once resolved.
-- **`config`** is a per-plugin JSON object forwarded verbatim to the plugin
-  (e.g. the `logo` plugin's `text`/`styles`/`charset` options). Every bundled
-  plugin parses its `config` strictly: an unknown field or a bad value is a
-  startup error naming `plugins.json: <plugin>.config.<field>`. A third-party
-  plugin gets the same behaviour from the SDK's `config::Reader`
-  (`minimal/common/config_reader.hpp`; files of its own through
-  `minimal/common/json_config_loader.hpp`), which names the file and full
-  path in every error and treats `"//"` keys as comments.
+- **A plugin's own settings** live in their own file, one per plugin:
+  `<config>/plugins.d/<stem>.json` (client: `<config>/client-plugins.d/`),
+  where `<stem>` is the module's file name without its extension — the
+  plugin's name for every bundled plugin. The object is forwarded verbatim
+  (e.g. `client-plugins.d/logo.json` holds the `logo` plugin's
+  `text`/`styles`/`charset` options); no file means `{}`. Only enabled
+  plugins' files are read. A file that is not a JSON object fails its plugin,
+  naming the file. A leftover `config` key on a `plugins.json` entry is a
+  startup error naming the file it moved to.
+- Every bundled plugin parses its file strictly: an unknown field or a bad
+  value is a startup error naming `plugins.d/<plugin>.json: <field>`. A
+  third-party plugin gets the same behaviour from the SDK's `config::Reader`
+  (`minimal/common/config_reader.hpp`), labelled with
+  `common::PluginConfigLabel` (`minimal/common/plugin_config_label.hpp`;
+  further files of its own through `minimal/common/json_config_loader.hpp`),
+  which names the file and full path in every error and treats `"//"` keys as
+  comments.
 - **The file is strict.** Invalid JSON, or any entry with a wrong type or an
   unknown field, is fatal on the server (no plugin loads, the file is not
   rewritten) and a warning on the client (that entry is skipped, the file is
@@ -172,6 +182,37 @@ Enablement is recorded in `<config>/plugins.json` (client:
 - To replace a bundled plugin with your own version of the same name: disable
   the bundled entry in `plugins.json` and drop yours in the user dir (two
   registrations with one name are fatal).
+
+### Configuring from a shell: `minimal plugin`
+
+```
+minimal plugin                          # every plugin: enabled, configured or not
+minimal plugin tools-web                # every field: value, default or set (*), apply, doc
+minimal plugin get tools-web search.api_url
+minimal plugin set tools-web search.api_url 'http://localhost:8888/search?format=json'
+minimal plugin unset tools-web fetch.timeout_ms
+minimal plugin tools-web --json         # schema, file contents, effective values
+```
+
+Keys are dotted paths into `plugins.d/<name>.json`. A value is parsed by
+the field's type (integers, booleans and enums as such, strings verbatim,
+lists and opaque fields as JSON) and then checked by the plugin's own parser
+before the file is written, so a refused value never reaches the file:
+
+```
+$ minimal plugin set tools-web fetch.max_bytes 1
+minimal: plugins.d/tools-web.json: fetch.max_bytes: must not be below fetch.default_max_bytes
+```
+
+`set` says how the change applies: **live** (every changed field is `live`:
+a running server takes it without a restart) or **restart**. When a server
+is running, `minimal plugin set`/`unset` then asks it to apply the change
+(the `plugins` endpoint's `apply`) and reports the outcome; a restart change
+stays listed as pending there until the server restarts. Unsetting the last
+key removes the file. The work runs in `minimal-server plugin ...`,
+which opens plugins for their config symbols only — no registration, no
+storage — so it is safe beside a running server. A secret field's literal
+value is shown as `****`; a `secret:`/`env:` reference is shown as written.
 
 ## Writing a third-party plugin
 
@@ -229,6 +270,27 @@ object code.
 - `minimal_plugin_register_model_catalogs` — lazy model discovery
 - `minimal_plugin_register_compaction_strategies`
 - `minimal_plugin_register_hook_points` — new veto-capable hook events
+- `minimal_plugin_config_schema` / `minimal_plugin_validate_config` — the
+  plugin's `plugins.d` schema and a dry-run check, both from its own parser:
+  one `MINIMAL_PLUGIN_CONFIG_SCHEMA(label, parse)` line
+  (`minimal/common/plugin_config_schema.hpp`). Called with no registration
+  context (the `minimal plugin` CLI, the config view), so the parser must
+  be side-effect free. Describe mode records every field the parser reads
+  through `config::Reader` (path, type, default, range, choices);
+  `reader.Describe(key, {doc, apply, secret})` adds the rest, and
+  `reader.RelevantWhen(key, field, {values})` / `RelevantWhenSet(key, field)`
+  say a field matters only in some modes (memory's http fields under
+  `strategy` http/auto). The CLI and `/config` show an unused field as such,
+  and changing one has no effect on the running plugin
+- `minimal_plugin_reconfigure` — take a changed config without a restart.
+  Only fields declared `ApplyPolicy::kLive` change this way; the host calls
+  it only when every changed field is live. Keep the settings in a
+  `common::LiveValue<T>` (`minimal/common/live_value.hpp`) and read one
+  snapshot per call. Keep configured values out of tool definitions: a
+  definition sits in every cached prompt prefix, so quoting a limit there
+  leaves the model a stale number after a live change and invalidates the
+  cache on every edit. State the limit in the result where it applied
+  instead (bash's timed-out result, web_fetch's truncation footer)
 
 A plugin that owns a config file validates it itself and reports problems
 through `PluginRegistrationContext::report_warning`; the startup sanity check
@@ -259,7 +321,7 @@ The pattern ("per-preset tool config"):
    resolved fresh each call from the active preset, so `/agent` switches take
    effect at the next tool call.
 3. Own your schema and merge: core never interprets a slice; the plugin decides
-   how it combines with its own `plugins.json` `config` object (tools-python
+   how it combines with its own `plugins.d` file (tools-python
    merges per-key, preset wins). Bundled example: `tools-python` keys the
    declared package contract under `python`.
 
@@ -323,17 +385,16 @@ whose watcher streams the job transcript and injects the verdict.
 
 It used to be bundled; it now lives in its own user plugin repo, registered
 through the `user-plugins/` tree (see "User plugins" above) — the reference
-example of the user plugin workflow, tests included. Configure via the
-plugin's `config` object in `plugins.json` (provenance `user`, so enable the
-entry once discovery records it):
+example of the user plugin workflow, tests included. Enable its
+`plugins.json` entry once discovery records it (provenance `user`, so it
+starts disabled), and configure it in `plugins.d/tools-windbg.json`:
 
 ```json
-{ "file": "tools-windbg.so", "enabled": true,
-  "config": {
-    "base_url": "http://debugger-host:8477",
-    "bearer_token": "<token from dbgd configure>",
-    "default_target": { "kind": "exec", "server": "tcp:server=10.0.0.9,port=5555" }
-  } }
+{
+  "base_url": "http://debugger-host:8477",
+  "bearer_token": "<token from dbgd configure>",
+  "default_target": { "kind": "exec", "server": "tcp:server=10.0.0.9,port=5555" }
+}
 ```
 
 `default_target` is a dbgd `TargetSpec` passed through verbatim (`exec`, `pid`,

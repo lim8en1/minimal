@@ -13,7 +13,7 @@ sections (100).
 
 ## Configuration
 
-`plugins.json` `config`, every key optional:
+`plugins.d/project-context.json`, every key optional:
 
 | Key | Default | Notes |
 | --- | --- | --- |
