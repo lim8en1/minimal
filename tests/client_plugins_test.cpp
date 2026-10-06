@@ -261,21 +261,24 @@ TEST_CASE("AdditiveRegistry: attribution, first-wins Find, rollback, seal",
     CHECK(registry.attributions().size() == 2);
 }
 
-TEST_CASE("ExclusiveSlot: holder only, rollback releases only the holder, seal",
+TEST_CASE("ExclusiveSlot: one holder, every claimant recorded, rollback, seal",
           "[client_plugins][registries]") {
     MarkdownEngineRegistry slot;
     CHECK_FALSE(slot.held());
     slot.SetAttribution("first");
     slot.Register(std::make_unique<StubEngine>());
     slot.SetAttribution("second");
-    slot.Register(std::make_unique<StubEngine>());   // warns, ignored
+    slot.Register(std::make_unique<StubEngine>());   // warns; recorded for the collision scan
     REQUIRE(slot.held());
     CHECK(slot.holder() == "first");
-    REQUIRE(slot.attributions().size() == 1);
+    REQUIRE(slot.attributions().size() == 2);
     CHECK(slot.attributions()[0].original_name == "markdown_engine");
+    CHECK(slot.attributions()[1].plugin_name == "second");
+    CHECK(slot.attributions()[1].original_name == "markdown_engine");
 
-    slot.RemoveByAttribution("second");   // never held it: no-op
+    slot.RemoveByAttribution("second");   // drops its claim; the holder stays
     CHECK(slot.held());
+    CHECK(slot.attributions().size() == 1);
     slot.RemoveByAttribution("first");
     CHECK_FALSE(slot.held());
     CHECK(slot.get() == nullptr);
@@ -287,7 +290,7 @@ TEST_CASE("ExclusiveSlot: holder only, rollback releases only the holder, seal",
     CHECK_FALSE(slot.held());
 }
 
-TEST_CASE("exclusive registries: second registration warns and is ignored",
+TEST_CASE("exclusive registries: the first claimant holds until startup refuses the second",
           "[client_plugins]") {
     ChatSurfaceRegistry surfaces;
     surfaces.SetAttribution("first");
@@ -301,8 +304,8 @@ TEST_CASE("exclusive registries: second registration warns and is ignored",
     engines.SetAttribution("second");
     engines.Register(std::make_unique<StubEngine>());
     CHECK(engines.holder() == "first");
-    // Only the holder is recorded.
-    CHECK(engines.attributions().size() == 1);
+    // Both are recorded: the startup collision scan names them (tui_bootstrap_test).
+    CHECK(engines.attributions().size() == 2);
     // The FIRST engine is still the active one (the second was discarded).
     CHECK(ToText(engines.get()->Render("x", Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor))) == "stub engine");
 }

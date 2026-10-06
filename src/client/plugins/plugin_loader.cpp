@@ -123,11 +123,13 @@ std::vector<RegistryHook> RegistryHooks(ClientRegistries& r) {
              r.status_segments, "status segment", Policy::kName),
         Hook("grammars", "minimal_client_plugin_register_syntax_grammars", r.grammars,
              "syntax grammar", Policy::kSlot),
-        // No key to collide on (one constant per observer; exclusive slots).
+        // No key to collide on (one constant per observer).
         Hook("observers", "minimal_client_plugin_register_observers", r.observers),
-        Hook("chat_surface", "minimal_client_plugin_register_chat_surface", r.chat_surface),
+        // An exclusive slot's key is the slot: a second claimant collides.
+        Hook("chat_surface", "minimal_client_plugin_register_chat_surface", r.chat_surface,
+             "exclusive slot", Policy::kSlot),
         Hook("markdown_engine", "minimal_client_plugin_register_markdown_engine",
-             r.markdown_engine),
+             r.markdown_engine, "exclusive slot", Policy::kSlot),
     };
 }
 

@@ -332,7 +332,7 @@ The "write a different frontend" tier shrinks to exactly this list. Not on it, u
 | Attention source | additive | core event derivation | live |
 | Theme sections (config) | namespaced roles | core roles | live |
 
-**Slot semantics (planned).** Today an exclusive slot is first-registration-wins with a warning, and core registers its default only into an empty slot. With the defaults in bundled plugins — which load first — that would make every default unbeatable, so: two plugins claiming an exclusive slot is **fatal at startup, naming both** (the additive collision rule), and replacing a bundled default means disabling it in `client-plugins.json` (the server's tool-replacement path). A **required** slot left empty after load refuses startup, naming the slot and the bundled plugin that fills it — the server's "no provider" rule. An optional slot left empty degrades: no tab bar, plain-text markdown.
+**Slot semantics.** Two plugins claiming an exclusive slot is **fatal at startup, naming both** — the additive collision rule (every claimant is recorded under the slot's name, and the startup name resolution reports it). First-registration-wins would make the outcome depend on load order, and bundled plugins load first, so a bundled default could never be replaced; replacing one means disabling it in `client-plugins.json` (the server's tool-replacement path). Core registers a default only into a slot no plugin claimed. *Planned, with the first default that leaves core:* a **required** slot left empty after load refuses startup, naming the slot and the bundled plugin that fills it — the server's "no provider" rule. An optional slot left empty degrades: no tab bar, plain-text markdown.
 
 **Widget kit.** The SDK defines the contracts — `FilterableMenuSpec`/callbacks and `MenuRow`, `SchemaFormState`/callbacks, the model selector's spec, modal chrome, the confirm dialog — with the pure models beside them; the kit implements the factories. A consumer calls the slot, never another plugin, so no plugin depends on another, and replacing the kit restyles every view built on it at once. The kit holds no data path: a consumer injects its fetch (the model selector takes a function answering the model list, so core's own uses and a plugin's `ClientApi` feed the same widget).
 
@@ -365,7 +365,7 @@ public:
 };
 ```
 
-Exclusive because the interface is deliberately big — streaming lifecycle, scrollback, focus and attention integration — and this repo's rule is that an interface which grew that big needs a reason; a wholesale chat replacement is the reason. The prompt editor is the only other slot expected to grow this big, and gets the same scrutiny (§4.2). Message-kind slots cover the common case; this covers "a whole different chat UI". Today a second registration warns and is ignored and, with none registered, the core chat view stands; planned: the default moves to a bundled plugin under the slot semantics above.
+Exclusive because the interface is deliberately big — streaming lifecycle, scrollback, focus and attention integration — and this repo's rule is that an interface which grew that big needs a reason; a wholesale chat replacement is the reason. The prompt editor is the only other slot expected to grow this big, and gets the same scrutiny (§4.2). Message-kind slots cover the common case; this covers "a whole different chat UI". A second claimant is fatal at startup (*Slot semantics* above); with none registered, the core chat view stands -- planned: that default moves to a bundled plugin.
 
 **Status-bar segments.**
 
