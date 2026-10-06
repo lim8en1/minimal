@@ -21,6 +21,11 @@ std::pair<std::string, bool> Outcome(const std::string& path, const json& answer
     if (answer.contains("error")) return {answer.value("error", std::string()), true};
     const std::string applied = answer.value("applied", "");
     if (applied == "live") return {path + " saved -- applied, no restart needed", false};
+    if (applied == "not_running") {
+        return {path + " saved -- " + answer.value("reason", std::string("not running")) +
+                    "; it takes effect when it starts",
+                false};
+    }
     if (applied == "restart") {
         std::string text = path + " saved -- restart the server to apply";
         if (answer.contains("reconfigure_error")) {
@@ -37,9 +42,10 @@ std::pair<std::string, bool> Outcome(const std::string& path, const json& answer
 
 // The list screen's label for one plugin.
 std::string ListLabel(const json& row) {
+    // Only what needs attention: how many keys a file sets is the steady
+    // state, not news (the form's * marks show them per field).
     std::string label = row.value("name", "");
     if (!row.value("enabled", false)) label += "  (disabled)";
-    if (const auto set = row.value("set", 0); set > 0) label += "  " + std::to_string(set) + " set";
     if (const auto pending = row.value("pending", json::array()); !pending.empty()) {
         label += "  · restart pending";
     }
@@ -71,16 +77,35 @@ public:
     }
 
 private:
-    ftxui::Component Current() {
-        if (!feed_->open_plugin().empty()) return form_;
+    // Picks the screen (rebuilding the list if a newer one landed) -- at the
+    // START of a render or an event, and nowhere else. ftxui asks
+    // ActiveChild() while it is drawing, and the feed's worker can land a new
+    // list at any moment: a rebuild there freed the very list being drawn,
+    // and the frame then wrote its layout into freed memory (a crash on "<-",
+    // whose refresh answer tends to land mid-frame). `shown_` holds the
+    // component until the next Sync, so whatever a frame or an event started
+    // on outlives it.
+    void Sync() {
+        if (!feed_->open_plugin().empty()) {
+            shown_ = form_;
+            return;
+        }
         RebuildListIfStale();
-        return list_;
+        shown_ = list_;
     }
 
-    ftxui::Element OnRender() override { return Current()->Render(); }
-    bool OnEvent(ftxui::Event event) override { return Current()->OnEvent(std::move(event)); }
+    ftxui::Element OnRender() override {
+        Sync();
+        return shown_->Render();
+    }
+    bool OnEvent(ftxui::Event event) override {
+        Sync();
+        const ftxui::Component target = shown_;  // a callback may switch screens
+        return target->OnEvent(std::move(event));
+    }
     bool Focusable() const override { return true; }
-    ftxui::Component ActiveChild() override { return Current(); }
+    // No side effects: called mid-frame.
+    ftxui::Component ActiveChild() override { return shown_; }
 
     void RebuildListIfStale() {
         const auto state = feed_->list();
@@ -123,6 +148,7 @@ private:
     plugins::HostUi* ui_;
     ftxui::Component form_;
     ftxui::Component list_;
+    ftxui::Component shown_;  // form_ or list_, as of the last Sync
     std::uint64_t built_generation_ = 0;
 };
 
@@ -194,6 +220,10 @@ void ConfigFeed::FetchList() {
         }
         list_.status.clear();
     } else {
+        // The previous answer is dropped, not kept beside the error: rows
+        // from before a server restart showed "restart pending" for changes
+        // the new server had already applied.
+        list_.rows = json::array();
         list_.status = answer.value("error", std::string("unavailable"));
     }
     ++list_.generation;
@@ -203,9 +233,13 @@ void ConfigFeed::Open(const std::string& name) {
     {
         std::lock_guard<std::mutex> lock(mu_);
         open_ = name;
+        // The generation keeps counting across plugins: reset to 1, the
+        // next plugin's description could land at the generation the form
+        // last built at, and the form kept the previous plugin's rows.
+        const std::uint64_t generation = form_.generation + 1;
         form_ = client::SchemaFormState{};
         form_.title = name;
-        form_.generation = 1;
+        form_.generation = generation;
     }
     Post([this, name] { FetchDescribe(name, "", false); });
 }
@@ -223,6 +257,9 @@ void ConfigFeed::FetchDescribe(const std::string& name, std::string status, bool
     std::lock_guard<std::mutex> lock(mu_);
     if (open_ != name) return;  // the user went back meanwhile
     if (answer.contains("error")) {
+        // Dropped for the same reason as a failed list: stale values and
+        // pending marks must not outlive the server that reported them.
+        form_.describe = nullptr;
         form_.status = answer.value("error", std::string());
         form_.status_is_error = true;
     } else {
