@@ -302,22 +302,22 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
         return std::nullopt;
     };
 
-    // The DEFAULT preset must exist, and a primary session runs on
-    // settings.default_model (a preset's own `model:` applies only when it is
-    // spawned as a subagent): every client that names no model -- the
-    // headless client's common case -- would fail otherwise.
-    if (bundle_.settings_loaded && !bundle_.settings.default_agent_preset.empty()) {
-        const auto it = presets_.find(bundle_.settings.default_agent_preset);
-        if (it == presets_.end()) {
-            results.push_back(Fatal("presets", "default_agent_preset '" + bundle_.settings.default_agent_preset +
-                                 "' does not resolve: agents/" + bundle_.settings.default_agent_preset +
-                                 ".md is missing or failed to parse"));
-        } else if (bundle_.settings.default_model.empty()) {
-            results.push_back(Fatal("presets", "settings.json default_model is not set: sessions "
-                                               "run on it unless a model is chosen (--model, "
-                                               "/model)"));
-        } else if (auto problem = model_problem(bundle_.settings.default_model)) {
-            results.push_back(Fatal("presets", "settings.json default_model " + *problem));
+    // Both defaults are optional: unset, a new session uses the only preset /
+    // model there is, or the client asks the user to pick (and remembers the
+    // pick). A value that is SET but broken is a typo worth naming -- it
+    // falls back the same way, so it warns rather than blocks.
+    if (bundle_.settings_loaded && !bundle_.settings.default_agent_preset.empty() &&
+        presets_.find(bundle_.settings.default_agent_preset) == presets_.end()) {
+        results.push_back(Warning("presets", "settings.json default_agent_preset '" +
+                                                 bundle_.settings.default_agent_preset +
+                                                 "' names no loadable agents/*.md; new sessions "
+                                                 "fall back to the only preset, or ask"));
+    }
+    if (bundle_.settings_loaded && !bundle_.settings.default_model.empty()) {
+        if (auto problem = model_problem(bundle_.settings.default_model)) {
+            results.push_back(Warning("presets", "settings.json default_model " + *problem +
+                                                     "; new sessions fall back to the only "
+                                                     "model, or ask"));
         }
     }
 

@@ -41,9 +41,9 @@ std::optional<SessionLlm> SessionSupport::LlmForSession(const std::string& sessi
     if (!row) return std::nullopt;
     try {
         ProviderResolver& resolver = sessions_->resolver();
-        const AgentPreset preset = resolver.ResolveModel(
-            presets_->Resolve(row->agent_preset),
-            row->model ? common::SplitModelRef(*row->model) : std::nullopt);
+        const auto model = row->model ? common::SplitModelRef(*row->model) : std::nullopt;
+        const AgentPreset preset =
+            resolver.ResolveModel(presets_->Resolve(row->agent_preset, {}, nullptr, model), model);
         auto provider = resolver.Acquire(preset);
         logger_.info("session {}: titling through the preset '{}' (session already ended)",
                      session_id, row->agent_preset);

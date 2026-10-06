@@ -891,8 +891,8 @@ TEST_CASE("/think lists the active model's declared variants and marks the curre
 TEST_CASE("/think switches to a declared variant; with no /model pin it records nothing",
           "[commands][think][invariant]") {
     // Pin only what was pinned: without a /model choice the variant changes
-    // the running preset's model and nothing more, so /agent afterwards runs
-    // the new preset's own model instead of this session's old one.
+    // the running preset's model and records no session choice. Switching
+    // agents never switches models, so /agent keeps the variant running.
     CommandFixture fixture;
     fixture.WriteProviders(
         R"({"providers":{"main":{"backend":"openai","url":"http://x/v1",
@@ -912,7 +912,8 @@ TEST_CASE("/think switches to a declared variant; with no /model pin it records 
     CHECK_FALSE(fixture.model_override().has_value());
 
     REQUIRE(fixture.Run("agent", {"other"}).status == Status::kOk);
-    CHECK(fixture.preset().model_ref.str() != "main/fast@high");
+    CHECK(fixture.preset().model_ref.str() == "main/fast@high");
+    CHECK_FALSE(fixture.model_override().has_value());
 }
 
 TEST_CASE("/think after /model replaces the pinned choice, which survives /agent",

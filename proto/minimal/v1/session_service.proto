@@ -753,6 +753,11 @@ message ListAgentPresetsRequest {
 
 message ListAgentPresetsResponse {
   repeated AgentPresetSummary presets = 1;
+  // The preset a new session starts with when none is chosen:
+  // settings.json default_agent_preset when it resolves, else the only
+  // listed preset. Empty = there is no default -- the client asks the user
+  // to pick (and remembers the pick).
+  string default_agent_preset = 2;
 }
 
 // One selectable model for the /model picker: "<provider>/<model>" plus the
@@ -776,8 +781,10 @@ message ListModelsRequest {
 
 message ListModelsResponse {
   repeated ModelSummary models = 1;
-  // settings.json default_model: what "/model default" (the picker's leading
-  // "default" row) returns a session to. Empty when unset.
+  // The model a session runs on when none is chosen -- what "/model default"
+  // (the picker's leading "default" row) returns to: settings.json
+  // default_model when it resolves, else the only configured model. Empty =
+  // there is no default -- the client asks the user to pick.
   string default_model = 2;
 }
 

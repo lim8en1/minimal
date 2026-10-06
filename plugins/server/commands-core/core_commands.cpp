@@ -225,8 +225,12 @@ public:
             // Switching agents never switches models: the session's chosen
             // model (or settings.default_model) carries over -- a preset's own
             // `model:` applies only when it is spawned as a subagent.
-            resolved = context.presets().Resolve(wanted, context.session().project_root(),
-                                                 nullptr, context.session().model_override());
+            const auto& chosen = context.session().model_override();
+            resolved = context.presets().Resolve(
+                wanted, context.session().project_root(), nullptr,
+                chosen ? chosen
+                       : std::optional<minimal::common::ModelRef>(
+                             context.session().preset().model_ref));
         } catch (const std::exception& error) {
             return CommandResult::Error(error.what());
         }
@@ -266,13 +270,14 @@ public:
         if (text == "default") {
             // Back to settings.json default_model: the session's own choice is
             // cleared, so a later /agent keeps following the default.
-            const std::string& fallback = context.presets().default_model();
-            const auto ref = minimal::common::SplitModelRef(fallback);
+            const auto ref = context.presets().DefaultModel();
             const auto model = ref ? context.providers().Resolve(*ref) : nullptr;
             if (model == nullptr) {
-                return CommandResult::Error("settings.json default_model '" + fallback +
-                                            "' does not resolve");
+                return CommandResult::Error(
+                    "there is no default model (settings.json default_model is unset or does "
+                    "not resolve, and several models are configured) -- pick one with /model");
             }
+            const std::string fallback = ref->str();
             context.session().set_model_override(std::nullopt);
             auto preset = context.session().preset();
             minimal::agent::ApplyModel(preset, *model);

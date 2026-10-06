@@ -64,7 +64,6 @@ Full example (`bundled/settings.json`):
 ```json
 {
   "default_agent_preset": "build",
-  "default_model": "local/your-model-name",
   "max_concurrent_subagents": 4,
   "background_wake": false,
   "memory": {
@@ -84,8 +83,8 @@ Full example (`bundled/settings.json`):
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `default_agent_preset` | string | `""` | file stem of an `agents/<name>.md` preset; unresolvable value → **fatal** |
-| `default_model` | string | `""` | `"<provider>/<model>"` (see providers.json) — the model every primary session runs on unless one is chosen; unset or unresolvable → **fatal** (a model under a `discover: true` entry warns as unverifiable instead) |
+| `default_agent_preset` | string | `""` | file stem of an `agents/<name>.md` preset a new session starts with when none is chosen. Unset or unresolvable (a warning): the only preset there is, else the TUI asks on the first message (picker; remembered per project) and headless needs `--agent` |
+| `default_model` | string | `""` | `"<provider>/<model>"` (see providers.json) — the model a session runs on when none is chosen. Unset or unresolvable (a warning): the only configured model (static or discovered; its effort variants count once), else the TUI asks on the first message (picker; remembered per project) and headless needs `--model`. A model under a `discover: true` entry warns as unverifiable |
 | `small_model` | string | `""` | opencode-compat: `"<provider>/<model>"` for the compaction summarizer only; unset/unresolvable → each session compacts on its own model. The summarizer reads the whole working history, so the small model's window must fit the compaction trigger; a different model also gets no prompt-cache reuse |
 | `default_subagent_model` | string | `""` | `"<provider>/<model>"` for spawned subagents whose preset declares no `model:`; unset/unresolvable → children run on the parent's model |
 | `max_concurrent_subagents` | int | `4` | ≥ 0; `0` (subagents disabled) or `> 8` → warning |
@@ -765,7 +764,8 @@ shows through.
   name its own `model: <provider>/<model>` — **it applies only when the preset
   is spawned as a subagent** (a cheap explorer, a fast reviewer). A primary
   session runs on the model you chose (`--model`, `/model`, or the last pick
-  remembered for the project) or else `settings.json` `default_model`, and
+  remembered for the project) or else the default model (`default_model`, or
+  the only one configured), and
   switching agents (`/agent`, the agent picker) never switches models. An
   unresolvable preset `model:` (a project preset written on another machine)
   warns at startup and its spawns fall back to `default_subagent_model`, then

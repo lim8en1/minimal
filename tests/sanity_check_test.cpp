@@ -313,9 +313,10 @@ TEST_CASE("no usable provider entry is fatal; a bad kind alone is a warning", "[
     CHECK(hits[1]->severity == CheckSeverity::Fatal);     // nothing usable remains
 }
 
-TEST_CASE("a default_model naming no configured model is fatal", "[sanity_check][presets]") {
-    // Every primary session runs on default_model unless one is chosen, so a
-    // typo here breaks every client that names no model.
+TEST_CASE("a default_model naming no configured model warns and falls back",
+          "[sanity_check][presets]") {
+    // A set-but-broken default is a typo worth naming; new sessions fall back
+    // to the only model, or ask -- so it warns, never blocks.
     Fixture f;
     WriteGoodConfig(f.config_dir);
     ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
@@ -325,7 +326,7 @@ TEST_CASE("a default_model naming no configured model is fatal", "[sanity_check]
     CHECK(ByCheck(results, "usable_provider").empty());
     const auto hits = ByCheck(results, "presets");
     REQUIRE(hits.size() == 1);
-    CHECK(hits[0]->severity == CheckSeverity::Fatal);
+    CHECK(hits[0]->severity == CheckSeverity::Warning);
     CHECK(hits[0]->message.find("ghost/nope") != std::string::npos);
 }
 
@@ -568,8 +569,9 @@ TEST_CASE("a cold start with no presets is fatal", "[sanity_check][presets]") {
     CHECK(hits[0]->message.find("no agent preset") != std::string::npos);
 }
 
-TEST_CASE("the default preset must resolve end to end", "[sanity_check][presets]") {
-    // Missing file.
+TEST_CASE("broken defaults warn and fall back; unset defaults are silent",
+          "[sanity_check][presets]") {
+    // A default_agent_preset naming a missing file.
     {
         Fixture f;
         WriteGoodConfig(f.config_dir);
@@ -579,10 +581,11 @@ TEST_CASE("the default preset must resolve end to end", "[sanity_check][presets]
         const auto results = RunChecks(f);
         const auto hits = ByCheck(results, "presets");
         REQUIRE(hits.size() == 1);
-        CHECK(hits[0]->severity == CheckSeverity::Fatal);
+        CHECK(hits[0]->severity == CheckSeverity::Warning);
         CHECK(hits[0]->message.find("ghost") != std::string::npos);
+        CHECK_FALSE(HasFatal(results));
     }
-    // Present, but the model a primary session runs on is broken.
+    // A default_model naming nothing.
     {
         Fixture f;
         WriteGoodConfig(f.config_dir);
@@ -593,8 +596,17 @@ TEST_CASE("the default preset must resolve end to end", "[sanity_check][presets]
         const auto results = RunChecks(f);
         const auto hits = ByCheck(results, "presets");
         REQUIRE(hits.size() == 1);
-        CHECK(hits[0]->severity == CheckSeverity::Fatal);
+        CHECK(hits[0]->severity == CheckSeverity::Warning);
         CHECK(hits[0]->message.find("no-such/model") != std::string::npos);
+        CHECK_FALSE(HasFatal(results));
+    }
+    // Neither set: the only preset / model is used, or the client asks.
+    {
+        Fixture f;
+        WriteGoodConfig(f.config_dir);
+        ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+        f.Write("settings.json", "{}");
+        CHECK(ByCheck(RunChecks(f), "presets").empty());
     }
     // A preset's own unresolvable `model:` only affects it as a subagent:
     // a warning, never fatal -- spawns fall back.

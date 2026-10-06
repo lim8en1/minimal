@@ -1123,6 +1123,19 @@ public:
     };
     CommandScope FocusedCommandScope() const;
 
+    // What a tab's session will be (or was) created with: the desired
+    // selection over the tab's pending create options. `model_default` is the
+    // staged "back to the default". `sessioned` = a session already exists.
+    struct TabSelection {
+        bool exists = false;
+        bool sessioned = false;
+        std::string project_root;
+        std::string agent;
+        std::string model;
+        bool model_default = false;
+    };
+    TabSelection SelectionFor(const std::string& tab_id) const;
+
     // The focused tab's TAB id ("" when no tabs) -- the UI's handle for it,
     // valid whether or not a session exists yet.
     std::string FocusedTabId() const;

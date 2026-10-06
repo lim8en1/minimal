@@ -639,6 +639,30 @@ TEST_CASE("CreateSession: a remembered selection falls back instead of refusing"
     }
 }
 
+TEST_CASE("CreateSession with no agent and no usable default names the choices",
+          "[session_service][defaults]") {
+    ServiceFixture fixture;
+    fixture.Write("settings.json", nlohmann::json{{"default_model", "main/test-model"}}.dump());
+    fixture.Write("agents/plan.md", "---\nname: plan\nallowed_tools: [\"*\"]\n---\nPlan.\n");
+    fixture.Start();
+
+    grpc::ClientContext context;
+    v1::CreateSessionRequest request;
+    request.set_project_root((fixture.dir / "work").string());
+    v1::CreateSessionResponse response;
+    const auto status = fixture.stub->CreateSession(&context, request, &response);
+    CHECK(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+    CHECK(status.error_message().find("main, plan") != std::string::npos);
+
+    // The listing says there is no default, so the client knows to ask.
+    grpc::ClientContext list_context;
+    v1::ListAgentPresetsRequest list_request;
+    v1::ListAgentPresetsResponse listed;
+    REQUIRE(fixture.stub->ListAgentPresets(&list_context, list_request, &listed).ok());
+    CHECK(listed.default_agent_preset().empty());
+    CHECK(listed.presets_size() == 2);
+}
+
 TEST_CASE("CreateSession refuses a project_root that is not an existing directory",
           "[session_service]") {
     // project_root is the confinement boundary; validating it here means a bad

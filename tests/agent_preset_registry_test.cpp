@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -1234,4 +1235,69 @@ TEST_CASE("AgentPresetRegistry: a subagent's plugins: group is still clamped by 
                                                      "memory_store"};
     CHECK(intersect_allowed(parent, child_expanded) ==
           std::vector<std::string>{"memory_search"});
+}
+
+// --- effective defaults --------------------------------------------------------
+
+TEST_CASE("AgentPresetRegistry: the default model is the setting, else the only model, else none",
+          "[agent_preset_registry][defaults]") {
+    TempConfigDir config;
+    config.WriteDefaults();  // three models; default_model gpt-4o-mini
+    {
+        AgentPresetRegistry registry(config.dir,
+                                     config::LoadSettingsConfig(config.dir / "settings.json"));
+        REQUIRE(registry.DefaultModel().has_value());
+        CHECK(registry.DefaultModel()->str() == "openai-main/gpt-4o-mini");
+    }
+    // Unset with several models: no default -- the user picks, and a primary
+    // resolve without a choice names the fix.
+    config.WriteJson("settings.json", nlohmann::json::object());
+    {
+        AgentPresetRegistry registry(config.dir,
+                                     config::LoadSettingsConfig(config.dir / "settings.json"));
+        CHECK_FALSE(registry.DefaultModel().has_value());
+        CHECK_THROWS_WITH(registry.Resolve("build"),
+                          Catch::Matchers::ContainsSubstring("no model chosen"));
+    }
+    // A broken setting falls back the same way; with ONE model (variants of
+    // it count once) that model is the default.
+    config.WriteJson("settings.json", {{"default_model", "ghost/nope"}});
+    config.WriteJson("providers.json",
+                     {{"providers",
+                       {{"local",
+                         {{"backend", "openai"},
+                          {"url", "http://localhost:8000/v1"},
+                          {"models", {{"qwen", {{"variants", {"low", "high"}}}}}}}}}}});
+    {
+        AgentPresetRegistry registry(config.dir,
+                                     config::LoadSettingsConfig(config.dir / "settings.json"));
+        REQUIRE(registry.DefaultModel().has_value());
+        CHECK(registry.DefaultModel()->str() == "local/qwen");
+        CHECK(registry.Resolve("build").model_ref.str() == "local/qwen");
+    }
+}
+
+TEST_CASE("AgentPresetRegistry: the default agent is the setting, else the only preset, else none",
+          "[agent_preset_registry][defaults]") {
+    TempConfigDir config;
+    config.WriteDefaults();  // agents/build.md only
+    config.WriteJson("settings.json", {{"default_agent_preset", "ghost"}});
+    {
+        AgentPresetRegistry registry(config.dir,
+                                     config::LoadSettingsConfig(config.dir / "settings.json"));
+        CHECK(registry.DefaultAgentPreset() == std::optional<std::string>("build"));
+    }
+    config.Write("agents/plan.md", "---\nname: plan\n---\nPlan.\n");
+    {
+        AgentPresetRegistry registry(config.dir,
+                                     config::LoadSettingsConfig(config.dir / "settings.json"));
+        CHECK_FALSE(registry.DefaultAgentPreset().has_value());
+        CHECK(registry.DescribeAgentPresets() == "build, plan");
+    }
+    config.WriteJson("settings.json", {{"default_agent_preset", "plan"}});
+    {
+        AgentPresetRegistry registry(config.dir,
+                                     config::LoadSettingsConfig(config.dir / "settings.json"));
+        CHECK(registry.DefaultAgentPreset() == std::optional<std::string>("plan"));
+    }
 }

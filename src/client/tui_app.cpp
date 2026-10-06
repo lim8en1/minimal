@@ -893,15 +893,29 @@ std::string TuiApp::FocusedOrNewTab() {
 
 void TuiApp::SubmitChat(const std::string& text) {
     const std::string tab = FocusedOrNewTab();
-    // Sending a turn returns the view to the newest row: scrolled-up content
-    // would otherwise sit frozen while the reply streams in somewhere below
-    // the visible viewport. Same for a row cursor left over from browsing.
-    // (A sessionless tab has no chat view yet -- nothing to scroll.)
-    WithChat(tab_ui_, tab, [](auto& chat) {
-        chat.ScrollToBottom();
-        chat.ClearRowFocus();
-    });
-    app_->SubmitChatTurn(tab, text);
+    // A new session with no agent/model chosen and no default to fall back
+    // on asks first (the pickers), then sends; dismissing a picker puts the
+    // message back in the prompt.
+    picker_controller_->EnsureSelectionThen(
+        tab,
+        [this, tab, text] {
+            // Sending a turn returns the view to the newest row: scrolled-up
+            // content would otherwise sit frozen while the reply streams in
+            // somewhere below the visible viewport. Same for a row cursor left
+            // over from browsing. (A sessionless tab has no chat view yet.)
+            WithChat(tab_ui_, tab, [](auto& chat) {
+                chat.ScrollToBottom();
+                chat.ClearRowFocus();
+            });
+            app_->SubmitChatTurn(tab, text);
+        },
+        [this, tab, text] {
+            auto& editor = prompt_editors_.CurrentState(tab);
+            if (editor.content.empty()) {
+                editor.content = text;
+                editor.cursor_position = static_cast<int>(text.size());
+            }
+        });
 }
 
 // Everything the client's own table does not handle. SESSIONLESS TABS: a

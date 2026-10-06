@@ -285,9 +285,19 @@ public:
     // rather than re-loaded by callers who need to resolve a model the USER
     // named (--model, /model): two loads would be two sources of truth.
     const config::ProvidersConfig& providers() const { return providers_; }
-    // settings.json default_model: what a primary session runs on when no
-    // model was chosen (`/model default` returns to it).
-    const std::string& default_model() const { return settings_.default_model; }
+    // The model a primary session runs on when none was chosen (`/model
+    // default` returns to it): settings.json default_model when it resolves,
+    // else the ONLY model configured (static or already discovered; variants
+    // of one model count once), else nullopt -- several candidates and no
+    // usable setting means the user picks.
+    std::optional<config::ModelRef> DefaultModel() const;
+    // The same rule for the agent preset of a new session: settings.json
+    // default_agent_preset when it names a resolvable preset, else the only
+    // picker-visible preset for `project_root`, else nullopt.
+    std::optional<std::string> DefaultAgentPreset(
+        const std::filesystem::path& project_root = {}) const;
+    // "a, b, c" -- what a "pick one" error lists.
+    std::string DescribeAgentPresets(const std::filesystem::path& project_root = {}) const;
 
 private:
     // Exactly one of `owned` / `borrowed` is set.

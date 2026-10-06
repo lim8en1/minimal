@@ -922,6 +922,8 @@ grpc::Status SessionServiceImpl::ListAgentPresets(grpc::ServerContext* context,
         proto_summary->set_description(summary.description);
         proto_summary->set_color(summary.color);
     }
+    response->set_default_agent_preset(
+        presets_->DefaultAgentPreset(request->project_root()).value_or(""));
     return grpc::Status::OK;
 }
 
@@ -932,7 +934,9 @@ grpc::Status SessionServiceImpl::ListModels(grpc::ServerContext* context,
 
     if (presets_ == nullptr) return grpc::Status::OK;  // empty list; see set_presets
     const auto& providers = presets_->providers();
-    response->set_default_model(presets_->default_model());
+    if (const auto fallback = presets_->DefaultModel()) {
+        response->set_default_model(fallback->str());
+    }
 
     // refresh_discovery is the /providers refresh role, relocated into the
     // picker: an explicit re-fetch of every discover-entry's catalog before

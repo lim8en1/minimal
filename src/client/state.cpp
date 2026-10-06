@@ -2504,6 +2504,24 @@ std::string AppState::FocusedSessionId() const {
     return std::string{};
 }
 
+AppState::TabSelection AppState::SelectionFor(const std::string& tab_id) const {
+    std::lock_guard lk(mtx_);
+    TabSelection out;
+    for (const auto& tab : tabs_) {
+        if (tab.info.tab_id != tab_id) continue;
+        out.exists = true;
+        out.sessioned = !tab.info.session_id.empty();
+        out.project_root = tab.pending_create.project_root;
+        out.agent = tab.info.state->DesiredAgentPreset();
+        if (out.agent.empty()) out.agent = tab.pending_create.agent_preset;
+        out.model_default = tab.info.state->DesiredModelIsDefault();
+        out.model = tab.info.state->DesiredModel();
+        if (out.model.empty() && !out.model_default) out.model = tab.pending_create.model;
+        break;
+    }
+    return out;
+}
+
 AppState::CommandScope AppState::FocusedCommandScope() const {
     std::lock_guard lk(mtx_);
     for (const auto& tab : tabs_) {
