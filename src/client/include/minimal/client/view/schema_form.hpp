@@ -10,8 +10,11 @@
 // through the state's status line.
 //
 // Keys: up/down (k/j) select; enter toggles a boolean, steps an enum, or
-// opens the inline editor (enter saves, esc cancels); d / delete resets the
-// field to its default; left / backspace goes back (on_back).
+// opens the inline editor (enter saves, esc cancels; a secret is typed
+// masked); d / delete resets the field to its default (a set secret asks for
+// a second d); left / backspace goes back (on_back). While `busy` the edit
+// keys are ignored; the field's details and the status stay pinned below the
+// list.
 //
 // The component implements EscapeAware: while the editor is open it claims
 // Escape, so a plugin modal host cancels the edit instead of closing.
@@ -35,6 +38,13 @@ struct SchemaFormState {
     // Bumped whenever `describe` changes: the rows rebuild, keeping the
     // selected field.
     std::uint64_t generation = 0;
+    // An edit was sent and its answer has not landed: the shown values may
+    // be stale, so the form takes no edit keys (a second toggle would send
+    // the same value again) and says it is saving.
+    bool busy = false;
+    // The field the last refused edit was for ("" = none): an edit typed in
+    // the editor reopens with its text, so a refusal does not lose it.
+    std::string error_path;
 };
 
 struct SchemaFormCallbacks {

@@ -241,7 +241,7 @@ void ConfigFeed::Open(const std::string& name) {
         form_.title = name;
         form_.generation = generation;
     }
-    Post([this, name] { FetchDescribe(name, "", false); });
+    Post([this, name] { FetchDescribe(name, "", ""); });
 }
 
 void ConfigFeed::Back() {
@@ -252,10 +252,13 @@ void ConfigFeed::Back() {
     RefreshList();
 }
 
-void ConfigFeed::FetchDescribe(const std::string& name, std::string status, bool status_is_error) {
+void ConfigFeed::FetchDescribe(const std::string& name, std::string status,
+                               std::string error_path) {
     const json answer = Call("describe", {{"name", name}});
     std::lock_guard<std::mutex> lock(mu_);
     if (open_ != name) return;  // the user went back meanwhile
+    form_.busy = false;
+    form_.error_path.clear();
     if (answer.contains("error")) {
         // Dropped for the same reason as a failed list: stale values and
         // pending marks must not outlive the server that reported them.
@@ -266,7 +269,8 @@ void ConfigFeed::FetchDescribe(const std::string& name, std::string status, bool
         form_.describe = answer;
         form_.title = answer.value("file", name);
         form_.status = std::move(status);
-        form_.status_is_error = status_is_error;
+        form_.status_is_error = !error_path.empty();
+        form_.error_path = std::move(error_path);
     }
     ++form_.generation;
 }
@@ -276,13 +280,16 @@ void ConfigFeed::Edit(const std::string& method, json request) {
     {
         std::lock_guard<std::mutex> lock(mu_);
         name = open_;
+        // Until the answer's describe lands: the form's values are stale.
+        if (!name.empty()) form_.busy = true;
     }
     if (name.empty()) return;
     request["name"] = name;
     const std::string path = request.value("key", "");
     Post([this, method, request, name, path] {
         const auto [status, is_error] = Outcome(path, Call(method, request));
-        FetchDescribe(name, status, is_error);  // the new values, and what happened
+        // The new values, and what happened.
+        FetchDescribe(name, status, is_error ? path : std::string());
     });
 }
 

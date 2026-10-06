@@ -221,7 +221,7 @@ int Get(const Target& target, const std::string& key, bool as_json) {
 // change applies.
 int Save(const Target& target, const json& next, const std::string& what) {
     std::string error;
-    target.inspected.config.validate(next, error);
+    if (target.inspected.config.validate != nullptr) target.inspected.config.validate(next, error);
     if (!error.empty()) {
         std::fprintf(stderr, "minimal: %s\n", error.c_str());
         return 1;
@@ -244,7 +244,11 @@ int Save(const Target& target, const json& next, const std::string& what) {
         std::printf("%s: %s (the plugin is disabled; applies when it is enabled)\n",
                     target.label.c_str(), what.c_str());
     } else if (change.all_live) {
-        std::printf("%s: %s (live: a running server takes it without a restart)\n",
+        // Saved only: this process never talks to a server. `minimal plugin`
+        // sends an edit through a running server instead (plugin_command.hpp),
+        // so reaching here means none was running.
+        std::printf("%s: %s (live: through `minimal plugin`, a running server applies it "
+                    "without a restart)\n",
                     target.label.c_str(), what.c_str());
     } else {
         std::printf("%s: %s (restart: takes effect when the server restarts)\n",

@@ -23,7 +23,11 @@ field — no core change, no enum to keep in sync.
     "enabled", budget_tokens: N}`, refit to each request's `max_tokens`;
   - `@none` → no thinking field.
 
-  A model discovery never saw is treated as current (adaptive). A backend
+  A model discovery never saw is treated as current (adaptive). That shape
+  is rejected by budget-only models, so a static (`discover: false`) entry
+  for Haiku 4.5 or older must either turn on `discover` or spell its
+  variants out in the map form (`{"high": {"thinking": {"type": "enabled",
+  "budget_tokens": 16384}}}`). A backend
   with no registered provider here gets core's generic `reasoning_effort`
   shape instead.
 

@@ -7,12 +7,14 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 
 #include <nlohmann/json.hpp>
 
 #include "minimal/client/cli_args.hpp"
 #include "minimal/client/server_spawn.hpp"
 #include "minimal/client/session_client.hpp"
+#include "minimal/common/plugin_config_label.hpp"
 
 extern char** environ;
 
@@ -40,46 +42,83 @@ int RunChild(const std::vector<std::string>& argv) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
-// After an edit: a running server (never one spawned for this) re-reads the
-// plugin's file and applies what it can live. No server, nothing to say.
-void TellRunningServer(const std::string& plugin) {
+// The running server's `plugins` endpoint answer to `method`, or nullopt
+// when no server is running (one is never spawned for this) or it could not
+// be reached -- the caller then edits the file itself.
+std::optional<nlohmann::json> CallRunningServer(const std::string& method,
+                                                const nlohmann::json& request) {
     const std::string target = DefaultServerTarget();
     SpawnOptions no_spawn;
     no_spawn.enabled = false;
-    if (!EnsureServerRunning(target, no_spawn)) return;
+    if (!EnsureServerRunning(target, no_spawn)) return std::nullopt;
     SessionClient client(target);
-    if (!client.WaitForConnected(std::chrono::seconds(2))) return;
-    const auto result = client.PluginCall("plugins", "apply",
-                                          nlohmann::json{{"name", plugin}}.dump());
+    if (!client.WaitForConnected(std::chrono::seconds(2))) return std::nullopt;
+    const auto result = client.PluginCall("plugins", method, request.dump());
     if (!result.status.ok()) {
-        std::fprintf(stderr, "minimal: running server: %s\n",
+        std::fprintf(stderr, "minimal: running server: %s -- editing the file directly\n",
                      result.status.error_message().c_str());
-        return;
+        return std::nullopt;
     }
-    const auto answer =
-        nlohmann::json::parse(result.json_payload, nullptr, /*allow_exceptions=*/false);
-    if (!answer.is_object()) return;
-    if (answer.contains("error")) {
-        std::fprintf(stderr, "minimal: running server: %s\n",
-                     answer.at("error").get<std::string>().c_str());
-        return;
+    auto answer = nlohmann::json::parse(result.json_payload, nullptr, /*allow_exceptions=*/false);
+    if (!answer.is_object()) return std::nullopt;
+    return answer;
+}
+
+// `set <name> <key> <value>` / `unset <name> <key>` through a running
+// server: validated by the plugin inside the server's own process and
+// environment (an "env:" key reference resolves against the server's
+// variables, not this shell's), written, and applied. nullopt when there is
+// no server to ask, or it does not know the plugin (one installed since it
+// started): the local CLI handles those.
+std::optional<int> EditThroughServer(const std::vector<std::string>& args) {
+    const bool set = args.size() == 4 && args[0] == "set";
+    const bool unset = args.size() == 3 && args[0] == "unset";
+    if (!set && !unset) return std::nullopt;
+    nlohmann::json request{{"name", args[1]}, {"key", args[2]}};
+    if (set) request["text"] = args[3];
+    const auto answer = CallRunningServer(args[0], request);
+    if (!answer) return std::nullopt;
+    if (answer->contains("error")) {
+        const std::string error = answer->value("error", std::string());
+        if (error.rfind("no plugin '", 0) == 0) return std::nullopt;
+        std::fprintf(stderr, "minimal: %s\n", error.c_str());
+        return 1;
     }
-    const std::string applied = answer.value("applied", "");
+    const std::string label =
+        common::PluginConfigLabel(common::kPluginConfigDirName, args[1]) + ": " + args[2];
+    const std::string what = label + (set ? " set" : " back to its default");
+    const std::string applied = answer->value("applied", "");
     if (applied == "live") {
-        std::printf("running server: applied, no restart needed\n");
+        std::printf("%s (applied by the running server, no restart needed)\n", what.c_str());
     } else if (applied == "restart") {
         std::string why;
-        if (answer.contains("reconfigure_error")) {
-            why = " (the plugin refused it live: " +
-                  answer.at("reconfigure_error").get<std::string>() + ")";
+        if (answer->contains("reconfigure_error")) {
+            why = "; the plugin refused it live: " + answer->value("reconfigure_error", std::string());
         }
-        std::printf("running server: restart it to apply%s\n", why.c_str());
+        std::printf("%s (restart the server to apply%s)\n", what.c_str(), why.c_str());
+    } else if (applied == "not_running") {
+        std::printf("%s (saved; %s -- it takes effect when it starts)\n", what.c_str(),
+                    answer->value("reason", std::string("the plugin is not running")).c_str());
+    } else if (const auto unused = answer->value("unused", nlohmann::json::object());
+               unused.contains(args[2])) {
+        std::printf("%s (saved; not used while %s)\n", what.c_str(),
+                    unused.at(args[2]).get<std::string>().c_str());
+    } else {
+        std::printf("%s (no change)\n", what.c_str());
     }
+    return 0;
 }
 
 }  // namespace
 
 int RunPluginCommand(const std::vector<std::string>& args) {
+    // --json changes nothing about an edit; only the bare verb form is routed.
+    std::vector<std::string> bare;
+    for (const auto& arg : args) {
+        if (arg != "--json") bare.push_back(arg);
+    }
+    if (const auto code = EditThroughServer(bare)) return *code;
+
     const std::string server = LocateServerBinary();
     if (server.empty()) {
         std::fprintf(stderr,
@@ -88,11 +127,7 @@ int RunPluginCommand(const std::vector<std::string>& args) {
     }
     std::vector<std::string> argv = {server, "plugin"};
     argv.insert(argv.end(), args.begin(), args.end());
-    const int code = RunChild(argv);
-    if (code == 0 && args.size() >= 2 && (args[0] == "set" || args[0] == "unset")) {
-        TellRunningServer(args[1]);
-    }
-    return code;
+    return RunChild(argv);
 }
 
 }  // namespace minimal::client

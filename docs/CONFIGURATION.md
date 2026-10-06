@@ -645,7 +645,7 @@ number the tab bar shows), `group.previous`, `group.next`, `jump.attention`,
 `chat.row_down`, `chat.toggle_collapse`, `chat.toggle_collapse_all`,
 `chat.toggle_thinking_fold`, `chat.toggle_tool_fold`,
 `chat.toggle_timestamps`, `turn.cancel`, `session.pause`, `prompt.newline`,
-`prompt.undo`, `prompt.redo`, `app.quit`.
+`prompt.undo`, `prompt.redo`, `prompt.clear`, `app.quit`.
 
 Modifiers: `ctrl` (or `control`), `alt` (or `option`/`opt`/`meta` — the
 macOS key's spelling), `shift`, joined by `+` in any order. macOS: Apple
@@ -695,6 +695,10 @@ into one step per word (a typed space, a caret jump or a pause over a second
 starts a new one); a whole paste, a kill line (`ctrl+u`/`ctrl+k`), an
 accepted completion and a history recall are one step each. Up to 100 steps;
 submitting clears them. Not `ctrl+z` — that is the terminal's suspend key.
+
+Prompt clear (`prompt.clear`, default `ctrl+alt+u`): empties the whole
+prompt wherever the caret is (`ctrl+u`/`ctrl+k` kill only one side of it).
+One undo step — `prompt.undo` brings the text back. Prompt editor only.
 
 ### ui.json
 

@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 
 #include "bash_settings.hpp"
 #include "minimal/common/config_reader.hpp"
@@ -14,6 +15,30 @@ using namespace minimal;
 using nlohmann::json;
 
 namespace {
+
+// RAII env var override so tests don't leak state into each other.
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value) : name_(name) {
+        if (const char* old = std::getenv(name)) {
+            had_old_ = true;
+            old_ = old;
+        }
+        ::setenv(name, value, 1);
+    }
+    ~ScopedEnv() {
+        if (had_old_) {
+            ::setenv(name_.c_str(), old_.c_str(), 1);
+        } else {
+            ::unsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string name_;
+    std::string old_;
+    bool had_old_ = false;
+};
 
 // Every recorded default, placed at its dotted path: the config a user who
 // wrote nothing effectively has.
@@ -134,7 +159,7 @@ TEST_CASE("a real plugin's schema: tools-bash", "[config_schema]") {
 TEST_CASE("every bundled plugin's schema agrees with its own parser", "[config_schema][bundled]") {
     // decision-advisor's parse reads its bundled defaults file from the config
     // dir; the source tree's bundled/ is that file's origin.
-    ::setenv("MINIMAL_CONFIG_DIR", MINIMAL_BUNDLED_DIR, /*overwrite=*/1);
+    ScopedEnv config_dir("MINIMAL_CONFIG_DIR", MINIMAL_BUNDLED_DIR);
 
     int described = 0;
     for (const auto& entry :

@@ -186,8 +186,9 @@ TEST_CASE("PromptEditor: an empty prompt renders the placeholder", "[prompt_edit
     PromptEditorState state;
     auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
 
+    // Not from "type": the painted caret's style codes sit after the "t".
     const std::string rendered = ToText(editor, 80, 6);
-    CHECK(rendered.find("type here; @ for files") != std::string::npos);
+    CHECK(rendered.find("ype here; @ for files") != std::string::npos);
 }
 
 TEST_CASE("PromptEditor: a multi-line draft renders each logical line", "[prompt_editor]") {
@@ -282,6 +283,96 @@ TEST_CASE("PromptEditor: kill line and paste are one undo step each", "[prompt_e
     REQUIRE(state.content == "abc x y");
     CHECK(editor->OnEvent(Key("alt+z")));
     CHECK(state.content == "abc");
+}
+
+TEST_CASE("PromptEditor: prompt.clear empties the prompt as one undo step",
+          "[prompt_editor][undo]") {
+    PromptEditorState state;
+    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+    TypeInto(editor, "one two");
+    state.cursor_position = 3;   // mid-buffer: both sides go
+    state.history_cursor = 0;
+    state.list_open = true;
+    state.suggestions = {"x"};
+    state.completions = {"x"};
+
+    REQUIRE(editor->OnEvent(Key("ctrl+alt+u")));
+    CHECK(state.content.empty());
+    CHECK(state.cursor_position == 0);
+    CHECK_FALSE(state.history_cursor.has_value());
+    CHECK_FALSE(state.list_open);
+    CHECK(state.suggestions.empty());
+    CHECK(state.completions.empty());
+
+    CHECK(editor->OnEvent(Key("alt+z")));
+    CHECK(state.content == "one two");
+    CHECK(state.cursor_position == 3);
+
+    // Already empty: still consumed, never typed as text.
+    REQUIRE(editor->OnEvent(Key("ctrl+alt+u")));
+    REQUIRE(editor->OnEvent(Key("ctrl+alt+u")));
+    CHECK(state.content.empty());
+}
+
+TEST_CASE("PromptEditor: prompt.clear is content mid-paste and follows key_matches",
+          "[prompt_editor]") {
+    PromptEditorState state;
+    auto editor = MakePromptEditor(
+        TestTheme(), state, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, nullptr,
+        [](std::string_view action, const ftxui::Event& event) {
+            return action == "prompt.clear" && event == Key("ctrl+alt+x");
+        });
+    TypeInto(editor, "abc");
+    REQUIRE(editor->OnEvent(ftxui::Event::Special("\x1b[200~")));
+    editor->OnEvent(Key("ctrl+alt+x"));
+    REQUIRE(editor->OnEvent(ftxui::Event::Special("\x1b[201~")));
+    CHECK_FALSE(state.content.empty());
+
+    state.content = "abc";
+    state.cursor_position = 3;
+    editor->OnEvent(Key("ctrl+alt+u"));   // the default key, rebound away
+    CHECK(state.content.find("abc") == 0);
+    REQUIRE(editor->OnEvent(Key("ctrl+alt+x")));
+    CHECK(state.content.empty());
+}
+
+namespace {
+
+// The caret cell's paint: CaretStyle's background, or `inverted` when the
+// theme leaves its roles unset. Row 0 is the separator above the prompt;
+// columns 0-1 are the "❯ " gutter.
+bool CaretPaintedAt(ftxui::Component& editor, int x) {
+    auto element = editor->Render();
+    auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(80), ftxui::Dimension::Fixed(6));
+    ftxui::Render(screen, element);
+    const auto& cell = screen.CellAt(x, 1);
+    return cell.inverted || cell.background_color != ftxui::Color::Default;
+}
+
+}  // namespace
+
+TEST_CASE("PromptEditor: the caret cell is painted, not only the terminal cursor",
+          "[prompt_editor]") {
+    PromptEditorState state;
+    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+
+    SECTION("empty prompt: the placeholder's first cell only") {
+        CHECK(CaretPaintedAt(editor, 2));
+        CHECK_FALSE(CaretPaintedAt(editor, 3));
+    }
+    SECTION("mid-line: the glyph under the caret") {
+        state.content = "abc";
+        state.cursor_position = 1;
+        CHECK_FALSE(CaretPaintedAt(editor, 2));
+        CHECK(CaretPaintedAt(editor, 3));
+        CHECK_FALSE(CaretPaintedAt(editor, 4));
+    }
+    SECTION("end of line: the cell past the last glyph") {
+        state.content = "abc";
+        state.cursor_position = 3;
+        CHECK_FALSE(CaretPaintedAt(editor, 4));
+        CHECK(CaretPaintedAt(editor, 5));
+    }
 }
 
 TEST_CASE("PromptUndo: a pause or a caret jump starts a new step", "[prompt_editor][undo]") {

@@ -39,6 +39,16 @@ const json kDescribe = json::parse(R"({
   "pending": ["mode"]
 })");
 
+// A form's state at generation 1, with no edit in flight.
+client::SchemaFormState FormState(std::string title, json describe, std::string status = "") {
+    client::SchemaFormState state;
+    state.title = std::move(title);
+    state.describe = std::move(describe);
+    state.status = std::move(status);
+    state.generation = 1;
+    return state;
+}
+
 client::Theme TestTheme() {
     return client::Theme::Parse(R"({"name":"test","colors":{}})", client::ColorDepth::Truecolor);
 }
@@ -82,7 +92,7 @@ TEST_CASE("form rows carry why a field is unused, and the form says it", "[schem
     CHECK(rows[4].unused == "mode is slow");
     CHECK(rows[3].unused.empty());
 
-    client::SchemaFormState state{"t", describe, "", false, 1};
+    client::SchemaFormState state = FormState("t", describe);
     const auto theme = TestTheme();
     auto form = client::MakeSchemaForm([&] { return state; }, {}, theme);
     std::string frame = minimal_test::RenderFrame(form, 100, 24);
@@ -96,7 +106,7 @@ TEST_CASE("the form: toggle, cycle, edit, reset; the editor claims Escape", "[sc
     std::vector<std::pair<std::string, std::string>> sets;
     std::vector<std::string> unsets;
     bool back = false;
-    client::SchemaFormState state{"plugins.d/sample.json", kDescribe, "", false, 1};
+    client::SchemaFormState state = FormState("plugins.d/sample.json", kDescribe);
     const auto theme = TestTheme();
     auto form = client::MakeSchemaForm(
         [&] { return state; },
@@ -139,9 +149,166 @@ TEST_CASE("the form: toggle, cycle, edit, reset; the editor claims Escape", "[sc
     CHECK(back);
 }
 
+TEST_CASE("Enter on an untouched secret does not erase it", "[schema_form][regression]") {
+    // The bug: the editor starts a secret empty (its literal is never put
+    // back on screen), so Enter without typing saved "" over the stored key.
+    const auto rows = client::BuildFormRows(kDescribe);
+    CHECK_FALSE(client::SubmitSaves(rows[4], ""));
+    CHECK(client::SubmitSaves(rows[4], "sk-new"));
+    CHECK(client::SubmitSaves(rows[3], ""));  // a non-secret's empty text is a value
+
+    std::vector<std::pair<std::string, std::string>> sets;
+    client::SchemaFormState state = FormState("plugins.d/sample.json", kDescribe);
+    const auto theme = TestTheme();
+    auto form = client::MakeSchemaForm(
+        [&] { return state; },
+        {.on_set = [&](const std::string& p, const std::string& t) { sets.emplace_back(p, t); }},
+        theme);
+    for (int i = 0; i < 3; ++i) minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
+    minimal_test::SendEvent(form, ftxui::Event::Return);  // net.api_key: the editor, empty
+    minimal_test::SendEvent(form, ftxui::Event::Return);  // nothing typed
+    CHECK(sets.empty());
+    const auto* aware = dynamic_cast<const client::EscapeAware*>(form.get());
+    REQUIRE(aware != nullptr);
+    CHECK_FALSE(aware->WantsEscape());  // the editor closed all the same
+}
+
+TEST_CASE("the selected field's details and the status stay on screen below a long list",
+          "[schema_form][regression]") {
+    // The bug: details and status were rows of the scrolling body, below
+    // every field -- on a long form the outcome of an edit near the top was
+    // scrolled out of sight.
+    json describe = kDescribe;
+    for (int i = 0; i < 40; ++i) {
+        describe["schema"]["fields"].push_back(
+            {{"path", "extra_" + std::to_string(i)}, {"type", "integer"}, {"default", i},
+             {"apply", "live"}});
+    }
+    client::SchemaFormState state = FormState("t", describe, "enabled saved -- the outcome");
+    const auto theme = TestTheme();
+    auto form = client::MakeSchemaForm([&] { return state; }, {}, theme);
+    const std::string frame = minimal_test::RenderFrame(form, 100, 24);
+    CHECK(frame.find("enabled saved -- the outcome") != std::string::npos);
+    CHECK(frame.find("Turns it on.") != std::string::npos);
+    CHECK(frame.find("esc: close") != std::string::npos);  // the hints too
+}
+
+TEST_CASE("while an edit is in flight the form takes no edit keys", "[schema_form][regression]") {
+    // The bug: a toggle computes its value from the last answer; two quick
+    // presses before the refetch sent the same value twice -- the second
+    // press did nothing.
+    std::vector<std::pair<std::string, std::string>> sets;
+    std::vector<std::string> unsets;
+    client::SchemaFormState state = FormState("t", kDescribe);
+    state.busy = true;
+    const auto theme = TestTheme();
+    auto form = client::MakeSchemaForm(
+        [&] { return state; },
+        {.on_set = [&](const std::string& p, const std::string& t) { sets.emplace_back(p, t); },
+         .on_unset = [&](const std::string& p) { unsets.push_back(p); }},
+        theme);
+    minimal_test::SendEvent(form, ftxui::Event::Return);
+    minimal_test::SendEvent(form, ftxui::Event::Character(' '));
+    minimal_test::SendEvent(form, ftxui::Event::Character('d'));
+    CHECK(sets.empty());
+    CHECK(unsets.empty());
+    CHECK(minimal_test::RenderFrame(form, 100, 24).find("saving...") != std::string::npos);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);  // moving is fine
+    minimal_test::SendEvent(form, ftxui::Event::ArrowUp);
+
+    state.busy = false;
+    minimal_test::SendEvent(form, ftxui::Event::Return);
+    CHECK(sets.size() == 1);
+}
+
+TEST_CASE("a secret is typed masked", "[schema_form][regression]") {
+    client::SchemaFormState state = FormState("t", kDescribe);
+    const auto theme = TestTheme();
+    auto form = client::MakeSchemaForm([&] { return state; }, {}, theme);
+    for (int i = 0; i < 3; ++i) minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
+    minimal_test::SendEvent(form, ftxui::Event::Return);  // net.api_key: the editor
+    for (const char c : std::string("sk-typed")) {
+        minimal_test::SendEvent(form, ftxui::Event::Character(c));
+    }
+    const std::string frame = minimal_test::RenderFrame(form, 100, 24);
+    CHECK(frame.find("sk-typed") == std::string::npos);
+    CHECK(frame.find("empty keeps the current key") != std::string::npos);
+
+    // A plain field's editor shows its text.
+    minimal_test::SendEvent(form, ftxui::Event::Escape);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowUp);  // net.timeout_ms
+    minimal_test::SendEvent(form, ftxui::Event::Return);
+    minimal_test::SendEvent(form, ftxui::Event::Character('7'));
+    CHECK(minimal_test::RenderFrame(form, 100, 24).find("10007") != std::string::npos);
+}
+
+TEST_CASE("resetting a set secret takes a second d", "[schema_form][regression]") {
+    // The bug: one keystroke erased the configured key.
+    std::vector<std::string> unsets;
+    client::SchemaFormState state = FormState("t", kDescribe);
+    const auto theme = TestTheme();
+    auto form = client::MakeSchemaForm(
+        [&] { return state; }, {.on_unset = [&](const std::string& p) { unsets.push_back(p); }},
+        theme);
+    for (int i = 0; i < 3; ++i) minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
+    minimal_test::SendEvent(form, ftxui::Event::Character('d'));
+    CHECK(unsets.empty());
+    CHECK(minimal_test::RenderFrame(form, 100, 24).find("d again") != std::string::npos);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowUp);    // any other key calls it off
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
+    minimal_test::SendEvent(form, ftxui::Event::Character('d'));
+    CHECK(unsets.empty());
+    minimal_test::SendEvent(form, ftxui::Event::Character('d'));
+    CHECK(unsets == std::vector<std::string>{"net.api_key"});
+
+    minimal_test::SendEvent(form, ftxui::Event::ArrowUp);  // a plain field: one d
+    minimal_test::SendEvent(form, ftxui::Event::Character('d'));
+    CHECK(unsets.size() == 2);
+}
+
+TEST_CASE("a refused edit reopens the editor with what was typed", "[schema_form][regression]") {
+    // The bug: the editor closed on Enter, before the answer; a refusal lost
+    // the text.
+    std::vector<std::pair<std::string, std::string>> sets;
+    client::SchemaFormState state = FormState("t", kDescribe);
+    const auto theme = TestTheme();
+    auto form = client::MakeSchemaForm(
+        [&] { return state; },
+        {.on_set = [&](const std::string& p, const std::string& t) { sets.emplace_back(p, t); }},
+        theme);
+    const auto* aware = dynamic_cast<const client::EscapeAware*>(form.get());
+    REQUIRE(aware != nullptr);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);  // net.timeout_ms
+    minimal_test::SendEvent(form, ftxui::Event::Return);
+    minimal_test::SendEvent(form, ftxui::Event::Character('x'));
+    minimal_test::SendEvent(form, ftxui::Event::Return);
+    REQUIRE(sets.size() == 1);
+    CHECK_FALSE(aware->WantsEscape());
+
+    state.status = "net.timeout_ms: not an integer";
+    state.status_is_error = true;
+    state.error_path = "net.timeout_ms";
+    ++state.generation;
+    (void)minimal_test::RenderFrame(form, 100, 24);
+    CHECK(aware->WantsEscape());
+    minimal_test::SendEvent(form, ftxui::Event::Backspace);
+    minimal_test::SendEvent(form, ftxui::Event::Return);
+    REQUIRE(sets.size() == 2);
+    CHECK(sets[1] == std::pair<std::string, std::string>{"net.timeout_ms", "1000"});
+
+    // Accepted: the editor stays closed.
+    state.status = "net.timeout_ms saved";
+    state.status_is_error = false;
+    state.error_path.clear();
+    ++state.generation;
+    (void)minimal_test::RenderFrame(form, 100, 24);
+    CHECK_FALSE(aware->WantsEscape());
+}
+
 TEST_CASE("the plugin modal host gives Escape to an editor that wants it, else closes",
           "[schema_form][modal_host]") {
-    client::SchemaFormState state{"t", kDescribe, "", false, 1};
+    client::SchemaFormState state = FormState("t", kDescribe);
     const auto theme = TestTheme();
     std::vector<std::pair<std::string, std::string>> sets;
     auto form = client::MakeSchemaForm(
@@ -176,6 +343,9 @@ public:
     }
     std::optional<std::string> PluginCall(const std::string& plugin, const std::string& method,
                                           const std::string& payload) override {
+        if (method == "set") {
+            while (hold_) std::this_thread::sleep_for(1ms);  // an answer still on its way
+        }
         std::lock_guard<std::mutex> lock(mtx_);
         calls_.push_back(plugin + " " + method + " " + payload);
         cv_.notify_all();
@@ -193,6 +363,7 @@ public:
             return rows.dump();
         }
         if (method == "describe") return kDescribe.dump();
+        if (method == "set" && refuse_) return json{{"error", "limit: must be at least 1"}}.dump();
         if (method == "set") return json{{"applied", "live"}, {"changed", {"net.timeout_ms"}}}.dump();
         return std::nullopt;
     }
@@ -217,6 +388,8 @@ private:
 
 public:
     std::atomic<bool> down_{false};
+    std::atomic<bool> hold_{false};    // `set` waits until cleared
+    std::atomic<bool> refuse_{false};  // `set` answers an error
 };
 
 template <typename Pred>
@@ -253,6 +426,29 @@ TEST_CASE("config-view's feed: lists configurable plugins, opens one, sets throu
 
     feed.Back();
     CHECK(feed.open_plugin().empty());
+}
+
+TEST_CASE("config-view's feed: busy until an edit's answer lands; a refusal names its field",
+          "[schema_form][config_view]") {
+    EndpointApi api;
+    config_view::ConfigFeed feed(&api, nullptr);
+    feed.Open("sample");
+    REQUIRE(Eventually([&] { return !feed.form().describe.is_null(); }));
+
+    api.hold_ = true;
+    feed.Set("net.timeout_ms", "2000");
+    CHECK(feed.form().busy);
+    api.hold_ = false;
+    REQUIRE(Eventually([&] { return !feed.form().busy; }));
+    CHECK(feed.form().error_path.empty());
+    CHECK_FALSE(feed.form().status_is_error);
+
+    api.refuse_ = true;
+    feed.Set("net.timeout_ms", "0");
+    REQUIRE(Eventually([&] { return feed.form().status_is_error; }));
+    CHECK(feed.form().error_path == "net.timeout_ms");
+    CHECK(feed.form().status == "limit: must be at least 1");
+    CHECK_FALSE(feed.form().busy);
 }
 
 TEST_CASE("config-view drops what it showed when a refetch fails", "[schema_form][config_view]") {

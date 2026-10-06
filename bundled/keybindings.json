@@ -40,5 +40,6 @@
   "prompt.newline": "alt+enter",
   "prompt.undo": "alt+z",
   "prompt.redo": "ctrl+alt+z",
+  "prompt.clear": "ctrl+alt+u",
   "app.quit": "ctrl+q"
 }

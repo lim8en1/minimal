@@ -59,7 +59,9 @@ private:
     void Post(std::function<void()> task);
     void Run();
     void FetchList();
-    void FetchDescribe(const std::string& name, std::string status, bool status_is_error);
+    // Fetches `name`'s description; `status` is the outcome to show with it,
+    // an error for `error_path` when that is not "".
+    void FetchDescribe(const std::string& name, std::string status, std::string error_path);
     void Edit(const std::string& method, nlohmann::json request);
     // The endpoint's answer, or {"error": ...} when there was none.
     nlohmann::json Call(const std::string& method, const nlohmann::json& request);

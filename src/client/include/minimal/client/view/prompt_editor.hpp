@@ -239,11 +239,12 @@ ftxui::Component MakePromptEditor(
     // PromptHistory).
     PromptHistory* history = nullptr,
     // The editor's own keymap actions -- "prompt.newline", "prompt.undo",
-    // "prompt.redo" (keybindings.json) -- as `matches(action, event)`. RunTui
-    // passes `keymap.Matches` so a user's rebind (see the NEWLINE comment
-    // above) takes effect. Null (the default, test call sites) falls back to
-    // the default keys: IsNewlineEvent's hardcoded candidate list for the
-    // newline, alt+z / ctrl+alt+z for undo / redo.
+    // "prompt.redo", "prompt.clear" (keybindings.json) -- as
+    // `matches(action, event)`. RunTui passes `keymap.Matches` so a user's
+    // rebind (see the NEWLINE comment above) takes effect. Null (the default,
+    // test call sites) falls back to the default keys: IsNewlineEvent's
+    // hardcoded candidate list for the newline, alt+z / ctrl+alt+z for undo /
+    // redo, ctrl+alt+u for clear.
     std::function<bool(std::string_view action, const ftxui::Event&)> key_matches = nullptr);
 
 // THE PER-TAB PROMPT EDITOR. A stable outer component in the FTXUI tree that

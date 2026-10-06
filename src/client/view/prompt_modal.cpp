@@ -76,9 +76,22 @@ Element ModalBody(const Theme& theme, Element content) {
 
 Element ModalFrame(const Theme& theme, const std::string& title, Elements rows,
                    const std::string& footer, int max_width) {
+    return ModalFrame(theme, title, std::move(rows), {}, footer, max_width);
+}
+
+Element ModalFrame(const Theme& theme, const std::string& title, Elements rows, Elements pinned,
+                   const std::string& footer, int max_width) {
     using namespace ftxui;
+    // The pinned rows (and their rule) come out of the scrolling budget, so
+    // the frame as a whole still fits and the hints stay on screen.
+    const int pinned_rows = pinned.empty() ? 0 : kModalPinnedMaxRows + 1;
     Elements body{vbox(std::move(rows)) | yframe | vscroll_indicator |
-                  size(HEIGHT, LESS_THAN, ModalBodyHeightBudget())};
+                  size(HEIGHT, LESS_THAN, std::max(ModalBodyHeightBudget() - pinned_rows, 1))};
+    if (!pinned.empty()) {
+        body.push_back(ModalRule(theme));
+        body.push_back(vbox(std::move(pinned)) | yframe |
+                       size(HEIGHT, LESS_THAN, kModalPinnedMaxRows));
+    }
     if (!footer.empty()) {
         body.push_back(ModalRule(theme));
         body.push_back(paragraph(footer) | Muted(theme));

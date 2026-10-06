@@ -1,10 +1,12 @@
 #pragma once
 
-// `minimal plugin ...`: plugin configuration from a shell. The work happens in
-// `minimal-server plugin ...` (src/server/plugin_cli.hpp) -- only the server
-// side can open a server plugin for its schema -- which this runs as a child,
-// passing the terminal through. After a successful set/unset it tells a
-// running server (if there is one) to apply the change.
+// `minimal plugin ...`: plugin configuration from a shell. With a server
+// running, set/unset go through its `plugins` endpoint: validated in the
+// server's own process and environment (an "env:" reference resolves against
+// its variables, not this shell's), written, and applied. Everything else --
+// and every edit when no server runs -- happens in `minimal-server plugin ...`
+// (src/server/plugin_cli.hpp; only the server side can open a server plugin
+// for its schema), run as a child with the terminal passed through.
 
 #include <string>
 #include <vector>

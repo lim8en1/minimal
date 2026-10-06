@@ -100,6 +100,13 @@ ftxui::Decorator SelectionStyle(const Theme& theme) {
     return ftxui::color(fg) | ftxui::bgcolor(bg);
 }
 
+ftxui::Decorator CaretStyle(const Theme& theme) {
+    const ftxui::Color block = theme.ColorForOr("cursor", "row_focused");
+    const ftxui::Color glyph = theme.ColorFor("status_bar_bg");
+    if (block == ftxui::Color::Default || glyph == ftxui::Color::Default) return ftxui::inverted;
+    return ftxui::color(glyph) | ftxui::bgcolor(block);
+}
+
 ftxui::Color MutedColor(const Theme& theme) {
     return theme.ColorForOr("muted", "system_message");
 }
