@@ -89,6 +89,7 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     settings_config_test.cpp
     config_reader_test.cpp
     config_docs_drift_test.cpp
+    last_selection_test.cpp
     read_file_test.cpp
     permissions_config_test.cpp
     agent_preset_frontmatter_test.cpp

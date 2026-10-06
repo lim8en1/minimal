@@ -283,7 +283,21 @@ bool AgentPresetRegistry::PresetDeclaresModel(const std::string& preset_name,
     bool from_project = false;
     const std::filesystem::path preset_path =
         FindPresetPath(preset_name, EffectiveRoot(requested_root), from_project);
-    return !LoadAgentPresetFrontmatter(preset_path, tool_permission_keys_.vocabulary()).model.empty();
+    const std::string model =
+        LoadAgentPresetFrontmatter(preset_path, tool_permission_keys_.vocabulary()).model;
+    if (model.empty()) return false;
+    // A declared model this machine's providers.json cannot serve (a project
+    // preset written elsewhere) is a preference, not a requirement: warn and
+    // let the spawn fall through to the next model in its chain.
+    const auto ref = config::SplitModelRef(model);
+    if (!ref || providers_.Resolve(*ref) == nullptr) {
+        common::DefaultLogger().warn(
+            "agent preset '{}' declares model '{}', which providers.json does not define; the "
+            "subagent runs on its fallback model",
+            preset_name, model);
+        return false;
+    }
+    return true;
 }
 
 AgentPreset AgentPresetRegistry::ResolveUncached(
@@ -332,14 +346,18 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
                                      config::DescribeDiscovery(providers_, model_override->provider));
         }
     } else {
-        // The preset's model, or settings.default_model when it declares none.
-        // Both are already known to be <provider>/<model>-shaped -- the
-        // frontmatter parser checks its own, and an unparseable default_model
-        // is caught here rather than being silently treated as absent.
-        const std::string model_text = raw.model.empty() ? settings_.default_model : raw.model;
+        // A preset's own `model:` applies only when it runs AS A SUBAGENT (the
+        // spawn path, the only caller passing `parent`): a cheap explorer, a
+        // fast reviewer. A primary session runs the user's choice, else
+        // settings.default_model -- switching agents never switches models.
+        const bool as_subagent = parent != nullptr;
+        const std::string model_text =
+            as_subagent && !raw.model.empty() ? raw.model : settings_.default_model;
         if (model_text.empty()) {
-            throw std::runtime_error("agent preset '" + preset_name +
-                                     "' declares no model and settings.json has no default_model");
+            throw std::runtime_error(
+                as_subagent ? "agent preset '" + preset_name +
+                                  "' declares no model and settings.json has no default_model"
+                            : "no model selected and settings.json has no default_model");
         }
         // SplitModelRef, matching ParseAgentPresetFrontmatter's own shape check
         // (see its comment) and settings.json default_model's own
@@ -347,13 +365,16 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
         // slash-bearing model ids, and this resolve step must accept whatever
         // the frontmatter parser already accepted.
         const auto ref = config::SplitModelRef(model_text);
+        const std::string source = model_text == raw.model && as_subagent
+                                       ? "agent preset '" + preset_name + "'"
+                                       : std::string("settings.json default_model");
         if (!ref) {
-            throw std::runtime_error("agent preset '" + preset_name + "': model '" + model_text +
+            throw std::runtime_error(source + ": model '" + model_text +
                                      "' must be <provider>/<model>, e.g. local/qwen4");
         }
         resolved_model = providers_.Resolve(*ref);  // snapshot; see ProvidersConfig::Resolve
         if (!resolved_model) {
-            throw std::runtime_error("agent preset '" + preset_name + "' names unknown model '" +
+            throw std::runtime_error(source + " names unknown model '" +
                                      model_text + "'; providers.json defines " +
                                      config::DescribeModels(providers_) +
                                      config::DescribeDiscovery(providers_, ref->provider));
@@ -370,7 +391,7 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     // Plugin prompt appendices (preloaded skill bodies) join below, once the
     // preset's permission models are bound -- they read them.
     preset.system_prompt = raw.body;
-    preset.model_declared = !raw.model.empty();
+    preset.model_declared = parent != nullptr && !raw.model.empty();
     ApplyModel(preset, *resolved_model);
     // Preset extras (temperature, top_p, reasoningEffort, ...) override the
     // model config's defaults: an agent declaring `temperature: 0.1` means it,

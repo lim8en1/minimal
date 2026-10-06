@@ -94,7 +94,8 @@ private:
 // A configuration that passes every check: the baseline each broken fixture is
 // one mutation away from.
 void WriteGoodConfig(const std::filesystem::path& dir) {
-    WriteFile(dir / "settings.json", R"({"default_agent_preset":"build"})");
+    WriteFile(dir / "settings.json",
+              R"({"default_agent_preset":"build","default_model":"fixture-main/test-model"})");
     WriteFile(dir / "permissions.json", R"({})");
     WriteFile(dir / "providers.json",
               R"({"providers":{"fixture-main":{"backend":"fixture",)"
@@ -312,17 +313,20 @@ TEST_CASE("no usable provider entry is fatal; a bad kind alone is a warning", "[
     CHECK(hits[1]->severity == CheckSeverity::Fatal);     // nothing usable remains
 }
 
-TEST_CASE("a default_model naming no configured model warns", "[sanity_check][usable_provider]") {
+TEST_CASE("a default_model naming no configured model is fatal", "[sanity_check][presets]") {
+    // Every primary session runs on default_model unless one is chosen, so a
+    // typo here breaks every client that names no model.
     Fixture f;
     WriteGoodConfig(f.config_dir);
     ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
     f.Write("settings.json", R"({"default_agent_preset":"build","default_model":"ghost/nope"})");
 
     const auto results = RunChecks(f);
-    const auto hits = ByCheck(results, "usable_provider");
+    CHECK(ByCheck(results, "usable_provider").empty());
+    const auto hits = ByCheck(results, "presets");
     REQUIRE(hits.size() == 1);
-    CHECK(hits[0]->severity == CheckSeverity::Warning);
-    CHECK(hits[0]->message.find("ghost") != std::string::npos);
+    CHECK(hits[0]->severity == CheckSeverity::Fatal);
+    CHECK(hits[0]->message.find("ghost/nope") != std::string::npos);
 }
 
 TEST_CASE("compaction_keep_recent_tokens at or above a fixed trigger warns",
@@ -449,7 +453,8 @@ TEST_CASE("two plugins registering one model catalog warns", "[sanity_check][pro
 // A config whose only provider is a discover-entry, and whose preset names a
 // model the catalog (not the file) defines.
 void WriteDiscoverConfig(const std::filesystem::path& dir, const char* backend = "fixture") {
-    WriteFile(dir / "settings.json", R"({"default_agent_preset":"build"})");
+    WriteFile(dir / "settings.json",
+              R"({"default_agent_preset":"build","default_model":"disc/some-model"})");
     WriteFile(dir / "permissions.json", R"({})");
     WriteFile(dir / "providers.json",
               std::string(R"({"providers":{"disc":{"backend":")") + backend +
@@ -477,9 +482,11 @@ TEST_CASE("a discover-only provider with a registered catalog is usable and sile
     f.model_catalogs.Register("fixture", std::make_shared<FakeCatalog>());
 
     const auto results = RunChecks(f);
-    // Zero findings: the backend is registered, the catalog exists, and the
-    // preset's model is unverifiable at startup -- which is not a problem.
-    CHECK(results.empty());
+    // The backend is registered and the catalog exists; the one finding is the
+    // heads-up that default_model is unverifiable without a network call.
+    REQUIRE(results.size() == 1);
+    CHECK(results[0].severity == CheckSeverity::Warning);
+    CHECK(results[0].message.find("cannot verify") != std::string::npos);
 }
 
 TEST_CASE("a discover-entry whose backend registers no catalog warns",
@@ -510,10 +517,11 @@ TEST_CASE("a discover-only provider with an unregistered backend is fatal",
 
     const auto results = RunChecks(f);
     const auto hits = ByCheck(results, "usable_provider");
-    REQUIRE(hits.size() == 2);
+    REQUIRE(hits.size() == 3);
     CHECK(hits[0]->severity == CheckSeverity::Warning);  // names the entry and the kind
     CHECK(hits[0]->message.find("discovery") != std::string::npos);
     CHECK(hits[1]->severity == CheckSeverity::Fatal);    // nothing usable remains
+    CHECK(hits[2]->message.find("cannot verify") != std::string::npos);  // default_model
 }
 
 TEST_CASE("a default_model under a discover-entry warns as unverified, not unresolvable",
@@ -574,7 +582,22 @@ TEST_CASE("the default preset must resolve end to end", "[sanity_check][presets]
         CHECK(hits[0]->severity == CheckSeverity::Fatal);
         CHECK(hits[0]->message.find("ghost") != std::string::npos);
     }
-    // Present, but its provider chain is broken.
+    // Present, but the model a primary session runs on is broken.
+    {
+        Fixture f;
+        WriteGoodConfig(f.config_dir);
+        ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+        f.Write("settings.json",
+                R"({"default_agent_preset":"build","default_model":"no-such/model"})");
+
+        const auto results = RunChecks(f);
+        const auto hits = ByCheck(results, "presets");
+        REQUIRE(hits.size() == 1);
+        CHECK(hits[0]->severity == CheckSeverity::Fatal);
+        CHECK(hits[0]->message.find("no-such/model") != std::string::npos);
+    }
+    // A preset's own unresolvable `model:` only affects it as a subagent:
+    // a warning, never fatal -- spawns fall back.
     {
         Fixture f;
         WriteGoodConfig(f.config_dir);
@@ -584,8 +607,9 @@ TEST_CASE("the default preset must resolve end to end", "[sanity_check][presets]
         const auto results = RunChecks(f);
         const auto hits = ByCheck(results, "presets");
         REQUIRE(hits.size() == 1);
-        CHECK(hits[0]->severity == CheckSeverity::Fatal);
-        CHECK(hits[0]->message.find("no-such/model") != std::string::npos);
+        CHECK(hits[0]->severity == CheckSeverity::Warning);
+        CHECK(hits[0]->message.find("subagent model") != std::string::npos);
+        CHECK_FALSE(HasFatal(results));
     }
 }
 

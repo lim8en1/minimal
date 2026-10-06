@@ -34,7 +34,7 @@ struct SkillsHarness {
     SkillsHarness() {
         Write("providers.json",
               R"({"providers":{"p":{"backend":"openai","url":"http://x/v1","models":{"m":{}}}}})");
-        Write("settings.json", R"({"default_agent_preset":"build"})");
+        Write("settings.json", R"({"default_agent_preset":"build","default_model":"p/m"})");
         Write("permissions.json", "{}");
         Write("skills/alpha/SKILL.md", "---\nname: alpha\ndescription: First skill.\n---\nAlpha body.\n");
         Write("skills/beta/SKILL.md", "---\nname: beta\ndescription: Second skill.\n---\nBeta body.\n");

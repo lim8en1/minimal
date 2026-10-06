@@ -690,6 +690,9 @@ message SessionSummary {
   // Session FORK provenance (v7 store): the source session this one forked
   // from, empty otherwise. A fork is a top-level peer -- NOT a subagent.
   string forked_from_session_id = 10;
+  // The session's own model choice ("<provider>/<model>"); empty = it runs
+  // settings.json default_model.
+  string model = 11;
 }
 
 message ListSessionsRequest {
@@ -773,6 +776,9 @@ message ListModelsRequest {
 
 message ListModelsResponse {
   repeated ModelSummary models = 1;
+  // settings.json default_model: what "/model default" (the picker's leading
+  // "default" row) returns a session to. Empty when unset.
+  string default_model = 2;
 }
 
 // Deletes a stored session that no stream has open. The database delete
@@ -824,6 +830,12 @@ message CreateSessionRequest {
   // apply to sessions that never subscribed). Re-supplied on resume;
   // subscriptions never persist across a stream.
   repeated string signals = 7;
+  // agent_preset/model are a REMEMBERED preference (the client's last pick
+  // for this project), not a choice made now: one that no longer resolves
+  // (a preset deleted, a provider removed) falls back -- model first, then
+  // agent -- instead of refusing the session. The response's SessionSummary
+  // says what actually ran, so the client can forget what was dropped.
+  bool remembered_selection = 8;
 }
 
 message CreateSessionResponse {

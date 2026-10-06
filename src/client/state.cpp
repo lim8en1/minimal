@@ -191,9 +191,15 @@ void SessionState::SetSessionId(std::string session_id) {
     session_id_ = std::move(session_id);
 }
 
-void SessionState::SetDesiredModel(std::string model_ref) {
+void SessionState::SetDesiredModel(std::string model_ref, bool is_default) {
     std::lock_guard lk(mtx_);
     desired_model_ = std::move(model_ref);
+    desired_model_default_ = is_default;
+}
+
+bool SessionState::DesiredModelIsDefault() const {
+    std::lock_guard lk(mtx_);
+    return desired_model_default_;
 }
 
 void SessionState::SetDesiredAgentPreset(std::string preset_name) {
@@ -237,7 +243,10 @@ std::vector<std::string> SessionState::ConvergenceCommands() const {
         out.push_back("/agent " + desired_agent_);
     }
     if (!desired_model_.empty() && desired_model_ != model_) {
-        out.push_back("/model " + desired_model_);
+        // "Back to the default" clears the session's choice rather than
+        // pinning the default's ref, so a later settings change still applies.
+        out.push_back(desired_model_default_ ? std::string("/model default")
+                                             : "/model " + desired_model_);
     }
     return out;
 }
@@ -1826,9 +1835,18 @@ std::string AppState::EnsureSession(const std::string& tab_id) {
         // session converges at the first turn instead (SubmitChatTurn).
         const auto desired_model = tab->info.state->DesiredModel();
         const auto desired_agent = tab->info.state->DesiredAgentPreset();
-        if (!desired_model.empty()) opts.model = desired_model;
+        if (tab->info.state->DesiredModelIsDefault()) {
+            opts.model.clear();  // no override: the session runs default_model
+            opts.remembered_selection = false;
+        } else if (!desired_model.empty()) {
+            opts.model = desired_model;
+            // A choice made now is a decision, not a preference: refused
+            // when it does not resolve, never silently dropped.
+            opts.remembered_selection = false;
+        }
         if (!desired_agent.empty() && opts.resume_session_id.empty()) {
             opts.agent_preset = desired_agent;
+            opts.remembered_selection = false;
         }
     }
 
@@ -1838,6 +1856,9 @@ std::string AppState::EnsureSession(const std::string& tab_id) {
 
     bool tab_gone = false;      // closed while the create was in flight
     bool create_failed = false; // the create was refused (or no server reachable)
+    bool dropped_agent = false; // a remembered pick the server did not honor
+    bool dropped_model = false;
+    SelectionHooks selection_hooks;
     std::vector<std::function<void(const std::string&)>> drained;
     {
         std::lock_guard lk(mtx_);
@@ -1864,6 +1885,30 @@ std::string AppState::EnsureSession(const std::string& tab_id) {
                 tab->stream = stream;
                 tab->info.session_id = *sid;
                 tab->info.state->SetSessionId(*sid);
+                if (opts.remembered_selection) {
+                    // The server started without whatever part of the
+                    // remembered pick no longer resolves: say so once, and
+                    // forget it (below, outside the lock).
+                    const auto& created = stream->created();
+                    dropped_agent = !opts.agent_preset.empty() &&
+                                    created.agent_preset() != opts.agent_preset;
+                    dropped_model = !opts.model.empty() && created.model() != opts.model;
+                    if (dropped_agent || dropped_model) {
+                        std::string what;
+                        if (dropped_agent) what = "agent '" + opts.agent_preset + "'";
+                        if (dropped_model) {
+                            what += (what.empty() ? "" : " and ") + std::string("model '") +
+                                    opts.model + "'";
+                        }
+                        v1::CommandResult notice;
+                        notice.set_status(v1::COMMAND_STATUS_OK);
+                        notice.set_message("your last pick (" + what +
+                                           ") is no longer available here; started with the "
+                                           "defaults");
+                        tab->info.state->OnCommandResult(notice);
+                    }
+                    selection_hooks = selection_hooks_;
+                }
                 // Close the fast path BEFORE the backlog drains: a submit
                 // landing between this unlock and the drained sends would
                 // otherwise overtake them (reordered FIFO submissions -- the
@@ -1884,6 +1929,9 @@ std::string AppState::EnsureSession(const std::string& tab_id) {
         return "";
     }
     if (create_failed) return "";
+    if ((dropped_agent || dropped_model) && selection_hooks.dropped) {
+        selection_hooks.dropped(dropped_agent, dropped_model);
+    }
 
     WireOnClosed(*stream, *sid);
     stream->Resume();   // start threads AFTER unlock — a dispatched event must find this entry
@@ -1910,25 +1958,41 @@ std::string AppState::EnsureSession(const std::string& tab_id) {
     return *sid;
 }
 
-bool AppState::StageModel(const std::string& tab_id, const std::string& model_ref) {
-    std::lock_guard lk(mtx_);
-    TabEntry* tab = FindTab(tab_id);
-    if (tab == nullptr) return false;
-    // The same desired state on every tab (see the header): EnsureSession
-    // overlays it onto the create request, and SubmitChatTurn converges a
-    // live session to it at the next turn boundary.
-    tab->info.state->SetDesiredModel(model_ref);
+bool AppState::StageModel(const std::string& tab_id, const std::string& model_ref,
+                          bool is_default) {
+    SelectionHooks hooks;
+    {
+        std::lock_guard lk(mtx_);
+        TabEntry* tab = FindTab(tab_id);
+        if (tab == nullptr) return false;
+        // The same desired state on every tab (see the header): EnsureSession
+        // overlays it onto the create request, and SubmitChatTurn converges a
+        // live session to it at the next turn boundary.
+        tab->info.state->SetDesiredModel(model_ref, is_default);
+        hooks = selection_hooks_;
+    }
     BumpUiVersion();
+    if (hooks.picked) hooks.picked(std::nullopt, is_default ? std::string() : model_ref);
     return true;
 }
 
 bool AppState::StageAgentPreset(const std::string& tab_id, const std::string& preset_name) {
-    std::lock_guard lk(mtx_);
-    TabEntry* tab = FindTab(tab_id);
-    if (tab == nullptr) return false;
-    tab->info.state->SetDesiredAgentPreset(preset_name);
+    SelectionHooks hooks;
+    {
+        std::lock_guard lk(mtx_);
+        TabEntry* tab = FindTab(tab_id);
+        if (tab == nullptr) return false;
+        tab->info.state->SetDesiredAgentPreset(preset_name);
+        hooks = selection_hooks_;
+    }
     BumpUiVersion();
+    if (hooks.picked) hooks.picked(preset_name, std::nullopt);
     return true;
+}
+
+void AppState::SetSelectionHooks(SelectionHooks hooks) {
+    std::lock_guard lk(mtx_);
+    selection_hooks_ = std::move(hooks);
 }
 
 void AppState::RunSessionlessCommand(const std::string& tab_id, const std::string& line) {

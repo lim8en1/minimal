@@ -161,12 +161,40 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     launch.run_mode = FromProto(request->run_mode());
     launch.model = request->model();
     launch.signals.assign(request->signals().begin(), request->signals().end());
-    try {
-        *response->mutable_session() = ToProto(agent::Launch(*launch_context_, launch));
-    } catch (const agent::LaunchError& error) {
-        return ToStatus(error);
-    } catch (const std::exception& error) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, error.what());
+    // A remembered selection is a preference: when it no longer resolves, the
+    // session starts without it -- the model dropped first, then the agent --
+    // rather than leaving the user with a tab that cannot start. A failed
+    // attempt rolls its row back (Create), so retrying leaves no residue.
+    std::vector<agent::LaunchRequest> attempts{launch};
+    if (request->remembered_selection() && launch.session_id.empty()) {
+        if (!launch.model.empty()) {
+            attempts.push_back(attempts.back());
+            attempts.back().model.clear();
+        }
+        if (!launch.agent_preset.empty()) {
+            attempts.push_back(attempts.back());
+            attempts.back().agent_preset.clear();
+        }
+    }
+    for (std::size_t i = 0; i < attempts.size(); ++i) {
+        try {
+            *response->mutable_session() = ToProto(agent::Launch(*launch_context_, attempts[i]));
+            if (i > 0) {
+                logger_.warn("CreateSession: the remembered selection (agent '{}', model '{}') "
+                             "did not resolve; started with agent '{}' and {}",
+                             launch.agent_preset, launch.model, response->session().agent_preset(),
+                             response->session().model().empty()
+                                 ? std::string("the default model")
+                                 : "model '" + response->session().model() + "'");
+            }
+            return grpc::Status::OK;
+        } catch (const agent::LaunchError& error) {
+            if (i + 1 == attempts.size()) return ToStatus(error);
+        } catch (const std::exception& error) {
+            if (i + 1 == attempts.size()) {
+                return grpc::Status(grpc::StatusCode::INTERNAL, error.what());
+            }
+        }
     }
     return grpc::Status::OK;
 }
@@ -904,6 +932,7 @@ grpc::Status SessionServiceImpl::ListModels(grpc::ServerContext* context,
 
     if (presets_ == nullptr) return grpc::Status::OK;  // empty list; see set_presets
     const auto& providers = presets_->providers();
+    response->set_default_model(presets_->default_model());
 
     // refresh_discovery is the /providers refresh role, relocated into the
     // picker: an explicit re-fetch of every discover-entry's catalog before

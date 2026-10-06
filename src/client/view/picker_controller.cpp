@@ -350,18 +350,20 @@ void PickerController::OpenModelPickerFetch(bool refresh) {
     RebuildModelPickerComponent();
     SessionClient::ListModelsOptions opts;
     opts.refresh_discovery = refresh;
-    RunFetch<std::vector<v1::ModelSummary>>(
+    RunFetch<v1::ListModelsResponse>(
         model_fetch_,
-        [this, opts](std::string& error) -> std::optional<std::vector<v1::ModelSummary>> {
-            const auto result = deps_.client.ListModels(opts);
+        [this, opts](std::string& error) -> std::optional<v1::ListModelsResponse> {
+            auto result = deps_.client.ListModels(opts);
             if (!result.status.ok()) {
                 error = result.status.error_message();
                 return std::nullopt;
             }
-            return std::vector<v1::ModelSummary>(result.response.models().begin(),
-                                                 result.response.models().end());
+            return std::move(result.response);
         },
-        [this](std::vector<v1::ModelSummary>&& models) { model_picker_models_ = std::move(models); },
+        [this](v1::ListModelsResponse&& response) {
+            model_picker_models_.assign(response.models().begin(), response.models().end());
+            model_picker_default_ = response.default_model();
+        },
         [this] { RebuildModelPickerComponent(); }, "model picker");
 }
 
@@ -370,6 +372,11 @@ void PickerController::RebuildModelPickerComponent() {
     if (model_picker_subagent_) {
         callbacks.leading_row_label = "same as parent";
         callbacks.leading_row_id = kSameAsParentRowId;
+    } else {
+        // Back to settings.json default_model: clears the tab's own choice.
+        callbacks.leading_row_label =
+            model_picker_default_.empty() ? "default" : "default (" + model_picker_default_ + ")";
+        callbacks.leading_row_id = kDefaultModelRowId;
     }
     callbacks.on_select =
         [this](const std::string& ref) {
@@ -398,9 +405,14 @@ void PickerController::RebuildModelPickerComponent() {
             // reason the agent picker stages through it.
             const std::string tab = deps_.focused_or_new_tab();
             if (!tab.empty()) {
-                deps_.app.StageModel(tab, ref);
-                deps_.app.TabNotice(tab, "model '" + ref +
-                                              "' will be used on your next message");
+                if (ref == kDefaultModelRowId) {
+                    deps_.app.StageModel(tab, model_picker_default_, /*is_default=*/true);
+                    deps_.app.TabNotice(tab, "the default model will be used on your next message");
+                } else {
+                    deps_.app.StageModel(tab, ref);
+                    deps_.app.TabNotice(tab, "model '" + ref +
+                                                  "' will be used on your next message");
+                }
             }
             deps_.show_model_picker = false;
         };

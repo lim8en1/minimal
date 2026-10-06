@@ -60,7 +60,8 @@ struct SubagentE2EFixture {
                                  {"url", "http://localhost/v1"},
                                  {"models", {{"child-script", nlohmann::json::object()}}}}}}}}
                   .dump());
-        Write("settings.json", nlohmann::json{{"default_agent_preset", "main"}}.dump());
+        Write("settings.json", nlohmann::json{{"default_agent_preset", "main"},
+                                              {"default_model", "main/parent-script"}}.dump());
         // spawn_subagent is Execute, Ask by default; AllowOnly would auto-deny
         // it, which is correct for bash but useless for a test about spawning.
         Write("permissions.json",

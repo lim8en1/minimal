@@ -58,7 +58,9 @@ struct TempConfigDir {
     // A minimal, valid tree every test can start from and then perturb.
     void WriteDefaults() const {
         WriteJson("providers.json", DefaultProviders());
-        WriteJson("settings.json", nlohmann::json::object());
+        // A primary session runs default_model; a preset's own `model:`
+        // applies only when it is spawned as a subagent.
+        WriteJson("settings.json", {{"default_model", "openai-main/gpt-4o-mini"}});
         WriteJson("permissions.json", nlohmann::json::object());
         Write("agents/build.md",
               "---\n"
@@ -97,8 +99,7 @@ TEST_CASE("AgentPresetRegistry: the model's context_window_tokens reaches the re
     // is the case the flat schema could not express at all.
     TempConfigDir config;
     config.WriteDefaults();
-    config.Write("agents/build.md",
-                 "---\nname: build\nmodel: openai-main/small\n---\nbody\n");
+    config.WriteJson("settings.json", {{"default_model", "openai-main/small"}});
     AgentPresetRegistry registry(config.dir,
                                   config::LoadSettingsConfig(config.dir / "settings.json"));
 
@@ -107,7 +108,7 @@ TEST_CASE("AgentPresetRegistry: the model's context_window_tokens reaches the re
     CHECK(*preset.context_window_tokens == 32768);
 }
 
-TEST_CASE("AgentPresetRegistry: a preset picks which of a provider's models it uses",
+TEST_CASE("AgentPresetRegistry: a preset's model applies when it is spawned as a subagent",
           "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();
@@ -120,7 +121,13 @@ TEST_CASE("AgentPresetRegistry: a preset picks which of a provider's models it u
     AgentPresetRegistry registry(config.dir,
                                   config::LoadSettingsConfig(config.dir / "settings.json"));
 
-    const auto& preset = registry.Resolve("build");
+    // As a primary session: the user's choice, else default_model -- switching
+    // agents never switches models.
+    CHECK(registry.Resolve("build").provider.model_name == "gpt-4o-mini");
+
+    // As a subagent (the spawn path passes the parent): the preset's own.
+    const auto parent = registry.Resolve("build");
+    const auto preset = registry.Resolve("build", {}, &parent);
     CHECK(preset.provider.model_name == "gpt-4.1");
     // Same connection, that model's own cap.
     CHECK(preset.provider.base_url == "https://api.openai.com/v1");
@@ -173,10 +180,14 @@ TEST_CASE("AgentPresetRegistry: model_declared records whether the preset named 
     CHECK(fallback.provider.model_name == "gpt-4o-mini");
     CHECK_FALSE(fallback.model_declared);
 
-    // Resolved from the preset's own `model:`: declared.
-    const auto declared = registry.Resolve("other");
+    // Resolved from the preset's own `model:` -- only on the spawn path.
+    const auto declared = registry.Resolve("other", {}, &fallback);
     CHECK(declared.provider.model_name == "gpt-4.1");
     CHECK(declared.model_declared);
+    // As a primary session the declaration does not apply.
+    const auto primary = registry.Resolve("other");
+    CHECK(primary.provider.model_name == "gpt-4o-mini");
+    CHECK_FALSE(primary.model_declared);
 
     // A model_override stamps the model but does not invent a declaration:
     // the caller chose the model, the preset still did not.
@@ -316,8 +327,9 @@ TEST_CASE("AgentPresetRegistry: an unknown model names what is available",
     AgentPresetRegistry registry(config.dir,
                                   config::LoadSettingsConfig(config.dir / "settings.json"));
 
+    AgentPreset parent;
     try {
-        registry.Resolve("build");
+        registry.Resolve("build", {}, &parent);
         FAIL("expected an unknown model to throw");
     } catch (const std::runtime_error& error) {
         const std::string message = error.what();
@@ -326,7 +338,7 @@ TEST_CASE("AgentPresetRegistry: an unknown model names what is available",
     }
 }
 
-TEST_CASE("AgentPresetRegistry: a preset naming a discover-only model resolves through discovery",
+TEST_CASE("AgentPresetRegistry: a discover-only default_model resolves through discovery",
           "[agent_preset_registry][discover]") {
     // Track N: providers.json need not name every model. The preset resolves at
     // first use, the catalog is consulted lazily through the injected hook, and
@@ -339,10 +351,9 @@ TEST_CASE("AgentPresetRegistry: a preset naming a discover-only model resolves t
                          {{"backend", "openai"},
                           {"url", "http://localhost:8000/v1"},
                           {"discover", true}}}}}});
-    config.WriteJson("settings.json", nlohmann::json::object());
+    config.WriteJson("settings.json", {{"default_model", "disc/served-model"}});
     config.WriteJson("permissions.json", nlohmann::json::object());
-    config.Write("agents/build.md",
-                 "---\nname: build\nmodel: disc/served-model\n---\nbody\n");
+    config.Write("agents/build.md", "---\nname: build\n---\nbody\n");
     auto catalog = config::LoadProvidersConfig(config.dir / "providers.json");
     AgentPresetRegistry registry(config.dir,
                                  config::LoadSettingsConfig(config.dir / "settings.json"),
@@ -367,12 +378,10 @@ TEST_CASE("AgentPresetRegistry: a preset naming a discover-only model resolves t
     CHECK(preset.provider.model_name == "served-model");
     CHECK(calls == 1);  // the fetch happened once, at first resolve
 
-    // And a preset naming a model the catalog does not serve reports why.
-    config.Write("agents/other.md",
-                 "---\nname: other\nmodel: disc/absent\n---\nbody\n");
+    // And a model the catalog does not serve reports why.
     bool threw = false;
     try {
-        registry.Resolve("other");
+        registry.Resolve("build", {}, nullptr, common::SplitModelRef("disc/absent"));
     } catch (const std::runtime_error& error) {
         threw = true;
         const std::string message = error.what();
@@ -913,8 +922,11 @@ TEST_CASE("AgentPresetRegistry: a project preset shadows a global one of the sam
 
     const auto preset = registry.Resolve("build", project_root);
     CHECK(preset.system_prompt == "PROJECT BUILD.\n");
-    // The project frontmatter won: gpt-4.1, not the global preset's gpt-4o-mini.
-    CHECK(preset.model_ref.str() == "openai-main/gpt-4.1");
+    // A primary session runs default_model; the project frontmatter's model
+    // applies when the preset is spawned.
+    CHECK(preset.model_ref.str() == "openai-main/gpt-4o-mini");
+    CHECK(registry.Resolve("build", project_root, &preset).model_ref.str() ==
+          "openai-main/gpt-4.1");
 
     // The global view is one Resolve away, unchanged: an empty root (or a
     // different root) reads the global file.

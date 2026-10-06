@@ -285,6 +285,9 @@ public:
     // rather than re-loaded by callers who need to resolve a model the USER
     // named (--model, /model): two loads would be two sources of truth.
     const config::ProvidersConfig& providers() const { return providers_; }
+    // settings.json default_model: what a primary session runs on when no
+    // model was chosen (`/model default` returns to it).
+    const std::string& default_model() const { return settings_.default_model; }
 
 private:
     // Exactly one of `owned` / `borrowed` is set.

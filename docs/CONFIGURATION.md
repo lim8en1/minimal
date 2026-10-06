@@ -9,7 +9,7 @@ this order (both server and client):
 
 Runtime state (SQLite session store, logs, plugin KV storage) lives in a
 separate data dir: `$XDG_DATA_HOME/minimal`, else `$HOME/.local/share/minimal`. So do
-stored keys (`secrets.json`, mode 0600 — see [Secrets](#secrets)). The TUI keeps its up-arrow prompt history there too (`prompt_history.json`: the newest 500 submitted lines, at most 1 MiB); delete the file to clear it.
+stored keys (`secrets.json`, mode 0600 — see [Secrets](#secrets)). The TUI keeps its up-arrow prompt history there too (`prompt_history.json`: the newest 500 submitted lines, at most 1 MiB); delete the file to clear it. And the last agent/model you picked, per project (`last_selection.json`): every new tab starts on it, `--agent`/`--model` outrank it, and a remembered pick that no longer resolves (a preset deleted, a provider removed) is dropped with a one-line notice instead of failing the tab. Picking **default** in the `/model` picker (or `/model default`) returns to `settings.json` `default_model` and is remembered as such. The headless client (`-p`) never reads it.
 
 The config dir is seeded from `bundled/` at `cmake --install` time (see
 BUILD.md); existing files are never overwritten. Nothing is seeded at server
@@ -85,7 +85,7 @@ Full example (`bundled/settings.json`):
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `default_agent_preset` | string | `""` | file stem of an `agents/<name>.md` preset; unresolvable value → **fatal** |
-| `default_model` | string | `""` | `"<provider>/<model>"` (see providers.json); a typo → warning at startup, first use fails |
+| `default_model` | string | `""` | `"<provider>/<model>"` (see providers.json) — the model every primary session runs on unless one is chosen; unset or unresolvable → **fatal** (a model under a `discover: true` entry warns as unverifiable instead) |
 | `small_model` | string | `""` | opencode-compat: `"<provider>/<model>"` for the compaction summarizer only; unset/unresolvable → each session compacts on its own model. The summarizer reads the whole working history, so the small model's window must fit the compaction trigger; a different model also gets no prompt-cache reuse |
 | `default_subagent_model` | string | `""` | `"<provider>/<model>"` for spawned subagents whose preset declares no `model:`; unset/unresolvable → children run on the parent's model |
 | `max_concurrent_subagents` | int | `4` | ≥ 0; `0` (subagents disabled) or `> 8` → warning |
@@ -762,8 +762,14 @@ shows through.
 - **`agents/<name>.md`** — agent presets ("declarations"): markdown with
   frontmatter; addressed by file stem (`build`, `plan`). At least one resolvable
   preset is **required**; a broken *non-default* preset only warns. A preset may
-  name its own `model: <provider>/<model>`, overriding `default_model`
-  (`--model` / `/model` override both), and its own `compaction_strategy: <name>`
+  name its own `model: <provider>/<model>` — **it applies only when the preset
+  is spawned as a subagent** (a cheap explorer, a fast reviewer). A primary
+  session runs on the model you chose (`--model`, `/model`, or the last pick
+  remembered for the project) or else `settings.json` `default_model`, and
+  switching agents (`/agent`, the agent picker) never switches models. An
+  unresolvable preset `model:` (a project preset written on another machine)
+  warns at startup and its spawns fall back to `default_subagent_model`, then
+  the parent's model. A preset may also name its own `compaction_strategy: <name>`
   — the strategy kind its compaction summaries use (`summarize`, or a
   plugin's: `structured`; see `memory.compaction_strategy`). Absent = the
   settings-level strategy stands; a name nothing registered warns once per
@@ -967,7 +973,8 @@ Deploy {env} from {branch} per {output:summary.plan}.
   positionals, each `` !`cmd` ``→an anonymous `sh` source. Mixing desugared
   constructs with declared sources works and is lint-warned. Frontmatter
   `model: <provider>/<model>` and `agent: <preset>` ride as PER-TURN
-  overrides: the turn the command submits runs on the borrowed model/preset,
+  overrides: the turn the command submits runs on the borrowed model and/or
+  preset (a borrowed preset brings its prompt and policy, not its `model:`),
   the session's sticky choices untouched; a malformed `model:` refuses to
   load, an unresolvable one fails the turn with a named error. `subtask:`
   still warns as not-yet-supported.

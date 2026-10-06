@@ -85,6 +85,24 @@ std::vector<CommandCatalogEntry> ToCatalogEntries(const v1::ListCommandsResponse
 
 int RunTui(const ParsedArgs& args) { return TuiApp(args).Run(); }
 
+SessionClient::CreateOptions TuiApp::NewTabOptions() const {
+    auto opts = DefaultCreateOptions();
+    if (!args_.headless.agent_preset.empty() || !args_.headless.model.empty()) {
+        // Explicit flags are a decision made now: sent as such, never
+        // softened, and the remembered pick is not consulted.
+        opts.agent_preset = args_.headless.agent_preset;
+        opts.model = args_.headless.model;
+        return opts;
+    }
+    if (last_selection_) {
+        const auto last = last_selection_->For(opts.project_root);
+        opts.agent_preset = last.agent;
+        opts.model = last.model;
+        opts.remembered_selection = !last.agent.empty() || !last.model.empty();
+    }
+    return opts;
+}
+
 int TuiApp::Run() {
     if (const int code = Connect(); code != kOk) return code;
     if (!BuildEnvironment()) {
@@ -242,6 +260,29 @@ void TuiApp::BuildState() {
         prompt_history_.PersistTo(common::DataDir() / "prompt_history.json");
     } catch (const std::exception& error) {   // no $HOME: recall stays per-run
         common::DefaultLogger().warn("prompt history not persisted: {}", error.what());
+    }
+
+    // The last agent/model pick, per project: recorded whenever the user
+    // stages one (picker or /agent, /model), applied to every new tab, and
+    // forgotten when the server can no longer honor it.
+    try {
+        last_selection_ =
+            std::make_shared<const LastSelectionStore>(common::DataDir() / "last_selection.json");
+    } catch (const std::exception& error) {
+        common::DefaultLogger().warn("last agent/model pick not remembered: {}", error.what());
+    }
+    if (last_selection_) {
+        const std::string root = CurrentProjectRootOrEmpty();
+        std::shared_ptr<const LastSelectionStore> store = last_selection_;
+        app_->SetSelectionHooks(AppState::SelectionHooks{
+            [store, root](const std::optional<std::string>& agent,
+                          const std::optional<std::string>& model) {
+                store->Record(root, agent, model);
+            },
+            [store = std::move(store), root](bool agent, bool model) {
+                store->Forget(root, agent, model);
+            },
+        });
     }
 
     // T2: @-mention suggestions used to run SuggestPaths synchronously, on
@@ -847,7 +888,7 @@ void TuiApp::CloseTab(const std::string& id) {
 // before that leaves no row at all.
 std::string TuiApp::FocusedOrNewTab() {
     if (std::string tab = app_->FocusedTabId(); !tab.empty()) return tab;
-    return app_->OpenTab(DefaultCreateOptions());   // local-only; focuses itself
+    return app_->OpenTab(NewTabOptions());   // local-only; focuses itself
 }
 
 void TuiApp::SubmitChat(const std::string& text) {
@@ -970,7 +1011,7 @@ void TuiApp::FocusedNotice(const std::string& text) {
 // opens is SESSIONLESS, so an abandoned "+ new" tab leaves no row behind.
 void TuiApp::OpenNewSession() {
     show_picker_ = false;
-    if (const auto tab = app_->OpenTab(DefaultCreateOptions()); !tab.empty()) {
+    if (const auto tab = app_->OpenTab(NewTabOptions()); !tab.empty()) {
         app_->SetFocusedTab(tab);
     }
 }

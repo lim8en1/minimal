@@ -169,41 +169,22 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
                       available + ")"));
     }
 
-    // The default has to name something, or every session that does not override
-    // it fails at creation with the same message.
+    // default_model's shape and resolution are check_presets' (fatal: every
+    // primary session runs on it). The one case left here is the one that
+    // check cannot judge: a model under a discover-entry, unverifiable without
+    // a network call -- worth a heads-up, since a typo'd discovered id is as
+    // likely as a static one.
     if (bundle_.settings_loaded && !bundle_.settings.default_model.empty()) {
-        // SplitModelRef: default_model is the same user-facing surface as
-        // --model/`/model` and an agent preset's `model:`, and must accept
-        // whatever a discovered catalog's slash-bearing model id those do.
-        const auto ref = common::SplitModelRef(bundle_.settings.default_model);
-        if (!ref) {
-            results.push_back(Warning("usable_provider",
-                                      "settings.json default_model '" + bundle_.settings.default_model +
-                                          "' is not <provider>/<model>"));
-        } else if (bundle_.providers.Resolve(*ref) == nullptr) {
-            // Under a discover-entry a non-static model cannot be VERIFIED at
-            // startup without a network call, which the check never makes -- the
-            // provider exists and discovery answers at first resolve. That is
-            // not a reason to stay silent, though: a typo'd or stale discovered
-            // model id is exactly as likely as a static one, and the operator
-            // deserves the same heads-up at startup rather than finding out only
-            // at first session creation. So this still warns under discovery,
-            // worded to say "unverified", not "matches no configured model".
+        if (const auto ref = common::SplitModelRef(bundle_.settings.default_model);
+            ref && bundle_.providers.Resolve(*ref) == nullptr) {
             const auto entry = bundle_.providers.provider_entries().find(ref->provider);
-            const bool unverifiable = entry != bundle_.providers.provider_entries().end() &&
-                                      entry->second.discover;
-            if (unverifiable) {
+            if (entry != bundle_.providers.provider_entries().end() && entry->second.discover) {
                 results.push_back(Warning(
                     "usable_provider",
                     "settings.json default_model '" + bundle_.settings.default_model +
                         "' is not in provider '" + ref->provider +
                         "'s static model list; it may only resolve through discovery, which this "
                         "check cannot verify without a network call -- confirm it after startup"));
-            } else {
-                results.push_back(Warning("usable_provider",
-                                          "settings.json default_model '" + bundle_.settings.default_model +
-                                              "' matches no configured model" +
-                                              (refs.empty() ? "" : " (have: " + JoinNames(refs) + ")")));
             }
         }
     }
@@ -291,18 +272,11 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
                              "settings.json default_agent_preset"));
     }
 
-    // Resolves the preset's model the way AgentPresetRegistry would: the
-    // preset's own <provider>/<model>, or settings.default_model when it
-    // declares none.
-    const auto preset_problem = [this](const agent::AgentPresetFrontmatter& raw) -> std::optional<std::string> {
+    // Whether `model_text` resolves the way AgentPresetRegistry would resolve
+    // it: <provider>/<model>-shaped, defined (or on a discover entry), and on a
+    // backend some loaded plugin registers.
+    const auto model_problem = [this](const std::string& model_text) -> std::optional<std::string> {
         if (!bundle_.providers_loaded) return std::nullopt;  // config_parse already names it
-        std::string model_text = raw.model;
-        if (model_text.empty()) {
-            model_text = bundle_.settings_loaded ? bundle_.settings.default_model : "";
-            if (model_text.empty()) {
-                return "declares no model and settings.json sets no default_model";
-            }
-        }
         // SplitModelRef, matching AgentPresetRegistry::Resolve and
         // ParseAgentPresetFrontmatter's own shape check (see their comments).
         const auto ref = common::SplitModelRef(model_text);
@@ -328,30 +302,33 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
         return std::nullopt;
     };
 
-    // The DEFAULT preset must resolve end to end: every client that does not
-    // name a preset (the headless client's common case) would fail otherwise.
+    // The DEFAULT preset must exist, and a primary session runs on
+    // settings.default_model (a preset's own `model:` applies only when it is
+    // spawned as a subagent): every client that names no model -- the
+    // headless client's common case -- would fail otherwise.
     if (bundle_.settings_loaded && !bundle_.settings.default_agent_preset.empty()) {
         const auto it = presets_.find(bundle_.settings.default_agent_preset);
         if (it == presets_.end()) {
             results.push_back(Fatal("presets", "default_agent_preset '" + bundle_.settings.default_agent_preset +
                                  "' does not resolve: agents/" + bundle_.settings.default_agent_preset +
                                  ".md is missing or failed to parse"));
-        } else if (auto problem = preset_problem(it->second)) {
-            results.push_back(Fatal("presets", "default_agent_preset '" + bundle_.settings.default_agent_preset +
-                                 "' does not resolve: " + *problem));
+        } else if (bundle_.settings.default_model.empty()) {
+            results.push_back(Fatal("presets", "settings.json default_model is not set: sessions "
+                                               "run on it unless a model is chosen (--model, "
+                                               "/model)"));
+        } else if (auto problem = model_problem(bundle_.settings.default_model)) {
+            results.push_back(Fatal("presets", "settings.json default_model " + *problem));
         }
     }
 
     for (const auto& [preset_name, raw] : presets_) {
-        const bool is_default = bundle_.settings_loaded && preset_name == bundle_.settings.default_agent_preset;
-        // Non-default presets break only the sessions that pick them; a broken
-        // provider chain on the DEFAULT preset was just reported as Fatal above,
-        // and repeating it as a Warning would read as two problems instead of
-        // one. The compression-prompt check still applies to it: a default
-        // preset's missing custom prompt is a distinct problem.
-        if (!is_default) {
-            if (auto problem = preset_problem(raw)) {
-                results.push_back(Warning("presets", "agent preset '" + preset_name + "': " + *problem));
+        // A preset's `model:` is a subagent preference: unresolvable here, a
+        // spawn falls back to default_subagent_model / the parent's model.
+        if (!raw.model.empty()) {
+            if (auto problem = model_problem(raw.model)) {
+                results.push_back(Warning("presets", "agent preset '" + preset_name +
+                                                         "': its subagent model " + *problem +
+                                                         "; spawns of it use their fallback model"));
             }
         }
         if (!raw.compression_prompt.empty() &&

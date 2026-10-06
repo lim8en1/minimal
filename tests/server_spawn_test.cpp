@@ -63,7 +63,7 @@ void SeedConfig(const std::filesystem::path& dir) {
     write("providers.json",
           R"({"providers": {"main": {"backend": "openai", "url": "http://127.0.0.1:9/v1",)"
           R"( "api_key": "test", "models": {"test-model": {}}}}})");
-    write("settings.json", R"({"default_agent_preset": "main"})");
+    write("settings.json", R"({"default_agent_preset": "main", "default_model": "main/test-model"})");
     write("permissions.json", R"({"fallback": {"execute": "ask"}})");
     write("agents/main.md",
           "---\nname: main\nmodel: main/test-model\n---\nYou help.\n");

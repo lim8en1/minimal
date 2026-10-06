@@ -68,7 +68,8 @@ struct ServiceFixture {
                                  {"url", "http://localhost/v1"},
                                  {"models", {{"test-model", nlohmann::json::object()}}}}}}}}
                   .dump());
-        Write("settings.json", nlohmann::json{{"default_agent_preset", "main"}}.dump());
+        Write("settings.json", nlohmann::json{{"default_agent_preset", "main"},
+                                              {"default_model", "main/test-model"}}.dump());
         Write("permissions.json", "{}");
         Write("agents/main.md", "---\nname: main\nmodel: main/test-model\nallowed_tools: [\"*\"]\n---\nYou help.\n");
 
@@ -173,7 +174,7 @@ struct ServiceFixture {
         service_options.presets = presets.get();
         service_options.signal_router = &signal_router;
         service = std::make_unique<rpc::SessionServiceImpl>(
-            *sessions, *db, config::SettingsConfig{}, service_permissions,
+            *sessions, *db, config::LoadSettingsConfig(dir / "settings.json"), service_permissions,
             common::DefaultLogger(), registries, std::move(service_options));
         service->set_on_last_client_detached([this] { last_detach.store(true); });
 
@@ -594,6 +595,48 @@ TEST_CASE("CreateSession requires a project_root", "[session_service]") {
     v1::CreateSessionResponse response;
     const auto status = fixture.stub->CreateSession(&context, request, &response);
     CHECK(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST_CASE("CreateSession: a remembered selection falls back instead of refusing",
+          "[session_service][last_selection]") {
+    ServiceFixture fixture;
+    fixture.Start();
+    const auto create = [&](const std::string& agent, const std::string& model, bool remembered,
+                            v1::CreateSessionResponse* response) {
+        grpc::ClientContext context;
+        v1::CreateSessionRequest request;
+        request.set_project_root((fixture.dir / "work").string());
+        request.set_agent_preset(agent);
+        request.set_model(model);
+        request.set_remembered_selection(remembered);
+        return fixture.stub->CreateSession(&context, request, response);
+    };
+
+    // A choice made NOW that does not resolve is refused.
+    {
+        v1::CreateSessionResponse response;
+        CHECK_FALSE(create("main", "main/gone", /*remembered=*/false, &response).ok());
+    }
+    // The same pick REMEMBERED starts without the stale model; the response
+    // says what ran, so the client can forget the rest.
+    {
+        v1::CreateSessionResponse response;
+        REQUIRE(create("main", "main/gone", /*remembered=*/true, &response).ok());
+        CHECK(response.session().agent_preset() == "main");
+        CHECK(response.session().model().empty());
+    }
+    // A stale remembered agent falls back to default_agent_preset.
+    {
+        v1::CreateSessionResponse response;
+        REQUIRE(create("deleted-preset", "", /*remembered=*/true, &response).ok());
+        CHECK(response.session().agent_preset() == "main");
+    }
+    // A remembered pick that still resolves is honored as is.
+    {
+        v1::CreateSessionResponse response;
+        REQUIRE(create("main", "main/test-model", /*remembered=*/true, &response).ok());
+        CHECK(response.session().model() == "main/test-model");
+    }
 }
 
 TEST_CASE("CreateSession refuses a project_root that is not an existing directory",

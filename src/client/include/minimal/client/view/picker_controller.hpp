@@ -233,6 +233,7 @@ private:
     // server-side; grouping is a pure display transform). No pagination --
     // even a large discovered catalog is one response of small rows.
     std::vector<v1::ModelSummary> model_picker_models_;
+    std::string model_picker_default_;  // settings.json default_model, for the default row
     // True while the model picker is open in its /subagent-model form: the
     // same list and fetch, but the rebuild prepends the "same as parent" row
     // and selection routes to the /subagent-model command rather than

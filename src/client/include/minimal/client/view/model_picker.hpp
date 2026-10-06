@@ -20,6 +20,9 @@ namespace minimal::client {
 // session's subagent-model override -- spawned children run the parent's
 // model". Carried as a row id so on_select can tell it from a real model ref.
 inline constexpr const char* kSameAsParentRowId = "same-as-parent";
+// The /model picker's prepended row: back to settings.json default_model (the
+// session's own choice cleared).
+inline constexpr const char* kDefaultModelRowId = "default";
 
 struct ModelPickerCallbacks {
     std::function<void(const std::string& ref)> on_select;

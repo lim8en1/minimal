@@ -63,7 +63,7 @@ TEST_CASE("help lists every registered command and explains one", "[commands]") 
     }
 
     const auto one = fixture.Run("help", {"model"});
-    CHECK(one.message.find("[provider/model]") != std::string::npos);
+    CHECK(one.message.find("[provider/model|default]") != std::string::npos);
     const auto subagent_one = fixture.Run("help", {"subagent-model"});
     CHECK(subagent_one.message.find("inherit") != std::string::npos);
 }
@@ -131,6 +131,19 @@ TEST_CASE("model switch by reference reports the status line, not the picker vie
     CHECK(result.display == commands::CommandDisplay::kStatus);
     CHECK(result.view_hint.empty());
     CHECK(fixture.preset().model_ref.str() == "main/slow");
+}
+
+TEST_CASE("/model default clears the session's choice and returns to default_model",
+          "[commands]") {
+    CommandFixture fixture;
+    REQUIRE(fixture.Run("model", {"main/slow"}).status == Status::kOk);
+    REQUIRE(fixture.preset().model_ref.str() == "main/slow");
+
+    const auto result = fixture.Run("model", {"default"});
+    REQUIRE(result.status == Status::kOk);
+    CHECK(result.message.find("main/fast") != std::string::npos);
+    CHECK(fixture.preset().model_ref.str() == "main/fast");
+    CHECK_FALSE(fixture.model_override().has_value());
 }
 
 TEST_CASE("agent switch by name reports the status line, not the picker view",
