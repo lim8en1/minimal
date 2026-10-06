@@ -76,7 +76,23 @@ struct LanguageDefinition {
 // matters and exactly where regex fails.
 //
 // The highlighter never hardcodes a color; the theme supplies one per category.
-class SyntaxHighlighter {
+// Code highlighting as a markdown engine (or any renderer) uses it: the
+// host's highlighter, over every registered grammar, handed to plugins
+// through ClientPluginRegistrationContext::highlighter.
+class CodeHighlighter {
+public:
+    virtual ~CodeHighlighter() = default;
+    // `code` as highlighted lines, colored by the current theme. `block_id`
+    // (non-zero) names a growing streaming block, so its parse is
+    // incremental. An unknown language renders plain.
+    virtual ftxui::Elements Highlight(std::string_view code, std::string_view language,
+                                      std::size_t block_id = 0) const = 0;
+    // A fence label's canonical language ("py" -> "python"); "" when no
+    // registered grammar knows it.
+    virtual std::string CanonicalLanguageFor(std::string_view language) const = 0;
+};
+
+class SyntaxHighlighter final : public CodeHighlighter {
 public:
     // `languages` is the grammar registry's contents, assembled by the host;
     // it must outlive the highlighter.
@@ -108,13 +124,13 @@ public:
     // One Element per line of the block (vbox-able), colors from the theme.
     // Per the documented signature; built on HighlightCode.
     ftxui::Elements Highlight(std::string_view code, std::string_view language,
-                              std::size_t block_id = 0) const;
+                              std::size_t block_id = 0) const override;
 
     // Whether `language` resolves to a registered grammar (aliases applied).
     bool Supports(std::string_view language) const;
 
     // CanonicalLanguage(language, this highlighter's own table).
-    std::string CanonicalLanguageFor(std::string_view language) const;
+    std::string CanonicalLanguageFor(std::string_view language) const override;
 
     // The Theme the highlighter holds is a REFERENCE whose contents may be
     // swapped in place at runtime (/theme); highlight_cache_ bakes the colors

@@ -320,7 +320,7 @@ The "write a different frontend" tier shrinks to exactly this list. Not on it, u
 | Display-kind renderer (keyed by display-payload kind) | additive | core renderers for the core kinds | live; default moving to a bundled plugin |
 | Message-kind presentation (agent/thinking/tool-activity/system) | additive | core defaults (§ *Message-kind rendering*) | live; default moving |
 | Chat surface (the whole chat view) | **exclusive, required** | core chat view | live; default moving |
-| Markdown engine | **exclusive**; absent → plain text | md4c adapter | live; default moving |
+| Markdown engine | **exclusive**; absent → plain text | bundled `markdown-md4c` | live: fenced code through `ClientPluginRegistrationContext::highlighter` (the host's highlighter over every grammar); a debounced stream asks for its frame with `HostUi::RequestRedrawAfter`; core keeps only a plain-text fallback |
 | Syntax-highlight languages (keyed by language) | additive, collisions fatal | bundled `syntax-grammars` | live: a grammar brings its node-type table, its function-name positions and its fence aliases; core keeps only the highlighter |
 | Prompt renderers (keyed by prompt kind) | additive; `permission` and `confirmation` **required** | plugin kinds: their pair's view; core kinds: core modals | live for plugin kinds; core kinds planned |
 | Widget kit (filterable menu, schema form, model selector, modal chrome; a confirm dialog to come) | **exclusive, required** | bundled `ui-kit` | live: every plugin view builds on it; core has no kit of its own |

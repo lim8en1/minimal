@@ -69,6 +69,12 @@ struct ClientPluginRegistrationContext {
     // queued from any thread, applied on the UI thread. Null on the same
     // terms as `ui`.
     HostActions* actions = nullptr;
+
+    // The host's code highlighter (render/syntax_highlighter.hpp), over every
+    // registered grammar -- what a markdown engine colors fenced code with.
+    // Usable from the first render (it is built after the plugins load).
+    // Null on the same terms as `ui`.
+    const CodeHighlighter* highlighter = nullptr;
 };
 
 }  // namespace minimal::client::plugins

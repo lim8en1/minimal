@@ -50,9 +50,7 @@ add_library(minimal_client_core SHARED
     view/modal_stack.cpp
     render/color_downsample.cpp
     render/theme.cpp
-    render/syntax_highlighter.cpp
-    render/markdown_renderer.cpp
-    render/streaming_markdown_view.cpp)
+    render/syntax_highlighter.cpp)
 add_library(minimal::client_core ALIAS minimal_client_core)
 
 target_include_directories(minimal_client_core PUBLIC
@@ -75,7 +73,6 @@ target_link_libraries(minimal_client_core
         # so naming them here too would put those archives on the link line
         # twice (ld notes the duplicate).
         ftxui::component
-        md4c::md4c
         minimal_tree_sitter
     PRIVATE
         spdlog::spdlog)

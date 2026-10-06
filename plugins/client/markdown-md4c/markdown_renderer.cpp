@@ -1,4 +1,4 @@
-#include "minimal/client/render/markdown_renderer.hpp"
+#include "markdown_renderer.hpp"
 
 #include <charconv>
 #include <cstdint>
@@ -13,7 +13,7 @@
 #include "minimal/client/render/syntax_highlighter.hpp"
 #include "minimal/client/utf8.hpp"
 
-namespace minimal::client {
+namespace minimal::client::markdown_md4c {
 
 namespace {
 
@@ -136,7 +136,7 @@ Element LinesToElement(std::vector<Elements> lines) {
 
 class Renderer {
 public:
-    Renderer(const Theme* theme, const SyntaxHighlighter* highlighter)
+    Renderer(const Theme* theme, const CodeHighlighter* highlighter)
         : theme_(theme), highlighter_(highlighter) {
         Block doc{};
         doc.type = MD_BLOCK_DOC;
@@ -160,9 +160,8 @@ public:
                 // table-less free function, which only ever matches the
                 // vendored aliases -- a plugin-only grammar's fence label used
                 // to resolve to "" here and never reach the highlighter at all.
-                block.code_language = highlighter_ != nullptr
-                                          ? highlighter_->CanonicalLanguageFor(lang)
-                                          : CanonicalLanguage(lang);
+                block.code_language =
+                    highlighter_ != nullptr ? highlighter_->CanonicalLanguageFor(lang) : "";
                 block.code_block_id = ++next_code_block_id_;
                 break;
             }
@@ -573,7 +572,7 @@ private:
     }
 
     const Theme* theme_;
-    const SyntaxHighlighter* highlighter_;
+    const CodeHighlighter* highlighter_;
     std::stack<Block> stack_;
     Element finished_doc_ = ftxui::text("");
     // Ordinal position of each code fence within this Render() call, so the
@@ -601,7 +600,7 @@ int TextCb(MD_TEXTTYPE type, const MD_CHAR* data, MD_SIZE size, void* userdata) 
 
 }  // namespace
 
-MarkdownRenderer::MarkdownRenderer(const Theme* theme, const SyntaxHighlighter* highlighter)
+MarkdownRenderer::MarkdownRenderer(const Theme* theme, const CodeHighlighter* highlighter)
     : theme_(theme), highlighter_(highlighter) {}
 
 ftxui::Element MarkdownRenderer::Render(std::string_view markdown_text) const {
@@ -632,4 +631,4 @@ ftxui::Element MarkdownRenderer::Render(std::string_view markdown_text) const {
     return renderer.Finish();
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::markdown_md4c

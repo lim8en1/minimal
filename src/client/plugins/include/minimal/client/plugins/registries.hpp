@@ -28,6 +28,7 @@
 // loaded), so nothing renderable can capture a theme at registration.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -90,6 +91,13 @@ class HostUi {
 public:
     virtual ~HostUi() = default;
     virtual void RequestRedraw() = 0;
+    // A frame no later than `delay` from now -- for state that changes with
+    // time and no event (a debounced reparse coming due). The earliest of
+    // several requests wins. Any thread. (The default draws one now.)
+    virtual void RequestRedrawAfter(std::chrono::milliseconds delay) {
+        (void)delay;
+        RequestRedraw();
+    }
     // View control, by registered view id. Callable from any thread: each is
     // queued and applied on the UI thread before the next frame (in call
     // order). An id no view answers to is a no-op.

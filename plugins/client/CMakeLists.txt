@@ -78,3 +78,8 @@ add_subdirectory(ui-kit)
 # highlighted with.
 
 add_subdirectory(syntax-grammars)
+
+# markdown-md4c is the markdown engine (md4c, debounced streaming, fenced code
+# through the host's highlighter); without it markdown reads as plain text.
+
+add_subdirectory(markdown-md4c)

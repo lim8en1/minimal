@@ -1,10 +1,10 @@
-#include "minimal/client/render/streaming_markdown_view.hpp"
+#include "streaming_markdown_view.hpp"
 #include "minimal/client/policy.hpp"
 
 #include <algorithm>
 #include <utility>
 
-namespace minimal::client {
+namespace minimal::client::markdown_md4c {
 
 std::chrono::milliseconds StreamingMarkdownView::EffectiveDebounce(std::size_t buffer_size) {
     if (buffer_size <= kMarkdownReparseScaleThresholdBytes) return kMarkdownReparseDebounce;
@@ -15,8 +15,9 @@ std::chrono::milliseconds StreamingMarkdownView::EffectiveDebounce(std::size_t b
 
 StreamingMarkdownView::StreamingMarkdownView(
     std::function<ftxui::Element(std::string_view)> render,
-    std::function<std::chrono::steady_clock::time_point()> clock)
-    : render_(std::move(render)), clock_(std::move(clock)) {}
+    std::function<std::chrono::steady_clock::time_point()> clock,
+    std::function<void(std::chrono::milliseconds)> redraw_after)
+    : render_(std::move(render)), clock_(std::move(clock)), redraw_after_(std::move(redraw_after)) {}
 
 void StreamingMarkdownView::AppendDelta(std::string_view text) {
     // Appending after Finalize() is LEGITIMATE, not a miswiring: Finalize
@@ -40,12 +41,6 @@ void StreamingMarkdownView::Finalize() {
     rendered_length_ = accumulated_text_.size();
     last_reparse_ = clock_();
     has_rendered_ = true;
-    PendingReparseHint().store(false, std::memory_order_release);
-}
-
-std::atomic<bool>& StreamingMarkdownView::PendingReparseHint() {
-    static std::atomic<bool> hint{false};
-    return hint;
 }
 
 ftxui::Element StreamingMarkdownView::Render() const {
@@ -58,15 +53,19 @@ ftxui::Element StreamingMarkdownView::Render() const {
         rendered_length_ = accumulated_text_.size();
         last_reparse_ = now;
         has_rendered_ = true;
-        PendingReparseHint().store(false, std::memory_order_release);
     } else if (dirty) {
         // Debounce not closed yet: the pump has nothing else telling it to
         // check back once it does (DispatchToTab's BumpUiVersion already
         // fired for the delta that made this dirty), so ask for one more
         // poll ourselves.
-        PendingReparseHint().store(true, std::memory_order_release);
+        // Dirty, but the debounce has not closed: ask for the frame that
+        // will reparse it.
+        if (redraw_after_) {
+            redraw_after_(std::chrono::duration_cast<std::chrono::milliseconds>(
+                debounce - (now - last_reparse_)));
+        }
     }
     return cached_render_;
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::markdown_md4c

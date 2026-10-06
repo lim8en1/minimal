@@ -8,7 +8,6 @@
 #include <utility>
 #include <vector>
 
-#include "minimal/client/render/streaming_markdown_view.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/tool_status.hpp"
@@ -18,40 +17,42 @@ namespace minimal::client::plugins {
 
 using ftxui::Element;
 
-// --- Md4cEngine: the default markdown-engine registrant ----------------------
+// --- The plain-text fallback engine --------------------------------------------
 //
-// Render delegates to MarkdownRenderer; Stream wraps the core
-// StreamingMarkdownView, whose debounce-and-finalize contract ("partial input
-// cannot soundly parse"; Finalize() always reparses authoritatively) the core
-// implements.
-class Md4cEngine final : public MarkdownEngine {
+// What markdown renders as with no markdown plugin loaded (the slot is
+// optional): the text itself, a line per line -- legible, never formatted.
+// Streaming needs no debounce: there is no parse to fall behind.
+class PlainMarkdownEngine final : public MarkdownEngine {
 public:
-    explicit Md4cEngine(const MarkdownRenderer& renderer) : renderer_(renderer) {}
-
     Element Render(std::string_view markdown_text, const Theme&) const override {
-        return renderer_.Render(markdown_text);
+        return Lines(markdown_text);
     }
-    std::unique_ptr<Stream> MakeStream() const override {
-        return std::make_unique<Md4cStream>(renderer_);
-    }
+    std::unique_ptr<Stream> MakeStream() const override { return std::make_unique<PlainStream>(); }
 
 private:
-    class Md4cStream final : public Stream {
-    public:
-        explicit Md4cStream(const MarkdownRenderer& renderer)
-            : view_([&renderer](std::string_view text) { return renderer.Render(text); }) {}
+    static Element Lines(std::string_view text) {
+        ftxui::Elements lines;
+        std::size_t start = 0;
+        while (start <= text.size()) {
+            const std::size_t end = text.find('\n', start);
+            const std::string_view line =
+                text.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start);
+            lines.push_back(ftxui::paragraph(std::string(line)));
+            if (end == std::string_view::npos) break;
+            start = end + 1;
+        }
+        return ftxui::vbox(std::move(lines));
+    }
 
-        void AppendDelta(std::string_view text) override { view_.AppendDelta(text); }
-        void Finalize() override { view_.Finalize(); }
-        Element Render(const Theme&) const override { return view_.Render(); }
+    class PlainStream final : public Stream {
+    public:
+        void AppendDelta(std::string_view text) override { text_.append(text); }
+        void Finalize() override {}
+        Element Render(const Theme&) const override { return Lines(text_); }
 
     private:
-        // The core streaming view owns the debounce/finalize contract; the
-        // theme was bound at MarkdownRenderer construction.
-        StreamingMarkdownView view_;
+        std::string text_;
     };
-
-    const MarkdownRenderer& renderer_;
 };
 
 namespace {
@@ -614,10 +615,9 @@ void RegisterCoreAgentMarkdownRenderer(MessageRendererRegistry& registry,
                       std::make_unique<CoreAgentMarkdownRenderer>(engine));
 }
 
-void RegisterDefaultMarkdownEngine(MarkdownEngineRegistry& registry,
-                                   const MarkdownRenderer& renderer) {
-    if (registry.held()) return;  // a plugin owns the slot
-    registry.Register(std::make_unique<Md4cEngine>(renderer));  // outside any window: core's
+void RegisterPlainMarkdownEngine(MarkdownEngineRegistry& registry) {
+    if (registry.held()) return;  // a markdown plugin owns the slot
+    registry.Register(std::make_unique<PlainMarkdownEngine>());  // outside any window: core's
 }
 
 }  // namespace minimal::client::plugins

@@ -4,11 +4,11 @@
 
 #include <ftxui/dom/elements.hpp>
 
+#include "minimal/client/render/syntax_highlighter.hpp"
 #include "minimal/client/render/theme.hpp"
 
-namespace minimal::client {
+namespace minimal::client::markdown_md4c {
 
-class SyntaxHighlighter;
 
 // md4c (SAX, GFM) mapped onto ftxui::Elements by a hand-rolled adapter -- the
 // same call made for openai-cpp: own the boundary rather than depend on a thin,
@@ -22,7 +22,7 @@ public:
     // Both may be omitted: no theme -> default terminal colors, no highlighter
     // -> fenced code renders uncolored. References must outlive the renderer.
     explicit MarkdownRenderer(const Theme* theme = nullptr,
-                              const SyntaxHighlighter* highlighter = nullptr);
+                              const CodeHighlighter* highlighter = nullptr);
 
     // Parses with MD_DIALECT_GITHUB (tables, strikethrough, tasklists, and the
     // permissive autolink rules chat text actually contains).
@@ -30,7 +30,7 @@ public:
 
 private:
     const Theme* theme_;
-    const SyntaxHighlighter* highlighter_;
+    const CodeHighlighter* highlighter_;
 };
 
-}  // namespace minimal::client
+}  // namespace minimal::client::markdown_md4c

@@ -130,7 +130,7 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
                 slot->view->AppendDelta(std::string_view(text).substr(slot->seen));
                 slot->seen = text.size();
                 // New text on an ALREADY-finalized segment means a re-arm at
-                // the engine level (StreamingMarkdownView::AppendDelta, track
+                // the engine level (the engine stream's AppendDelta, track
                 // A1) -- mirror that here too, so this segment gets its own
                 // fresh authoritative reparse when it next finalizes, exactly
                 // like the engine's own re-arm.

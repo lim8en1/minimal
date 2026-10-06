@@ -1209,7 +1209,7 @@ Slots:
 2. **Message-kind presentation — v1.** Additive renderers keyed by message kind (agent text, thinking, tool activity, system); core supplies the defaults § *Message-kind rendering* specifies. The data plane — event demux, scrollback virtualization, streaming buffer — stays core regardless of who renders a row.
 3. **Chat surface — exclusive.** One plugin may replace the whole chat view. The host pushes the session's events; scrollback pages come through the shared client API; two claimants are fatal at startup, naming both, and replacing a bundled default means disabling it (EXTENSIBILITY.md §4.2, *Slot semantics*). The interface is deliberately big and deliberately the only one of its kind — message-kind slots cover the common case, a whole new chat UI is a whole different component.
 4. **Status-bar segments — v1.** Plugins register segment providers (`{git_branch}`); the format string orders and selects them by id; an unknown id renders nothing with a startup warning. Config keeps layout control; plugins add content.
-5. **Markdown engine and syntax grammars — v1.** The md4c adapter is the exclusive slot's default; a replacement engine must carry the streaming contract itself (§ *TUI rendering*). Grammar registration is additive and language-keyed, the vendored set registering as the defaults.
+5. **Markdown engine and syntax grammars — v1.** The md4c adapter is a bundled plugin (`markdown-md4c`) in the exclusive slot, core rendering plain text without one; a replacement engine must carry the streaming contract itself (§ *TUI rendering*). Grammar registration is additive and language-keyed, the vendored set registering as the defaults.
 6. **Tools-panel / session-picker columns — later.**
 
 ```cpp

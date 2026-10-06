@@ -17,7 +17,6 @@
 #include "client_entry.hpp"
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
-#include "minimal/client/render/streaming_markdown_view.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/keymap_help_model.hpp"
@@ -658,9 +657,10 @@ void TuiApp::StartBackground() {
 // change or the shutdown flag). The forced-redraw floor is gated on what
 // actually needs time to pass with no version bump: the editor's @-mention
 // debounce (query_pending_hint -- it fires FROM a render pass), the streaming
-// markdown debounce (StreamingMarkdownView::PendingReparseHint -- a burst of
-// deltas that PAUSES wakes this pump once for the last delta, and nothing
-// bumps the version when the debounce window closes), a quiet running tool's
+// frames plugins asked for ahead of time (HostUi::RequestRedrawAfter -- the
+// markdown engine's debounce: a burst of deltas that PAUSES wakes this pump
+// once for the last delta, and nothing bumps the version when the debounce
+// window closes), a quiet running tool's
 // elapsed counter, and a due scrollback retry.
 void TuiApp::RunPump() {
     uint64_t last_version = app_->UiVersion();
@@ -694,7 +694,7 @@ void TuiApp::RunPump() {
         }
         const bool debounce_pending =
             prompt_editors_.QueryPendingHint(app_->FocusedTabId()) ||
-            StreamingMarkdownView::PendingReparseHint().load(std::memory_order_acquire) ||
+            env_.host_focus_provider->TakeRedrawDue() ||
             running_tool_redraw_due || tab_maintenance_->RefreshRetryDue();
         if (version != last_version || debounce_pending) {
             // Coalesce: skip the post while the previous Custom is still

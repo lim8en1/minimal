@@ -1,5 +1,6 @@
 #include "minimal/client/plugins/host_seams.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <stdexcept>
 #include <utility>
@@ -235,6 +236,55 @@ void HostFocusProvider::RequestRedraw() {
     if (app_ != nullptr) app_->NotifyExternalUpdate();   // an atomic bump; never blocks
 }
 
+namespace {
+
+std::int64_t SteadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+}  // namespace
+
+void HostFocusProvider::RequestRedrawAfter(std::chrono::milliseconds delay) {
+    const std::int64_t due = SteadyNowMs() + std::max<std::int64_t>(delay.count(), 0);
+    std::int64_t current = redraw_due_ms_.load();
+    // Keep the earliest: a later request must not postpone an earlier one.
+    while ((current == 0 || due < current) &&
+           !redraw_due_ms_.compare_exchange_weak(current, due)) {
+    }
+}
+
+bool HostFocusProvider::TakeRedrawDue() {
+    const std::int64_t due = redraw_due_ms_.load();
+    if (due == 0 || SteadyNowMs() < due) return false;
+    std::int64_t expected = due;
+    redraw_due_ms_.compare_exchange_strong(expected, 0);
+    return true;
+}
+
+ftxui::Elements HostCodeHighlighter::Highlight(std::string_view code, std::string_view language,
+                                               std::size_t block_id) const {
+    if (const CodeHighlighter* target = target_.load()) {
+        return target->Highlight(code, language, block_id);
+    }
+    ftxui::Elements lines;
+    std::size_t start = 0;
+    while (start <= code.size()) {
+        const std::size_t end = code.find('\n', start);
+        lines.push_back(ftxui::text(std::string(
+            code.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start))));
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    return lines;
+}
+
+std::string HostCodeHighlighter::CanonicalLanguageFor(std::string_view language) const {
+    const CodeHighlighter* target = target_.load();
+    return target != nullptr ? target->CanonicalLanguageFor(language) : std::string();
+}
+
 void HostFocusProvider::Enqueue(ViewRequest request) {
     {
         std::lock_guard lk(requests_mtx_);
@@ -280,6 +330,9 @@ public:
         return host_.CommandCatalog();
     }
     std::vector<std::string> ThemeNames() const override { return host_.ThemeNames(); }
+    void RequestRedrawAfter(std::chrono::milliseconds delay) override {
+        host_.RequestRedrawAfter(delay);
+    }
 
 private:
     HostFocusProvider& host_;

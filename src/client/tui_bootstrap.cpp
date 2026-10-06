@@ -64,6 +64,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         plugins::MakeHostAttentionSink(&out.attention_state, out.host_focus_provider.get());
     out.host_client_api = plugins::MakeHostClientApi(&client);
     out.host_widget_kit = plugins::MakeHostWidgetKit(out.registries.widget_kit);
+    out.host_highlighter = std::make_unique<plugins::HostCodeHighlighter>();
     out.host_actions = std::make_unique<plugins::HostActionQueue>(out.host_focus_provider.get());
 
 
@@ -138,6 +139,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                              .ui = out.host_focus_provider.get(),
                              .widgets = out.host_widget_kit.get(),
                              .actions = out.host_actions.get(),
+                             .highlighter = out.host_highlighter.get(),
                              .ui_for_plugin = [provider = out.host_focus_provider.get()](
                                                   const std::string& plugin_name) {
                                  return provider->UiFor(plugin_name);
@@ -350,20 +352,15 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // ITS final address (out.theme.emplace() ran above, on `out` itself), and
     // `out.languages` is too (populated in place, just above).
     out.highlighter.emplace(*out.theme, out.languages);
+    // Plugins hold the proxy from registration; it reaches the real one now.
+    out.host_highlighter->Attach(&*out.highlighter);
 
     // Core defaults fill every slot no plugin claimed. The engine first (the
     // agent-markdown default renders through it), then the kind defaults.
-    // ONE construction of the renderer (emplace, same reasoning as
-    // highlighter above: MarkdownRenderer stores raw Theme*/SyntaxHighlighter*
-    // pointers, so it is built once with both dependencies already at their
-    // final addresses inside `out`) -- the original inline code's own
-    // comment recorded the exact bug a second construction would reintroduce:
-    // "a refactor that introduced a second variable would dangle the engine
-    // silently".
-    out.renderer.emplace(&*out.theme, &*out.highlighter);
-    plugins::RegisterDefaultMarkdownEngine(out.registries.markdown_engine, *out.renderer);
-    // Non-null by construction: RegisterDefaultMarkdownEngine registers the
-    // md4c adapter when no plugin claimed the slot.
+    // The markdown engine is a plugin's (the bundled markdown-md4c); with
+    // none, markdown reads as plain text. Non-null by construction either
+    // way.
+    plugins::RegisterPlainMarkdownEngine(out.registries.markdown_engine);
     out.engine = out.registries.markdown_engine.get();
     plugins::RegisterCoreMessageRenderers(out.registries.message_renderers);
     plugins::RegisterCoreAgentMarkdownRenderer(out.registries.message_renderers, *out.engine);

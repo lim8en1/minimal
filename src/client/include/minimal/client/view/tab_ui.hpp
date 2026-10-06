@@ -29,7 +29,6 @@
 #include <ftxui/component/component.hpp>
 
 #include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/streaming_markdown_view.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/scrollback_refresh.hpp"
 #include "minimal/client/state.hpp"

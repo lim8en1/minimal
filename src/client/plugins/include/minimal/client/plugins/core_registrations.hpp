@@ -4,7 +4,6 @@
 #include <vector>
 
 #include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/markdown_renderer.hpp"
 #include "minimal/client/render/syntax_highlighter.hpp"
 
 namespace minimal::client::plugins {
@@ -26,8 +25,8 @@ void RegisterCoreDisplayRenderers(DisplayRendererRegistry& registry, const Markd
                                   const SyntaxHighlighter& highlighter);
 
 
-// Registers the md4c engine when no plugin claimed the exclusive slot.
-void RegisterDefaultMarkdownEngine(MarkdownEngineRegistry& registry,
-                                   const MarkdownRenderer& renderer);
+// Registers the plain-text engine when no plugin claimed the markdown slot
+// (it is optional: without a markdown plugin, markdown reads as plain text).
+void RegisterPlainMarkdownEngine(MarkdownEngineRegistry& registry);
 
 }  // namespace minimal::client::plugins
