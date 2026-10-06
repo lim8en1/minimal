@@ -1,16 +1,22 @@
 #include "settings.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <string>
 
+#include "decision.hpp"
 #include "minimal/common/config_reader.hpp"
 #include "minimal/common/json_config_loader.hpp"
 
 namespace minimal::decision_advisor {
 namespace {
 
-constexpr std::int64_t kMaxMs = 600000;
+// The only upper bounds are representational: Settings stores int, and
+// max_retries + 1 attempts must still fit. Budget, not a cap here, is what
+// bounds a call; the host's advisor_timeout_ms is the outer ceiling.
+constexpr std::int64_t kIntMax = std::numeric_limits<int>::max();
+// Names for error messages only: the registration context carries no path.
 constexpr const char* kPluginsFile = "plugins.json";
 constexpr const char* kPluginPath = "decision-advisor.config";
 
@@ -23,15 +29,16 @@ nlohmann::json ReadLayer(config::Reader& reader) {
     if (auto v = reader.MaybeString("api_key")) out["api_key"] = *v;
     if (auto v = reader.MaybeString("endpoint", /*allow_empty=*/false)) out["endpoint"] = *v;
     if (auto v = reader.MaybeString("model", /*allow_empty=*/false)) out["model"] = *v;
-    if (auto v = reader.MaybeInt("request_timeout_ms", 1, kMaxMs)) out["request_timeout_ms"] = *v;
-    if (auto v = reader.MaybeInt("budget_ms", 1, kMaxMs)) out["budget_ms"] = *v;
+    if (auto v = reader.MaybeString("deny_message", /*allow_empty=*/false)) out["deny_message"] = *v;
+    if (auto v = reader.MaybeInt("request_timeout_ms", 1, kIntMax)) out["request_timeout_ms"] = *v;
+    if (auto v = reader.MaybeInt("budget_ms", 1, kIntMax)) out["budget_ms"] = *v;
     if (auto retry = reader.MaybeObject("retry")) {
         nlohmann::json r = nlohmann::json::object();
-        if (auto v = retry->MaybeInt("max_retries", 0, 100)) r["max_retries"] = *v;
-        if (auto v = retry->MaybeInt("backoff_initial_ms", 1, kMaxMs)) r["backoff_initial_ms"] = *v;
-        if (auto v = retry->MaybeInt("backoff_max_ms", 1, kMaxMs)) r["backoff_max_ms"] = *v;
+        if (auto v = retry->MaybeInt("max_retries", 0, kIntMax - 1)) r["max_retries"] = *v;
+        if (auto v = retry->MaybeInt("backoff_initial_ms", 1, kIntMax)) r["backoff_initial_ms"] = *v;
+        if (auto v = retry->MaybeInt("backoff_max_ms", 1, kIntMax)) r["backoff_max_ms"] = *v;
         if (auto v = retry->MaybeDouble("jitter", 0.0, 1.0)) r["jitter"] = *v;
-        if (auto v = retry->MaybeInt("retry_after_cap_ms", 1, kMaxMs)) r["retry_after_cap_ms"] = *v;
+        if (auto v = retry->MaybeInt("retry_after_cap_ms", 1, kIntMax)) r["retry_after_cap_ms"] = *v;
         retry->Finish();
         out["retry"] = std::move(r);
     }
@@ -150,10 +157,33 @@ Settings ParseSettings(const nlohmann::json& bundled, const nlohmann::json& conf
     settings.min_probability_deny = require_double(resolved, "min_probability_deny");
     settings.min_margin = require_double(resolved, "min_margin");
 
+    settings.deny_message = require_string(resolved, "deny_message");
+
+    // The rubric is sent verbatim, but the code acts on one answer of it: the
+    // "action" choice over a fixed option set (decision.hpp). Check that
+    // coupling here, so a renamed option fails at load rather than turning
+    // every call into an abstain.
     const auto* questions = resolved.Raw("questions");
     if (questions == nullptr) resolved.Fail("questions", unset);
-    if (!questions->contains("action")) {
-        resolved.Fail("questions", "must define \"action\" -- the answer the advisor acts on");
+    const std::string action_path = "questions." + std::string(kActionQuestion);
+    const auto action = questions->find(kActionQuestion);
+    if (action == questions->end() || !action->is_object()) {
+        resolved.Fail("questions", "must define \"" + std::string(kActionQuestion) +
+                                       "\" -- the answer the advisor acts on");
+    }
+    if (action->value("type", std::string()) != "choice") {
+        resolved.Fail(action_path + ".type", "must be \"choice\"");
+    }
+    const auto criteria = action->find("criteria");
+    bool options_match = criteria != action->end() && criteria->is_object() &&
+                         criteria->size() == kActionOptions.size();
+    for (const std::string_view option : kActionOptions) {
+        options_match = options_match && criteria->contains(option);
+    }
+    if (!options_match) {
+        resolved.Fail(action_path + ".criteria",
+                      "must have exactly the options \"allow\", \"deny\", \"review\" -- the ones "
+                      "the advisor acts on");
     }
     settings.questions = *questions;
     const auto* extra = resolved.Raw("extra_questions");

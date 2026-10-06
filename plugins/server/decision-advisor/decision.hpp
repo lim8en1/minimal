@@ -1,11 +1,20 @@
 #pragma once
 
+#include <array>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 
 namespace minimal::decision_advisor {
+
+// The protocol, not tunables: the question the advisor acts on and the options
+// its answer must choose among. The configured rubric (questions.action) must
+// define exactly these options -- ParseSettings checks it at load, so a rubric
+// edit that renames one fails naming the field instead of abstaining forever.
+inline constexpr std::string_view kActionQuestion = "action";
+inline constexpr std::array<std::string_view, 3> kActionOptions = {"allow", "deny", "review"};
 
 // The one decision the advisor can act on, resolved from a Choice answer over
 // the fixed option set {allow, deny, review}. Anything below the operator's
@@ -32,8 +41,9 @@ struct ChoiceAnswer {
 };
 
 // Extracts answers["action"] as a ChoiceAnswer. nullopt when the body is not
-// the expected envelope, the answer is missing, is not a choice, or names an
-// option outside the fixed set -- every one of those is a contract violation
+// the expected envelope, the answer is missing, is not a choice, names an
+// option outside the fixed set, or lacks a numeric probability for any option
+// (an absent option is not "probability 0") -- every one of those is a contract violation
 // the caller reports as a warn + abstain, never a guess.
 std::optional<ChoiceAnswer> ExtractActionAnswer(const nlohmann::json& body);
 

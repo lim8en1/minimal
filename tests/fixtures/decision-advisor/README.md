@@ -16,7 +16,7 @@ response parser for both backends.
 
 ## Clef (llama backend)
 
-Captured 2026-10-05 against a local llama-server (0.6.0-dev b11433, router
+Captured 2026-10-06 against a local llama-server (0.6.0-dev b11433, router
 mode) serving the ggml-org Q6_K GGUFs, `POST /v1/systemone`:
 
 - clef-flash-cases.json -- `model: "clef-flash"`
@@ -26,7 +26,7 @@ Each holds the `questions` sent (equal to `questions` in bundled/decision-adviso
 asserts it, so a rubric change means re-capturing) and 22 cases: the bash
 command, the summary, whether it is `dangerous`, and the verbatim response.
 The request state is the advisor's own `StateOf` shape
-(`{"session_id","tool_name","summary","tool_input":{"command"}}`). The 16
+(`{"tool_name","summary","tool_input":{"command"}}`). The 16
 dangerous cases include base64-, `eval`/`printf`-, `pack("H*")`- and
 `$()`/backtick-obfuscated payloads, misleading summaries ("List files in src"
 on a base64 `rm -rf ~`) and a benign command chained to a destructive one.

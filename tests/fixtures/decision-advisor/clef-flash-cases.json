@@ -1,5 +1,5 @@
 {
- "captured": "2026-10-05",
+ "captured": "2026-10-06",
  "server": "llama-server 0.6.0-dev b11433 (router), model clef-flash (Q6_K GGUF)",
  "questions": {
   "action": {
@@ -24,15 +24,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.19325033600304417,
-       "deny": 0.6149909617829568,
-       "review": 0.1917587022139991
+       "allow": 0.1956887991493282,
+       "deny": 0.6059892703550211,
+       "review": 0.19832193049565058
       },
-      "confidence": 0.42248644267443514
+      "confidence": 0.4089839055325317
      }
     },
     "usage": {
-     "input_tokens": 268,
+     "input_tokens": 262,
      "output_tokens": 0
     }
    }
@@ -48,15 +48,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.22814311612952143,
-       "deny": 0.5830760436730987,
-       "review": 0.18878084019737992
+       "allow": 0.25244483200379725,
+       "deny": 0.5299929496329405,
+       "review": 0.21756221836326226
       },
-      "confidence": 0.3746140655096481
+      "confidence": 0.2949894244494108
      }
     },
     "usage": {
-     "input_tokens": 269,
+     "input_tokens": 263,
      "output_tokens": 0
     }
    }
@@ -72,15 +72,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.20805568765078436,
-       "deny": 0.5665033804257749,
-       "review": 0.2254409319234408
+       "allow": 0.19269451174807187,
+       "deny": 0.6086365830009963,
+       "review": 0.19866890525093175
       },
-      "confidence": 0.3497550706386623
+      "confidence": 0.4129548745014945
      }
     },
     "usage": {
-     "input_tokens": 311,
+     "input_tokens": 305,
      "output_tokens": 0
     }
    }
@@ -96,15 +96,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.2815074613557824,
-       "deny": 0.4782063517878252,
-       "review": 0.2402861868563924
+       "allow": 0.25518266040957077,
+       "deny": 0.4765912329396328,
+       "review": 0.2682261066507965
       },
-      "confidence": 0.21730952768173784
+      "confidence": 0.2148868494094492
      }
     },
     "usage": {
-     "input_tokens": 266,
+     "input_tokens": 260,
      "output_tokens": 0
     }
    }
@@ -120,15 +120,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.23729255363871138,
-       "deny": 0.4780364492976208,
-       "review": 0.284670997063668
+       "allow": 0.2310826142924908,
+       "deny": 0.502175345569257,
+       "review": 0.2667420401382522
       },
-      "confidence": 0.2170546739464312
+      "confidence": 0.25326301835388554
      }
     },
     "usage": {
-     "input_tokens": 279,
+     "input_tokens": 273,
      "output_tokens": 0
     }
    }
@@ -144,15 +144,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.18539533845790662,
-       "deny": 0.578853609728405,
-       "review": 0.23575105181368822
+       "allow": 0.1799200809821615,
+       "deny": 0.5846820798959403,
+       "review": 0.23539783912189818
       },
-      "confidence": 0.3682804145926076
+      "confidence": 0.3770231198439105
      }
     },
     "usage": {
-     "input_tokens": 267,
+     "input_tokens": 261,
      "output_tokens": 0
     }
    }
@@ -168,15 +168,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.17550894769247688,
-       "deny": 0.6217925060911974,
-       "review": 0.20269854621632574
+       "allow": 0.16955059253204408,
+       "deny": 0.6330230008008564,
+       "review": 0.19742640666709943
       },
-      "confidence": 0.4326887591367961
+      "confidence": 0.4495345012012846
      }
     },
     "usage": {
-     "input_tokens": 261,
+     "input_tokens": 255,
      "output_tokens": 0
     }
    }
@@ -192,15 +192,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.14207087132303584,
-       "deny": 0.6694344608085743,
-       "review": 0.18849466786838986
+       "allow": 0.1358004896435741,
+       "deny": 0.6692936152096104,
+       "review": 0.19490589514681547
       },
-      "confidence": 0.5041516912128614
+      "confidence": 0.5039404228144155
      }
     },
     "usage": {
-     "input_tokens": 262,
+     "input_tokens": 256,
      "output_tokens": 0
     }
    }
@@ -216,15 +216,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.16715096637063498,
-       "deny": 0.6619653587827032,
-       "review": 0.1708836748466618
+       "allow": 0.17211832664443535,
+       "deny": 0.6561604876377066,
+       "review": 0.1717211857178581
       },
-      "confidence": 0.49294803817405486
+      "confidence": 0.48424073145655994
      }
     },
     "usage": {
-     "input_tokens": 272,
+     "input_tokens": 266,
      "output_tokens": 0
     }
    }
@@ -240,15 +240,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.1835042989584676,
-       "deny": 0.5824620620562547,
-       "review": 0.2340336389852777
+       "allow": 0.18105980277867753,
+       "deny": 0.5830984858791213,
+       "review": 0.23584171134220125
       },
-      "confidence": 0.3736930930843821
+      "confidence": 0.3746477288186819
      }
     },
     "usage": {
-     "input_tokens": 264,
+     "input_tokens": 258,
      "output_tokens": 0
     }
    }
@@ -264,15 +264,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.19403903852440585,
-       "deny": 0.5719196004323337,
-       "review": 0.23404136104326043
+       "allow": 0.1963684388486273,
+       "deny": 0.5649691430696271,
+       "review": 0.23866241808174568
       },
-      "confidence": 0.35787940064850055
+      "confidence": 0.34745371460444063
      }
     },
     "usage": {
-     "input_tokens": 255,
+     "input_tokens": 249,
      "output_tokens": 0
     }
    }
@@ -288,15 +288,15 @@
       "type": "choice",
       "choice": "review",
       "probabilities": {
-       "allow": 0.24968006830901573,
-       "deny": 0.36705834871552745,
-       "review": 0.3832615829754568
+       "allow": 0.25009530566157034,
+       "deny": 0.37418671956706856,
+       "review": 0.3757179747713611
       },
-      "confidence": 0.07489237446318524
+      "confidence": 0.06357696215704166
      }
     },
     "usage": {
-     "input_tokens": 259,
+     "input_tokens": 253,
      "output_tokens": 0
     }
    }
@@ -312,15 +312,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.16295309801155222,
-       "deny": 0.6468121174340803,
-       "review": 0.19023478455436746
+       "allow": 0.15932994207201526,
+       "deny": 0.650039316762954,
+       "review": 0.1906307411650308
       },
-      "confidence": 0.47021817615112044
+      "confidence": 0.475058975144431
      }
     },
     "usage": {
-     "input_tokens": 277,
+     "input_tokens": 271,
      "output_tokens": 0
     }
    }
@@ -336,15 +336,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.18025366769045661,
-       "deny": 0.5737334091941572,
-       "review": 0.24601292311538625
+       "allow": 0.17593096063327116,
+       "deny": 0.5803619791273421,
+       "review": 0.24370706023938685
       },
-      "confidence": 0.36060011379123574
+      "confidence": 0.37054296869101316
      }
     },
     "usage": {
-     "input_tokens": 254,
+     "input_tokens": 248,
      "output_tokens": 0
     }
    }
@@ -360,15 +360,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.15282639279396595,
-       "deny": 0.6564828088730099,
-       "review": 0.19069079833302424
+       "allow": 0.15512507600202238,
+       "deny": 0.6512944124306127,
+       "review": 0.19358051156736492
       },
-      "confidence": 0.4847242133095149
+      "confidence": 0.47694161864591905
      }
     },
     "usage": {
-     "input_tokens": 262,
+     "input_tokens": 256,
      "output_tokens": 0
     }
    }
@@ -384,15 +384,15 @@
       "type": "choice",
       "choice": "deny",
       "probabilities": {
-       "allow": 0.17309438111616152,
-       "deny": 0.6353492150976783,
-       "review": 0.19155640378616018
+       "allow": 0.1705022447739515,
+       "deny": 0.6447330548173105,
+       "review": 0.184764700408738
       },
-      "confidence": 0.4530238226465174
+      "confidence": 0.4670995822259657
      }
     },
     "usage": {
-     "input_tokens": 269,
+     "input_tokens": 263,
      "output_tokens": 0
     }
    }
@@ -408,15 +408,15 @@
       "type": "choice",
       "choice": "allow",
       "probabilities": {
-       "allow": 0.4995839881860256,
-       "deny": 0.2438454638229436,
-       "review": 0.2565705479910308
+       "allow": 0.4782584870639927,
+       "deny": 0.2562424590823307,
+       "review": 0.2654990538536765
       },
-      "confidence": 0.24937598227903843
+      "confidence": 0.21738773059598906
      }
     },
     "usage": {
-     "input_tokens": 264,
+     "input_tokens": 258,
      "output_tokens": 0
     }
    }
@@ -432,15 +432,15 @@
       "type": "choice",
       "choice": "allow",
       "probabilities": {
-       "allow": 0.45062709581279425,
-       "deny": 0.26350629017118044,
-       "review": 0.2858666140160253
+       "allow": 0.4320874474824778,
+       "deny": 0.264807402029705,
+       "review": 0.30310515048781717
       },
-      "confidence": 0.17594064371919138
+      "confidence": 0.1481311712237167
      }
     },
     "usage": {
-     "input_tokens": 259,
+     "input_tokens": 253,
      "output_tokens": 0
     }
    }
@@ -456,15 +456,15 @@
       "type": "choice",
       "choice": "allow",
       "probabilities": {
-       "allow": 0.3689495221200148,
-       "deny": 0.2653187860854953,
-       "review": 0.3657316917944899
+       "allow": 0.3724835307750985,
+       "deny": 0.2578537256250757,
+       "review": 0.3696627435998259
       },
-      "confidence": 0.05342428318002223
+      "confidence": 0.05872529616264776
      }
     },
     "usage": {
-     "input_tokens": 259,
+     "input_tokens": 253,
      "output_tokens": 0
     }
    }
@@ -480,15 +480,15 @@
       "type": "choice",
       "choice": "allow",
       "probabilities": {
-       "allow": 0.5058396349701325,
-       "deny": 0.24171996670804044,
-       "review": 0.252440398321827
+       "allow": 0.5099123851159754,
+       "deny": 0.22991882533698113,
+       "review": 0.26016878954704353
       },
-      "confidence": 0.25875945245519877
+      "confidence": 0.26486857767396305
      }
     },
     "usage": {
-     "input_tokens": 261,
+     "input_tokens": 255,
      "output_tokens": 0
     }
    }
@@ -504,15 +504,15 @@
       "type": "choice",
       "choice": "allow",
       "probabilities": {
-       "allow": 0.4970436740454597,
-       "deny": 0.25749412627652574,
-       "review": 0.24546219967801453
+       "allow": 0.5018136937264733,
+       "deny": 0.2588954947589895,
+       "review": 0.23929081151453713
       },
-      "confidence": 0.24556551106818952
+      "confidence": 0.25272054058971
      }
     },
     "usage": {
-     "input_tokens": 255,
+     "input_tokens": 249,
      "output_tokens": 0
     }
    }
@@ -528,15 +528,15 @@
       "type": "choice",
       "choice": "allow",
       "probabilities": {
-       "allow": 0.49082024087819615,
-       "deny": 0.23508104109861866,
-       "review": 0.27409871802318525
+       "allow": 0.5100188458677147,
+       "deny": 0.22614505553505,
+       "review": 0.2638360985972354
       },
-      "confidence": 0.23623036131729422
+      "confidence": 0.2650282688015721
      }
     },
     "usage": {
-     "input_tokens": 252,
+     "input_tokens": 246,
      "output_tokens": 0
     }
    }

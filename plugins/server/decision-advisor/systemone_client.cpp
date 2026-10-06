@@ -16,14 +16,16 @@ namespace {
 
 using namespace std::chrono_literals;
 
-// The cancel-poll slice of every backoff sleep: fine enough that a cancel or
-// terminate unblocks promptly, coarse enough not to matter at prompt scale.
+// The cancel-poll slice of every backoff sleep -- the longest a cancel waits to
+// be noticed. Not a tunable: is_cancelled() is a predicate, so the sleep must
+// poll; 25ms is below what a person waiting on a modal perceives, and a
+// handful of wakeups per backoff costs nothing next to the HTTP call.
 constexpr auto kSleepSlice = 25ms;
 
-// Statuses the loop retries -- TypeSafe SDK policy (408/429/5xx), of which
-// 429 and 529-overloaded are the ones the docs actually predict. Minus 501:
-// llama-server's answer for a model that is not a decision model, which no
-// retry can change.
+// Statuses the loop retries -- HTTP semantics, not a tunable: TypeSafe's own
+// SDK policy (408/429/5xx), of which 429 and 529-overloaded are the ones the
+// docs actually predict. Minus 501: llama-server's answer for a model that is
+// not a decision model, which no retry can change.
 bool IsRetryableStatus(int status) {
     return status == 408 || status == 429 || (status >= 500 && status <= 599 && status != 501);
 }
@@ -36,6 +38,8 @@ bool IsRetryableTransport(net::HttpErrorKind kind) {
             return true;
         case net::HttpErrorKind::Cancelled:
             return false;  // a cancel is terminal everywhere: abstain
+        case net::HttpErrorKind::TlsError:
+            return false;  // a bad certificate recurs on every attempt
     }
     return false;
 }
@@ -61,29 +65,15 @@ std::optional<std::chrono::milliseconds> RetryAfterOf(const net::HttpResponse& r
     return std::nullopt;
 }
 
-// Clamped [0, jitter] fraction of `delay`, subtracted. Uses a fresh
-// default-seeded engine per call: the loop runs at most a handful of times per
-// Advise, so there is no distribution worth persisting state for.
+// A [0, jitter] fraction of `delay`, subtracted (ParseSettings keeps jitter in
+// [0, 1]). One engine per thread: the loop runs a handful of times per Advise,
+// so there is no distribution worth sharing state for.
 std::chrono::milliseconds ApplyJitter(std::chrono::milliseconds delay, double jitter) {
     if (jitter <= 0.0) return delay;
     static thread_local std::mt19937_64 engine{std::random_device{}()};
-    const double fraction =
-        std::uniform_real_distribution<double>(0.0, std::min(jitter, 1.0))(engine);
+    const double fraction = std::uniform_real_distribution<double>(0.0, jitter)(engine);
     const double scaled = static_cast<double>(delay.count()) * (1.0 - fraction);
     return std::chrono::milliseconds(static_cast<int64_t>(std::max(0.0, scaled)));
-}
-
-// Exponential backoff, capped by backoff_max_ms. int64_t, not int: both
-// operator-configured (backoff_initial_ms) and computed here, `initial *
-// 2^attempt` overflows a 32-bit int for realistic values well before the
-// backoff_max_ms clamp below ever runs -- e.g. 50000ms at attempt=16 is
-// ~3.3 billion, past INT_MAX. Computing in a wider type first means the
-// clamp always sees the real (possibly huge) value, never a wrapped one.
-std::chrono::milliseconds BackoffFor(int attempt, const Settings& settings) {
-    const std::int64_t raw = static_cast<std::int64_t>(settings.backoff_initial_ms) *
-                             (std::int64_t{1} << std::min(attempt, 16));
-    return std::min(std::chrono::milliseconds(settings.backoff_max_ms),
-                    std::chrono::milliseconds(raw));
 }
 
 nlohmann::json BuildBody(const Settings& settings, const nlohmann::json& state) {
@@ -122,6 +112,8 @@ bool SleepFor(std::chrono::milliseconds delay, std::chrono::milliseconds budget_
 // head with 501 "This model is not a decision model" -- the status alone
 // would not say which of the operator's knobs is wrong.
 std::string ErrorDetailOf(const std::string& body) {
+    // Keeps the warn line one line: enough for any server's error sentence,
+    // not an HTML error page. Same clip as mcp_connection's stderr quote.
     constexpr std::size_t kMaxDetail = 200;
     auto parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
     std::string detail;
@@ -143,6 +135,14 @@ std::string ErrorDetailOf(const std::string& body) {
 }
 
 }  // namespace
+
+std::chrono::milliseconds BackoffFor(int attempt, const Settings& settings) {
+    // Doubles until backoff_max_ms, then stays there: saturating, so no
+    // attempt count can overflow and no shift cap is needed.
+    std::int64_t delay = settings.backoff_initial_ms;
+    for (int i = 0; i < attempt && delay < settings.backoff_max_ms; ++i) delay *= 2;
+    return std::chrono::milliseconds(std::min<std::int64_t>(delay, settings.backoff_max_ms));
+}
 
 SystemOneOutcome AskSystemOne(const net::HttpClient& http, const Settings& settings,
                               const std::string& api_key, const nlohmann::json& state,

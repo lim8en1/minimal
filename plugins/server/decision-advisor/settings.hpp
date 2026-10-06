@@ -11,6 +11,12 @@ namespace minimal::decision_advisor {
 // seeded into the config dir at install (never overwritten, user-editable --
 // the bundled/ contract). The code carries NO defaults: a value missing from
 // both that file and the plugins.json entry is a load error naming the field.
+//
+// The constants that remain in code are not tunables, and each says why where
+// it is defined: the System One wire format and the action options
+// (decision.hpp), the retryable HTTP statuses, the cancel-poll slice and the
+// logged error-detail clip (systemone_client.cpp), and int-range bounds
+// (settings.cpp). README § "Fixed in code" lists them.
 inline constexpr const char* kBundledSettingsFile = "decision-advisor.json";
 
 // One resolved configuration. Built by layering, later wins:
@@ -28,8 +34,9 @@ struct Settings {
     std::string backend;
 
     // A key reference (config/secrets.hpp: "env:NAME", "secret:NAME", ...),
-    // bound at registration: an unset env variable is a startup error, not a
-    // silent 401 on the first prompt. Empty = no Authorization header at all
+    // bound at registration and read per call: an unset env variable is a
+    // startup warning and each call abstains naming the fix, never a silent
+    // 401. Empty = no Authorization header at all
     // (a local llama-server started without --api-key).
     std::string api_key;
     std::string endpoint;
@@ -63,8 +70,14 @@ struct Settings {
     double min_probability_deny = 0.0;
     double min_margin = 0.0;
 
+    // What a denied model reads after the facts ("auto-denied by
+    // decision-advisor (model M): p(deny)=P; "). Text for the model, like
+    // the questions, so it lives beside them in config.
+    std::string deny_message;
+
     // The questions map sent verbatim; the answer is read from its "action"
-    // key, a Choice over {allow, deny, review}.
+    // key, a Choice whose criteria must be exactly {allow, deny, review}
+    // (checked at load: decision.hpp's kActionOptions).
     nlohmann::json questions = nlohmann::json::object();
 
     // Merged into the same request (one round trip, the fan-out pattern);

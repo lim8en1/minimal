@@ -25,6 +25,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <thread>
@@ -238,8 +239,19 @@ TEST_CASE("decision-advisor the plugins.json entry overrides any layer",
     CHECK(nlohmann::json(settings.endpoint) == Bundled().at("backends").at("openrouter").at("endpoint"));
 
     // "questions" replaces wholesale; it must still define "action".
-    const nlohmann::json own{{"action", {{"type", "choice"}}}};
+    const nlohmann::json own{
+        {"action",
+         {{"type", "choice"}, {"criteria", {{"allow", "a"}, {"deny", "d"}, {"review", "r"}}}}}};
     CHECK(Parse(nlohmann::json{{"questions", own}}).questions == own);
+    CHECK(Parse(nlohmann::json{{"deny_message", "house rule: ask first"}}).deny_message ==
+          "house rule: ask first");
+
+    // No arbitrary ceilings: the only upper bound is what an int holds.
+    const auto generous = Parse(nlohmann::json{{"budget_ms", 3600000},
+                                               {"request_timeout_ms", 3600000},
+                                               {"retry", {{"max_retries", 1000}}}});
+    CHECK(generous.budget_ms == 3600000);
+    CHECK(generous.max_retries == 1000);
 }
 
 TEST_CASE("decision-advisor settings errors are named, never defaulted",
@@ -266,6 +278,19 @@ TEST_CASE("decision-advisor settings errors are named, never defaulted",
                       ContainsSubstring("config.endpoint: must not be empty"));
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"questions", {{"audit", nlohmann::json::object()}}}}),
                       ContainsSubstring("must define \"action\""));
+    // The rubric's options are what the decision rule acts on: a renamed or
+    // missing one fails at load, not as an abstain on every call.
+    auto renamed = Bundled().at("questions");
+    renamed.at("action").at("criteria").erase("deny");
+    renamed.at("action").at("criteria")["block"] = "x";
+    CHECK_THROWS_WITH(Parse(nlohmann::json{{"questions", renamed}}),
+                      ContainsSubstring("questions.action.criteria: must have exactly the options"));
+    auto not_choice = Bundled().at("questions");
+    not_choice.at("action")["type"] = "boolean";
+    CHECK_THROWS_WITH(Parse(nlohmann::json{{"questions", not_choice}}),
+                      ContainsSubstring("questions.action.type: must be \"choice\""));
+    CHECK_THROWS_WITH(Parse(nlohmann::json{{"deny_message", ""}}),
+                      ContainsSubstring("config.deny_message: must not be empty"));
     CHECK_THROWS_WITH(Parse(nlohmann::json::array()), ContainsSubstring("must be an object"));
     // A per-attempt cap above the total budget is refused, not clamped.
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"budget_ms", 500}, {"request_timeout_ms", 90000}}),
@@ -316,6 +341,27 @@ TEST_CASE("decision-advisor extracts the action answer from the live envelope",
     CHECK(ExtractActionAnswer(nlohmann::json{
               {"answers", {{"action", {{"choice", "explode"}, {"probabilities", {}}}}}}}) ==
           std::nullopt);
+    // A missing or non-numeric probability is not "0": the answer is invalid.
+    auto missing = allow;
+    missing.at("answers").at("action").at("probabilities").erase("deny");
+    CHECK(ExtractActionAnswer(missing) == std::nullopt);
+    auto textual = allow;
+    textual.at("answers").at("action").at("probabilities")["review"] = "low";
+    CHECK(ExtractActionAnswer(textual) == std::nullopt);
+}
+
+TEST_CASE("decision-advisor backoff doubles and saturates at backoff_max_ms",
+          "[decision_advisor][retry]") {
+    auto settings = FastSettings();
+    settings.backoff_initial_ms = 100;
+    settings.backoff_max_ms = 2000;
+    CHECK(BackoffFor(0, settings) == std::chrono::milliseconds(100));
+    CHECK(BackoffFor(1, settings) == std::chrono::milliseconds(200));
+    CHECK(BackoffFor(4, settings) == std::chrono::milliseconds(1600));
+    CHECK(BackoffFor(5, settings) == std::chrono::milliseconds(2000));
+    // No attempt count overflows: the doubling stops at the cap.
+    CHECK(BackoffFor(40, settings) == std::chrono::milliseconds(2000));
+    CHECK(BackoffFor(std::numeric_limits<int>::max(), settings) == std::chrono::milliseconds(2000));
 }
 
 TEST_CASE("decision-advisor decision rule: census floor, majority margin, review",
@@ -686,6 +732,8 @@ TEST_CASE("decision-advisor Advise resolves allow/deny/abstain from the live-sha
             CHECK(response->deny_message.find("auto-denied by decision-advisor") !=
                   std::string::npos);
             CHECK(response->deny_message.find("p(deny)=") != std::string::npos);
+            // ...then the configured text, verbatim.
+            CHECK(response->deny_message.ends_with("; " + settings.deny_message));
         }
     }
 }

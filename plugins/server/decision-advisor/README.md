@@ -137,8 +137,28 @@ field. Restore a deleted file from `bundled/`.
 | `min_probability_allow` | `0.75` (`llama`: `0.45`) | Census floor: the chosen option's probability must clear it. |
 | `min_probability_deny` | `0.85` (`llama`: `0.50`) | Deny's floor — stricter than allow's, deliberately. |
 | `min_margin` | `0.25` (`llama`: `0.20`) | Majority margin: the top option must beat the runner-up by this much. Both gates, because TypeSafe's own cookbook measured label flips exactly where top probabilities were close, and a floor alone cannot see a near-tie. |
-| `questions` | the rubric in the file | The questions map sent verbatim. The answer is read from its `"action"` key, which must exist and be a Choice over `{allow, deny, review}`. Changing the wording changes the probabilities: re-tune the thresholds after. |
+| `deny_message` | "the call looks destructive or out of scope -- ask the user before retrying" | What a denied model reads, after `auto-denied by decision-advisor (model M): p(deny)=P; `. |
+| `questions` | the rubric in the file | The questions map sent verbatim. The answer is read from its `"action"` key: `"type": "choice"` with `criteria` for exactly `allow`, `deny` and `review` (checked at load). Changing the wording changes the probabilities: re-tune the thresholds after. |
 | `extra_questions` | `{}` | Merged into the same request (one round trip, the speculative fan-out pattern); answers are logged, never acted on. |
+
+### Fixed in code
+
+What stays in code is protocol or representation, not tuning:
+
+- **The System One wire format**: `state`/`model`/`questions` in the body,
+  `answers.action.choice`/`probabilities` out, `Authorization: Bearer`,
+  `Retry-After`/`retry-after-ms`. The option set `{allow, deny, review}` is
+  what the decision rule acts on; the rubric must match it.
+- **Which failures retry**: 408, 429 and 5xx except 501; connection failures
+  and timeouts. HTTP semantics (TypeSafe's SDK policy), plus llama-server's
+  501 for a model that no retry fixes.
+- **The 25 ms cancel poll** during backoff sleeps: the longest a cancel waits
+  to be noticed, below what anyone waiting on a prompt perceives.
+- **200 characters** of a server's error quoted in the warn line, so it stays
+  one line.
+- **Range bounds**: probabilities and `jitter` in [0, 1]; milliseconds at
+  least 1; nothing above what an `int` holds. The budget, not a cap, bounds
+  a call.
 
 ## The decision rule
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -40,8 +42,8 @@ struct SystemOneOutcome {
 // defaults: max_retries 2, backoff 500ms doubling to 5s, jitter 0.25, retry
 // 408/429/5xx + connection/timeout errors, honor Retry-After up to a cap):
 //
-//   retryable     408, 429, 500..599; HttpError{ConnectFailed, Timeout, Other}
-//   non-retryable 401, 422, any other status, unparseable body
+//   retryable     408, 429, 500..599 but 501; HttpError{ConnectFailed, Timeout, Other}
+//   non-retryable 401, 422, 501, any other status, unparseable body
 //   abort         is_cancelled() (checked before every attempt and during
 //                 every backoff sleep, in slices) or budget exhausted
 //
@@ -52,5 +54,9 @@ struct SystemOneOutcome {
 SystemOneOutcome AskSystemOne(const net::HttpClient& http, const Settings& settings,
                   const std::string& api_key, const nlohmann::json& state,
                   std::function<bool()> is_cancelled);
+
+// The policy delay before retry `attempt + 1`, before jitter: backoff_initial_ms
+// doubled per attempt, saturating at backoff_max_ms.
+std::chrono::milliseconds BackoffFor(int attempt, const Settings& settings);
 
 }  // namespace minimal::decision_advisor

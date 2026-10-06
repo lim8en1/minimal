@@ -8,6 +8,15 @@
 #include "systemone_client.hpp"
 
 namespace minimal::decision_advisor {
+namespace {
+
+// The answering model for the log line and deny message; a server that omits
+// the envelope's "model" field still gets a readable line.
+std::string ModelName(const SystemOneOutcome& outcome) {
+    return outcome.answered_model.empty() ? "unknown" : outcome.answered_model;
+}
+
+}  // namespace
 
 DecisionAdvisor::DecisionAdvisor(Settings settings, common::SecretHandle api_key,
                                  net::HttpClient http,
@@ -20,9 +29,12 @@ DecisionAdvisor::DecisionAdvisor(Settings settings, common::SecretHandle api_key
 nlohmann::json DecisionAdvisor::StateOf(const tools::PermissionRequest& request) const {
     // The decision, not the world: what the judge needs to rule on this one
     // call. tool_input is JSON already; nothing else about the harness (the
-    // mode that produced the Ask, grants held, history) is sent.
-    return nlohmann::json{{"session_id", request.session_id},
-                          {"tool_name", request.tool_name},
+    // mode that produced the Ask, grants held, history) is sent. Nor is the
+    // session id: it means nothing to the judge, identifies the session to an
+    // external service, and no backend keys a cache on it -- llama-server's
+    // cache is a token prefix, which a per-session id at the head of the
+    // state would only break.
+    return nlohmann::json{{"tool_name", request.tool_name},
                           {"summary", request.summary},
                           {"tool_input", request.tool_input}};
 }
@@ -83,9 +95,8 @@ std::optional<tools::PermissionResponse> DecisionAdvisor::Advise(
         logger_.info(
             "decision-advisor: session {} tool '{}' -> abstained ({}) [model={} choice={} "
             "p1={:.3f} p2={:.3f} attempts={} total_ms={}]",
-            request.session_id, request.tool_name, decision.abstain_reason,
-            outcome.answered_model.empty() ? "unknown" : outcome.answered_model, answer->choice,
-            chosen, best_other, outcome.attempts, outcome.total.count());
+            request.session_id, request.tool_name, decision.abstain_reason, ModelName(outcome),
+            answer->choice, chosen, best_other, outcome.attempts, outcome.total.count());
         return std::nullopt;
     }
 
@@ -93,25 +104,21 @@ std::optional<tools::PermissionResponse> DecisionAdvisor::Advise(
         logger_.info(
             "decision-advisor: session {} tool '{}' -> denied [model={} choice={} p1={:.3f} "
             "p2={:.3f} attempts={} total_ms={}]",
-            request.session_id, request.tool_name,
-            outcome.answered_model.empty() ? "unknown" : outcome.answered_model, answer->choice,
-            chosen, best_other, outcome.attempts, outcome.total.count());
+            request.session_id, request.tool_name, ModelName(outcome), answer->choice, chosen,
+            best_other, outcome.attempts, outcome.total.count());
         tools::PermissionResponse response;
         response.decision = tools::PermissionDecision::Deny;
-        response.deny_message =
-            "auto-denied by decision-advisor (model " +
-            (outcome.answered_model.empty() ? std::string("unknown") : outcome.answered_model) +
-            "): p(" + answer->choice + ")=" + std::to_string(chosen) +
-            "; the call looks destructive or out of scope -- ask the user before retrying";
+        response.deny_message = "auto-denied by decision-advisor (model " + ModelName(outcome) +
+                                "): p(" + answer->choice + ")=" + std::to_string(chosen) + "; " +
+                                settings_.deny_message;
         return response;
     }
 
     logger_.info(
         "decision-advisor: session {} tool '{}' -> allowed [model={} choice={} p1={:.3f} "
         "p2={:.3f} attempts={} total_ms={}]",
-        request.session_id, request.tool_name,
-        outcome.answered_model.empty() ? "unknown" : outcome.answered_model, answer->choice,
-        chosen, best_other, outcome.attempts, outcome.total.count());
+        request.session_id, request.tool_name, ModelName(outcome), answer->choice, chosen,
+        best_other, outcome.attempts, outcome.total.count());
     tools::PermissionResponse response;
     // This invocation only: no granted_keys. The advised checker discards an
     // advisor's grants anyway -- a blanket grant would let one confident
