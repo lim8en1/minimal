@@ -157,7 +157,11 @@ Enablement is recorded in `<config>/plugins.json` (client:
 - **`config`** is a per-plugin JSON object forwarded verbatim to the plugin
   (e.g. the `logo` plugin's `text`/`styles`/`charset` options). Every bundled
   plugin parses its `config` strictly: an unknown field or a bad value is a
-  startup error naming `plugins.json: <plugin>.config.<field>`.
+  startup error naming `plugins.json: <plugin>.config.<field>`. A third-party
+  plugin gets the same behaviour from the SDK's `config::Reader`
+  (`minimal/common/config_reader.hpp`; files of its own through
+  `minimal/common/json_config_loader.hpp`), which names the file and full
+  path in every error and treats `"//"` keys as comments.
 - **The file is strict.** Invalid JSON, or any entry with a wrong type or an
   unknown field, is fatal on the server (no plugin loads, the file is not
   rewritten) and a warning on the client (that entry is skipped, the file is

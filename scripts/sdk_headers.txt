@@ -62,12 +62,13 @@ minimal/tools/permission.hpp
 
 # Shared utilities (no policy; safe for any plugin to build on).
 minimal/common/clock.hpp
+minimal/common/config_reader.hpp
 minimal/common/event_queue.hpp
+minimal/common/json_config_loader.hpp
 minimal/common/model_ref.hpp
 minimal/common/read_file.hpp
 minimal/common/utf8.hpp
 minimal/config/frontmatter.hpp
-minimal/config/json_config_loader.hpp
 minimal/config/parse_util.hpp
 minimal/config/permission_codec.hpp
 minimal/config/project_dirs.hpp
