@@ -240,7 +240,7 @@ TEST_CASE("project context: a symlink staying inside its directory is read", "[p
 }
 
 TEST_CASE("project-context config: defaults and overrides", "[project_context]") {
-    const auto defaults = ParseProjectContextSettings(nlohmann::json());
+    const auto defaults = ParseProjectContextSettings(nlohmann::json::object());
     CHECK(defaults.files == std::vector<std::string>{"AGENTS.md", "CLAUDE.md"});
     CHECK(defaults.max_bytes == 262144);
     CHECK_FALSE(defaults.search_ancestors);

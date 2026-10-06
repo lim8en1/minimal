@@ -87,7 +87,9 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     sanity_check_test.cpp
     fd_hygiene_test.cpp
     settings_config_test.cpp
-    parse_util_test.cpp
+    config_reader_test.cpp
+    config_docs_drift_test.cpp
+    last_selection_test.cpp
     read_file_test.cpp
     permissions_config_test.cpp
     agent_preset_frontmatter_test.cpp
@@ -408,6 +410,7 @@ target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_USER_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures-deployed"
     MINIMAL_BUNDLED_DIR="${CMAKE_SOURCE_DIR}/bundled"
     MINIMAL_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples"
+    MINIMAL_DOCS_DIR="${CMAKE_SOURCE_DIR}/docs"
     MINIMAL_LOGO_PLUGIN="$<TARGET_FILE:minimal_logo>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto"
     # The captured live Jev responses (fixtures/decision-advisor/): the

@@ -18,4 +18,5 @@ minimal/client/view/tool_status.hpp
 
 # Shared utilities.
 minimal/common/abi_tag.hpp
+minimal/common/config_reader.hpp
 minimal/common/logger.hpp

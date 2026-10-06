@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <iterator>
 
+#include "minimal/common/config_reader.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::common {
@@ -25,78 +26,53 @@ PluginConfigFile ParsePluginConfigFile(const std::string& json_text,
 
     const auto parsed = nlohmann::json::parse(json_text, nullptr, /*allow_exceptions=*/false);
     if (parsed.is_discarded() || !parsed.is_object()) {
-        config.malformed = true;  // the host warns and skips the rewrite
+        config.malformed = true;  // the host reports it and skips the rewrite
         return config;
     }
     const std::string& label = format.file_label;
+    const auto problem = [&](const std::exception& error) {
+        config.problems.emplace_back(error.what());
+    };
 
-    if (auto it = parsed.find("plugins"); it != parsed.end() && !it->is_array()) {
-        common::DefaultLogger().warn(
-            "{}: 'plugins' is a {}, not an array; ignoring it -- no plugins will load", label,
-            it->type_name());
-    }
-    if (auto it = parsed.find("plugins"); it != parsed.end() && it->is_array()) {
-        for (const auto& item : *it) {
-            if (!item.is_object()) continue;
-            PluginConfigFile::Entry entry;
-            // Type-checked reads, not item.value(key, default): that overload only
-            // substitutes the default when the key is ABSENT -- a key present with
-            // the wrong JSON type (a user hand-editing this file can write
-            // "enabled": "false" or "enabled": 1) makes it throw type_error.302
-            // uncaught, which discards the ENTIRE parsed config at the caller (or
-            // aborts startup). Degrade-don't-throw: say what was dropped.
-            if (auto file_it = item.find("file"); file_it != item.end()) {
-                if (file_it->is_string()) {
-                    entry.file = file_it->get<std::string>();
-                } else {
-                    common::DefaultLogger().warn(
-                        "{}: a plugin entry has a non-string 'file' ({}); skipping it", label,
-                        file_it->type_name());
+    if (const auto it = parsed.find("plugins"); it != parsed.end()) {
+        if (!it->is_array()) {
+            config.problems.push_back(label + ": plugins: must be a list of plugin entries");
+        } else {
+            for (std::size_t index = 0; index < it->size(); ++index) {
+                const auto& item = (*it)[index];
+                const std::string segment = "plugins[" + std::to_string(index) + "]";
+                try {
+                    if (!item.is_object()) {
+                        throw config::ConfigError(label + ": " + segment + ": must be an object");
+                    }
+                    config::Reader reader(item, label, segment);
+                    PluginConfigFile::Entry entry;
+                    entry.file = reader.RequireString("file");
+                    if (const auto provenance = reader.MaybeEnum("provenance", {kBundled, kUser})) {
+                        entry.provenance = *provenance == kBundled ? PluginProvenance::Bundled
+                                                                   : PluginProvenance::User;
+                    }
+                    entry.enabled = reader.MaybeBool("enabled");
+                    if (auto plugin_config = reader.MaybeObject("config")) {
+                        entry.config = plugin_config->node();
+                    }
+                    reader.Finish();
+                    config.plugins.push_back(std::move(entry));
+                } catch (const config::ConfigError& error) {
+                    problem(error);
                 }
             }
-            if (entry.file.empty()) continue;
-            entry.provenance = PluginProvenance::User;
-            if (auto prov_it = item.find("provenance");
-                prov_it != item.end() && prov_it->is_string()) {
-                entry.provenance = prov_it->get<std::string>() == kBundled
-                                       ? PluginProvenance::Bundled
-                                       : PluginProvenance::User;
-            }
-            entry.enabled = false;
-            if (auto enabled_it = item.find("enabled"); enabled_it != item.end()) {
-                if (enabled_it->is_boolean()) {
-                    entry.enabled = enabled_it->get<bool>();
-                } else {
-                    common::DefaultLogger().warn(
-                        "{}: entry '{}' has a non-boolean 'enabled' ({}); defaulting to "
-                        "disabled",
-                        label, entry.file, enabled_it->type_name());
-                }
-            }
-            if (auto config_it = item.find("config"); config_it != item.end()) {
-                if (config_it->is_object()) {
-                    entry.config = *config_it;
-                } else {
-                    // Degrade-don't-throw: a malformed config must not stop the
-                    // plugin from loading. The plugin sees {} and the warning says
-                    // what was dropped.
-                    common::DefaultLogger().warn(
-                        "{}: entry '{}' has a non-object 'config' ({}); ignoring it -- the "
-                        "plugin will receive an empty config",
-                        label, entry.file, config_it->type_name());
-                }
-            }
-            config.plugins.push_back(std::move(entry));
         }
     }
 
-    if (auto it = parsed.find("aliases"); it != parsed.end() && !it->is_object()) {
-        common::DefaultLogger().warn("{}: 'aliases' is a {}, not an object; ignoring it", label,
-                                     it->type_name());
-    }
-    if (auto it = parsed.find("aliases"); it != parsed.end() && it->is_object()) {
-        for (const auto& [key, value] : it->items()) {
-            if (value.is_string()) config.aliases.emplace(key, value.get<std::string>());
+    if (const auto it = parsed.find("aliases"); it != parsed.end()) {
+        try {
+            config::Reader root(parsed, label);
+            if (auto aliases = root.MaybeStringMap("aliases")) {
+                config.aliases = {aliases->begin(), aliases->end()};
+            }
+        } catch (const config::ConfigError& error) {
+            problem(error);
         }
     }
 
@@ -114,11 +90,13 @@ std::string SerializePluginConfigFile(const PluginConfigFile& config) {
     nlohmann::json out = config.preserved;
     out["plugins"] = nlohmann::json::array();
     for (const auto& entry : config.plugins) {
-        nlohmann::json item = {
-            {"file", entry.file},
-            {"provenance", entry.provenance == PluginProvenance::Bundled ? kBundled : kUser},
-            {"enabled", entry.enabled},
-        };
+        nlohmann::json item = {{"file", entry.file}};
+        // Written once known: a hand-written entry that omitted them gets the
+        // resolved values persisted, so the next edit starts from the truth.
+        if (entry.provenance) {
+            item["provenance"] = *entry.provenance == PluginProvenance::Bundled ? kBundled : kUser;
+        }
+        if (entry.enabled) item["enabled"] = *entry.enabled;
         // User config must survive the load->save cycle: the file is rewritten on
         // every startup, so dropping config here would silently erase it. Emitted
         // unconditionally (object or not) so what round-trips is what was parsed
@@ -193,24 +171,49 @@ std::vector<PluginFileCandidate> DiscoverPluginFiles(const std::filesystem::path
                                          return e.file == item.file &&
                                                 e.provenance == item.provenance;
                                      });
-
+        // An entry that names no provenance claims the file by name -- unless
+        // both directories ship that name, where guessing could enable a
+        // plugin nobody opted into: that is a named problem instead.
         if (existing == config.plugins.end()) {
-            // Provenance decides the default, mechanically: shipped-with-this-build
-            // is trusted, dropped-in-later is opt-in -- except a bundled plugin
-            // whose build marked it disabled-by-default (kDisabledByDefaultSuffix).
-            // Once an entry exists, the user's `enabled` governs and this default
-            // is never consulted again.
-            std::error_code marker_ec;
-            const auto marker = item.path.parent_path() /
-                                (item.path.stem().string() + kDisabledByDefaultSuffix);
+            existing = std::find_if(config.plugins.begin(), config.plugins.end(),
+                                    [&](const PluginConfigFile::Entry& e) {
+                                        return e.file == item.file && !e.provenance;
+                                    });
+            if (existing != config.plugins.end()) {
+                const bool ambiguous = std::any_of(found.begin(), found.end(), [&](const Found& e) {
+                    return e.file == item.file && e.provenance != item.provenance;
+                });
+                if (ambiguous) {
+                    // Reported once, from the bundled side (sorted first).
+                    if (item.provenance == PluginProvenance::Bundled) config.problems.push_back(
+                        format.file_label + ": the entry for '" + item.file +
+                        "' names no provenance, and both a bundled and a user plugin of that "
+                        "name exist -- add \"provenance\": \"bundled\" or \"user\"");
+                    existing = config.plugins.end();
+                    continue;
+                }
+                existing->provenance = item.provenance;
+            }
+        }
+
+        // Provenance decides the default, mechanically: shipped-with-this-build
+        // is trusted, dropped-in-later is opt-in -- except a bundled plugin
+        // whose build marked it disabled-by-default (kDisabledByDefaultSuffix).
+        // Once an entry says `enabled`, the user's choice governs and this
+        // default is never consulted again.
+        std::error_code marker_ec;
+        const auto marker =
+            item.path.parent_path() / (item.path.stem().string() + kDisabledByDefaultSuffix);
+        const bool default_enabled = item.provenance == PluginProvenance::Bundled &&
+                                     !std::filesystem::exists(marker, marker_ec);
+        if (existing == config.plugins.end()) {
             PluginConfigFile::Entry entry;
             entry.file = item.file;
             entry.provenance = item.provenance;
-            entry.enabled = item.provenance == PluginProvenance::Bundled &&
-                            !std::filesystem::exists(marker, marker_ec);
             config.plugins.push_back(entry);
             existing = std::prev(config.plugins.end());
         }
+        if (!existing->enabled) existing->enabled = default_enabled;
 
         // The same basename discovered from BOTH directories: both files still load
         // (each under its own independent entry), which is a guaranteed name
@@ -251,7 +254,7 @@ std::vector<PluginFileCandidate> DiscoverPluginFiles(const std::filesystem::path
                 item.path.string(), format.file_label);
         }
 
-        candidates.push_back(PluginFileCandidate{item.path, item.provenance, existing->enabled,
+        candidates.push_back(PluginFileCandidate{item.path, item.provenance, *existing->enabled,
                                                  existing->config});
     }
 

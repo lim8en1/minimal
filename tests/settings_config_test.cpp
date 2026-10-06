@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <fstream>
 
@@ -13,7 +14,6 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
     CHECK(config.default_agent_preset.empty());
     CHECK(config.default_model.empty());
     CHECK(config.default_subagent_model.empty());
-    CHECK(config.default_theme.empty());
     CHECK(config.max_concurrent_subagents == 4);
     CHECK(config.memory.auto_compact == true);
     CHECK(config.memory.context_compaction_trigger.kind == CompactionTriggerSettings::Kind::Never);
@@ -31,7 +31,6 @@ TEST_CASE("ParseSettingsConfig: top-level fields overridable individually", "[se
     nlohmann::json doc = {{"default_agent_preset", "build"},
                            {"default_model", "openai-main"},
                            {"default_subagent_model", "openai-main/small"},
-                           {"default_theme", "dark"},
                            {"max_concurrent_subagents", 8},
                            {"session_db_path", "/data/sessions.db"}};
 
@@ -39,7 +38,6 @@ TEST_CASE("ParseSettingsConfig: top-level fields overridable individually", "[se
     CHECK(config.default_agent_preset == "build");
     CHECK(config.default_model == "openai-main");
     CHECK(config.default_subagent_model == "openai-main/small");
-    CHECK(config.default_theme == "dark");
     CHECK(config.max_concurrent_subagents == 8);
     CHECK(config.session_db_path == "/data/sessions.db");
 }
@@ -121,12 +119,12 @@ TEST_CASE("ParseSettingsConfig: compaction trigger is a one-of strategy choice",
     }
 }
 
-TEST_CASE("ParseSettingsConfig: context_compaction_trigger_tokens is not a trigger",
+TEST_CASE("ParseSettingsConfig: context_compaction_trigger_tokens is an unknown field",
           "[settings_config]") {
-    const auto config =
-        ParseSettingsConfig({{"memory", {{"context_compaction_trigger_tokens", 100000}}}});
-    CHECK(config.memory.context_compaction_trigger.kind ==
-          CompactionTriggerSettings::Kind::Never);
+    CHECK_THROWS_WITH(
+        ParseSettingsConfig({{"memory", {{"context_compaction_trigger_tokens", 100000}}}}),
+        Catch::Matchers::ContainsSubstring(
+            "settings.json: memory.context_compaction_trigger_tokens: unknown field"));
 }
 
 TEST_CASE("ParseSettingsConfig: negative compaction_keep_recent_tokens is fatal",
@@ -136,24 +134,23 @@ TEST_CASE("ParseSettingsConfig: negative compaction_keep_recent_tokens is fatal"
         std::runtime_error);
 }
 
-TEST_CASE("ParseSettingsConfig: tools.raw carries the whole slice verbatim, including keys "
-          "ParseTools does not recognize",
-          "[settings_config]") {
-    // Phase 3: main.cpp forwards this to every plugin as context.tools_settings
-    // without going through the typed fields above -- a plugin's own top-level
-    // key under "tools" (here "a_plugin_only_key") must survive intact.
-    nlohmann::json doc = {{"tools", {{"bash", {{"timeout_ms", 5000}}},
-                                     {"a_plugin_only_key", {{"anything", true}}}}}};
-
-    auto config = ParseSettingsConfig(doc);
-    CHECK(config.tools.raw == doc.at("tools"));
-    CHECK(config.tools.raw.at("a_plugin_only_key") == nlohmann::json{{"anything", true}});
+TEST_CASE("ParseSettingsConfig: the tools section is strict", "[settings_config]") {
+    // Tool plugins take their knobs from plugins.json, not from here: a
+    // tools.bash slice is an unknown field, not a silently ignored one.
+    CHECK_THROWS_WITH(
+        ParseSettingsConfig({{"tools", {{"bash", {{"timeout_ms", 5000}}}}}}),
+        Catch::Matchers::ContainsSubstring("settings.json: tools.bash: unknown field"));
 }
 
-TEST_CASE("ParseSettingsConfig: tools.raw defaults to an empty object with no \"tools\" key",
-          "[settings_config]") {
-    auto config = ParseSettingsConfig(nlohmann::json::object());
-    CHECK(config.tools.raw == nlohmann::json::object());
+TEST_CASE("ParseSettingsConfig: unknown and wrong-shaped keys are named", "[settings_config]") {
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(ParseSettingsConfig({{"defualt_model", "x"}}),
+                      ContainsSubstring("settings.json: defualt_model: unknown field"));
+    CHECK_THROWS_WITH(ParseSettingsConfig({{"memory", "oops"}}),
+                      ContainsSubstring("settings.json: memory: must be an object"));
+    CHECK_THROWS_WITH(ParseSettingsConfig({{"logging", {{"level", "verbose"}}}}),
+                      ContainsSubstring("settings.json: logging.level: must be one of"));
+    CHECK_NOTHROW(ParseSettingsConfig({{"// comment", "allowed"}}));
 }
 
 TEST_CASE("ParseSettingsConfig: max_parallel_tool_calls defaults to 4, must be positive",
@@ -224,14 +221,14 @@ TEST_CASE("ParseSettingsConfig: a wrong-typed value names its key", "[settings_c
         }
         return std::string();
     };
-    CHECK(message({{"default_model", 5}}).find("default_model must be a string") !=
+    CHECK(message({{"default_model", 5}}).find("settings.json: default_model: must be a string") !=
           std::string::npos);
     CHECK(message({{"memory", {{"auto_compact", "yes"}}}}).find("memory.auto_compact") !=
           std::string::npos);
     CHECK(message({{"tools", {{"max_input_bytes", 1.5}}}}).find("tools.max_input_bytes") !=
           std::string::npos);
     // An integer that does not fit its field is an error, not a silent wrap.
-    CHECK(message({{"tools", {{"max_parallel_tool_calls", 4294967296LL}}}}).find("out of range") !=
+    CHECK(message({{"tools", {{"max_parallel_tool_calls", 4294967296LL}}}}).find("must be at most 64") !=
           std::string::npos);
 }
 

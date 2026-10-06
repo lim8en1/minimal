@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <signal.h>
 
@@ -157,7 +158,8 @@ struct CtxBuilder {
 
 // --- pure logic -----------------------------------------------------------------
 
-TEST_CASE("python settings parse with defaults and clamps", "[tools_python][settings]") {
+TEST_CASE("python settings: defaults, seconds-suffixed keys, and named refusals",
+          "[tools_python][settings]") {
     const auto defaults = ParsePythonSettings(nlohmann::json::object());
     CHECK(defaults.python == "python3");
     CHECK(defaults.sync_wait_ceiling == 300);
@@ -168,30 +170,30 @@ TEST_CASE("python settings parse with defaults and clamps", "[tools_python][sett
     CHECK(defaults.stream_tail_bytes == 768 * 1024);
 
     const auto configured = ParsePythonSettings(nlohmann::json{
-        {"python", "python3.12"}, {"sync_wait_ceiling", 5}, {"startup_timeout", 2}});
+        {"python", "python3.12"}, {"sync_wait_ceiling_s", 5}, {"startup_timeout_s", 2},
+        {"stream_head_bytes", 4096}, {"stream_tail_bytes", 8192},
+        {"background_max_runtime_s", 60}});
     CHECK(configured.python == "python3.12");
     CHECK(configured.sync_wait_ceiling == 5);
+    CHECK(configured.startup_timeout == 2);
+    CHECK(configured.stream_head_bytes == 4096);
+    CHECK(configured.stream_tail_bytes == 8192);
+    CHECK(configured.background_max_runtime == 60);
+    // 0 is the documented "unlimited" for the two bounds that have one.
+    CHECK(ParsePythonSettings({{"sync_wait_ceiling_s", 0}}).sync_wait_ceiling == 0);
 
-    // A negative ceiling means "unlimited", the only safe direction for a
-    // value whose job is to bound a NON-destructive wait.
-    CHECK(ParsePythonSettings(nlohmann::json{{"sync_wait_ceiling", -3}}).sync_wait_ceiling == 0);
-    CHECK(ParsePythonSettings(nlohmann::json{{"python", ""}}).python == "python3");
-
-    // The stream windows and the one destructive timer parse with clamps.
-    const auto tuned = ParsePythonSettings(nlohmann::json{
-        {"stream_head_bytes", 4096}, {"stream_tail_bytes", 8192}, {"background_max_runtime", 60}});
-    CHECK(tuned.stream_head_bytes == 4096);
-    CHECK(tuned.stream_tail_bytes == 8192);
-    CHECK(tuned.background_max_runtime == 60);
-    CHECK(ParsePythonSettings(nlohmann::json{{"background_max_runtime", -5}})
-              .background_max_runtime == 0);
-
-    // Regression: background_max_runtime feeds `now() + seconds(N)`
-    // (StampRunningLocked); converting to nanoseconds overflows a 64-bit rep
-    // above ~9.2e9 seconds and wraps to a deadline in the PAST, hard-killing
-    // the interpreter almost immediately despite asking for MORE time.
-    CHECK(ParsePythonSettings(nlohmann::json{{"background_max_runtime", 9999999999LL}})
-              .background_max_runtime <= 100'000'000);
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(ParsePythonSettings({{"sync_wait_ceiling_s", -3}}),
+                      ContainsSubstring("tools-python.config.sync_wait_ceiling_s: must be at least 0"));
+    CHECK_THROWS_WITH(ParsePythonSettings({{"python", ""}}),
+                      ContainsSubstring("python: must not be empty"));
+    // The pre-suffix spelling is an unknown field, not a silent no-op.
+    CHECK_THROWS_WITH(ParsePythonSettings({{"startup_timeout", 2}}),
+                      ContainsSubstring("startup_timeout: unknown field"));
+    // background_max_runtime_s feeds `now() + seconds(N)`; a value past the
+    // sane ceiling would overflow the nanosecond rep and wrap into the past.
+    CHECK_THROWS_WITH(ParsePythonSettings({{"background_max_runtime_s", 9999999999LL}}),
+                      ContainsSubstring("background_max_runtime_s: must be at most"));
 }
 
 TEST_CASE("python slice: null-safe parse of packages and requirements", "[tools_python][slice]") {

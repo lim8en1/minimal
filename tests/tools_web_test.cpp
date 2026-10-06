@@ -718,18 +718,18 @@ TEST_CASE("ParseWebSettings: defaults with an empty config", "[tools_web][settin
 TEST_CASE("ParseWebSettings: an unknown field is a named error at either level",
           "[tools_web][settings]") {
     CHECK_THROWS_WITH(ParseWebSettings({{"serch", nlohmann::json::object()}}),
-                      Catch::Matchers::ContainsSubstring("tools-web: config has unknown field \"serch\""));
+                      Catch::Matchers::ContainsSubstring("tools-web.config.serch: unknown field"));
     CHECK_THROWS_WITH(ParseWebSettings({{"search", {{"api_key_env", "K"}}}}),
                       Catch::Matchers::ContainsSubstring(
-                          "tools-web: config.search has unknown field \"api_key_env\""));
+                          "tools-web.config.search.api_key_env: unknown field"));
 }
 
-TEST_CASE("ParseWebSettings: a fetch.max_bytes below the default is raised, not honoured",
+TEST_CASE("ParseWebSettings: a fetch.max_bytes below the default is refused",
           "[tools_web][settings]") {
     const nlohmann::json config = {{"fetch", {{"default_max_bytes", 1024}, {"max_bytes", 512}}}};
-    const auto settings = ParseWebSettings(config);
-    CHECK(settings.fetch_default_max_bytes == 1024);
-    CHECK(settings.fetch_max_bytes == 1024);
+    CHECK_THROWS_WITH(ParseWebSettings(config),
+                      Catch::Matchers::ContainsSubstring(
+                          "fetch.max_bytes: must not be below fetch.default_max_bytes"));
 }
 
 TEST_CASE("ParseWebSettings: reads fetch.* and search.*", "[tools_web][settings]") {
@@ -744,23 +744,22 @@ TEST_CASE("ParseWebSettings: reads fetch.* and search.*", "[tools_web][settings]
     CHECK(settings.search_default_max_results == 3);
 }
 
-TEST_CASE("ParseWebSettings: an unset env: search.api_key throws", "[tools_web][settings]") {
+TEST_CASE("ParseWebSettings: an unset env: search.api_key binds and fails per use",
+          "[tools_web][settings]") {
     const nlohmann::json config = {{"search", {{"api_key", "env:MINIMAL_TEST_UNSET_VAR_XYZ"}}}};
-    CHECK_THROWS_AS(ParseWebSettings(config), std::runtime_error);
+    const auto settings = ParseWebSettings(config);
+    CHECK_THROWS_WITH(settings.search_api_key.Get(),
+                      Catch::Matchers::ContainsSubstring("MINIMAL_TEST_UNSET_VAR_XYZ"));
+    CHECK_THROWS_AS(ParseWebSettings({{"search", {{"api_key", "secrets:typo"}}}}),
+                    std::runtime_error);
 }
 
-TEST_CASE("ParseWebSettings: a fractional or absurdly large value falls back, never wraps",
+TEST_CASE("ParseWebSettings: a fractional or absurdly large value is refused, never wrapped",
           "[tools_web][settings]") {
-    // Regression: is_number() accepted a float (1500.7, silently truncated
-    // by get<T>()) and an unclamped get<T>() narrowing let a huge value
-    // (4294967297) wrap to 1 when cast to `int` -- both instead of falling
-    // back to the struct default.
-    const auto defaults = ParseWebSettings(nlohmann::json::object());
-    const auto fractional =
-        ParseWebSettings(nlohmann::json{{"fetch", {{"timeout_ms", 1500.7}}}});
-    CHECK(fractional.fetch_timeout_ms == defaults.fetch_timeout_ms);
-    const auto huge =
-        ParseWebSettings(nlohmann::json{{"fetch", {{"max_redirects", 4294967297LL}}}});
-    CHECK(huge.fetch_max_redirects > 0);  // never the wrap-to-1 the old code produced
-    CHECK(huge.fetch_max_redirects == std::numeric_limits<int>::max());  // clamped, not wrapped
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(ParseWebSettings(nlohmann::json{{"fetch", {{"timeout_ms", 1500.7}}}}),
+                      ContainsSubstring("fetch.timeout_ms: must be an integer"));
+    CHECK_THROWS_WITH(
+        ParseWebSettings(nlohmann::json{{"fetch", {{"max_redirects", 4294967297LL}}}}),
+        ContainsSubstring("fetch.max_redirects: must be at most"));
 }

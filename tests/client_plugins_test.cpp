@@ -548,37 +548,31 @@ TEST_CASE("client plugin discovery: provenance defaults, merge, and round-trip",
     REQUIRE(config.plugins.size() == 3);  // written back for persistence
 }
 
-TEST_CASE("client plugin discovery: a wrong-typed field degrades instead of throwing",
+TEST_CASE("client plugin config: a wrong-typed entry is a named problem, never a default",
           "[client_plugins][discovery]") {
-    // item.value(key, default) throws type_error.302 when the key is PRESENT
-    // with the wrong type (never when it's absent) -- a user hand-editing
-    // client-plugins.json used to abort the whole TUI at startup with no
-    // diagnostic. Degrade-don't-throw, like every other malformed-input case
-    // in this file.
+    // A typo'd entry used to degrade to "disabled" / "user" silently. Now each
+    // bad entry is dropped AND named, the host warns, and the file is never
+    // rewritten over the user's bytes.
     const std::string text = R"({
         "plugins": [
             {"file": "a.so", "enabled": "false"},
-            {"file": "b.so", "enabled": 1},
             {"file": "c.so", "provenance": 5, "enabled": true},
-            {"file": 5, "enabled": true}
+            {"file": "d.so", "enable": true},
+            {"file": "ok.so", "enabled": true}
         ]
     })";
 
     ClientPluginConfig parsed;
     REQUIRE_NOTHROW(parsed = ParseClientPluginConfig(text));
-    // The fourth entry's "file" isn't a string at all -- skipped entirely,
-    // same as an empty/missing file (the existing rule just above this one).
-    REQUIRE(parsed.plugins.size() == 3);
+    REQUIRE(parsed.plugins.size() == 1);
+    CHECK(parsed.plugins[0].file == "ok.so");
+    CHECK(parsed.plugins[0].enabled == true);
+    CHECK_FALSE(parsed.plugins[0].provenance.has_value());   // resolved at discovery
 
-    CHECK(parsed.plugins[0].file == "a.so");
-    CHECK_FALSE(parsed.plugins[0].enabled);   // non-boolean "enabled" -> defaults to disabled
-
-    CHECK(parsed.plugins[1].file == "b.so");
-    CHECK_FALSE(parsed.plugins[1].enabled);   // same for a numeric "enabled"
-
-    CHECK(parsed.plugins[2].file == "c.so");
-    CHECK(parsed.plugins[2].provenance == Provenance::User);   // non-string "provenance" -> default
-    CHECK(parsed.plugins[2].enabled);                          // this entry's "enabled" was valid
+    REQUIRE(parsed.problems.size() == 3);
+    CHECK(parsed.problems[0].find("plugins[0].enabled: must be true or false") != std::string::npos);
+    CHECK(parsed.problems[1].find("plugins[1].provenance: must be a string") != std::string::npos);
+    CHECK(parsed.problems[2].find("plugins[2].enable: unknown field") != std::string::npos);
 }
 
 TEST_CASE("client plugin discovery: a user-dir twin of a bundled basename is its own "

@@ -213,7 +213,9 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     // plus the host-owned seams the context carries. Built once per plugin,
     // before any hook runs.
     ClientPluginRegistrationContext context;
-    context.config = candidate.config;
+    // Always an object: "no config" is {}, never null, so every plugin parser
+    // sees one shape.
+    context.config = candidate.config.is_null() ? nlohmann::json::object() : candidate.config;
     context.attention = seams_.attention;
     context.client_api = seams_.client_api;
     context.focus = seams_.focus;

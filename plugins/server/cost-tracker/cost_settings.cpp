@@ -1,28 +1,25 @@
 #include "cost_settings.hpp"
 
+#include <limits>
+
+#include "minimal/common/config_reader.hpp"
+
 namespace minimal::cost_tracker {
 
 CostSettings ParseCostSettings(const nlohmann::json& config) {
     CostSettings settings;
-    if (!config.is_object()) return settings;
-    if (const auto it = config.find("rates_fetch_url");
-        it != config.end() && it->is_string() && !it->get<std::string>().empty()) {
-        settings.rates_fetch_url = it->get<std::string>();
-    }
-    if (const auto it = config.find("openrouter_rates_fetch_url");
-        it != config.end() && it->is_string() && !it->get<std::string>().empty()) {
-        settings.openrouter_rates_fetch_url = it->get<std::string>();
-    }
-    if (const auto it = config.find("rates_fetch_timeout_ms");
-        it != config.end() && it->is_number_integer() && it->get<int>() > 0) {
-        settings.rates_fetch_timeout_ms = it->get<int>();
-    }
-    // 0 is meaningful ("always refresh"), so it is the one accepted
-    // non-positive value; anything negative or non-integer keeps the default.
-    if (const auto it = config.find("rates_refresh_days");
-        it != config.end() && it->is_number_integer() && it->get<int>() >= 0) {
-        settings.rates_refresh_days = it->get<int>();
-    }
+    config::Reader reader(config, "plugins.json", "cost-tracker.config");
+    settings.rates_fetch_url =
+        reader.String("rates_fetch_url", settings.rates_fetch_url, /*allow_empty=*/false);
+    settings.openrouter_rates_fetch_url = reader.String(
+        "openrouter_rates_fetch_url", settings.openrouter_rates_fetch_url, /*allow_empty=*/false);
+    settings.rates_fetch_timeout_ms = static_cast<int>(reader.Int(
+        "rates_fetch_timeout_ms", settings.rates_fetch_timeout_ms, 1, 600000));
+    // 0 is meaningful ("always refresh").
+    settings.rates_refresh_days = static_cast<int>(
+        reader.Int("rates_refresh_days", settings.rates_refresh_days, 0, 3650));
+    if (auto rates = reader.MaybeObject("rates")) settings.rates = rates->node();
+    reader.Finish();
     return settings;
 }
 

@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <fstream>
 #include <string>
@@ -319,20 +320,12 @@ TEST_CASE("ParseAgentPresetFrontmatter: a native permission_mode wins over the a
     CHECK(*preset.permission_mode.file_write == PermissionMode::AlwaysAllow);
 }
 
-TEST_CASE("ParseAgentPresetFrontmatter: a tools key is neither a permission nor a provider "
-          "parameter",
+TEST_CASE("ParseAgentPresetFrontmatter: a tools key is an error naming the native fields",
           "[agent_preset_frontmatter]") {
-    // opencode's old `tools: {name: bool}` map is not read; and `tools` names
-    // a request field the harness owns, so it never passes through either.
-    auto preset = Parse(
-        "---\n"
-        "name: build\n"
-        "tools:\n"
-        "  write: false\n"
-        "---\n"
-        "body\n");
-    CHECK(preset.permission_mode.per_tool_overrides.empty());
-    CHECK_FALSE(preset.extra_parameters.contains("tools"));
+    // opencode's / Claude Code's `tools:` is not read here; a preset carrying
+    // one used to load with zero tools and no message.
+    CHECK_THROWS_WITH(Parse("---\nname: build\ntools:\n  write: false\n---\nbody\n"),
+                      Catch::Matchers::ContainsSubstring("allowed_tools"));
 }
 
 TEST_CASE("ParseAgentPresetFrontmatter: a permission key resolves through the live tool "
@@ -416,7 +409,7 @@ TEST_CASE("ParseAgentPresetFrontmatter: disable, hidden, color and steps decode"
     CHECK_THROWS_AS(Parse("---\nname: a\nsteps: -3\n---\nb\n"), std::runtime_error);
 }
 
-TEST_CASE("ParseAgentPresetFrontmatter: unknown keys become provider parameter passthrough",
+TEST_CASE("ParseAgentPresetFrontmatter: provider parameters -- allowlist and parameters: map",
           "[agent_preset_frontmatter][compat]") {
     auto preset = Parse(
         "---\n"
@@ -425,11 +418,27 @@ TEST_CASE("ParseAgentPresetFrontmatter: unknown keys become provider parameter p
         "temperature: 0.1\n"
         "top_p: 0.9\n"
         "reasoningEffort: high\n"
+        "parameters:\n"
+        "  seed: \"007\"\n"
+        "  stop: no\n"
+        "  temperature: 0.2\n"
         "---\n"
         "body\n");
-    CHECK(preset.extra_parameters["temperature"] == 0.1);
+    CHECK(preset.extra_parameters["temperature"] == 0.2);  // parameters: wins
     CHECK(preset.extra_parameters["top_p"] == 0.9);
     CHECK(preset.extra_parameters["reasoningEffort"] == "high");
+    CHECK(preset.extra_parameters["seed"] == "007");  // quoted stays a string
+    CHECK(preset.extra_parameters["stop"] == "no");   // YAML 1.1 "no" is not a bool
+
+    using Catch::Matchers::ContainsSubstring;
+    // A typo'd structural key no longer rides to the provider.
+    CHECK_THROWS_WITH(Parse("---\nname: a\nallowed-tools: [read]\n---\nb\n"),
+                      ContainsSubstring("unknown field 'allowed-tools'"));
+    CHECK_THROWS_WITH(Parse("---\nname: a\nparameters:\n  stream: true\n---\nb\n"),
+                      ContainsSubstring("parameters.stream is a request field the harness owns"));
+    // A single value where a list belongs is refused, not read as "no tools".
+    CHECK_THROWS_WITH(Parse("---\nname: a\nallowed_tools: \"*\"\n---\nb\n"),
+                      ContainsSubstring("'allowed_tools' must be a list"));
 }
 
 // --- tool_config -----------------------------------------------------------------
@@ -637,19 +646,56 @@ TEST_CASE("LoadAgentPresetFrontmatter: a normally-sized file is unaffected by th
     CHECK(preset.name == "build");
 }
 
-TEST_CASE("ParseAgentPresetFrontmatter: unknown permission_mode keys are reported",
+TEST_CASE("ParseAgentPresetFrontmatter: unknown permission_mode keys are errors",
           "[agent_preset_frontmatter]") {
-    auto preset = Parse(
-        "---\n"
-        "name: plan\n"
-        "permission_mode:\n"
-        "  file_writes: deny\n"
-        "  pattern_precedence: specific\n"
-        "---\n"
-        "body\n");
-    CHECK(preset.unknown_permission_keys == std::vector<std::string>{"file_writes"});
+    // A typo'd permission rule silently ignored is less protection than written.
+    CHECK_THROWS_WITH(Parse("---\nname: plan\npermission_mode:\n  file_writes: deny\n---\nb\n"),
+                      Catch::Matchers::ContainsSubstring("unknown permission_mode field 'file_writes'"));
+    auto preset = Parse("---\nname: plan\npermission_mode:\n  pattern_precedence: specific\n---\nb\n");
     CHECK(preset.permission_mode.pattern_precedence ==
           minimal::tools::PatternPrecedence::Specific);
     // A wrong-SHAPED known block is an error, not a silent no-op.
     CHECK_THROWS(Parse("---\nname: p\npermission_mode:\n  patterns: nope\n---\nb\n"));
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: removed fields name their replacement, all at once",
+          "[agent_preset_frontmatter]") {
+    using Catch::Matchers::ContainsSubstring;
+    const std::string preset =
+        "---\nname: a\n"
+        "allowed_mcp_servers: [ida]\n"
+        "mcp_permissions: {ida: allow}\n"
+        "allowed_skills: {x: allow}\n"
+        "---\nb\n";
+    CHECK_THROWS_WITH(Parse(preset), ContainsSubstring("'allowed_mcp_servers' was removed -- use "
+                                                       "tool_sources: {mcp:"));
+    CHECK_THROWS_WITH(Parse(preset), ContainsSubstring("'mcp_permissions' was removed -- use "
+                                                       "plugin_permissions: {mcp:"));
+    CHECK_THROWS_WITH(Parse(preset), ContainsSubstring("'allowed_skills' was removed -- use "
+                                                       "plugin_permissions: {skills:"));
+    // Only removed fields: no hint about provider parameters.
+    CHECK_THROWS_WITH(Parse(preset), !ContainsSubstring("parameters:"));
+    // A plain unknown key still gets it.
+    CHECK_THROWS_WITH(Parse("---\nname: a\ntemprature: 1\n---\nb\n"),
+                      ContainsSubstring("unknown field 'temprature'") &&
+                          ContainsSubstring("parameters:"));
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: permission_mode shape errors name the field",
+          "[agent_preset_frontmatter]") {
+    using Catch::Matchers::ContainsSubstring;
+    // Globs under overrides: point at patterns.
+    CHECK_THROWS_WITH(Parse("---\nname: a\npermission_mode:\n  overrides:\n"
+                            "    bash: {\"git *\": allow}\n---\nb\n"),
+                      ContainsSubstring("permission_mode.overrides.bash must be allow, ask or "
+                                        "deny; {glob: mode} rules go under "
+                                        "permission_mode.patterns.bash"));
+    CHECK_THROWS_WITH(Parse("---\nname: a\npermission_mode:\n  execute: [ask]\n---\nb\n"),
+                      ContainsSubstring("permission_mode.execute must be allow, ask or deny, "
+                                        "got a list"));
+    CHECK_THROWS_WITH(Parse("---\nname: a\npermission_mode:\n  patterns:\n    bash:\n"
+                            "      \"rm *\": {x: 1}\n---\nb\n"),
+                      ContainsSubstring("permission_mode.patterns.bash[\"rm *\"] must be"));
+    CHECK_THROWS_WITH(Parse("---\nname: a\npermission_mode: ask\n---\nb\n"),
+                      ContainsSubstring("permission_mode must be a map"));
 }

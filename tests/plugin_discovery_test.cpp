@@ -38,36 +38,26 @@ TEST_CASE("a plugin entry without config gets an empty object", "[plugin_config]
     CHECK(config.plugins[0].config == nlohmann::json::object());
 }
 
-TEST_CASE("a non-object config degrades to an empty object", "[plugin_config][track_k]") {
-    // Degrade-don't-throw, like the rest of this file: the plugin still loads,
-    // it just sees no config. (The startup warning is logged; not asserted here.)
+TEST_CASE("a non-object config is a named problem, not an empty object",
+          "[plugin_config][track_k]") {
+    // Degrading it let the plugin load with every default while the user
+    // believed their settings applied.
     const std::string text = R"({
       "plugins": [
         {"file": "a.so", "config": [1, 2, 3]},
-        {"file": "b.so", "config": "timeout_ms=30"},
-        {"file": "c.so", "config": 42}
+        {"file": "b.so", "config": "timeout_ms=30"}
       ]
     })";
 
     const auto config = ParsePluginConfig(text);
-    REQUIRE(config.plugins.size() == 3);
-    for (const auto& entry : config.plugins) {
-        CHECK(entry.config == nlohmann::json::object());
-    }
+    CHECK(config.plugins.empty());
+    REQUIRE(config.problems.size() == 2);
+    CHECK(config.problems[0].find("plugins.json: plugins[0].config: must be an object") !=
+          std::string::npos);
 }
 
-TEST_CASE(
-    "a wrong-type 'enabled'/'provenance'/'file' field degrades instead of discarding the config",
-    "[plugin_config][track_k][regression]") {
-    // The bug: item.value(key, default) throws json::type_error.302 when the
-    // key is PRESENT with the wrong JSON type (not merely absent), and
-    // ParsePluginConfig had no try/catch of its own -- the throw propagated
-    // out and discarded the caller's ENTIRE parsed plugins.json on one
-    // hand-edited typo, re-deriving every plugin's enabled state from its
-    // provenance default instead. Each entry below has exactly one
-    // wrong-type field; every entry must still parse (degrading only that
-    // field), and a later entry must not be skipped because an earlier one
-    // would have thrown.
+TEST_CASE("a wrong-typed entry is named and dropped; later entries still parse",
+          "[plugin_config][track_k][regression]") {
     const std::string text = R"({
       "plugins": [
         {"file": "a.so", "enabled": "true"},
@@ -78,18 +68,55 @@ TEST_CASE(
     })";
 
     const auto config = ParsePluginConfig(text);
-    // "a.so": non-boolean enabled degrades to disabled, entry still present.
-    // "b.so": non-string provenance degrades to User, enabled still honored.
-    // file: 42 has no usable name and is skipped, same as an empty 'file'.
-    // "d.so" proves parsing continued past every earlier malformed entry.
-    REQUIRE(config.plugins.size() == 3);
-    CHECK(config.plugins[0].file == "a.so");
-    CHECK_FALSE(config.plugins[0].enabled);
-    CHECK(config.plugins[1].file == "b.so");
-    CHECK(config.plugins[1].provenance == Provenance::User);
-    CHECK(config.plugins[1].enabled);
-    CHECK(config.plugins[2].file == "d.so");
-    CHECK(config.plugins[2].enabled);
+    REQUIRE(config.plugins.size() == 1);
+    CHECK(config.plugins[0].file == "d.so");
+    CHECK(config.plugins[0].enabled == true);
+    REQUIRE(config.problems.size() == 3);
+    CHECK(config.problems[2].find("plugins[2].file: must be a string") != std::string::npos);
+}
+
+TEST_CASE("an entry without provenance or enabled resolves at discovery",
+          "[plugin_discovery]") {
+    // The hand-written {"file": ..., "config": ...} used to be read as a USER
+    // plugin that is DISABLED -- so a bundled plugin's config was silently
+    // orphaned. Now the file name claims the plugin and the default applies.
+    const auto tmp = std::filesystem::temp_directory_path() /
+                     ("minimal-discovery-resolve-" + std::to_string(::getpid()));
+    const auto bundled = tmp / "bundled";
+    std::filesystem::create_directories(bundled);
+    { std::ofstream(bundled / "alpha.so") << "x"; }
+
+    auto config = ParsePluginConfig(
+        R"({"plugins": [{"file": "alpha.so", "config": {"echo_value": "mine"}}]})");
+    const auto candidates = plugins::DiscoverPlugins(bundled, {}, config);
+    REQUIRE(candidates.size() == 1);
+    CHECK(candidates[0].enabled);
+    CHECK(candidates[0].config == nlohmann::json{{"echo_value", "mine"}});
+    REQUIRE(config.plugins.size() == 1);
+    CHECK(config.plugins[0].provenance == Provenance::Bundled);
+    CHECK(config.plugins[0].enabled == true);
+    CHECK(config.problems.empty());
+
+    std::filesystem::remove_all(tmp);
+}
+
+TEST_CASE("an entry without provenance is ambiguous when both sides ship the name",
+          "[plugin_discovery]") {
+    const auto tmp = std::filesystem::temp_directory_path() /
+                     ("minimal-discovery-ambiguous-" + std::to_string(::getpid()));
+    const auto bundled = tmp / "bundled";
+    const auto user = tmp / "user";
+    std::filesystem::create_directories(bundled);
+    std::filesystem::create_directories(user);
+    { std::ofstream(bundled / "alpha.so") << "x"; }
+    { std::ofstream(user / "alpha.so") << "x"; }
+
+    auto config = ParsePluginConfig(R"({"plugins": [{"file": "alpha.so", "enabled": true}]})");
+    (void)plugins::DiscoverPlugins(bundled, user, config);
+    REQUIRE(config.problems.size() == 1);
+    CHECK(config.problems[0].find("names no provenance") != std::string::npos);
+
+    std::filesystem::remove_all(tmp);
 }
 
 TEST_CASE("serialization round-trips config through a load->save->load cycle",

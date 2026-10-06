@@ -35,7 +35,7 @@ struct Settings {
     std::string endpoint;
     std::string model;  // the body's "model" value; a router-mode llama-server routes on it
 
-    // Per-ATTEMPT transfer cap; clamped to budget_ms. Total wall-clock budget
+    // Per-ATTEMPT transfer cap, at most budget_ms. Total wall-clock budget
     // for one Advise call, attempts AND backoff sleeps combined --
     // authoritative: when it runs out, abstain. Keep it below the host's
     // permissions.json advisor_timeout_ms, which remains the outer ceiling.
@@ -73,14 +73,15 @@ struct Settings {
 };
 
 // Layers `config` (the plugins.json entry's object; null or empty = none) over
-// `bundled` (the parsed bundled file) and validates the result. Throws
-// std::runtime_error naming the field: an unknown key at any layer, an unknown
-// backend, a missing or wrong-typed value, or one out of range. Never
-// substitutes a value of its own.
+// `bundled` (the parsed bundled file) and validates the result through
+// config::Reader. Throws config::ConfigError naming file and path: an unknown
+// key at any layer (every profile is checked, not only the selected one), an
+// unknown backend, a wrong-typed or out-of-range value, or one no layer sets.
+// Never substitutes a value of its own.
 Settings ParseSettings(const nlohmann::json& bundled, const nlohmann::json& config);
 
-// Reads and parses the bundled file. Throws std::runtime_error naming the path
-// when it is missing or not JSON.
+// Reads the bundled file through config::LoadJsonConfig. Throws
+// config::ConfigError when it is missing, unreadable or not JSON.
 nlohmann::json LoadBundledSettings(const std::filesystem::path& path);
 
 }  // namespace minimal::decision_advisor

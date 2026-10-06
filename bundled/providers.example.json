@@ -43,7 +43,7 @@
     },
 
     "auto": {
-      "//": "With \"discover\": true the backend lists its own models -- no \"models\" object needed (static entries beside it still work, and a model's own window always wins over the provider default). The list is fetched lazily, never written back to this file, and /providers refresh re-fetches it on demand. Works with any OpenAI-shaped backend provider-openai covers: llama.cpp, vLLM, OpenRouter.",
+      "//": "With \"discover\": true the backend lists its own models -- no \"models\" object needed (static entries beside it still work, and a model's own window always wins over the provider default). The list is fetched lazily, never written back to this file, and the /model picker's refresh (ctrl+r) re-fetches it on demand. Works with any OpenAI-shaped backend provider-openai covers: llama.cpp, vLLM, OpenRouter.",
       "backend": "openai",
       "url": "http://localhost:8000/v1",
       "discover": true
@@ -107,11 +107,11 @@
               "max_tokens": 16384
             }
           }
-        },
+        }
+      },
 
-        "//4": "A provider-level \"variants\" (either form) applies to EVERY model under the entry -- for a \"discover\": true entry it IS the autodiscovery recipe: models whose catalog advertises reasoning efforts get exactly these variants. With no recipe, discovery AUTODETECTS: every model that advertises an effort ladder gets its own ladder verbatim (glm-5.3-flash's supported_efforts [max,high,low] becomes @max, @high, @low with zero config); a model advertising no ladder gets none.",
-        "variants": ["high"]
-      }
+      "//4": "A provider-level \"variants\" (either form) applies to EVERY model under the entry that declares none of its own -- for a \"discover\": true entry it IS the autodiscovery recipe: models whose catalog advertises reasoning efforts get exactly these variants. With no recipe, discovery AUTODETECTS: every model that advertises an effort ladder gets its own ladder verbatim (glm-5.3-flash's supported_efforts [max,high,low] becomes @max, @high, @low with zero config); a model advertising no ladder gets none.",
+      "variants": ["high"]
     }
   },
 

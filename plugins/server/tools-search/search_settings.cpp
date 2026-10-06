@@ -2,59 +2,33 @@
 
 #include <limits>
 
-#include "minimal/config/parse_util.hpp"
+#include "minimal/common/config_reader.hpp"
 
 namespace minimal::tools_search {
-namespace {
-
-template <typename T>
-T ValueOr(const nlohmann::json& parent, const char* section, const char* key, T fallback) {
-    auto section_it = parent.find(section);
-    if (section_it == parent.end() || !section_it->is_object()) return fallback;
-    // config::ReadClampedInt64 rejects a non-integer number (`is_number()`
-    // accepted 250.9 and get<T>() silently truncated it) and clamps into T's
-    // own range, so a huge configured value narrows safely instead of
-    // wrapping. The floor of 0 is harmless here: every field below is a
-    // non-negative count/timeout, and PositiveOr's own `value > 0` check
-    // already rejected a negative the same way a not-positive one is.
-    const auto value =
-        config::ReadClampedInt64(*section_it, key, static_cast<std::int64_t>(fallback), 0,
-                                 static_cast<std::int64_t>(std::numeric_limits<T>::max()));
-    return static_cast<T>(value);
-}
-
-template <typename T>
-T PositiveOr(const nlohmann::json& parent, const char* section, const char* key, T fallback) {
-    const auto value = ValueOr(parent, section, key, fallback);
-    return value > 0 ? value : fallback;
-}
-
-}  // namespace
 
 SearchSettings ParseSearchSettings(const nlohmann::json& config) {
     SearchSettings settings;
-    if (!config.is_object()) return settings;
+    constexpr std::int64_t kIntMax = std::numeric_limits<int>::max();
+    config::Reader root(config, "plugins.json", "tools-search.config");
+    const auto positive_int = [&](config::Reader& section, const char* key, int& target) {
+        target = static_cast<int>(section.Int(key, target, 1, kIntMax));
+    };
 
-    settings.grep_default_head_limit =
-        PositiveOr(config, "grep", "default_head_limit", settings.grep_default_head_limit);
-    settings.grep_max_results =
-        PositiveOr(config, "grep", "max_results", settings.grep_max_results);
-    settings.grep_max_file_bytes =
-        PositiveOr(config, "grep", "max_file_bytes", settings.grep_max_file_bytes);
-    settings.grep_timeout_ms =
-        PositiveOr(config, "grep", "timeout_ms", settings.grep_timeout_ms);
-    settings.grep_max_context_lines =
-        PositiveOr(config, "grep", "max_context_lines", settings.grep_max_context_lines);
-    settings.grep_max_line_length =
-        PositiveOr(config, "grep", "max_line_length", settings.grep_max_line_length);
+    config::Reader grep = root.Object("grep");
+    positive_int(grep, "default_head_limit", settings.grep_default_head_limit);
+    positive_int(grep, "max_results", settings.grep_max_results);
+    settings.grep_max_file_bytes = grep.Int("max_file_bytes", settings.grep_max_file_bytes, 1);
+    positive_int(grep, "timeout_ms", settings.grep_timeout_ms);
+    positive_int(grep, "max_context_lines", settings.grep_max_context_lines);
+    positive_int(grep, "max_line_length", settings.grep_max_line_length);
+    grep.Finish();
 
-    settings.glob_default_limit =
-        PositiveOr(config, "glob", "default_limit", settings.glob_default_limit);
-    settings.glob_max_results =
-        PositiveOr(config, "glob", "max_results", settings.glob_max_results);
-    settings.glob_timeout_ms =
-        PositiveOr(config, "glob", "timeout_ms", settings.glob_timeout_ms);
-
+    config::Reader glob = root.Object("glob");
+    positive_int(glob, "default_limit", settings.glob_default_limit);
+    positive_int(glob, "max_results", settings.glob_max_results);
+    positive_int(glob, "timeout_ms", settings.glob_timeout_ms);
+    glob.Finish();
+    root.Finish();
     return settings;
 }
 

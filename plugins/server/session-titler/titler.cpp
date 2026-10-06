@@ -1,5 +1,8 @@
 #include "titler.hpp"
 
+#include "minimal/common/config_reader.hpp"
+#include "minimal/common/model_ref.hpp"
+
 #include <cctype>
 #include <exception>
 #include <optional>
@@ -106,21 +109,16 @@ std::string_view DefaultPrompt() { return kDefaultPrompt; }
 
 TitlerConfig ParseTitlerConfig(const nlohmann::json& config) {
     TitlerConfig out;
-    if (!config.is_object()) return out;
-    if (auto it = config.find("model"); it != config.end() && it->is_string()) {
-        out.model = it->get<std::string>();
+    config::Reader reader(config, "plugins.json", "session-titler.config");
+    out.model = reader.String("model", out.model);
+    if (!out.model.empty() && !common::SplitModelRef(out.model)) {
+        reader.Fail("model", "must be <provider>/<model>, got \"" + out.model + "\"");
     }
-    if (auto it = config.find("max_tokens"); it != config.end() && it->is_number_integer()) {
-        const int value = it->get<int>();
-        if (value > 0) out.max_tokens = value;
-    }
-    if (auto it = config.find("input_char_budget"); it != config.end() && it->is_number_integer()) {
-        const int value = it->get<int>();
-        if (value > 0) out.input_char_budget = value;
-    }
-    if (auto it = config.find("prompt"); it != config.end() && it->is_string()) {
-        out.prompt = it->get<std::string>();
-    }
+    out.max_tokens = static_cast<int>(reader.Int("max_tokens", out.max_tokens, 1, 1 << 20));
+    out.input_char_budget =
+        static_cast<int>(reader.Int("input_char_budget", out.input_char_budget, 1, 1 << 24));
+    out.prompt = reader.String("prompt", out.prompt);
+    reader.Finish();
     return out;
 }
 

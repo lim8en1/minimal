@@ -47,7 +47,8 @@ struct McpE2eFixture {
                                  {"url", "http://localhost/v1"},
                                  {"models", {{"test-model", nlohmann::json::object()}}}}}}}}
                   .dump());
-        Write("settings.json", nlohmann::json{{"default_agent_preset", "main"}}.dump());
+        Write("settings.json", nlohmann::json{{"default_agent_preset", "main"},
+                                              {"default_model", "main/test-model"}}.dump());
         Write("permissions.json", "{}");  // the mcp model's default is ASK
         Write("agents/main.md",
               "---\nname: main\nmodel: main/test-model\nallowed_tools: [\"*\"]\n"
@@ -71,8 +72,8 @@ struct McpE2eFixture {
     }
 
     void Start() {
-        presets = std::make_unique<agent::AgentPresetRegistry>(dir,
-                                                               config::SettingsConfig{});
+        presets = std::make_unique<agent::AgentPresetRegistry>(
+            dir, config::LoadSettingsConfig(dir / "settings.json"));
         // The mcp plugin's permission model, bound to every preset the way
         // the plugin registers it (permissions.json leaves its default: Ask).
         permission_models.SetAttribution("mcp");

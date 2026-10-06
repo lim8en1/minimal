@@ -46,20 +46,32 @@ TEST_CASE("HostAllowed matches host, and port only when the binding names one", 
     CHECK_FALSE(HostAllowed(hosts, ""));
 }
 
-TEST_CASE("ParseSecretStore skips malformed entries and refuses a malformed document",
+TEST_CASE("ParseSecretStore is strict: a malformed entry is named, never skipped",
           "[secrets]") {
     const auto entries = ParseSecretStore(R"({
-      "good": {"value": "v1", "hosts": ["a.example", 7, ""]},
-      "no-value": {"hosts": ["a.example"]},
-      "not-an-object": "v2"
+      "// note": "comments are allowed",
+      "good": {"value": "v1", "hosts": ["a.example"]}
     })");
     REQUIRE(entries.size() == 1);
     CHECK(entries[0].first == "good");
     CHECK(entries[0].second.value == "v1");
     CHECK(entries[0].second.hosts == std::vector<std::string>{"a.example"});
 
+    // A skipped entry would read as "not set"; a skipped hosts binding would
+    // let a host-bound key go anywhere. Both are errors.
+    CHECK_THROWS_WITH(ParseSecretStore(R"({"a": "sk-bare"})"),
+                      ContainsSubstring("secrets.json: a: must be an object"));
+    CHECK_THROWS_WITH(ParseSecretStore(R"({"a": {"hosts": ["x"]}})"),
+                      ContainsSubstring("secrets.json: a.value: is required"));
+    CHECK_THROWS_WITH(ParseSecretStore(R"({"a": {"value": "v", "hosts": "api.example"}})"),
+                      ContainsSubstring("secrets.json: a.hosts: must be a list of strings"));
+    CHECK_THROWS_WITH(ParseSecretStore(R"({"a": {"value": "v", "hosts": ["x", 7]}})"),
+                      ContainsSubstring("a.hosts: must contain only strings"));
+    CHECK_THROWS_WITH(ParseSecretStore(R"({"a": {"value": "v", "host": ["x"]}})"),
+                      ContainsSubstring("a.host: unknown field"));
+
     CHECK(ParseSecretStore("").empty());
-    CHECK_THROWS_WITH(ParseSecretStore("{"), ContainsSubstring("malformed"));
+    CHECK_THROWS_WITH(ParseSecretStore("{"), ContainsSubstring("invalid JSON"));
     CHECK_THROWS_AS(ParseSecretStore("[]"), std::runtime_error);
 }
 
@@ -79,8 +91,11 @@ TEST_CASE("Bind: empty, literal and env references", "[secrets]") {
     CHECK(env.Get().value == "from-env");
     CHECK(env.Get().source == "env MINIMAL_TEST_SECRET_ENV");
 
-    CHECK_THROWS_WITH(resolver.Bind("env:MINIMAL_TEST_SECRET_ENV", "http://x"),
-                      ContainsSubstring("unset"));
+    // Unset binds (one provider's missing key never aborts startup); each use
+    // fails naming the variable.
+    const auto unset = resolver.Bind("env:MINIMAL_TEST_SECRET_ENV", "http://x");
+    CHECK(unset.configured());
+    CHECK_THROWS_WITH(unset.Get(), ContainsSubstring("unset"));
     CHECK_THROWS(resolver.Bind("env:", "http://x"));
 
     // A typo'd scheme is refused rather than sent as the key; the error names
@@ -113,10 +128,10 @@ TEST_CASE("Bind: a stored secret is read per Get, and its binding is enforced", 
     CHECK_THROWS_WITH(handle.Get(), ContainsSubstring("may not be sent to 127.0.0.1:8080"));
 
     WriteStore(store, R"({"emb": {"value": ""}})");
-    CHECK_THROWS_WITH(handle.Get(), ContainsSubstring("is empty"));
+    CHECK_THROWS_WITH(handle.Get(), ContainsSubstring("must not be empty"));
 
     WriteStore(store, "{not json");
-    CHECK_THROWS_WITH(handle.Get(), ContainsSubstring("malformed"));
+    CHECK_THROWS_WITH(handle.Get(), ContainsSubstring("invalid JSON"));
 }
 
 namespace {

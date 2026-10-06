@@ -108,14 +108,11 @@ class PluginLoader : public commands::ProjectCommandProvider,
 public:
     // `registries`: every seam a plugin may register into; a null member is
     // simply not offered (plugins treat every registration hook as optional).
-    // `tools_settings` is the `tools` object from settings.json, forwarded
-    // verbatim to every plugin; core imposes no schema on it. `storage` (may be
+    // `storage` (may be
     // null) is per-plugin KV storage, forwarded through the registration
     // context. `plugin_data_root` is where each plugin's own data_dir is
     // provisioned (<root>/<plugin_name>/); empty disables provisioning.
-    explicit PluginLoader(HostRegistries registries,
-                          nlohmann::json tools_settings = nlohmann::json::object(),
-                          PluginStorage* storage = nullptr,
+    explicit PluginLoader(HostRegistries registries, PluginStorage* storage = nullptr,
                           std::filesystem::path plugin_data_root = {});
     ~PluginLoader();
 
@@ -164,7 +161,6 @@ private:
     void BuildTargets();
 
     HostRegistries registries_;
-    nlohmann::json tools_settings_;
     PluginStorage* storage_ = nullptr;
     std::filesystem::path plugin_data_root_;
     std::vector<std::unique_ptr<Target>> targets_;  // registration order
@@ -179,7 +175,7 @@ private:
     // One entry per loaded plugin that exports
     // minimal_plugin_register_project_commands, checked once at LoadOne time
     // (cheap: a dlsym, not a call). Each entry carries a COPY of what this
-    // plugin's other hooks saw at startup -- config, data_dir, tools_settings,
+    // plugin's other hooks saw at startup -- config, data_dir,
     // the services/storage pointers -- because RegisterProjectCommands runs
     // long after LoadOne returns, per project root, and LoadOne's own
     // `context` local does not survive that. unique_ptr of the

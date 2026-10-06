@@ -279,9 +279,9 @@ TEST_CASE("plugins.json round-trips as an object", "[plugin_config]") {
     REQUIRE(config.plugins.size() == 2);
     CHECK(config.plugins[0].file == "tools-fs.so");
     CHECK(config.plugins[0].provenance == Provenance::Bundled);
-    CHECK(config.plugins[0].enabled);
+    CHECK(config.plugins[0].enabled == true);
     CHECK(config.plugins[1].provenance == Provenance::User);
-    CHECK_FALSE(config.plugins[1].enabled);
+    CHECK(config.plugins[1].enabled == false);
     REQUIRE(config.aliases.count("bash_over_ssh.bash") == 1);
     CHECK(config.aliases.at("bash_over_ssh.bash") == "ssh_bash");
 
@@ -502,17 +502,11 @@ TEST_CASE("a plugin's hook points register before its tools, and land on the rec
     CHECK(*flag);
 }
 
-TEST_CASE("config reaches the tool seam while tools_settings stays verbatim",
-          "[plugin_loader][track_k]") {
-    // The two channels are independent: config is per-plugin, tools_settings is
-    // the whole verbatim `tools` object every tool plugin still receives.
+TEST_CASE("config reaches the tool seam", "[plugin_loader][track_k]") {
     tools::ToolRegistry tool_registry;
     llm::ProviderFactoryRegistry provider_registry;
-    const nlohmann::json tools_settings = {
-        {"some_third_party_tool", nlohmann::json::object()}};
     plugins::PluginLoader loader{
-        plugins::HostRegistries{.tools = &tool_registry, .providers = &provider_registry},
-        tools_settings};
+        plugins::HostRegistries{.tools = &tool_registry, .providers = &provider_registry}};
 
     PluginCandidate good = Enabled("fixture-good");
     good.config = nlohmann::json{{"echo_value", "from config"}};

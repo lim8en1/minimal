@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "deadline.hpp"
+#include "minimal/common/config_reader.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/net/http_client.hpp"
 #include "minimal/tools/permission_advisor.hpp"
@@ -244,46 +245,52 @@ TEST_CASE("decision-advisor the plugins.json entry overrides any layer",
 TEST_CASE("decision-advisor settings errors are named, never defaulted",
           "[decision_advisor][settings]") {
     using Catch::Matchers::ContainsSubstring;
-    // Unknown fields, at the entry and in retry.
+    // Errors name file and full path (config::Reader's format). Unknown
+    // fields, at the entry and in retry:
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"apikey", "k"}}),
-                      ContainsSubstring("unknown field \"apikey\""));
+                      ContainsSubstring("plugins.json: decision-advisor.config.apikey: unknown field"));
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"retry", {{"retries", 3}}}}),
-                      ContainsSubstring("config.retry has unknown field \"retries\""));
+                      ContainsSubstring("decision-advisor.config.retry.retries: unknown field"));
     // A backend the bundled file does not define names the ones it does.
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"backend", "anthropic"}}),
-                      ContainsSubstring("unknown backend \"anthropic\""));
+                      ContainsSubstring("config.backend: \"anthropic\" is not a profile in "
+                                        "decision-advisor.json (backends: \"llama\""));
     // Wrong types and out-of-range values.
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"budget_ms", "soon"}}),
-                      ContainsSubstring("\"budget_ms\" must be an integer"));
+                      ContainsSubstring("config.budget_ms: must be an integer"));
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"budget_ms", 0}}),
-                      ContainsSubstring("\"budget_ms\" must be >= 1"));
+                      ContainsSubstring("config.budget_ms: must be at least 1"));
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"min_margin", 1.5}}),
-                      ContainsSubstring("\"min_margin\" must be within [0, 1]"));
+                      ContainsSubstring("config.min_margin: must be between 0.0 and 1.0"));
     CHECK_THROWS_WITH(Parse(nlohmann::json{{"endpoint", ""}}),
-                      ContainsSubstring("\"endpoint\" must not be empty"));
-    CHECK_THROWS_WITH(Parse(nlohmann::json{{"questions", {{"audit", {}}}}}),
+                      ContainsSubstring("config.endpoint: must not be empty"));
+    CHECK_THROWS_WITH(Parse(nlohmann::json{{"questions", {{"audit", nlohmann::json::object()}}}}),
                       ContainsSubstring("must define \"action\""));
     CHECK_THROWS_WITH(Parse(nlohmann::json::array()), ContainsSubstring("must be an object"));
+    // A per-attempt cap above the total budget is refused, not clamped.
+    CHECK_THROWS_WITH(Parse(nlohmann::json{{"budget_ms", 500}, {"request_timeout_ms", 90000}}),
+                      ContainsSubstring("request_timeout_ms: must not exceed budget_ms"));
+
+    // Every profile is checked, not only the selected one.
+    auto bad_profile = Bundled();
+    bad_profile.at("backends").at("llama")["modle"] = "clef";
+    CHECK_THROWS_WITH(ParseSettings(bad_profile, nlohmann::json::object()),
+                      ContainsSubstring("decision-advisor.json: backends.llama.modle: unknown field"));
 
     // A value missing from every layer is an error naming it -- the code has
     // no fallback to reach for.
     auto incomplete = Bundled();
     incomplete.at("backends").at("typesafe").erase("model");
     CHECK_THROWS_WITH(ParseSettings(incomplete, nlohmann::json::object()),
-                      ContainsSubstring("\"model\" is not set"));
+                      ContainsSubstring("model: is not set for backend \"typesafe\""));
     auto no_retry_field = Bundled();
     no_retry_field.at("retry").erase("jitter");
     CHECK_THROWS_WITH(ParseSettings(no_retry_field, nlohmann::json::object()),
-                      ContainsSubstring("\"jitter\" is not set"));
+                      ContainsSubstring("retry.jitter: is not set"));
 
-    // A missing bundled file names its path.
-    CHECK_THROWS_WITH(minimal::decision_advisor::LoadBundledSettings("/nonexistent/da.json"),
-                      ContainsSubstring("/nonexistent/da.json"));
-}
-
-TEST_CASE("decision-advisor request_timeout is clamped to the budget", "[decision_advisor]") {
-    const auto settings = Parse(nlohmann::json{{"budget_ms", 500}, {"request_timeout_ms", 90000}});
-    CHECK(settings.request_timeout_ms == 500);
+    // A missing bundled file is a ConfigError, not a silent default.
+    CHECK_THROWS_AS(minimal::decision_advisor::LoadBundledSettings("/nonexistent/da.json"),
+                    minimal::config::ConfigError);
 }
 
 // --- Decision rule -----------------------------------------------------------

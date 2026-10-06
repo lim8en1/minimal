@@ -12,14 +12,14 @@ namespace {
 // in `reasoning_options`; a future catalog plugin can feed those through and
 // this table becomes the fallback). Values sit well under every thinking
 // model's output cap, and the caller clamps against the base's max_tokens
-// when known (the API rejects budget_tokens >= max_tokens). Only
-// low/medium/high are checked here -- the dispatcher in core's
-// VariantParametersFor already folds "xhigh"/"max" to "high" before this
-// provider is ever consulted.
+// when known (the API rejects budget_tokens >= max_tokens). Core passes the
+// effort name verbatim, so every rung of the ladder gets its own budget.
 std::optional<int> AnthropicBudgetFor(const std::string& effort_word) {
     if (effort_word == "low") return 4096;
     if (effort_word == "medium") return 8192;
     if (effort_word == "high") return 16384;
+    if (effort_word == "xhigh") return 32768;
+    if (effort_word == "max") return 65536;
     return std::nullopt;  // "minimal": no thinking block at all
 }
 

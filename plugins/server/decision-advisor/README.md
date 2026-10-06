@@ -42,9 +42,9 @@ permission prompts. Enabling it is two deliberate edits:
 
 Optional: `"advisor_inherit": true` also lets it answer prompts inside
 **subagent** sessions (default: off — children keep their human even when the
-parent is advised). The env var must exist at server startup; an unset key
-loads the plugin degraded with a clear error, never a silent 401 on the first
-gated call.
+parent is advised). An unset `env:` variable or a `secret:` not stored yet
+is a startup warning, and every advisor call abstains naming the fix —
+never a silent 401.
 
 ## Backends
 
@@ -125,10 +125,10 @@ field. Restore a deleted file from `bundled/`.
 | Key | Shipped value | Meaning |
 | --- | --- | --- |
 | `backend` | `typesafe` | Which profile under `backends` to use (`typesafe`, `openrouter`, `llama`, or one you add). |
-| `api_key` | per profile (`env:TYPESAFE_API_KEY` / `env:OPENROUTER_API_KEY` / `""`) | A key reference (docs/CONFIGURATION.md § Secrets). Bound at registration — an unset `env:` variable keeps the advisor from registering; a `secret:` is read per call, and one not stored yet abstains. Empty sends no `Authorization` header. |
+| `api_key` | per profile (`env:TYPESAFE_API_KEY` / `env:OPENROUTER_API_KEY` / `""`) | A key reference (docs/CONFIGURATION.md § Secrets). Read per call: an unset `env:` variable or a `secret:` not stored yet is a startup warning, and each call abstains naming the fix. Empty sends no `Authorization` header. |
 | `endpoint` | per profile | The System One URL. |
 | `model` | per profile | The model id sent in the body. Pin the versioned id (`jev-1.13.0` / `typesafe/jev-1.13`) once you tune thresholds — aliases move. |
-| `request_timeout_ms` | `2000` (`llama`: `5000`) | Per-attempt transfer cap. The healthy call is 0.1–0.5 s. Clamped to `budget_ms`. |
+| `request_timeout_ms` | `2000` (`llama`: `5000`) | Per-attempt transfer cap. The healthy call is 0.1–0.5 s. Must not exceed `budget_ms`. |
 | `budget_ms` | `2000` (`llama`: `5000`) | Total wall clock for one advisor call: attempts **and** backoff sleeps. When it runs out the advisor abstains. Keep below the host's `advisor_timeout_ms` (default 30 s), which stays the outer ceiling. |
 | `retry.max_retries` | `2` | Retries after the first attempt, on 408/429/5xx, timeouts and connection failures (the TypeSafe SDK's retryable set). 401/422, 501 (llama-server: not a decision model) and malformed bodies never retry — they recur, and the warn line is how you find out. |
 | `retry.backoff_initial_ms` / `retry.backoff_max_ms` | `100` / `2000` | Exponential backoff, doubling per attempt. |

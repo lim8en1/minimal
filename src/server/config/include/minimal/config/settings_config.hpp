@@ -86,13 +86,6 @@ struct ToolsSettings {
     // Over it the payload is DROPPED, never truncated -- a cut diff misleads --
     // and the client falls back to the text. 0 disables.
     std::int64_t max_display_bytes = 128 * 1024;
-    // The full parsed "tools" JSON object, verbatim -- alongside the typed
-    // fields above -- so a plugin's own top-level key under "tools" that
-    // ParseTools does not recognize still reaches PluginLoader intact. This
-    // is what main.cpp forwards as context.tools_settings: core imposes no
-    // schema on that slice, and the typed fields above exist for core's own
-    // consumers, not to replace this passthrough.
-    nlohmann::json raw = nlohmann::json::object();
 };
 
 struct ToolsViewSettings {
@@ -180,7 +173,6 @@ struct SettingsConfig {
     // specific overrides it). Shape-checked by the sanity check; a reference
     // providers.json cannot resolve warns and behaves as empty.
     std::string default_subagent_model;
-    std::string default_theme;
     std::int64_t max_concurrent_subagents = 4;
     // When an out-of-band message (a background task's result, a non-blocking
     // subagent's completion) lands on an IDLE session, run a turn for it

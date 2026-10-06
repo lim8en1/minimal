@@ -1,68 +1,59 @@
 #include "settings.hpp"
 
-#include <algorithm>
 #include <cstdint>
-#include <fstream>
-#include <limits>
-#include <stdexcept>
-#include <vector>
+#include <map>
+#include <string>
+
+#include "minimal/common/config_reader.hpp"
+#include "minimal/common/json_config_loader.hpp"
 
 namespace minimal::decision_advisor {
 namespace {
 
-constexpr const char* kWhere = "decision-advisor";
+constexpr std::int64_t kMaxMs = 600000;
+constexpr const char* kPluginsFile = "plugins.json";
+constexpr const char* kPluginPath = "decision-advisor.config";
 
-// The settings keys, valid at every layer (the bundled top level, a profile,
-// the plugins.json entry). "backend" is valid at the top level and in the
-// entry, never inside a profile; "backends" only at the bundled top level.
-const std::vector<std::string> kSettingKeys = {
-    "api_key", "endpoint", "model", "request_timeout_ms", "budget_ms", "retry",
-    "min_probability_allow", "min_probability_deny", "min_margin", "questions",
-    "extra_questions"};
-const std::vector<std::string> kRetryKeys = {
-    "max_retries", "backoff_initial_ms", "backoff_max_ms", "jitter", "retry_after_cap_ms"};
-
-bool IsComment(const std::string& key) { return key.rfind("//", 0) == 0; }
-
-std::vector<std::string> KeysPlus(std::vector<std::string> keys,
-                                  std::initializer_list<const char*> extra) {
-    keys.insert(keys.end(), extra.begin(), extra.end());
-    return keys;
-}
-
-// Strict schema, the config::RejectUnknownKeys rule over a runtime key set: a
-// misspelled field is a named error, never a silent ignore.
-void RejectUnknown(const nlohmann::json& object, const std::vector<std::string>& known,
-                   const std::string& where) {
-    for (auto it = object.begin(); it != object.end(); ++it) {
-        if (IsComment(it.key()) ||
-            std::find(known.begin(), known.end(), it.key()) != known.end()) {
-            continue;
+// Reads one layer's settings keys through the strict reader -- type and range
+// checked, unknown keys refused by the caller's Finish() -- and returns the
+// ones present, normalized. Absent keys stay absent: whether a value is
+// missing is only known once every layer is merged.
+nlohmann::json ReadLayer(config::Reader& reader) {
+    nlohmann::json out = nlohmann::json::object();
+    if (auto v = reader.MaybeString("api_key")) out["api_key"] = *v;
+    if (auto v = reader.MaybeString("endpoint", /*allow_empty=*/false)) out["endpoint"] = *v;
+    if (auto v = reader.MaybeString("model", /*allow_empty=*/false)) out["model"] = *v;
+    if (auto v = reader.MaybeInt("request_timeout_ms", 1, kMaxMs)) out["request_timeout_ms"] = *v;
+    if (auto v = reader.MaybeInt("budget_ms", 1, kMaxMs)) out["budget_ms"] = *v;
+    if (auto retry = reader.MaybeObject("retry")) {
+        nlohmann::json r = nlohmann::json::object();
+        if (auto v = retry->MaybeInt("max_retries", 0, 100)) r["max_retries"] = *v;
+        if (auto v = retry->MaybeInt("backoff_initial_ms", 1, kMaxMs)) r["backoff_initial_ms"] = *v;
+        if (auto v = retry->MaybeInt("backoff_max_ms", 1, kMaxMs)) r["backoff_max_ms"] = *v;
+        if (auto v = retry->MaybeDouble("jitter", 0.0, 1.0)) r["jitter"] = *v;
+        if (auto v = retry->MaybeInt("retry_after_cap_ms", 1, kMaxMs)) r["retry_after_cap_ms"] = *v;
+        retry->Finish();
+        out["retry"] = std::move(r);
+    }
+    for (const char* key : {"min_probability_allow", "min_probability_deny", "min_margin"}) {
+        if (auto v = reader.MaybeDouble(key, 0.0, 1.0)) out[key] = *v;
+    }
+    // Sent verbatim, so only their shape is the advisor's business.
+    for (const char* key : {"questions", "extra_questions"}) {
+        if (const auto* v = reader.Raw(key)) {
+            if (!v->is_object()) reader.Fail(key, "must be an object");
+            out[key] = *v;
         }
-        std::string list;
-        for (const auto& key : known) list += (list.empty() ? "" : ", ") + key;
-        throw std::runtime_error(where + " has unknown field \"" + it.key() + "\" (known: " +
-                                 list + ")");
     }
-}
-
-void CheckLayer(const nlohmann::json& layer, const std::vector<std::string>& known,
-                const std::string& where) {
-    if (!layer.is_object()) throw std::runtime_error(where + " must be an object");
-    RejectUnknown(layer, known, where);
-    if (const auto retry = layer.find("retry"); retry != layer.end()) {
-        if (!retry->is_object()) throw std::runtime_error(where + ".retry must be an object");
-        RejectUnknown(*retry, kRetryKeys, where + ".retry");
-    }
+    return out;
 }
 
 // Later layer wins; "retry" merges field by field, everything else replaces.
 void Overlay(nlohmann::json& merged, const nlohmann::json& layer) {
     for (auto it = layer.begin(); it != layer.end(); ++it) {
-        if (IsComment(it.key())) continue;
         if (it.key() == "retry") {
             for (auto field = it->begin(); field != it->end(); ++field) {
-                if (!IsComment(field.key())) merged["retry"][field.key()] = field.value();
+                merged["retry"][field.key()] = field.value();
             }
         } else {
             merged[it.key()] = it.value();
@@ -70,136 +61,113 @@ void Overlay(nlohmann::json& merged, const nlohmann::json& layer) {
     }
 }
 
-const nlohmann::json& Require(const nlohmann::json& parent, const char* key,
-                              const std::string& where) {
-    const auto it = parent.find(key);
-    if (it == parent.end() || it->is_null()) {
-        throw std::runtime_error(where + ": \"" + key + "\" is not set (" +
-                                 kBundledSettingsFile + " or the plugins.json entry)");
-    }
-    return *it;
-}
-
-std::string RequireString(const nlohmann::json& parent, const char* key, const std::string& where,
-                          bool allow_empty) {
-    const auto& value = Require(parent, key, where);
-    if (!value.is_string()) throw std::runtime_error(where + ": \"" + key + "\" must be a string");
-    auto out = value.get<std::string>();
-    if (!allow_empty && out.empty()) {
-        throw std::runtime_error(where + ": \"" + key + "\" must not be empty");
-    }
-    return out;
-}
-
-int RequireInt(const nlohmann::json& parent, const char* key, const std::string& where, int min) {
-    const auto& value = Require(parent, key, where);
-    if (!value.is_number_integer()) {
-        throw std::runtime_error(where + ": \"" + key + "\" must be an integer");
-    }
-    const auto raw = value.get<std::int64_t>();
-    if (raw < min || raw > std::numeric_limits<int>::max()) {
-        throw std::runtime_error(where + ": \"" + key + "\" must be >= " + std::to_string(min));
-    }
-    return static_cast<int>(raw);
-}
-
-double RequireFraction(const nlohmann::json& parent, const char* key, const std::string& where) {
-    const auto& value = Require(parent, key, where);
-    if (!value.is_number()) throw std::runtime_error(where + ": \"" + key + "\" must be a number");
-    const double out = value.get<double>();
-    if (out < 0.0 || out > 1.0) {
-        throw std::runtime_error(where + ": \"" + key + "\" must be within [0, 1]");
-    }
-    return out;
-}
-
-const nlohmann::json& RequireObject(const nlohmann::json& parent, const char* key,
-                                    const std::string& where) {
-    const auto& value = Require(parent, key, where);
-    if (!value.is_object()) throw std::runtime_error(where + ": \"" + key + "\" must be an object");
-    return value;
-}
-
 }  // namespace
 
 Settings ParseSettings(const nlohmann::json& bundled, const nlohmann::json& config) {
-    const std::string bundled_where = std::string(kWhere) + ": " + kBundledSettingsFile;
-    const std::string config_where = std::string(kWhere) + ": config";
-    CheckLayer(bundled, KeysPlus(kSettingKeys, {"backend", "backends"}), bundled_where);
-    const bool has_config = !config.is_null() && !(config.is_object() && config.empty());
-    if (has_config) CheckLayer(config, KeysPlus(kSettingKeys, {"backend"}), config_where);
+    // Layer 1: the bundled file's top level, and every profile in it -- all
+    // validated, so a typo in a profile not selected today is still caught.
+    config::Reader file(bundled, kBundledSettingsFile);
+    const std::string file_backend = file.String("backend", {}, /*allow_empty=*/false);
+    const nlohmann::json top = ReadLayer(file);
+    std::map<std::string, nlohmann::json> profiles;
+    std::string known;
+    for (const auto& [name, node] : file.Entries("backends")) {
+        config::Reader profile = file.Child(*node, "backends." + name);
+        profiles[name] = ReadLayer(profile);
+        profile.Finish();
+        known += (known.empty() ? "\"" : ", \"") + name + "\"";
+    }
+    file.Finish();
+
+    // Layer 3: the plugins.json entry.
+    const nlohmann::json empty = nlohmann::json::object();
+    config::Reader entry(config.is_null() ? empty : config, kPluginsFile, kPluginPath);
+    const auto entry_backend = entry.MaybeString("backend", /*allow_empty=*/false);
+    const nlohmann::json overrides = ReadLayer(entry);
+    entry.Finish();
 
     Settings settings;
-    const bool backend_from_config = has_config && config.contains("backend");
-    settings.backend = RequireString(backend_from_config ? config : bundled, "backend",
-                                     backend_from_config ? config_where : bundled_where,
-                                     /*allow_empty=*/false);
-
-    const auto& backends = RequireObject(bundled, "backends", bundled_where);
-    const auto profile = backends.find(settings.backend);
-    if (profile == backends.end()) {
-        std::string known;
-        for (auto it = backends.begin(); it != backends.end(); ++it) {
-            if (!IsComment(it.key())) known += (known.empty() ? "" : ", ") + it.key();
-        }
-        throw std::runtime_error(std::string(kWhere) + ": unknown backend \"" + settings.backend +
-                                 "\" (" + kBundledSettingsFile + " defines: " + known + ")");
+    settings.backend = entry_backend.value_or(file_backend);
+    if (settings.backend.empty()) {
+        file.Fail("backend", "is required: the profile used when the plugins.json entry names none");
     }
-    CheckLayer(*profile, kSettingKeys, bundled_where + ": backends." + settings.backend);
+    const auto profile = profiles.find(settings.backend);
+    if (profile == profiles.end()) {
+        const std::string message = "\"" + settings.backend + "\" is not a profile in " +
+                                    kBundledSettingsFile + " (backends: " + known + ")";
+        if (entry_backend) entry.Fail("backend", message);
+        file.Fail("backend", message);
+    }
 
+    // Layer 2 between them, then one resolved object, read once more: a value
+    // no layer sets is an error -- the code has nothing to fall back to.
     nlohmann::json merged = nlohmann::json::object();
-    Overlay(merged, bundled);
-    Overlay(merged, *profile);
-    if (has_config) Overlay(merged, config);
-    merged.erase("backend");
-    merged.erase("backends");
-
-    // Validated as ONE resolved object: which layer a value came from does
-    // not change what it must be.
-    const std::string where = std::string(kWhere) + " (backend \"" + settings.backend + "\")";
-    settings.api_key = RequireString(merged, "api_key", where, /*allow_empty=*/true);
-    settings.endpoint = RequireString(merged, "endpoint", where, /*allow_empty=*/false);
-    settings.model = RequireString(merged, "model", where, /*allow_empty=*/false);
-    settings.request_timeout_ms = RequireInt(merged, "request_timeout_ms", where, 1);
-    settings.budget_ms = RequireInt(merged, "budget_ms", where, 1);
+    Overlay(merged, top);
+    Overlay(merged, profile->second);
+    Overlay(merged, overrides);
+    if (!merged.contains("retry")) merged["retry"] = nlohmann::json::object();
+    config::Reader resolved(merged, std::string(kBundledSettingsFile) + " + " + kPluginsFile);
+    const std::string unset = "is not set for backend \"" + settings.backend + "\" (set it in " +
+                              kBundledSettingsFile + " or the plugins.json entry)";
+    const auto require_string = [&](config::Reader& reader, std::string_view key) {
+        auto value = reader.MaybeString(key);  // "" is meaningful: api_key "" = no header
+        if (!value) reader.Fail(key, unset);
+        return *value;
+    };
+    const auto require_int = [&](config::Reader& reader, std::string_view key) {
+        const auto value = reader.MaybeInt(key);
+        if (!value) reader.Fail(key, unset);
+        return static_cast<int>(*value);
+    };
+    const auto require_double = [&](config::Reader& reader, std::string_view key) {
+        const auto value = reader.MaybeDouble(key);
+        if (!value) reader.Fail(key, unset);
+        return *value;
+    };
+    settings.api_key = require_string(resolved, "api_key");
+    settings.endpoint = require_string(resolved, "endpoint");
+    settings.model = require_string(resolved, "model");
+    settings.request_timeout_ms = require_int(resolved, "request_timeout_ms");
+    settings.budget_ms = require_int(resolved, "budget_ms");
     // A per-attempt cap above the total budget can only mean "budget wins";
-    // clamp it so the first attempt cannot silently outlive the loop.
-    settings.request_timeout_ms = std::min(settings.request_timeout_ms, settings.budget_ms);
-
-    const auto& retry = RequireObject(merged, "retry", where);
-    const std::string retry_where = where + ".retry";
-    settings.max_retries = RequireInt(retry, "max_retries", retry_where, 0);
-    settings.backoff_initial_ms = RequireInt(retry, "backoff_initial_ms", retry_where, 1);
-    settings.backoff_max_ms =
-        RequireInt(retry, "backoff_max_ms", retry_where, settings.backoff_initial_ms);
-    settings.jitter = RequireFraction(retry, "jitter", retry_where);
-    settings.retry_after_cap_ms = RequireInt(retry, "retry_after_cap_ms", retry_where, 1);
-
-    settings.min_probability_allow = RequireFraction(merged, "min_probability_allow", where);
-    settings.min_probability_deny = RequireFraction(merged, "min_probability_deny", where);
-    settings.min_margin = RequireFraction(merged, "min_margin", where);
-
-    settings.questions = RequireObject(merged, "questions", where);
-    if (!settings.questions.contains("action")) {
-        throw std::runtime_error(where + ": \"questions\" must define \"action\" -- the answer "
-                                         "the advisor acts on");
+    // the first attempt must not be able to outlive the loop.
+    if (settings.request_timeout_ms > settings.budget_ms) {
+        resolved.Fail("request_timeout_ms", "must not exceed budget_ms");
     }
-    settings.extra_questions = RequireObject(merged, "extra_questions", where);
+
+    config::Reader retry = resolved.Object("retry");
+    settings.max_retries = require_int(retry, "max_retries");
+    settings.backoff_initial_ms = require_int(retry, "backoff_initial_ms");
+    settings.backoff_max_ms = require_int(retry, "backoff_max_ms");
+    settings.jitter = require_double(retry, "jitter");
+    settings.retry_after_cap_ms = require_int(retry, "retry_after_cap_ms");
+    retry.Finish();
+    if (settings.backoff_max_ms < settings.backoff_initial_ms) {
+        resolved.Fail("retry.backoff_max_ms", "must not be below retry.backoff_initial_ms");
+    }
+
+    settings.min_probability_allow = require_double(resolved, "min_probability_allow");
+    settings.min_probability_deny = require_double(resolved, "min_probability_deny");
+    settings.min_margin = require_double(resolved, "min_margin");
+
+    const auto* questions = resolved.Raw("questions");
+    if (questions == nullptr) resolved.Fail("questions", unset);
+    if (!questions->contains("action")) {
+        resolved.Fail("questions", "must define \"action\" -- the answer the advisor acts on");
+    }
+    settings.questions = *questions;
+    const auto* extra = resolved.Raw("extra_questions");
+    if (extra == nullptr) resolved.Fail("extra_questions", unset);
+    settings.extra_questions = *extra;
+    resolved.Finish();
     return settings;
 }
 
 nlohmann::json LoadBundledSettings(const std::filesystem::path& path) {
-    std::ifstream stream(path);
-    if (!stream) {
-        throw std::runtime_error(std::string(kWhere) + ": cannot read " + path.string() +
-                                 " (seeded from bundled/ at install; restore it from there)");
-    }
-    auto parsed = nlohmann::json::parse(stream, nullptr, /*allow_exceptions=*/false,
-                                        /*ignore_comments=*/true);
-    if (parsed.is_discarded()) {
-        throw std::runtime_error(std::string(kWhere) + ": " + path.string() + " is not valid JSON");
-    }
-    return parsed;
+    return config::LoadJsonConfig<nlohmann::json>(
+        path, kBundledSettingsFile, config::AbsencePolicy::kThrow,
+        config::EmptyFilePolicy::kTreatAsMalformed,
+        [](const nlohmann::json& doc) { return doc; });
 }
 
 }  // namespace minimal::decision_advisor

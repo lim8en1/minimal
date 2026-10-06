@@ -93,6 +93,17 @@ public:
 
     explicit PickerController(Dependencies deps);
 
+    // The first message on a sessionless tab: when the tab has no agent (or
+    // no model) chosen and the server has no default for it -- several to
+    // choose from and no usable settings.json value -- opens the agent
+    // picker, then the model picker, and runs `send` once both are chosen.
+    // The picks are staged like any picker selection, so they are remembered
+    // for the project. A dismissed picker runs `cancel` instead. Everything
+    // chosen, a default available, or an already-sessioned tab: `send` at
+    // once. Loop thread only.
+    void EnsureSelectionThen(const std::string& tab, std::function<void()> send,
+                             std::function<void()> cancel);
+
     // The picker-open flow, shared by the keybinding and by the /sessions
     // view_hint. T8: always a fresh first page in the project's own
     // directory.
@@ -233,11 +244,25 @@ private:
     // server-side; grouping is a pure display transform). No pagination --
     // even a large discovered catalog is one response of small rows.
     std::vector<v1::ModelSummary> model_picker_models_;
+    std::string model_picker_default_;  // settings.json default_model, for the default row
     // True while the model picker is open in its /subagent-model form: the
     // same list and fetch, but the rebuild prepends the "same as parent" row
     // and selection routes to the /subagent-model command rather than
     // StageModel. Set by OpenSubagentModelPicker, cleared by OpenModelPicker.
     bool model_picker_subagent_ = false;
+
+    // A first message waiting on EnsureSelectionThen's pickers.
+    struct PendingSelection {
+        std::string tab;
+        std::function<void()> send;
+        std::function<void()> cancel;
+        bool need_agent = false;
+        bool need_model = false;
+    };
+    std::optional<PendingSelection> pending_selection_;
+    // After a desired-state picker closes: `chosen` = a selection was made.
+    // Opens the next picker still needed, or sends / cancels the message.
+    void ContinuePendingSelection(bool chosen);
     // The /subagents picker's list: ONE parent's children (filtered from the
     // include_subagents page at apply time), fetched whole on each open.
     // Spawns per session are bounded server-side (the concurrency cap), so a

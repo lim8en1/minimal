@@ -56,6 +56,10 @@ public:
         // the stored row. Validated server-side; an unknown selector fails the
         // create.
         std::vector<std::string> signals;
+        // agent_preset/model came from the project's remembered last pick,
+        // not a choice made now: the server falls back instead of refusing
+        // when they no longer resolve (see created() for what actually ran).
+        bool remembered_selection = false;
     };
 
     // One persistent session stream: a single gRPC bidi with its own reader thread
@@ -77,6 +81,9 @@ public:
         // caller's first real turn. Does NOT start reader/writer threads
         // yet. Returns the session_id, or nullopt on failure (see status()).
         std::optional<std::string> Open(const CreateOptions& opts);
+        // The row a successful Open() created or resumed (what actually ran:
+        // agent_preset, and model -- empty when it runs the default).
+        const v1::SessionSummary& created() const { return created_; }
 
         // Attaches to a session ALREADY LIVE server-side by id (a subagent the
         // parent's stream just announced). Names the stream on its first
@@ -206,6 +213,7 @@ public:
         EventCallback event_cb_;
         std::function<void(const grpc::Status&)> on_closed_;
         std::string session_id_;
+        v1::SessionSummary created_;
 
         // Must outlive the bidi below -- gRPC requires the ClientContext used to
         // create a call to stay alive for the call's whole lifetime, not just the

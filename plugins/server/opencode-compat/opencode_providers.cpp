@@ -83,7 +83,13 @@ nlohmann::json TranslateOpencodeProvider(const nlohmann::json& provider, const s
     if (out.contains("models") && out.at("models").is_object()) {
         nlohmann::json models = nlohmann::json::object();
         for (const auto& [id, model] : out.at("models").items()) {
-            nlohmann::json normalized = model.is_object() ? model : nlohmann::json::object();
+            // Not a model object (a typo, a stray list): left as written, so
+            // core's own validation names it.
+            if (!model.is_object()) {
+                models[id] = model;
+                continue;
+            }
+            nlohmann::json normalized = model;
             if (normalized.contains("limit") && normalized.at("limit").is_object()) {
                 const auto& limit = normalized.at("limit");
                 if (limit.contains("context") && limit.at("context").is_number_integer() &&

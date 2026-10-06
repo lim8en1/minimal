@@ -83,6 +83,7 @@ struct SubagentFixture {
                                  {"models", {{"child-script", nlohmann::json::object()}}}}}}}}
                   .dump());
         Write("settings.json", nlohmann::json{{"default_agent_preset", "main"},
+                                              {"default_model", "main/parent-script"},
                                               {"max_concurrent_subagents", max_concurrent}}
                                    .dump());
         Write("permissions.json", permissions.dump());
@@ -425,21 +426,26 @@ TEST_CASE("a per-turn agent override runs one turn on the borrowed preset",
     auto* parent_script = fixture.scripts["parent-script"].get();
     auto* other_script = fixture.scripts["child-script"].get();
 
-    other_script->Push(testing::TextResponse("planner done"));
+    parent_script->Push(testing::TextResponse("planner done"));
     parent_script->Push(testing::TextResponse("back home"));
 
     agent::QueuedTurn borrowed;
     borrowed.text = "plan it";
-    borrowed.agent_preset = "child";  // that preset's model is childmain/child-script
+    // The borrowed preset brings its prompt and policy, not its model: a
+    // preset's `model:` applies only when it is spawned as a subagent, so the
+    // turn stays on the session's model.
+    borrowed.agent_preset = "child";
     REQUIRE(parent->SubmitTurnWithOverrides(std::move(borrowed)));
     REQUIRE(parent->WaitForIdleForTesting(10s));
     REQUIRE(parent->SubmitTurn("plain"));
     REQUIRE(parent->WaitForIdleForTesting(10s));
 
-    REQUIRE(other_script->requests.size() == 1);
-    REQUIRE(parent_script->requests.size() == 1);
-    CHECK(other_script->requests[0].model == "child-script");
-    CHECK(parent_script->requests[0].model == "parent-script");
+    CHECK(other_script->requests.empty());
+    REQUIRE(parent_script->requests.size() == 2);
+    REQUIRE(parent_script->requests[0].system.has_value());
+    CHECK(parent_script->requests[0].system->find("You are the child agent.") != std::string::npos);
+    REQUIRE(parent_script->requests[1].system.has_value());
+    CHECK(parent_script->requests[1].system->find("You are the main agent.") != std::string::npos);
     CHECK(parent->preset().model_ref.str() == "main/parent-script");
     CHECK(parent->info().agent_preset == "main");
 }

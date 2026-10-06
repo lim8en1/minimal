@@ -1,9 +1,9 @@
 #pragma once
 
-// ParseMemorySettings -- the tools-web shape: lenient where a value is
-// cosmetic (a bad optional number falls back to the default), strict where
-// structural (missing strategy inputs leave that backend unconfigured, which
-// the strategy resolver reports, not a load failure).
+// ParseMemorySettings -- strict like every plugin config: a wrong type, an
+// out-of-range value or an unknown field throws config::ConfigError naming it.
+// Missing strategy inputs are not a parse error: they leave that backend
+// unconfigured, which the strategy resolver reports.
 
 #include <nlohmann/json.hpp>
 #include <string>

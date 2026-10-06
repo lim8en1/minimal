@@ -60,3 +60,13 @@ TEST_CASE("DeriveParameters: an unmapped effort word throws rather than sending 
     AnthropicVariantParams params;
     CHECK_THROWS_AS(params.DeriveParameters("minimal", std::nullopt), std::runtime_error);
 }
+
+TEST_CASE("DeriveParameters: every rung of the ladder has its own budget",
+          "[anthropic_variant]") {
+    // Core passes the effort name verbatim, so @high, @xhigh and @max must not
+    // collapse into one budget.
+    AnthropicVariantParams params;
+    CHECK(params.DeriveParameters("high", 200000).first["thinking"]["budget_tokens"] == 16384);
+    CHECK(params.DeriveParameters("xhigh", 200000).first["thinking"]["budget_tokens"] == 32768);
+    CHECK(params.DeriveParameters("max", 200000).first["thinking"]["budget_tokens"] == 65536);
+}

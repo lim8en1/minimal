@@ -324,7 +324,7 @@ public:
     // state (SetDesired* below) seeds the status-bar fields directly -- the
     // wire metadata event only arrives once a session exists.
     void SetSessionId(std::string session_id);
-    void SetDesiredModel(std::string model_ref);
+    void SetDesiredModel(std::string model_ref, bool is_default = false);
     void SetDesiredAgentPreset(std::string preset_name);
     void SetDesiredPermissionMode(std::string mode);
 
@@ -332,6 +332,11 @@ public:
     // none). Read by EnsureSession (create-options overlay) under the state's
     // own mutex.
     std::string DesiredModel() const;
+    // The desired model is "the default" (the picker's default row, `/model
+    // default`): the session's own choice is to be CLEARED, not pinned.
+    // DesiredModel() is then the default's ref when known (for display and
+    // convergence), or empty.
+    bool DesiredModelIsDefault() const;
     std::string DesiredAgentPreset() const;
     std::string DesiredPermissionMode() const;
 
@@ -646,6 +651,7 @@ private:
     std::string model_;
     std::string agent_preset_;
     std::string desired_model_;
+    bool desired_model_default_ = false;
     std::string desired_agent_;
     std::string permission_mode_;
     std::string desired_permission_mode_;  // shift+tab, sent but not yet confirmed
@@ -1044,8 +1050,27 @@ public:
     // Either way the status bar reflects the choice immediately (the desired
     // pair in SessionState::Snapshot). Returns false only when the tab does
     // not exist.
-    bool StageModel(const std::string& tab_id, const std::string& model_ref);
+    // `is_default`: return to settings.json default_model (see
+    // SessionState::DesiredModelIsDefault); `model_ref` is then its ref, or
+    // empty when unknown.
+    bool StageModel(const std::string& tab_id, const std::string& model_ref,
+                    bool is_default = false);
     bool StageAgentPreset(const std::string& tab_id, const std::string& preset_name);
+
+    // Selection persistence, wired by the TUI to its LastSelectionStore (the
+    // headless client wires nothing: scripts stay deterministic). Both run on
+    // the calling thread, outside the state lock.
+    struct SelectionHooks {
+        // The user staged an agent and/or model: nullopt = that field
+        // unchanged; model "" = back to the default.
+        std::function<void(const std::optional<std::string>& agent,
+                           const std::optional<std::string>& model)>
+            picked;
+        // A create carrying a REMEMBERED selection started without part of it
+        // (the server could not resolve it): forget those fields.
+        std::function<void(bool agent, bool model)> dropped;
+    };
+    void SetSelectionHooks(SelectionHooks hooks);
 
     // Runs `action` on the RPC worker once the tab's session exists (creating
     // it if needed; single-flight per tab, queued actions share one create).
@@ -1097,6 +1122,19 @@ public:
         std::string project_root;
     };
     CommandScope FocusedCommandScope() const;
+
+    // What a tab's session will be (or was) created with: the desired
+    // selection over the tab's pending create options. `model_default` is the
+    // staged "back to the default". `sessioned` = a session already exists.
+    struct TabSelection {
+        bool exists = false;
+        bool sessioned = false;
+        std::string project_root;
+        std::string agent;
+        std::string model;
+        bool model_default = false;
+    };
+    TabSelection SelectionFor(const std::string& tab_id) const;
 
     // The focused tab's TAB id ("" when no tabs) -- the UI's handle for it,
     // valid whether or not a session exists yet.
@@ -1302,7 +1340,8 @@ private:
 
     int64_t next_root_ordinal_ = 0;
     uint32_t next_spawn_seq_ = 0;
-    std::string focused_id_;     // active tab ("" => none)
+    std::string focused_id_;
+    SelectionHooks selection_hooks_;     // active tab ("" => none)
 
     // The tab-bar filter (TabFilter / ActiveTabFilter). Under mtx_ with
     // focused_id_: written by the loop thread's dispatch, read by the frame

@@ -32,12 +32,9 @@ enum class AgentMode {
 //
 // opencode-compat aliases are accepted beside the native fields and folded
 // into them at parse time (`permission` -> permission_mode, `mode`, `steps`,
-// `disable`, `hidden`, `color`, deprecated `tools`). Unknown structural keys do
-// NOT warn: any frontmatter key this parser does not recognize is carried in
-// `extra_parameters` and passed to the provider as request parameters
-// (opencode's "additional options" passthrough -- `reasoningEffort` and
-// friends). The trade, accepted deliberately, is that a typo'd structural key
-// becomes a harmless unknown parameter instead of a load error.
+// `disable`, `hidden`, `color`). Strict: an unknown key is an error. Provider
+// request parameters go under `parameters:`; opencode's top-level
+// `temperature`, `top_p` and `reasoningEffort` are accepted beside it.
 struct AgentPresetFrontmatter {
     std::string name;                              // required
     std::string description;                       // optional, default ""
@@ -64,10 +61,6 @@ struct AgentPresetFrontmatter {
     // definition builder filters its listing with exactly this list).
     std::optional<std::vector<std::string>> allowed_subagents;
     tools::PermissionOverrideLayer permission_mode;  // read_only/file_write/execute/out_of_workdir/network + overrides -> per_tool_overrides
-    // Keys inside `permission_mode:` the decoder did not recognise (a typo'd
-    // `pattern:` or `file_writes:` used to vanish silently). Reported as
-    // startup warnings by the sanity check.
-    std::vector<std::string> unknown_permission_keys;
     // plugin_permissions: {<model>: {...}} -- each plugin permission model's
     // preset slice, verbatim (YamlToJson lowering). Core never reads inside a
     // slice; the model's BuildLayer does. Empty object when absent.
@@ -91,8 +84,9 @@ struct AgentPresetFrontmatter {
     // Ceiling on the subagent's tool rounds when THIS preset is spawned as a
     // child (a spawn request may lower it, never raise it). nullopt = unbounded.
     std::optional<int> steps;
-    // Unknown frontmatter keys, merged OVER the resolved model's parameters at
-    // registry resolve time (a preset's extra beats the model's default).
+    // The preset's provider parameters (`parameters:` plus the allowlisted
+    // top-level keys), merged OVER the resolved model's parameters at
+    // registry resolve time (a preset's value beats the model's default).
     nlohmann::json extra_parameters = nlohmann::json::object();
     // Per-tool/per-plugin configuration, keyed by the namespace a tool's
     // config_namespace() claims: `tool_config: {python: {venv: ".venv"}}`.

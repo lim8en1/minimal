@@ -53,7 +53,7 @@ struct SupportFixture {
                                  {"url", "http://localhost:8080/v1"},
                                  {"models", {{"test-model", nlohmann::json::object()}}}}}}}}
                   .dump());
-        Write("settings.json", "{}");
+        Write("settings.json", R"({"default_model": "main/test-model"})");
         Write("permissions.json", "{}");
         Write("agents/build.md",
               "---\nname: build\nmodel: main/test-model\n---\nYou are a build agent.\n");

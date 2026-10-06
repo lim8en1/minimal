@@ -192,6 +192,7 @@ public:
     // SessionSupportService so a plugin-configured model lands on the same
     // shared instances. The registry outlives every session and service call.
     ProviderResolver& resolver() { return resolver_; }
+    const AgentPresetRegistry& presets() const { return presets_; }
 
     // Sessions of `parent_id` that are still RUNNING: neither terminated nor
     // finished-with-their-seeded-turn. This is the count the subagent
