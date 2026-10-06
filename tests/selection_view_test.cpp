@@ -47,6 +47,9 @@ public:
     void ChooseModel(const std::string& ref) override { calls.push_back("model " + ref); }
     void ChooseDefaultModel(const std::string& ref) override { calls.push_back("default " + ref); }
     void SetSubagentModel(const std::string& ref) override { calls.push_back("subagent " + ref); }
+    void NewTab() override {}
+    void OpenSession(const std::string&, bool) override {}
+    void OpenSubagent(const std::string&, const std::string&, bool) override {}
 
     std::optional<MessagePage> GetMessages(const std::string&, std::optional<std::int64_t>,
                                            int) override {
@@ -68,6 +71,15 @@ public:
         *response.add_presets() = Preset("plan", "Plans work.");
         return response;
     }
+    std::optional<minimal::v1::ListSessionsResponse> ListSessions(const SessionQuery&,
+                                                                  std::string*) override {
+        return std::nullopt;
+    }
+    std::optional<std::vector<minimal::v1::SessionSummary>> ListSubagents(const std::string&,
+                                                                          std::string*) override {
+        return std::nullopt;
+    }
+    bool DeleteSession(const std::string&, std::string*) override { return false; }
     client::SubscribeOutcome PluginSubscribe(const std::string&, const std::string&,
                                              const std::string&,
                                              const std::function<bool(const std::string&)>&) override {

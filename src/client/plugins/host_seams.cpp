@@ -98,6 +98,59 @@ public:
         return std::move(result.response);
     }
 
+    std::optional<v1::ListSessionsResponse> ListSessions(const SessionQuery& query,
+                                                         std::string* error) override {
+        if (client_ == nullptr) {
+            if (error != nullptr) *error = "not connected to a server";
+            return std::nullopt;
+        }
+        SessionClient::ListSessionsOptions options;
+        options.project_root = CurrentProjectRootOrEmpty();
+        options.include_all_dirs = query.include_all_dirs;
+        if (query.limit > 0) options.limit = query.limit;
+        options.before_updated_at = query.before_updated_at;
+        options.before_id = query.before_id;
+        auto result = client_->ListSessions(options);
+        if (!result.status.ok()) {
+            if (error != nullptr) *error = result.status.error_message();
+            return std::nullopt;
+        }
+        return std::move(result.response);
+    }
+
+    std::optional<std::vector<v1::SessionSummary>> ListSubagents(
+        const std::string& parent_session_id, std::string* error) override {
+        if (client_ == nullptr) {
+            if (error != nullptr) *error = "not connected to a server";
+            return std::nullopt;
+        }
+        // Every page, filtered as it arrives: one 200-row page silently
+        // dropped the children of any session older than the 200 most
+        // recently updated. include_all_dirs: the GROUP's own project root
+        // governs where its children live, not this client's cwd.
+        SessionClient::ListSessionsOptions options;
+        options.include_all_dirs = true;
+        options.include_subagents = true;
+        auto result = client_->ListAllSessions(options, [&](const v1::SessionSummary& row) {
+            return row.parent_session_id() == parent_session_id;
+        });
+        if (!result.status.ok()) {
+            if (error != nullptr) *error = result.status.error_message();
+            return std::nullopt;
+        }
+        return std::move(result.sessions);
+    }
+
+    bool DeleteSession(const std::string& session_id, std::string* error) override {
+        if (client_ == nullptr) {
+            if (error != nullptr) *error = "not connected to a server";
+            return false;
+        }
+        const auto status = client_->DeleteSession(session_id);
+        if (!status.ok() && error != nullptr) *error = status.error_message();
+        return status.ok();
+    }
+
     SubscribeOutcome PluginSubscribe(const std::string& plugin_name, const std::string& method,
                                      const std::string& json_payload,
                                      const std::function<bool(const std::string&)>& on_payload) override {
@@ -329,6 +382,21 @@ void HostActionQueue::ChooseDefaultModel(const std::string& default_ref) {
 
 void HostActionQueue::SetSubagentModel(const std::string& ref) {
     Enqueue([ref](HostActions& host) { host.SetSubagentModel(ref); });
+}
+
+void HostActionQueue::NewTab() {
+    Enqueue([](HostActions& host) { host.NewTab(); });
+}
+
+void HostActionQueue::OpenSession(const std::string& session_id, bool is_live) {
+    Enqueue([session_id, is_live](HostActions& host) { host.OpenSession(session_id, is_live); });
+}
+
+void HostActionQueue::OpenSubagent(const std::string& session_id,
+                                   const std::string& parent_session_id, bool is_live) {
+    Enqueue([session_id, parent_session_id, is_live](HostActions& host) {
+        host.OpenSubagent(session_id, parent_session_id, is_live);
+    });
 }
 
 void HostActionQueue::Enqueue(std::function<void(HostActions&)> action) {

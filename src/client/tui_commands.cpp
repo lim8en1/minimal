@@ -182,7 +182,7 @@ void TuiApp::RegisterClientCommands() {
     // like any other command.
     router.Add({"sessions", "", true, false, [this](const CommandInvocationText& parsed) {
         if (!parsed.positional.empty() || !app_->FocusedSessionId().empty()) return false;
-        picker_controller_->OpenSessionPicker();
+        OpenRoleView("sessions");
         return true;
     }});
     // Plugin-contributed client commands (ClientCommandRegistry), after the

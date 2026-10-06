@@ -56,3 +56,9 @@ add_subdirectory(theme-view)
 # needs a choice) open by role.
 
 add_subdirectory(selection-view)
+
+# session-view is the session and subagent pickers: the "sessions" and
+# "subagents" views core (ctrl+o, a bare /sessions) and the server's view
+# hints open.
+
+add_subdirectory(session-view)

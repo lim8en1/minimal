@@ -31,7 +31,7 @@ TEST_CASE("modal stack: the permission prompt draws above everything else",
           "[modal_stack]") {
     ModalStack stack;
     stack.Set(ModalId::kPluginModal, Label("plugin-modal"));
-    stack.Set(ModalId::kSessionPicker, Label("session-picker"));
+    stack.Set(ModalId::kQuitConfirm, Label("quit-confirm"));
     stack.Set(ModalId::kPermission, Label("permission-prompt"));
     auto tree = stack.Build(Label("frame"));
 

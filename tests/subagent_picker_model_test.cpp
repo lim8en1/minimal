@@ -3,10 +3,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "minimal/client/subagent_picker_model.hpp"
+#include "session_rows.hpp"
 
-using minimal::client::BuildSubagentPickerRows;
-using minimal::client::SubagentPickerRow;
+using minimal::session_view::BuildSubagentPickerRows;
+using minimal::session_view::SubagentPickerRow;
 
 namespace {
 

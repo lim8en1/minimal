@@ -6,6 +6,8 @@ minimal/client/plugins/client_plugin_abi.h
 minimal/client/plugins/registries.hpp
 minimal/client/plugins/background_poller.hpp
 minimal/client/plugins/task_worker.hpp
+# The wire types the ABI already hands over (ClientApi answers, events).
+minimal/v1/session_service.pb.h
 
 # Rendering, and the widget contracts (the widgets themselves come from the
 # WidgetKit slot, through the registration context).
@@ -15,12 +17,14 @@ minimal/client/utf8.hpp
 minimal/client/command_catalog_entry.hpp
 minimal/client/view/schema_form_model.hpp
 minimal/client/view/widget_types.hpp
+minimal/client/picker_model.hpp
 minimal/client/view/rebuilding.hpp
 minimal/client/view/tool_status.hpp
 
 # Shared utilities.
 minimal/common/abi_tag.hpp
 minimal/common/config_reader.hpp
+minimal/common/clock.hpp
 minimal/common/count_format.hpp
 minimal/common/logger.hpp
 minimal/common/plugin_config_label.hpp

@@ -147,6 +147,10 @@ public:
     void ChooseModel(const std::string& ref) override;
     void ChooseDefaultModel(const std::string& default_ref) override;
     void SetSubagentModel(const std::string& ref) override;
+    void NewTab() override;
+    void OpenSession(const std::string& session_id, bool is_live) override;
+    void OpenSubagent(const std::string& session_id, const std::string& parent_session_id,
+                      bool is_live) override;
 
     // The UI thread's half: every verb queued since the last call, oldest
     // first, each to be applied to the TUI's own HostActions.

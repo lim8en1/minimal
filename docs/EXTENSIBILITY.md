@@ -327,7 +327,7 @@ The "write a different frontend" tier shrinks to exactly this list. Not on it, u
 | Prompt editor | **exclusive, required** | core prompt editor | planned — its own design pass |
 | Tab bar | **exclusive** | core tab bar | planned |
 | Status-bar segments (keyed by segment id) | additive; **format string orders/selects** | core segments | live; default moving |
-| Views (Panel/Modal) | additive | — | live; the help overlays (`help-view`), the theme picker (`theme-view`) and the agent/model/subagent-model choosers (`selection-view`, opened by role: `agents`, `models`, `subagent-models`) are bundled plugins; the session and subagent pickers move here next |
+| Views (Panel/Modal) | additive | — | live; every picker is a bundled plugin view, opened by role id -- the server's view_hint names -- by core's commands and keys: `help-view` (`help.overlay`, `help.commands`), `theme-view` (`theme`), `selection-view` (`agents`, `models`, `subagent-models`), `session-view` (`sessions`, `subagents`) |
 | MentionResolver (server-side) | exclusive | `PrefixMentionResolver` — live: `SessionServiceImpl` resolves through `MentionResolverRegistry::Active()` | live |
 | Attention source | additive | core event derivation | live |
 | Theme sections (config) | namespaced roles | core roles | live |

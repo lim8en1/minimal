@@ -384,6 +384,9 @@ public:
     void ChooseModel(const std::string&) override {}
     void ChooseDefaultModel(const std::string&) override {}
     void SetSubagentModel(const std::string&) override {}
+    void NewTab() override {}
+    void OpenSession(const std::string&, bool) override {}
+    void OpenSubagent(const std::string&, const std::string&, bool) override {}
     std::vector<std::string> inserted;
     std::vector<std::string> themes;
 };
@@ -1029,6 +1032,21 @@ TEST_CASE("the bundled selection-view plugin registers the agents, models and su
         INFO(id);
         CHECK(fixtures->registries.views.Find(id) != nullptr);
     }
+}
+
+#ifndef MINIMAL_SESSION_VIEW_PLUGIN
+#error "MINIMAL_SESSION_VIEW_PLUGIN must name the built session-view plugin"
+#endif
+
+TEST_CASE("the bundled session-view plugin registers the sessions and subagents views",
+          "[client_plugins][session_view]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_SESSION_VIEW_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    INFO(fixtures->records.front().error);
+    REQUIRE(fixtures->records.front().ok());
+    CHECK(fixtures->registries.views.Find("sessions") != nullptr);
+    CHECK(fixtures->registries.views.Find("subagents") != nullptr);
 }
 
 // regenerate_per_session=false must share one banner across every session

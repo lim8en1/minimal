@@ -118,11 +118,6 @@ public:
         std::vector<plugins::PluginViewEntry>& plugin_views;
         std::shared_ptr<ftxui::Component>& plugin_modal_child;
         bool& show_plugin_modal;
-        std::function<void()> open_picker;
-        // The `/subagents` view_hint: opens the focused session's subagent
-        // picker. Takes the parent session id (the focused tab's session) --
-        // the picker filters ListSessions to that parent's children.
-        std::function<void(const std::string& parent_session_id)> open_subagents_picker;
         // Drains PickerController's async fetch completions and rebuilds
         // whichever picker's component they belong to (PickerController::Poll).
         // Called every pass BEFORE the version-gate below can skip it: a

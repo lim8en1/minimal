@@ -109,6 +109,11 @@ private:
     void ChooseModel(const std::string& ref) override;
     void ChooseDefaultModel(const std::string& default_ref) override;
     void SetSubagentModel(const std::string& ref) override;
+    // The "+ new session" row: a sessionless tab, focused.
+    void NewTab() override;
+    void OpenSession(const std::string& session_id, bool is_live) override;
+    void OpenSubagent(const std::string& session_id, const std::string& parent,
+                      bool is_live) override;
     // Shows the plugin view registered as `role` ("agents", ...); false, with
     // a notice, when none is.
     bool OpenRoleView(const std::string& role);
@@ -130,7 +135,6 @@ private:
     std::vector<std::string> ListThemeNames() const;
     void ClearFocusedNotice();
     void FocusedNotice(const std::string& text);
-    void OpenNewSession();
     void RequestQuit();
     void StageClose(std::vector<std::string> ids, bool quit);
     void ToggleFold(const std::string& tab_id, bool thinking);
@@ -169,15 +173,11 @@ private:
     // Every modal's visibility flag lives in the stack (view/modal_stack.hpp);
     // these names are references into it.
     ModalStack modals_;
-    bool& show_picker_ = modals_.Flag(ModalId::kSessionPicker);
-    bool& show_subagent_picker_ = modals_.Flag(ModalId::kSubagentPicker);
     bool& show_quit_confirm_ = modals_.Flag(ModalId::kQuitConfirm);
     bool& show_permission_ = modals_.Flag(ModalId::kPermission);
     bool& show_confirmation_ = modals_.Flag(ModalId::kConfirmation);
-    bool& show_delete_confirm_ = modals_.Flag(ModalId::kDeleteConfirm);
     bool& show_plugin_modal_ = modals_.Flag(ModalId::kPluginModal);
     bool& show_prompt_ = modals_.Flag(ModalId::kPluginPrompt);
-    std::string staged_delete_id_;   // the picker delete confirmation's subject
     PendingClose pending_close_;
     // Per-tab UI caches, keyed by TAB id (AppState's tab handle -- the only
     // key that exists for a sessionless tab). CloseTab erases from it.
@@ -197,9 +197,6 @@ private:
     std::shared_ptr<ftxui::Component> permission_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> confirmation_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> prompt_child_ = std::make_shared<ftxui::Component>();
-    std::shared_ptr<ftxui::Component> picker_child_ = std::make_shared<ftxui::Component>();
-    std::shared_ptr<ftxui::Component> subagent_picker_child_ =
-        std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> plugin_modal_child_ = std::make_shared<ftxui::Component>();
     PendingConfirmation confirm_request_;
     ftxui::Component confirm_modal_;
@@ -213,8 +210,6 @@ private:
     // Never moved once built: Focused()/FocusedDetails() return references
     // into its own members, which the renderer and key dispatch hold.
     std::optional<TabMaintenance> tab_maintenance_;
-    PendingConfirmation delete_request_;
-    ftxui::Component delete_modal_;
     std::optional<FrameRenderer> frame_renderer_;
     std::optional<KeyContext> key_ctx_;
     // Coalescing for the pump's Event::Custom posts, cleared by the frame's

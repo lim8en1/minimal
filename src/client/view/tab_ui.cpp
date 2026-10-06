@@ -239,14 +239,7 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
     if (notice.display != v1::COMMAND_DISPLAY_VIEW || notice.view_hint.empty()) {
         return;
     }
-    if (notice.view_hint == "sessions") {
-        deps_.open_picker();   // core mapping: the picker modal
-    } else if (notice.view_hint == "subagents") {
-        // core mapping: `/subagents` -- the picker lists the FOCUSED
-        // session's own children (a read-only command, so it fires just as
-        // well from a nested subagent's tab, whose children these are).
-        if (!snap.session_id.empty()) deps_.open_subagents_picker(snap.session_id);
-    } else if (auto* view = deps_.view_registry.Find(notice.view_hint)) {
+    if (auto* view = deps_.view_registry.Find(notice.view_hint)) {
         // The keybinding's own opener (keybinding_dispatch.hpp): the same
         // staged component instance, the same focus rule -- and a modal
         // retires any other modal's `visible`, not only a panel's focus.

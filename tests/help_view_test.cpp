@@ -49,6 +49,9 @@ public:
     void ChooseModel(const std::string&) override {}
     void ChooseDefaultModel(const std::string&) override {}
     void SetSubagentModel(const std::string&) override {}
+    void NewTab() override {}
+    void OpenSession(const std::string&, bool) override {}
+    void OpenSubagent(const std::string&, const std::string&, bool) override {}
 
     std::unordered_map<std::string, std::string> keys = kKeys;
     std::vector<client::CommandCatalogEntry> catalog;

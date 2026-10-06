@@ -368,6 +368,10 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     # selection-view: the agent/model/subagent-model choosers, over a fake host.
     "${CMAKE_SOURCE_DIR}/plugins/client/selection-view/selection_view.cpp"
     selection_view_test.cpp
+    # session-view: the session and subagent pickers, and their rows.
+    "${CMAKE_SOURCE_DIR}/plugins/client/session-view/session_view.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/session-view/session_rows.cpp"
+    session_view_test.cpp
     task_worker_test.cpp
     model_selector_test.cpp
     mcp_view_test.cpp)
@@ -380,6 +384,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/client/help-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/theme-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/selection-view"
+    "${CMAKE_SOURCE_DIR}/plugins/client/session-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")
 
 target_include_directories(minimal_tests PRIVATE
@@ -439,6 +444,7 @@ target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_HELP_VIEW_PLUGIN="$<TARGET_FILE:minimal_help_view>"
     MINIMAL_THEME_VIEW_PLUGIN="$<TARGET_FILE:minimal_theme_view>"
     MINIMAL_SELECTION_VIEW_PLUGIN="$<TARGET_FILE:minimal_selection_view>"
+    MINIMAL_SESSION_VIEW_PLUGIN="$<TARGET_FILE:minimal_session_view>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto"
     # The captured live Jev responses (fixtures/decision-advisor/): the
     # response-shape contract the advisor parses, kept as data not literals.

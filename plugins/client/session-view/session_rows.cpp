@@ -1,14 +1,18 @@
-#include "minimal/client/picker_model.hpp"
+#include "session_rows.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <ctime>
 
+#include "minimal/client/picker_model.hpp"
+#include "minimal/client/policy.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/common/clock.hpp"
-#include "minimal/client/policy.hpp"
 
-namespace minimal::client {
+namespace minimal::session_view {
+
+using namespace minimal::client;  // the shared row helpers (picker_model.hpp), utf8, policy
+
 
 namespace {
 
@@ -110,4 +114,67 @@ std::vector<PickerRow> BuildPickerRows(const std::vector<v1::SessionSummary>& se
     return rows;
 }
 
-}  // namespace minimal::client
+
+// --- subagents ---------------------------------------------------------------
+
+namespace {
+
+// A subagent row is created nameless server-side (subagent_manager.cpp mints
+// the row with name=""); a titler or /rename may have named it since. The raw
+// id as the fallback label (truncated) beats a row of empty strings.
+std::string SubagentName(const v1::SessionSummary& session) {
+    std::string name = StripControlChars(session.name());
+    if (name.empty()) {
+        name = session.session_id();
+        if (name.size() > kUnnamedSessionIdPrefixChars) name.resize(kUnnamedSessionIdPrefixChars);
+        return name;
+    }
+    if (Utf8ColumnWidth(name) > kNameColumnCap) name = TruncateUtf8Columns(name, kNameColumnCap);
+    return name;
+}
+
+std::string SubagentLabel(const v1::SessionSummary& session, std::int64_t now_unix_ms) {
+    // Same leading-glyph convention as the session picker's Label
+    // (picker_model.cpp): the live dot scans down the column; ended rows
+    // indent to align. State vocabulary is deliberately coarse -- the wire
+    // summary carries is_live only (see the header).
+    const std::string state = session.is_live() ? "running" : "ended";
+    std::string count = std::to_string(session.message_count()) + " msgs";
+    return std::string(LiveMarker(session.is_live())) + SubagentName(session) + "  ·  " + count +
+           "  ·  " + state + "  ·  " + RelativeAge(session.updated_at_unix_ms(), now_unix_ms);
+}
+
+}  // namespace
+
+std::vector<SubagentPickerRow> BuildSubagentPickerRows(
+    const std::vector<v1::SessionSummary>& sessions, bool include_ended,
+    const std::string& filter, std::int64_t now_unix_ms) {
+    now_unix_ms = NowUnixMsOr(now_unix_ms);
+    const std::string lowered_filter = ToLower(filter);
+
+    std::vector<const v1::SessionSummary*> matched;
+    matched.reserve(sessions.size());
+    for (const auto& session : sessions) {
+        if (!include_ended && !session.is_live()) continue;
+        if (!MatchesFilter(lowered_filter, {session.name(), session.session_id()})) continue;
+        matched.push_back(&session);
+    }
+
+    // Live first, newest activity within each group (stable_sort preserves
+    // the server's updated_at DESC delivery order for ties).
+    std::stable_sort(matched.begin(), matched.end(),
+                     [](const v1::SessionSummary* a, const v1::SessionSummary* b) {
+                         if (a->is_live() != b->is_live()) return a->is_live();
+                         return false;
+                     });
+
+    std::vector<SubagentPickerRow> rows;
+    rows.reserve(matched.size());
+    for (const auto* session : matched) {
+        rows.push_back(SubagentPickerRow{SubagentLabel(*session, now_unix_ms), session->session_id(),
+                                         session->is_live()});
+    }
+    return rows;
+}
+
+}  // namespace minimal::session_view

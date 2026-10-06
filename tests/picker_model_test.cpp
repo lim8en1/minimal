@@ -5,11 +5,11 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "minimal/client/picker_model.hpp"
+#include "session_rows.hpp"
 
-using minimal::client::BuildPickerRows;
-using minimal::client::PickerRow;
-using minimal::client::PickerSort;
+using minimal::session_view::BuildPickerRows;
+using minimal::session_view::PickerRow;
+using minimal::session_view::PickerSort;
 
 namespace {
 
@@ -52,7 +52,7 @@ TEST_CASE("picker rows: labels are aligned columns with a live dot and a relativ
 }
 
 TEST_CASE("RelativeAge buckets by minute, hour and day, then falls back to a date") {
-    using minimal::client::RelativeAge;
+    using minimal::session_view::RelativeAge;
     constexpr int64_t kNow = 1'700'000'000'000;
     CHECK(RelativeAge(kNow - 5'000, kNow) == "just now");
     CHECK(RelativeAge(kNow - 5 * 60'000, kNow) == "5m ago");

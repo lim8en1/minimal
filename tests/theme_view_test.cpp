@@ -30,6 +30,9 @@ public:
     void ChooseModel(const std::string&) override {}
     void ChooseDefaultModel(const std::string&) override {}
     void SetSubagentModel(const std::string&) override {}
+    void NewTab() override {}
+    void OpenSession(const std::string&, bool) override {}
+    void OpenSubagent(const std::string&, const std::string&, bool) override {}
 
     std::vector<std::string> names = {"dark", "light", "solarized"};
     std::vector<std::string> shown, closed, switched;

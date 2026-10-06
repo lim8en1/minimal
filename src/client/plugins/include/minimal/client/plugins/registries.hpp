@@ -150,6 +150,17 @@ public:
     // The focused session's subagent model: a `<provider>/<model>` ref, or
     // "inherit" (children run the parent's model).
     virtual void SetSubagentModel(const std::string& ref) = 0;
+
+    // A fresh tab without a session (its first message creates one), focused.
+    virtual void NewTab() = 0;
+    // Opens a stored session in a tab and focuses it: attached when it is
+    // live (`is_live`, as the session list said), resumed from its
+    // transcript otherwise. A session already open in a tab just focuses it.
+    virtual void OpenSession(const std::string& session_id, bool is_live) = 0;
+    // A subagent of `parent_session_id`: an open tab is focused, a live one
+    // attached into its parent's tab group, an ended one opened read-only.
+    virtual void OpenSubagent(const std::string& session_id, const std::string& parent_session_id,
+                              bool is_live) = 0;
 };
 
 class AttentionSink {
@@ -637,6 +648,27 @@ public:
     // The agent presets for this client's project, and the default when
     // there is one. Blocking, like ListModels.
     virtual std::optional<v1::ListAgentPresetsResponse> ListAgentPresets(std::string* error) = 0;
+
+    // One page of the stored sessions -- this client's project's, or every
+    // project's -- newest first, top-level only. `before_*` is the keyset
+    // cursor (the last row of the previous page; unset = the first page).
+    // Blocking, like ListModels.
+    struct SessionQuery {
+        bool include_all_dirs = false;
+        int limit = 0;  // 0: the server's page size
+        std::optional<std::int64_t> before_updated_at;
+        std::optional<std::string> before_id;
+    };
+    virtual std::optional<v1::ListSessionsResponse> ListSessions(const SessionQuery& query,
+                                                                 std::string* error) = 0;
+    // Every session `parent_session_id` spawned, live or ended, across all
+    // pages. Blocking.
+    virtual std::optional<std::vector<v1::SessionSummary>> ListSubagents(
+        const std::string& parent_session_id, std::string* error) = 0;
+    // Deletes a stored session (its transcript and its subagents'),
+    // permanently. Blocking. False, with `error`, when the server refused --
+    // a session that is open somewhere stays.
+    virtual bool DeleteSession(const std::string& session_id, std::string* error) = 0;
 
     // Streams the subscription to `on_payload` on the CALLING thread (blocking
     // until the server closes the stream or the callback returns false).
