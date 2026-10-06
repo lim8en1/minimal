@@ -10,6 +10,9 @@
 
 #include "decision.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/http_status.hpp"
+#include "policy.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::decision_advisor {
 namespace {
@@ -20,14 +23,14 @@ using namespace std::chrono_literals;
 // be noticed. Not a tunable: is_cancelled() is a predicate, so the sleep must
 // poll; 25ms is below what a person waiting on a modal perceives, and a
 // handful of wakeups per backoff costs nothing next to the HTTP call.
-constexpr auto kSleepSlice = 25ms;
 
 // Statuses the loop retries -- HTTP semantics, not a tunable: TypeSafe's own
 // SDK policy (408/429/5xx), of which 429 and 529-overloaded are the ones the
 // docs actually predict. Minus 501: llama-server's answer for a model that is
 // not a decision model, which no retry can change.
 bool IsRetryableStatus(int status) {
-    return status == 408 || status == 429 || (status >= 500 && status <= 599 && status != 501);
+    return status == common::kHttpRequestTimeout || status == common::kHttpTooManyRequests ||
+           (common::IsServerErrorStatus(status) && status != common::kHttpNotImplemented);
 }
 
 bool IsRetryableTransport(net::HttpErrorKind kind) {
@@ -100,7 +103,7 @@ bool SleepFor(std::chrono::milliseconds delay, std::chrono::milliseconds budget_
         if (is_cancelled()) return false;
         auto now = std::chrono::steady_clock::now();
         if (now >= deadline) return true;
-        const auto slice = std::min(kSleepSlice, std::chrono::duration_cast<std::chrono::milliseconds>(
+        const auto slice = std::min(common::kCancelPollSlice, std::chrono::duration_cast<std::chrono::milliseconds>(
                                                         deadline - now));
         std::this_thread::sleep_for(slice);
     }
@@ -114,8 +117,7 @@ bool SleepFor(std::chrono::milliseconds delay, std::chrono::milliseconds budget_
 std::string ErrorDetailOf(const std::string& body) {
     // Keeps the warn line one line: enough for any server's error sentence,
     // not an HTML error page. Same clip as mcp_connection's stderr quote.
-    constexpr std::size_t kMaxDetail = 200;
-    auto parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        auto parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
     std::string detail;
     if (parsed.is_object()) {
         if (auto error = parsed.find("error"); error != parsed.end()) {
@@ -130,7 +132,7 @@ std::string ErrorDetailOf(const std::string& body) {
         }
     }
     if (detail.empty()) detail = body;
-    if (detail.size() > kMaxDetail) detail = detail.substr(0, kMaxDetail) + "...";
+    if (detail.size() > kMaxErrorDetailBytes) detail = detail.substr(0, kMaxErrorDetailBytes) + "...";
     return detail;
 }
 
@@ -210,7 +212,7 @@ SystemOneOutcome AskSystemOne(const net::HttpClient& http, const Settings& setti
         }
 
         status = response->status;
-        if (status >= 200 && status < 300) {
+        if (common::IsSuccessStatus(response->status)) {
             auto parsed = nlohmann::json::parse(response->body, nullptr,
                                                 /*allow_exceptions=*/false);
             if (parsed.is_discarded()) {

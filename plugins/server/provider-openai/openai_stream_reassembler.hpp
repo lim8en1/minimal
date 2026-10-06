@@ -67,7 +67,7 @@ private:
     std::vector<Block> blocks_;                    // insertion order == first-seen order
     std::optional<std::size_t> text_block_index_;
     std::map<int, std::size_t> tool_call_indices_;  // OpenAI tool_calls[].index -> blocks_ index
-    std::size_t accumulated_bytes_ = 0;  // text + arguments content, capped -- see kMaxAccumulatedBytes
+    std::size_t accumulated_bytes_ = 0;  // text + arguments content, capped -- see llm::kMaxStreamContentBytes
     llm::StopReason stop_reason_ = llm::StopReason::Unknown;
     llm::Usage usage_;
 };

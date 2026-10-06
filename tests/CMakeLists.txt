@@ -175,6 +175,7 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     streaming_markdown_view_test.cpp
     syntax_highlighter_test.cpp
     common_utf8_test.cpp
+    common_clock_test.cpp
     session_state_test.cpp
     session_state_invariants_test.cpp
     app_state_test.cpp
@@ -545,6 +546,16 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME module_deps
              COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/check_module_deps.py"
                      "${CMAKE_SOURCE_DIR}")
+    # No hidden judgment calls (ARCHITECTURE.md "Policy constants"): every
+    # number is a cited fact, a written derivation, or a policy.hpp entry.
+    # Needs clang-tidy (LLVM); skipped where it is not installed.
+    find_program(MINIMAL_CLANG_TIDY NAMES clang-tidy
+                 HINTS /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin)
+    if(MINIMAL_CLANG_TIDY)
+        add_test(NAME policy_constants
+                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/check_policy_constants.py"
+                         --build-dir "${CMAKE_BINARY_DIR}")
+    endif()
     # Core + one provider is a working harness, and every bundled plugin can be
     # disabled alone (tests/plugin_matrix_test.py, against the real binaries).
     add_test(NAME plugin_matrix

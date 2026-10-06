@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "memory_store.hpp"
+#include "policy.hpp"
 
 namespace minimal::memory {
 
@@ -20,7 +21,7 @@ class EmbeddingService;
 struct SearchRequest {
     std::optional<std::string> query;  // nullopt/empty = browse
     MemoryStore::Filters filters;
-    int limit = 12;
+    int limit = kDefaultSearchLimit;
     // Pre-computed query vector (the store path already embedded the text);
     // when absent and a query is given, the service is asked for one.
     std::optional<std::vector<float>> query_vector;

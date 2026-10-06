@@ -5,6 +5,8 @@
 
 #include "minimal/common/config_reader.hpp"
 #include "minimal/common/json_config_loader.hpp"
+#include "minimal/config/policy.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::config {
 
@@ -49,7 +51,8 @@ MemorySettings ParseMemory(Reader& root) {
     result.compaction_keep_recent_tokens =
         memory.Int("compaction_keep_recent_tokens", result.compaction_keep_recent_tokens, 0);
     result.compaction_replace_percent = static_cast<int>(
-        memory.Int("compaction_replace_percent", result.compaction_replace_percent, 1, 100));
+        memory.Int("compaction_replace_percent", result.compaction_replace_percent, 1,
+                   100));  // NOLINT(readability-magic-numbers): a percentage
     result.scrollback_page_size =
         memory.Int("scrollback_page_size", result.scrollback_page_size, 0, kIntMax);
     result.compaction_strategy =
@@ -62,10 +65,8 @@ MemorySettings ParseMemory(Reader& root) {
 ToolsSettings ParseTools(Reader& root) {
     ToolsSettings result;
     Reader tools = root.Object("tools");
-    // The pool starts one thread per slot, per session: an absurd value is a
-    // resource-exhaustion typo, not a tuning choice.
-    result.max_parallel_tool_calls = static_cast<int>(
-        tools.Int("max_parallel_tool_calls", result.max_parallel_tool_calls, 1, 64));
+    result.max_parallel_tool_calls = static_cast<int>(tools.Int(
+        "max_parallel_tool_calls", result.max_parallel_tool_calls, 1, kMaxParallelToolCalls));
     result.max_input_bytes = tools.Int("max_input_bytes", result.max_input_bytes, 0);
     result.max_result_bytes = tools.Int("max_result_bytes", result.max_result_bytes, 0);
     result.max_display_bytes = tools.Int("max_display_bytes", result.max_display_bytes, 0);
@@ -111,9 +112,12 @@ LoggingSettings ParseLogging(Reader& root) {
     result.level = logging.Enum("level", result.level,
                                 {"trace", "debug", "info", "warn", "error", "critical", "off"});
     result.path = logging.String("path", result.path);
-    // 0 MB would rotate on every message; 0 files keeps nothing.
-    result.max_size_mb = logging.Int("max_size_mb", result.max_size_mb, 1, 1 << 20);
-    result.max_files = logging.Int("max_files", result.max_files, 1, 1000);
+    // 0 MB would rotate on every message; 0 files keeps nothing. The size is
+    // multiplied out to bytes, which must fit.
+    result.max_size_mb = logging.Int(
+        "max_size_mb", result.max_size_mb, 1,
+        std::numeric_limits<std::int64_t>::max() / static_cast<std::int64_t>(common::kMiB));
+    result.max_files = logging.Int("max_files", result.max_files, 1);
     logging.Finish();
     return result;
 }

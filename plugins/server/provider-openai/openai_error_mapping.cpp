@@ -5,28 +5,29 @@
 #include <optional>
 
 #include <nlohmann/json.hpp>
+#include "minimal/common/units.hpp"
+#include "minimal/common/clock.hpp"
+#include "minimal/common/http_status.hpp"
+#include "minimal/llm/policy.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::provider_openai {
 
 namespace {
 
-// Only the head of an error body is ever parsed for a message. The body can
-// be as large as the HTTP client's 64 MiB cap; handing all of it to nlohmann
-// to extract one string is a self-inflicted stall on a hostile (or merely
-// absurd) error body. 64 KiB is the same bound the streaming path applies.
-constexpr std::size_t kMaxErrorBodyParse = 64 * 1024;
-// And no extracted/embedded message grows beyond this either.
-constexpr std::size_t kMaxErrorMessage = 2000;
+// Only the head of an error body is ever parsed for a message
+// (llm::kMaxErrorBodyBytes), and no extracted/embedded message grows beyond
+// common::kMaxQuotedErrorBytes.
 
 std::string_view HeadOf(const std::string& body) {
     std::string_view slice(body);
-    if (slice.size() > kMaxErrorBodyParse) slice = slice.substr(0, kMaxErrorBodyParse);
+    if (slice.size() > llm::kMaxErrorBodyBytes) slice = slice.substr(0, llm::kMaxErrorBodyBytes);
     return slice;
 }
 
 std::string CapMessage(std::string message) {
-    if (message.size() > kMaxErrorMessage) {
-        message.resize(kMaxErrorMessage);
+    if (message.size() > common::kMaxQuotedErrorBytes) {
+        message.resize(common::kMaxQuotedErrorBytes);
         message += " …[truncated]";
     }
     return message;
@@ -68,14 +69,14 @@ std::optional<std::chrono::milliseconds> ParseRetryAfter(const std::vector<net::
         // std::stoll can parse but that is still absurd (e.g.
         // "9999999999999999" seconds) overflowed the signed 64-bit
         // multiply -- UB -- before a post-multiply `duration > minutes(10)`
-        // check ever ran. 10 minutes is above any real rate-limit window.
-        constexpr long long kMaxMs = 10 * 60 * 1000LL;
+        // check ever ran.
+        constexpr long long kMaxMs = llm::kMaxRetryAfter.count();
         if (is_ms) {
             if (parsed > kMaxMs) return std::nullopt;
             return std::chrono::milliseconds(parsed);
         }
-        if (parsed > kMaxMs / 1000) return std::nullopt;
-        return std::chrono::milliseconds(parsed * 1000LL);
+        if (parsed > common::MillisToSeconds(kMaxMs)) return std::nullopt;
+        return std::chrono::seconds(parsed);
     } catch (const std::exception&) {
         return std::nullopt;  // non-numeric (e.g. an HTTP-date) -- leave unset
     }
@@ -87,20 +88,20 @@ llm::LlmError ClassifyHttpFailure(int status, const std::string& body, const std
     std::string message = ExtractMessage(body, status);
     std::optional<std::chrono::milliseconds> retry_after = ParseRetryAfter(headers);
 
-    if (status == 429) {
+    if (status == common::kHttpTooManyRequests) {
         return llm::LlmError(llm::LlmErrorCategory::RateLimit, message, status, retry_after);
     }
-    if (status == 401 || status == 403) {
+    if (status == common::kHttpUnauthorized || status == common::kHttpForbidden) {
         return llm::LlmError(llm::LlmErrorCategory::AuthError, message, status);
     }
-    if (status == 408) {
+    if (status == common::kHttpRequestTimeout) {
         // Request Timeout is the HTTP analogue of the transport timeouts the
         // loop retries -- Azure-fronted gateways emit it routinely -- and used
         // to fall to RequestError, non-retryable, failing a whole turn on one
         // transient gateway timeout.
         return llm::LlmError(llm::LlmErrorCategory::Transport, message, status, retry_after);
     }
-    if (status >= 500) {
+    if (status >= common::kHttpInternalServerError) {
         return llm::LlmError(llm::LlmErrorCategory::ServerError, message, status, retry_after);
     }
     return llm::LlmError(llm::LlmErrorCategory::RequestError, message, status);

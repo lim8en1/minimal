@@ -11,19 +11,19 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/common/read_file.hpp"
 #include "minimal/config/permission_codec.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::agent {
 
 namespace {
 
-// A preset is prose plus a handful of frontmatter keys -- kilobytes, not
-// megabytes. This is the cap, not a tuning knob: agents/*.md is UNTRUSTED
-// content (a project-local file the current repo shipped, walked before the
-// operator's own config_dir -- see AgentPresetRegistry::ResolveUncached),
-// and yaml-cpp's recursive-descent parser has no built-in depth or size
-// limit. An oversized file is refused after reading at most one byte past
+// agents/*.md is UNTRUSTED content (a project-local file the current repo
+// shipped, walked before the operator's own config_dir -- see
+// AgentPresetRegistry::ResolveUncached), and yaml-cpp's recursive-descent
+// parser has no built-in depth or size limit: an oversized file
+// (common::kMaxConfigFileBytes) is refused after reading at most one byte past
 // the cap, before any parse, on every ListAvailable() scan and Resolve().
-constexpr std::uintmax_t kMaxPresetFileBytes = 1 << 20;  // 1 MiB
 
 std::string RequireString(const YAML::Node& node, const std::string& key) {
     const YAML::Node value = node[key];
@@ -610,7 +610,7 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(
 
 AgentPresetFrontmatter LoadAgentPresetFrontmatter(const std::filesystem::path& path,
                                                   const ToolVocabulary& tools) {
-    common::ReadFileResult file = common::ReadFile(path, kMaxPresetFileBytes);
+    common::ReadFileResult file = common::ReadFile(path, common::kMaxConfigFileBytes);
     if (file.status == common::ReadFileResult::Status::kNotFound) {
         throw std::runtime_error("agent preset not found: " + path.string());
     }

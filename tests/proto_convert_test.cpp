@@ -2,6 +2,7 @@
 
 #include "minimal/rpc/proto_convert.hpp"
 #include "proto_inverse.hpp"
+#include "minimal/proto/struct_json.hpp"
 
 using namespace minimal;
 using namespace minimal::rpc;
@@ -17,7 +18,7 @@ llm::ContentBlock RoundTrip(const llm::ContentBlock& block) {
 }
 
 nlohmann::json RoundTrip(const nlohmann::json& value) {
-    return StructToJson(JsonToStruct(value));
+    return proto::StructToJson(proto::JsonToStruct(value));
 }
 
 }  // namespace
@@ -71,8 +72,8 @@ TEST_CASE("integers survive Struct's double-only number model", "[proto_convert]
 }
 
 TEST_CASE("a non-object json cannot be a Struct and yields an empty one", "[proto_convert]") {
-    CHECK(JsonToStruct(nlohmann::json::array({1, 2})).fields_size() == 0);
-    CHECK(JsonToStruct(nlohmann::json(42)).fields_size() == 0);
+    CHECK(proto::JsonToStruct(nlohmann::json::array({1, 2})).fields_size() == 0);
+    CHECK(proto::JsonToStruct(nlohmann::json(42)).fields_size() == 0);
 }
 
 // --- Content blocks ----------------------------------------------------------

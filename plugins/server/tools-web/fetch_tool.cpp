@@ -9,7 +9,9 @@
 #include "html_text.hpp"
 #include "minimal/common/utf8.hpp"
 #include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/http_status.hpp"
 #include "url_policy.hpp"
+#include "minimal/common/fnv.hpp"
 
 namespace minimal::tools_web {
 namespace {
@@ -25,12 +27,8 @@ ToolResult Error(std::string message) { return ToolResult{true, std::move(messag
 // boundary: it only has to be deterministic so the same URL overwrites its
 // file instead of accumulating one per fetch.
 std::string SpillName(const std::string& url) {
-    std::uint64_t hash = 1469598103934665603ULL;
-    for (const unsigned char c : url) {
-        hash ^= c;
-        hash *= 1099511628211ULL;
-    }
-    char buffer[17];
+    const std::uint64_t hash = common::Fnv1a64(url);
+    char buffer[sizeof(hash) * 2 + 1];  // two hex digits per byte, and the NUL
     std::snprintf(buffer, sizeof(buffer), "%016llx", static_cast<unsigned long long>(hash));
     return std::string(buffer) + ".txt";
 }
@@ -160,7 +158,7 @@ public:
                 return Error(std::string("web_fetch: ") + error.what());
             }
 
-            if (response.status >= 300 && response.status < 400) {
+            if (common::IsRedirectStatus(response.status)) {
                 const auto next = AbsoluteRedirectTarget(response.headers);
                 if (!next) {
                     return Error("web_fetch: redirect (HTTP " + std::to_string(response.status) +
@@ -179,7 +177,7 @@ public:
                 continue;
             }
 
-            if (response.status < 200 || response.status >= 300) {
+            if (!common::IsSuccessStatus(response.status)) {
                 return Error("web_fetch: HTTP " + std::to_string(response.status));
             }
 

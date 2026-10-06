@@ -20,6 +20,9 @@
 #include "stage_normalize.hpp"
 #include "minimal/common/utf8.hpp"
 #include "minimal/sidecar/drain.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/common/clock.hpp"
+#include "policy.hpp"
 
 namespace minimal::tools_bash {
 namespace {
@@ -37,7 +40,6 @@ ToolResult Error(std::string message) { return ToolResult{true, std::move(messag
 // already holds the whole capped output for the model, a client renders a
 // tail anyway, and a full copy would blow tools.max_display_bytes (dropping
 // the payload) for exactly the long runs where the exit badge matters most.
-constexpr std::size_t kDisplayOutputTailBytes = 16 * 1024;
 
 nlohmann::json ProcessDisplay(const std::string& command, const std::filesystem::path& cwd,
                               std::int64_t duration_ms, const std::string& output) {
@@ -113,7 +115,7 @@ RunOutcome RunProcess(minimal::sidecar::Launched launched, const BashSettings& s
     // Fail fast when a grandchild holds the output pipe after the shell exits
     // (the `nohup cmd &` trap): idle-after-reap ends the run in ~2 s with a
     // teaching note instead of the full deadline.
-    options.idle_after_reap_ms = kIdleAfterReapMs;
+    options.idle_after_reap_ms = kIdleAfterReap.count();
 
     // Sliced inside the runner so cancellation is noticed within a slice,
     // not at the deadline.
@@ -227,8 +229,8 @@ public:
               {"timeout",
                {{"type", "integer"},
                 {"description", "Wall-clock limit in seconds; defaults to " +
-                                    std::to_string(settings_.timeout_ms / 1000) + ", capped at " +
-                                    std::to_string(settings_.max_timeout_ms / 1000) + ". " +
+                                    std::to_string(common::MillisToSeconds(settings_.timeout_ms)) + ", capped at " +
+                                    std::to_string(common::MillisToSeconds(settings_.max_timeout_ms)) + ". " +
                                     "Foreground tasks are killed (process group) on timeout."}}},
               {"restart",
                {{"type", "boolean"},
@@ -412,16 +414,16 @@ public:
             if (seconds <= 0) {
                 return Reject(ctx, started, "timeout must be positive", command);
             }
-            // Range-checked before the *1000 widening, not after: an
+            // Range-checked before the widening to ms, not after: an
             // unchecked `seconds` near INT64_MAX overflowed the multiply
             // (UB), and a wrapped negative timeout_ms passed both
             // std::min(timeout_ms, max_timeout_ms) below and the
             // background path's std::min, reaching DrainAndReap as a
             // negative deadline.
-            if (seconds > std::numeric_limits<std::int64_t>::max() / 1000) {
+            if (seconds > common::MillisToSeconds(std::numeric_limits<std::int64_t>::max())) {
                 return Reject(ctx, started, "timeout is out of range", command);
             }
-            timeout_ms = seconds * 1000;
+            timeout_ms = common::SecondsToMillis(seconds);
             timeout_supplied = true;
         }
 
@@ -663,7 +665,7 @@ private:
             false,
             "running detached as task " + started_task->id + " (pid " +
                 std::to_string(started_task->pid) + ", timeout " +
-                std::to_string(bg_timeout / 1000) + " s). The result will be reported "
+                std::to_string(common::MillisToSeconds(bg_timeout)) + " s). The result will be reported "
                 "automatically at a turn boundary once it finishes; this session ends, so does "
                 "the task. To follow progress mid-run, redirect output to a file and read it "
                 "with later calls; to stop the task: kill -- -" +

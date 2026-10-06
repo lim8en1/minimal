@@ -1,6 +1,7 @@
 #include "minimal/client/view/prompt_editor.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <memory>
 
 #include <ftxui/component/event.hpp>
@@ -13,6 +14,7 @@
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/prompt_wrap.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/client/policy.hpp"
 
 #include <string>
 #include <vector>
@@ -24,11 +26,9 @@ namespace {
 using ftxui::Element;
 using ftxui::Event;
 
-constexpr auto kSuggestDebounce = std::chrono::milliseconds(120);
-
 // The prompt's own gutter: "❯ " on the first line, two spaces under it. The
 // wrap width and the click-to-position mapping both account for it.
-constexpr int kPromptGutter = 2;
+constexpr int kPromptGutter = 2;  // NOLINT(readability-magic-numbers): the columns of "❯ "
 
 constexpr const char* kPromptPlaceholder =
     "type here; @ for files, / for commands, alt+enter for newline";
@@ -220,7 +220,7 @@ private:
         if (event.is_character() && !event.character().empty() &&
             state_.content.size() > size_before) {
             const auto first = static_cast<unsigned char>(event.character().front());
-            if (first >= 0x20 && first != 0x7f) return PromptUndo::Kind::Insert;
+            if (!std::iscntrl(first)) return PromptUndo::Kind::Insert;
         }
         return PromptUndo::Kind::Other;
     }
@@ -245,10 +245,10 @@ void PromptUndo::Record(Snapshot before, Kind kind, int cursor_after, bool break
     redo_.clear();
     const bool coalesce =
         run_open_ && !breaks_run && kind != Kind::Other && kind == run_kind_ &&
-        (kind == Kind::Paste || (before.cursor == run_cursor_ && now - run_at_ <= kCoalesceGap));
+        (kind == Kind::Paste || (before.cursor == run_cursor_ && now - run_at_ <= kUndoCoalesceGap));
     if (!coalesce) {
         undo_.push_back(std::move(before));
-        if (undo_.size() > kMaxSteps) undo_.erase(undo_.begin());
+        if (undo_.size() > kMaxUndoSteps) undo_.erase(undo_.begin());
     }
     run_open_ = kind != Kind::Other;
     run_kind_ = kind;
@@ -282,8 +282,7 @@ void PromptUndo::Clear() {
 }
 
 namespace {
-// 500 recent entries is far past what arrow-up recall is used for.
-constexpr std::size_t kMaxHistoryEntries = 500;
+// kMaxPromptHistoryEntries is far past what arrow-up recall is used for.
 
 // What of a submitted line the history may keep. A /-command whose
 // arguments may carry a credential (CommandCatalogEntry::sensitive_args) is
@@ -314,8 +313,8 @@ void PromptHistory::Record(const std::string& line) {
     // Bounded: a long-lived TUI session otherwise kept every submitted line
     // for the process's whole life. 500 recent entries is far past what
     // arrow-up recall is used for.
-    if (entries.size() > kMaxHistoryEntries) {
-        const std::size_t trimmed = entries.size() - kMaxHistoryEntries;
+    if (entries.size() > kMaxPromptHistoryEntries) {
+        const std::size_t trimmed = entries.size() - kMaxPromptHistoryEntries;
         entries.erase(entries.begin(), entries.begin() + static_cast<long>(trimmed));
         // Every registered browse position is a raw index into `entries`
         // (see the ArrowUp/ArrowDown handling below); a front-trim triggered
@@ -347,9 +346,9 @@ void PromptHistory::PersistTo(std::filesystem::path path) {
     // Loaded lines come BEFORE anything recorded this run, under the same
     // entry bound Record keeps.
     entries.insert(entries.begin(), loaded.begin(), loaded.end());
-    if (entries.size() > kMaxHistoryEntries) {
+    if (entries.size() > kMaxPromptHistoryEntries) {
         entries.erase(entries.begin(),
-                      entries.begin() + static_cast<long>(entries.size() - kMaxHistoryEntries));
+                      entries.begin() + static_cast<long>(entries.size() - kMaxPromptHistoryEntries));
     }
 }
 
@@ -358,7 +357,7 @@ void PromptHistory::Save() const {
     // The newest entries that fit the byte budget, oldest first on disk.
     std::size_t bytes = 0;
     std::size_t first = entries.size();
-    while (first > 0 && bytes + entries[first - 1].size() <= kPersistMaxBytes) {
+    while (first > 0 && bytes + entries[first - 1].size() <= kMaxPromptHistoryFileBytes) {
         bytes += entries[first - 1].size();
         --first;
     }
@@ -556,10 +555,12 @@ ftxui::Component MakePromptEditor(
         // Byte encoding matches key_event_parser.cpp's CtrlLetter exactly
         // (ctrl+<letter> is ASCII letter - 'a' + 1); duplicated rather than
         // shared because that helper is file-local to key_event_parser.cpp.
-        static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
+        // NOLINTBEGIN(readability-magic-numbers) -- ASCII control codes (ctrl+letter).
+static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
         static const Event kCtrlE = Event::Character(std::string(1, '\x05'));
         static const Event kCtrlK = Event::Character(std::string(1, '\x0B'));
         static const Event kCtrlU = Event::Character(std::string(1, '\x15'));
+// NOLINTEND(readability-magic-numbers)
         if (event == kCtrlA) {
             state.cursor_position = 0;
             return true;
@@ -1021,7 +1022,6 @@ ftxui::Component MakePromptEditor(
         // caret with it, so re-anchoring on the caret row each frame is the
         // whole scroll model -- there is nothing to look at without also
         // moving the caret there.
-        constexpr std::size_t kMinPromptRows = 4;
         const std::size_t cap =
             std::max(kMinPromptRows, static_cast<std::size_t>(std::max(term.dimy, 0)) / 2);
         const std::size_t first_row = wrap.cursor_row >= cap ? wrap.cursor_row - cap + 1 : 0;
@@ -1121,7 +1121,7 @@ ftxui::Component MakePromptEditor(
             // full content height inside the frame, so the `focus` anchor on
             // the selected row actually scrolls it into view.
             lines.push_back(vbox(std::move(items)) | yframe |
-                            size(HEIGHT, LESS_THAN, 8) | vscroll_indicator);
+                            size(HEIGHT, LESS_THAN, kSuggestionListMaxHeight) | vscroll_indicator);
         }
         return vbox(std::move(lines));
     });
@@ -1312,7 +1312,7 @@ MentionSuggestor MakeMentionSuggestor(
         // every request (session id or project root, validated & clamped
         // server-side), so nothing here is unscoped even for "".
         if (!sid.empty()) {
-            app->RequestSuggestPaths(sid, prefix, 20, [&slots, tab, prefix](
+            app->RequestSuggestPaths(sid, prefix, kMentionSuggestionCount, [&slots, tab, prefix](
                                                           std::vector<std::string> paths) {
                 slots.Complete(tab, prefix, std::move(paths));
             });
@@ -1333,7 +1333,7 @@ MentionSuggestor MakeMentionSuggestor(
                 // change re-arms cleanly.
                 return std::nullopt;
             }
-            app->RequestSuggestPathsForRoot(root, prefix, 20, [&slots, tab, prefix](
+            app->RequestSuggestPathsForRoot(root, prefix, kMentionSuggestionCount, [&slots, tab, prefix](
                                                                   std::vector<std::string> paths) {
                 slots.Complete(tab, prefix, std::move(paths));
             });

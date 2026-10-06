@@ -43,6 +43,7 @@
 #include "minimal/session/session_database.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/tools/tool_registry.hpp"
+#include "minimal/config/policy.hpp"
 
 namespace minimal::agent {
 
@@ -66,13 +67,13 @@ public:
     // documented default; nothing at the use site is hardcoded.
     struct ReaperConfig {
         // The never-attach guard (sessions.initial_attach_guard_seconds).
-        std::chrono::milliseconds initial_attach_guard = std::chrono::seconds(10);
+        std::chrono::milliseconds initial_attach_guard = config::kDefaultInitialAttachGuard;
         // A fully quiescent detached session (no subscribers, no turn in
         // flight, no live background tasks, no subagent children) is
         // terminated after being quiescent this long. Collecting a quiescent
         // session is lossless: the transcript stays in SQLite, and re-attach
         // becomes resume. 0 = never reap detached sessions.
-        std::chrono::seconds detached_idle_ttl = std::chrono::seconds(1800);
+        std::chrono::seconds detached_idle_ttl = config::kDefaultDetachedIdleTtl;
     };
 
     // Fills a session's transport-facing SessionParams -- transport, permission

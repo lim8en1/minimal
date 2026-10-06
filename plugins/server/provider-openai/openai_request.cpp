@@ -149,11 +149,6 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream,
     // definitions) go through nlohmann here; message text is escaped
     // straight into the output buffer.
     std::string out;
-    // The history dominates the body; give the buffer a head start so the
-    // first few appends do not re-grow it. 4x bytes-per-token estimate over
-    // the request's own serialized size is not knowable cheaply, so this is a
-    // floor, not a prediction.
-    out.reserve(4096);
 
     // `n` (parallel sampling) would pass through to the wire verbatim, but the
     // response parser reads only choices[0] -- choices[1..n-1] would be

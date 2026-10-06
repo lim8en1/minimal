@@ -12,6 +12,7 @@
 
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
+#include "minimal/agent/policy.hpp"
 
 namespace minimal::agent {
 
@@ -94,11 +95,9 @@ using WorkItem =
 // NOT thread-safe: the owner guards every call with its own mutex.
 class WorkQueue {
 public:
-    static constexpr std::size_t kMaxItems = 32;
-
     bool empty() const { return items_.empty(); }
     std::size_t size() const { return items_.size(); }
-    bool full() const { return items_.size() >= kMaxItems; }
+    bool full() const { return items_.size() >= kMaxQueuedWorkItems; }
 
     // False (nothing queued) when full.
     bool TryPush(WorkItem item) {

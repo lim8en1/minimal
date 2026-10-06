@@ -1,6 +1,7 @@
 #include "minimal/sidecar/process.hpp"
 
 #include "minimal/common/env.hpp"
+#include "minimal/sidecar/policy.hpp"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -22,9 +23,6 @@ extern char** environ;
 namespace minimal::sidecar {
 
 namespace {
-// Post-kill reap ceiling: how long a bounded waitpid polls before giving up.
-constexpr int kPostKillReapMs = 5000;
-
 // Held from pipe creation through fork: where pipe2(O_CLOEXEC) is unavailable
 // the create-then-fcntl window would otherwise let a concurrent Launch fork a
 // child that inherits another session's pipe ends (its drain then never sees
@@ -147,11 +145,9 @@ bool ReapAfterKill(pid_t pid) {
     int status = 0;
     // Bounded, not blocking: SIGKILL's "the process will die" does not hold
     // for a D-state child, and a blocking waitpid there would park the
-    // caller (a session worker, at shutdown) forever. 5 s matches the bash
-    // plugin's post-kill reap ceiling; an unreaped child is a zombie at
-    // worst, never a hang.
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(kPostKillReapMs);
+    // caller (a session worker, at shutdown) forever. The same ceiling as
+    // DrainAndReap's; an unreaped child is a zombie at worst, never a hang.
+    const auto deadline = std::chrono::steady_clock::now() + kPostKillReapCeiling;
     while (std::chrono::steady_clock::now() < deadline) {
         const pid_t rc = waitpid(pid, &status, WNOHANG);
         if (rc == pid) return true;
@@ -160,7 +156,7 @@ bool ReapAfterKill(pid_t pid) {
         // nothing left to wait for, which is success, not failure. Any other
         // waitpid error is reported.
         if (rc < 0) return errno == ECHILD;
-        poll(nullptr, 0, 25);
+        poll(nullptr, 0, static_cast<int>(kReapPollInterval.count()));
     }
     return false;
 }
@@ -200,7 +196,7 @@ bool Child::TerminateAfter(std::chrono::milliseconds grace) {
             return true;
         }
         if (std::chrono::steady_clock::now() >= deadline) break;
-        poll(nullptr, 0, 25);
+        poll(nullptr, 0, static_cast<int>(kReapPollInterval.count()));
     }
     return Terminate();  // SIGKILL the group, bounded reap, forget the pgid
 }
@@ -365,7 +361,7 @@ Launched Launch(const LaunchSpec& spec) {
         auto child_die = []<std::size_t N>(const char (&message)[N]) -> int {
             (void)!write(STDERR_FILENO, message, N - 1);
             (void)!write(STDERR_FILENO, "\n", 1);
-            return 127;
+            return 127;  // NOLINT(readability-magic-numbers): sh's "could not execute" status
         };
 
         // RLIMIT_CPU is a backstop for CPU-bound runaways; the wall-clock

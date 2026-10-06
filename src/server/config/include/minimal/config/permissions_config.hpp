@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/tools/permission.hpp"
+#include "minimal/config/policy.hpp"
 
 namespace minimal::config {
 
@@ -40,7 +41,7 @@ struct PermissionsConfig {
     // reaper and process shutdown. 0 disables the budget (Advise is then
     // bounded only by its cancellation contract). Negative values are refused
     // at parse -- silently disabling a safety timeout is never intended.
-    int advisor_timeout_ms = 30000;
+    int advisor_timeout_ms = static_cast<int>(kDefaultAdvisorTimeout.count());
 };
 
 // Pure and strict: an unknown key, a wrong type or an invalid mode is a

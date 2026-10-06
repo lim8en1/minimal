@@ -15,6 +15,7 @@
 #include "minimal/llm/chat.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
+#include "minimal/agent/policy.hpp"
 
 namespace minimal::agent {
 
@@ -133,13 +134,15 @@ std::optional<CompactionResult> compact_messages(
     std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
     const CompactionRequest& request);
 
-// Rough size of a message range in tokens: serialized bytes / 4. The fallback
+// Rough size of a message range in tokens: serialized bytes /
+// kEstimatedBytesPerToken. The fallback
 // for context_tokens_before when the backend reported no usage -- an estimate
 // that says so on its sleeve beats a precise number computed from nothing.
 // Exposed beyond the compactor because resume has the same problem: it seeds
 // the compaction trigger with a loaded transcript and no backend count either.
 std::int64_t estimate_tokens(std::span<const llm::Message> messages);
-// The byte count behind estimate_tokens (estimate_tokens == this / 4). Sums
+// The byte count behind estimate_tokens (estimate_tokens == this /
+// kEstimatedBytesPerToken). Sums
 // across ranges, so WorkingHistory can keep a running total and divide once.
 std::int64_t estimate_bytes(std::span<const llm::Message> messages);
 

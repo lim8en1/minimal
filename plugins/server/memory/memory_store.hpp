@@ -30,8 +30,9 @@ class ExclusiveFileLock;
 
 namespace minimal::memory {
 
-inline constexpr int kScopeGlobal = 0;
-inline constexpr int kScopeProject = 1;
+// The scope column's stored values (schema facts).
+inline constexpr int kScopeGlobal = 0;   // NOLINT(readability-magic-numbers): stored value
+inline constexpr int kScopeProject = 1;  // NOLINT(readability-magic-numbers): stored value
 
 // Which rows a caller may see. Global rows are visible from everywhere;
 // project rows only from their own project root.
@@ -143,7 +144,7 @@ public:
     MemoryStore(const MemoryStore&) = delete;
     MemoryStore& operator=(const MemoryStore&) = delete;
 
-    static constexpr int kSchemaVersion = 2;
+    static constexpr int kSchemaVersion = 2;  // NOLINT(readability-magic-numbers): the schema's own version
 
     // ---------------------------------------------------------------- writes
     std::string Insert(const NewEntry& entry);

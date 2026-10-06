@@ -101,6 +101,22 @@ Not unit-tested: FTXUI render output (visual, low yield) and live provider calls
 
 `tests/support/` is a build target, not just test-local code, so **plugin authors can link the same fakes** — which matters when most functionality ships as plugins.
 
+## Policy constants
+
+**No literal hides a judgment call.** Every number in the code is one of:
+
+1. **An external fact** — a protocol value, POSIX convention, file mode, exit code (`127`, `0600`, `$1..$9`). Stays where it is used, marked `// NOLINT(readability-magic-numbers): <source>` — the marker is the citation. A header that is the home of a whole encoding (`utf8.hpp`, `units.hpp`) wraps it in `NOLINTBEGIN`/`NOLINTEND` instead.
+2. **A derivation** — written as the derivation (`kArguments.size()`, `std::numeric_limits<int>::max() / 1000`), next to what it derives from. The expression is the justification. Units are never bare: sizes are `count * common::kMiB` (`minimal/common/units.hpp`), durations are `std::chrono` or `common::MillisToSeconds`/`SecondsToMillis` (`minimal/common/clock.hpp`) — the count stays visible as the judgment call it is.
+3. **A policy choice** — a default, cap, timeout, grace, budget: a value someone picked. Lives in the unit's `policy.hpp` (`plugins/<side>/<plugin>/policy.hpp`; a core subsystem's own), never inline.
+4. **A "none" sentinel** — not a big number standing in for infinity. Model "no limit" explicitly (`0` where the consumer defines it, `std::optional`).
+5. **None of the above** — delete it.
+
+**A `policy.hpp` entry carries:** a name with its unit (`kDefaultTimeoutSeconds`, `kStderrCapBytes`); a comment saying why this value — what it admits, what it stops, and what is only a guess; nothing else. A value a config key overrides is the key's default, read through `config_reader` from the same constant; docs state the default but code comments never repeat the number. A ceiling with no reason beyond "seemed generous" is not policy — drop it and let the type's range bound it.
+
+**Promotion, not copies.** When a second unit needs the same concept, it moves to an SDK header beside the mechanism it parameterizes (`agent::kEstimatedBytesPerToken` sits with `estimate_tokens`), and both use it. Two plugins carrying their own value for one concept is a defect.
+
+**Enforced.** `ctest -R policy_constants` runs `scripts/check_policy_constants.py`: clang-tidy's `readability-magic-numbers` (`.clang-tidy`) for bare literals, plus a pass for what clang-tidy exempts -- a `const`/`constexpr` name initialized with a number, or a bare `kMiB`-style size, outside a `*policy.hpp`. `--tsv` / `--markdown FILE` list the hits by unit.
+
 ## High-level architecture
 
 - **Server** (C++): owns the agent turn loop, tool-calling machinery, skills, LLM provider dispatch, session persistence, command dispatch, plugin loading.

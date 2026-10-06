@@ -311,7 +311,7 @@ TEST_CASE("External path: wire contract, allowlist, meta sanitization", "[signal
 TEST_CASE("External path: a full injection queue refuses delivery without crashing",
           "[signals][router]") {
     // THE kDropped PATH: a subscribed, LIVE session whose InjectionQueue is
-    // already at kMaxPending is a different outcome from "no subscriber at
+    // already at kMaxPendingInjections is a different outcome from "no subscriber at
     // all" (kNoSubscriber) -- Deliver() -> Session::QueueInjectedMessage
     // refuses every target, and SignalRouter::DeliverExternal's switch
     // must handle Delivery::kDropped without throwing (it previously fell
@@ -329,7 +329,7 @@ TEST_CASE("External path: a full injection queue refuses delivery without crashi
     std::string error;
     REQUIRE(router.Subscribe(gina.session, "ci/build.completed", error));
 
-    // Fill the queue to exactly kMaxPending via the same entry point a
+    // Fill the queue to exactly kMaxPendingInjections via the same entry point a
     // subagent completion or background task uses -- ground truth for "the
     // queue is genuinely full", not an internals assumption. The fillers are
     // TOOL-RESULT-shaped, the shape those producers actually stage: a user
@@ -341,7 +341,7 @@ TEST_CASE("External path: a full injection queue refuses delivery without crashi
         return llm::Message{llm::Role::User,
                             {llm::ToolResultBlock{"filler-tu", {llm::TextBlock{"filler"}}, false}}};
     };
-    for (std::size_t i = 0; i < agent::InjectionQueue::kMaxPending; ++i) {
+    for (std::size_t i = 0; i < agent::kMaxPendingInjections; ++i) {
         REQUIRE(gina.session->QueueInjectedMessage(filler()));
     }
     REQUIRE_FALSE(gina.session->QueueInjectedMessage(filler()));

@@ -6,6 +6,7 @@
 
 #include "search.hpp"
 #include "tool_common.hpp"
+#include "policy.hpp"
 
 namespace minimal::memory {
 
@@ -34,8 +35,6 @@ namespace {
 using detail::Error;
 using detail::Ok;
 
-constexpr int kLimitCeiling = 64;
-constexpr std::size_t kGetMaxIds = 20;
 
 std::vector<std::string> StringArray(const nlohmann::json& input, const char* key) {
     std::vector<std::string> out;
@@ -75,7 +74,7 @@ public:
                {{"type", "string"},
                 {"enum", {"all", "project", "global"}},
                 {"description", "default all"}}},
-              {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", kLimitCeiling}}}}}};
+              {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", kSearchLimitCeiling}}}}}};
     }
 
     const tools::ToolSpec& spec() const override { return spec_; }
@@ -94,14 +93,14 @@ public:
             else if (scope == "global") request.filters.scope.include_project = false;
             else if (scope != "all") return Error("scope must be \"all\", \"project\" or \"global\"");
             request.filters.tags = StringArray(input, "tags");
-            request.limit = std::clamp(input.value("limit", rt.settings.default_limit), 1, kLimitCeiling);
+            request.limit = std::clamp(input.value("limit", rt.settings.default_limit), 1, kSearchLimitCeiling);
 
             const auto results = HybridSearch(*rt.store, rt.embeddings.get(), request);
             nlohmann::json list = nlohmann::json::array();
             for (const auto& result : results) {
                 nlohmann::json j = detail::SummaryJson(result.row);
                 if (request.query && !request.query->empty()) {
-                    j["score"] = std::round(result.score * 1000) / 1000;
+                    j["score"] = detail::RoundScore(result.score);
                 }
                 if (!result.snippet.empty()) j["match"] = result.snippet;
                 list.push_back(std::move(j));

@@ -53,7 +53,7 @@ namespace minimal::plugins {
 
 class PluginStorage {
 public:
-    static constexpr int kSchemaVersion = 1;
+    static constexpr int kSchemaVersion = 1;  // NOLINT(readability-magic-numbers): the schema's own version
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on
     // any failure, including a database whose user_version is newer than this

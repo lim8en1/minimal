@@ -19,6 +19,7 @@
 #include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/common/abi_tag.hpp"
 #include "totals_feed.hpp"
+#include "policy.hpp"
 
 namespace {
 
@@ -37,7 +38,7 @@ public:
         return feed_->Render(focused_session_id, field_);
     }
     // Reference detail, but above the session name and version.
-    int priority() const override { return 40; }
+    int priority() const override { return minimal::client::cost_view::kStatusSegmentPriority; }
 
 private:
     std::string_view id_;

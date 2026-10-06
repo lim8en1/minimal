@@ -1,17 +1,15 @@
 #include "minimal/client/scrollback_refresh.hpp"
+#include "minimal/client/policy.hpp"
 
 #include <algorithm>
 
 namespace minimal::client {
 
 namespace {
-// Backoff schedule for consecutive failed refreshes (see
-// ScrollbackRefreshState): 250 ms base, doubling per further failure, 5 s
-// cap. Applied only from the SECOND consecutive failure on -- a single
-// failure still retries on the same frame, which is what keeps the "the
-// next frame retries" contract below intact for a merely-slow server.
-constexpr auto kRetryBackoffBase = std::chrono::milliseconds(250);
-constexpr auto kRetryBackoffMax = std::chrono::milliseconds(5000);
+// Backoff for consecutive failed refreshes (kScrollbackRetryBase doubling to
+// kScrollbackRetryMax), applied only from the SECOND consecutive failure on --
+// a single failure still retries on the same frame, which is what keeps the
+// "the next frame retries" contract below intact for a merely-slow server.
 }  // namespace
 
 ScrollbackRefreshAction AdvanceScrollbackRefresh(ScrollbackRefreshState& state,
@@ -50,7 +48,7 @@ ScrollbackRefreshAction AdvanceScrollbackRefresh(ScrollbackRefreshState& state,
             if (state.consecutive_failures >= 2) {
                 const int shift = std::min(state.consecutive_failures - 2, 10);
                 state.next_retry_earliest =
-                    now + std::min(kRetryBackoffBase * (1 << shift), kRetryBackoffMax);
+                    now + std::min(kScrollbackRetryBase * (1 << shift), kScrollbackRetryMax);
             }
         }
     }

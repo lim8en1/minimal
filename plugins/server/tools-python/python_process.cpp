@@ -5,6 +5,8 @@
 #include <utility>
 
 #include "minimal/sidecar/drain.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/common/clock.hpp"
 
 namespace minimal::tools_python {
 
@@ -39,13 +41,14 @@ LaunchedInterpreter LaunchInterpreter(const std::vector<std::string>& argv,
     spec.cpu_seconds = cpu_seconds;
     spec.file_size_bytes = file_size_bytes;
 
+    const std::size_t pipe_count = spec.pipes.size();
     auto launched = minimal::sidecar::Launch(spec);
     LaunchedInterpreter proc;
     proc.ok = launched.ok;
     proc.spawn_error = std::move(launched.spawn_error);
     proc.pid = launched.pid;
     proc.warnings = std::move(launched.warnings);
-    if (launched.ok && launched.parent_fds.size() == 5) {
+    if (launched.ok && launched.parent_fds.size() == pipe_count) {
         proc.in_fd = launched.parent_fds[0].release();
         proc.diag_fd = launched.parent_fds[1].release();
         proc.out_fd = launched.parent_fds[2].release();
@@ -68,10 +71,7 @@ CapturedRun RunCaptured(const std::vector<std::string>& argv, const std::filesys
     spec.pipes = {minimal::sidecar::PipePlan{
         minimal::sidecar::PipePlan::ChildEnd::kWrite,
         {{STDOUT_FILENO, false}, {STDERR_FILENO, false}}}};
-    // RLIMIT_CPU backstop: the wall-clock deadline normally fires first; the
-    // grace keeps the two from racing on a slow-but-healthy install.
-    spec.cpu_seconds = timeout_seconds + 30;
-    spec.file_size_bytes = 1024LL * 1024 * 1024;
+    spec.cpu_seconds = minimal::sidecar::CpuBackstopSeconds(std::chrono::seconds(timeout_seconds));
 
     auto launched = minimal::sidecar::Launch(spec);
     if (!launched.ok) {
@@ -84,7 +84,7 @@ CapturedRun RunCaptured(const std::vector<std::string>& argv, const std::filesys
     sinks[0].cap = static_cast<std::int64_t>(max_output_bytes);
 
     minimal::sidecar::DrainOptions options;
-    options.timeout_ms = timeout_seconds * 1000;
+    options.timeout_ms = common::SecondsToMillis(timeout_seconds);
 
     const auto outcome = minimal::sidecar::DrainAndReap(
         std::move(launched), std::move(sinks), options, {});

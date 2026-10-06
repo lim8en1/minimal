@@ -109,7 +109,7 @@ TEST_CASE("an answer the broker cannot read is a dismissal, never an answer",
     std::string json;
     SECTION("unparseable") { json = "{not json"; }
     SECTION("over the size cap") {
-        json = "\"" + std::string(rpc::WirePluginPromptBroker::kMaxAnswerBytes, 'x') + "\"";
+        json = "\"" + std::string(rpc::kMaxPluginPromptAnswerBytes, 'x') + "\"";
     }
     harness->pending.Resolve(event->plugin_prompt().request_id(),
                              Reply(tools::PromptOutcome::Answered, json));

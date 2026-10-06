@@ -1,10 +1,13 @@
 #include "html_text.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
+
+#include "minimal/common/utf8.hpp"
 
 namespace minimal::tools_web {
 
@@ -56,34 +59,19 @@ const std::unordered_set<std::string>& BlockTags() {
     return tags;
 }
 
-void AppendUtf8(std::string& out, std::uint32_t codepoint) {
+void AppendEntityCodepoint(std::string& out, std::uint32_t codepoint) {
     // Surrogates (UTF-16 code units with no Unicode scalar value) and C0
     // control characters never belong in the text: a numeric entity naming
     // them produced INVALID UTF-8 (D800-DFFF as 3-byte sequences) or a raw
     // NUL byte (&#0;) -- the first corrupts every downstream UTF-8 consumer,
     // the second truncates C-string handling. Both are dropped; the model
-    // loses nothing it could have used.
-    if (codepoint >= 0xD800 && codepoint <= 0xDFFF) return;
-    if (codepoint < 0x20 && codepoint != '\t' && codepoint != '\n' && codepoint != '\r') {
+    // loses nothing it could have used. Surrogates and out-of-range
+    // codepoints have no encoding, so AppendUtf8 drops them -- cosmetic, not
+    // a correctness boundary (see html_text.hpp's header comment).
+    if (codepoint < ' ' && codepoint != '\t' && codepoint != '\n' && codepoint != '\r') {
         return;
     }
-    if (codepoint <= 0x7F) {
-        out += static_cast<char>(codepoint);
-    } else if (codepoint <= 0x7FF) {
-        out += static_cast<char>(0xC0 | (codepoint >> 6));
-        out += static_cast<char>(0x80 | (codepoint & 0x3F));
-    } else if (codepoint <= 0xFFFF) {
-        out += static_cast<char>(0xE0 | (codepoint >> 12));
-        out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (codepoint & 0x3F));
-    } else if (codepoint <= 0x10FFFF) {
-        out += static_cast<char>(0xF0 | (codepoint >> 18));
-        out += static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (codepoint & 0x3F));
-    }
-    // Out-of-range codepoints are dropped silently -- cosmetic, not a
-    // correctness boundary (see html_text.hpp's header comment).
+    common::AppendUtf8(out, codepoint);
 }
 
 const std::unordered_map<std::string, std::uint32_t>& NamedEntities() {
@@ -123,34 +111,28 @@ std::size_t DecodeEntity(std::string_view html, std::size_t pos, std::string& ou
             out += '&';
             return 1;
         }
-        try {
-            // `pos` (the consumed-length out-param), not nullptr: stoul does
-            // not throw for a PARTIAL parse ("12abc" -> 12, silently
-            // swallowing "abc" into the entity's consumed span instead of
-            // leaving it as literal text) -- consumed must cover the whole
-            // digit run. The value is also bounds-checked before narrowing:
-            // "&#x100000041;" fits in stoul's own (wider) return type without
-            // throwing, but static_cast<uint32_t> used to wrap it to 'A'
-            // instead of rejecting a codepoint past the valid Unicode range.
-            std::size_t consumed = 0;
-            const unsigned long value = std::stoul(std::string(digits), &consumed, hex ? 16 : 10);
-            if (consumed != digits.size() || value > 0x10FFFFUL) {
-                out += '&';
-                return 1;
-            }
-            AppendUtf8(out, static_cast<std::uint32_t>(value));
-            return semi - pos + 1;
-        } catch (const std::exception&) {
+        // from_chars must consume the whole digit run (a partial parse would
+        // swallow trailing text into the entity) and reports overflow; the
+        // value is range-checked before narrowing, so a codepoint past
+        // Unicode's range is rejected rather than wrapped.
+        constexpr int kHex = 16;      // NOLINT(readability-magic-numbers): &#x...; is hexadecimal
+        constexpr int kDecimal = 10;  // NOLINT(readability-magic-numbers): &#...; is decimal
+        std::uint32_t value = 0;
+        const char* const last = digits.data() + digits.size();
+        const auto [end, error] = std::from_chars(digits.data(), last, value, hex ? kHex : kDecimal);
+        if (error != std::errc{} || end != last || value > common::kMaxCodePoint) {
             out += '&';
             return 1;
         }
+        AppendEntityCodepoint(out, value);
+        return semi - pos + 1;
     }
     const auto it = NamedEntities().find(ToLowerCopy(body));
     if (it == NamedEntities().end()) {
         out += '&';
         return 1;
     }
-    AppendUtf8(out, it->second);
+    AppendEntityCodepoint(out, it->second);
     return semi - pos + 1;
 }
 

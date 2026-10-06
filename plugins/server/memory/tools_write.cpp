@@ -10,6 +10,9 @@
 
 #include "minimal/common/utf8.hpp"
 #include "minimal/tools/path_confinement.hpp"
+#include "minimal/common/units.hpp"
+#include "policy.hpp"
+#include "minimal/tools/policy.hpp"
 
 namespace minimal::memory {
 namespace {
@@ -17,22 +20,6 @@ namespace {
 using detail::Error;
 using detail::Ok;
 
-constexpr std::size_t kTitleMaxChars = 120;
-constexpr std::size_t kDescriptionMaxChars = 300;
-// Cosine above which a just-stored entry is reported as a likely duplicate.
-constexpr double kSimilarThreshold = 0.92;
-// A memory file is notes, not a corpus: checked BEFORE reading, so a huge or
-// wrong file is refused without being loaded (and without flooding the store
-// with thousands of chunks).
-constexpr std::uintmax_t kMaxIngestFileBytes = 2u << 20;
-
-std::size_t CodePoints(std::string_view text) {
-    std::size_t count = 0;
-    for (const char c : text) {
-        if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) ++count;
-    }
-    return count;
-}
 
 // Titles and descriptions are single lines: they render in lists and in the
 // context index.
@@ -60,8 +47,8 @@ std::optional<std::string> OptionalString(const nlohmann::json& input, const cha
 std::string CheckedTitle(const std::string& raw) {
     std::string title = OneLine(raw);
     if (title.empty()) throw std::runtime_error("title is empty");
-    if (CodePoints(title) > kTitleMaxChars) {
-        throw std::runtime_error("title is longer than " + std::to_string(kTitleMaxChars) +
+    if (common::CountCodePoints(title) > kMaxTitleChars) {
+        throw std::runtime_error("title is longer than " + std::to_string(kMaxTitleChars) +
                                  " characters -- keep it a short name; detail belongs in the body");
     }
     return title;
@@ -72,9 +59,9 @@ std::string CheckedDescription(const std::string& raw) {
     if (description.empty()) {
         throw std::runtime_error("description is empty -- one line saying what this entry is about");
     }
-    if (CodePoints(description) > kDescriptionMaxChars) {
+    if (common::CountCodePoints(description) > kMaxDescriptionChars) {
         throw std::runtime_error("description is longer than " +
-                                 std::to_string(kDescriptionMaxChars) +
+                                 std::to_string(kMaxDescriptionChars) +
                                  " characters -- one line; detail belongs in the body");
     }
     return description;
@@ -216,7 +203,7 @@ private:
             rt.store->StoreEmbedding(id, *vector, rt.embeddings->signature());
             for (const auto& hit : rt.store->Nearest(vector->values, rt.embeddings->signature(),
                                                      same_scope, 2)) {
-                if (hit.id != id && hit.score >= kSimilarThreshold) {
+                if (hit.id != id && hit.score >= kDuplicateSimilarity) {
                     match_id = hit.id;
                     match_score = hit.score;
                     break;
@@ -239,7 +226,7 @@ private:
         if (!row) return std::nullopt;
         nlohmann::json similar{{"id", row->id}, {"title", row->title},
                                {"description", row->description}};
-        if (match_score) similar["score"] = std::round(*match_score * 1000) / 1000;
+        if (match_score) similar["score"] = detail::RoundScore(*match_score);
         similar["hint"] = "a similar entry already exists: if this one supersedes it, "
                           "memory_update that entry instead and memory_delete this one";
         return similar;
@@ -264,7 +251,8 @@ private:
         std::ifstream file(resolved.absolute_path, std::ios::binary);
         if (!file) return Error("memory_store: cannot read " + path);
         std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        if (std::string_view(content).substr(0, 8192).find('\0') != std::string_view::npos) {
+        if (std::string_view(content).substr(0, tools::kBinarySniffBytes).find('\0') !=
+            std::string_view::npos) {
             return Error("memory_store: refusing a binary file (memory is text)");
         }
 

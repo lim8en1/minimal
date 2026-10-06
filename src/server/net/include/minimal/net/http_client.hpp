@@ -7,6 +7,9 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "minimal/common/units.hpp"
+#include "minimal/common/policy.hpp"
+#include "minimal/net/policy.hpp"
 
 namespace minimal::net {
 
@@ -27,7 +30,7 @@ struct HttpRequest {
     std::string url;
     std::vector<HttpHeader> headers;
     std::string body;
-    std::chrono::milliseconds connect_timeout{5000};
+    std::chrono::milliseconds connect_timeout = common::kDefaultConnectTimeout;
     std::chrono::milliseconds request_timeout{0};  // 0 = uncapped; caps the WHOLE transfer in every mode
     std::chrono::milliseconds idle_timeout{0};     // 0 = disabled; StreamPost() only
     // Idle limit applied until the first response byte arrives (the server may
@@ -53,11 +56,9 @@ struct HttpResponse {
 
 enum class HttpErrorKind { ConnectFailed, TlsError, Timeout, Cancelled, Other };
 
-// Bounds a buffered GET response (model catalogs) in bytes -- a transfer past
-// it aborts with HttpError{Other} rather than buffering unboundedly. Post()
-// carries a larger internal cap (see http_client.cpp) because legitimate
-// completions can be large.
-inline constexpr std::size_t kMaxResponseBodyBytes = 8u << 20;  // 8 MiB
+// A buffered response past kMaxResponseBodyBytes (GET) or kMaxPostBodyBytes
+// (Post) aborts with HttpError{Other} rather than buffering unboundedly
+// (net/policy.hpp).
 
 // Transport-level failure only -- a non-2xx status is NOT an error here. It
 // comes back via HttpResponse::status so the caller can classify it against

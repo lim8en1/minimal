@@ -21,6 +21,8 @@
 
 #include <sys/types.h>
 
+#include <unistd.h>
+
 #include "minimal/sidecar/process.hpp"
 
 namespace minimal::tools_python {
@@ -61,9 +63,10 @@ struct LaunchedInterpreter {
 // executed code writing to "stdout" cannot corrupt the JSON lines); the
 // user stdin pipe is dup2'd to kUserStdinFd with FD_CLOEXEC cleared (the
 // driver's sys.stdin reads it).
-constexpr int kProtoStdoutFd = 3;
-constexpr int kStreamFd = 4;
-constexpr int kUserStdinFd = 5;
+// The first fds after stdio, in order.
+constexpr int kProtoStdoutFd = STDERR_FILENO + 1;
+constexpr int kStreamFd = kProtoStdoutFd + 1;
+constexpr int kUserStdinFd = kStreamFd + 1;
 LaunchedInterpreter LaunchInterpreter(const std::vector<std::string>& argv,
                                       const std::filesystem::path& cwd,
                                       const std::map<std::string, std::string>& env,

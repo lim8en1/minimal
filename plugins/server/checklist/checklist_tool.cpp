@@ -1,4 +1,5 @@
 #include "checklist_tool.hpp"
+#include "policy.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -13,7 +14,6 @@ namespace {
 
 // Shared by OpSet (bulk replace) and OpUpdate (single-item edit) so the two
 // enforcement points can't silently diverge.
-constexpr std::size_t kMaxItemTextBytes = 4000;
 
 tools::ToolResult Error(const std::string& message) {
     return tools::ToolResult{true, message};
@@ -174,7 +174,6 @@ private:
         }
         // The list is one KV row: without a cap, a runaway model could store
         // an unbounded blob under its own session key.
-        constexpr std::size_t kMaxItems = 200;
         if (entries.size() > kMaxItems) {
             return Error("checklist: 'items' is capped at " + std::to_string(kMaxItems) +
                          " entries");

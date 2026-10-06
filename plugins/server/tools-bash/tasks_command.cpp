@@ -38,10 +38,14 @@ minimal::commands::CommandResult TasksCommand::Execute(
                 out << "killed   ";
                 break;
         }
-        const auto seconds = task.elapsed_ms / 1000;
-        out << "  " << (seconds < 60 ? std::to_string(seconds) + "s"
-                                     : std::to_string(seconds / 60) + "m" +
-                                           std::to_string(seconds % 60) + "s");
+        const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::milliseconds(task.elapsed_ms));
+        const auto minutes = std::chrono::duration_cast<std::chrono::minutes>(elapsed);
+        out << "  "
+            << (minutes.count() == 0
+                    ? std::to_string(elapsed.count()) + "s"
+                    : std::to_string(minutes.count()) + "m" +
+                          std::to_string((elapsed - minutes).count()) + "s");
         out << "  pid " << task.pid << "  " << task.command << '\n';
     }
     return minimal::commands::CommandResult::Ok(out.str());

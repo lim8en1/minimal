@@ -33,6 +33,8 @@
 
 #include <sys/resource.h>
 #include <sys/types.h>
+#include "minimal/common/units.hpp"
+#include "minimal/sidecar/policy.hpp"
 
 namespace minimal::sidecar {
 
@@ -73,6 +75,14 @@ struct PipePlan {
     std::vector<Dup> dups;
 };
 
+// LaunchSpec::cpu_seconds backing up a wall-clock `deadline`: the deadline
+// plus kCpuBackstopGrace, rounded down to whole seconds; 0 (no limit) when
+// there is no deadline to back up.
+inline std::int64_t CpuBackstopSeconds(std::chrono::milliseconds deadline) {
+    if (deadline <= std::chrono::milliseconds::zero()) return 0;
+    return std::chrono::duration_cast<std::chrono::seconds>(deadline + kCpuBackstopGrace).count();
+}
+
 struct LaunchSpec {
     // argv[0] is resolved against the PROCESS's PATH when it contains no '/'
     // (execve does no PATH resolution); resolution failure is a spawn error,
@@ -89,7 +99,8 @@ struct LaunchSpec {
     // this, a child inherits the server's stdin and any command that reads
     // fd 0 blocks until the deadline.
     std::int64_t cpu_seconds = 0;  // 0 = unlimited; clamped to the host's hard cap by Launch()
-    std::int64_t file_size_bytes = 1LL << 30;  // RLIMIT_FSIZE backstop, 0 = unlimited; clamped likewise
+                                   // (CpuBackstopSeconds sizes it from a deadline)
+    std::int64_t file_size_bytes = kFileSizeBackstopBytes;  // RLIMIT_FSIZE backstop, 0 = unlimited; clamped likewise
 };
 
 // The parent-side handles of a launched process. All fds are O_CLOEXEC and

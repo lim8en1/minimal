@@ -1,5 +1,7 @@
 #include "minimal/client/render/markdown_renderer.hpp"
 
+#include <charconv>
+#include <cstdint>
 #include <limits>
 #include <stack>
 #include <string>
@@ -81,44 +83,18 @@ std::string DecodeEntity(std::string_view entity) {
     std::string_view digits = entity.substr(2, entity.size() - 3);
     const bool hex = !digits.empty() && (digits.front() == 'x' || digits.front() == 'X');
     if (hex) digits.remove_prefix(1);
-    // 8 digits cap both the realistic cases and char32_t overflow: anything
-    // longer is malformed by construction.
-    if (digits.empty() || digits.size() > 8) return std::string(entity);
-    char32_t cp = 0;
-    for (const char c : digits) {
-        int value;
-        if (c >= '0' && c <= '9') {
-            value = c - '0';
-        } else if (hex && c >= 'a' && c <= 'f') {
-            value = c - 'a' + 10;
-        } else if (hex && c >= 'A' && c <= 'F') {
-            value = c - 'A' + 10;
-        } else {
-            return std::string(entity);
-        }
-        cp = cp * (hex ? 16u : 10u) + static_cast<char32_t>(value);
-    }
-    // Surrogates and out-of-range values would encode to invalid UTF-8 (and 0
-    // has no glyph); render them verbatim instead of corrupting the output.
-    if (cp == 0 || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
-        return std::string(entity);
-    }
+    // from_chars rejects anything but digits of the base and reports
+    // overflow, so a malformed or absurd entity stays literal text.
+    constexpr int kHex = 16;      // NOLINT(readability-magic-numbers): &#x...; is hexadecimal
+    constexpr int kDecimal = 10;  // NOLINT(readability-magic-numbers): &#...; is decimal
+    std::uint32_t cp = 0;
+    const char* const last = digits.data() + digits.size();
+    const auto [end, error] = std::from_chars(digits.data(), last, cp, hex ? kHex : kDecimal);
+    if (digits.empty() || error != std::errc{} || end != last) return std::string(entity);
+    // Surrogates and out-of-range values have no UTF-8 encoding (and 0 has
+    // no glyph); render them verbatim instead of corrupting the output.
     std::string out;
-    if (cp < 0x80) {
-        out.push_back(static_cast<char>(cp));
-    } else if (cp < 0x800) {
-        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp < 0x10000) {
-        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else {
-        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    }
+    if (cp == 0 || !common::AppendUtf8(out, cp)) return std::string(entity);
     return out;
 }
 

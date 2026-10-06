@@ -2,6 +2,7 @@
 // TU so they are testable -- the logo_generator pattern).
 
 #include "cost_view_format.hpp"
+#include "minimal/common/count_format.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -9,26 +10,20 @@
 
 using minimal::client::cost_view::FormatCost;
 using minimal::client::cost_view::FormatTokenDetail;
-using minimal::client::cost_view::FormatTokens;
 using minimal::client::cost_view::FormatTotals;
 
-TEST_CASE("FormatTokens tiers at k/M/G and never truncates at extremes") {
-    CHECK(FormatTokens(123) == "123");
-    CHECK(FormatTokens(12'345) == "12.3k");
-    CHECK(FormatTokens(1'234'567) == "1.2M");
-    // The G tier: the old table stopped at M, so a billion-token session
-    // rendered "1234.5M".
-    CHECK(FormatTokens(1'234'567'890) == "1.2G");
-}
-
-TEST_CASE("FormatTokens picks the tier by the rounded value") {
-    // 999'950 / 1e3 rounds to 1000.0 -- which must read "1.0M", not "1000.0k".
-    CHECK(FormatTokens(999) == "999");
-    CHECK(FormatTokens(1'000) == "1.0k");
-    CHECK(FormatTokens(999'949) == "999.9k");
-    CHECK(FormatTokens(999'950) == "1.0M");
-    CHECK(FormatTokens(999'949'999) == "999.9M");
-    CHECK(FormatTokens(999'950'000) == "1.0G");
+TEST_CASE("CompactCount: one decimal below ten of a unit, k/M/G, truncating") {
+    using minimal::common::CompactCount;
+    CHECK(CompactCount(999) == "999");
+    CHECK(CompactCount(1'000) == "1k");
+    CHECK(CompactCount(4'250) == "4.2k");
+    CHECK(CompactCount(12'345) == "12k");
+    CHECK(CompactCount(999'999) == "999k");
+    CHECK(CompactCount(1'234'567) == "1.2M");
+    CHECK(CompactCount(2'000'000) == "2M");
+    // The G tier: cumulative cost totals pass a billion tokens.
+    CHECK(CompactCount(1'234'567'890) == "1.2G");
+    CHECK(CompactCount(std::numeric_limits<std::int64_t>::max()).back() == 'G');
 }
 
 TEST_CASE("a negative per-model token count counts as zero, not a refund") {
@@ -40,8 +35,8 @@ TEST_CASE("a negative per-model token count counts as zero, not a refund") {
                        {{"input_tokens", 5'000}, {"output_tokens", -7'000}},
                        {{"input_tokens", -2'000}, {"output_tokens", 3'000}},
                    })}};
-    CHECK(FormatTotals(totals).value_or("") == "$1.00 · 5.0k/3.0k tok");
-    CHECK(FormatTokenDetail(totals).value_or("") == "i 5.0k · o 3.0k");
+    CHECK(FormatTotals(totals).value_or("") == "$1.00 · 5k/3k tok");
+    CHECK(FormatTokenDetail(totals).value_or("") == "i 5k · o 3k");
 }
 
 TEST_CASE("FormatCost keeps sub-cent precision") {
@@ -78,7 +73,7 @@ TEST_CASE("a partially-known total (mixed priced/unpriced models) shows a floor,
                                      nlohmann::json{{"input_tokens", 10'000},
                                                     {"output_tokens", 7'000}},
                                  })}};
-    CHECK(FormatTotals(totals).value_or("") == ">= $0.42 · 10.0k/7.0k tok (+unpriced)");
+    CHECK(FormatTotals(totals).value_or("") == ">= $0.42 · 10k/7k tok (+unpriced)");
 }
 
 TEST_CASE("known totals format normally") {
@@ -89,7 +84,7 @@ TEST_CASE("known totals format normally") {
                                      nlohmann::json{{"input_tokens", 1'234'567},
                                                     {"output_tokens", 12'345}},
                                  })}};
-    CHECK(FormatTotals(totals).value_or("") == "$0.42 · 1.2M/12.3k tok");
+    CHECK(FormatTotals(totals).value_or("") == "$0.42 · 1.2M/12k tok");
 }
 
 TEST_CASE("a fresh session with no turns shows nothing, not $0.00") {
@@ -108,7 +103,7 @@ TEST_CASE("FormatTokenDetail renders the four sums with i/o/cr/cw labels") {
                                                     {"cache_write_tokens", 240}},
                                  })}};
     CHECK(FormatTokenDetail(totals).value_or("") ==
-          "i 3.1k · o 812 · cr 34.0k · cw 240");
+          "i 3.1k · o 812 · cr 34k · cw 240");
 }
 
 TEST_CASE("FormatTokenDetail aggregates across models") {
@@ -127,7 +122,7 @@ TEST_CASE("FormatTokenDetail aggregates across models") {
                                                     {"cache_write_tokens", 0}},
                                  })}};
     CHECK(FormatTokenDetail(totals).value_or("") ==
-          "i 3.0k · o 150 · cr 15.0k · cw 200");
+          "i 3k · o 150 · cr 15k · cw 200");
 }
 
 TEST_CASE("FormatTokenDetail suppresses zero fields (OpenAI never reports cw)") {
@@ -140,7 +135,7 @@ TEST_CASE("FormatTokenDetail suppresses zero fields (OpenAI never reports cw)") 
                                                     {"cache_read_tokens", 0},
                                                     {"cache_write_tokens", 0}},
                                  })}};
-    CHECK(FormatTokenDetail(totals).value_or("") == "i 45.1k · o 3.2k");
+    CHECK(FormatTokenDetail(totals).value_or("") == "i 45k · o 3.2k");
 }
 
 TEST_CASE("FormatTokenDetail renders nothing for an all-zero or malformed payload") {

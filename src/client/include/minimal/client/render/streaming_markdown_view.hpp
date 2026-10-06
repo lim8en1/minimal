@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include <ftxui/dom/elements.hpp>
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -14,27 +15,24 @@ namespace minimal::client {
 // parse API and CANNOT soundly parse partial input -- `**bold` cannot be
 // interpreted before its closing `**` arrives, so chunk-parsing would produce
 // wrong output, not just slower output. So the whole accumulated buffer is
-// re-parsed, but at most once per kReparseDebounce; deltas accumulate as a pure
+// re-parsed, but at most once per kMarkdownReparseDebounce; deltas accumulate as a pure
 // string append between reparses. Finalize() always reparses once, replacing
 // artifacts from mid-stream unclosed spans.
 class StreamingMarkdownView {
 public:
-    static constexpr auto kReparseDebounce = std::chrono::milliseconds(120);
     // md4c reparses the WHOLE accumulated buffer every tick (no incremental
     // API -- see the class comment), so the cost grows with the message, not
     // just with how often Render() is called: a long, code-heavy reply got
-    // progressively janky near its end at a fixed 120 ms cadence. Past
-    // kScaleThresholdBytes the debounce grows (EffectiveDebounce), capped at
-    // kMaxReparseDebounce -- the tail of a long message still updates, just
+    // progressively janky near its end at a fixed cadence. Past
+    // kMarkdownReparseScaleThresholdBytes the debounce grows (EffectiveDebounce), capped at
+    // kMaxMarkdownReparseDebounce -- the tail of a long message still updates, just
     // less often, rather than a fixed-rate reparse eating a growing share of
     // every frame budget.
-    static constexpr auto kMaxReparseDebounce = std::chrono::milliseconds(500);
-    static constexpr std::size_t kScaleThresholdBytes = 8192;
 
     // Visible for tests: the debounce Render() actually uses for a buffer of
-    // `buffer_size` bytes. kReparseDebounce below the threshold; grows
+    // `buffer_size` bytes. kMarkdownReparseDebounce below the threshold; grows
     // linearly above it (1 ms per 64 bytes past the threshold), clamped at
-    // kMaxReparseDebounce.
+    // kMaxMarkdownReparseDebounce.
     static std::chrono::milliseconds EffectiveDebounce(std::size_t buffer_size);
 
     // `render` re-parses full markdown text into an Element -- in production,

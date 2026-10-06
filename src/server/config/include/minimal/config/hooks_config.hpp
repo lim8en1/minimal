@@ -24,6 +24,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "minimal/config/policy.hpp"
 
 namespace minimal::config {
 
@@ -49,7 +50,7 @@ struct HookActionConfig {
 };
 
 struct HooksConfig {
-    int default_timeout_ms = 10000;
+    int default_timeout_ms = static_cast<int>(kDefaultHookTimeout.count());
     std::vector<HookActionConfig> hooks;
 };
 

@@ -6,6 +6,9 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "minimal/common/units.hpp"
+#include "minimal/common/policy.hpp"
+#include "minimal/config/policy.hpp"
 
 namespace minimal::config {
 
@@ -38,7 +41,7 @@ struct MemorySettings {
     // replaces everything but the newest message (always kept whole, and the
     // cut never splits a tool call from its result). Ignored when
     // compaction_keep_recent_tokens is set (an absolute budget wins).
-    int compaction_replace_percent = 80;
+    int compaction_replace_percent = kDefaultCompactionReplacePercent;
     std::int64_t scrollback_page_size = 0;
     // S4: selects a CompactionStrategyRegistry entry by name. "summarize"
     // (free-text summary head) is core's own built-in and the default, so
@@ -65,13 +68,13 @@ struct ToolsSettings {
     // (parallel dispatch -- see ARCHITECTURE.md "Tool dispatch"). 1 reproduces
     // the sequential behavior exactly. This is a WIDTH, not a thread-pool size:
     // the per-session pool is built from it, so 1 allocates no extra threads.
-    int max_parallel_tool_calls = 4;
+    int max_parallel_tool_calls = kDefaultMaxParallelToolCalls;
     // THE global ceiling on one tool call's serialized input. Every other
     // model-authored allocation has a bound; the input itself -- copied into
     // lifecycle events, permission requests and hook payloads -- was bounded
     // only by the model's output budget. Over the cap is an error result the
     // model adapts to, like every other refusal. 0 disables.
-    std::int64_t max_input_bytes = 10 * 1024 * 1024;
+    std::int64_t max_input_bytes = kDefaultMaxToolInputBytes;
     // THE global ceiling on one tool call's RESULT, checked once after
     // execution regardless of which tool produced it. A core tool like bash
     // caps its own output (bash.max_output_bytes), but that cap is the
@@ -81,15 +84,15 @@ struct ToolsSettings {
     // request, into SQLite, and into every later turn's prefix until
     // compaction. Truncated over the cap, with a visible marker, never an
     // error result -- a large result is not a refusal. 0 disables.
-    std::int64_t max_result_bytes = 10 * 1024 * 1024;
+    std::int64_t max_result_bytes = kDefaultMaxToolResultBytes;
     // Ceiling on one result's client-only display payload (serialized JSON).
     // Over it the payload is DROPPED, never truncated -- a cut diff misleads --
     // and the client falls back to the text. 0 disables.
-    std::int64_t max_display_bytes = 128 * 1024;
+    std::int64_t max_display_bytes = kDefaultMaxToolDisplayBytes;
 };
 
 struct ToolsViewSettings {
-    std::int64_t stdout_buffer_lines = 100;
+    std::int64_t stdout_buffer_lines = kDefaultToolsViewStdoutBufferLines;
 };
 
 // Whether the project's own agents/, skills/ and commands/ directories (found by
@@ -113,14 +116,14 @@ struct ContextContributorSettings {
     // switch that does not require disabling the whole plugin.
     std::vector<std::string> disabled;
     // Per-section body cap in bytes. 0 = uncapped.
-    std::int64_t max_bytes_per_section = 16384;
+    std::int64_t max_bytes_per_section = kDefaultContextSectionMaxBytes;
 };
 
 struct LoggingSettings {
     std::string level = "info";
     std::string path;
-    std::int64_t max_size_mb = 10;
-    std::int64_t max_files = 5;
+    std::int64_t max_size_mb = common::kDefaultLogMaxSizeMb;
+    std::int64_t max_files = common::kDefaultLogMaxFiles;
 };
 
 // Session lifetime policy (S5). Every timeout is a settings.json key with a
@@ -133,7 +136,7 @@ struct SessionSettings {
     // reaper terminates it. Collecting a quiescent session is lossless: the
     // transcript stays in SQLite and re-attach becomes resume. 0 = never reap
     // (sessions live until explicitly terminated or deleted).
-    std::int64_t detached_idle_ttl_seconds = 1800;
+    std::int64_t detached_idle_ttl_seconds = kDefaultDetachedIdleTtl.count();
     // An unanswered permission/confirmation prompt is denied after this long.
     // 0 (the default) waits forever: a human may simply be away, and
     // auto-denying their work is worse than waiting (ARCHITECTURE.md).
@@ -141,7 +144,7 @@ struct SessionSettings {
     // The never-attached guard: a session no client attaches to is terminated
     // after this grace period. Purely a safety net against a non-conforming
     // client; surfacing it here replaced a hardcoded constructor default.
-    std::int64_t initial_attach_guard_seconds = 10;
+    std::int64_t initial_attach_guard_seconds = kDefaultInitialAttachGuard.count();
 };
 
 // Server process lifetime. With detach, the server legitimately outlives its
@@ -149,13 +152,13 @@ struct SessionSettings {
 struct ServerSettings {
     // Once there are zero attached clients AND zero live sessions, exit after
     // this linger. 0 = never exit (true daemon deployment).
-    std::int64_t idle_shutdown_seconds = 5;
+    std::int64_t idle_shutdown_seconds = kDefaultIdleShutdown.count();
     // Wall-clock budget for the post-listen background warm-up of providers.json
     // "discover": true entries, so the /model picker lists discovered models on a
     // freshly started server without a manual refresh. The fetch runs on its own
     // thread (startup never waits on it); this bounds only that thread. 0 =
     // disabled (static models only until ctrl+r or first resolve).
-    std::int64_t discovery_warmup_timeout_seconds = 15;
+    std::int64_t discovery_warmup_timeout_seconds = kDefaultDiscoveryWarmupTimeout.count();
 };
 
 struct SettingsConfig {

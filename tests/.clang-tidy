@@ -1,0 +1,4 @@
+# Test inputs are literals by nature: fixtures, expected values, timeouts
+# sized for the test itself.
+InheritParentConfig: true
+Checks: '-readability-magic-numbers'

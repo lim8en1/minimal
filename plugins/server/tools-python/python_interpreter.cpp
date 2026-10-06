@@ -14,9 +14,13 @@
 #include <utility>
 
 #include "minimal/common/utf8.hpp"
+#include "minimal/common/units.hpp"
 
 #include "driver_source.hpp"
 #include "json_fields.hpp"
+#include "policy.hpp"
+#include "minimal/common/policy.hpp"
+#include "minimal/sidecar/policy.hpp"
 
 namespace minimal::tools_python {
 namespace {
@@ -27,21 +31,16 @@ using tools::BackgroundTaskEvent;
 // request, a kill, protocol traffic) wakes poll() directly, and deadlines
 // shorten the slice; the slice itself only bounds how late a session's death
 // is noticed through session_lifetime -- OnSessionEnded's Erase already
-// kills, so this is the backstop, not the mechanism.
-constexpr int kPollSliceMs = 500;
-constexpr std::size_t kMaxDiagBytes = 64 * 1024;
-constexpr std::size_t kReadChunk = 16 * 1024;  // stack buffers; the reader nests three
-// How long DeliverResponse waits for live-stream bytes the driver reports
-// having written but the reader has not read yet. They are already in the
-// pipe (the driver writes them before the response line), so this only
+// kills, so this is the backstop, not the mechanism (kReaderPollSlice).
+// Live-stream bytes the driver reports having written are already in the pipe
+// (the driver writes them before the response line), so kStreamOwedBudget only
 // bounds a driver whose count was off (a signal between write and count).
-constexpr auto kStreamOwedBudget = std::chrono::milliseconds(500);
+constexpr std::size_t kReadChunk = common::kReadChunkBytes;  // stack buffers; the reader nests three
 
 // Sync waiters poll the cancel flag on this slice while parked on the
 // interpreter cv (two cvs -- the token's and the interpreter's -- cannot be
 // waited on together; a slice bounds cancel latency without a second
-// registration mechanism).
-constexpr auto kCancelSlice = std::chrono::milliseconds(50);
+// registration mechanism): common::kCancelPollSlice.
 
 // Poll timeout bounded by the nearest armed request deadline, clamped to the
 // slice: deadline enforcement never waits longer than one slice past expiry.
@@ -57,10 +56,15 @@ int BoundedSlice(int slice_ms, std::chrono::steady_clock::duration until) {
 // escapes). A fixed limit let a raised max_capture_bytes turn ordinary
 // output into "corruption"; this derives it from the same knob.
 std::size_t MaxLineBytes(std::int64_t max_capture_bytes) {
-    constexpr std::size_t kFloor = 64ULL * 1024 * 1024;
-    constexpr std::size_t kFields = 4, kBytesPerChar = 12, kMarkerSlack = 64;
+    // NOLINTBEGIN(readability-magic-numbers) -- the protocol's shape: four
+    // free-text fields, and an astral code point json.dumps-escaped as two
+    // \uXXXX sequences.
+    constexpr std::size_t kFields = 4, kBytesPerChar = 12;
+    // NOLINTEND(readability-magic-numbers)
     const auto cap = static_cast<std::size_t>(std::max<std::int64_t>(max_capture_bytes, 0));
-    return std::max(kFloor, kFields * kBytesPerChar * (cap + kMarkerSlack) + 64 * 1024);
+    return std::max(kMinProtocolLineBytes,
+                    kFields * kBytesPerChar * (cap + kProtocolFieldSlackChars) +
+                        kProtocolEnvelopeBytes);
 }
 
 void SetNonBlocking(int fd) {
@@ -284,7 +288,7 @@ void Interpreter::ReadStreamOwed(const std::shared_ptr<Pending>& p, std::uint64_
         const auto left = deadline - std::chrono::steady_clock::now();
         if (left <= std::chrono::steady_clock::duration::zero()) return;
         pollfd fd{stream_fd_.get(), POLLIN, 0};
-        ::poll(&fd, 1, BoundedSlice(50, left));
+        ::poll(&fd, 1, BoundedSlice(static_cast<int>(sidecar::kDrainSlice.count()), left));
     }
 }
 
@@ -307,7 +311,7 @@ void Interpreter::ReaderLoop() {
         // is the plugin's ONE destructive timer, and only for requests that
         // asked for it.
         const auto now = std::chrono::steady_clock::now();
-        int timeout = kPollSliceMs;
+        int timeout = static_cast<int>(kReaderPollSlice.count());
         std::shared_ptr<Pending> fire, kill;
         bool want_write = false;
         {
@@ -343,7 +347,7 @@ void Interpreter::ReaderLoop() {
         }
         if (fire) SoftInterrupt();
 
-        pollfd fds[5];
+        pollfd fds[5];  // NOLINT(readability-magic-numbers): one per channel added below
         nfds_t nfds = 0;
         auto add = [&](bool on, int fd, short events) -> int {
             if (!on || fd < 0) return -1;
@@ -367,7 +371,7 @@ void Interpreter::ReaderLoop() {
         };
 
         if (ready(wake_slot)) {
-            char sink[64];
+            char sink[64];  // NOLINT(readability-magic-numbers): any size drains the wake pipe
             while (::read(wake_r_.get(), sink, sizeof(sink)) > 0) {
             }
         }
@@ -666,7 +670,7 @@ Interpreter::WaitOutcome Interpreter::WaitSync(const std::string& id,
             EmitEvent(p->handles, p->id, BackgroundTaskEvent::State::kStarted);
             return expired ? WaitOutcome::kDemoted : WaitOutcome::kCancelled;
         }
-        cv_.wait_until(lock, std::min(deadline, now + kCancelSlice));
+        cv_.wait_until(lock, std::min(deadline, now + common::kCancelPollSlice));
     }
 }
 
@@ -811,7 +815,7 @@ Interpreter::InterruptOutcome Interpreter::WaitForInterrupt(
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) return InterruptOutcome::kNoReaction;
         if (cancel && cancel->IsCancelled()) return InterruptOutcome::kNoReaction;
-        cv_.wait_until(lock, std::min(deadline, now + kCancelSlice));
+        cv_.wait_until(lock, std::min(deadline, now + common::kCancelPollSlice));
     }
 }
 

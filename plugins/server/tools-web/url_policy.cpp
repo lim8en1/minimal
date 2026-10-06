@@ -15,6 +15,8 @@ namespace minimal::tools_web {
 
 namespace {
 
+// NOLINTBEGIN(readability-magic-numbers) -- the IANA special-purpose address
+// registries (RFC 6890 and the RFCs cited per range): prefixes and masks.
 bool IsPrivateOrLocalIPv4(const in_addr& addr) {
     const std::uint32_t ip = ntohl(addr.s_addr);
     if ((ip & 0xFF000000u) == 0x7F000000u) return true;  // 127.0.0.0/8 loopback
@@ -70,6 +72,8 @@ bool IsPrivateOrLocalIPv6(const in6_addr& addr) {
     if (addr.s6_addr[0] == 0x20 && addr.s6_addr[1] == 0x02) return true;
     return false;
 }
+
+// NOLINTEND(readability-magic-numbers)
 
 struct ParsedUrl {
     std::string scheme;

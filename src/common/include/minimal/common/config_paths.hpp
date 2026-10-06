@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <string_view>
 
 namespace minimal::common {
 
@@ -24,5 +25,12 @@ std::filesystem::path ConfigDir();
 // else $XDG_DATA_HOME/minimal, else $HOME/.local/share/minimal. Relative values
 // rejected and $HOME needed only for the last step, as above.
 std::filesystem::path DataDir();
+
+// gRPC's scheme for a unix-domain socket target ("unix://<path>").
+inline constexpr std::string_view kUnixSocketScheme = "unix://";
+
+// The server's default socket, under DataDir(): what the server listens on
+// and the client dials when neither is told otherwise.
+inline std::filesystem::path DefaultSocketPath() { return DataDir() / "server.sock"; }
 
 }  // namespace minimal::common

@@ -1,12 +1,14 @@
 #include "minimal/client/view/filterable_menu.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <optional>
 
 #include <ftxui/component/component_options.hpp>
 #include <ftxui/dom/elements.hpp>
 
 #include "minimal/client/utf8.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 namespace {
@@ -206,7 +208,7 @@ ftxui::Component MakeFilterableMenuModal(
         if (event.is_character()) {
             // Control bytes (an unbound ctrl+letter) are not filter text.
             const std::string& typed = event.character();
-            if (typed.size() == 1 && static_cast<unsigned char>(typed[0]) < 0x20) return true;
+            if (typed.size() == 1 && std::iscntrl(static_cast<unsigned char>(typed[0]))) return true;
             state->filter += typed;
             rebuild();
             return true;
@@ -336,7 +338,7 @@ ftxui::Component MakeFilterableMenuModal(
         // hierarchy left).
         return window(text(" " + spec.window_title + " ") | bold,
                       vbox(std::move(rows)) | color(theme.ColorFor("assistant_message")) |
-                          size(HEIGHT, LESS_THAN, 20)) |
+                          size(HEIGHT, LESS_THAN, kMenuMaxHeight)) |
                color(theme.ColorFor("border_focused"));
     });
 }

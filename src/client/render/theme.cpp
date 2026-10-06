@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
+#include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <tuple>
 
 #include <ftxui/dom/node.hpp>
@@ -11,32 +14,34 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/common/read_file.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::client {
 
 std::optional<std::tuple<uint8_t, uint8_t, uint8_t>> TryParseHexColor(std::string_view value) {
-    if ((value.size() != 7 && value.size() != 4) || value[0] != '#') return std::nullopt;
-    // Each digit is validated on its own: combining first could turn a valid
-    // high nibble and an invalid low one into a plausible small value.
-    const auto digit = [](char c) -> int {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-        return -1;
+    // "#rrggbb", or CSS shorthand "#rgb" where each digit stands for itself
+    // twice ("#f80" is "#ff8800").
+    constexpr std::size_t kLong = std::string_view("#rrggbb").size();
+    constexpr std::size_t kShort = std::string_view("#rgb").size();
+    if ((value.size() != kLong && value.size() != kShort) || value[0] != '#') return std::nullopt;
+    const bool shorthand = value.size() == kShort;
+    // One channel from its two hex digits. from_chars validates every digit,
+    // so a valid high nibble cannot hide an invalid low one.
+    const auto channel = [](char high, char low) -> std::optional<uint8_t> {
+        constexpr int kHex = 16;  // NOLINT(readability-magic-numbers): hexadecimal
+        const char pair[] = {high, low};
+        uint8_t out = 0;
+        const auto [end, error] = std::from_chars(pair, pair + 2, out, kHex);
+        if (error != std::errc{} || end != pair + 2) return std::nullopt;
+        return out;
     };
-    int d[6] = {};
-    const std::size_t n = value.size() - 1;
-    for (std::size_t i = 0; i < n; ++i) {
-        d[i] = digit(value[i + 1]);
-        if (d[i] < 0) return std::nullopt;
-    }
-    if (n == 3) {
-        return std::make_tuple(static_cast<uint8_t>(d[0] * 17), static_cast<uint8_t>(d[1] * 17),
-                               static_cast<uint8_t>(d[2] * 17));
-    }
-    return std::make_tuple(static_cast<uint8_t>(d[0] * 16 + d[1]),
-                           static_cast<uint8_t>(d[2] * 16 + d[3]),
-                           static_cast<uint8_t>(d[4] * 16 + d[5]));
+    const auto digit = [&](std::size_t i) { return shorthand ? value[1 + i / 2] : value[1 + i]; };
+    const auto r = channel(digit(0), digit(1));
+    const auto g = channel(digit(2), digit(3));
+    const auto b = channel(digit(4), digit(5));
+    if (!r || !g || !b) return std::nullopt;
+    return std::make_tuple(*r, *g, *b);
 }
 
 namespace {
@@ -180,7 +185,7 @@ Theme Theme::Parse(std::string_view json, ColorDepth depth,
 Theme Theme::Load(const std::filesystem::path& themes_dir, const std::string& name,
                   ColorDepth depth, const std::vector<std::string>* known_plugins) {
     const std::filesystem::path file = themes_dir / (name + ".json");
-    const common::ReadFileResult read = common::ReadFile(file, 1u << 20);
+    const common::ReadFileResult read = common::ReadFile(file, common::kMaxConfigFileBytes);
     if (!read.ok()) throw std::runtime_error("theme: " + read.error);
     try {
         return Parse(read.contents, depth, known_plugins);

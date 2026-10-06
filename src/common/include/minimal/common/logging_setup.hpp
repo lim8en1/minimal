@@ -16,14 +16,15 @@
 
 #include <cstdint>
 #include <string>
+#include "minimal/common/policy.hpp"
 
 namespace minimal::common {
 
 struct LoggingOptions {
     std::string level = "info";
     std::string path;  // empty: console only
-    std::int64_t max_size_mb = 10;
-    std::int64_t max_files = 5;
+    std::int64_t max_size_mb = kDefaultLogMaxSizeMb;
+    std::int64_t max_files = kDefaultLogMaxFiles;
     // The console sink is on by default (a server in a terminal keeps printing
     // there; the file is an addition, not a replacement). The client opts out:
     // it owns the terminal -- an out-of-band write desyncs the TUI's alternate

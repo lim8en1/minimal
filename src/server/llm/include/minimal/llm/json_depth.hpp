@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <string_view>
+#include "minimal/llm/policy.hpp"
 
 namespace minimal::llm {
 
@@ -14,14 +15,12 @@ namespace minimal::llm {
 // validating brace matching -- an unbalanced close is tolerated and simply
 // ignored, since a malformed document fails in parse() anyway).
 //
-// max_depth 512 is far above any legitimate model/tool payload (tool
-// arguments, stream chunks, error bodies are all single-digit-depth objects).
 // Depth here means actual nesting (opens minus closes), not a running total
 // of every '{'/'[' seen in the whole document: a wide-but-shallow payload
 // (e.g. a flat array of hundreds of sibling objects) opens and closes each
 // one in turn, never nesting past depth 2, so counting only opens would
 // reject it as a false-positive stack-overflow attempt.
-inline bool JsonDepthWithinLimit(std::string_view text, std::size_t max_depth = 512) {
+inline bool JsonDepthWithinLimit(std::string_view text, std::size_t max_depth = kMaxJsonDepth) {
     std::size_t depth = 0;
     bool in_string = false;
     bool escaped = false;

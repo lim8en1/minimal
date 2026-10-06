@@ -2,6 +2,7 @@
 
 // Helpers shared by the memory tools (tools_read.cpp, tools_write.cpp).
 
+#include <cmath>
 #include <ctime>
 #include <string>
 
@@ -10,17 +11,22 @@
 #include "memory_runtime.hpp"
 
 #include "minimal/tools/tool.hpp"
+#include "minimal/common/clock.hpp"
+#include "policy.hpp"
 
 namespace minimal::memory::detail {
 
 inline std::string Iso8601(std::int64_t ms) {
-    const std::time_t seconds = static_cast<std::time_t>(ms / 1000);
+    const std::time_t seconds = common::UnixMillisToTimeT(ms);
     std::tm tm{};
     gmtime_r(&seconds, &tm);
-    char buffer[32];
+    char buffer[sizeof("YYYY-MM-DDTHH:MM:SSZ")];
     std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &tm);
     return buffer;
 }
+
+// A score as shown to the model (kScoreScale).
+inline double RoundScore(double score) { return std::round(score * kScoreScale) / kScoreScale; }
 
 inline const char* ScopeName(int scope) { return scope == kScopeGlobal ? "global" : "project"; }
 

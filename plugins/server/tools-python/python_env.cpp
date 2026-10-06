@@ -15,6 +15,7 @@
 extern char** environ;
 
 #include "minimal/common/logger.hpp"
+#include "minimal/common/units.hpp"
 
 #include "python_process.hpp"
 
@@ -118,7 +119,7 @@ std::string EnsureEnvironment(const EnvPlan& plan, const PythonSettings& setting
         const auto helper_env = BuildChildEnv(plan, settings);
         if (const std::string uv = ResolveOnPath("uv"); !uv.empty()) {
             const auto run = RunCaptured({uv, "venv", plan.venv.string()}, plan.project_root,
-                                         helper_env, settings.install_timeout, 64 * 1024);
+                                         helper_env, settings.install_timeout, 64 * common::kKiB);
             if (run.ok && run.exit_status == 0) {
                 note = "created .venv (uv)";
             } else {
@@ -131,7 +132,7 @@ std::string EnsureEnvironment(const EnvPlan& plan, const PythonSettings& setting
         if (!std::filesystem::exists(plan.venv_python, ec)) {
             const auto run = RunCaptured({settings.python, "-m", "venv", plan.venv.string()},
                                          plan.project_root, helper_env, settings.install_timeout,
-                                         64 * 1024);
+                                         64 * common::kKiB);
             if (run.ok && run.exit_status == 0) {
                 note = "created .venv (python -m venv)";
             } else {
@@ -188,7 +189,7 @@ std::string EnsurePackages(const std::filesystem::path& project_root,
     env_plan.venv = project_root / ".venv";
     env_plan.wants_venv = true;
     const auto run = RunCaptured(argv, project_root, BuildChildEnv(env_plan, settings),
-                                 settings.install_timeout, 256 * 1024);
+                                 settings.install_timeout, 256 * common::kKiB);
     if (!run.ok || run.exit_status != 0) {
         *error = "installing " + Join(specs, ", ") + " failed (" + via + "): " +
                  (run.error.empty() ? run.output : run.error + " " + run.output);

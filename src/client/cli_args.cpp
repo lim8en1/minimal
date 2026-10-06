@@ -60,11 +60,12 @@ std::string ResolveServerTarget(std::string_view value) {
     // interpret them against its own notion of the cwd rather than the user's.
     std::error_code ec;
     auto absolute = std::filesystem::absolute(expanded, ec);
-    return "unix://" + (ec ? expanded : absolute.lexically_normal().string());
+    return std::string(common::kUnixSocketScheme) +
+           (ec ? expanded : absolute.lexically_normal().string());
 }
 
 std::string DefaultServerTarget() {
-    return "unix://" + (common::DataDir() / "server.sock").string();
+    return std::string(common::kUnixSocketScheme) + common::DefaultSocketPath().string();
 }
 
 std::string UsageText() {

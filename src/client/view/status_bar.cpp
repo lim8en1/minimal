@@ -3,32 +3,25 @@
 #include <algorithm>
 
 #include "minimal/client/utf8.hpp"
+#include "minimal/common/count_format.hpp"
+#include "minimal/client/policy.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::client {
 
 namespace {
-// {session} duplicates the tab bar's own label; capped independently even
-// when the terminal has room to spare, so it never dominates the bar.
-constexpr std::size_t kSessionColumnCap = 24;
+// {session} duplicates the tab bar's own label; capped independently
+// (kStatusSessionColumnCap) even when the terminal has room to spare, so it
+// never dominates the bar.
 
-// Which segment gives way first when the bar overflows: lowest first. The
-// live, decision-relevant state (mode, activity, model, context) outranks
-// reference detail the user can get elsewhere (version, the tab bar's own
-// session name). A plugin segment ranks by its own priority (`priorities`).
+// Which segment gives way first when the bar overflows: lowest first
+// (kStatusSegmentPriorities). A plugin segment ranks by its own priority.
 int SegmentPriority(std::string_view id, const std::map<std::string, int>& priorities) {
     if (const auto it = priorities.find(std::string(id)); it != priorities.end()) return it->second;
-    if (id == "permission_mode") return 100;
-    if (id == "activity") return 90;
-    if (id == "model") return 80;
-    if (id == "tokens") return 70;
-    if (id == "agent") return 60;
-    // Decision-relevant like the mode: a paused session is not running, and
-    // knowing why nothing is happening outranks reference detail.
-    if (id == "paused") return 50;
-    if (id == "session") return 20;
-    if (id == "token_detail") return 15;
-    if (id == "version") return 10;
-    return 30;   // a plugin segment: below core state, above pure reference
+    for (const auto& [core_id, priority] : kStatusSegmentPriorities) {
+        if (id == core_id) return priority;
+    }
+    return kPluginStatusSegmentPriority;
 }
 
 std::size_t PartsWidth(const std::vector<StatusBarPart>& parts) {
@@ -53,22 +46,6 @@ void DropSegment(std::vector<StatusBarPart>& parts, std::size_t index) {
                 parts.begin() + static_cast<std::ptrdiff_t>(last) + 1);
 }
 
-std::string CompactCount(std::int64_t n) {
-    // One decimal below 10 of a unit ("4.2k"), none above ("62k"); a
-    // trailing ".0" is dropped ("2M", not "2.0M").
-    const auto scaled = [](std::int64_t value, std::int64_t unit, const char* suffix) {
-        if (value < 10 * unit) {
-            const std::int64_t tenths = value * 10 / unit;
-            std::string out = std::to_string(tenths / 10);
-            if (tenths % 10 != 0) out += "." + std::to_string(tenths % 10);
-            return out + suffix;
-        }
-        return std::to_string(value / unit) + suffix;
-    };
-    if (n < 1000) return std::to_string(n);
-    if (n < 1'000'000) return scaled(n, 1000, "k");
-    return scaled(n, 1'000'000, "M");
-}
 }  // namespace
 
 bool IsKnownStatusSegment(std::string_view id) {
@@ -89,9 +66,9 @@ std::vector<std::string> UnknownStatusSegments(const std::string& format) {
 
 std::string FormatTokenUsage(std::int64_t used, std::int64_t max) {
     if (used < 0) used = 0;
-    if (max <= 0) return CompactCount(used) + " tok";
-    return CompactCount(used) + "/" + CompactCount(max) + " · " +
-           std::to_string(used * 100 / max) + "%";
+    if (max <= 0) return common::CompactCount(used) + " tok";
+    return common::CompactCount(used) + "/" + common::CompactCount(max) + " · " +
+           std::to_string(common::AsPercent(used, max)) + "%";
 }
 
 std::string PermissionModeSegmentValue(const std::string& applied,
@@ -170,13 +147,13 @@ std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& fo
         const std::size_t own = Utf8ColumnWidth(session->text);
         const std::size_t others = PartsWidth(parts) - own;
         const std::size_t budget =
-            others < max_width_u ? std::min(kSessionColumnCap, max_width_u - others) : 0;
+            others < max_width_u ? std::min(kStatusSessionColumnCap, max_width_u - others) : 0;
         if (budget == 0) {
             DropSegment(parts, index);
         } else if (own > budget) {
             session->text = TruncateUtf8Columns(session->text, budget);
-        } else if (own > kSessionColumnCap) {
-            session->text = TruncateUtf8Columns(session->text, kSessionColumnCap);
+        } else if (own > kStatusSessionColumnCap) {
+            session->text = TruncateUtf8Columns(session->text, kStatusSessionColumnCap);
         }
     }
 

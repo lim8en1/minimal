@@ -9,6 +9,9 @@
 #if defined(__linux__)
 #include <linux/sockios.h>
 #include <sys/ioctl.h>
+
+#include "minimal/common/units.hpp"
+#include "minimal/net/policy.hpp"
 #endif
 
 namespace minimal::net {
@@ -67,12 +70,10 @@ enum class Mode { Blocking, Streaming, Get, Delete };
 
 // The blocking path accumulates the whole response body in memory before
 // returning it, so an endpoint (typically a proxy) that streams an endless or
-// mislabelled body would grow that string without bound. 64 MiB is orders of
-// magnitude above any legitimate completion and orders below anything that
-// could OOM the process. Enforced in WriteCallback rather than only via
+// mislabelled body would grow that string without bound (kMaxPostBodyBytes).
+// Enforced in WriteCallback rather than only via
 // CURLOPT_MAXFILESIZE_LARGE, because the libcurl option is advisory unless the
 // server states a Content-Length -- a chunked response would sail past it.
-constexpr std::size_t kMaxBodyBytes = 64ull << 20;
 
 struct TransferState {
     Mode mode = Mode::Blocking;
@@ -126,9 +127,6 @@ void MaybeFireHeadersReady(TransferState& state) {
     state.headers_ready_fired = true;
 }
 
-// 64 KiB of response headers is orders above any legitimate completion
-// response (status, content-type, request ids, rate-limit buckets).
-constexpr std::size_t kMaxHeaderBytes = 64ull << 10;
 
 std::size_t HeaderCallback(char* buffer, std::size_t size, std::size_t nitems, void* userdata) {
     auto& state = *static_cast<TransferState*>(userdata);
@@ -154,7 +152,7 @@ std::size_t WriteCallback(char* ptr, std::size_t size, std::size_t nmemb, void* 
         // silently dropping every GET response body -- the bug the loopback
         // transport test exists to catch.) The cap is per mode: completions
         // (Post) may legitimately be large, catalogs (Get) are small JSON.
-        const std::size_t cap = state.mode == Mode::Get ? kMaxResponseBodyBytes : kMaxBodyBytes;
+        const std::size_t cap = state.mode == Mode::Get ? kMaxResponseBodyBytes : kMaxPostBodyBytes;
         if (state.response.body.size() + total > cap) {
             state.body_exceeded_cap = true;
             return 0;  // short count -> CURLE_WRITE_ERROR, classified below
@@ -335,7 +333,7 @@ HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode 
     // at the wrong threshold (its WriteCallback still caught the real cap).
     curl_easy_setopt(handle, CURLOPT_MAXFILESIZE_LARGE,
                      static_cast<curl_off_t>(state.mode == Mode::Get ? kMaxResponseBodyBytes
-                                                                     : kMaxBodyBytes));
+                                                                     : kMaxPostBodyBytes));
 
     // The cap is total, not per-phase, in EVERY mode: a streaming server that
     // accepts the connection and then goes silent must degrade to a bounded

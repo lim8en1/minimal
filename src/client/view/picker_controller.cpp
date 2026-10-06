@@ -10,6 +10,7 @@
 #include "minimal/client/view/model_picker.hpp"
 #include "minimal/client/view/session_picker.hpp"
 #include "minimal/client/view/subagent_picker.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -24,9 +25,6 @@ PickerController::PickerController(Dependencies deps) : deps_(std::move(deps)) {
 //
 // Requests one row beyond the page size to detect a further page: the wire
 // has no dedicated has_more field on ListSessionsResponse.
-namespace {
-constexpr int32_t kPickerPageSize = 100;
-}  // namespace
 
 // The picker's open action, decided per ROW: a LIVE session (is_live -- a
 // Session object still exists server-side, attached or detached) ATTACHES to
@@ -140,7 +138,7 @@ void PickerController::FetchPickerPage(bool reset) {
     SessionClient::ListSessionsOptions opts;
     opts.project_root = CurrentProjectRootOrEmpty();
     opts.include_all_dirs = picker_data_.include_all_dirs;
-    opts.limit = kPickerPageSize + 1;
+    opts.limit = kSessionListPageSize + 1;
     if (!reset && !picker_data_.sessions.empty()) {
         const auto& last = picker_data_.sessions.back();
         opts.before_updated_at = last.updated_at_unix_ms();
@@ -170,8 +168,8 @@ void PickerController::FetchPickerPage(bool reset) {
         }
         const auto& page = result.response.sessions();
         const int64_t fetched = page.size();
-        const bool has_more = fetched > kPickerPageSize;
-        const int64_t take = has_more ? kPickerPageSize : fetched;
+        const bool has_more = fetched > kSessionListPageSize;
+        const int64_t take = has_more ? kSessionListPageSize : fetched;
         std::vector<v1::SessionSummary> rows(page.begin(), page.begin() + take);
         QueueApply([this, rows = std::move(rows), has_more, generation]() mutable {
             // Superseded by a later fetch (typically a reset that fired
@@ -453,7 +451,6 @@ void PickerController::OpenSubagentsPicker(const std::string& parent_session_id)
             SessionClient::ListSessionsOptions opts;
             opts.include_all_dirs = true;
             opts.include_subagents = true;
-            opts.limit = 200;
             auto result = deps_.client.ListAllSessions(opts, [&](const v1::SessionSummary& row) {
                 return row.parent_session_id() == parent_session_id;
             });

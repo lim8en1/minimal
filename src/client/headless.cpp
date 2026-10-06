@@ -42,6 +42,8 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/common/logging_setup.hpp"
 #include "minimal/common/model_ref.hpp"
+#include "minimal/common/clock.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client::app {
 
@@ -202,7 +204,8 @@ int RunHeadless(const HeadlessOptions& options) {
     } else {
         create.project_root = minimal::client::CurrentProjectRootOrEmpty();
         create.agent_preset = options.agent_preset;
-        create.name = TruncateUtf8(options.prompt, 60);
+        // No name: the server names the session from its first turn
+        // (agent::DefaultSessionName), which this prompt is.
     }
     // OUTSIDE the branch, like run_mode: a model named on THIS invocation
     // outranks whatever the stored session was created with. Omitting it (the
@@ -458,10 +461,10 @@ int RunHeadless(const HeadlessOptions& options) {
             // RunTurn publishes the handle before its first event; allow a
             // short window for that rather than dropping a cancel that raced
             // the turn's start.
-            for (int waited_ms = 0;
-                 !turn_handle_ready.load(std::memory_order_acquire) && waited_ms < 5000;
-                 waited_ms += 5) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            for (std::chrono::milliseconds waited{0};
+                 !turn_handle_ready.load(std::memory_order_acquire) && waited < kHeadlessCancelWait;
+                 waited += kHeadlessCancelPoll) {
+                std::this_thread::sleep_for(kHeadlessCancelPoll);
             }
             if (turn_handle_ready.load(std::memory_order_acquire)) turn_handle->Cancel();
             // Cancelled, or no handle ever arrived (nothing to cancel). Either
@@ -532,7 +535,6 @@ int RunListSessions(const minimal::client::HeadlessOptions& options) {
     minimal::client::SessionClient::ListSessionsOptions opts;
     opts.include_all_dirs = options.all_dirs;
     if (!options.all_dirs) opts.project_root = minimal::client::CurrentProjectRootOrEmpty();
-    opts.limit = 200;
     auto listed = client.ListAllSessions(opts);
     if (!listed.status.ok()) {
         std::fprintf(stderr, "could not list sessions: %s\n",
@@ -566,10 +568,10 @@ int RunListSessions(const minimal::client::HeadlessOptions& options) {
     // name -- which truncates, being the only column of unbounded width.
     const auto human_time = [](int64_t unix_ms) {
         if (unix_ms <= 0) return std::string("-");
-        const std::time_t seconds = static_cast<std::time_t>(unix_ms / 1000);
+        const std::time_t seconds = common::UnixMillisToTimeT(unix_ms);
         std::tm local{};
         localtime_r(&seconds, &local);
-        char buffer[32];
+        char buffer[sizeof("YYYY-MM-DD HH:MM")];
         std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &local);
         return std::string(buffer);
     };
@@ -592,7 +594,9 @@ int RunListSessions(const minimal::client::HeadlessOptions& options) {
         std::string name =
             row.name().empty() ? "(unnamed)" : minimal::client::StripControlChars(row.name());
         if (name.empty()) name = "(unnamed)";   // a name that was ONLY control chars
-        if (name.size() > 48) name = TruncateUtf8(name, 47) + "…";
+        if (name.size() > kSessionListNameColumnChars) {
+            name = TruncateUtf8(name, kSessionListNameColumnChars - 1) + "…";
+        }
         std::printf("%-26s  %6d  %s  %s  %s\n", row.session_id().c_str(),
                     row.message_count(), human_time(row.updated_at_unix_ms()).c_str(),
                     row.is_live() ? "live" : "    ", name.c_str());

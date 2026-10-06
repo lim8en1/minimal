@@ -1,4 +1,5 @@
 #include "minimal/client/render/syntax_highlighter.hpp"
+#include "minimal/client/policy.hpp"
 
 #include <algorithm>
 #include <array>
@@ -506,12 +507,12 @@ Language GoLanguage() {
             }};
 }
 
-const std::array<Language, 9>& VendoredTable() {
-    static const std::array<Language, 9> kLanguages = {
+const auto& VendoredTable() {
+    static const auto kLanguages = std::to_array<Language>({
         CppLanguage(),   PythonLanguage(), JavascriptLanguage(), TypescriptLanguage(),
         BashLanguage(),  JsonLanguage(),   YamlLanguage(),       RustLanguage(),
         GoLanguage(),
-    };
+    });
     return kLanguages;
 }
 
@@ -1038,7 +1039,7 @@ std::vector<HighlightSpan> ApplySpanOverrides(std::string_view code,
 
 ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code, std::string_view language,
                                              std::size_t block_id) const {
-    // MRU-ordered linear scan: kHighlightCacheCap (64) is small enough that a
+    // MRU-ordered linear scan: kHighlightCacheCap is small enough that a
     // handful of string compares is cheaper than the hashing/bucketing this
     // would need to be an unordered_map, and simple enough that it needs no
     // custom hasher for a (language, code) pair. theme_ is FIXED FOR THE

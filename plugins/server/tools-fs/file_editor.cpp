@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::tools_fs {
 namespace {
@@ -47,7 +48,7 @@ LoadedFile LoadWholeFile(const std::filesystem::path& path, std::int64_t max_byt
     // read. The read itself is bounded, and crossing the cap rejects the
     // whole file exactly like the stat path -- never a truncated prefix, which
     // would edit (and write back) only part of the file.
-    char chunk[65536];
+    char chunk[common::kReadChunkBytes];
     while (in) {
         in.read(chunk, sizeof(chunk));
         loaded.content.append(chunk, static_cast<std::size_t>(in.gcount()));
@@ -79,7 +80,7 @@ bool UsesCrlf(std::string_view text) {
 // Every bare '\n' becomes "\r\n"; an existing "\r\n" is left alone.
 std::string LfToCrlf(std::string_view text) {
     std::string out;
-    out.reserve(text.size() + text.size() / 16);
+    out.reserve(text.size());
     for (std::size_t i = 0; i < text.size(); ++i) {
         if (text[i] == '\n' && (i == 0 || text[i - 1] != '\r')) out += '\r';
         out += text[i];

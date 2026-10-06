@@ -238,7 +238,7 @@ TEST_CASE("the turn-aware clear keeps a newer turn's thinking", "[session_state]
 TEST_CASE("a delta apply that evicts the oldest rows re-enables load-older",
           "[session_state][invariants]") {
     SessionState state("s");
-    state.SetBounds(3, SessionState::kDefaultToolOutputBufferBytes);
+    state.SetBounds(3, minimal::client::kDefaultToolOutputBufferBytes);
     state.ApplyScrollbackPage(Page({{3}, {2}, {1}}, /*has_more=*/false));
     REQUIRE_FALSE(state.CanLoadMore());
     CHECK(state.NewestScrollbackSeq() == 3);
@@ -252,7 +252,7 @@ TEST_CASE("a delta apply that evicts the oldest rows re-enables load-older",
 TEST_CASE("a delta apply that catches up clears the trimmed marker, a hole sets the gap",
           "[session_state][invariants]") {
     SessionState state("s");
-    state.SetBounds(3, SessionState::kDefaultToolOutputBufferBytes);
+    state.SetBounds(3, minimal::client::kDefaultToolOutputBufferBytes);
     state.ApplyScrollbackPage(Page({{6}, {5}, {4}}, /*has_more=*/true));
     state.ApplyScrollbackPage(Page({{3}, {2}}, /*has_more=*/true));   // older: evicts 6, 5
     REQUIRE(state.TakeSnapshot().scrollback_trimmed);
@@ -315,7 +315,7 @@ TEST_CASE("a compaction bumps both counters", "[session_state][invariants]") {
 TEST_CASE("refresh failures surface once per streak; a success ends the streak",
           "[session_state][invariants]") {
     SessionState state("s");
-    const auto failures_until_notice = SessionState::kScrollbackFailureNoticeAfter;
+    const auto failures_until_notice = minimal::client::kScrollbackFailureNoticeAfter;
     for (int i = 1; i < failures_until_notice; ++i) state.NoteRefreshFailed("x");
     CHECK_FALSE(state.TakeSnapshot().latest_notice.has_value());
     state.NoteRefreshFailed("x");

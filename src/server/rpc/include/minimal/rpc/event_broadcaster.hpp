@@ -56,6 +56,9 @@
 #include <vector>
 
 #include "minimal/v1/session_service.pb.h"
+#include "minimal/common/units.hpp"
+#include "minimal/common/policy.hpp"
+#include "minimal/rpc/policy.hpp"
 
 namespace minimal::rpc {
 
@@ -66,24 +69,17 @@ public:
     struct SubscriberState;
     using Handle = std::shared_ptr<SubscriberState>;
 
-    // The old EventQueue's bounds, unchanged: a ceiling that catches a runaway
-    // producer, not a tuning knob (see event_queue.hpp for the arithmetic).
-    static constexpr std::size_t kDefaultMaxEvents = 65536;
-    static constexpr std::size_t kDefaultMaxBytes = 64ull << 20;
-    // The zero-subscriber backlog's byte bound, deliberately far below a live
-    // subscriber's: nobody is reading it, so it is pure resident memory per
-    // detached session (a background subagent streaming tool output filled
-    // 64 MiB each). Overflow is the same drop-oldest + resync latch as
-    // everywhere else -- the transcript, not the backlog, is the durable log.
-    static constexpr std::size_t kDefaultBacklogMaxBytes = 8ull << 20;
+    // Bounds (rpc/policy.hpp, common::kDefaultEventQueueMaxSize): ceilings that
+    // catch a runaway producer, not tuning knobs. Overflow is drop-oldest plus
+    // a resync latch everywhere.
 
     // session_id is stamped onto the ResyncRequiredEvents this broadcaster
     // synthesizes -- they must be wire-valid ServerEvents like any other.
     // A byte bound of 0 means "events-count bound only".
     explicit EventBroadcaster(std::string session_id,
-                              std::size_t max_events = kDefaultMaxEvents,
-                              std::size_t max_bytes = kDefaultMaxBytes,
-                              std::size_t max_backlog_bytes = kDefaultBacklogMaxBytes);
+                              std::size_t max_events = common::kDefaultEventQueueMaxSize,
+                              std::size_t max_bytes = kSubscriberMaxBytes,
+                              std::size_t max_backlog_bytes = kBacklogMaxBytes);
     ~EventBroadcaster();
 
     EventBroadcaster(const EventBroadcaster&) = delete;

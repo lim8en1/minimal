@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "minimal/rpc/policy.hpp"
+
 namespace minimal::rpc {
 
 WirePluginPromptBroker::WirePluginPromptBroker(std::string session_id, EventBroadcaster& queue,
@@ -31,7 +33,7 @@ tools::PromptResult WirePluginPromptBroker::Prompt(const tools::PromptRequest& r
     // it is "not answered", the same rule an unoffered option gets in
     // WireConfirmationBroker.
     const std::string& json = reply.answer->answer_json;
-    if (json.size() > kMaxAnswerBytes) {
+    if (json.size() > kMaxPluginPromptAnswerBytes) {
         result.outcome = tools::PromptOutcome::Dismissed;
         return result;
     }

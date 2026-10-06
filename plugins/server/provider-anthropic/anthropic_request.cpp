@@ -117,7 +117,6 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
     }
 
     std::string out;
-    out.reserve(4096);  // the history dominates; give the buffer a head start
 
     out += '{';
     bool first_key = true;

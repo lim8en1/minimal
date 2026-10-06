@@ -38,6 +38,7 @@
 #include "minimal/client/status_format.hpp"
 #include "minimal/client/view/tab_bar.hpp"
 #include "minimal/client/view/tab_ui.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -112,11 +113,10 @@ private:
     // Per-frame plugin calls (start views, panels, status segments) run in
     // GuardPluginCall: a throw is contained, logged ONCE (not at frame rate
     // -- a broken segment used to write an error line per repaint), and
-    // after kPluginThrowLimit consecutive throws the call is skipped for the
+    // after kMaxPluginThrows consecutive throws the call is skipped for the
     // rest of the session, the way a throwing chat surface is disabled.
     // Returns whether `call` ran and returned normally. `key` names the
     // plugin surface ("segment:todo"); `what` is the log's noun.
-    static constexpr int kPluginThrowLimit = 3;
     bool GuardPluginCall(const std::string& key, const std::string& what,
                          const std::function<void()>& call);
     std::map<std::string, int> plugin_throws_;

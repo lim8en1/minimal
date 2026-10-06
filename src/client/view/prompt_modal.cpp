@@ -1,4 +1,5 @@
 #include "minimal/client/view/prompt_modal.hpp"
+#include "minimal/client/policy.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -43,13 +44,14 @@ Element ModalRule(const Theme& theme) {
 // the grants list is.
 int ModalBodyHeightBudget() {
     const int dimy = ftxui::Terminal::Size().dimy;
-    // window borders (2) + hint line (1) + slack for the tab bar/editor the
-    // modal overlays; a tiny or unknown terminal degrades to the smallest
+    // The frame's rows (borders, hint line) plus slack for the tab bar/editor
+    // the modal overlays; a tiny or unknown terminal degrades to the smallest
     // budget that still leaves room for the pinned hint line, rather than a
     // fixed value that could exceed dimy itself and clip the hints again --
     // the exact regression this cap exists to prevent, just at small sizes.
-    if (dimy > 8) return dimy - 6;
-    return std::max(dimy - 3, 1);
+    constexpr int kReserved = kModalFrameRows + kModalOverlaySlackRows;
+    if (dimy > kReserved + kMinModalBodyRows) return dimy - kReserved;
+    return std::max(dimy - kModalFrameRows, 1);
 }
 
 namespace {
@@ -485,7 +487,7 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
         // at all when the wire request offers no cancel option -- see the
         // CatchEvent below.)
         return ModalFrame(theme, "confirm", std::move(rows),
-                          has_cancel ? "esc: cancel" : "", /*max_width=*/72);
+                          has_cancel ? "esc: cancel" : "", kConfirmModalMaxWidth);
     });
     // Escape picks the "cancel" option when the modal offers one: both
     // destructive confirms do, and the picker/permission modals already honor

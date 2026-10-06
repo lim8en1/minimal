@@ -134,13 +134,13 @@ TEST_CASE("observer delivery: in order, a thrower is contained and disabled",
     dispatcher.Deliver(deriver.Derive({Tab("t1", "", true), Tab("t2", "")}));
     CHECK(log == std::vector<std::string>{"open:t1", "open:t2", "focus:t1"});
 
-    for (int i = 0; i < 2 * plugins::ObserverDispatcher::kMaxThrows; ++i) {
+    for (int i = 0; i < 2 * minimal::client::kMaxPluginThrows; ++i) {
         dispatcher.Deliver({{Kind::FocusChanged, {"t2", "", ""}}});
     }
     // Every delivery reached the healthy observer; the thrower stopped being
     // called once disabled.
-    CHECK(throws == plugins::ObserverDispatcher::kMaxThrows);
-    CHECK(log.size() == 3 + 2 * plugins::ObserverDispatcher::kMaxThrows);
+    CHECK(throws == minimal::client::kMaxPluginThrows);
+    CHECK(log.size() == 3 + 2 * minimal::client::kMaxPluginThrows);
 }
 
 TEST_CASE("session turn counters count each edge once", "[observer_events]") {

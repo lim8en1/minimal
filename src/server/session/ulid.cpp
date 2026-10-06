@@ -5,6 +5,10 @@
 
 #include "minimal/common/clock.hpp"
 
+// NOLINTBEGIN(readability-magic-numbers) -- the ULID spec
+// (github.com/ulid/spec): a 48-bit big-endian millisecond timestamp, 80 random
+// bits, 26 Crockford base32 characters of 5 bits each.
+
 namespace minimal::session {
 namespace {
 
@@ -63,3 +67,5 @@ std::string GenerateUlid() {
 }
 
 }  // namespace minimal::session
+
+// NOLINTEND(readability-magic-numbers)

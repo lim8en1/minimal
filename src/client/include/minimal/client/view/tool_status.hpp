@@ -16,6 +16,7 @@
 
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/theme.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -35,7 +36,7 @@ inline std::string SpinnerFrame() {
                                                           "⠼", "⠴", "⠦", "⠧"};
     using namespace std::chrono;
     const auto ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch());
-    return kFrames[static_cast<std::size_t>(ms.count() / 120) % kFrames.size()];
+    return kFrames[static_cast<std::size_t>(ms / kSpinnerFrameInterval) % kFrames.size()];
 }
 
 inline std::string ToolStatusGlyph(ToolStatus status) {
@@ -73,12 +74,19 @@ inline ftxui::Element ToolHeadline(ToolStatus status, const std::string& name,
 // started_at_unix_ms). Was plugins-local (core_display_renderers.cpp); lifted
 // here so all three read the same number the same way.
 inline std::string FormatDuration(std::int64_t ms) {
-    if (ms < 1000) return std::to_string(ms) + "ms";
-    if (ms < 60'000) {
-        const auto tenths = ms / 100;
-        return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + "s";
+    using std::chrono::duration_cast;
+    const std::chrono::milliseconds elapsed(ms);
+    if (elapsed < std::chrono::seconds(1)) return std::to_string(ms) + "ms";
+    if (elapsed < std::chrono::minutes(1)) {
+        using Tenths = std::chrono::duration<std::int64_t, std::deci>;
+        const auto tenths = duration_cast<Tenths>(elapsed).count();
+        constexpr std::int64_t kTenthsPerSecond = 10;  // NOLINT(readability-magic-numbers): deci
+        return std::to_string(tenths / kTenthsPerSecond) + "." +
+               std::to_string(tenths % kTenthsPerSecond) + "s";
     }
-    return std::to_string(ms / 60'000) + "m " + std::to_string((ms % 60'000) / 1000) + "s";
+    const auto minutes = duration_cast<std::chrono::minutes>(elapsed);
+    return std::to_string(minutes.count()) + "m " +
+           std::to_string(duration_cast<std::chrono::seconds>(elapsed - minutes).count()) + "s";
 }
 
 // The leading disclosure glyph of a collapsible row ("▸ " collapsed, "▾ "

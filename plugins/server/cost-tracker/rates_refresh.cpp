@@ -16,7 +16,7 @@ bool RefreshRatesDue(const std::optional<FetchedRates>& litellm,
                          .count();
     // Absent snapshot or a zero timestamp: no cache, or a cache written by a
     // build before fetched_at_unix existed -- both fetch.
-    const auto stale = [now, horizon = settings.rates_refresh_days * 86400](
+    const auto stale = [now, horizon = std::chrono::seconds(std::chrono::days(settings.rates_refresh_days)).count()](
                            const std::optional<FetchedRates>& rates) {
         return !rates || rates->fetched_at_unix <= 0 || now - rates->fetched_at_unix >= horizon;
     };

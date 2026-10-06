@@ -26,6 +26,7 @@
 
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -84,9 +85,7 @@ ftxui::Element ModalBody(const Theme& theme, ftxui::Element content);
 // attention color; `rows` in the body color, scrolling under the height
 // budget; the key hints (`footer`, omitted when empty) pinned below a rule --
 // visible however much content there is -- and wrapped rather than clipped.
-// `max_width` caps the frame; 82 leaves the body's hints 78 usable columns
-// after the body's own 2-column margin.
-inline constexpr int kModalMaxWidth = 82;
+// `max_width` caps the frame (kModalMaxWidth by default).
 ftxui::Element ModalFrame(const Theme& theme, const std::string& title, ftxui::Elements rows,
                           const std::string& footer, int max_width = kModalMaxWidth);
 

@@ -27,6 +27,7 @@
 #include "minimal/common/event_queue.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/plugins/service_registry.hpp"
+#include "policy.hpp"
 
 namespace minimal::session_titler {
 
@@ -40,10 +41,10 @@ struct TitlerConfig {
     std::string model;
     // A reasoning model spends hidden tokens before any visible text; too low a
     // cap yields an empty reply (GenerateTitle warns when that happens).
-    int max_tokens = 64;
+    int max_tokens = kDefaultMaxTokens;
     // The first user message is truncated to this before it is sent. A prompt
     // can carry inlined @-mention file content; only enough to title by is needed.
-    int input_char_budget = 2000;
+    int input_char_budget = kDefaultInputCharBudget;
     std::string prompt;  // empty = the default below
 };
 

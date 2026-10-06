@@ -36,6 +36,7 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
+#include "minimal/agent/policy.hpp"
 
 namespace minimal::agent {
 
@@ -55,9 +56,8 @@ struct ContextSection {
 
 // Where sections land in the session's context tail: ascending priority, 0
 // first; equal priorities keep registration (plugins.json load) order. Core's
-// own signal-channel instructions sit at kSignalContextPriority.
-inline constexpr int kDefaultContextPriority = 100;
-inline constexpr int kSignalContextPriority = 50;
+// own signal-channel instructions sit at kSignalContextPriority; plugins
+// default to kDefaultContextPriority (both in agent/policy.hpp).
 
 class ContextContributor {
 public:

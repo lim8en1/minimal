@@ -1,4 +1,5 @@
 #include "minimal/client/render/streaming_markdown_view.hpp"
+#include "minimal/client/policy.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -6,9 +7,10 @@
 namespace minimal::client {
 
 std::chrono::milliseconds StreamingMarkdownView::EffectiveDebounce(std::size_t buffer_size) {
-    if (buffer_size <= kScaleThresholdBytes) return kReparseDebounce;
-    const auto extra = std::chrono::milliseconds((buffer_size - kScaleThresholdBytes) / 64);
-    return std::min(kMaxReparseDebounce, kReparseDebounce + extra);
+    if (buffer_size <= kMarkdownReparseScaleThresholdBytes) return kMarkdownReparseDebounce;
+    const auto extra = std::chrono::milliseconds(
+        (buffer_size - kMarkdownReparseScaleThresholdBytes) / kMarkdownReparseBytesPerExtraMs);
+    return std::min(kMaxMarkdownReparseDebounce, kMarkdownReparseDebounce + extra);
 }
 
 StreamingMarkdownView::StreamingMarkdownView(

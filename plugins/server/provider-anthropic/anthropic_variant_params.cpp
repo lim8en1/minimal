@@ -1,4 +1,5 @@
 #include "anthropic_variant_params.hpp"
+#include "policy.hpp"
 
 #include <stdexcept>
 
@@ -15,11 +16,9 @@ namespace {
 // when known (the API rejects budget_tokens >= max_tokens). Core passes the
 // effort name verbatim, so every rung of the ladder gets its own budget.
 std::optional<int> AnthropicBudgetFor(const std::string& effort_word) {
-    if (effort_word == "low") return 4096;
-    if (effort_word == "medium") return 8192;
-    if (effort_word == "high") return 16384;
-    if (effort_word == "xhigh") return 32768;
-    if (effort_word == "max") return 65536;
+    for (const auto& [word, budget] : kThinkingBudgets) {
+        if (effort_word == word) return budget;
+    }
     return std::nullopt;  // "minimal": no thinking block at all
 }
 
@@ -51,12 +50,11 @@ std::pair<nlohmann::json, bool> AnthropicVariantParams::DeriveParameters(
         // the reserved output can't be salvaged by clamping: skip thinking
         // for this request rather than send a budget guaranteed invalid
         // either way, the same degrade "none"/"minimal" already use above.
-        constexpr int kAnthropicMinBudgetTokens = 1024;
-        constexpr int kReservedVisibleOutput = 1024;
-        if (*max_tokens < kAnthropicMinBudgetTokens + kReservedVisibleOutput) {
+        constexpr int kAnthropicMinBudgetTokens = 1024;  // NOLINT(readability-magic-numbers): the API's minimum
+        if (*max_tokens < kAnthropicMinBudgetTokens + kReservedVisibleOutputTokens) {
             return {nlohmann::json::object(), false};
         }
-        const int ceiling = *max_tokens - kReservedVisibleOutput;
+        const int ceiling = *max_tokens - kReservedVisibleOutputTokens;
         if (value > ceiling) {
             value = ceiling;
             clamped = true;

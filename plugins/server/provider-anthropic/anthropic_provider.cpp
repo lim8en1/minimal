@@ -8,6 +8,9 @@
 #include "anthropic_stream_reassembler.hpp"
 #include "minimal/llm/json_depth.hpp"
 #include "minimal/net/sse_parser.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/common/http_status.hpp"
+#include "minimal/llm/policy.hpp"
 
 namespace minimal::provider_anthropic {
 
@@ -81,7 +84,7 @@ llm::ChatResponse AnthropicProvider::Complete(const llm::ChatRequest& request) {
         throw ClassifyTransportFailure(error);
     }
 
-    if (http_response.status < 200 || http_response.status >= 300) {
+    if (!common::IsSuccessStatus(http_response.status)) {
         throw ClassifyHttpFailure(http_response.status, http_response.body, http_response.headers);
     }
 
@@ -122,7 +125,7 @@ llm::ChatResponse AnthropicProvider::StreamComplete(const llm::ChatRequest& requ
     // even if the header-vector copy throws) for rethrow_pending_if_any()
     // once StreamPost unwinds.
     auto on_headers = [&](int status, const std::vector<net::HttpHeader>& headers) {
-        is_error_status = status < 200 || status >= 300;
+        is_error_status = !common::IsSuccessStatus(status);
         response_status = status;
         try {
             response_headers = headers;  // vector copy -- allocation can throw
@@ -138,9 +141,8 @@ llm::ChatResponse AnthropicProvider::StreamComplete(const llm::ChatRequest& requ
             // The append allocates too -- the barrier covers the whole
             // error-body branch, not just the parse path below.
             try {
-                constexpr std::size_t kMaxErrorBody = 64 * 1024;
-                if (error_body.size() < kMaxErrorBody) {
-                    error_body.append(chunk.substr(0, kMaxErrorBody - error_body.size()));
+                if (error_body.size() < llm::kMaxErrorBodyBytes) {
+                    error_body.append(chunk.substr(0, llm::kMaxErrorBodyBytes - error_body.size()));
                     return true;
                 }
                 error_body_capped = true;
