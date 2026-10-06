@@ -62,7 +62,8 @@
 #include "minimal/rpc/session_service.hpp"
 #include "minimal/session/session_database.hpp"
 #include "minimal/startup/sanity_check.hpp"
-#include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/atomic_write.hpp"
+#include "plugin_cli.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace {
@@ -84,7 +85,7 @@ void WriteConfigIfChanged(const std::filesystem::path& path, const std::string& 
     if (contents == previous) return;
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
-    const auto outcome = minimal::tools::write_file(path, contents);
+    const auto outcome = minimal::common::write_file(path, contents);
     if (!outcome.ok) {
         std::fprintf(stderr, "warning: could not update %s: %s\n", path.c_str(),
                      outcome.error.c_str());
@@ -1015,6 +1016,12 @@ int main(int argc, char** argv) {
     // loading, registry construction): uncaught, that is std::terminate with
     // no message, and an operator staring at a dead server with an empty log.
     try {
+        // `plugin ...`: the config CLI (plugin_cli.hpp) -- no banner, no
+        // startup, nothing but the plugins.d file it was asked about.
+        if (argc >= 2 && std::strcmp(argv[1], "plugin") == 0) {
+            return minimal::server::RunPluginCli({argv + 2, argv + argc},
+                                                 minimal::common::ConfigDir());
+        }
         return RunServer(argc, argv);
     } catch (const std::exception& error) {
         std::fprintf(stderr, "minimal-server: fatal: %s\n", error.what());

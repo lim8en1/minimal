@@ -1,5 +1,6 @@
 add_library(minimal_common STATIC
     abi_tag.cpp
+    atomic_write.cpp
     bundled_assets.cpp
     config_reader.cpp
     config_paths.cpp
@@ -14,7 +15,8 @@ add_library(minimal_common STATIC
     # plugins.json / client-plugins.json format: shared by both plugin hosts,
     # which each own their namespaces and policy.
     plugins/name_table.cpp
-    plugins/plugin_config.cpp)
+    plugins/plugin_config.cpp
+    plugins/plugin_config_store.cpp)
 add_library(minimal::common ALIAS minimal_common)
 
 target_include_directories(minimal_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

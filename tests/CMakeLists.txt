@@ -60,6 +60,7 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     provider_factory_registry_test.cpp
     model_catalog_test.cpp
     config_schema_test.cpp
+    plugin_config_store_test.cpp
     model_catalog_live_test.cpp
     permission_codec_test.cpp
     providers_config_test.cpp

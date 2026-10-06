@@ -10,10 +10,12 @@
 
 #include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 
 #include "client_entry.hpp"
 #include "minimal/client/cli_args.hpp"
+#include "minimal/client/plugin_command.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
@@ -28,6 +30,12 @@ int main(int argc, char** argv) {
     // writes after that simply fail; the run completes and the exit status
     // goes where it can.
     std::signal(SIGPIPE, SIG_IGN);
+
+    // `minimal plugin ...`: a subcommand, not a flag -- plugin configuration
+    // from a shell (plugin_command.hpp). Nothing else here applies to it.
+    if (argc >= 2 && std::strcmp(argv[1], "plugin") == 0) {
+        return minimal::client::RunPluginCommand({argv + 2, argv + argc});
+    }
 
     const auto parsed = minimal::client::ParseArgs(argc, argv);
     switch (parsed.action) {

@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-namespace minimal::tools {
+namespace minimal::common {
 
 struct WriteOutcome {
     bool ok = false;
@@ -41,4 +41,4 @@ struct WriteOutcome {
 WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::string_view content,
                         std::optional<std::filesystem::perms> create_perms = std::nullopt);
 
-}  // namespace minimal::tools
+}  // namespace minimal::common

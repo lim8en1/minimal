@@ -9,6 +9,7 @@ add_library(minimal_client_core SHARED
     command_line.cpp
     command_router.cpp
     server_spawn.cpp
+    plugin_command.cpp
     session_client.cpp
     rpc_queue.cpp
     picker_model.cpp

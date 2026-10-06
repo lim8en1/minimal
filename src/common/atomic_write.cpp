@@ -1,4 +1,4 @@
-#include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/atomic_write.hpp"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace minimal::tools {
+namespace minimal::common {
 namespace {
 
 std::string Errno() { return std::strerror(errno); }
@@ -180,4 +180,4 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
     return outcome;
 }
 
-}  // namespace minimal::tools
+}  // namespace minimal::common

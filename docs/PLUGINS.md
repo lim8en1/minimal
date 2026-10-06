@@ -182,6 +182,34 @@ Enablement is recorded in `<config>/plugins.json` (client:
   the bundled entry in `plugins.json` and drop yours in the user dir (two
   registrations with one name are fatal).
 
+### Configuring from a shell: `minimal plugin`
+
+```
+minimal plugin                          # every plugin: enabled, configured or not
+minimal plugin tools-web                # every field: value, default or set (*), apply, doc
+minimal plugin get tools-web search.api_url
+minimal plugin set tools-web search.api_url 'http://localhost:8888/search?format=json'
+minimal plugin unset tools-web fetch.timeout_ms
+minimal plugin tools-web --json         # schema, file contents, effective values
+```
+
+Keys are dotted paths into `plugins.d/<name>.json`. A value is parsed by
+the field's type (integers, booleans and enums as such, strings verbatim,
+lists and opaque fields as JSON) and then checked by the plugin's own parser
+before the file is written, so a refused value never reaches the file:
+
+```
+$ minimal plugin set tools-web fetch.max_bytes 1
+minimal: plugins.d/tools-web.json: fetch.max_bytes: must not be below fetch.default_max_bytes
+```
+
+`set` says how the change applies: **live** (every changed field is `live`:
+a running server takes it without a restart) or **restart**. Unsetting
+the last key removes the file. The work runs in `minimal-server plugin ...`,
+which opens plugins for their config symbols only — no registration, no
+storage — so it is safe beside a running server. A secret field's literal
+value is shown as `****`; a `secret:`/`env:` reference is shown as written.
+
 ## Writing a third-party plugin
 
 See ["User plugins"](#user-plugins-user-plugins) for the build-and-deploy

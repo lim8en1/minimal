@@ -10,7 +10,7 @@
 
 #include "file_editor.hpp"
 #include "line_diff.hpp"
-#include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/atomic_write.hpp"
 #include "minimal/tools/path_confinement.hpp"
 
 namespace minimal::tools_fs {
@@ -189,7 +189,7 @@ ToolResult WriteWholeFile(const nlohmann::json& input, const std::filesystem::pa
     if (parents.is_error) return Error(parents.content_text);
 
     const auto previous = FileEditor::ReadForDiff(path, settings.edit_max_editable_file_bytes);
-    const auto outcome = tools::write_file(path, content);
+    const auto outcome = common::write_file(path, content);
     if (!outcome.ok) return Error(outcome.error);
     return ToolResult{false,
                       std::string(outcome.created ? "Created" : overwrite_verb) + " " +

@@ -8,7 +8,7 @@
 
 #include "html_text.hpp"
 #include "minimal/common/utf8.hpp"
-#include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/atomic_write.hpp"
 #include "url_policy.hpp"
 
 namespace minimal::tools_web {
@@ -222,7 +222,7 @@ private:
         const auto dir = ctx.project_root / ".minimal" / "web-fetch";
         std::filesystem::create_directories(dir, ec);
         const std::string name = SpillName(url);
-        const auto outcome = ec ? tools::WriteOutcome{} : tools::write_file(dir / name, text);
+        const auto outcome = ec ? common::WriteOutcome{} : common::write_file(dir / name, text);
         // Backed up to a UTF-8 boundary, not a raw byte cut: a cut landing
         // inside a multi-byte sequence emitted invalid UTF-8 into the
         // model's context.

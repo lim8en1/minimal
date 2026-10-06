@@ -2,7 +2,8 @@
 
 #include <fstream>
 #include <iterator>
-#include <system_error>
+
+#include "minimal/common/atomic_write.hpp"
 
 namespace minimal::client {
 
@@ -14,16 +15,9 @@ bool TryReadConfigFile(const std::filesystem::path& path, std::string* out) {
 }
 
 bool WriteConfigFileAtomic(const std::filesystem::path& path, std::string_view contents) {
-    const auto tmp = path.string() + ".tmp";
-    {
-        std::ofstream out(tmp);
-        if (!out) return false;
-        out << contents;
-        if (!out) return false;
-    }
-    std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    return !ec;
+    // The shared writer: a same-directory temp file, fsync, rename -- and a
+    // unique temp name, so two clients saving at once cannot collide.
+    return common::write_file(path, contents).ok;
 }
 
 }  // namespace minimal::client

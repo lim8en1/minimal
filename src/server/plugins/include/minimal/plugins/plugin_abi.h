@@ -62,7 +62,7 @@
 #include "minimal/plugins/plugin_storage.hpp"
 #include "minimal/session/history_window.hpp"
 #include "minimal/session/session_reader.hpp"
-#include "minimal/tools/atomic_write.hpp"
+#include "minimal/common/atomic_write.hpp"
 #include "minimal/tools/file_access.hpp"
 #include "minimal/tools/path_confinement.hpp"
 #include "minimal/tools/permission_advisor.hpp"
