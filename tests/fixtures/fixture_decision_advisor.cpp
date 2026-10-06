@@ -1,4 +1,4 @@
-// The typesafe-advisor E2E fixture: the REAL TypesafeAdvisor behind a fixture
+// The decision-advisor E2E fixture: the REAL DecisionAdvisor behind a fixture
 // .so, so session_service_test's advisor E2E can load it through the real
 // plugin loader and exercise the full path -- registration attribution, config
 // slice, composition, and an actual Ask resolved over the wire -- against a
@@ -23,20 +23,23 @@
 extern "C" {
 
 const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
-const char* minimal_plugin_name() { return "typesafe-advisor-fixture"; }
+const char* minimal_plugin_name() { return "decision-advisor-fixture"; }
 const char* minimal_plugin_version() { return "1.0.0"; }
 
 void minimal_plugin_register_permission_advisor(
     minimal::tools::PermissionAdvisorRegistry& registry,
     const minimal::plugins::PluginRegistrationContext& context) {
-    auto settings = minimal::typesafe_advisor::ParseSettings(context.config);
-    // The E2E passes its loopback stub URL; defaults for everything it omits.
+    // The SHIPPED bundled file (the source tree's, not a config dir's) under
+    // the E2E's config slice, which carries its loopback stub URL.
+    auto settings = minimal::decision_advisor::ParseSettings(
+        minimal::decision_advisor::LoadBundledSettings(DECISION_ADVISOR_BUNDLED_FILE),
+        context.config);
     settings.max_retries = 0;        // deterministic: exactly one attempt
     settings.backoff_initial_ms = 1;
     settings.request_timeout_ms = 1000;
     settings.budget_ms = 1000;
 
-    registry.Register(std::make_shared<minimal::typesafe_advisor::TypesafeAdvisor>(
+    registry.Register(std::make_shared<minimal::decision_advisor::DecisionAdvisor>(
         settings, minimal::common::SecretHandle::Literal("fixture-key"),
         minimal::net::HttpClient{}));
 }

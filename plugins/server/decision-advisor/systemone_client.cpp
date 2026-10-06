@@ -1,4 +1,4 @@
-#include "typesafe_client.hpp"
+#include "systemone_client.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -11,7 +11,7 @@
 #include "decision.hpp"
 #include "minimal/common/logger.hpp"
 
-namespace minimal::typesafe_advisor {
+namespace minimal::decision_advisor {
 namespace {
 
 using namespace std::chrono_literals;
@@ -21,9 +21,11 @@ using namespace std::chrono_literals;
 constexpr auto kSleepSlice = 25ms;
 
 // Statuses the loop retries -- TypeSafe SDK policy (408/429/5xx), of which
-// 429 and 529-overloaded are the ones the docs actually predict.
+// 429 and 529-overloaded are the ones the docs actually predict. Minus 501:
+// llama-server's answer for a model that is not a decision model, which no
+// retry can change.
 bool IsRetryableStatus(int status) {
-    return status == 408 || status == 429 || (status >= 500 && status <= 599);
+    return status == 408 || status == 429 || (status >= 500 && status <= 599 && status != 501);
 }
 
 bool IsRetryableTransport(net::HttpErrorKind kind) {
@@ -85,18 +87,13 @@ std::chrono::milliseconds BackoffFor(int attempt, const Settings& settings) {
 }
 
 nlohmann::json BuildBody(const Settings& settings, const nlohmann::json& state) {
-    // Identical shape for both backends (verified live): {"state", "model",
+    // Identical shape for every backend (verified live): {"state", "model",
     // "questions"} with the model id VALUE carrying the backend namespace.
-    nlohmann::json questions = settings.questions.is_object() && !settings.questions.empty()
-                                   ? settings.questions
-                                   : DefaultQuestions();
-    if (settings.extra_questions.is_object()) {
-        for (auto it = settings.extra_questions.begin(); it != settings.extra_questions.end();
-             ++it) {
-            questions[it.key()] = it.value();  // fan-out: same request, logged only
-        }
+    nlohmann::json questions = settings.questions;
+    for (auto it = settings.extra_questions.begin(); it != settings.extra_questions.end(); ++it) {
+        questions[it.key()] = it.value();  // fan-out: same request, logged only
     }
-    return nlohmann::json{{"state", state}, {"model", settings.EffectiveModel()},
+    return nlohmann::json{{"state", state}, {"model", settings.model},
                           {"questions", std::move(questions)}};
 }
 
@@ -119,21 +116,49 @@ bool SleepFor(std::chrono::milliseconds delay, std::chrono::milliseconds budget_
     }
 }
 
+// The server's own words for a refusal, when it gave any: {"error":
+// {"message": ...}} (llama-server, OpenAI-shape) or {"error": "..."}, else the
+// clipped body. llama-server answers a GGUF converted without Clef's decision
+// head with 501 "This model is not a decision model" -- the status alone
+// would not say which of the operator's knobs is wrong.
+std::string ErrorDetailOf(const std::string& body) {
+    constexpr std::size_t kMaxDetail = 200;
+    auto parsed = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+    std::string detail;
+    if (parsed.is_object()) {
+        if (auto error = parsed.find("error"); error != parsed.end()) {
+            if (error->is_string()) {
+                detail = error->get<std::string>();
+            } else if (error->is_object()) {
+                if (auto message = error->find("message");
+                    message != error->end() && message->is_string()) {
+                    detail = message->get<std::string>();
+                }
+            }
+        }
+    }
+    if (detail.empty()) detail = body;
+    if (detail.size() > kMaxDetail) detail = detail.substr(0, kMaxDetail) + "...";
+    return detail;
+}
+
 }  // namespace
 
-JevOutcome AskJev(const net::HttpClient& http, const Settings& settings,
-                  const std::string& api_key, const nlohmann::json& state,
-                  std::function<bool()> is_cancelled) {
-    JevOutcome outcome;
+SystemOneOutcome AskSystemOne(const net::HttpClient& http, const Settings& settings,
+                              const std::string& api_key, const nlohmann::json& state,
+                              std::function<bool()> is_cancelled) {
+    SystemOneOutcome outcome;
     if (!is_cancelled) is_cancelled = [] { return false; };
 
     const auto started = std::chrono::steady_clock::now();
     const auto deadline = started + std::chrono::milliseconds(settings.budget_ms);
 
     net::HttpRequest request;
-    request.url = settings.EffectiveEndpoint();
+    request.url = settings.endpoint;
     request.body = BuildBody(settings, state).dump();
-    request.headers.push_back({"Authorization", "Bearer " + api_key});
+    // An empty key sends no header at all -- a local llama-server started
+    // without --api-key -- rather than a "Bearer " with nothing after it.
+    if (!api_key.empty()) request.headers.push_back({"Authorization", "Bearer " + api_key});
     request.headers.push_back({"Content-Type", "application/json"});
     request.request_timeout = std::chrono::milliseconds(settings.request_timeout_ms);
 
@@ -170,7 +195,7 @@ JevOutcome AskJev(const net::HttpClient& http, const Settings& settings,
                     deadline - std::chrono::steady_clock::now());
                 const auto backoff = ApplyJitter(BackoffFor(attempt, settings), settings.jitter);
                 common::DefaultLogger().warn(
-                    "typesafe-advisor: attempt {} to {} failed ({}); retrying",
+                    "decision-advisor: attempt {} to {} failed ({}); retrying",
                     attempt + 1, request.url, transport_error);
                 if (!SleepFor(backoff, budget_left_now, is_cancelled)) {
                     outcome.abstain_reason =
@@ -215,7 +240,7 @@ JevOutcome AskJev(const net::HttpClient& http, const Settings& settings,
             // Two clamps, one purpose: no server header and no policy backoff
             // can stretch one Advise past its budget.
             delay = std::min(delay, std::chrono::milliseconds(settings.retry_after_cap_ms));
-            common::DefaultLogger().warn("typesafe-advisor: attempt {} got HTTP {}; retrying",
+            common::DefaultLogger().warn("decision-advisor: attempt {} got HTTP {}; retrying",
                                          attempt + 1, *status);
             if (!SleepFor(delay, budget_left_now, is_cancelled)) {
                 outcome.abstain_reason = is_cancelled() ? "cancelled" : "budget exhausted";
@@ -226,10 +251,12 @@ JevOutcome AskJev(const net::HttpClient& http, const Settings& settings,
         // Non-retryable status, or retries spent: fail open with one warn line
         // (401s and 422s recur on every call -- the log line is how the
         // operator finds out the key is wrong or the rubric malformed).
+        const std::string detail = ErrorDetailOf(response->body);
         common::DefaultLogger().warn(
-            "typesafe-advisor: giving up after {} attempt(s), HTTP {} from {}",
-            outcome.attempts, *status, request.url);
+            "decision-advisor: giving up after {} attempt(s), HTTP {} from {}{}",
+            outcome.attempts, *status, request.url, detail.empty() ? "" : ": " + detail);
         outcome.abstain_reason = "HTTP " + std::to_string(*status);
+        if (!detail.empty()) outcome.abstain_reason += " (" + detail + ")";
         break;
     }
 
@@ -245,4 +272,4 @@ JevOutcome AskJev(const net::HttpClient& http, const Settings& settings,
     return outcome;
 }
 
-}  // namespace minimal::typesafe_advisor
+}  // namespace minimal::decision_advisor

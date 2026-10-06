@@ -149,7 +149,7 @@ Enablement is recorded in `<config>/plugins.json` (client:
   user plugins default **disabled**. A bundled plugin can opt out of the
   enabled default from its own build: `minimal_add_plugin(<name>
   DISABLED_BY_DEFAULT ...)` installs a `<name>.disabled-by-default` marker
-  beside the module (`session-titler` and `typesafe-advisor` do). Once an
+  beside the module (`session-titler` and `decision-advisor` do). Once an
   entry exists in `plugins.json`, your `enabled` value wins forever.
 - **`config`** is a per-plugin JSON object forwarded verbatim to the plugin
   (e.g. the `logo` plugin's `text`/`styles`/`charset` options).

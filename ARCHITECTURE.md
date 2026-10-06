@@ -1706,7 +1706,7 @@ variable the install rule uses, so overriding one moves both.
   }
   ```
 
-  Newly discovered plugins are appended on startup with enablement defaulted by provenance, so the file is self-maintaining and the user only edits it to change a decision. One exception: a bundled plugin built `DISABLED_BY_DEFAULT` (a `<name>.disabled-by-default` marker beside the module; currently `session-titler` and `typesafe-advisor`) appends as `enabled: false` — the plugin declares it, the host keeps no list of names. Malformed content degrades to empty rather than throwing — a broken `plugins.json` should not prevent the server starting.
+  Newly discovered plugins are appended on startup with enablement defaulted by provenance, so the file is self-maintaining and the user only edits it to change a decision. One exception: a bundled plugin built `DISABLED_BY_DEFAULT` (a `<name>.disabled-by-default` marker beside the module; currently `session-titler` and `decision-advisor`) appends as `enabled: false` — the plugin declares it, the host keeps no list of names. Malformed content degrades to empty rather than throwing — a broken `plugins.json` should not prevent the server starting.
 - **No `commands/` config dir** — a command's value is its code; a data-only manifest would be a drift-prone shadow copy.
 
 **Seeding**: `cmake --install` copies `bundled/` into the config dir and never overwrites — see *Bundled assets*. Nothing is compiled into the binary and nothing is read from the install prefix at runtime, so every file above is one the user can see and edit, and the copy they edit is the copy that runs.

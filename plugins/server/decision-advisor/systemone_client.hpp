@@ -10,20 +10,20 @@
 
 #include "settings.hpp"
 
-namespace minimal::typesafe_advisor {
+namespace minimal::decision_advisor {
 
-// The outcome of one AskJev call, after retries. `answer`/`choice` are set
+// The outcome of one AskSystemOne call, after retries. `answer`/`choice` are set
 // exactly when the endpoint answered 2xx with a parseable envelope; every
 // other terminal condition -- budget exhausted, retries spent, cancel,
 // non-retryable status, unparseable body -- is `abstain` with a reason for
 // the log line. There is no error outcome that blocks the caller: a judge
 // that cannot answer costs one human prompt, never the turn (the hooks
 // fail-open posture).
-struct JevOutcome {
+struct SystemOneOutcome {
     bool ok = false;
     nlohmann::json answer;      // the verbatim answers map (present when ok)
     // The SAME ExtractActionAnswer call that validates the envelope already
-    // produces this; carrying it here means the caller (TypesafeAdvisor::
+    // produces this; carrying it here means the caller (DecisionAdvisor::
     // Advise) doesn't have to wrap `answer` back into a fake envelope and
     // parse it a second time just to get what this struct already computed.
     std::optional<ChoiceAnswer> choice;
@@ -49,8 +49,8 @@ struct JevOutcome {
 // Retry-After header is clamped to settings.retry_after_cap_ms and the sleep
 // to the budget remaining, so no server header can stretch one call past the
 // budget. `jitter` 0 makes the delays deterministic (tests).
-JevOutcome AskJev(const net::HttpClient& http, const Settings& settings,
+SystemOneOutcome AskSystemOne(const net::HttpClient& http, const Settings& settings,
                   const std::string& api_key, const nlohmann::json& state,
                   std::function<bool()> is_cancelled);
 
-}  // namespace minimal::typesafe_advisor
+}  // namespace minimal::decision_advisor

@@ -110,11 +110,11 @@ Everything interesting ships as a plugin: `tools-fs`, `tools-search`,
 `tools-bash`, `tools-python`, `tools-web`, `tool-ask`, `provider-openai`,
 `provider-anthropic`, `commands-core`, `commands-md`, `checklist`,
 `signals-message`, `cost-tracker`, `memory`, `session-titler`,
-`typesafe-advisor` (server), and `logo`, `cost-view`, `checklist-view`
-(client). `session-titler` and `typesafe-advisor` ship disabled;
-`typesafe-advisor` sends tool input to an external endpoint to auto-answer
+`decision-advisor` (server), and `logo`, `cost-view`, `checklist-view`
+(client). `session-titler` and `decision-advisor` ship disabled;
+`decision-advisor` sends tool input to a decision-model endpoint to auto-answer
 permission prompts, so enabling it takes two deliberate edits (see its
-[README](plugins/server/typesafe-advisor/README.md)). Drop your own
+[README](plugins/server/decision-advisor/README.md)). Drop your own
 into `<config>/plugins/`, enable/disable or reconfigure any plugin in
 `plugins.json`, and rename tools/commands via its `"aliases"` map — see
 **[docs/PLUGINS.md](docs/PLUGINS.md)**.

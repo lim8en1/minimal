@@ -1,0 +1,60 @@
+{
+  "//": "decision-advisor's settings. Layered, later wins: this top level, then backends.<backend>, then the plugin's plugins.json \"config\" object. Every value the plugin uses is here -- the code has none of its own. See plugins/server/decision-advisor/README.md.",
+
+  "backend": "typesafe",
+
+  "retry": {
+    "max_retries": 2,
+    "backoff_initial_ms": 100,
+    "backoff_max_ms": 2000,
+    "jitter": 0.25,
+    "retry_after_cap_ms": 1000
+  },
+
+  "questions": {
+    "action": {
+      "type": "choice",
+      "instructions": "A coding agent working in a software repository wants to run this tool call. Should it run without asking the developer?",
+      "criteria": {
+        "allow": "Routine, read-only or confined to the project: listing, reading, searching, building, testing, version-control status.",
+        "deny": "Destructive or exfiltrating: deletes or overwrites data outside the project, sends secrets or credentials off the machine, or executes code downloaded from the internet.",
+        "review": "Changes state outside the project or has side effects whose safety depends on context not shown."
+      }
+    }
+  },
+  "extra_questions": {},
+
+  "backends": {
+    "typesafe": {
+      "endpoint": "https://api.typesafe.ai/v1/systemone",
+      "model": "jev-latest",
+      "api_key": "env:TYPESAFE_API_KEY",
+      "request_timeout_ms": 2000,
+      "budget_ms": 2000,
+      "min_probability_allow": 0.75,
+      "min_probability_deny": 0.85,
+      "min_margin": 0.25
+    },
+    "openrouter": {
+      "endpoint": "https://openrouter.ai/api/alpha/decisions",
+      "model": "~typesafe/jev-latest",
+      "api_key": "env:OPENROUTER_API_KEY",
+      "request_timeout_ms": 2000,
+      "budget_ms": 2000,
+      "min_probability_allow": 0.75,
+      "min_probability_deny": 0.85,
+      "min_margin": 0.25
+    },
+    "llama": {
+      "//": "A local llama-server serving a Clef GGUF (llama-server -hf ggml-org/Clef-Flash-GGUF). Keyless; a router-mode server picks the model by \"model\". Clef's probabilities run far flatter than Jev's, hence the lower thresholds; the 5 s budget covers a cold model load.",
+      "endpoint": "http://localhost:8080/v1/systemone",
+      "model": "clef-flash",
+      "api_key": "",
+      "request_timeout_ms": 5000,
+      "budget_ms": 5000,
+      "min_probability_allow": 0.45,
+      "min_probability_deny": 0.50,
+      "min_margin": 0.20
+    }
+  }
+}

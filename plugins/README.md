@@ -24,7 +24,7 @@ Entries are configured in `plugins.json` (see
 The `config` object is passed to the plugin verbatim — core imposes no schema;
 each plugin owns its own, and every one documented here treats missing or
 partial config as normal (defaults apply). `session-titler` and
-`typesafe-advisor` ship disabled; everything else is load-bearing for the
+`decision-advisor` ship disabled; everything else is load-bearing for the
 default harness.
 
 ## Tools
@@ -70,4 +70,4 @@ names. Configured in providers.json, not plugins.json
 | project-context | AGENTS.md / CLAUDE.md as the first context section of every session | [README](server/project-context/README.md) |
 | compaction-structured | the `structured` compaction strategy (`record_summary` tool call → typed summary sections) | [README](server/compaction-structured/README.md) |
 | opencode-compat | opencode-shaped `providers.json` entries, and opencode's `auth.json` as the `secret:opencode-compat:` namespace | [README](server/opencode-compat/README.md) |
-| typesafe-advisor | Jev-based permission advisor (auto-allow/auto-deny with abstain-to-human). **Ships disabled** — enable in plugins.json + permissions.json `advisor` | [README](server/typesafe-advisor/README.md) |
+| decision-advisor | Decision-model permission advisor: TypeSafe Jev, or Clef on a local llama-server (auto-allow/auto-deny with abstain-to-human). **Ships disabled** — enable in plugins.json + permissions.json `advisor` | [README](server/decision-advisor/README.md) |

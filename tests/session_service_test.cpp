@@ -113,7 +113,7 @@ struct ServiceFixture {
     }
 
     // Same, with a config slice for plugins whose registration reads one
-    // (the typesafe-advisor E2E: the loopback stub URL rides the plugin's own
+    // (the decision-advisor E2E: the loopback stub URL rides the plugin's own
     // "config" object, exactly as a real plugins.json entry would carry it).
     void LoadAdvisorPlugin(const nlohmann::json& config, const std::string& file) {
         plugins::PluginCandidate candidate;
@@ -465,7 +465,7 @@ private:
 
 // The captured live responses, as the strings the stub answers with.
 std::string JevFixtureBody(const std::string& name) {
-    std::ifstream stream(std::filesystem::path(TYPESAFE_FIXTURE_DIR) / name);
+    std::ifstream stream(std::filesystem::path(DECISION_ADVISOR_FIXTURE_DIR) / name);
     REQUIRE(stream.good());
     return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
 }
@@ -3292,14 +3292,14 @@ TEST_CASE("an advisor answers Ask; abstention still reaches the human over the w
 
 // --- Session traversal (rewind) over the real channel ------------------------
 
-// The typesafe-advisor E2E: the SHIPPED advisor -- its own sources behind a
+// The decision-advisor E2E: the SHIPPED advisor -- its own sources behind a
 // fixture .so, registered through the real loader with a config slice, named
 // by permissions.json -- resolves an Ask over a real socket, against a loopback
 // stub standing in for the System One endpoint. This is the full length of the
 // track-J path with the production plugin at the end of it: the same registration
 // attribution permissions.json selects on, the same composition in
 // FinishSessionWiring, the same thresholds, and the same grant behavior.
-TEST_CASE("the typesafe-advisor answers a confident Ask and abstains below the margin",
+TEST_CASE("the decision-advisor answers a confident Ask and abstains below the margin",
           "[session_service][advisor][typesafe]") {
     ServiceFixture fixture;
     fixture.tools.Register(std::make_unique<testing::FakeTool>("auto_tool",
@@ -3319,8 +3319,8 @@ TEST_CASE("the typesafe-advisor answers a confident Ask and abstains below the m
     // Load the REAL advisor through the REAL loader, with the stub URL riding
     // the config slice -- a plugins.json entry in miniature.
     fixture.LoadAdvisorPlugin(nlohmann::json{{"endpoint", stub.url()}},
-                              "typesafe-advisor-fixture.so");
-    fixture.service_permissions.advisor = "typesafe-advisor-fixture";
+                              "decision-advisor-fixture.so");
+    fixture.service_permissions.advisor = "decision-advisor-fixture";
     fixture.Script(testing::ToolUseResponse("call-1", "auto_tool", nlohmann::json::object()));
     fixture.Script(testing::TextResponse("auto done"));
     fixture.Script(testing::ToolUseResponse("call-2", "manual_tool", nlohmann::json::object()));

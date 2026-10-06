@@ -10,7 +10,7 @@
 
 #include "settings.hpp"
 
-namespace minimal::typesafe_advisor {
+namespace minimal::decision_advisor {
 
 // The track-J advisor: answers an Ask by asking Jev whether the tool call
 // should be allowed, denied, or left to a human. Everything dangerous stays
@@ -23,10 +23,10 @@ namespace minimal::typesafe_advisor {
 // is_cancelled (before every HTTP attempt and during every backoff sleep) and
 // returns promptly, per the advisor contract. Owned values only: the request
 // arrives by value into a thread that may be detached and outlive the session.
-class TypesafeAdvisor : public tools::PermissionAdvisor {
+class DecisionAdvisor : public tools::PermissionAdvisor {
 public:
     // `api_key` is read per Advise call; one that does not resolve abstains.
-    TypesafeAdvisor(Settings settings, common::SecretHandle api_key, net::HttpClient http,
+    DecisionAdvisor(Settings settings, common::SecretHandle api_key, net::HttpClient http,
                     common::Logger logger = common::DefaultLogger());
 
     // nullopt = abstain: the human decides. A decisive Allow carries every key
@@ -45,4 +45,4 @@ private:
     common::Logger logger_;
 };
 
-}  // namespace minimal::typesafe_advisor
+}  // namespace minimal::decision_advisor

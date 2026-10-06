@@ -303,13 +303,13 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/host_permission_model.cpp"
     tools_web_test.cpp
     tools_web_permission_test.cpp
-    # Same pattern for typesafe-advisor: settings + decision + the retry/budget
+    # Same pattern for decision-advisor: settings + decision + the retry/budget
     # HTTP loop, all compiled in; the .so itself is only exercised by the E2E.
-    "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor/settings.cpp"
-    "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor/decision.cpp"
-    "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor/typesafe_client.cpp"
-    "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor/advisor.cpp"
-    typesafe_advisor_test.cpp
+    "${CMAKE_SOURCE_DIR}/plugins/server/decision-advisor/settings.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/decision-advisor/decision.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/decision-advisor/systemone_client.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/decision-advisor/advisor.cpp"
+    decision_advisor_test.cpp
     # Same pattern for tools-python. The interpreter tests fork real python
     # processes, so they need the actual spawn code, not a seam around it.
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-python/python_tools.cpp"
@@ -384,7 +384,7 @@ target_include_directories(minimal_tests PRIVATE
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-python"
-    "${CMAKE_SOURCE_DIR}/plugins/server/typesafe-advisor"
+    "${CMAKE_SOURCE_DIR}/plugins/server/decision-advisor"
     "${CMAKE_SOURCE_DIR}/plugins/server/opencode-compat"
     "${CMAKE_SOURCE_DIR}/plugins/server/skills"
     "${CMAKE_SOURCE_DIR}/plugins/server/compaction-structured"
@@ -398,7 +398,7 @@ target_include_directories(minimal_tests PRIVATE
 add_subdirectory(fixtures EXCLUDE_FROM_ALL)   # built via minimal_tests, not `all`
 add_dependencies(minimal_tests
     fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
-    fixture-throws fixture-advisor typesafe-advisor-fixture fixture-service fixture-service-b
+    fixture-throws fixture-advisor decision-advisor-fixture fixture-service fixture-service-b
     fixture-hook
     fixture-lifecycle
     fixture-client fixture-client-exclusive fixture-client-partial-throw fixture-endpoint
@@ -410,9 +410,9 @@ target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples"
     MINIMAL_LOGO_PLUGIN="$<TARGET_FILE:minimal_logo>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto"
-    # The captured live Jev responses (fixtures/typesafe-advisor/): the
+    # The captured live Jev responses (fixtures/decision-advisor/): the
     # response-shape contract the advisor parses, kept as data not literals.
-    TYPESAFE_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/typesafe-advisor")
+    DECISION_ADVISOR_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/decision-advisor")
 
 # The headless client is exercised as a real client here, so the test binary
 # links it -- the E2E tier is the whole point of building -p first.

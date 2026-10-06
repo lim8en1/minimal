@@ -5,11 +5,11 @@
 
 #include "decision.hpp"
 #include "minimal/tools/permission.hpp"
-#include "typesafe_client.hpp"
+#include "systemone_client.hpp"
 
-namespace minimal::typesafe_advisor {
+namespace minimal::decision_advisor {
 
-TypesafeAdvisor::TypesafeAdvisor(Settings settings, common::SecretHandle api_key,
+DecisionAdvisor::DecisionAdvisor(Settings settings, common::SecretHandle api_key,
                                  net::HttpClient http,
                                  common::Logger logger)
     : settings_(std::move(settings)),
@@ -17,7 +17,7 @@ TypesafeAdvisor::TypesafeAdvisor(Settings settings, common::SecretHandle api_key
       http_(std::move(http)),
       logger_(std::move(logger)) {}
 
-nlohmann::json TypesafeAdvisor::StateOf(const tools::PermissionRequest& request) const {
+nlohmann::json DecisionAdvisor::StateOf(const tools::PermissionRequest& request) const {
     // The decision, not the world: what the judge needs to rule on this one
     // call. tool_input is JSON already; nothing else about the harness (the
     // mode that produced the Ask, grants held, history) is sent.
@@ -27,7 +27,7 @@ nlohmann::json TypesafeAdvisor::StateOf(const tools::PermissionRequest& request)
                           {"tool_input", request.tool_input}};
 }
 
-std::optional<tools::PermissionResponse> TypesafeAdvisor::Advise(
+std::optional<tools::PermissionResponse> DecisionAdvisor::Advise(
     const tools::PermissionRequest& request, const tools::AdvisorContext& context) {
     // The advisor contract: poll and return. A cancelled call must never spend
     // its budget -- and never reach the network. An ABSENT predicate (a
@@ -41,29 +41,29 @@ std::optional<tools::PermissionResponse> TypesafeAdvisor::Advise(
     try {
         if (api_key_.configured()) key = api_key_.Get().value;
     } catch (const std::exception& error) {
-        logger_.warn("typesafe-advisor: abstained for session {} tool '{}' (api key: {})",
+        logger_.warn("decision-advisor: abstained for session {} tool '{}' (api key: {})",
                      request.session_id, request.tool_name, error.what());
         return std::nullopt;
     }
-    const JevOutcome outcome = AskJev(http_, settings_, key, StateOf(request), cancelled);
+    const SystemOneOutcome outcome = AskSystemOne(http_, settings_, key, StateOf(request), cancelled);
     if (!outcome.ok) {
-        logger_.warn("typesafe-advisor: abstained for session {} tool '{}' ({}; {} attempt(s), "
+        logger_.warn("decision-advisor: abstained for session {} tool '{}' ({}; {} attempt(s), "
                      "{}ms)",
                      request.session_id, request.tool_name, outcome.abstain_reason,
                      outcome.attempts, outcome.total.count());
         return std::nullopt;
     }
 
-    // AskJev's own ExtractActionAnswer call (the one that validated the
+    // AskSystemOne's own ExtractActionAnswer call (the one that validated the
     // envelope enough to set outcome.ok) already produced this -- re-wrapping
     // outcome.answer into a fake envelope and parsing it again here would be
     // redundant work on every successful call, and a second place the two
     // call sites could drift if ExtractActionAnswer's contract changed.
     const auto& answer = outcome.choice;
     if (answer == std::nullopt) {
-        // AskJev already refused to return an envelope without a choice
+        // AskSystemOne already refused to return an envelope without a choice
         // answer; reaching here would mean the parse contract drifted.
-        logger_.warn("typesafe-advisor: abstained for session {} tool '{}' (answer shape "
+        logger_.warn("decision-advisor: abstained for session {} tool '{}' (answer shape "
                      "changed)",
                      request.session_id, request.tool_name);
         return std::nullopt;
@@ -81,7 +81,7 @@ std::optional<tools::PermissionResponse> TypesafeAdvisor::Advise(
 
     if (decision.action == Action::kAbstain) {
         logger_.info(
-            "typesafe-advisor: session {} tool '{}' -> abstained ({}) [model={} choice={} "
+            "decision-advisor: session {} tool '{}' -> abstained ({}) [model={} choice={} "
             "p1={:.3f} p2={:.3f} attempts={} total_ms={}]",
             request.session_id, request.tool_name, decision.abstain_reason,
             outcome.answered_model.empty() ? "unknown" : outcome.answered_model, answer->choice,
@@ -91,7 +91,7 @@ std::optional<tools::PermissionResponse> TypesafeAdvisor::Advise(
 
     if (decision.action == Action::kDeny) {
         logger_.info(
-            "typesafe-advisor: session {} tool '{}' -> denied [model={} choice={} p1={:.3f} "
+            "decision-advisor: session {} tool '{}' -> denied [model={} choice={} p1={:.3f} "
             "p2={:.3f} attempts={} total_ms={}]",
             request.session_id, request.tool_name,
             outcome.answered_model.empty() ? "unknown" : outcome.answered_model, answer->choice,
@@ -99,7 +99,7 @@ std::optional<tools::PermissionResponse> TypesafeAdvisor::Advise(
         tools::PermissionResponse response;
         response.decision = tools::PermissionDecision::Deny;
         response.deny_message =
-            "auto-denied by typesafe-advisor (model " +
+            "auto-denied by decision-advisor (model " +
             (outcome.answered_model.empty() ? std::string("unknown") : outcome.answered_model) +
             "): p(" + answer->choice + ")=" + std::to_string(chosen) +
             "; the call looks destructive or out of scope -- ask the user before retrying";
@@ -107,7 +107,7 @@ std::optional<tools::PermissionResponse> TypesafeAdvisor::Advise(
     }
 
     logger_.info(
-        "typesafe-advisor: session {} tool '{}' -> allowed [model={} choice={} p1={:.3f} "
+        "decision-advisor: session {} tool '{}' -> allowed [model={} choice={} p1={:.3f} "
         "p2={:.3f} attempts={} total_ms={}]",
         request.session_id, request.tool_name,
         outcome.answered_model.empty() ? "unknown" : outcome.answered_model, answer->choice,
@@ -120,4 +120,4 @@ std::optional<tools::PermissionResponse> TypesafeAdvisor::Advise(
     return response;
 }
 
-}  // namespace minimal::typesafe_advisor
+}  // namespace minimal::decision_advisor

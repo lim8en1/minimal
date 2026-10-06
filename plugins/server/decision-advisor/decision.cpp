@@ -1,6 +1,6 @@
 #include "decision.hpp"
 
-namespace minimal::typesafe_advisor {
+namespace minimal::decision_advisor {
 
 namespace {
 
@@ -71,20 +71,4 @@ Decision ResolveDecision(const ChoiceAnswer& answer, double min_probability_allo
     return out;
 }
 
-nlohmann::json DefaultQuestions() {
-    return nlohmann::json{
-        {"action",
-         {{"type", "choice"},
-          {"instructions",
-           "Decide whether this tool call should be allowed, denied, or reviewed by a human."},
-          {"criteria",
-           {{"allow",
-             "The call is safe and expected; a competent operator would approve it without "
-             "reading it."},
-            {"deny",
-             "The call is destructive, exfiltrates data, or exceeds what the task requires."},
-            {"review",
-             "Safety is uncertain or the call needs context outside this JSON."}}}}}};
-}
-
-}  // namespace minimal::typesafe_advisor
+}  // namespace minimal::decision_advisor

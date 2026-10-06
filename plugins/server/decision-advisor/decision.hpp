@@ -5,7 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
-namespace minimal::typesafe_advisor {
+namespace minimal::decision_advisor {
 
 // The one decision the advisor can act on, resolved from a Choice answer over
 // the fixed option set {allow, deny, review}. Anything below the operator's
@@ -54,9 +54,4 @@ std::optional<ChoiceAnswer> ExtractActionAnswer(const nlohmann::json& body);
 Decision ResolveDecision(const ChoiceAnswer& answer, double min_probability_allow,
                          double min_probability_deny, double min_margin);
 
-// The questions map sent when the operator did not override "questions". The
-// fixed option set is what ResolveDecision reads; the wording is the rubric an
-// operator tuning thresholds should read first.
-nlohmann::json DefaultQuestions();
-
-}  // namespace minimal::typesafe_advisor
+}  // namespace minimal::decision_advisor

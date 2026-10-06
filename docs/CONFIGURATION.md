@@ -30,6 +30,7 @@ runtime. Copyable example agents, prompts, skills, and commands live in
 | `agents/<name>.md` | server | **at least one required** | none resolvable → **fatal** |
 | `prompts/<name>.md` | server | optional | missing `prompts/compression.md` → warning |
 | `cost-rates.json` | server | optional | cost-tracker's fallback price table |
+| `decision-advisor.json` | server (`decision-advisor` plugin) | required when the plugin is enabled | every advisor default: backend profiles, retry, thresholds, questions; missing, unknown key or bad value → the plugin does not load (named field) |
 | `plugins/` (dir) | server | optional | user plugins scanned here (docs/PLUGINS.md) |
 | `client-plugins.json` | client | optional | malformed → warning, treated as empty |
 | `client-plugins/` (dir) | client | optional | user client plugins scanned here |
@@ -370,7 +371,7 @@ same list-or-map convention the skills plugin's slice uses):
 
 Every config field that carries a key — providers.json `api_key`, and the
 plugin settings that send one (`memory`'s `api_key`, `tools-web`'s
-`search.api_key`, `typesafe-advisor`'s `api_key`) — takes the same reference:
+`search.api_key`, `decision-advisor`'s `api_key`) — takes the same reference:
 
 | Reference | Resolves to | When it is read |
 |---|---|---|

@@ -1,4 +1,4 @@
-// typesafe-advisor -- auto-mode as a track-J permission advisor (docs/
+// decision-advisor -- auto-mode as a track-J permission advisor (docs/
 // EXTENSIBILITY.md §3): Jev answers the Ask-gated tool calls the substrate
 // resolved to "ask a human"; abstentions (review choice, below-threshold
 // probabilities, HTTP trouble, cancel) fall through to the wire checker.
@@ -19,6 +19,7 @@
 #include <utility>
 
 #include "minimal/config/secrets.hpp"
+#include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/net/http_client.hpp"
 #include "minimal/plugins/plugin_abi.h"
@@ -30,12 +31,18 @@
 
 extern "C" {
 
-MINIMAL_PLUGIN_ABI_SYMBOLS("typesafe-advisor")
+MINIMAL_PLUGIN_ABI_SYMBOLS("decision-advisor")
 
 void minimal_plugin_register_permission_advisor(
     minimal::tools::PermissionAdvisorRegistry& registry,
     const minimal::plugins::PluginRegistrationContext& context) {
-    const auto settings = minimal::typesafe_advisor::ParseSettings(context.config);
+    // Every value comes from the seeded bundled file under this entry's
+    // overrides; a missing file or field throws, which keeps the plugin from
+    // loading with the reason named -- there is no built-in fallback.
+    const auto settings = minimal::decision_advisor::ParseSettings(
+        minimal::decision_advisor::LoadBundledSettings(
+            minimal::common::ConfigDir() / minimal::decision_advisor::kBundledSettingsFile),
+        context.config);
 
     // Bound ONCE, here: a reference that can never resolve (an unset env
     // var) is a loud, contained registration failure (the plugin loads
@@ -51,14 +58,14 @@ void minimal_plugin_register_permission_advisor(
     minimal::common::SecretHandle api_key;
     try {
         api_key = (found != nullptr ? *found : kDefaultSecrets)
-                      .Bind(settings.api_key, settings.EffectiveEndpoint());
+                      .Bind(settings.api_key, settings.endpoint);
     } catch (const std::exception& error) {
         minimal::common::DefaultLogger().error(
-            "typesafe-advisor: api_key {}; the advisor will not register", error.what());
+            "decision-advisor: api_key {}; the advisor will not register", error.what());
         return;
     }
 
-    registry.Register(std::make_shared<minimal::typesafe_advisor::TypesafeAdvisor>(
+    registry.Register(std::make_shared<minimal::decision_advisor::DecisionAdvisor>(
         settings, std::move(api_key), minimal::net::HttpClient{}));
 }
 
