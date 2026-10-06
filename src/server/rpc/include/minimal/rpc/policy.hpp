@@ -59,11 +59,6 @@ inline constexpr std::chrono::milliseconds kSubscriptionCancelPoll{500};
 // Page size when settings.json leaves scrollback_page_size unset: a screenful
 // or two of messages per round trip.
 inline constexpr int kDefaultPageSize = 100;
-// Ceiling on a client-asked page size, load-bearing: the store binds
-// `limit + 1`, and an unbounded page loads a whole transcript in one response
-// -- the O(n) blowup keyset paging exists to prevent.
-inline constexpr int kMaxPageSize = 1000;
-
 // A plugin prompt's answer from the wire: answers are small structured
 // choices; past this one reads as dismissed.
 inline constexpr std::size_t kMaxPluginPromptAnswerBytes = 256 * common::kKiB;

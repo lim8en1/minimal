@@ -45,6 +45,7 @@ minimal/plugins/plugin_storage.hpp
 minimal/plugins/policy.hpp
 minimal/plugins/service_registry.hpp
 minimal/session/history_window.hpp
+minimal/session/policy.hpp
 minimal/session/session_reader.hpp
 minimal/tools/atomic_write.hpp
 minimal/tools/file_access.hpp

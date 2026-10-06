@@ -367,7 +367,7 @@ TEST_CASE("HistoryWindow clamps the page size instead of honoring a tool's huge 
     const auto huge = window.GetMessages(std::nullopt, 100000000);
     CHECK(huge.messages.size() == 3);  // transcript size, not 10^8 -- and the
                                        // cap, not the data, would bound a real one
-    CHECK(window.GetMessages(std::nullopt, session::HistoryWindow::kMaxPageLimit + 1)
+    CHECK(window.GetMessages(std::nullopt, session::kMaxHistoryPageSize + 1)
               .messages.size() == 3);
 
     const auto zero = window.GetMessages(std::nullopt, 0);

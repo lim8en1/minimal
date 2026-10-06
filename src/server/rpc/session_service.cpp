@@ -20,6 +20,7 @@
 
 #include "minimal/plugins/plugin_rpc.hpp"
 #include "minimal/rpc/policy.hpp"
+#include "minimal/session/policy.hpp"
 
 namespace minimal::rpc {
 namespace {
@@ -35,14 +36,14 @@ namespace {
 // transcript -- every row, every JSON decode, every proto copy, in one response
 // -- which is precisely the O(n) blowup the keyset paging exists to prevent.
 // ListSessions' proto comment already documented a bound it did not have.
-// (kMaxPageSize, rpc/policy.hpp.)
+// (session::kMaxHistoryPageSize.)
 
 // Clamped, never rejected: a client asking for more than we will serve is not
 // making an error, and paging is the caller's answer either way. `has_more`
 // already tells it there is another page.
 int ClampPageSize(int requested, int fallback) {
     if (requested <= 0) requested = fallback;
-    return std::min(requested, kMaxPageSize);
+    return std::min(requested, session::kMaxHistoryPageSize);
 }
 
 // The fallback when no registry was wired (tests, or a service built before
