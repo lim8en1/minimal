@@ -1134,6 +1134,13 @@ Default is no authentication, matching the local-only topology. `src/server/rpc/
 3. **is the shared vocabulary** — messages, the tool/command/provider contracts, events, the wire protocol;
 4. **runs the loop** — the turn engine and *when* compaction triggers (a strategy is pluggable).
 
+**The test, server and client alike.** Two questions place a piece:
+
+1. Can core run without it — even if it adds value, makes things easier, or opens new workflows? Yes → plugin.
+2. If not: is it interchangeable — could a user write their own (a provider, a chat view, widgets that redefine how the standard ones look)? Yes → a slot core defines, with a bundled plugin as the default; a *required* slot left empty refuses startup, as no provider does. No → core.
+
+Plugins are trusted, in-process code built from source: a plugin can do anything the host can. Core therefore enforces robustness and ordering — collisions, layering, fail-closed defaults, throw containment — never distrust; "a plugin could misuse X" is no argument for keeping X in core.
+
 Core never names a plugin, a plugin's tool, or a plugin's directory layout: a plugin that needs core to know something about it declares it through a seam (a reserved namespace, `ToolSource::ReconnectHint`, `Tool::Summary`, `minimal_plugin_describe_project_content`, the `DISABLED_BY_DEFAULT` marker, the `.rpc` handler `--plugin-call` reaches).
 
 **The SDK.** `scripts/sdk_headers.txt` (v0, unstable) lists the core headers a plugin may include: the ABI, the types its hooks take, and shared utilities. `scripts/client_sdk_headers.txt` is the client plugins' equivalent. The `plugin_conformance` test fails on any other include. The `plugin_matrix` test runs the real binaries with no plugins (must refuse to start), with only `provider-openai` (must complete a turn), and with each bundled plugin disabled in turn (must still complete one).
@@ -1157,7 +1164,7 @@ Core never names a plugin, a plugin's tool, or a plugin's directory layout: a pl
 | Skills (`skills`: the `skill` tool, its permission model, the listing and preloads) | **Bundled plugin** | Prompt content a preset opts into; its gate is a plugin permission model, its listing and preloads are preset extensions. Disabled, no skill concept remains. |
 | `PrefixMentionResolver` | **Core default**, plugin-overridable | The minimum default needed to function. |
 | Themes, skills, agent presets, prompts | **Not plugins — config** | Pure data; a plugin would add ABI/build complexity for something that is already just a file. |
-| Syntax-highlighting grammars | **Fixed vendored set** | Runtime-loadable grammars are plausible future work. |
+| Syntax-highlighting grammars | **Client slot**, vendored set as the default | Additive and language-keyed (EXTENSIBILITY.md §4.2); the vendored set moves to a bundled plugin. |
 
 `ask_user` (`tool-ask`) is also a bundled plugin, not listed as its own row — see *Asking the user* above for its rationale.
 
@@ -1187,21 +1194,22 @@ rpc PluginSubscribe(PluginCallRequest) returns (stream PluginCallResponse);
 
 Core defines neither payload nor semantics; plugin authors define their own JSON on both ends.
 
-**Additive views: yes. Compositional: only through named slots.** The frame, the tab model, and the transport stay core; presentation is plugin surface — and most of the TUI is presentation. `docs/EXTENSIBILITY.md` §4 is the full core-vs-pluggable split and wins where the two disagree.
+**Core hosts; plugins present.** Under the test in § *Core vs. plugin surface*, client core is the machinery that hosts plugin-registered views — state, transport, composition (layout, modal layering, focus, keybinding dispatch), orchestration verbs and the plugin host. All presentation is plugin surface, reached through views and named slots, with bundled plugins as the defaults. `docs/EXTENSIBILITY.md` §4 is the full core-vs-pluggable split, with each slot's status, and wins where the two disagree.
 
 | Kind | Mechanism | Support |
 |---|---|---|
 | New self-contained view (panel or modal) | register a `View` — placement + default keybinding, remappable | **v1** |
-| Fill a named slot | slot registry | **v1**: tool-result renderers, message-kind presentation, status-bar segments; follow-on: markdown engine, syntax grammars, chat surface |
-| Wrap/replace core views, restructure the frame | — | **No** — write a different client. One exception: the chat surface below is replaceable wholesale, exclusively. |
+| Fill a named slot | slot registry | **v1**: tool-result and display-kind renderers, message-kind presentation, status-bar segments, prompt renderers, markdown engine, syntax grammars, chat surface |
+| Replace a default presentation (chat view, prompt editor, widgets, tab bar, pickers, the permission prompt) | an exclusive slot or a bundled view; disable the bundled default | live for the chat surface and markdown engine; the rest **planned** (EXTENSIBILITY.md §4.2) |
+| Restructure the frame, the state, the transport | — | **No** — write a different client |
 
 Slots:
 
 1. **Tool-result renderers keyed by tool name — v1.** The strongest case in a plugin-first harness: a plugin shipping a `sql_query` tool wants a table, a `diff` tool wants colored hunks, not raw text. The plugin owns both the tool and its rendering. A renderer registered for a tool whose plugin is disabled falls back to default rendering rather than erroring. A renderer for a *core* tool (a diff view for `edit`) is equally legitimate — bundled tools are themselves plugins, replaceable via `plugins.json`, and rendering follows the same rule. *[Update: tools now also attach a typed display payload (`ToolResult::display`, `{"kind": ...}`) that is never sent to the model, and a second slot keyed by that kind — `DisplayRenderer` — draws it for every tool that emits it. The tool decides what its result is, the client decides how it looks, and a tool emitting a core kind (`diff`, `file`, `process`, `markdown`) needs no client plugin at all. A tool-name renderer still takes precedence. Contract and vocabulary: EXTENSIBILITY.md §4.2, "Tool-result display payloads".]*
 2. **Message-kind presentation — v1.** Additive renderers keyed by message kind (agent text, thinking, tool activity, system); core supplies the defaults § *Message-kind rendering* specifies. The data plane — event demux, scrollback virtualization, streaming buffer — stays core regardless of who renders a row.
-3. **Chat surface — exclusive.** One plugin may replace the whole chat view. The host pushes the session's events; scrollback pages come through the shared client API; second registration warns and is ignored (the `MentionResolver`/`AuthProvider` pattern). The interface is deliberately big and deliberately the only one of its kind — message-kind slots cover the common case, a whole new chat UI is a whole different component.
+3. **Chat surface — exclusive.** One plugin may replace the whole chat view. The host pushes the session's events; scrollback pages come through the shared client API; a second registration warns and is ignored today — planned: two claimants are fatal, and replacing the default means disabling it (EXTENSIBILITY.md §4.2, *Slot semantics*). The interface is deliberately big and deliberately the only one of its kind — message-kind slots cover the common case, a whole new chat UI is a whole different component.
 4. **Status-bar segments — v1.** Plugins register segment providers (`{git_branch}`); the format string orders and selects them by id; an unknown id renders nothing with a startup warning. Config keeps layout control; plugins add content.
-5. **Markdown engine and syntax grammars — follow-on.** The md4c adapter becomes an exclusive-slot default; a replacement engine must carry the streaming contract itself (§ *TUI rendering*). Grammar registration is additive and language-keyed, the vendored set registering as the defaults.
+5. **Markdown engine and syntax grammars — v1.** The md4c adapter is the exclusive slot's default; a replacement engine must carry the streaming contract itself (§ *TUI rendering*). Grammar registration is additive and language-keyed, the vendored set registering as the defaults.
 6. **Tools-panel / session-picker columns — later.**
 
 ```cpp
@@ -1259,7 +1267,7 @@ Both registries follow the server's collision rules: a duplicate is fatal. View 
 
 Three policies complete the surface:
 
-- **Plugin modals never preempt the permission modal.** Permission/confirmation prompts are always topmost in the modal stack; a plugin modal cannot mask one or steal its input. Invariant, tested.
+- **The prompt layer is topmost.** Permission, confirmation and plugin prompts render above every view; no view can mask one or steal its input. It is a layering rule the host enforces whoever renders the prompt — permission and confirmation renderers are planned to become prompt-renderer kinds like any plugin's (EXTENSIBILITY.md §4.2). Invariant, tested.
 - **Client plugins own their data path.** A plugin view wanting live data subscribes itself through the generic `PluginCall`/`PluginSubscribe` channel; core transports and never interprets plugin payloads. A plugin *pair* binding a server command to a client view works the same way: the client side observes its own `CommandResult` — whose `view_hint` names the view — and opens or refreshes it.
 - **Attention is raiseable.** Plugins receive an `AttentionSink` at registration and may raise or clear tab/global attention; core event derivation (§ *Tab states and attention*) remains the default source, and the `!` glyph stays the only color-independent signal.
 - **`PluginSubscribe` is tri-state** (`SubscribeOutcome`: cancelled / ended / error) -- a single bool conflated the subscriber's own cancellation, a clean server close, and a refusal or transport death. Live subscriptions are cancelled at client teardown; the sink and data-path pointers a plugin captures at registration are host-owned for the process lifetime (the temporaries that once dangled them are the exact bug class the R harness tests now pin).
@@ -1456,7 +1464,7 @@ Three tiers:
 
 1. **Config** — no code: `themes/*.json` (now with namespaced plugin sections — `git_plugin.branch` — merged after core roles so a plugin can never shadow one); **`keybindings.json`** (not optional: terminals disagree on what they can even *encode* — `Shift+Enter` is indistinguishable from `Enter` without the kitty keyboard protocol / CSI-u — so remapping must be user config; default newline-in-prompt is the more portable `Alt+Enter`); status bar as a format string (`"{version} | {model} | {tokens} | {agent} | {permission_mode} | {session}"`) that orders and selects registered segments — core's and plugins' alike; layout ratios and collapse/timestamp toggles.
 2. **Server plugins extend UI *content* without touching UI code** — a plugin command appears in `/`-autocomplete via `ListCommands`, and its results surface as a view or status line, never as a chat message (§ `/-command system`); a plugin tool appears in chat and the tools panel automatically.
-3. **Client plugins** for additive views, message-kind and tool-result renderers, status segments, and — exclusively — the chat surface and markdown engine; for anything beyond (frame, tab model, transport), **write a different frontend** against `SessionService` — language-agnostic, process-isolated. This is also why @-mention resolution lives server-side: every frontend inherits it.
+3. **Client plugins** for all presentation — additive views, renderers and status segments, and exclusive slots for the chat surface, markdown engine and (planned) the prompt editor, widget kit and tab bar (EXTENSIBILITY.md §4); for anything beyond (frame, state, tab model, transport), **write a different frontend** against `SessionService` — language-agnostic, process-isolated. This is also why @-mention resolution lives server-side: every frontend inherits it.
 
 ## @-mention file references
 
