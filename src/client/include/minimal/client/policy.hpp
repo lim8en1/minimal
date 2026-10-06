@@ -202,6 +202,9 @@ inline constexpr int kConfirmModalMaxWidth = 72;
 inline constexpr int kModalFrameRows = 3;
 inline constexpr int kModalOverlaySlackRows = 3;
 inline constexpr int kMinModalBodyRows = 2;
+// A modal's pinned rows (ModalFrame's `pinned`: a selected row's details, the
+// last outcome) take at most this many rows.
+inline constexpr int kModalPinnedMaxRows = 8;
 // Status bar / tools panel / tab bar columns.
 inline constexpr std::size_t kStatusSessionColumnCap = 24;
 inline constexpr std::size_t kToolsPanelSessionColumn = 16;

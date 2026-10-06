@@ -88,5 +88,13 @@ ftxui::Element ModalBody(const Theme& theme, ftxui::Element content);
 // `max_width` caps the frame (kModalMaxWidth by default).
 ftxui::Element ModalFrame(const Theme& theme, const std::string& title, ftxui::Elements rows,
                           const std::string& footer, int max_width = kModalMaxWidth);
+// The same, with `pinned` between the scrolling rows and the hints, below a
+// rule and always visible: what describes the selected row, or the outcome
+// of the last action -- content that must not scroll away with a long list.
+// It takes at most kModalPinnedMaxRows rows (scrolling past that); the
+// scrolling rows give up that much of their budget.
+ftxui::Element ModalFrame(const Theme& theme, const std::string& title, ftxui::Elements rows,
+                          ftxui::Elements pinned, const std::string& footer,
+                          int max_width = kModalMaxWidth);
 
 }  // namespace minimal::client
