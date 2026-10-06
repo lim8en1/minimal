@@ -71,6 +71,38 @@ void SeedConfig(const std::filesystem::path& dir) {
 
 }  // namespace
 
+namespace {
+
+// RAII env var override: restored however the test ends -- a failed REQUIRE
+// skips a trailing unsetenv, and a leaked MINIMAL_CONFIG_DIR pointed every
+// later test (random order) at this test's deleted temp dir.
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value) : name_(name) {
+        if (const char* old = std::getenv(name)) {
+            had_old_ = true;
+            old_ = old;
+        }
+        ::setenv(name, value, 1);
+    }
+    ~ScopedEnv() {
+        if (had_old_) {
+            ::setenv(name_.c_str(), old_.c_str(), 1);
+        } else {
+            ::unsetenv(name_.c_str());
+        }
+    }
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+
+private:
+    std::string name_;
+    std::string old_;
+    bool had_old_ = false;
+};
+
+}  // namespace
+
 TEST_CASE("spawnable targets are unix sockets, nothing else", "[server_spawn]") {
     CHECK(IsSpawnableTarget("unix:///tmp/x.sock"));
     CHECK(IsSpawnableTarget("unix://" + (minimal::common::DataDir() / "server.sock").string()));
@@ -90,9 +122,8 @@ TEST_CASE("LocateServerBinary honours MINIMAL_SERVER_BIN", "[server_spawn]") {
     }
     std::filesystem::permissions(script, std::filesystem::perms::owner_exec);
 
-    ::setenv("MINIMAL_SERVER_BIN", script.string().c_str(), /*overwrite=*/1);
+    ScopedEnv server_env("MINIMAL_SERVER_BIN", script.string().c_str());
     CHECK(LocateServerBinary() == script.string());
-    ::unsetenv("MINIMAL_SERVER_BIN");
 }
 
 TEST_CASE("EnsureServerRunning with spawn disabled fails fast on a dead target",
@@ -149,9 +180,9 @@ TEST_CASE("a client with no server spawns one, uses it, and the server exits on 
     minimal::testing::TempDir dir;
     const auto config_dir = dir.path() / "config";
     SeedConfig(config_dir);
-    ::setenv("MINIMAL_CONFIG_DIR", config_dir.string().c_str(), 1);
-    ::setenv("XDG_DATA_HOME", dir.path().string().c_str(), 1);
-    ::setenv("MINIMAL_SERVER_BIN", MINIMAL_SPAWN_TEST_SERVER, 1);
+    ScopedEnv config_env("MINIMAL_CONFIG_DIR", config_dir.string().c_str());
+    ScopedEnv data_env("XDG_DATA_HOME", dir.path().string().c_str());
+    ScopedEnv server_env("MINIMAL_SERVER_BIN", MINIMAL_SPAWN_TEST_SERVER);
 
     const std::string target =
         "unix://" + (minimal::common::DataDir() / "spawn-test.sock").string();
@@ -211,9 +242,6 @@ TEST_CASE("a client with no server spawns one, uses it, and the server exits on 
     // And the diagnostics land where the failure path says they do.
     CHECK(std::filesystem::exists(minimal::client::SpawnedServerLogPath()));
 
-    ::unsetenv("MINIMAL_SERVER_BIN");
-    ::unsetenv("XDG_DATA_HOME");
-    ::unsetenv("MINIMAL_CONFIG_DIR");
 }
 
 TEST_CASE("a spawned server that fails at startup is reported at once, with its reason",
@@ -225,9 +253,9 @@ TEST_CASE("a spawned server that fails at startup is reported at once, with its 
     const auto config_dir = dir.path() / "config";
     SeedConfig(config_dir);
     std::ofstream(config_dir / "settings.json") << R"({"memory": "oops"})";
-    ::setenv("MINIMAL_CONFIG_DIR", config_dir.string().c_str(), 1);
-    ::setenv("XDG_DATA_HOME", dir.path().string().c_str(), 1);
-    ::setenv("MINIMAL_SERVER_BIN", MINIMAL_SPAWN_TEST_SERVER, 1);
+    ScopedEnv config_env("MINIMAL_CONFIG_DIR", config_dir.string().c_str());
+    ScopedEnv data_env("XDG_DATA_HOME", dir.path().string().c_str());
+    ScopedEnv server_env("MINIMAL_SERVER_BIN", MINIMAL_SPAWN_TEST_SERVER);
     const std::string target =
         "unix://" + (minimal::common::DataDir() / "spawn-fail.sock").string();
 
