@@ -65,15 +65,11 @@ public:
     // Every session id with a recorded turn, sorted.
     std::vector<std::string> SessionIds() const;
 
-    std::optional<FetchedRates> GetFetchedRates() const;
+    // One snapshot per rate source, under FetchedRatesKey(source_name): separate
+    // blobs so each refreshes (and corrupts) independently.
+    std::optional<FetchedRates> GetFetchedRates(const std::string& source_name) const;
     // Throws std::runtime_error on I/O failure.
-    void SetFetchedRates(const FetchedRates& rates);
-
-    // The same shape, under "rates/fetched_openrouter". The two snapshots are
-    // separate blobs so each refreshes (and corrupts) independently.
-    std::optional<FetchedRates> GetOpenRouterFetchedRates() const;
-    // Throws std::runtime_error on I/O failure.
-    void SetOpenRouterFetchedRates(const FetchedRates& rates);
+    void SetFetchedRates(const std::string& source_name, const FetchedRates& rates);
 
 private:
     plugins::PluginStorage* storage_;  // borrowed; may be null

@@ -9,12 +9,12 @@ every completed turn (the only writer).
 - **SessionObserver**: records every completed turn (model, usage) per session.
 - **Command**: `/cost [session-id|all]` — renders a session's (or every
   session's) totals as text. Read-only.
-- **Startup auto-refresh**: when the cached pricing snapshot is older than
-  `rates_refresh_days` (default 7), the plugin fetches fresh LiteLLM +
-  OpenRouter prices on a bounded background thread as the server boots. No
+- **Startup auto-refresh**: when any cached pricing snapshot is older than
+  `rates_refresh_days` (default 7), the plugin fetches fresh prices from every
+  `rate_sources` entry on a bounded background thread as the server boots. No
   network during a turn; a failed refresh keeps the previous prices.
-- **Server flag**: `minimal-server --plugin-call cost-tracker refresh_rates` — fetch both pricing
-  snapshots now and exit (bypasses the staleness gate). The manual escape
+- **Server flag**: `minimal-server --plugin-call cost-tracker refresh_rates` — fetch every pricing
+  snapshot now and exit (bypasses the staleness gate). The manual escape
   hatch the old `/cost-update-rates` command was; there is no TUI command for
   refreshing prices.
 - **RPC service**: `cost-tracker.rpc` — serves the same state as JSON over the
@@ -34,19 +34,29 @@ every completed turn (the only writer).
 
 ## Pricing
 
-Four tiers, config > openrouter-fetched > litellm-fetched > bundled, all
+Tiers, config > each fetched source in `rate_sources` order > bundled, all
 resolved through ONE RateTable so a report can never disagree with itself:
 
 1. The user's `rates` in `plugins.d/cost-tracker.json` (below).
-2. The fetched OpenRouter snapshot, cached by the startup auto-refresh, the
-   `--plugin-call cost-tracker refresh_rates` flag, or the `.rpc` service's `refresh_rates` method
-   (keys are model ids — the ccusage convention; a cached snapshot from an
-   earlier run is picked up at startup). Ranked above the LiteLLM snapshot
-   because the wire ids an OpenRouter-shaped provider sends ARE OpenRouter
-   slugs, so OpenRouter's own price for that exact string is authoritative;
-   LiteLLM's `openrouter/*` entries duplicate the same data and lag it.
-3. The fetched LiteLLM snapshot, the same paths, the same rule.
-4. The seeded `cost-rates.json` in the config dir.
+2. One fetched snapshot per `rate_sources` entry, first entry first, each
+   cached under its own name by the startup auto-refresh, the
+   `--plugin-call cost-tracker refresh_rates` flag, or the `.rpc` service's
+   `refresh_rates` method (keys are model ids — the ccusage convention; a
+   cached snapshot from an earlier run is picked up at startup). The default
+   list is OpenRouter, then LiteLLM: the wire ids an OpenRouter-shaped
+   provider sends ARE OpenRouter slugs, so OpenRouter's own price for that
+   exact string is authoritative; LiteLLM's `openrouter/*` entries duplicate
+   the same data and lag it. A gateway's own `/model/info` belongs first — it
+   prices the exact ids it serves, which no public snapshot knows.
+3. The seeded `cost-rates.json` in the config dir.
+
+Source formats:
+
+| `format` | Shape | Model id | Kept rows |
+| --- | --- | --- | --- |
+| `litellm` | LiteLLM's `model_prices_and_context_window.json`: an object of `*_cost_per_token` entries | the key | input and output priced |
+| `openrouter` | OpenRouter's `/api/v1/models`: `data[].pricing` with decimal-string prices | `id` | input and output priced |
+| `litellm-proxy` | A LiteLLM proxy's `/model/info`: `data[].model_info` with the `litellm` fields | `model_name` | input priced (output/cache default to 0 — internal gateways serve free models) |
 
 A model with no rate anywhere — and a turn whose usage the backend reported as
 all zeros (the known proxy gap) — renders as "unknown", never as $0.00.
@@ -63,7 +73,11 @@ optional; an absent or partial config object is normal rather than an error.
   "rates": {
     "claude-opus-5": { "input": 15.0, "output": 75.0, "cache_read": 1.5 }
   },
-  "rates_fetch_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+  "rate_sources": [
+    { "format": "litellm-proxy", "url": "https://gw.example/model/info", "api_key": "secret:gateway" },
+    { "format": "openrouter", "url": "https://openrouter.ai/api/v1/models" },
+    { "format": "litellm", "url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json" }
+  ],
   "rates_fetch_timeout_ms": 30000,
   "rates_refresh_days": 7
 }
@@ -72,9 +86,9 @@ optional; an absent or partial config object is normal rather than an error.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `rates` | *(none)* | Per-model rate overrides, consumed verbatim as the RateTable's config tier. Keys are model ids. |
-| `rates_fetch_url` | LiteLLM `model_prices_and_context_window.json` on GitHub | What the fetch (startup auto-refresh, the flag, the `.rpc` method) reads. A constant by default so pricing works with zero configuration; overridable for a mirror or pinned revision. |
+| `rate_sources` | OpenRouter `/api/v1/models`, then LiteLLM's catalog on GitHub | What the fetch (startup auto-refresh, the flag, the `.rpc` method) reads, highest priority first. Setting it replaces the whole list; `[]` fetches nothing. Each entry: `format` (required, above), `url` (required), `name` (defaults to `format`; must be unique — it keys the cached snapshot, so two sources of one format need names), `api_key` (optional key reference — `"secret:NAME"`, `"env:NAME"`, `"secret:<plugin>:NAME"` or a literal, docs/CONFIGURATION.md § Secrets — sent as `Authorization: Bearer`; a stored secret is read per fetch). Restart to apply. |
 | `rates_fetch_timeout_ms` | `30000` | Every fetch — the startup auto-refresh included — is bounded even when the transfer stalls. |
-| `rates_refresh_days` | `7` | How stale the cached snapshot may be before a server start fetches again. `0` fetches on every start; the `--plugin-call cost-tracker refresh_rates` flag always fetches regardless. |
+| `rates_refresh_days` | `7` | How stale a cached snapshot may be before a server start fetches again. `0` fetches on every start; the `--plugin-call cost-tracker refresh_rates` flag always fetches regardless. |
 
 ## Notes
 

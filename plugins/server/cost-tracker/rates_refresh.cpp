@@ -1,15 +1,17 @@
 #include "rates_refresh.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <string>
 
 #include "minimal/common/logger.hpp"
 #include "rates_fetch.hpp"
 
 namespace minimal::cost_tracker {
 
-bool RefreshRatesDue(const std::optional<FetchedRates>& litellm,
-                     const std::optional<FetchedRates>& openrouter,
+bool RefreshRatesDue(const std::vector<std::optional<FetchedRates>>& snapshots,
                      const CostSettings& settings) {
+    if (snapshots.empty()) return false;  // no sources: nothing to fetch
     if (settings.rates_refresh_days <= 0) return true;  // 0: fetch on every start
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
                          std::chrono::system_clock::now().time_since_epoch())
@@ -20,17 +22,18 @@ bool RefreshRatesDue(const std::optional<FetchedRates>& litellm,
                            const std::optional<FetchedRates>& rates) {
         return !rates || rates->fetched_at_unix <= 0 || now - rates->fetched_at_unix >= horizon;
     };
-    return stale(litellm) || stale(openrouter);
+    return std::any_of(snapshots.begin(), snapshots.end(), stale);
 }
 
 void RatesRefresher::MaybeStart() {
     // Storage is the fetch's cache; without the seam there is nothing to
     // refresh (bundled/config tiers still price every report).
     if (storage_ == nullptr) return;
-    if (!RefreshRatesDue(store_.GetFetchedRates(), store_.GetOpenRouterFetchedRates(),
-                         settings_)) {
-        return;
+    std::vector<std::optional<FetchedRates>> snapshots;
+    for (const auto& source : settings_.rate_sources) {
+        snapshots.push_back(store_.GetFetchedRates(source.name));
     }
+    if (!RefreshRatesDue(snapshots, settings_)) return;
     bool expected = false;
     if (!started_.compare_exchange_strong(expected, true)) return;
     worker_ = std::thread([this] { Run(); });
@@ -43,10 +46,14 @@ void RatesRefresher::Run() {
     // caller to answer.
     const auto outcome = FetchAndUpdateRates(settings_, store_, rates_);
     if (outcome.ok) {
+        std::string per_source;
+        for (const auto& source : outcome.sources) {
+            per_source += (per_source.empty() ? "" : ", ") + source.name + " " +
+                          std::to_string(source.updated);
+        }
         common::DefaultLogger().info("cost-tracker: refreshed {} model rate(s) at startup "
-                                     "(LiteLLM {}, OpenRouter {}, snapshot of {}){}",
-                                     outcome.updated, outcome.litellm_updated,
-                                     outcome.openrouter_updated, outcome.fetched_at,
+                                     "({}, snapshot of {}){}",
+                                     outcome.updated, per_source, outcome.fetched_at,
                                      outcome.warning.empty() ? "" : "; " + outcome.warning);
     } else {
         common::DefaultLogger().warn("cost-tracker: startup rates refresh failed; keeping the "

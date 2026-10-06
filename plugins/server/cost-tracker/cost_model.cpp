@@ -139,6 +139,29 @@ std::map<std::string, Rate> ParseRateTable(const nlohmann::json& models_object) 
     return rates;
 }
 
+namespace {
+
+// One entry in LiteLLM's per-token field schema, shared by the catalog and the
+// proxy's /model/info. nullopt when the entry is not a text-chat price: no
+// usable input cost, or (when `require_output`) no usable output cost.
+std::optional<Rate> LiteLlmEntryRate(const nlohmann::json& entry, bool require_output) {
+    const auto in = PositiveNumber(entry, kLiteLlmInput);
+    const auto out = PositiveNumber(entry, kLiteLlmOutput);
+    if (!in || (require_output && !out)) return std::nullopt;
+    Rate rate;
+    rate.input_per_mtok = *in * kTokensPerMtok;
+    if (out) rate.output_per_mtok = *out * kTokensPerMtok;
+    if (const auto v = PositiveNumber(entry, kLiteLlmCacheRead)) {
+        rate.cache_read_per_mtok = *v * kTokensPerMtok;
+    }
+    if (const auto v = PositiveNumber(entry, kLiteLlmCacheWrite)) {
+        rate.cache_write_per_mtok = *v * kTokensPerMtok;
+    }
+    return rate;
+}
+
+}  // namespace
+
 std::map<std::string, Rate> IngestLiteLlmPrices(const nlohmann::json& document) {
     std::map<std::string, Rate> rates;
     if (!document.is_object()) return rates;
@@ -146,19 +169,29 @@ std::map<std::string, Rate> IngestLiteLlmPrices(const nlohmann::json& document) 
         // Skip LiteLLM's own metadata keys ("sample_spec", etc.) -- they carry
         // no per-token costs and fall out of the has-both-costs filter anyway.
         if (!it.value().is_object()) continue;
-        const auto in = PositiveNumber(it.value(), kLiteLlmInput);
-        const auto out = PositiveNumber(it.value(), kLiteLlmOutput);
-        if (!in || !out) continue;
-        Rate rate;
-        rate.input_per_mtok = *in * kTokensPerMtok;
-        rate.output_per_mtok = *out * kTokensPerMtok;
-        if (const auto v = PositiveNumber(it.value(), kLiteLlmCacheRead)) {
-            rate.cache_read_per_mtok = *v * kTokensPerMtok;
+        if (const auto rate = LiteLlmEntryRate(it.value(), /*require_output=*/true)) {
+            rates.emplace(it.key(), *rate);
         }
-        if (const auto v = PositiveNumber(it.value(), kLiteLlmCacheWrite)) {
-            rate.cache_write_per_mtok = *v * kTokensPerMtok;
+    }
+    return rates;
+}
+
+std::map<std::string, Rate> IngestLiteLlmProxyPrices(const nlohmann::json& document) {
+    std::map<std::string, Rate> rates;
+    if (!document.is_object()) return rates;
+    const auto data = document.find("data");
+    if (data == document.end() || !data->is_array()) return rates;
+    for (const auto& entry : *data) {
+        if (!entry.is_object()) continue;
+        const auto name = entry.find("model_name");
+        if (name == entry.end() || !name->is_string() || name->get<std::string>().empty()) {
+            continue;
         }
-        rates.emplace(it.key(), rate);
+        const auto info = entry.find("model_info");
+        if (info == entry.end() || !info->is_object()) continue;
+        if (const auto rate = LiteLlmEntryRate(*info, /*require_output=*/false)) {
+            rates.emplace(name->get<std::string>(), *rate);
+        }
     }
     return rates;
 }
@@ -190,6 +223,24 @@ std::map<std::string, Rate> IngestOpenRouterPrices(const nlohmann::json& documen
         rates.emplace(id->get<std::string>(), rate);
     }
     return rates;
+}
+
+const char* RateFormatName(RateFormat format) {
+    switch (format) {
+        case RateFormat::kLiteLlm: return "litellm";
+        case RateFormat::kOpenRouter: return "openrouter";
+        case RateFormat::kLiteLlmProxy: return "litellm-proxy";
+    }
+    return "";
+}
+
+std::map<std::string, Rate> IngestPrices(RateFormat format, const nlohmann::json& document) {
+    switch (format) {
+        case RateFormat::kLiteLlm: return IngestLiteLlmPrices(document);
+        case RateFormat::kOpenRouter: return IngestOpenRouterPrices(document);
+        case RateFormat::kLiteLlmProxy: return IngestLiteLlmProxyPrices(document);
+    }
+    return {};
 }
 
 nlohmann::json FetchedToJson(const FetchedRates& rates) {
@@ -234,9 +285,8 @@ std::optional<FetchedRates> FetchedFromJson(std::string_view json) {
 RateTable::RateTable(RateSources sources, plugins::PluginStorage* storage)
     : bundled_(ParseRateTable(sources.bundled_models)),
       config_(ParseRateTable(sources.config_rates)),
-      fetched_(sources.fetched ? sources.fetched->models : std::map<std::string, Rate>{}),
-      openrouter_fetched_(sources.openrouter_fetched ? sources.openrouter_fetched->models
-                                                     : std::map<std::string, Rate>{}),
+      fetched_sources_(std::move(sources.fetched_sources)),
+      fetched_(fetched_sources_.size()),
       storage_(storage) {}
 
 void RateTable::SetConfigRates(const nlohmann::json& config_rates) {
@@ -246,37 +296,33 @@ void RateTable::SetConfigRates(const nlohmann::json& config_rates) {
 }
 
 void RateTable::RefreshFetched() {
-    std::map<std::string, Rate> fetched;
-    std::map<std::string, Rate> openrouter;
+    std::vector<std::map<std::string, Rate>> fetched(fetched_sources_.size());
     if (storage_ != nullptr) {
         // Namespace is this plugin's own, so the blobs are unreachable from
         // outside; the keys are the ones the rates fetch writes. Each tier
-        // decodes independently: one corrupt snapshot must not lose the other.
-        if (const auto blob = storage_->Get(kStorageNamespace, kFetchedRatesKey)) {
-            if (const auto rates = FetchedFromJson(*blob)) fetched = rates->models;
-        }
-        if (const auto blob = storage_->Get(kStorageNamespace, kOpenRouterFetchedRatesKey)) {
-            if (const auto rates = FetchedFromJson(*blob)) openrouter = rates->models;
+        // decodes independently: one corrupt snapshot must not lose the others.
+        for (std::size_t i = 0; i < fetched_sources_.size(); ++i) {
+            const auto blob =
+                storage_->Get(kStorageNamespace, FetchedRatesKey(fetched_sources_[i]));
+            if (!blob) continue;
+            if (auto rates = FetchedFromJson(*blob)) fetched[i] = std::move(rates->models);
         }
     }
     {
         const std::lock_guard<std::mutex> lock(mu_);
         fetched_ = std::move(fetched);
-        openrouter_fetched_ = std::move(openrouter);
     }
 }
 
 std::optional<Rate> RateTable::Resolve(const std::string& model) const {
     const std::lock_guard<std::mutex> lock(mu_);
-    // config > openrouter > litellm > bundled: the user's explicit price
-    // outranks every snapshot, OpenRouter's own price for its slug outranks
-    // the derived copy in LiteLLM's catalog, and any snapshot outranks the
-    // stale shipped one.
+    // config > fetched sources in list order > bundled: the user's explicit
+    // price outranks every snapshot, the configured order ranks the
+    // snapshots, and any snapshot outranks the stale shipped one.
     if (const auto it = config_.find(model); it != config_.end()) return it->second;
-    if (const auto it = openrouter_fetched_.find(model); it != openrouter_fetched_.end()) {
-        return it->second;
+    for (const auto& tier : fetched_) {
+        if (const auto it = tier.find(model); it != tier.end()) return it->second;
     }
-    if (const auto it = fetched_.find(model); it != fetched_.end()) return it->second;
     if (const auto it = bundled_.find(model); it != bundled_.end()) return it->second;
     return std::nullopt;
 }

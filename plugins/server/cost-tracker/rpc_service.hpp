@@ -17,13 +17,13 @@
 //                                   subagent runs included. (see TotalsToJson)
 //   list   {}                    -> {"sessions": [totals...]}   every session
 //                                   (per-session, no roll-up)
-//   refresh_rates {}             -> fetches both pricing snapshots now; same
-//                                   path as the startup auto-refresh and the
-//                                   server's --plugin-call flag.
-//                                   Returns {"updated": N, "litellm_updated": N,
-//                                   "openrouter_updated": N, "fetched_at":
+//   refresh_rates {}             -> fetches every rate source's snapshot now;
+//                                   same path as the startup auto-refresh and
+//                                   the server's --plugin-call flag.
+//                                   Returns {"updated": N, "sources": [{"name",
+//                                   "updated": N, "error"?}...], "fetched_at":
 //                                   "...", "warning": "..."} or !ok with the
-//                                   failure (both sources down).
+//                                   failure (every source down).
 //
 // Threading: Handle runs on gRPC handler threads, concurrently across calls;
 // all state sits behind PluginStorage's per-call mutex, RateTable's own, and

@@ -87,6 +87,12 @@ public:
 
     std::string url() const { return "http://127.0.0.1:" + std::to_string(port_) + "/x.json"; }
 
+    // The raw request head the server received; waits for the one exchange.
+    std::string received() {
+        if (thread_.joinable()) thread_.join();
+        return request_;
+    }
+
 private:
     void Serve(const std::string& body) {
         timeval tv{5, 0};
@@ -100,6 +106,7 @@ private:
             if (n <= 0) break;
             request.append(buffer, static_cast<std::size_t>(n));
         }
+        request_ = request;
         if (delay_.count() > 0) std::this_thread::sleep_for(delay_);
         const std::string response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                                      "Content-Length: " +
@@ -121,8 +128,25 @@ private:
     int listen_fd_ = -1;
     int port_ = 0;
     std::chrono::milliseconds delay_;
+    std::string request_;
     std::thread thread_;
 };
+
+RateSourceSettings Source(std::string name, RateFormat format, std::string url,
+                          std::string api_key = {}) {
+    RateSourceSettings source;
+    source.name = std::move(name);
+    source.format = format;
+    source.url = std::move(url);
+    if (!api_key.empty()) source.api_key = common::SecretHandle::Literal(std::move(api_key));
+    return source;
+}
+
+// The default list's shape on closed ports: no live network in tests.
+std::vector<RateSourceSettings> UnroutableSources() {
+    return {Source("openrouter", RateFormat::kOpenRouter, "http://127.0.0.1:1/or.json"),
+            Source("litellm", RateFormat::kLiteLlm, "http://127.0.0.1:1/x.json")};
+}
 
 TurnRecord Turn(const std::string& model, std::int64_t in, std::int64_t out,
                 std::int64_t cr = 0, std::int64_t cw = 0, bool reported = true,
@@ -212,6 +236,33 @@ TEST_CASE("OpenRouter ingestion parses string pricing and skips the rest", "[cos
 
     // No "data" array (or a non-array one) is simply an empty table.
     CHECK(IngestOpenRouterPrices(nlohmann::json::parse(R"({"error": "x"})")).empty());
+}
+
+TEST_CASE("LiteLLM proxy ingestion reads model_info under model_name, input alone suffices",
+          "[cost_tracker]") {
+    const nlohmann::json document = nlohmann::json::parse(R"({"data": [
+        {"model_name": "full", "model_info": {"input_cost_per_token": 0.000002,
+            "output_cost_per_token": 0.000008, "cache_read_input_token_cost": 0.0000005}},
+        {"model_name": "free-internal", "model_info": {"input_cost_per_token": 0}},
+        {"model_name": "no-input", "model_info": {"output_cost_per_token": 0.000001}},
+        {"model_name": "", "model_info": {"input_cost_per_token": 0.000001}},
+        {"model_name": "no-info"},
+        7
+    ]})");
+    const auto rates = IngestLiteLlmProxyPrices(document);
+    REQUIRE(rates.size() == 2);
+    CHECK(rates.at("full").input_per_mtok == 2.0);
+    CHECK(rates.at("full").output_per_mtok == 8.0);
+    CHECK(rates.at("full").cache_read_per_mtok == 0.5);
+    // A zero price from the gateway's own meter is a known (free) rate.
+    CHECK(rates.at("free-internal").input_per_mtok == 0.0);
+    CHECK(rates.at("free-internal").output_per_mtok == 0.0);
+    CHECK(IngestLiteLlmProxyPrices(nlohmann::json::array()).empty());
+
+    // The dispatcher routes each format to its own ingest.
+    CHECK(IngestPrices(RateFormat::kLiteLlmProxy, document).size() == 2);
+    CHECK(IngestPrices(RateFormat::kOpenRouter, document).empty());
+    CHECK(IngestPrices(RateFormat::kLiteLlm, document).empty());
 }
 
 TEST_CASE("fetched-rates blob round-trips and rejects corruption", "[cost_tracker]") {
@@ -337,15 +388,16 @@ TEST_CASE("the config tier swaps live; the other tiers stay", "[cost_tracker]") 
     CHECK(table.Resolve("m")->input_per_mtok == 1.0);  // the bundled tier shows through
 }
 
-TEST_CASE("rate resolution is config > openrouter > litellm > bundled",
+TEST_CASE("rate resolution is config > fetched sources in list order > bundled",
           "[cost_tracker][invariant]") {
     Harness harness;
-    harness.store.SetFetchedRates(FetchedRates{
+    harness.store.SetFetchedRates("litellm", FetchedRates{
         "t", 0, {{"m", Rate{10.0, 10.0}}, {"only-litellm", Rate{7.0, 7.0}}}});
-    harness.store.SetOpenRouterFetchedRates(FetchedRates{
+    harness.store.SetFetchedRates("openrouter", FetchedRates{
         "t", 0, {{"m", Rate{20.0, 20.0}}, {"only-openrouter", Rate{30.0, 30.0}}}});
 
     RateSources sources;
+    sources.fetched_sources = {"openrouter", "litellm"};
     sources.bundled_models = nlohmann::json::parse(R"({"m": {"input": 1.0, "output": 1.0}})");
     sources.config_rates = nlohmann::json::parse(R"({"m": {"input": 100.0, "output": 100.0}})");
     RateTable table(sources, &harness.storage);
@@ -353,7 +405,7 @@ TEST_CASE("rate resolution is config > openrouter > litellm > bundled",
 
     REQUIRE(table.Resolve("m"));
     CHECK(table.Resolve("m")->input_per_mtok == 100.0);
-    // A slug both snapshots carry resolves to OpenRouter's own price.
+    // A slug both snapshots carry resolves to the earlier source's price.
     sources.config_rates = nlohmann::json::object();
     RateTable no_config(sources, &harness.storage);
     no_config.RefreshFetched();
@@ -376,12 +428,25 @@ TEST_CASE("rate resolution is config > openrouter > litellm > bundled",
 
     // One corrupt snapshot blob clears only ITS tier: the LiteLLM data must
     // survive a corrupt OpenRouter blob (and vice versa).
-    harness.storage.Set("cost-tracker", "rates/fetched_openrouter", "{not json");
+    harness.storage.Set("cost-tracker", "rates/fetched/openrouter", "{not json");
     RateTable with_corrupt(sources, &harness.storage);
     with_corrupt.RefreshFetched();
     REQUIRE(with_corrupt.Resolve("only-litellm"));
     CHECK(with_corrupt.Resolve("only-litellm")->input_per_mtok == 7.0);
     CHECK(!with_corrupt.Resolve("only-openrouter"));
+
+    // Reordering the list reorders the tiers; a source no longer listed is
+    // not consulted even though its snapshot is still stored.
+    harness.store.SetFetchedRates("openrouter", FetchedRates{
+        "t", 0, {{"m", Rate{20.0, 20.0}}, {"only-openrouter", Rate{30.0, 30.0}}}});
+    sources.fetched_sources = {"litellm", "openrouter"};
+    RateTable reordered(sources, &harness.storage);
+    reordered.RefreshFetched();
+    CHECK(reordered.Resolve("m")->input_per_mtok == 10.0);
+    sources.fetched_sources = {"litellm"};
+    RateTable dropped(sources, &harness.storage);
+    dropped.RefreshFetched();
+    CHECK(!dropped.Resolve("only-openrouter"));
 }
 
 TEST_CASE("the store round-trips history and pins the parent", "[cost_tracker]") {
@@ -417,7 +482,7 @@ TEST_CASE("the store degrades with null storage and throws on corruption",
     orphan.AppendTurn("s1", "", Turn("m", 1, 1));
     CHECK(orphan.Load("s1").turns.empty());
     CHECK(orphan.SessionIds().empty());
-    CHECK(!orphan.GetFetchedRates());
+    CHECK(!orphan.GetFetchedRates("litellm"));
 
     Harness harness;
     harness.storage.Set("cost-tracker", "sessions/s1", "{not json");
@@ -602,21 +667,59 @@ TEST_CASE("rewind removes the records past the cut; redo and unclassifiable reco
 TEST_CASE("plugin settings parse from the config slice with defaults",
           "[cost_tracker]") {
     const auto defaults = ParseCostSettings(nlohmann::json::object());
-    CHECK(!defaults.rates_fetch_url.empty());
-    CHECK(!defaults.openrouter_rates_fetch_url.empty());
+    REQUIRE(defaults.rate_sources.size() == 2);
+    CHECK(defaults.rate_sources[0].name == "openrouter");
+    CHECK(defaults.rate_sources[0].format == RateFormat::kOpenRouter);
+    CHECK(defaults.rate_sources[1].name == "litellm");
+    CHECK(defaults.rate_sources[1].format == RateFormat::kLiteLlm);
+    CHECK(!defaults.rate_sources[1].url.empty());
+    CHECK(!defaults.rate_sources[0].api_key.configured());
     CHECK(defaults.rates_fetch_timeout_ms == 30000);
 
-    const auto custom = ParseCostSettings(nlohmann::json::parse(
-        R"({"rates_fetch_url": "http://mirror/x.json", "rates_fetch_timeout_ms": 5, )"
-        R"("openrouter_rates_fetch_url": "http://mirror/or.json"})"));
-    CHECK(custom.rates_fetch_url == "http://mirror/x.json");
-    CHECK(custom.openrouter_rates_fetch_url == "http://mirror/or.json");
+    const auto custom = ParseCostSettings(nlohmann::json::parse(R"({
+        "rate_sources": [
+            {"format": "litellm-proxy", "url": "http://gw/model/info", "api_key": "inline-key"},
+            {"name": "mirror", "format": "litellm", "url": "http://mirror/x.json"},
+            {"format": "litellm", "url": "http://other/x.json"}
+        ],
+        "rates_fetch_timeout_ms": 5})"));
+    REQUIRE(custom.rate_sources.size() == 3);
+    CHECK(custom.rate_sources[0].name == "litellm-proxy");  // name defaults to format
+    CHECK(custom.rate_sources[0].format == RateFormat::kLiteLlmProxy);
+    REQUIRE(custom.rate_sources[0].api_key.configured());
+    CHECK(custom.rate_sources[0].api_key.Get().value == "inline-key");
+    CHECK(custom.rate_sources[1].name == "mirror");
+    CHECK(custom.rate_sources[1].url == "http://mirror/x.json");
+    CHECK(custom.rate_sources[2].name == "litellm");
+    CHECK(custom.RateSourceNames() == std::vector<std::string>{"litellm-proxy", "mirror", "litellm"});
     CHECK(custom.rates_fetch_timeout_ms == 5);
+    CHECK(ParseCostSettings({{"rate_sources", nlohmann::json::array()}}).rate_sources.empty());
 
     // Junk is refused by name rather than silently replaced by a default.
     using Catch::Matchers::ContainsSubstring;
-    CHECK_THROWS_WITH(ParseCostSettings({{"rates_fetch_url", 3}}),
-                      ContainsSubstring("plugins.d/cost-tracker.json: rates_fetch_url: must be a string"));
+    CHECK_THROWS_WITH(ParseCostSettings({{"rate_sources", 3}}),
+                      ContainsSubstring("plugins.d/cost-tracker.json: rate_sources: must be a list"));
+    CHECK_THROWS_WITH(
+        ParseCostSettings(nlohmann::json::parse(R"({"rate_sources": [{"url": "http://x"}]})")),
+        ContainsSubstring("rate_sources[0].format: is required"));
+    CHECK_THROWS_WITH(ParseCostSettings(nlohmann::json::parse(
+                          R"({"rate_sources": [{"format": "csv", "url": "http://x"}]})")),
+                      ContainsSubstring("rate_sources[0].format"));
+    CHECK_THROWS_WITH(ParseCostSettings(nlohmann::json::parse(
+                          R"({"rate_sources": [{"format": "litellm"}]})")),
+                      ContainsSubstring("rate_sources[0].url"));
+    CHECK_THROWS_WITH(ParseCostSettings(nlohmann::json::parse(
+                          R"({"rate_sources": [{"format": "litellm", "url": "http://a"},)"
+                          R"( {"format": "litellm", "url": "http://b"}]})")),
+                      ContainsSubstring("rate_sources[1].name"));
+    CHECK_THROWS_WITH(ParseCostSettings(nlohmann::json::parse(
+                          R"({"rate_sources": [{"name": "../x", "format": "litellm", "url": "http://a"}]})")),
+                      ContainsSubstring("rate_sources[0].name"));
+    CHECK_THROWS_WITH(ParseCostSettings(nlohmann::json::parse(
+                          R"({"rate_sources": [{"format": "litellm", "url": "http://a", "uri": 1}]})")),
+                      ContainsSubstring("rate_sources[0].uri: unknown field"));
+    CHECK_THROWS_WITH(ParseCostSettings({{"rates_fetch_url", "x"}}),
+                      ContainsSubstring("rates_fetch_url: unknown field"));
     CHECK_THROWS_WITH(ParseCostSettings({{"rates_fetch_timeout_ms", -1}}),
                       ContainsSubstring("rates_fetch_timeout_ms: must be at least 1"));
     CHECK_THROWS_WITH(ParseCostSettings({{"rates_url", "x"}}),
@@ -1025,12 +1128,17 @@ TEST_CASE("a failed rates fetch keeps the old table", "[cost_tracker]") {
     // nothing.) Drives FetchAndUpdateRates directly -- it is the shared path
     // all three run on.
     CostSettings settings;
-    settings.rates_fetch_url = "http://127.0.0.1:1/x.json";
-    settings.openrouter_rates_fetch_url = "http://127.0.0.1:1/or.json";
+    settings.rate_sources = UnroutableSources();
     settings.rates_fetch_timeout_ms = 2000;
 
     const auto outcome = FetchAndUpdateRates(settings, harness.store, rates);
     CHECK_FALSE(outcome.ok);
+    CHECK_FALSE(outcome.error.empty());
+
+    // No sources at all is a clean failure too, never a crash.
+    CostSettings none;
+    none.rate_sources.clear();
+    CHECK_FALSE(FetchAndUpdateRates(none, harness.store, rates).ok);
 
     const auto totals = Aggregate("s1", "", harness.store.Load("s1").turns,
                                   [&rates](const std::string& m) { return rates.Resolve(m); });
@@ -1047,23 +1155,28 @@ TEST_CASE("one snapshot fetching successfully still refreshes the table when the
     // URL is unroutable, exercising the exact partial-success path end to end:
     // the successful snapshot must reach the live table regardless.
     Harness harness;
-    RateSources sources;
-    RateTable rates(sources, &harness.storage);
-    harness.store.AppendTurn("s1", "", Turn("only-litellm", 1000000, 0));
-
     LoopbackJsonServer litellm_server(R"({
         "only-litellm": {"input_cost_per_token": 0.000001, "output_cost_per_token": 0.000002}
     })");
 
     CostSettings settings;
-    settings.rates_fetch_url = litellm_server.url();
-    settings.openrouter_rates_fetch_url = "http://127.0.0.1:1/or.json";  // unroutable
+    settings.rate_sources = {Source("openrouter", RateFormat::kOpenRouter,
+                                    "http://127.0.0.1:1/or.json"),  // unroutable
+                             Source("litellm", RateFormat::kLiteLlm, litellm_server.url())};
     settings.rates_fetch_timeout_ms = 2000;
+    RateSources sources;
+    sources.fetched_sources = settings.RateSourceNames();
+    RateTable rates(sources, &harness.storage);
+    harness.store.AppendTurn("s1", "", Turn("only-litellm", 1000000, 0));
 
     const auto outcome = FetchAndUpdateRates(settings, harness.store, rates);
     CHECK(outcome.ok);                       // partial success is still success
-    CHECK(outcome.litellm_updated == 1);
-    CHECK(outcome.openrouter_updated == 0);
+    REQUIRE(outcome.sources.size() == 2);
+    CHECK(outcome.sources[0].name == "openrouter");
+    CHECK(outcome.sources[0].updated == 0);
+    CHECK_FALSE(outcome.sources[0].error.empty());
+    CHECK(outcome.sources[1].updated == 1);
+    CHECK(outcome.sources[1].error.empty());
     CHECK_FALSE(outcome.warning.empty());    // the OpenRouter failure is surfaced...
     CHECK(outcome.error.empty());            // ...but does not read as a hard error
 
@@ -1074,9 +1187,9 @@ TEST_CASE("one snapshot fetching successfully still refreshes the table when the
     CHECK(totals.total_cost == 1.0);  // 1e6 tokens * $1/mtok input
 }
 
-TEST_CASE("LiteLLM and OpenRouter are fetched concurrently, not sequentially",
+TEST_CASE("rate sources are fetched concurrently, not sequentially",
           "[cost_tracker]") {
-    // Both loopback servers sleep 300ms before answering. Sequential fetches
+    // Every loopback server sleeps 300ms before answering. Sequential fetches
     // (the pre-fix shape) would take >=600ms end to end; concurrent fetches
     // take ~300ms plus overhead. The threshold is set well below 2x the
     // per-source delay to tolerate scheduling jitter while still failing
@@ -1092,9 +1205,13 @@ TEST_CASE("LiteLLM and OpenRouter are fetched concurrently, not sequentially",
     LoopbackJsonServer openrouter_server(
         R"({"data":[{"id":"m2","pricing":{"prompt":"0.000001","completion":"0.000001"}}]})", kDelay);
 
+    LoopbackJsonServer proxy_server(
+        R"({"data":[{"model_name":"m3","model_info":{"input_cost_per_token":0.000001}}]})", kDelay);
+
     CostSettings settings;
-    settings.rates_fetch_url = litellm_server.url();
-    settings.openrouter_rates_fetch_url = openrouter_server.url();
+    settings.rate_sources = {Source("litellm", RateFormat::kLiteLlm, litellm_server.url()),
+                             Source("openrouter", RateFormat::kOpenRouter, openrouter_server.url()),
+                             Source("gw", RateFormat::kLiteLlmProxy, proxy_server.url())};
     settings.rates_fetch_timeout_ms = 5000;
 
     const auto start = std::chrono::steady_clock::now();
@@ -1102,9 +1219,35 @@ TEST_CASE("LiteLLM and OpenRouter are fetched concurrently, not sequentially",
     const auto elapsed = std::chrono::steady_clock::now() - start;
 
     CHECK(outcome.ok);
-    CHECK(outcome.litellm_updated == 1);
-    CHECK(outcome.openrouter_updated == 1);
+    CHECK(outcome.updated == 3);
+    for (const auto& source : outcome.sources) CHECK(source.updated == 1);
     CHECK(elapsed < kDelay * 3 / 2);  // well under 2x kDelay's sequential-sum shape
+}
+
+TEST_CASE("a rate source's api_key is sent as a bearer; an unkeyed one sends none",
+          "[cost_tracker]") {
+    Harness harness;
+    LoopbackJsonServer keyed(
+        R"({"data":[{"model_name":"m","model_info":{"input_cost_per_token":0.000001}}]})");
+    LoopbackJsonServer open(R"({"m2": {"input_cost_per_token": 0.000001, "output_cost_per_token": 0.000001}})");
+
+    CostSettings settings;
+    settings.rate_sources = {Source("gw", RateFormat::kLiteLlmProxy, keyed.url(), "sekrit"),
+                             Source("litellm", RateFormat::kLiteLlm, open.url())};
+    settings.rates_fetch_timeout_ms = 2000;
+    RateSources sources;
+    sources.fetched_sources = settings.RateSourceNames();
+    RateTable rates(sources, &harness.storage);
+
+    const auto outcome = FetchAndUpdateRates(settings, harness.store, rates);
+    CHECK(outcome.ok);
+    CHECK(keyed.received().find("Authorization: Bearer sekrit\r\n") != std::string::npos);
+    CHECK(open.received().find("Authorization") == std::string::npos);
+    // Each snapshot lands under its own source's key and reaches the table.
+    CHECK(harness.store.GetFetchedRates("gw"));
+    CHECK(harness.store.GetFetchedRates("litellm"));
+    CHECK(rates.Resolve("m"));
+    CHECK(rates.Resolve("m2"));
 }
 
 TEST_CASE("the startup refresh gate fetches only when a snapshot is stale", "[cost_tracker]") {
@@ -1118,22 +1261,27 @@ TEST_CASE("the startup refresh gate fetches only when a snapshot is stale", "[co
     const FetchedRates old{"t", now - 8 * 86400, {{"m", Rate{1.0, 1.0}}}};
     const FetchedRates boundary{"t", now - 6 * 86400, {{"m", Rate{1.0, 1.0}}}};
 
+    using Snapshots = std::vector<std::optional<FetchedRates>>;
     // No cache at all: the first boot fetches.
-    CHECK(RefreshRatesDue(std::nullopt, std::nullopt, settings));
-    // Either tier stale (or timestamp-less: a pre-fetched_at_unix cache) is
+    CHECK(RefreshRatesDue(Snapshots{std::nullopt, std::nullopt}, settings));
+    // Any tier stale (or timestamp-less: a pre-fetched_at_unix cache) is
     // enough -- one tier of prices silently aging out is what the gate exists
     // to prevent.
-    CHECK(RefreshRatesDue(old, fresh, settings));
-    CHECK(RefreshRatesDue(fresh, old, settings));
-    CHECK(RefreshRatesDue(FetchedRates{"t", 0, {}}, fresh, settings));
-    // Fresh on both sides of the horizon: skip. (The boundary case sits one
-    // day inside the 7-day window; "at least 7 days" is covered by `old`.)
-    CHECK_FALSE(RefreshRatesDue(fresh, fresh, settings));
-    CHECK_FALSE(RefreshRatesDue(fresh, boundary, settings));
+    CHECK(RefreshRatesDue(Snapshots{old, fresh}, settings));
+    CHECK(RefreshRatesDue(Snapshots{fresh, fresh, old}, settings));
+    CHECK(RefreshRatesDue(Snapshots{FetchedRates{"t", 0, {}}, fresh}, settings));
+    CHECK(RefreshRatesDue(Snapshots{fresh, std::nullopt}, settings));
+    // Fresh everywhere: skip. (The boundary case sits one day inside the
+    // 7-day window; "at least 7 days" is covered by `old`.)
+    CHECK_FALSE(RefreshRatesDue(Snapshots{fresh, fresh}, settings));
+    CHECK_FALSE(RefreshRatesDue(Snapshots{fresh, boundary}, settings));
+    // No sources configured: nothing to fetch, whatever the horizon.
+    CHECK_FALSE(RefreshRatesDue(Snapshots{}, settings));
     // rates_refresh_days == 0 means fetch on every start, fresh or not.
     CostSettings always;
     always.rates_refresh_days = 0;
-    CHECK(RefreshRatesDue(fresh, fresh, always));
+    CHECK(RefreshRatesDue(Snapshots{fresh, fresh}, always));
+    CHECK_FALSE(RefreshRatesDue(Snapshots{}, always));
 }
 
 TEST_CASE("the startup refresh runs in the background and teardown joins it", "[cost_tracker]") {
@@ -1144,8 +1292,7 @@ TEST_CASE("the startup refresh runs in the background and teardown joins it", "[
     // Unroutable ports: the worker runs its full (bounded) fetch and fails,
     // which is exactly the shape the teardown join must tolerate.
     CostSettings settings;
-    settings.rates_fetch_url = "http://127.0.0.1:1/x.json";
-    settings.openrouter_rates_fetch_url = "http://127.0.0.1:1/or.json";
+    settings.rate_sources = UnroutableSources();
     settings.rates_fetch_timeout_ms = 2000;
 
     RatesRefresher refresher(settings, harness.store, rates, &harness.storage);

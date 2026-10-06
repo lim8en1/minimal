@@ -34,6 +34,7 @@
 #include <atomic>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #include "cost_model.hpp"
 #include "cost_settings.hpp"
@@ -43,14 +44,14 @@
 
 namespace minimal::cost_tracker {
 
-// True when a server start should fetch: rates_refresh_days == 0 always
-// fetches; otherwise any of -- no cached snapshot at all, a snapshot with no
-// machine timestamp (pre-dates the field: assume old), or a snapshot past the
-// -- gate. BOTH snapshots must be fresh for a skip: one stale tier means one
-// tier of prices silently aging out, which is exactly what the gate exists to
-// prevent. Errs toward fetching, never toward keeping a stale price.
-bool RefreshRatesDue(const std::optional<FetchedRates>& litellm,
-                     const std::optional<FetchedRates>& openrouter,
+// True when a server start should fetch, given one cached snapshot per
+// configured source: no sources never fetches; rates_refresh_days == 0
+// always fetches; otherwise any of -- no cached snapshot at all, a snapshot
+// with no machine timestamp (pre-dates the field: assume old), or a snapshot
+// past the gate. EVERY snapshot must be fresh for a skip: one stale tier
+// means one tier of prices silently aging out, which is exactly what the gate
+// exists to prevent. Errs toward fetching, never toward keeping a stale price.
+bool RefreshRatesDue(const std::vector<std::optional<FetchedRates>>& snapshots,
                      const CostSettings& settings);
 
 class RatesRefresher {

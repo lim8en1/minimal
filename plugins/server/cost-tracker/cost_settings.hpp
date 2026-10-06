@@ -1,11 +1,36 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
+#include "cost_model.hpp"
+#include "minimal/common/secret_handle.hpp"
+#include "minimal/config/secrets.hpp"
 #include "policy.hpp"
 
 namespace minimal::cost_tracker {
+
+// One pricing snapshot the plugin fetches. `name` is the snapshot's storage
+// key suffix and its label in logs and the refresh_rates reply, so it is
+// unique within the list; `format` picks the ingest.
+struct RateSourceSettings {
+    std::string name;
+    RateFormat format = RateFormat::kLiteLlm;
+    std::string url;
+    // A key reference ("secret:NAME", "env:NAME", "secret:<plugin>:NAME", or a
+    // literal) sent as Authorization: Bearer; empty = no header. Bound to
+    // `url`'s host at parse time, read per fetch -- a secret stored later
+    // reaches the next refresh.
+    std::string api_key_ref;
+    common::SecretHandle api_key;
+};
+
+// The default list: OpenRouter's own /api/v1/models (keyed by OpenRouter slug
+// -- exactly the wire model id an OpenRouter-shaped provider sends, so no
+// provider naming or base-url sniffing is involved anywhere), then LiteLLM's
+// all-vendors catalog. Constant URLs so pricing works with zero configuration.
+std::vector<RateSourceSettings> DefaultRateSources();
 
 // This plugin's own config, the "config" object on its plugins.json entry.
 // Core keeps it as raw JSON precisely so each plugin owns its own schema --
@@ -13,27 +38,26 @@ namespace minimal::cost_tracker {
 //
 //   "config": {
 //     "rates": {"gpt-4o": {"input": 2.5, "output": 10.0, "cache_read": 1.25}},
-//     "rates_fetch_url": "https://...",
-//     "openrouter_rates_fetch_url": "https://...",
+//     "rate_sources": [
+//       {"format": "litellm-proxy", "url": "https://gw/model/info",
+//        "api_key": "secret:gateway"},
+//       {"format": "openrouter", "url": "https://openrouter.ai/api/v1/models"},
+//       {"name": "litellm-mirror", "format": "litellm", "url": "https://..."}
+//     ],
 //     "rates_fetch_timeout_ms": 30000,
 //     "rates_refresh_days": 7
 //   }
 //
-// `rates` is NOT parsed here: it is consumed verbatim as the RateTable's
-// config tier (ParseRateTable owns the entry schema).
+// A source's `name` defaults to its `format`, so a list naming each format
+// once needs no names. `rates` is NOT parsed here: it is consumed verbatim as
+// the RateTable's config tier (ParseRateTable owns the entry schema).
 struct CostSettings {
-    // The two pricing snapshots the plugin fetches (at server start when the
-    // cached snapshot is stale, from --plugin-call cost-tracker refresh_rates, and through the
-    // .rpc service's refresh_rates): LiteLLM's all-vendors catalog and
-    // OpenRouter's own /api/v1/models list. Constant URLs by default so
-    // pricing works with zero configuration; overridable for a mirror or a
-    // pinned revision. The OpenRouter snapshot is keyed by OpenRouter slug --
-    // which is exactly the wire model id an OpenRouter-shaped provider sends
-    // -- so no provider naming or base-url sniffing is involved anywhere.
-    std::string rates_fetch_url =
-        "https://raw.githubusercontent.com/BerriAI/litellm/main/"
-        "model_prices_and_context_window.json";
-    std::string openrouter_rates_fetch_url = "https://openrouter.ai/api/v1/models";
+    // The pricing snapshots the plugin fetches (at server start when a cached
+    // snapshot is stale, from --plugin-call cost-tracker refresh_rates, and
+    // through the .rpc service's refresh_rates), highest priority first: a
+    // model priced by several resolves to the earliest. Replacing the list
+    // replaces it whole; an empty list fetches nothing.
+    std::vector<RateSourceSettings> rate_sources = DefaultRateSources();
     // Every fetch (the startup auto-refresh included) is bounded even when
     // the transfer stalls.
     int rates_fetch_timeout_ms = static_cast<int>(kDefaultRatesFetchTimeout.count());
@@ -44,11 +68,17 @@ struct CostSettings {
     // The operator's own price table ({"<model>": {...}}), highest precedence
     // over the bundled and fetched ones; parsed by the rate table itself.
     nlohmann::json rates = nlohmann::json::object();
+
+    // The fetched tiers' names, in priority order -- what RateTable needs.
+    std::vector<std::string> RateSourceNames() const;
 };
 
 // Every field optional; a missing field keeps the struct's default. A present
-// field of the wrong type or out of range, or an unknown field, throws
-// config::ConfigError naming it -- the plugin then fails to load, loudly.
-CostSettings ParseCostSettings(const nlohmann::json& config);
+// field of the wrong type or out of range, an unknown field, a duplicate
+// source name, or a malformed api_key reference throws config::ConfigError
+// naming it -- the plugin then fails to load, loudly. `secrets` null = the
+// default resolver (the operator's store, no plugin namespaces).
+CostSettings ParseCostSettings(const nlohmann::json& config,
+                               const config::SecretResolver* secrets = nullptr);
 
 }  // namespace minimal::cost_tracker

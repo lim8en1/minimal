@@ -169,9 +169,14 @@ plugins::PluginRpcHandler::Reply CostRpcService::Handle(const std::string& metho
             reply.error = outcome.error;
             return reply;
         }
+        nlohmann::json sources = nlohmann::json::array();
+        for (const auto& source : outcome.sources) {
+            nlohmann::json entry{{"name", source.name}, {"updated", source.updated}};
+            if (!source.error.empty()) entry["error"] = source.error;
+            sources.push_back(std::move(entry));
+        }
         reply.payload = nlohmann::json{{"updated", outcome.updated},
-                                       {"litellm_updated", outcome.litellm_updated},
-                                       {"openrouter_updated", outcome.openrouter_updated},
+                                       {"sources", std::move(sources)},
                                        {"fetched_at", outcome.fetched_at},
                                        {"warning", outcome.warning}}
                             .dump();
