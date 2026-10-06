@@ -3,15 +3,10 @@
 #include <algorithm>
 #include <variant>
 
-namespace minimal::agent {
+#include "minimal/agent/policy.hpp"
+#include "minimal/common/units.hpp"
 
-namespace {
-constexpr std::int64_t kOutputCapMinMarginTokens = 4096;
-constexpr std::int64_t kOutputCapMarginPercent = 2;
-constexpr std::int64_t kOutputCapFloorTokens = 1024;
-constexpr std::int64_t kElisionMinSizeToBother = 1000;  // below this, eliding buys nothing
-constexpr std::int64_t kElisionTargetBytes = 500;
-}  // namespace
+namespace minimal::agent {
 
 std::vector<const llm::ToolUseBlock*> ToolUsesOf(const llm::Message& message) {
     std::vector<const llm::ToolUseBlock*> out;
@@ -62,7 +57,7 @@ std::optional<int> FitOutputCap(std::optional<int> cap, std::optional<std::int64
                                 std::int64_t input_tokens) {
     if (!cap || !window || *window <= 0) return cap;
     const std::int64_t margin =
-        std::max(kOutputCapMinMarginTokens, *window * kOutputCapMarginPercent / 100);
+        std::max(kOutputCapMinMarginTokens, common::PercentOf(*window, kOutputCapMarginPercent));
     const std::int64_t room = std::max(kOutputCapFloorTokens, *window - input_tokens - margin);
     return static_cast<int>(std::min<std::int64_t>(*cap, room));
 }
@@ -84,7 +79,7 @@ bool ElideLargestToolResult(std::vector<llm::Message>& history) {
             }
         }
     }
-    if (largest == nullptr || static_cast<std::int64_t>(largest_size) <= kElisionMinSizeToBother) {
+    if (largest == nullptr || static_cast<std::int64_t>(largest_size) <= kElisionMinBytes) {
         return false;
     }
     CapToolResult(*largest, kElisionTargetBytes);

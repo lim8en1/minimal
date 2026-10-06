@@ -4,6 +4,7 @@
 #include <set>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client::plugins {
 
@@ -81,7 +82,7 @@ void ObserverDispatcher::Deliver(const std::vector<ObserverEvent>& events) {
     for (const auto& observer : registry_.All()) {
         int& throws = throws_[observer.get()];
         for (const auto& event : events) {
-            if (throws >= kMaxThrows) break;
+            if (throws >= kMaxPluginThrows) break;
             try {
                 switch (event.kind) {
                     case Kind::TabOpened:       observer->OnTabOpened(event.tab); break;
@@ -98,11 +99,11 @@ void ObserverDispatcher::Deliver(const std::vector<ObserverEvent>& events) {
             } catch (const std::exception& error) {
                 ++throws;
                 common::DefaultLogger().warn("plugin observer threw: {}{}", error.what(),
-                                             throws >= kMaxThrows ? " -- disabled" : "");
+                                             throws >= kMaxPluginThrows ? " -- disabled" : "");
             } catch (...) {
                 ++throws;
                 common::DefaultLogger().warn("plugin observer threw a non-standard exception{}",
-                                             throws >= kMaxThrows ? " -- disabled" : "");
+                                             throws >= kMaxPluginThrows ? " -- disabled" : "");
             }
         }
     }

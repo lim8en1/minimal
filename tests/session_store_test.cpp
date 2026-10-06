@@ -1017,7 +1017,7 @@ TEST_CASE("the checkpoint runs on the reaper's threshold, not the append's",
     SessionDatabase db(path);
     const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
 
-    for (int i = 0; i < SessionDatabase::kCheckpointAppends - 1; ++i) {
+    for (int i = 0; i < kCheckpointAppends - 1; ++i) {
         db.AppendMessage(id, UserMsg(std::string(64, 'x')), 0);
     }
     using CheckpointOutcome = SessionDatabase::CheckpointOutcome;

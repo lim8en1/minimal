@@ -4,6 +4,7 @@
 #include "minimal/common/plugin_config_label.hpp"
 
 #include "minimal/common/logger.hpp"
+#include "minimal/common/policy.hpp"
 
 #include <cstdint>
 #include <fstream>
@@ -29,7 +30,7 @@ bool ReadBounded(const std::filesystem::path& path, std::int64_t limit, std::str
         if (in.bad()) return false;
         buffer.resize(static_cast<std::size_t>(in.gcount()));
     } else {
-        std::string chunk(65536, '\0');
+        std::string chunk(common::kReadChunkBytes, '\0');
         while (true) {
             in.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
             if (in.bad()) return false;
@@ -117,7 +118,7 @@ std::optional<ProjectContext> LoadProjectContext(const std::filesystem::path& pr
 std::string RenderProjectContextSection(const ProjectContext& context) {
     if (context.body.empty()) return {};
     std::string out;
-    out.reserve(context.body.size() + 128);
+    out.reserve(context.body.size());
     out += "## Project context\n\n";
     out += "Instructions from " + context.file_name + " in the project root:\n\n";
     out += context.body;

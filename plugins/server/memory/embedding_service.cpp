@@ -8,6 +8,7 @@
 #include "memory_store.hpp"
 
 #include "minimal/common/logger.hpp"
+#include "policy.hpp"
 
 namespace minimal::memory {
 
@@ -229,7 +230,7 @@ void EmbeddingService::WorkerLoop() {
         if (state.open) {
             wait = std::min<std::chrono::milliseconds>(
                 wait, std::chrono::duration_cast<std::chrono::milliseconds>(state.retry_in) +
-                          std::chrono::milliseconds(50));
+                          kBreakerWakeSlack);
         }
         std::unique_lock<std::mutex> lock(mu_);
         cv_.wait_for(lock, wait, [this] { return stop_ || notified_; });

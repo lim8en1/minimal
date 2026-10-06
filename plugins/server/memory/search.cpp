@@ -4,18 +4,13 @@
 #include <unordered_map>
 
 #include "embedding_service.hpp"
+#include "policy.hpp"
 
 namespace minimal::memory {
 namespace {
 
-// The standard RRF constant: dampens the gap between rank 1 and rank 2 so
-// one list cannot dominate on a single strong hit.
-constexpr double kRrfK = 60.0;
-
-// A vector list always returns its k nearest, however unrelated. A hit the
-// lexical side did not also find must be at least this fraction of the best
-// cosine to count, so a small store does not pad every answer with noise.
-constexpr double kVectorRelativeFloor = 0.5;
+// kRrfK and kVectorRelativeFloor: memory/policy.hpp. A vector list always
+// returns its k nearest, however unrelated, hence the floor.
 
 }  // namespace
 

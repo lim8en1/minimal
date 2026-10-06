@@ -10,6 +10,7 @@
 #include "minimal/config/project_trust.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/session/sqlite_history_store.hpp"
+#include "minimal/agent/policy.hpp"
 
 namespace minimal::agent {
 
@@ -580,7 +581,7 @@ std::chrono::milliseconds SessionRegistry::ReapInterval() const {
     // target without a timer per session. Floored: a test or direct
     // construction that bypasses the settings parser must not turn this into
     // a 0ms wait that spins the thread under the registry mutex.
-    return std::max(initial_attach_guard_ / 4, std::chrono::milliseconds(250));
+    return std::max(initial_attach_guard_ / kReapTicksPerAttachGuard, kMinReapInterval);
 }
 
 void SessionRegistry::ReapOnce() {

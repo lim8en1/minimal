@@ -17,6 +17,8 @@
 #include <optional>
 
 #include "minimal/common/periodic_task.hpp"
+#include "minimal/config/policy.hpp"
+#include "minimal/rpc/policy.hpp"
 
 namespace minimal::rpc {
 
@@ -24,7 +26,7 @@ class ServerHousekeeping {
 public:
     struct Config {
         // 0 = never exit (daemon deployment).
-        std::chrono::seconds idle_shutdown = std::chrono::seconds(5);
+        std::chrono::seconds idle_shutdown = config::kDefaultIdleShutdown;
         // The service's attached-stream count. Empty disables the idle exit.
         std::function<std::size_t()> attached_clients;
         // Age of the most recent client Ping. The exit holds while this is
@@ -37,7 +39,7 @@ public:
         std::function<void()> on_idle_expired;
         // Called every tick, after the idle check. Empty: no periodic work.
         std::function<void()> periodic_checkpoint;
-        std::chrono::milliseconds tick = std::chrono::milliseconds(250);
+        std::chrono::milliseconds tick = kHousekeepingTick;
     };
 
     // Starts ticking immediately.

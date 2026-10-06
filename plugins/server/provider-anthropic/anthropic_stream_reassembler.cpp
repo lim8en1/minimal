@@ -4,6 +4,8 @@
 
 #include "anthropic_response.hpp"
 #include "minimal/llm/json_depth.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/llm/policy.hpp"
 
 namespace minimal::provider_anthropic {
 namespace {
@@ -13,27 +15,26 @@ namespace {
 // parser bounds individual LINES, nothing bounds the TOTAL, and a server
 // drip-feeding just under the idle timeout would otherwise grow this
 // forever while the session worker hangs.
-constexpr std::size_t kMaxAccumulatedBytes = 64ull << 20;
 
 void Accumulate(std::size_t& total, std::size_t bytes) {
     total += bytes;
-    if (total > kMaxAccumulatedBytes) {
-        throw AnthropicParseError("stream content exceeded 64 MiB; refusing to accumulate more");
+    if (total > llm::kMaxStreamContentBytes) {
+        throw AnthropicParseError("stream content exceeded " + std::to_string(llm::kMaxStreamContentBytes) +
+                         " bytes; refusing to accumulate more");
     }
 }
 
 // The content_block index comes straight off the wire, so it is
 // attacker-influenced -- and blocks_.resize(index + 1) trusted it: an index
 // of SIZE_MAX overflowed the addition, and even a "modest" 5,000,000
-// allocated ~700 MB of Blocks in one step, bypassing the 64 MiB budget
+// allocated ~700 MB of Blocks in one step, bypassing the content budget
 // Accumulate() enforces on delta CONTENT (the Block vector itself is not
 // content). No real message approaches this many blocks, so anything at or
 // beyond the ceiling is a malformed stream, reported on the same
 // AnthropicParseError channel as bad frame JSON.
-constexpr std::size_t kMaxBlocks = 4096;
 
 std::size_t CheckedBlockIndex(std::size_t index) {
-    if (index + 1 < index || index >= kMaxBlocks) {
+    if (index + 1 < index || index >= llm::kMaxStreamBlocks) {
         throw AnthropicParseError("stream event named an implausible content_block index (" +
                                   std::to_string(index) + ")");
     }
@@ -145,7 +146,7 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
         } else if (delta_type == "signature_delta") {
             // The thinking block's replay signature, delivered as fragments
             // like every other delta -- concatenated, never overwritten.
-            // Counted against the same 64 MiB budget as content: it rides the
+            // Counted against the same budget as content: it rides the
             // same attacker-influenced channel and unbounded accumulation is
             // unbounded accumulation.
             std::string signature = StringOr(delta, "signature");

@@ -11,6 +11,7 @@ minimal/client/session_client.hpp
 
 # Rendering and UI building blocks a plugin composes with.
 minimal/client/render/theme.hpp
+minimal/client/policy.hpp
 minimal/client/utf8.hpp
 minimal/client/view/filterable_menu.hpp
 minimal/client/view/modal_host.hpp
@@ -22,6 +23,10 @@ minimal/client/view/tool_status.hpp
 # Shared utilities.
 minimal/common/abi_tag.hpp
 minimal/common/config_reader.hpp
+minimal/common/count_format.hpp
 minimal/common/logger.hpp
 minimal/common/plugin_config_label.hpp
 minimal/common/plugin_config_schema.hpp
+minimal/common/policy.hpp
+minimal/common/utf8.hpp
+minimal/common/units.hpp

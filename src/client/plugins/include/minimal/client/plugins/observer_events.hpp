@@ -18,6 +18,7 @@
 
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/state.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client::plugins {
 
@@ -47,12 +48,10 @@ private:
 };
 
 // Calls every observer for each event, in order. A throw is caught and
-// logged; an observer that throws kMaxThrows times is disabled for the
+// logged; an observer that throws kMaxPluginThrows times is disabled for the
 // process.
 class ObserverDispatcher {
 public:
-    static constexpr int kMaxThrows = 3;
-
     explicit ObserverDispatcher(const ObserverRegistry& registry) : registry_(registry) {}
     void Deliver(const std::vector<ObserverEvent>& events);
 

@@ -27,6 +27,7 @@
 #include "minimal/client/view/theme_picker.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client::app {
 
@@ -568,7 +569,7 @@ void TuiApp::BuildFrame() {
         registries.display_renderers, registries.status_segments, *env_.engine, show_panel_,
         panel_height,
         env_.ui.tools_panel_stdout_buffer_lines > 0 ? env_.ui.tools_panel_stdout_buffer_lines
-                                                    : 100,
+                                                    : kDefaultToolsPanelStdoutLines,
         editor_, env_.status_format, env_.plugin_views,
         // Row-renderer collapse hints follow the user's keymap, not a
         // hardcoded alt+c -- and so do the other key names the frame spells
@@ -750,7 +751,7 @@ void TuiApp::RunPump() {
     // very first running tick fires immediately.
     auto last_running_redraw = std::chrono::steady_clock::now() - std::chrono::hours(1);
     while (running_.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(kUiTick);
         const uint64_t version = app_->UiVersion();
         // A foreground tool that goes quiet (a long `sleep`, a silent build
         // step) produces no wire events, so nothing bumps UiVersion -- without

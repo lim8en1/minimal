@@ -1,4 +1,5 @@
 #include "logo_generator.hpp"
+#include "policy.hpp"
 
 #include <algorithm>
 #include <map>
@@ -60,8 +61,7 @@ const std::map<char, std::vector<std::string>>& Glyphs() {
     return glyphs;
 }
 
-constexpr int kGlyphRows = 5;
-constexpr int kLetterGap = 1;  // blank columns between letters
+constexpr int kGlyphRows = 5;  // NOLINT(readability-magic-numbers): the built-in font's height
 
 const std::vector<LogoStyle>& Styles() {
     static const std::vector<LogoStyle> styles = {

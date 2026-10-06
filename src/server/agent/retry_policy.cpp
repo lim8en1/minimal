@@ -5,6 +5,9 @@
 #include <string>
 #include <thread>
 
+#include "minimal/common/policy.hpp"
+#include "minimal/common/http_status.hpp"
+
 namespace minimal::agent {
 
 bool RetryPolicy::SleepForBackoff(int attempt,
@@ -35,10 +38,9 @@ bool RetryPolicy::SleepForBackoff(int attempt,
     // Slept in slices, polling cancellation. Sleeping the whole delay would
     // make CancelTurn wait out a backoff the user just asked to abandon --
     // the same argument that put a cancel-polling sink in the compactor.
-    constexpr std::chrono::milliseconds kSlice{25};
-    for (std::chrono::milliseconds slept{0}; slept < delay; slept += kSlice) {
+    for (std::chrono::milliseconds slept{0}; slept < delay; slept += common::kCancelPollSlice) {
         if (Cancelled()) return false;
-        std::this_thread::sleep_for(std::min(kSlice, delay - slept));
+        std::this_thread::sleep_for(std::min(common::kCancelPollSlice, delay - slept));
     }
     return !Cancelled();
 }
@@ -50,7 +52,8 @@ bool RetryPolicy::SleepForBackoff(int attempt,
 // the old behaviour (the turn fails).
 bool RetryPolicy::IsContextOverflow(const llm::LlmError& error) {
     if (error.category() != llm::LlmErrorCategory::RequestError) return false;
-    if (error.http_status() && *error.http_status() != 400 && *error.http_status() != 413) {
+    if (error.http_status() && *error.http_status() != common::kHttpBadRequest &&
+        *error.http_status() != common::kHttpContentTooLarge) {
         return false;
     }
     std::string message = error.what();

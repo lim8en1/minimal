@@ -22,12 +22,13 @@
 #include <chrono>
 #include <functional>
 #include <string>
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
 struct SpawnOptions {
     bool enabled = true;  // --no-autospawn clears this
-    std::chrono::milliseconds startup_timeout{25000};
+    std::chrono::milliseconds startup_timeout = kServerStartupTimeout;
 };
 
 // True when `target` names a filesystem socket this module could spawn a server

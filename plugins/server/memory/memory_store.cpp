@@ -16,6 +16,11 @@
 #include "minimal/store/sqlite_util.hpp"
 #include "minimal/common/utf8.hpp"
 #include "minimal/session/ulid.hpp"
+#include "policy.hpp"
+
+// NOLINTBEGIN(readability-magic-numbers) -- SQLite positional parameter and
+// result-column indices, facts of each statement's text. Judgment calls live
+// in memory/policy.hpp, never in this file.
 
 namespace minimal::memory {
 namespace {
@@ -119,8 +124,7 @@ END;
 // local ones; an http server may reject longer input outright), so the
 // embedded form is capped. Title and description lead, so the cap only ever
 // trims the tail of the body -- the part that matters least for "what is
-// this entry about".
-constexpr std::size_t kEmbedTextMaxChars = 2000;
+// this entry about" (kEmbedTextMaxChars).
 
 constexpr const char* kEntryColumns =
     "e.rowid_, e.id, e.scope, e.project_root, e.session_id, e.origin, e.origin_ref, "
@@ -226,14 +230,14 @@ std::string FtsOrQuery(std::string_view query) {
     };
     for (const char raw : query) {
         const unsigned char c = static_cast<unsigned char>(raw);
-        if (std::isalnum(c) || c >= 0x80) {
+        if (std::isalnum(c) || !common::IsAscii(raw)) {
             current += static_cast<char>(std::tolower(c));
         } else {
             flush();
         }
     }
     flush();
-    if (terms.size() > 32) terms.resize(32);
+    if (terms.size() > kMaxFtsTerms) terms.resize(kMaxFtsTerms);
 
     std::string out;
     for (const auto& term : terms) {
@@ -253,7 +257,7 @@ std::vector<std::string> SubstringTerms(std::string_view query) {
         while (i < query.size() && !std::isspace(static_cast<unsigned char>(query[i]))) ++i;
         if (i > start) terms.push_back(AsciiLower(query.substr(start, i - start)));
     }
-    if (terms.size() > 16) terms.resize(16);
+    if (terms.size() > kMaxSubstringTerms) terms.resize(kMaxSubstringTerms);
     return terms;
 }
 
@@ -362,14 +366,14 @@ std::string NormalizeTagName(std::string_view raw) {
         const unsigned char c = static_cast<unsigned char>(ch);
         if (std::isalnum(c)) {
             out += static_cast<char>(std::tolower(c));
-        } else if (c >= 0x80) {
+        } else if (!common::IsAscii(ch)) {
             out += ch;  // UTF-8 letters pass through; ASCII case-folding only
         } else if (c == ' ' || c == '_' || c == '-' || c == '.' || c == '/' || c == ':') {
             if (!out.empty() && out.back() != '-') out += '-';
         }
     }
     while (!out.empty() && out.back() == '-') out.pop_back();
-    out = common::TruncateUtf8Bytes(out, 32);
+    out = common::TruncateUtf8Bytes(out, kMaxTagBytes);
     while (!out.empty() && out.back() == '-') out.pop_back();
     return out;
 }
@@ -1155,3 +1159,5 @@ StoreStats MemoryStore::Stats(const ScopeFilter& filter) {
 }
 
 }  // namespace minimal::memory
+
+// NOLINTEND(readability-magic-numbers)

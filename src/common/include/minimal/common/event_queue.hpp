@@ -25,13 +25,14 @@
 #include <mutex>
 #include <optional>
 #include <utility>
+#include "minimal/common/policy.hpp"
 
 namespace minimal::common {
 
 template <typename T>
 class EventQueue {
 public:
-    explicit EventQueue(std::size_t max_size = kDefaultMaxSize) : max_size_(max_size) {}
+    explicit EventQueue(std::size_t max_size = kDefaultEventQueueMaxSize) : max_size_(max_size) {}
 
     // Blocks while the queue is full. Returns whether the event was queued:
     // false means the queue is (or became, while waiting) closed.
@@ -112,9 +113,6 @@ public:
     std::size_t max_size() const { return max_size_; }
 
 private:
-    // A ceiling that catches a runaway producer, not a tuning knob.
-    static constexpr std::size_t kDefaultMaxSize = 65536;
-
     // Caller holds mutex_. Every parked producer waits on the same predicate
     // (room for one more), so one freed slot needs one wake-up.
     std::optional<T> TakeFrontLocked() {

@@ -758,7 +758,7 @@ TEST_CASE("terminating a session whose subscriber never drains returns instead o
         (void)testing::Transport(*fixture.session).queue().Publish(std::move(filler));
     }
     // The cap is real and reachable, and drop-oldest held it.
-    CHECK(wedged.queued() == rpc::EventBroadcaster::kDefaultMaxEvents);
+    CHECK(wedged.queued() == common::kDefaultEventQueueMaxSize);
 
     // The turn runs to completion anyway -- the worker is never gated on a
     // client.
@@ -1649,14 +1649,14 @@ TEST_CASE("the injection queue is bounded; over the limit is a refusal, not a qu
     // turn. Over the limit is a refusal the caller logs, the same contract
     // Close has.
     agent::InjectionQueue queue;
-    for (std::size_t i = 0; i < agent::InjectionQueue::kMaxPending; ++i) {
+    for (std::size_t i = 0; i < agent::kMaxPendingInjections; ++i) {
         REQUIRE(queue.Push(llm::Message{llm::Role::User, {llm::TextBlock{"m"}}}));
     }
     CHECK_FALSE(queue.Push(llm::Message{llm::Role::User, {llm::TextBlock{"overflow"}}}));
     // Drain frees slots.
     std::size_t drained = 0;
     queue.DrainAll([&](llm::Message&&) { ++drained; });
-    CHECK(drained == agent::InjectionQueue::kMaxPending);
+    CHECK(drained == agent::kMaxPendingInjections);
     CHECK(queue.Push(llm::Message{llm::Role::User, {llm::TextBlock{"after drain"}}}));
 }
 

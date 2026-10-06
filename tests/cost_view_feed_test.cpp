@@ -150,10 +150,10 @@ TEST_CASE("pushes fill a per-session cache; a switch to a cached session renders
     api.Push(TotalsPush("s1", 1.0));
 
     REQUIRE(WaitFor([&] { return !feed.Render("s1", TotalsField::kCost).empty(); }));
-    CHECK(feed.Render("s1", TotalsField::kCost) == "$1.00 · 1.0k/2.0k tok");
-    CHECK(feed.Render("s1", TotalsField::kTokenDetail) == "i 1.0k · o 2.0k");
+    CHECK(feed.Render("s1", TotalsField::kCost) == "$1.00 · 1k/2k tok");
+    CHECK(feed.Render("s1", TotalsField::kTokenDetail) == "i 1k · o 2k");
     // The tab switch: no blank frame, no fetch to wait on.
-    CHECK(feed.Render("s2", TotalsField::kCost) == "$2.00 · 1.0k/2.0k tok");
+    CHECK(feed.Render("s2", TotalsField::kCost) == "$2.00 · 1k/2k tok");
 }
 
 TEST_CASE("a turns:0 push clears the session's figures", "[cost_view]") {
@@ -172,7 +172,7 @@ TEST_CASE("an uncached focused session is seeded with exactly one call", "[cost_
     TotalsFeed feed(&api, kFastTiming);
 
     REQUIRE(WaitFor([&] { return !feed.Render("s3", TotalsField::kCost).empty(); }));
-    CHECK(feed.Render("s3", TotalsField::kCost) == "$3.00 · 1.0k/2.0k tok");
+    CHECK(feed.Render("s3", TotalsField::kCost) == "$3.00 · 1k/2k tok");
     std::this_thread::sleep_for(100ms);   // ~10 heartbeats
     CHECK(api.Calls("s3") == 1);
 
@@ -192,13 +192,13 @@ TEST_CASE("a dead stream marks figures stale, polls, and resubscribes", "[cost_v
 
     // The server goes away; its "totals" call fails too: last-known, marked.
     api.EndStream();
-    const std::string stale = std::string("$1.00 · 1.0k/2.0k tok") + kStaleSuffix;
+    const std::string stale = std::string("$1.00 · 1k/2k tok") + kStaleSuffix;
     REQUIRE(WaitFor([&] { return feed.Render("s1", TotalsField::kCost) == stale; }));
 
     // The fallback poll recovers the figure (and clears the mark)...
     api.SetTotals("s1", TotalsPush("s1", 1.5));
     CHECK(WaitFor(
-        [&] { return feed.Render("s1", TotalsField::kCost) == "$1.50 · 1.0k/2.0k tok"; }));
+        [&] { return feed.Render("s1", TotalsField::kCost) == "$1.50 · 1k/2k tok"; }));
     // ...and the stream is retried once the fallback period is over.
     CHECK(WaitFor([&] { return api.Subscribes() >= 2; }));
 }
@@ -209,7 +209,7 @@ TEST_CASE("a server without the stream still fills through polling", "[cost_view
     api.SetTotals("s1", TotalsPush("s1", 1.0));
     TotalsFeed feed(&api, kFastTiming);
     CHECK(WaitFor(
-        [&] { return feed.Render("s1", TotalsField::kCost) == "$1.00 · 1.0k/2.0k tok"; }));
+        [&] { return feed.Render("s1", TotalsField::kCost) == "$1.00 · 1k/2k tok"; }));
 }
 
 TEST_CASE("a closed tab's figures are forgotten, the focused one's kept", "[cost_view]") {

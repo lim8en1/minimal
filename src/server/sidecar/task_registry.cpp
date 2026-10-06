@@ -70,8 +70,8 @@ void TaskRegistry::PruneFinishedLocked(std::vector<std::shared_ptr<TaskState>>& 
             ++finished;
         }
     }
-    std::size_t excess = finished > kMaxFinishedRecordsPerSession
-                             ? finished - kMaxFinishedRecordsPerSession
+    std::size_t excess = finished > kMaxFinishedTaskRecordsPerSession
+                             ? finished - kMaxFinishedTaskRecordsPerSession
                              : 0;
     if (excess == 0) return;
     tasks.erase(std::remove_if(tasks.begin(), tasks.end(),

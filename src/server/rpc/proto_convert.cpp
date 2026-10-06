@@ -8,6 +8,7 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/common/utf8.hpp"
+#include "minimal/proto/struct_json.hpp"
 
 namespace minimal::rpc {
 namespace {
@@ -18,24 +19,6 @@ namespace {
 // bodies, plugin messages, a tool's display JSON.
 std::string Clean(std::string_view text) { return common::ScrubUtf8(text); }
 
-// An integral double is narrowed back to a JSON integer -- see the header for
-// why. Guarded on range as well as integrality: a double past int64's limits
-// would be UB to cast, and is not an integer anyone meant to send.
-bool IsExactInteger(double value) {
-    if (!std::isfinite(value)) return false;
-    if (value != std::trunc(value)) return false;
-    // STRICTLY LESS at the top, and the asymmetry is the point.
-    // static_cast<double>(INT64_MAX) is not INT64_MAX: 2^63-1 is not
-    // representable, so the conversion rounds UP to exactly 2^63 -- and a `<=`
-    // against that admitted 9223372036854775808.0, whose cast to int64_t is the
-    // precise UB this guard was written to prevent. INT64_MIN is exactly -2^63
-    // and needs no such care, so the bounds are deliberately not symmetric.
-    // Reachable from the wire: any tool_use input carrying a number that large.
-    constexpr double kTwoToThe63 = 9223372036854775808.0;  // -static_cast<double>(INT64_MIN)
-    return value >= static_cast<double>(std::numeric_limits<std::int64_t>::min()) &&
-           value < kTwoToThe63;
-}
-
 // Makes the terminal `else` of an if-constexpr chain a COMPILE ERROR rather than
 // a silent no-op. Dependent on T so it only fires when that branch is actually
 // instantiated.
@@ -43,104 +26,6 @@ template <typename>
 constexpr bool kAlwaysFalse = false;
 
 }  // namespace
-
-// --- JSON <-> Struct ---------------------------------------------------------
-
-google::protobuf::Value JsonToValue(const nlohmann::json& value) {
-    google::protobuf::Value out;
-    switch (value.type()) {
-        case nlohmann::json::value_t::null:
-            out.set_null_value(google::protobuf::NULL_VALUE);
-            break;
-        case nlohmann::json::value_t::boolean:
-            out.set_bool_value(value.get<bool>());
-            break;
-        case nlohmann::json::value_t::number_integer:
-            out.set_number_value(static_cast<double>(value.get<std::int64_t>()));
-            break;
-        case nlohmann::json::value_t::number_unsigned:
-            out.set_number_value(static_cast<double>(value.get<std::uint64_t>()));
-            break;
-        case nlohmann::json::value_t::number_float:
-            out.set_number_value(value.get<double>());
-            break;
-        case nlohmann::json::value_t::string:
-            out.set_string_value(Clean(value.get<std::string>()));
-            break;
-        case nlohmann::json::value_t::array: {
-            auto* list = out.mutable_list_value();
-            for (const auto& element : value) {
-                *list->add_values() = JsonToValue(element);
-            }
-            break;
-        }
-        case nlohmann::json::value_t::object: {
-            auto* fields = out.mutable_struct_value()->mutable_fields();
-            for (const auto& [key, element] : value.items()) {
-                (*fields)[Clean(key)] = JsonToValue(element);
-            }
-            break;
-        }
-        // Binary has no JSON (and so no Struct) representation at all; it cannot
-        // arrive from a parsed LLM response. Discarded rather than approximated.
-        case nlohmann::json::value_t::binary:
-        case nlohmann::json::value_t::discarded:
-            out.set_null_value(google::protobuf::NULL_VALUE);
-            break;
-    }
-    return out;
-}
-
-nlohmann::json ValueToJson(const google::protobuf::Value& value) {
-    switch (value.kind_case()) {
-        case google::protobuf::Value::kNullValue:
-            return nullptr;
-        case google::protobuf::Value::kNumberValue: {
-            const double number = value.number_value();
-            if (IsExactInteger(number)) return static_cast<std::int64_t>(number);
-            return number;
-        }
-        case google::protobuf::Value::kStringValue:
-            return value.string_value();
-        case google::protobuf::Value::kBoolValue:
-            return value.bool_value();
-        case google::protobuf::Value::kStructValue: {
-            nlohmann::json out = nlohmann::json::object();
-            for (const auto& [key, field] : value.struct_value().fields()) {
-                out[key] = ValueToJson(field);
-            }
-            return out;
-        }
-        case google::protobuf::Value::kListValue: {
-            nlohmann::json out = nlohmann::json::array();
-            for (const auto& element : value.list_value().values()) {
-                out.push_back(ValueToJson(element));
-            }
-            return out;
-        }
-        case google::protobuf::Value::KIND_NOT_SET:
-            break;
-    }
-    return nullptr;
-}
-
-google::protobuf::Struct JsonToStruct(const nlohmann::json& value) {
-    google::protobuf::Struct out;
-    if (!value.is_object()) return out;
-    auto* fields = out.mutable_fields();
-    for (const auto& [key, element] : value.items()) {
-        (*fields)[Clean(key)] = JsonToValue(element);
-    }
-    return out;
-}
-
-nlohmann::json StructToJson(const google::protobuf::Struct& value) {
-    nlohmann::json out = nlohmann::json::object();
-    for (const auto& [key, field] : value.fields()) {
-        out[key] = ValueToJson(field);
-    }
-    return out;
-}
 
 // --- Enums -------------------------------------------------------------------
 //
@@ -256,7 +141,7 @@ v1::ContentBlock ToProto(const llm::ContentBlock& block) {
                 auto* tool_use = out.mutable_tool_use();
                 tool_use->set_id(value.id);
                 tool_use->set_name(value.name);
-                *tool_use->mutable_input() = JsonToStruct(value.input);
+                *tool_use->mutable_input() = proto::JsonToStruct(value.input);
             } else if constexpr (std::is_same_v<T, llm::ToolResultBlock>) {
                 auto* result = out.mutable_tool_result();
                 result->set_tool_use_id(value.tool_use_id);
@@ -372,7 +257,7 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 auto* execution = out.mutable_tool_execution();
                 execution->set_tool_use_id(value.tool_use_id);
                 execution->set_tool_name(value.tool_name);
-                *execution->mutable_input() = JsonToStruct(value.input);
+                *execution->mutable_input() = proto::JsonToStruct(value.input);
                 execution->set_summary(Clean(value.summary));
                 execution->set_started(value.started);
                 if (!value.started) {

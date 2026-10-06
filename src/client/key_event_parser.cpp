@@ -111,7 +111,8 @@ const std::unordered_map<std::string, Event>& NamedKeys() {
 }
 
 // index 0 = F1 .. index 11 = F12.
-const std::array<Event, 12>& FunctionKeys() {
+constexpr std::size_t kFunctionKeyCount = 12;  // NOLINT(readability-magic-numbers): F1-F12
+const std::array<Event, kFunctionKeyCount>& FunctionKeys() {
     static const std::array<Event, 12> table = {
         Event::F1, Event::F2, Event::F3,  Event::F4,  Event::F5,  Event::F6,
         Event::F7, Event::F8, Event::F9,  Event::F10, Event::F11, Event::F12,
@@ -369,7 +370,9 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
             // spec here.
             return {};
         }
-        if (n >= 1 && n <= 12) return {FunctionKeys()[static_cast<std::size_t>(n - 1)]};
+        if (n >= 1 && static_cast<std::size_t>(n) <= kFunctionKeyCount) {
+        return {FunctionKeys()[static_cast<std::size_t>(n - 1)]};
+    }
     }
 
     // A single letter, any modifier combination.

@@ -19,14 +19,14 @@
 #include "minimal/rpc/stream_attachment.hpp"
 
 #include "minimal/plugins/plugin_rpc.hpp"
+#include "minimal/rpc/policy.hpp"
+#include "minimal/session/policy.hpp"
 
 namespace minimal::rpc {
 namespace {
 
-// The floor under both paged RPCs when settings.json leaves scrollback_page_size
-// unset, which is its default. Named rather than repeated as a literal: two
-// call sites drifting apart is how a "default" becomes two different defaults.
-constexpr int kFallbackPageSize = 100;
+// kDefaultPageSize is the floor under both paged RPCs when settings.json leaves
+// scrollback_page_size unset, which is its default.
 
 // CEILING on a client-supplied page size, and it is load-bearing rather than
 // tidy. `limit` arrives as a wire int32 with a floor and nothing above it, and
@@ -36,14 +36,14 @@ constexpr int kFallbackPageSize = 100;
 // transcript -- every row, every JSON decode, every proto copy, in one response
 // -- which is precisely the O(n) blowup the keyset paging exists to prevent.
 // ListSessions' proto comment already documented a bound it did not have.
-constexpr int kMaxPageSize = 1000;
+// (session::kMaxHistoryPageSize.)
 
 // Clamped, never rejected: a client asking for more than we will serve is not
 // making an error, and paging is the caller's answer either way. `has_more`
 // already tells it there is another page.
 int ClampPageSize(int requested, int fallback) {
     if (requested <= 0) requested = fallback;
-    return std::min(requested, kMaxPageSize);
+    return std::min(requested, session::kMaxHistoryPageSize);
 }
 
 // The fallback when no registry was wired (tests, or a service built before
@@ -125,7 +125,7 @@ grpc::Status SessionServiceImpl::Ping(grpc::ServerContext* context, const v1::Pi
 
 int SessionServiceImpl::ScrollbackPageSize() const {
     const auto configured = static_cast<int>(settings_.memory.scrollback_page_size);
-    return configured > 0 ? configured : kFallbackPageSize;
+    return configured > 0 ? configured : kDefaultPageSize;
 }
 
 namespace {
@@ -1377,7 +1377,7 @@ grpc::Status SessionServiceImpl::PluginSubscribe(grpc::ServerContext* context,
     // of the scope, exceptions included.
     const AttachedClientSlot subscription_slot(this);
     while (!sink->closed() && !context->IsCancelled()) {
-        sink->WaitUntilClosed(std::chrono::milliseconds(500));
+        sink->WaitUntilClosed(kSubscriptionCancelPoll);
     }
     sink->Close();
     return grpc::Status::OK;

@@ -12,6 +12,8 @@
 #include "minimal/store/file_lock.hpp"
 #include "minimal/common/clock.hpp"
 #include "minimal/store/sqlite_util.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/plugins/policy.hpp"
 
 namespace minimal::plugins {
 namespace {
@@ -50,7 +52,7 @@ void RequireNonEmpty(std::string_view plugin, std::string_view key) {
 std::optional<std::string> UpperBound(std::string_view prefix) {
     std::string bound(prefix);
     for (std::size_t i = bound.size(); i-- > 0;) {
-        if (static_cast<unsigned char>(bound[i]) < 0xFF) {
+        if (static_cast<unsigned char>(bound[i]) < std::numeric_limits<unsigned char>::max()) {
             ++bound[i];
             bound.resize(i + 1);
             return bound;
@@ -162,13 +164,11 @@ std::optional<std::string> PluginStorage::Get(std::string_view plugin, std::stri
 
 void PluginStorage::Set(std::string_view plugin, std::string_view key, std::string_view value) {
     RequireNonEmpty(plugin, key);
-    // A per-value quota: the KV seam is the plugin's persistence, not an
-    // unbounded scratch space -- one buggy or hostile plugin could otherwise
-    // grow the host's plugin database without limit. 1 MiB per value is far
-    // above any legitimate state blob (checklist/cost rows are kilobytes).
-    constexpr std::size_t kMaxValueBytes = 1u << 20;
-    if (value.size() > kMaxValueBytes) {
-        throw std::runtime_error("plugin storage: value exceeds the 1 MiB quota (plugin '" +
+    // A per-value quota (kMaxPluginStorageValueBytes).
+    if (value.size() > kMaxPluginStorageValueBytes) {
+        throw std::runtime_error("plugin storage: value exceeds the " +
+                                 std::to_string(kMaxPluginStorageValueBytes) +
+                                 "-byte quota (plugin '" +
                                  std::string(plugin) + "', key '" + std::string(key) + "')");
     }
     std::lock_guard<std::mutex> lock(mu_);

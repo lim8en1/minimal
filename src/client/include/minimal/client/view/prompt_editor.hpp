@@ -65,6 +65,8 @@
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/v1/session_service.pb.h"
+#include "minimal/common/units.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -73,7 +75,7 @@ namespace minimal::client {
 // it was BEFORE each edit, and coalesces runs so one undo reverts a word, not
 // a keystroke: consecutive inserts (or consecutive erases) at a contiguous
 // caret merge into one step until whitespace is typed, the caret jumps, or
-// more than kCoalesceGap passes. A whole bracketed paste is one step; every
+// more than kUndoCoalesceGap passes. A whole bracketed paste is one step; every
 // other edit (kill line, completion accept, history recall, newline) is a
 // step of its own. Submit clears both stacks. Loop-thread only.
 class PromptUndo {
@@ -84,8 +86,6 @@ public:
     };
     enum class Kind { Insert, Erase, Paste, Other };
 
-    static constexpr std::size_t kMaxSteps = 100;
-    static constexpr auto kCoalesceGap = std::chrono::seconds(1);
 
     // An edit of `kind` turned `before` into text whose caret is now at
     // `cursor_after`. `breaks_run` forces a new step (e.g. a typed space).
@@ -180,12 +180,11 @@ struct PromptHistory {
 
     // Keeps the timeline across launches: loads `path` (a JSON array of
     // lines) into `entries` now, and every Record() rewrites it atomically.
-    // Bounded on disk too: the newest entries up to kPersistMaxBytes -- one
+    // Bounded on disk too: the newest entries up to kMaxPromptHistoryFileBytes -- one
     // pasted log must not make every submit rewrite megabytes. Never set
     // (the default): memory only, the test/private-history case. A missing
     // or unreadable file starts empty; a failed write is logged, not fatal.
     void PersistTo(std::filesystem::path path);
-    static constexpr std::size_t kPersistMaxBytes = 1024 * 1024;
 
     // A live browse position (PromptEditorState::history_cursor) registers
     // its address here for as long as its editor is alive, while `entries`

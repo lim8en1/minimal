@@ -4,6 +4,8 @@
 #include <utility>
 
 #include "minimal/agent/agent_preset.hpp"
+#include "minimal/agent/policy.hpp"
+#include "minimal/common/utf8.hpp"
 
 namespace minimal::agent {
 namespace {
@@ -189,8 +191,9 @@ tools::PermissionDisclosure SpawnSubagentTool::Disclose(const nlohmann::json& in
     // carry the whole thing anyway.
     const auto newline = task.find_first_of("\r\n");
     if (newline != std::string::npos) task.resize(newline);
-    constexpr std::size_t kMaxTaskPreview = 100;
-    if (task.size() > kMaxTaskPreview) task = task.substr(0, kMaxTaskPreview) + "...";
+    if (task.size() > kPermissionPreviewChars) {
+        task = common::TruncateCodePoints(task, kPermissionPreviewChars) + "...";
+    }
 
     disclosure.summary = std::string("spawn subagent") + (task.empty() ? "" : ": " + task);
     disclosure.complete = true;

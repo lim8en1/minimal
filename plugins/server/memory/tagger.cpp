@@ -16,14 +16,11 @@
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/stream_event.hpp"
+#include "policy.hpp"
 
 namespace minimal::memory {
 namespace {
 
-constexpr int kPendingScan = 32;           // rows looked at per batch
-constexpr std::size_t kBatchBytes = 24000;  // entry text per provider call
-constexpr int kNeighbors = 5;
-constexpr std::chrono::milliseconds kIdlePoll{60000};
 
 std::string ResponseText(const llm::ChatResponse& response) {
     std::string out;
@@ -146,13 +143,13 @@ std::vector<std::string> Tagger::NeighborTags(const PendingTagRow& row) {
     request.filters.scope.include_global = row.scope == kScopeGlobal;
     request.filters.scope.include_project = row.scope == kScopeProject;
     request.filters.scope.project_root = row.project_root;
-    request.limit = kNeighbors + 4;
+    request.limit = kTaggerNeighbors + 4;
     std::map<std::string, int> votes;
     int used = 0;
     for (const auto& hit : HybridSearch(*store_, embeddings_, request)) {
         if (hit.row.id == row.id || hit.row.tags.empty()) continue;
         for (const auto& tag : hit.row.tags) ++votes[tag];
-        if (++used >= kNeighbors) break;
+        if (++used >= kTaggerNeighbors) break;
     }
     std::vector<std::pair<std::string, int>> ranked(votes.begin(), votes.end());
     std::stable_sort(ranked.begin(), ranked.end(),
@@ -208,7 +205,7 @@ std::optional<std::int64_t> Tagger::ResolveNewTag(int scope, const std::string& 
 bool Tagger::RunOnce() {
     if (!enabled()) return false;
     if (!breaker_.Allow(CircuitBreaker::Clock::now())) return false;
-    const auto pending = store_->PendingTagging(kPendingScan);
+    const auto pending = store_->PendingTagging(kTaggerPendingScan);
     if (pending.empty()) return false;
 
     // One scope per call: the vocabulary is per scope.
@@ -219,7 +216,7 @@ bool Tagger::RunOnce() {
             continue;
         }
         const std::size_t size = row.title.size() + row.description.size() + row.body.size();
-        if (!rows.empty() && bytes + size > kBatchBytes) break;
+        if (!rows.empty() && bytes + size > kTaggerBatchBytes) break;
         rows.push_back(row);
         bytes += size;
     }
@@ -400,12 +397,12 @@ void Tagger::WorkerLoop() {
             logger_.warn("memory: tagging worker error: {}", error.what());
         }
         if (did_work) continue;
-        auto wait = kIdlePoll;
+        auto wait = kWorkerIdlePoll;
         const auto state = breaker_.Snapshot(CircuitBreaker::Clock::now());
         if (state.open) {
             wait = std::min<std::chrono::milliseconds>(
                 wait, std::chrono::duration_cast<std::chrono::milliseconds>(state.retry_in) +
-                          std::chrono::milliseconds(50));
+                          kBreakerWakeSlack);
         }
         std::unique_lock<std::mutex> lock(mu_);
         cv_.wait_for(lock, wait, [this] { return stop_ || notified_; });

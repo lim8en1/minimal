@@ -302,10 +302,10 @@ TEST_CASE("PromptUndo: a pause or a caret jump starts a new step", "[prompt_edit
 TEST_CASE("PromptUndo: the history is capped", "[prompt_editor][undo]") {
     PromptUndo undo;
     const auto now = std::chrono::steady_clock::now();
-    for (std::size_t i = 0; i < PromptUndo::kMaxSteps + 20; ++i) {
+    for (std::size_t i = 0; i < minimal::client::kMaxUndoSteps + 20; ++i) {
         undo.Record({std::to_string(i), 0}, PromptUndo::Kind::Other, 0, false, now);
     }
-    CHECK(undo.undo_depth() == PromptUndo::kMaxSteps);
+    CHECK(undo.undo_depth() == minimal::client::kMaxUndoSteps);
     // The oldest steps went first.
     std::optional<PromptUndo::Snapshot> last;
     while (auto step = undo.Undo({"current", 0})) last = step;

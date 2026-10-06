@@ -13,20 +13,12 @@
 #include "minimal/common/utf8.hpp"
 #include "minimal/sidecar/drain.hpp"
 #include "minimal/sidecar/process.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/hooks/policy.hpp"
 
 namespace minimal::hooks {
 namespace {
 
-// Bounds what a hook's output may hold in memory: only the first non-empty
-// line ever becomes a block reason, and a hook piping a build log must not
-// grow a string without limit on the caller's thread. Past the cap the output
-// is still drained (head and tail kept), so the child never blocks writing.
-constexpr std::int64_t kMaxCapturedBytes = 1 << 20;  // 1 MiB
-constexpr std::size_t kMaxBlockReasonBytes = 500;
-// Matches the bash tool's default filesize backstop (bash_settings.hpp): a
-// hook script redirecting to a file is bounded the same way its model-driven
-// cousin is.
-constexpr std::int64_t kMaxHookFileSizeBytes = 1024LL * 1024 * 1024;  // 1 GiB
 
 std::string FirstLine(std::string_view captured) {
     std::string_view line;
@@ -53,7 +45,7 @@ std::string FirstLine(std::string_view captured) {
     }
     // Cut on a character boundary and scrub: this is raw subprocess output
     // that becomes a user-visible reason string.
-    return common::ScrubUtf8(common::TruncateUtf8Bytes(line, kMaxBlockReasonBytes));
+    return common::ScrubUtf8(common::TruncateUtf8Bytes(line, kMaxHookBlockReasonBytes));
 }
 
 }  // namespace
@@ -68,11 +60,10 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
     // a null canceller, though, and the hook worker is a single thread: zero
     // budget plus no cancellation means one wedged script blocks every later
     // hook, forever. Uncancellable runs therefore get a floor budget.
-    static constexpr std::chrono::milliseconds kUncancellableFloor{60000};
     const bool cancellable = is_cancelled != nullptr;
     const std::chrono::milliseconds effective =
         timeout.count() > 0 ? timeout : (cancellable ? std::chrono::milliseconds::zero()
-                                                     : kUncancellableFloor);
+                                                     : kUncancellableHookFloor);
     const bool budgeted = effective.count() > 0;
 
     // A hook is operator config, not model input: it runs with the server's
@@ -92,8 +83,8 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
     };
     // CPU and file-size backstops behind the wall-clock deadline, like the
     // bash tool's; none when there is no budget to back up.
-    spec.cpu_seconds = budgeted ? effective.count() / 1000 + 5 : 0;
-    spec.file_size_bytes = budgeted ? kMaxHookFileSizeBytes : 0;
+    spec.cpu_seconds = sidecar::CpuBackstopSeconds(effective);
+    spec.file_size_bytes = budgeted ? sidecar::kFileSizeBackstopBytes : 0;
 
     sidecar::Launched launched = sidecar::Launch(spec);
     result.warnings = launched.warnings;
@@ -105,7 +96,7 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
 
     std::vector<sidecar::PipeSink> sinks(2);
     sinks[0].mode = sidecar::PipeSink::Mode::kCapped;
-    sinks[0].cap = kMaxCapturedBytes;
+    sinks[0].cap = kMaxHookCapturedBytes;
     sinks[1].mode = sidecar::PipeSink::Mode::kSource;
     sinks[1].payload = std::string(stdin_payload);
     sidecar::DrainOptions options;

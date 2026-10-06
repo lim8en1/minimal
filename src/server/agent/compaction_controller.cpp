@@ -9,6 +9,8 @@
 #include "minimal/agent/context_compactor.hpp"
 #include "minimal/agent/transcript_repair.hpp"
 #include "minimal/common/utf8.hpp"
+#include "minimal/agent/policy.hpp"
+#include "minimal/common/units.hpp"
 #include "tool_result_caps.hpp"
 
 namespace minimal::agent {
@@ -209,7 +211,7 @@ std::optional<std::size_t> CompactionController::ChooseCut(std::string_view trig
     if (keep_recent_tokens <= 0 && config_.compaction_replace_percent > 0) {
         const std::int64_t total = working_.estimated_tokens();
         keep_recent_tokens =
-            std::max<std::int64_t>(1, total * (100 - config_.compaction_replace_percent) / 100);
+            std::max<std::int64_t>(1, total - common::PercentOf(total, config_.compaction_replace_percent));
     }
     // Strategy code is plugin code: a throwing selector or summarizer fails
     // the COMPACTION (flagged by failure_guard, the turn continues
@@ -518,7 +520,8 @@ std::optional<std::size_t> CompactionController::Compact(std::string_view trigge
     // large as what it replaced, or the kept tail is most of the history).
     // Not refused -- the summary is already in -- but said out loud.
     const std::int64_t history_tokens_after = event.tokens_after - fixed_tokens;
-    if (history_tokens_before > 0 && history_tokens_after * 10 >= history_tokens_before * 9) {
+    if (history_tokens_before > 0 &&
+        history_tokens_after >= common::PercentOf(history_tokens_before, kCompactionFreedLittlePercent)) {
         event.warning = "compaction freed little: the history went from ~" +
                         std::to_string(history_tokens_before) + " to ~" +
                         std::to_string(history_tokens_after) +

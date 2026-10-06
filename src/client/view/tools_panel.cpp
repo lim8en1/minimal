@@ -8,13 +8,12 @@
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/live_tool_row.hpp"
 #include "minimal/client/view/tool_status.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
 namespace {
 
-// The session-name column's width, in display columns.
-constexpr std::size_t kSessionColumn = 16;
 
 // The starting BYTE OFFSET of the last `max_lines` lines of `text` -- an
 // offset into the ORIGINAL buffer, not a copy of the tail. This function ran
@@ -71,9 +70,9 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
             line.push_back(ToolHeadline(LiveToolStatus(tool), LiveToolName(tool), theme));
             // The session as a fixed-width column, so the summaries line up
             // across tabs instead of starting wherever each name ended.
-            std::string session = TruncateUtf8Columns(tab.display_name, kSessionColumn);
+            std::string session = TruncateUtf8Columns(tab.display_name, kToolsPanelSessionColumn);
             session += std::string(
-                kSessionColumn - std::min(kSessionColumn, Utf8ColumnWidth(session)), ' ');
+                kToolsPanelSessionColumn - std::min(kToolsPanelSessionColumn, Utf8ColumnWidth(session)), ' ');
             line.push_back(text("  " + session) | Muted(theme));
             if (const std::string summary = LiveToolSummary(tool); !summary.empty()) {
                 // Shrinks first, so the fields after it stay visible.

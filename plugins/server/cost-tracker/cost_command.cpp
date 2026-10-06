@@ -206,7 +206,6 @@ std::string FormatSessionTotals(const SessionTotals& totals) {
     }
 
     std::vector<Column> columns;
-    columns.reserve(6);
     columns.push_back(std::move(models));
     columns.push_back(std::move(turns));
     columns.push_back(std::move(in));

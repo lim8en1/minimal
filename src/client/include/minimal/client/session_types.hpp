@@ -150,7 +150,7 @@ struct LiveTurnSegment {
     // like the tool-output cache inside ToolRunTracker::Copy.
     mutable std::shared_ptr<const std::string> text_view;
     mutable bool text_dirty = true;
-    // True once `text` hit SessionState::kStreamingTextCapBytes: further
+    // True once `text` hit kLiveTextCapBytes: further
     // deltas for THIS segment are dropped (the truncation marker inside
     // `text` was appended once). The transcript itself is authoritative --
     // the turn-end refresh re-fetches the full persisted text -- so the

@@ -13,6 +13,7 @@
 #include "minimal/config/project_dirs.hpp"
 #include "minimal/store/file_lock.hpp"
 #include "minimal/common/atomic_write.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::config {
 
@@ -25,7 +26,7 @@ std::set<std::string> ReadRoots(const std::filesystem::path& state_file) {
     std::error_code ec;
     if (!std::filesystem::exists(state_file, ec) || ec) return roots;
     try {
-        const auto file = common::ReadFile(state_file, 1u << 20);
+        const auto file = common::ReadFile(state_file, common::kMaxConfigFileBytes);
         if (!file.ok()) throw std::runtime_error(file.error);
         const auto doc = nlohmann::json::parse(file.contents);
         for (const auto& entry : doc.at("trusted")) roots.insert(entry.get<std::string>());

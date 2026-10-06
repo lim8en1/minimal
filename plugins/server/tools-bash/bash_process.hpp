@@ -21,9 +21,11 @@
 
 #include "minimal/sidecar/capped_buffer.hpp"
 #include "minimal/sidecar/process.hpp"
+#include "minimal/common/units.hpp"
 
 #include "bash_settings.hpp"
 #include "bash_session_state.hpp"
+#include "policy.hpp"
 
 namespace minimal::tools_bash {
 
@@ -32,25 +34,10 @@ namespace minimal::tools_bash {
 using CappedBuffer = minimal::sidecar::CappedBuffer;
 using ScopedFd = minimal::sidecar::ScopedFd;
 
-// The fd the wrapper writes session state to. Any fd can collide with something
-// the command does itself, so correctness rests on validating the payload rather
-// than on picking a lucky number -- see ParseStatePayload.
-constexpr int kStateFd = 9;
-
-// The state payload is `pwd -P` plus `env -0` -- kilobytes at most. Bounded so a
-// command pumping fd 9 (`yes >&9`) cannot grow one string without limit for the
-// whole timeout; on overflow the payload is discarded WHOLESALE, preserving the
-// all-or-nothing rule: adopting a truncated prefix would silently apply partial
-// environment state.
-constexpr std::size_t kMaxStatePayloadBytes = 1 << 20;  // 1 MiB
-
-// Fail-fast window for a detached grandchild (DrainOptions::idle_after_reap_ms):
-// after the shell is reaped, output pipes still open mean a grandchild inherited
-// them; quiet for this long ends the run with a teaching note instead of holding
-// the call to its deadline. A grandchild that exits 2-5 s after the shell is
-// killed at 2 s -- accepted, the footer makes the fix a one-line edit (fully
-// redirect the child's stdio). Not config on purpose: one default, no knobs.
-constexpr std::int64_t kIdleAfterReapMs = 2000;
+// kStateFd, kMaxStatePayloadBytes and kIdleAfterReap: tools-bash/policy.hpp.
+// On a state-payload overflow the payload is discarded WHOLESALE, preserving
+// the all-or-nothing rule: adopting a truncated prefix would silently apply
+// partial environment state.
 
 struct ShellState {
     std::filesystem::path cwd;

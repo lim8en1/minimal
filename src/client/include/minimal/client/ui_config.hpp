@@ -55,9 +55,7 @@ namespace minimal::client {
 // The fold-default vocabulary: 0 = "auto" (the built-in kind default,
 // CollapsedByDefault), 1 = "expanded", 2 = "collapsed". Strings in ui.json,
 // ints in memory.
-inline constexpr int kFoldDefaultAuto = 0;
-inline constexpr int kFoldExpanded = 1;
-inline constexpr int kFoldCollapsed = 2;
+enum : int { kFoldDefaultAuto, kFoldExpanded, kFoldCollapsed };
 
 struct UiConfig {
     // Empty = use the built-in default. A non-string or missing key means the

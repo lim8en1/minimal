@@ -16,6 +16,8 @@
 #include "glob_matcher.hpp"
 #include "minimal/tools/path_confinement.hpp"
 #include "tree_walker.hpp"
+#include "minimal/common/policy.hpp"
+#include "minimal/tools/policy.hpp"
 
 namespace minimal::tools_search {
 namespace {
@@ -30,11 +32,10 @@ ToolResult Error(std::string message) { return ToolResult{true, std::move(messag
 
 enum class OutputMode { kFilesWithMatches, kContent, kCount };
 
-// NUL within the first 8 KiB: the same binary heuristic file_access's
-// read_window uses, so the two tools agree on what "text" means.
-constexpr std::size_t kBinarySniffBytes = 8192;
+// NUL within the first tools::kBinarySniffBytes: the same binary heuristic
+// file_access's read_window uses, so the two tools agree on what "text" means.
 bool LooksBinary(std::string_view text) {
-    const auto window = std::min<std::size_t>(text.size(), kBinarySniffBytes);
+    const auto window = std::min<std::size_t>(text.size(), tools::kBinarySniffBytes);
     return text.substr(0, window).find('\0') != std::string_view::npos;
 }
 
@@ -599,7 +600,7 @@ private:
         // read in full just to be discarded.
         const std::int64_t cap = S().grep_max_file_bytes;
         std::string text;
-        char chunk[65536];
+        char chunk[common::kReadChunkBytes];
         bool sniffed = false;
         for (;;) {
             const ssize_t got = ::read(fd, chunk, sizeof(chunk));
@@ -611,7 +612,7 @@ private:
             }
             if (got == 0) break;
             text.append(chunk, static_cast<std::size_t>(got));
-            if (!sniffed && text.size() >= kBinarySniffBytes) {
+            if (!sniffed && text.size() >= tools::kBinarySniffBytes) {
                 sniffed = true;
                 if (LooksBinary(text)) {
                     ::close(fd);

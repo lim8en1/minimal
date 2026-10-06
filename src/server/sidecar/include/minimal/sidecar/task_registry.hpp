@@ -48,6 +48,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/tools/background_task_event.hpp"
+#include "minimal/sidecar/policy.hpp"
 
 namespace minimal::sidecar {
 
@@ -153,12 +154,6 @@ public:
                        const std::string& result_text, bool is_error);
 
 private:
-    // Finished records are retained for /tasks visibility, but capped,
-    // dropping the OLDEST finished records first; running records are never
-    // touched. (A long-lived session running thousands of tasks once kept
-    // every record forever.)
-    static constexpr std::size_t kMaxFinishedRecordsPerSession = 32;
-
     static void PruneFinishedLocked(std::vector<std::shared_ptr<TaskState>>& tasks);
 
     std::mutex mutex_;

@@ -22,6 +22,11 @@
 #include "minimal/store/sqlite_util.hpp"
 #include "minimal/session/message_codec.hpp"
 #include "minimal/session/ulid.hpp"
+#include "minimal/session/policy.hpp"
+
+// NOLINTBEGIN(readability-magic-numbers) -- SQLite positional parameter and
+// result-column indices, facts of each statement's text. Judgment calls live
+// in session/policy.hpp, never in this file.
 
 namespace minimal::session {
 namespace {
@@ -975,7 +980,6 @@ bool SessionDatabase::DeleteSession(const std::string& session_id) {
     // startup orphan sweep cleans what a crash can orphan. message_count is
     // decremented inside each chunk's transaction, so even the partial state
     // keeps the count consistent with the rows that survive.
-    constexpr int kChunk = 500;
     {
         Stmt chunk(db_, "DELETE FROM messages WHERE id IN"
                         " (SELECT id FROM messages WHERE session_id = ?1 LIMIT ?2);",
@@ -990,7 +994,7 @@ bool SessionDatabase::DeleteSession(const std::string& session_id) {
                 sqlite3_reset(chunk.stmt);
                 sqlite3_clear_bindings(chunk.stmt);
                 sqlite3_bind_text(chunk.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_int(chunk.stmt, 2, kChunk);
+                sqlite3_bind_int(chunk.stmt, 2, kRowsPerLockedChunk);
                 if (sqlite3_step(chunk.stmt) != SQLITE_DONE) {
                     // Capture the original error BEFORE rolling back: a failed
                     // rollback overwrites sqlite3_errmsg and would mask the
@@ -1014,7 +1018,7 @@ bool SessionDatabase::DeleteSession(const std::string& session_id) {
                     }
                 }
                 ExecChecked(db_, "COMMIT;", "failed to commit delete chunk");
-            } while (removed == static_cast<std::size_t>(kChunk));
+            } while (removed == static_cast<std::size_t>(kRowsPerLockedChunk));
         }
     }
 
@@ -1259,7 +1263,6 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
     // (CollectRows is a caller-holds-mu_ contract), and only the JSON decode
     // -- the expensive half -- runs outside it, exactly as the unchunked
     // version already did.
-    constexpr std::int64_t kChunkRows = 500;
     std::vector<StoredMessage> out;
     std::int64_t after_seq = -1;  // exclusive cursor; -1 selects from the start
     while (true) {
@@ -1274,7 +1277,7 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
                              "failed to load messages");
             sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(query.stmt, 2, after_seq);
-            sqlite3_bind_int64(query.stmt, 3, kChunkRows);
+            sqlite3_bind_int64(query.stmt, 3, kRowsPerLockedChunk);
             // THE RESUME PATH, and the most damaging place to return short: a
             // partial read becomes the loop's working history while
             // SqliteHistoryStore keeps appending at MAX(seq) + 1, so the
@@ -1284,7 +1287,7 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
         }
         if (rows.empty()) break;
         after_seq = rows.back().seq;
-        const bool full_chunk = static_cast<std::int64_t>(rows.size()) == kChunkRows;
+        const bool full_chunk = rows.size() == static_cast<std::size_t>(kRowsPerLockedChunk);
 
         // Decode OUTSIDE the lock. The JSON parse is the expensive part of a
         // large resume, and holding the one database mutex through it would
@@ -1821,3 +1824,5 @@ std::filesystem::path ResolveSessionDbPath(const std::string& configured) {
 }
 
 }  // namespace minimal::session
+
+// NOLINTEND(readability-magic-numbers)

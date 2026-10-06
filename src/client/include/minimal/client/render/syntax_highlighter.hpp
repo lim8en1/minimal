@@ -13,6 +13,7 @@
 #include <tree_sitter/api.h>
 
 #include "minimal/client/render/theme.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -156,7 +157,6 @@ private:
         std::string code;
         ftxui::Elements lines;
     };
-    static constexpr std::size_t kHighlightCacheCap = 64;
     mutable std::list<HighlightCacheEntry> highlight_cache_;   // MRU at front
 };
 

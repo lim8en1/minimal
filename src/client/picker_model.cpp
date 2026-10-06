@@ -5,6 +5,8 @@
 #include <ctime>
 
 #include "minimal/client/utf8.hpp"
+#include "minimal/common/clock.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -27,7 +29,9 @@ std::string Label(const v1::SessionSummary& session, std::size_t name_width,
     if (Utf8ColumnWidth(name) > name_width) name = TruncateUtf8Columns(name, name_width);
     const std::size_t pad = name_width - std::min(name_width, Utf8ColumnWidth(name));
     std::string count = std::to_string(session.message_count()) + " msgs";
-    if (count.size() < 9) count.insert(0, 9 - count.size(), ' ');
+    if (count.size() < kMessageCountColumnWidth) {
+        count.insert(0, kMessageCountColumnWidth - count.size(), ' ');
+    }
     return std::string(LiveMarker(session.is_live())) + name + std::string(pad, ' ') + "  " +
            count + "  " + RelativeAge(session.updated_at_unix_ms(), now_unix_ms);
 }
@@ -36,15 +40,23 @@ std::string Label(const v1::SessionSummary& session, std::size_t name_width,
 
 std::string RelativeAge(std::int64_t unix_ms, std::int64_t now_unix_ms) {
     if (unix_ms <= 0) return "";
-    const std::int64_t seconds = (now_unix_ms - unix_ms) / 1000;
-    if (seconds < 60) return "just now";   // includes a clock slightly behind the server's
-    if (seconds < 3600) return std::to_string(seconds / 60) + "m ago";
-    if (seconds < 86'400) return std::to_string(seconds / 3600) + "h ago";
-    if (seconds < 7 * 86'400) return std::to_string(seconds / 86'400) + "d ago";
-    const std::time_t stamp = static_cast<std::time_t>(unix_ms / 1000);
+    using std::chrono::duration_cast;
+    const std::chrono::milliseconds age(now_unix_ms - unix_ms);
+    // Under a minute includes a clock slightly behind the server's.
+    if (age < std::chrono::minutes(1)) return "just now";
+    if (age < std::chrono::hours(1)) {
+        return std::to_string(duration_cast<std::chrono::minutes>(age).count()) + "m ago";
+    }
+    if (age < std::chrono::days(1)) {
+        return std::to_string(duration_cast<std::chrono::hours>(age).count()) + "h ago";
+    }
+    if (age < std::chrono::weeks(1)) {
+        return std::to_string(duration_cast<std::chrono::days>(age).count()) + "d ago";
+    }
+    const std::time_t stamp = common::UnixMillisToTimeT(unix_ms);
     std::tm local{};
     localtime_r(&stamp, &local);
-    char buffer[16];
+    char buffer[sizeof("YYYY-MM-DD")];
     std::strftime(buffer, sizeof(buffer), "%Y-%m-%d", &local);
     return buffer;
 }

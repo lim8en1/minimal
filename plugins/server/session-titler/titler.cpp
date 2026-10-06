@@ -5,24 +5,25 @@
 #include "minimal/common/model_ref.hpp"
 
 #include <cctype>
+#include <limits>
 #include <exception>
 #include <optional>
 #include <utility>
 #include <vector>
 
 #include "minimal/common/utf8.hpp"
+#include "policy.hpp"
+#include "minimal/agent/policy.hpp"
 
 namespace minimal::session_titler {
 namespace {
 
 // Mirrors the free default's cap (session_database.cpp kDefaultNameMaxChars):
 // whatever names the session, it ends up the same shape.
-constexpr std::size_t kTitleMaxCodePoints = 60;
 
 // Pending titles, not sessions: one entry per NEW session awaiting its title.
 // A backlog this deep means the provider is wedged; dropping beyond it keeps
 // the default name, which is the plugin's whole failure mode anyway.
-constexpr std::size_t kJobQueueSize = 64;
 
 const char* kDefaultPrompt =
     "Write a short title for a coding-assistant conversation that begins with the user "
@@ -60,16 +61,11 @@ std::string ResponseText(const llm::ChatResponse& response) {
     return {};
 }
 
-bool IsAsciiSpace(char c) {
-    const auto u = static_cast<unsigned char>(c);
-    return u < 0x80 && std::isspace(u) != 0;
-}
-
 void Trim(std::string& s) {
     std::size_t begin = 0;
     std::size_t end = s.size();
-    while (begin < end && IsAsciiSpace(s[begin])) ++begin;
-    while (end > begin && IsAsciiSpace(s[end - 1])) --end;
+    while (begin < end && common::IsAsciiSpace(s[begin])) ++begin;
+    while (end > begin && common::IsAsciiSpace(s[end - 1])) --end;
     s = s.substr(begin, end - begin);
 }
 
@@ -125,9 +121,11 @@ TitlerConfig ParseTitlerConfig(const nlohmann::json& config) {
     if (!out.model.empty() && !common::SplitModelRef(out.model)) {
         reader.Fail("model", "must be <provider>/<model>, got \"" + out.model + "\"");
     }
-    out.max_tokens = static_cast<int>(reader.Int("max_tokens", out.max_tokens, 1, 1 << 20));
+    out.max_tokens = static_cast<int>(
+        reader.Int("max_tokens", out.max_tokens, 1, std::numeric_limits<int>::max()));
     out.input_char_budget =
-        static_cast<int>(reader.Int("input_char_budget", out.input_char_budget, 1, 1 << 24));
+        static_cast<int>(reader.Int("input_char_budget", out.input_char_budget, 1,
+                                    std::numeric_limits<int>::max()));
     out.prompt = reader.String("prompt", out.prompt);
     reader.Finish();
     return out;
@@ -143,9 +141,9 @@ std::string CleanTitle(std::string_view text) {
     bool pending_space = false;
     for (const char ch : text) {
         const auto c = static_cast<unsigned char>(ch);
-        if (IsAsciiSpace(ch)) {
+        if (common::IsAsciiSpace(ch)) {
             pending_space = !out.empty();
-        } else if (c < 0x20 || c == 0x7F) {
+        } else if (std::iscntrl(static_cast<unsigned char>(c))) {
             continue;  // control byte: dropped, not rendered
         } else {
             if (pending_space) {
@@ -170,7 +168,7 @@ std::string CleanTitle(std::string_view text) {
     }
 
     // Code-point cap: a byte cut would render as U+FFFD in the tab bar.
-    return common::TruncateCodePoints(out, kTitleMaxCodePoints);
+    return common::TruncateCodePoints(out, agent::kDefaultSessionNameMaxChars);
 }
 
 TitlerObserver::TitlerObserver(TitlerConfig config, plugins::ServiceRegistry* services,

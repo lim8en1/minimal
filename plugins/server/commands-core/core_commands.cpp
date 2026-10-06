@@ -645,8 +645,10 @@ private:
         // positional tokens is the fallback for callers that set no raw.
         std::string tail;
         if (!args.raw.empty()) {
-            auto at = args.raw.find("check");
-            at = at == std::string::npos ? std::string::npos : args.raw.find(tool, at + 5);
+            constexpr std::string_view kCheck = "check";
+            auto at = args.raw.find(kCheck);
+            at = at == std::string::npos ? std::string::npos
+                                         : args.raw.find(tool, at + kCheck.size());
             if (at != std::string::npos) tail = args.raw.substr(at + tool.size());
         } else {
             for (std::size_t i = 2; i < args.positional.size(); ++i) {

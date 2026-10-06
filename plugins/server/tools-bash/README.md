@@ -30,7 +30,7 @@ detached task, redirect output to a file to follow it mid-run. A bare
 `nohup cmd &` in a FOREGROUND call is the one trap: the grandchild inherits
 the output pipe, so the call wedges to its deadline. The drain fails fast on
 that shape — once the shell exits, a pipe still open with no data for
-`kIdleAfterReapMs` (2 s, bash_process.hpp) ends the run and the result
+`kIdleAfterReap` (tools-bash/policy.hpp) ends the run and the result
 carries a note pointing at `detach` or full redirection
 (`cmd > log 2>&1 < /dev/null &`, the deliberate escape hatch that releases
 the pipe and outlives the session).

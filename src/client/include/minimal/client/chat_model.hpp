@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/v1/session_service.pb.h"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -46,8 +47,8 @@ enum class ChatRowKind {
 // name kinds by it.
 std::string_view ToString(ChatRowKind kind);
 
-inline constexpr int kSwitchSlot = -1;
-inline constexpr int kCompactionSlotBase = 1 << 20;
+inline constexpr int kSwitchSlot = -1;  // NOLINT(readability-magic-numbers): a sentinel slot
+// Compaction rows' slots start at kCompactionSlotBase (client/policy.hpp).
 
 struct ChatRow {
     // The transcript row this view row came from (first member: designated
@@ -155,15 +156,8 @@ std::string CompactionHeadline(const ChatRow& row);
 // neither label nor reset. Every other kind is false.
 std::vector<bool> LabelContinuations(const std::vector<ChatRow>& rows);
 
-// google.protobuf.Struct -> JSON, for a tool's input/args. Exposed here (the
-// definition lives in chat_model.cpp) so callers outside the transcript path
-// -- e.g. SessionState::OnToolStarted, which needs the SAME conversion for
-// the LIVE tool_use_id it just opened, not a persisted StoredMessage -- can
-// reuse it instead of re-deriving it from google::protobuf::Value by hand.
-nlohmann::json StructToJson(const google::protobuf::Struct& value);
-
-// A bounded one-line dump of a tool's raw input JSON (truncated at 120
-// chars). A tool that wants a better line sends ToolExecutionEvent.summary
+// A bounded one-line dump of a tool's raw input JSON (truncated at kToolInputSummaryBytes
+// bytes). A tool that wants a better line sends ToolExecutionEvent.summary
 // (Tool::Summary on the server); the client never special-cases tool names.
 std::string InputSummary(const nlohmann::json& input);
 
@@ -251,13 +245,9 @@ RowWindowSelection SelectRowWindow(const std::vector<RowSpan>& spans,
 // repaint, so a notice on an otherwise-idle screen stays put (there is
 // nothing to wake the tick), and fades once the user resumes actually doing
 // something -- which is when a stale "/theme x" or "/cost" line stops being
-// useful anyway. Picked by feel; tune if it reads as too eager or too sticky.
-inline constexpr int kNoticeTicksDefault = 20;
-// ...and never before it has been on screen this long. The ticks count
-// app-wide UI activity, and a background tab streaming deltas is activity
-// too: 20 ticks alone could clear a notice in well under a second, before
-// anyone read it.
-inline constexpr std::chrono::milliseconds kNoticeMinVisible{4000};
+// useful anyway. kNoticeTicksDefault / kNoticeMinVisible (client/policy.hpp):
+// the ticks count app-wide UI activity, and a background tab streaming deltas
+// is activity too, so a minimum visible time backs the tick count.
 
 // CommandResult -> transient notice line. The return type is deliberately not
 // a ChatRow and not convertible to one: a command result has no path into the

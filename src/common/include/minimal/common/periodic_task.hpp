@@ -21,6 +21,7 @@
 #include <utility>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::common {
 
@@ -48,11 +49,8 @@ public:
     }
 
 private:
-    // Used until `interval` has answered once.
-    static constexpr std::chrono::milliseconds kFallbackInterval{1000};
-
     void Run() {
-        std::chrono::milliseconds interval = kFallbackInterval;
+        std::chrono::milliseconds interval = kPeriodicTaskFallbackInterval;
         while (true) {
             Guarded("interval", [&] { interval = interval_(); });
             {

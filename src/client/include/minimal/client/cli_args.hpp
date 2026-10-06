@@ -79,7 +79,7 @@ ParsedArgs ParseArgs(int argc, const char* const* argv);
 std::string ResolveServerTarget(std::string_view value);
 
 // The default endpoint when --server is absent: <data dir>/server.sock. Matches
-// rpc::DefaultSocketPath()/SocketTarget() on the server side.
+// common::DefaultSocketPath() and rpc::SocketTarget() on the server side.
 std::string DefaultServerTarget();
 
 

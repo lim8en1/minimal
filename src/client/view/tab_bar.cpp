@@ -8,6 +8,7 @@
 
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/tool_status.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -123,14 +124,10 @@ namespace {
 
 // " │ ", the separator rendered between adjacent tab cells so labels can
 // never fuse into one run-together string.
-constexpr int kSeparatorWidth = 3;
+constexpr int kSeparatorWidth = 3;  // NOLINT(readability-magic-numbers): the columns of " │ "
 
 // Digits in a 1-based tab index, for the label prefix's width.
-int DigitWidth(std::size_t n) {
-    int digits = 1;
-    for (std::size_t v = n; v >= 10; v /= 10) ++digits;
-    return digits;
-}
+int DigitWidth(std::size_t n) { return static_cast<int>(std::to_string(n).size()); }
 
 // One tab's label -- "<index> <name>", name column-truncated (see
 // utf8.hpp: codepoint-width, not byte length, so a CJK/emoji name isn't cut
@@ -247,7 +244,6 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
     // overrun this by even one column is a TUI with 1000+ open tabs, an
     // extreme nobody hits in practice, and overrunning a text row by one
     // column is a cosmetic non-event, not a functional break.
-    constexpr int kMarkerWidth = 5;
     // The filter badge (see the header) rides the bar's trailing edge; its
     // width comes out of the overflow window's budget FIRST, so visible
     // cells + markers + badge always fit together. Two strings: the muted
@@ -265,7 +261,7 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
                       kSeparatorWidth;   // plus the separator that joins it
     }
     const auto window = ComputeTabBarWindow(widths, Terminal::Size().dimx - badge_width,
-                                            focused_index, kMarkerWidth);
+                                            focused_index, kTabOverflowMarkerWidth);
 
     Elements cells;
     if (window.hidden_before > 0) {

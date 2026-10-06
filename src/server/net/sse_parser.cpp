@@ -2,6 +2,10 @@
 
 #include <stdexcept>
 
+#include "minimal/common/units.hpp"
+#include "minimal/common/utf8.hpp"
+#include "minimal/net/policy.hpp"
+
 namespace minimal::net {
 namespace {
 
@@ -12,11 +16,10 @@ std::string_view strip_cr(std::string_view line) {
 
 // A stream with no newline -- or a `data:` firehose that never sends the blank
 // line that completes a frame -- grew line_buffer_ / pending_data_ without
-// bound. 1 MiB is far above any legitimate SSE line (deltas are small JSON
-// objects); past it the stream is broken, and the failure is thrown so the
-// provider's existing catch-and-classify machinery turns it into an LlmError
-// rather than letting a wedged proxy consume memory until the idle timeout.
-constexpr std::size_t kMaxPendingBytes = 1ull << 20;
+// bound. Past kMaxSsePendingBytes the stream is broken, and the failure is
+// thrown so the provider's existing catch-and-classify machinery turns it into
+// an LlmError rather than letting a wedged proxy consume memory until the idle
+// timeout.
 
 }  // namespace
 
@@ -27,17 +30,15 @@ std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
     // dropped from every BOM-prefixed stream. The latch does NOT burn on a
     // short first chunk: a 1-2 byte write (a dribbling server, a split prologue)
     // used to set bom_checked_ with an insufficient prefix, and the split BOM
-    // then survived into the first field name. Bytes are latched until three
+    // then survived into the first field name. Bytes are latched until a BOM's worth
     // are available, then fed through the normal path (one recursion level
     // deep -- bom_checked_ is set, so this branch is not re-entered).
     if (!bom_checked_) {
         bom_prefix_.append(chunk);
-        if (bom_prefix_.size() < 3) return {};
+        if (bom_prefix_.size() < common::kUtf8Bom.size()) return {};
         bom_checked_ = true;
-        if (static_cast<unsigned char>(bom_prefix_[0]) == 0xEF &&
-            static_cast<unsigned char>(bom_prefix_[1]) == 0xBB &&
-            static_cast<unsigned char>(bom_prefix_[2]) == 0xBF) {
-            bom_prefix_.erase(0, 3);
+        if (std::string_view(bom_prefix_).starts_with(common::kUtf8Bom)) {
+            bom_prefix_.erase(0, common::kUtf8Bom.size());
         }
         const std::string latched = std::move(bom_prefix_);
         return Feed(latched);
@@ -102,7 +103,7 @@ std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
             // An empty event value is the spec's "message", not a name.
             pending_event_.assign(value.empty() ? "message" : value);
         } else if (field == "data") {
-            if (pending_data_.size() + value.size() > kMaxPendingBytes) {
+            if (pending_data_.size() + value.size() > kMaxSsePendingBytes) {
                 throw std::runtime_error(
                     "SSE frame exceeded 1 MiB of data without a completing blank line");
             }
@@ -123,7 +124,7 @@ std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
     // (The old pre-append check measured buffered TOTALS, so one chunk
     // carrying many complete lines tripped the "1 MiB line" error on
     // legitimate traffic.)
-    if (line_buffer_.size() > kMaxPendingBytes) {
+    if (line_buffer_.size() > kMaxSsePendingBytes) {
         throw std::runtime_error("SSE line exceeded 1 MiB without a newline");
     }
     return frames;

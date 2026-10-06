@@ -9,32 +9,22 @@
 
 #include "minimal/tools/file_access.hpp"
 #include "minimal/tools/path_confinement.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/agent/policy.hpp"
 
 namespace minimal::agent {
 
 namespace {
 
-// Per-mention caps. A mention is a convenience window, not a substitute for the
-// read tool: the truncation note says so, and the model can pull more itself.
-// A file is NEVER split across blocks -- fragments would read as separate
-// documents the model cannot reassemble; one bounded block with a visible note
-// is the whole contract.
-constexpr int kMentionMaxLines = 1000;
-constexpr int kMentionMaxLineLength = 2000;
-constexpr int kTreeMaxDepth = 3;  // levels BELOW the mentioned directory
-constexpr std::size_t kTreeMaxEntries = 500;
+// Per-mention caps (agent/policy.hpp). A file is NEVER split across blocks --
+// fragments would read as separate documents the model cannot reassemble; one
+// bounded block with a visible note is the whole contract.
 // First line of every <file-tree> frame: the listing lines are
 // project-root-relative, not relative to the mentioned directory, and the
 // note is what makes the frame self-describing about that (a model joining
 // the path attribute onto already-prefixed lines would mis-call read).
 constexpr std::string_view kTreePathNote =
     "[paths are relative to the project root -- pass them to read as-is]";
-// Expansion is bounded per mention AND per message: without the count cap,
-// a message of N mentions reads N ~2 MiB windows into the provider prompt
-// in one turn. Both ceilings leave the mention verbatim -- the model can
-// still read the file itself through the gated read tool.
-constexpr int kMaxMentionsPerMessage = 32;
-constexpr std::size_t kMaxMentionBytesPerMessage = 8u << 20;  // 8 MiB of blocks
 
 bool IsWhitespace(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
@@ -90,8 +80,8 @@ bool AppendTree(std::string& out, const std::filesystem::path& dir,
     std::sort(entries.begin(), entries.end());
 
     for (const auto& path : entries) {
-        if (count >= kTreeMaxEntries) {
-            out += "[truncated: " + std::to_string(kTreeMaxEntries) + " entries shown]\n";
+        if (count >= kMentionTreeMaxEntries) {
+            out += "[truncated: " + std::to_string(kMentionTreeMaxEntries) + " entries shown]\n";
             return false;
         }
         const std::string name = path.filename().string();
@@ -100,7 +90,7 @@ bool AppendTree(std::string& out, const std::filesystem::path& dir,
         const bool is_dir = std::filesystem::is_directory(path, type_ec);
         out += rel_prefix + name + (is_dir ? "/" : "") + "\n";
         ++count;
-        if (is_dir && depth < kTreeMaxDepth) {
+        if (is_dir && depth < kMentionTreeMaxDepth) {
             if (!AppendTree(out, path, rel_prefix + name + "/", depth + 1, count)) return false;
         }
     }

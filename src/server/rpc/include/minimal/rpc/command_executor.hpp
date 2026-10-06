@@ -39,6 +39,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include "minimal/rpc/policy.hpp"
 
 namespace minimal::rpc {
 
@@ -47,9 +48,9 @@ public:
     using Task = std::function<void()>;
 
     struct Options {
-        std::size_t max_per_key = 2;
-        std::chrono::milliseconds deadline{60000};  // 0 = no deadline
-        std::size_t max_abandoned = 8;
+        std::size_t max_per_key = kMaxCommandsPerKey;
+        std::chrono::milliseconds deadline = kCommandDeadline;  // 0 = no deadline
+        std::size_t max_abandoned = kMaxAbandonedCommands;
     };
 
     CommandExecutor(std::size_t threads, std::size_t max_backlog);

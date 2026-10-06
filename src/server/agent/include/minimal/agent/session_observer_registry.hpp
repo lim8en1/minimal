@@ -44,23 +44,18 @@
 #include "minimal/agent/session_observer.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/serial_executor.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::agent {
 
 class SessionObserverRegistry {
 public:
-    // The queue bound is EXPLICIT rather than EventQueue's default. That default
-    // (65536) was sized for stream events -- token deltas -- and a notification
-    // task is a different animal: each holds a copy of SessionInfo plus the
-    // observer snapshot, so inheriting it reserved tens of megabytes for a
-    // backlog that means "an observer has stopped consuming" long before it
-    // fills. A few hundred pending notifications is already pathological.
-    // Injectable so a test can wedge an observer and reach the bound without
-    // queueing 65536 of them.
-    static constexpr std::size_t kDefaultTaskQueueSize = 1024;
-
-    explicit SessionObserverRegistry(common::Logger& logger,
-                                     std::size_t task_queue_size = kDefaultTaskQueueSize);
+    // The queue bound is explicit (common::kDefaultNotificationQueueCapacity),
+    // not EventQueue's stream-sized default. Injectable so a test can wedge an
+    // observer and reach the bound cheaply.
+    explicit SessionObserverRegistry(
+        common::Logger& logger,
+        std::size_t task_queue_size = common::kDefaultNotificationQueueCapacity);
 
     // Notifications refused because the queue was full. Read by tests, and the
     // number the warning reports.

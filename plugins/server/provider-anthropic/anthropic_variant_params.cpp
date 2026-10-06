@@ -1,7 +1,9 @@
 #include "anthropic_variant_params.hpp"
 
-#include <array>
 #include <stdexcept>
+#include <string>
+
+#include "policy.hpp"
 
 namespace minimal::provider_anthropic {
 
@@ -9,21 +11,16 @@ namespace {
 
 using nlohmann::json;
 
-// The effort ladder, lowest first: the order step-down walks.
-constexpr std::array<const char*, 5> kLadder = {"low", "medium", "high", "xhigh", "max"};
-
 // Anthropic thinking budgets per effort name, for models that only take a
 // budget (pre-adaptive: Haiku 4.5 and older). A scale, not data: values sit
 // well under every such model's output cap, and the caller clamps against the
 // base's max_tokens when known (the API rejects budget_tokens >= max_tokens);
 // the request builder clamps again against the per-request cap.
 std::optional<int> AnthropicBudgetFor(const std::string& effort_word) {
-    if (effort_word == "low") return 4096;
-    if (effort_word == "medium") return 8192;
-    if (effort_word == "high") return 16384;
-    if (effort_word == "xhigh") return 32768;
-    if (effort_word == "max") return 65536;
-    return std::nullopt;
+    for (const auto& [word, budget] : kThinkingBudgets) {
+        if (effort_word == word) return budget;
+    }
+    return std::nullopt;  // "minimal": no thinking block at all
 }
 
 bool Supported(const json& node) {
@@ -67,8 +64,9 @@ std::optional<std::string> EffortFor(const json* capabilities, const std::string
     }
     const json& effort = capabilities->at("effort");
     std::optional<std::string> best;
-    for (const char* rung : kLadder) {
-        if (effort.contains(rung) && Supported(effort.at(rung))) best = rung;
+    for (const auto& [rung, budget] : kThinkingBudgets) {  // the ladder, lowest first
+        const std::string name(rung);
+        if (effort.contains(name) && Supported(effort.at(name))) best = name;
         if (word == rung) return best;
     }
     return best;
@@ -120,12 +118,11 @@ std::pair<json, bool> AnthropicVariantParams::DeriveParameters(const std::string
         // the reserved output can't be salvaged by clamping: skip thinking
         // for this request rather than send a budget guaranteed invalid
         // either way, the same degrade "none"/"minimal" already use above.
-        constexpr int kAnthropicMinBudgetTokens = 1024;
-        constexpr int kReservedVisibleOutput = 1024;
-        if (*max_tokens < kAnthropicMinBudgetTokens + kReservedVisibleOutput) {
+        constexpr int kAnthropicMinBudgetTokens = 1024;  // NOLINT(readability-magic-numbers): the API's minimum
+        if (*max_tokens < kAnthropicMinBudgetTokens + kReservedVisibleOutputTokens) {
             return {out, false};
         }
-        const int ceiling = *max_tokens - kReservedVisibleOutput;
+        const int ceiling = *max_tokens - kReservedVisibleOutputTokens;
         if (value > ceiling) {
             value = ceiling;
             clamped = true;

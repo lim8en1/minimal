@@ -8,6 +8,8 @@
 #include "minimal/common/secret_handle.hpp"
 #include "minimal/llm/chat.hpp"
 #include "minimal/llm/stream_event.hpp"
+#include "minimal/common/policy.hpp"
+#include "minimal/llm/policy.hpp"
 
 namespace minimal::llm {
 
@@ -30,15 +32,15 @@ struct ProviderConfig {
     // providers.json's "max_tokens_field" sets it per entry; the OpenAI
     // provider consumes it, other backends ignore it.
     std::string max_tokens_field;
-    std::chrono::milliseconds connect_timeout{5000};
-    std::chrono::milliseconds request_timeout{120000};
-    std::chrono::milliseconds stream_idle_timeout{60000};
+    std::chrono::milliseconds connect_timeout = common::kDefaultConnectTimeout;
+    std::chrono::milliseconds request_timeout = kDefaultRequestTimeout;
+    std::chrono::milliseconds stream_idle_timeout = kDefaultStreamIdleTimeout;
     // Longest wait for the FIRST response byte once the request is fully sent.
     // Longer than the idle timeout because a local backend prefilling a
     // 300k-1M token prompt legitimately says nothing for minutes; a cancel
     // still lands within about a second (ChatRequest::should_abort). 0 = use
     // stream_idle_timeout.
-    std::chrono::milliseconds first_byte_timeout{600000};
+    std::chrono::milliseconds first_byte_timeout = kDefaultFirstByteTimeout;
 };
 
 enum class LlmErrorCategory { Transport, RateLimit, ServerError, AuthError, RequestError, ParseError };

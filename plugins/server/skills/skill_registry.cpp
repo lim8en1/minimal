@@ -12,6 +12,8 @@
 #include "minimal/config/project_dirs.hpp"
 #include "minimal/config/project_trust.hpp"
 #include "minimal/config/project_trust.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::skills {
 namespace {
@@ -21,8 +23,8 @@ namespace {
 // skills/ directories are walked the same way agents/ is), and a `preload`
 // skill's body is inlined verbatim into the system prompt on every session
 // start, so an oversized file is not just a slow parse -- it is unbounded
-// prompt-cache-busting content shipped to the model on every turn.
-constexpr std::uintmax_t kMaxSkillFileBytes = 1 << 20;  // 1 MiB
+// prompt-cache-busting content shipped to the model on every turn
+// (common::kMaxConfigFileBytes).
 
 // nullopt distinguishes "could not read" from "read an empty file". Collapsing
 // the two made an unreadable SKILL.md report "missing frontmatter block", which
@@ -31,7 +33,7 @@ constexpr std::uintmax_t kMaxSkillFileBytes = 1 << 20;  // 1 MiB
 // every call site already has a skip-and-log (or demote-to-on-demand) path for
 // it, so this needs no new error shape.
 std::optional<std::string> ReadFile(const std::filesystem::path& path) {
-    common::ReadFileResult result = common::ReadFile(path, kMaxSkillFileBytes);
+    common::ReadFileResult result = common::ReadFile(path, common::kMaxConfigFileBytes);
     if (!result.ok()) return std::nullopt;
     return std::move(result.contents);
 }

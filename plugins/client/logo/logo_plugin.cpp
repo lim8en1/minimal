@@ -34,8 +34,10 @@
 #include "logo_generator.hpp"
 #include "minimal/common/config_reader.hpp"
 #include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/utf8.hpp"
 #include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/common/abi_tag.hpp"
+#include "policy.hpp"
 
 namespace {
 
@@ -65,25 +67,13 @@ bool IsPrintableUtf8Glyph(const std::string& glyph) {
     // control character; any continuation structure that does not parse is a
     // fragment. Multi-byte sequences are accepted wholesale (the generator
     // slices per cell the same way it slices its own pools).
-    const auto byte = [&glyph](std::size_t i) {
-        return static_cast<unsigned char>(glyph[i]);
-    };
-    for (char c : glyph) {
-        const auto b = static_cast<unsigned char>(c);
-        if (b < 0x20 || b == 0x7F) return false;
+    for (const char c : glyph) {
+        if (static_cast<unsigned char>(c) < ' ' || c == '\x7F') return false;  // C0, DEL
     }
-    const unsigned char lead = byte(0);
-    std::size_t length = 0;
-    if (lead < 0x80) return glyph.size() == 1;
-    if ((lead & 0xE0) == 0xC0) length = 2;
-    else if ((lead & 0xF0) == 0xE0) length = 3;
-    else if ((lead & 0xF8) == 0xF0) length = 4;
-    else return false;  // stray continuation byte as a lead
+    const std::size_t length = minimal::common::Utf8LeadLength(glyph.front());
+    if (length == 0) return false;  // stray continuation byte as a lead
     if (glyph.size() != length) return false;
-    for (std::size_t i = 1; i < length; ++i) {
-        if ((byte(i) & 0xC0) != 0x80) return false;
-    }
-    return true;
+    return std::all_of(glyph.begin() + 1, glyph.end(), minimal::common::IsUtf8Continuation);
 }
 
 // Strict about shape (wrong types and unknown fields are named errors, like
@@ -103,11 +93,8 @@ LogoConfig ParseConfig(const nlohmann::json& config) {
         // is used (the empty-charset default).
         std::string cleaned;
         for (std::size_t i = 0; i < charset.size();) {
-            std::size_t length = 1;
-            const unsigned char lead = static_cast<unsigned char>(charset[i]);
-            if (lead >= 0xC0 && lead < 0xF8) {
-                length = lead < 0xE0 ? 2 : (lead < 0xF0 ? 3 : 4);
-            }
+            const std::size_t length =
+                std::max<std::size_t>(minimal::common::Utf8LeadLength(charset[i]), 1);
             const std::string glyph = charset.substr(i, length);
             if (IsPrintableUtf8Glyph(glyph)) cleaned += glyph;
             else std::fprintf(stderr,
@@ -195,7 +182,7 @@ private:
         auto cached = cache_.find(cache_key);
         if (cached != cache_.end()) return cached->second;
 
-        if (cache_.size() >= kCacheCap && !cache_order_.empty()) {
+        if (cache_.size() >= minimal::logo::kCacheCap && !cache_order_.empty()) {
             cache_.erase(cache_order_.front());
             cache_order_.pop_front();
         }
@@ -274,13 +261,12 @@ private:
     // FIFO eviction order, kept alongside cache_ (regenerate_per_session=true
     // means one entry PER SESSION ID ever opened, unbounded for a
     // long-running client -- a session closed an hour ago has no other event
-    // that would ever remove its art). kCacheCap is generous for what a
+    // that would ever remove its art). minimal::logo::kCacheCap is generous for what a
     // process realistically has open or recently open at once; eviction
     // order is FIFO, not true LRU -- simplicity over precision for a cache
     // this cheap to regenerate and this small per entry (a handful of ASCII
     // lines).
     mutable std::deque<std::string> cache_order_;
-    static constexpr std::size_t kCacheCap = 200;
     mutable std::mt19937 rng_;  // Render is loop-thread only; the mutex covers it anyway
 
     static constexpr const char* kSharedKey = "";

@@ -1,5 +1,8 @@
 #include "bash_settings.hpp"
 
+#include <limits>
+
+#include "minimal/common/clock.hpp"
 #include "minimal/common/config_reader.hpp"
 #include "minimal/common/plugin_config_label.hpp"
 
@@ -27,19 +30,22 @@ BashSettings ParseBashSettings(const nlohmann::json& config) {
     reader.Describe("shell", {"The POSIX shell (or a wrapper entering a container)."});
     reader.Describe("inherit_env", {"How the session environment is seeded: \"allowlist\" "
                                     "($HOME, $PATH, ...) or \"all\" (includes API keys)."});
-    constexpr std::int64_t kMaxSeconds = 7LL * 24 * 3600;
-    settings.timeout_ms = reader.Int("timeout_s", settings.timeout_ms / 1000, 1, kMaxSeconds) * 1000;
-    settings.max_timeout_ms =
-        reader.Int("max_timeout_s", settings.max_timeout_ms / 1000, 1, kMaxSeconds) * 1000;
+    // The largest timeout a deadline can represent (common::kMaxDeadline).
+    const std::int64_t kMaxSeconds = common::MillisToSeconds(common::kMaxDeadline.count());
+    const auto seconds_key = [&reader](const char* key, std::int64_t default_ms) {
+        return common::SecondsToMillis(
+            reader.Int(key, common::MillisToSeconds(default_ms), 1, kMaxSeconds));
+    };
+    settings.timeout_ms = seconds_key("timeout_s", settings.timeout_ms);
+    settings.max_timeout_ms = seconds_key("max_timeout_s", settings.max_timeout_ms);
     settings.background_max_timeout_ms =
-        reader.Int("background_max_timeout_s", settings.background_max_timeout_ms / 1000, 1,
-                   kMaxSeconds) *
-        1000;
+        seconds_key("background_max_timeout_s", settings.background_max_timeout_ms);
     settings.max_output_bytes = reader.Int("max_output_bytes", settings.max_output_bytes, 1);
     settings.max_file_size_bytes =
         reader.Int("max_file_size_bytes", settings.max_file_size_bytes, 1);
     settings.max_background_tasks = static_cast<int>(
-        reader.Int("max_background_tasks", settings.max_background_tasks, 1, 1024));
+        reader.Int("max_background_tasks", settings.max_background_tasks, 1,
+                   std::numeric_limits<int>::max()));
     settings.shell = reader.String("shell", settings.shell, /*allow_empty=*/false);
     // A typo'd mode must not silently mean "allowlist" (or worse, "all").
     settings.inherit_env = reader.Enum("inherit_env", settings.inherit_env, {"allowlist", "all"});

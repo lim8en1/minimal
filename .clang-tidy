@@ -1,0 +1,9 @@
+# Policy constants (ARCHITECTURE.md "Policy constants"): a bare literal is an
+# external fact or a derivation written out, never a hidden judgment call.
+# readability-magic-numbers cannot see literals initializing a const/constexpr
+# name; scripts/check_policy_constants.py covers those.
+Checks: '-*,readability-magic-numbers'
+HeaderFilterRegex: '/(src|plugins)/'
+CheckOptions:
+  readability-magic-numbers.IgnoredIntegerValues: '1;2;3;4'
+  readability-magic-numbers.IgnoredFloatingPointValues: '0.5;1.0;2.0'

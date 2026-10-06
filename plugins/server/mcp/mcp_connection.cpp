@@ -27,6 +27,11 @@
 #include "minimal/sidecar/process.hpp"
 #include "minimal/net/http_client.hpp"
 #include "minimal/net/sse_parser.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/common/http_status.hpp"
+#include "policy.hpp"
+#include "minimal/common/policy.hpp"
+#include "minimal/sidecar/policy.hpp"
 
 namespace minimal::mcp {
 
@@ -181,9 +186,8 @@ bool ReadResponse(const nlohmann::json& message, nlohmann::json* result, std::st
                     error_obj.at("message").is_string()
                 ? error_obj.at("message").get<std::string>()
                 : "unknown";
-        constexpr std::size_t kMaxErrorMessage = 2000;
-        if (server_message.size() > kMaxErrorMessage) {
-            server_message.resize(kMaxErrorMessage);
+        if (server_message.size() > common::kMaxQuotedErrorBytes) {
+            server_message.resize(common::kMaxQuotedErrorBytes);
             server_message += " …[truncated]";
         }
         *error = "MCP server error: " + server_message;
@@ -298,11 +302,9 @@ private:
 
 // An unterminated line can only be a misbehaving or hostile child: a
 // conforming message is newline-framed. Past this, the connection is dropped
-// rather than growing the buffer without bound.
-constexpr std::size_t kMaxLineBytes = 16 * 1024 * 1024;
-
-// The reader's poll slice: how long ~StdioTransport can wait for its join.
-constexpr int kReaderSliceMs = 100;
+// rather than growing the buffer without bound (kMaxStdioLineBytes). The
+// reader polls in common::kCancelPollSlice slices, which bound how long
+// ~StdioTransport waits for its join.
 
 class StdioTransport final : public JsonRpcTransport {
 public:
@@ -522,10 +524,10 @@ private:
 
     void ReadLoop() {
         std::string buffer;
-        char chunk[8192];
+        char chunk[sidecar::kPipeReadChunkBytes];
         while (!stopping_.load(std::memory_order_acquire)) {
             pollfd fd{stdout_.get(), POLLIN, 0};
-            const int rc = ::poll(&fd, 1, kReaderSliceMs);
+            const int rc = ::poll(&fd, 1, static_cast<int>(common::kCancelPollSlice.count()));
             if (rc < 0 && errno == EINTR) continue;
             if (rc < 0) {
                 Close("MCP transport error: polling the server failed");
@@ -545,9 +547,9 @@ private:
                 if (end > start) Dispatch(buffer.substr(start, end - start));
             }
             buffer.erase(0, start);
-            if (buffer.size() > kMaxLineBytes) {
+            if (buffer.size() > kMaxStdioLineBytes) {
                 Close("MCP server sent an unterminated line over " +
-                      std::to_string(kMaxLineBytes) + " bytes; connection dropped");
+                      std::to_string(kMaxStdioLineBytes) + " bytes; connection dropped");
                 return;
             }
         }
@@ -745,9 +747,10 @@ private:
             std::lock_guard<std::mutex> lock(slot->mu);
             if (slot->done) {
                 message = *slot->value;
-            } else if (*status < 200 || *status >= 300) {
+            } else if (!common::IsSuccessStatus(*status)) {
                 *error = "MCP server returned HTTP " + std::to_string(*status) +
-                         (buffer->empty() ? std::string() : ": " + buffer->substr(0, 200));
+                         (buffer->empty() ? std::string()
+                                  : ": " + buffer->substr(0, common::kMaxErrorSnippetBytes));
                 return false;
             } else if (*is_sse) {
                 // The stream ended within the deadline but the matching frame
@@ -776,7 +779,7 @@ private:
                                     .dump();
         try {
             const net::HttpResponse response = session_.Post(BuildRequest(body));
-            if (response.status < 200 || response.status >= 300) {
+            if (!common::IsSuccessStatus(response.status)) {
                 error = "MCP server returned HTTP " + std::to_string(response.status) +
                         " for " + method;
                 return false;
@@ -906,7 +909,7 @@ void McpConnection::Teardown() {
         // call almost at once (the reader sees EOF and fails every pending
         // request), and an http call is bounded by its request timeout, so
         // the grace only has to cover a worker leaving a call in flight.
-        joined = worker_->cv.wait_for(lock, std::chrono::milliseconds(250),
+        joined = worker_->cv.wait_for(lock, kWorkerJoinGrace,
                                       [this] { return worker_->exited; });
     }
     if (loop_.joinable()) {
@@ -914,14 +917,14 @@ void McpConnection::Teardown() {
             loop_.join();
             // The child is ours to reap NOW, on this thread: nothing else
             // waits for it, and nothing outlives this call.
-            if (child) child->TerminateAfter(std::chrono::seconds(5));
+            if (child) child->TerminateAfter(kChildTerminateGrace);
         } else {
             // Wedged past the grace: detach, never join. The thread references
             // only shared_ptr-held state, so it exits safely whenever its
             // call returns. The child gets a detached escalation watcher,
             // since this thread is done waiting.
             if (child) {
-                std::thread([child] { child->TerminateAfter(std::chrono::seconds(5)); }).detach();
+                std::thread([child] { child->TerminateAfter(kChildTerminateGrace); }).detach();
             }
             loop_.detach();
         }

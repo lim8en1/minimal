@@ -1,4 +1,5 @@
 #include "minimal/agent/mention_resolver.hpp"
+#include "minimal/agent/policy.hpp"
 
 #include <algorithm>
 #include <system_error>
@@ -6,16 +7,10 @@
 
 namespace minimal::agent {
 
-namespace {
-
-constexpr int kDefaultSuggestLimit = 50;
-
-}  // namespace
-
 std::vector<std::string> PrefixMentionResolver::Suggest(std::string_view prefix,
                                                         const std::filesystem::path& project_root,
                                                         int limit) const {
-    if (limit <= 0) limit = kDefaultSuggestLimit;
+    if (limit <= 0) limit = kDefaultMentionSuggestLimit;
 
     // The deepest complete component is everything up to and including the last
     // '/'. Descent ONLY on '/': that rule is what keeps a keystroke O(entries of

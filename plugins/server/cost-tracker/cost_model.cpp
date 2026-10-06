@@ -17,7 +17,7 @@ constexpr const char* kLiteLlmOutput = "output_cost_per_token";
 constexpr const char* kLiteLlmCacheRead = "cache_read_input_token_cost";
 constexpr const char* kLiteLlmCacheWrite = "cache_creation_input_token_cost";
 
-constexpr double kTokensPerMtok = 1e6;
+constexpr double kTokensPerMtok = 1e6;  // NOLINT(readability-magic-numbers): prices are per million
 
 std::optional<double> PositiveNumber(const nlohmann::json& entry, const char* key) {
     const auto it = entry.find(key);

@@ -3,6 +3,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <system_error>
 
@@ -11,6 +12,7 @@
 #include "minimal/client/config_file_io.hpp"
 #include "minimal/common/config_reader.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -52,15 +54,17 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
     lenient([&] { config.status_format = reader.String("status_format", config.status_format); });
     lenient([&] { config.theme = reader.String("theme", config.theme); });
     const auto bounded_int = [&](const char* key, int& out, int floor) {
-        lenient([&] { out = static_cast<int>(reader.Int(key, out, floor, 1 << 30)); });
+        lenient([&] {
+            out = static_cast<int>(reader.Int(key, out, floor, std::numeric_limits<int>::max()));
+        });
     };
     bounded_int("scrollback_window_max_messages", config.scrollback_window_max_messages, 1);
-    // A floor well above the head+marker+tail split's fixed overhead
-    // (SessionState::OnToolOutputDelta's truncation marker alone is ~70
-    // bytes): a value below it made head_bytes/tail_budget underflow to a
-    // huge size_t and threw std::out_of_range out of the gRPC reader thread
-    // on the first delta past the cap.
-    bounded_int("tool_output_buffer_bytes", config.tool_output_buffer_bytes, 4096);
+    // Floored (kMinToolOutputBufferBytes): below the head+marker+tail split's
+    // fixed overhead, head_bytes/tail_budget underflowed to a huge size_t and
+    // threw std::out_of_range out of the gRPC reader thread on the first delta
+    // past the cap.
+    bounded_int("tool_output_buffer_bytes", config.tool_output_buffer_bytes,
+                kMinToolOutputBufferBytes);
     bounded_int("tools_panel_stdout_buffer_lines", config.tools_panel_stdout_buffer_lines, 1);
     bounded_int("panel_height", config.panel_height, 3);
 

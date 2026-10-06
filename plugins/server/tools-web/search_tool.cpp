@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "url_policy.hpp"
+#include "minimal/common/http_status.hpp"
 
 namespace minimal::tools_web {
 namespace {
@@ -42,8 +43,9 @@ std::string PercentEncode(std::string_view text) {
             out += static_cast<char>(c);
         } else {
             out += '%';
+            // NOLINTNEXTLINE(readability-magic-numbers): a byte's two nibbles
             out += kHex[c >> 4];
-            out += kHex[c & 0x0F];
+            out += kHex[c & 0x0F];  // NOLINT(readability-magic-numbers)
         }
     }
     return out;
@@ -151,7 +153,7 @@ public:
         } catch (const net::HttpError& error) {
             return Error(std::string("web_search: ") + error.what());
         }
-        if (response.status < 200 || response.status >= 300) {
+        if (!common::IsSuccessStatus(response.status)) {
             return Error("web_search: backend returned HTTP " + std::to_string(response.status));
         }
 

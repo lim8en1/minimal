@@ -56,7 +56,7 @@ void WatchBackgroundTask(TaskRegistry::TaskState& task,
     // (the `nohup cmd &` trap): idle-after-reap ends the run in ~2 s with the
     // teaching note appended to the injected result, turning a would-be 600 s
     // "timed out" into a prompt completion-with-note.
-    options.idle_after_reap_ms = kIdleAfterReapMs;
+    options.idle_after_reap_ms = kIdleAfterReap.count();
 
     // session_lifetime is the ONLY stop source (no turn CancelToken is held).
     const auto outcome = minimal::sidecar::DrainAndReap(

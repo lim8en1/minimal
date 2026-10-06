@@ -14,6 +14,7 @@
 
 #include "minimal/llm/message.hpp"
 #include "minimal/session/stored_message.hpp"
+#include "minimal/session/policy.hpp"
 
 struct sqlite3;      // opaque handle; <sqlite3.h> stays private to the .cpp
 struct sqlite3_stmt;
@@ -174,7 +175,7 @@ struct OpenOptions {
 // (Default naming is NOT part of the append transaction; see SetDefaultName.)
 class SessionDatabase {
 public:
-    static constexpr int kSchemaVersion = 11;
+    static constexpr int kSchemaVersion = 11;  // NOLINT(readability-magic-numbers): the schema's own version
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on any
     // failure, including a database whose user_version is newer than this
@@ -302,7 +303,6 @@ public:
     // hold mu_ behind a busy-timeout-bounded RESTART each time), so failures
     // are counted: checkpoint_failures() lets the wiring log a persistently
     // pinned WAL instead of the failure being silent.
-    static constexpr int kCheckpointAppends = 200;
     enum class CheckpointOutcome { kNotDue, kCompleted, kFailed };
     CheckpointOutcome MaybeRunPassiveCheckpoint();
 

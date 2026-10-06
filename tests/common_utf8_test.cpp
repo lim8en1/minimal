@@ -74,3 +74,55 @@ TEST_CASE("the boundary walks are bounded on malformed runs of continuation byte
     CHECK(Utf8FloorToBoundary(junk, 10) == 10);
     CHECK(Utf8CeilToBoundary(junk, 5) == 5);
 }
+
+// --- the primitives: the one home of the bit layout every encoder/decoder in
+// the tree goes through.
+
+TEST_CASE("AppendUtf8 encodes every length and refuses what has no encoding", "[utf8]") {
+    using minimal::common::AppendUtf8;
+    std::string out;
+    CHECK(AppendUtf8(out, U'A'));
+    CHECK(AppendUtf8(out, U'é'));       // 2 bytes
+    CHECK(AppendUtf8(out, U'€'));       // 3 bytes
+    CHECK(AppendUtf8(out, U'\U0001F680'));   // 4 bytes
+    CHECK(out == "A\xC3\xA9\xE2\x82\xAC\xF0\x9F\x9A\x80");
+    std::string refused;
+    CHECK_FALSE(AppendUtf8(refused, 0xD800));     // surrogate
+    CHECK_FALSE(AppendUtf8(refused, 0x110000));   // past U+10FFFF
+    CHECK(refused.empty());
+}
+
+TEST_CASE("Utf8Decode and Utf8LeadLength agree with the encoder", "[utf8]") {
+    using minimal::common::Utf8Decode;
+    using minimal::common::Utf8LeadLength;
+    const std::string text = "A\xC3\xA9\xE2\x82\xAC\xF0\x9F\x9A\x80";
+    std::size_t i = 0;
+    CHECK(Utf8LeadLength(text[i]) == 1);
+    CHECK(Utf8Decode(text, i) == U'A');
+    CHECK(Utf8LeadLength(text[i]) == 2);
+    CHECK(Utf8Decode(text, i) == U'é');
+    CHECK(Utf8LeadLength(text[i]) == 3);
+    CHECK(Utf8Decode(text, i) == U'€');
+    CHECK(Utf8LeadLength(text[i]) == 4);
+    CHECK(Utf8Decode(text, i) == U'\U0001F680');
+    CHECK(i == text.size());
+    // A stray continuation byte or a truncated tail costs one byte as U+FFFD.
+    CHECK(Utf8LeadLength('\x80') == 0);
+    const std::string bad = "\x80\xE2\x82";
+    i = 0;
+    CHECK(Utf8Decode(bad, i) == U'�');
+    CHECK(i == 1);
+    CHECK(Utf8Decode(bad, i) == U'�');
+    CHECK(i == 2);
+}
+
+TEST_CASE("CountCodePoints and IsAsciiSpace never look inside a sequence", "[utf8]") {
+    using minimal::common::CountCodePoints;
+    using minimal::common::IsAsciiSpace;
+    CHECK(CountCodePoints("") == 0);
+    CHECK(CountCodePoints("A\xC3\xA9\xE2\x82\xAC\xF0\x9F\x9A\x80") == 4);
+    CHECK(IsAsciiSpace(' '));
+    CHECK(IsAsciiSpace('\n'));
+    CHECK_FALSE(IsAsciiSpace('\xA0'));   // Latin-1 NBSP byte: part of a sequence here
+    CHECK_FALSE(IsAsciiSpace('a'));
+}

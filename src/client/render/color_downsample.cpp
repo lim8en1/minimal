@@ -1,6 +1,7 @@
 #include "minimal/client/render/color_downsample.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <string_view>
 
 #include "minimal/common/env.hpp"
@@ -25,7 +26,7 @@ constexpr int kCubeLevels[6] = {0, 95, 135, 175, 215, 255};
 
 int CubeLevel(int channel) {
     int best = 0;
-    for (int i = 1; i < 6; ++i) {
+    for (int i = 1; i < static_cast<int>(std::size(kCubeLevels)); ++i) {
         if (std::abs(kCubeLevels[i] - channel) < std::abs(kCubeLevels[best] - channel)) best = i;
     }
     return best;
@@ -60,7 +61,7 @@ ftxui::Color Downsample16(uint8_t r, uint8_t g, uint8_t b) {
         {85, 85, 255},   {255, 85, 255},  {85, 255, 255},  {255, 255, 255},
     };
     int best = 0;
-    for (int i = 1; i < 16; ++i) {
+    for (int i = 1; i < static_cast<int>(std::size(kRgb)); ++i) {
         if (Distance2(r, g, b, kRgb[i][0], kRgb[i][1], kRgb[i][2]) <
             Distance2(r, g, b, kRgb[best][0], kRgb[best][1], kRgb[best][2])) {
             best = i;

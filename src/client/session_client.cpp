@@ -6,33 +6,18 @@
 #include <grpcpp/create_channel.h>
 #include <grpcpp/support/channel_arguments.h>
 
+#include "minimal/common/policy.hpp"
+#include "minimal/common/units.hpp"
+#include "minimal/client/policy.hpp"
+
 namespace minimal::client {
 
 namespace {
-// Unary deadlines. Every call is bounded: a wedged (or still-spawning) server
-// must surface as DEADLINE_EXCEEDED, never a hang of whatever thread asked.
-// The default: listings, lookups, deletes, one scrollback page.
-inline constexpr std::chrono::seconds kUnaryDeadline{2};
-// Session creation (a create or a stream's Open) and plugin calls touch the
-// database or plugin code: generous, still bounded.
-inline constexpr std::chrono::seconds kCreateDeadline{5};
-inline constexpr std::chrono::seconds kPluginCallDeadline{5};
-// The keep-alive: a missed beat costs nothing, so it gives up quickly.
-inline constexpr std::chrono::seconds kPingDeadline{1};
-// A model-list REFRESH waits on every discover-entry's catalog fetch
-// (parallel server-side, bounded by the slowest provider's own timeout).
-inline constexpr std::chrono::seconds kListModelsRefreshDeadline{15};
-// @-mention suggestions answer while the user types: a bounded pause for the
-// editor's query, never for the UI.
-inline constexpr std::chrono::milliseconds kSuggestPathsDeadline{250};
+// Unary deadlines: client/policy.hpp.
 
 std::chrono::system_clock::time_point In(std::chrono::milliseconds d) {
     return std::chrono::system_clock::now() + d;
 }
-// How long Detach() waits for its writer to flush the DETACH before issuing
-// the context cancel as a last resort (see Stream::Detach): long enough for
-// any healthy round trip, far short of hanging quit forever.
-inline constexpr std::chrono::seconds kDetachJoinTimeout = std::chrono::seconds(2);
 
 // Symmetric with the server's explicit limit (server.cpp): the gRPC default
 // capped RECEIVE at 4 MB -- a large tool result streamed into the client's
@@ -41,9 +26,8 @@ inline constexpr std::chrono::seconds kDetachJoinTimeout = std::chrono::seconds(
 // tool-output cap every producer applies.
 std::shared_ptr<grpc::Channel> MakeChannel(const std::string& target) {
     grpc::ChannelArguments args;
-    constexpr int kMaxMessageBytes = 64 * 1024 * 1024;
-    args.SetMaxReceiveMessageSize(kMaxMessageBytes);
-    args.SetMaxSendMessageSize(kMaxMessageBytes);
+    args.SetMaxReceiveMessageSize(static_cast<int>(common::kMaxWireMessageBytes));
+    args.SetMaxSendMessageSize(static_cast<int>(common::kMaxWireMessageBytes));
     return grpc::CreateCustomChannel(target, grpc::InsecureChannelCredentials(), args);
 }
 }  // namespace
@@ -139,7 +123,7 @@ SessionClient::ListAllSessionsResult SessionClient::ListAllSessions(
     ListAllSessionsResult out;
     options.before_updated_at.reset();
     options.before_id.reset();
-    if (options.limit <= 0) options.limit = 200;
+    if (options.limit <= 0) options.limit = kSessionListPageSize;
     for (;;) {
         const auto page = ListSessions(options);
         if (!page.status.ok()) {
@@ -701,7 +685,7 @@ bool SessionClient::Stream::Send(const v1::ClientEvent& event) {
     {
         std::lock_guard lk(qmtx_);
         if (closing_.load()) return false;
-        if (send_queue_.size() >= kSendQueueCap) return false;   // stalled stream: refuse
+        if (send_queue_.size() >= kStreamSendQueueCap) return false;   // stalled stream: refuse
         send_queue_.push_back(event);
     }
     send_cv_.notify_one();

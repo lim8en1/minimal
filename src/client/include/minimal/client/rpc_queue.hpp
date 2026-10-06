@@ -28,6 +28,7 @@
 #include <functional>
 #include <mutex>
 #include <thread>
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 
@@ -47,7 +48,7 @@ public:
     // instead of discarding them -- for queues whose jobs are obligations
     // (the stream closer: a queued Detach IS the server's goodbye), not
     // requests whose answer nobody will read after shutdown.
-    explicit RpcQueue(std::size_t capacity = 64, bool drain_on_stop = false);
+    explicit RpcQueue(std::size_t capacity = kRpcQueueCapacity, bool drain_on_stop = false);
     ~RpcQueue();
 
     RpcQueue(const RpcQueue&) = delete;

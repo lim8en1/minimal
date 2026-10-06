@@ -1,4 +1,5 @@
 #include "command_scanner.hpp"
+#include "policy.hpp"
 
 #include <tree_sitter/api.h>
 #include <tree_sitter/parser.h>  // the vendored grammar's tree_sitter_bash()
@@ -159,7 +160,6 @@ bool IsPlainWord(std::string_view text) {
 // small; the cap turns a pathological input into "computed, not named" --
 // complete = false -- instead of unbounded recursion.
 bool CollectLiteral(TSNode node, std::string_view src, std::string& out_text, int depth = 0) {
-    constexpr int kMaxLiteralDepth = 64;
     if (depth > kMaxLiteralDepth) return false;
     const std::string type = ts_node_type(node);
     if (!IsLiteralKind(type)) return false;
