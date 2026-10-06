@@ -1,4 +1,5 @@
 #include "bash_settings.hpp"
+#include <limits>
 
 #include "minimal/common/config_reader.hpp"
 #include "minimal/common/clock.hpp"
@@ -11,7 +12,8 @@ BashSettings ParseBashSettings(const nlohmann::json& config) {
     // knob belongs to this one tool. Timeouts are configured in SECONDS (the
     // unit the model-facing tool input uses) and stored in ms.
     config::Reader reader(config, "plugins.json", "tools-bash.config");
-    constexpr std::int64_t kMaxSeconds = std::chrono::seconds(std::chrono::days(7)).count();
+    // The largest timeout a deadline can represent (common::kMaxDeadline).
+    const std::int64_t kMaxSeconds = common::MillisToSeconds(common::kMaxDeadline.count());
     const auto seconds_key = [&reader](const char* key, std::int64_t default_ms) {
         return common::SecondsToMillis(
             reader.Int(key, common::MillisToSeconds(default_ms), 1, kMaxSeconds));
@@ -24,7 +26,8 @@ BashSettings ParseBashSettings(const nlohmann::json& config) {
     settings.max_file_size_bytes =
         reader.Int("max_file_size_bytes", settings.max_file_size_bytes, 1);
     settings.max_background_tasks = static_cast<int>(
-        reader.Int("max_background_tasks", settings.max_background_tasks, 1, 1024));
+        reader.Int("max_background_tasks", settings.max_background_tasks, 1,
+                   std::numeric_limits<int>::max()));
     settings.shell = reader.String("shell", settings.shell, /*allow_empty=*/false);
     // A typo'd mode must not silently mean "allowlist" (or worse, "all").
     settings.inherit_env = reader.Enum("inherit_env", settings.inherit_env, {"allowlist", "all"});

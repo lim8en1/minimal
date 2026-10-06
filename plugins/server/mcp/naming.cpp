@@ -1,6 +1,7 @@
 #include "minimal/mcp/naming.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 namespace minimal::mcp {
 
@@ -9,9 +10,9 @@ namespace {
 bool HasDisallowedCharacter(std::string_view name) {
     return std::any_of(name.begin(), name.end(), [](char c) {
         const auto u = static_cast<unsigned char>(c);
-        // Whitespace, other C0 controls, and DEL: all corrupt a name the model
-        // must read and call back verbatim. (0x20 is space itself.)
-        return u <= 0x20 || u == 0x7f;
+        // Space, C0 controls, and DEL: all corrupt a name the model must read
+        // and call back verbatim.
+        return u == ' ' || std::iscntrl(u);
     });
 }
 

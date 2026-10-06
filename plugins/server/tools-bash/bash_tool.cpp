@@ -22,6 +22,7 @@
 #include "minimal/sidecar/drain.hpp"
 #include "minimal/common/units.hpp"
 #include "minimal/common/clock.hpp"
+#include "policy.hpp"
 
 namespace minimal::tools_bash {
 namespace {
@@ -39,7 +40,6 @@ ToolResult Error(std::string message) { return ToolResult{true, std::move(messag
 // already holds the whole capped output for the model, a client renders a
 // tail anyway, and a full copy would blow tools.max_display_bytes (dropping
 // the payload) for exactly the long runs where the exit badge matters most.
-constexpr std::size_t kDisplayOutputTailBytes = 16 * common::kKiB;
 
 nlohmann::json ProcessDisplay(const std::string& command, const std::filesystem::path& cwd,
                               std::int64_t duration_ms, const std::string& output) {
@@ -115,7 +115,7 @@ RunOutcome RunProcess(minimal::sidecar::Launched launched, const BashSettings& s
     // Fail fast when a grandchild holds the output pipe after the shell exits
     // (the `nohup cmd &` trap): idle-after-reap ends the run in ~2 s with a
     // teaching note instead of the full deadline.
-    options.idle_after_reap_ms = kIdleAfterReapMs;
+    options.idle_after_reap_ms = kIdleAfterReap.count();
 
     // Sliced inside the runner so cancellation is noticed within a slice,
     // not at the deadline.

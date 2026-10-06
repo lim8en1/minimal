@@ -1,5 +1,6 @@
 #include "glob_matcher.hpp"
 #include "minimal/common/units.hpp"
+#include "policy.hpp"
 
 namespace minimal::tools_search {
 namespace {
@@ -150,11 +151,9 @@ namespace {
 // dependency exists -- is moot if the TRANSLATION blows up first: nested brace
 // alternation duplicated each level into the output (`{{a,b},{a,b}}` doubles),
 // so a ~320-byte model-authored pattern reached a 2^40-byte string before RE2
-// ever saw it, and the recursion depth was stack-bound. Depth 16 and a 64 KiB
-// translation are far above every legitimate glob; past either the pattern is
-// refused (nullopt -> the tool's error result), not matched.
-constexpr int kMaxBraceDepth = 16;
-constexpr std::size_t kMaxTranslatedBytes = 64 * common::kKiB;
+// ever saw it, and the recursion depth was stack-bound. Past kMaxBraceDepth or
+// kMaxTranslatedBytes the pattern is refused (nullopt -> the tool's error
+// result), not matched.
 
 bool GlobToRegexImpl(std::string_view glob, GlobFlags flags, int depth, std::string& out) {
     if (depth > kMaxBraceDepth) return false;

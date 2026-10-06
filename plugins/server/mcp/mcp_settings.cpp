@@ -16,7 +16,7 @@ McpLimits ParseMcpLimits(const nlohmann::json& config) {
     limits.request = std::chrono::milliseconds(
         reader.Int("request_timeout_ms", limits.request.count(), 1, kMaxMs));
     limits.max_list_pages = static_cast<decltype(limits.max_list_pages)>(
-        reader.Int("max_list_pages", limits.max_list_pages, 1, 100000));
+        reader.Int("max_list_pages", limits.max_list_pages, 1));
     limits.restart_cooldown = std::chrono::milliseconds(
         reader.Int("restart_cooldown_ms", limits.restart_cooldown.count(), 0, kMaxMs));
     reader.Finish();

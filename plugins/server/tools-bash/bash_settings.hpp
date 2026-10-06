@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 #include "minimal/common/units.hpp"
 #include "minimal/sidecar/policy.hpp"
+#include "policy.hpp"
 
 namespace minimal::tools_bash {
 
@@ -18,11 +19,11 @@ struct BashSettings {
     // Configured in SECONDS (`timeout_s`) -- the unit the model-facing tool
     // input uses too -- and stored in ms, the unit the process plumbing
     // (deadlines, RLIMIT_CPU, logs) already speaks.
-    std::int64_t timeout_ms = 120000;
+    std::int64_t timeout_ms = kDefaultTimeout.count();
     // Ceiling on the model-supplied `timeout` (seconds). The model may ask for
     // longer than the default (a build is not `ls`) but not without bound: the
     // deadline is the only hard limit on a session worker thread.
-    std::int64_t max_timeout_ms = 600000;
+    std::int64_t max_timeout_ms = kDefaultMaxTimeout.count();
     // Background tasks have their OWN ceiling, and it exists for a different
     // reason: a background task never holds the session worker, so the sync
     // rationale ("the deadline is the only hard bound on a session worker
@@ -31,15 +32,15 @@ struct BashSettings {
     // that supplies no timeout gets the ceiling itself: a long-running build is
     // the entire point of the mode. Still killable at any time (kill -- -PID
     // from a later call) and killed when the session ends.
-    std::int64_t background_max_timeout_ms = 600000;
+    std::int64_t background_max_timeout_ms = kDefaultBackgroundMaxTimeout.count();
     // Per-session cap on LIVE background tasks. Over the limit is an error
     // result the model adapts to, not a queue -- the same ruling as
     // max_concurrent_subagents.
-    int max_background_tasks = 4;
+    int max_background_tasks = kDefaultMaxBackgroundTasks;
     // Bounds the PERSISTED result (the ToolResultBlock the model sees). Live
     // streaming through emit_output is uncapped -- that channel is lossy by
     // design, this one is the record.
-    std::int64_t max_output_bytes = common::kMiB;
+    std::int64_t max_output_bytes = kDefaultMaxOutputBytes;
     // RLIMIT_FSIZE backstop, reachable now that redirection works (`cmd > big`).
     std::int64_t max_file_size_bytes = sidecar::kFileSizeBackstopBytes;
     // Operator-swappable, like everything else here: a different POSIX shell, or

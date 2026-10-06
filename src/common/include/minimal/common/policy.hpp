@@ -56,6 +56,13 @@ inline constexpr std::chrono::milliseconds kDefaultConnectTimeout = std::chrono:
 // Human scale; shorter only multiplies wake-ups over a long wait.
 inline constexpr std::chrono::milliseconds kCancelPollSlice{100};
 
+// A peer-authored error message kept in an exception or a session error (a
+// provider's, an MCP server's): enough for any real diagnosis; past it remote
+// text would ride into what the model and user see. And the shorter snippet
+// of a response body a one-line error quotes.
+inline constexpr std::size_t kMaxQuotedErrorBytes = 2000;
+inline constexpr std::size_t kMaxErrorSnippetBytes = 200;
+
 // Log rotation defaults (settings.json logging.max_size_mb / max_files): disk
 // use is bounded by their product, and a few rotated files keep the
 // history before a problem without anyone pruning by hand.

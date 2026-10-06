@@ -5,6 +5,7 @@
 
 #include "openai_error_mapping.hpp"
 #include "minimal/common/http_status.hpp"
+#include "policy.hpp"
 
 namespace minimal::provider_openai {
 namespace {
@@ -15,9 +16,8 @@ using nlohmann::json;
 // users (--model resolution, the /model picker's ListModels) -- not from the
 // chat path. A hung
 // backend must therefore not wedge a caller for the chat-length request
-// timeout; ten seconds bounds the worst case while local servers answer in
-// milliseconds.
-constexpr std::chrono::milliseconds kListRequestTimeout{10000};
+// timeout; a short bound caps the worst case while local servers answer in
+// milliseconds (kListModelsTimeout).
 
 // <base_url>/models, tolerating a trailing slash on the configured url.
 std::string ModelsUrl(const std::string& base_url) {
@@ -119,7 +119,7 @@ std::vector<llm::DiscoveredModel> OpenAiModelCatalog::List(const llm::ProviderCo
     net::HttpRequest request;
     request.url = ModelsUrl(config.base_url);
     request.connect_timeout = config.connect_timeout;
-    request.request_timeout = kListRequestTimeout;
+    request.request_timeout = kListModelsTimeout;
     if (const auto key = llm::RequestApiKey(config)) {
         request.headers.push_back({"Authorization", "Bearer " + *key});
     }

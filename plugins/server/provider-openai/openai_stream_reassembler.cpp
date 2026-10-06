@@ -5,6 +5,7 @@
 #include "openai_response.hpp"
 #include "minimal/llm/json_depth.hpp"
 #include "minimal/common/units.hpp"
+#include "minimal/llm/policy.hpp"
 
 namespace minimal::provider_openai {
 namespace {
@@ -13,13 +14,13 @@ namespace {
 // fragments. The SSE parser's 1 MiB caps bound individual LINES; nothing used
 // to bound the TOTAL, so a server dripping one small frame just under every
 // idle timeout grew these strings at its drip rate forever while the session
-// worker hung. 64 MiB is ~16x a legitimate 1M-token text response.
-constexpr std::size_t kMaxAccumulatedBytes = 64 * common::kMiB;
+// worker hung (llm::kMaxStreamContentBytes).
 
 void Accumulate(std::size_t& total, std::size_t bytes) {
     total += bytes;
-    if (total > kMaxAccumulatedBytes) {
-        throw OpenAiParseError("stream content exceeded 64 MiB; refusing to accumulate more");
+    if (total > llm::kMaxStreamContentBytes) {
+        throw OpenAiParseError("stream content exceeded " + std::to_string(llm::kMaxStreamContentBytes) +
+                         " bytes; refusing to accumulate more");
     }
 }
 
@@ -28,13 +29,12 @@ void Accumulate(std::size_t& total, std::size_t bytes) {
 // bound of its own -- unlike delta CONTENT, which Accumulate() meters, the
 // Block vector itself is not content, so a stream of bare
 // {"tool_calls":[{"index":N}]} frames (no arguments fragment to advance the
-// 64 MiB budget) grew blocks_ and tool_call_indices_ by one entry per frame,
+// content budget) grew blocks_ and tool_call_indices_ by one entry per frame,
 // unbounded. Same reasoning and same ceiling as provider-anthropic's
 // CheckedBlockIndex (anthropic_stream_reassembler.cpp) -- no real response
 // approaches this many tool calls, so anything at or beyond it is a
 // malformed stream, reported on the same OpenAiParseError channel as bad
 // frame JSON.
-constexpr std::size_t kMaxBlocks = 4096;
 
 std::string_view TrimTrailing(std::string_view s) {
     while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r' ||
@@ -107,12 +107,12 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
             // -> text -> reasoning must stay three blocks in arrival order,
             // not fuse into one.
             if (blocks_.empty() || blocks_.back().kind != Block::Kind::Thinking) {
-                // Same DoS class kMaxBlocks exists to close for tool_calls: a
+                // Same DoS class llm::kMaxStreamBlocks exists to close for tool_calls: a
                 // backend alternating 1-byte content/reasoning_content deltas
                 // flips Block::Kind every frame, opening a new Block each
                 // time with no delta content large enough to trip
-                // Accumulate()'s 64 MiB budget on its own.
-                if (blocks_.size() >= kMaxBlocks) {
+                // Accumulate()'s content budget on its own.
+                if (blocks_.size() >= llm::kMaxStreamBlocks) {
                     throw OpenAiParseError("stream opened an implausible number of content blocks");
                 }
                 blocks_.push_back(Block{Block::Kind::Thinking, {}, {}, {}, {}, {}, false});
@@ -135,7 +135,7 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
                 // re-emitted a TextDelta for a block the client had already seen
                 // closed. The unified model carries multi-block content natively.
                 if (!text_block_index_ || blocks_.back().kind != Block::Kind::Text) {
-                    if (blocks_.size() >= kMaxBlocks) {
+                    if (blocks_.size() >= llm::kMaxStreamBlocks) {
                         throw OpenAiParseError(
                             "stream opened an implausible number of content blocks");
                     }
@@ -163,7 +163,7 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
                 }
                 auto it = tool_call_indices_.find(openai_index);
                 if (it == tool_call_indices_.end()) {
-                    if (blocks_.size() >= kMaxBlocks) {
+                    if (blocks_.size() >= llm::kMaxStreamBlocks) {
                         throw OpenAiParseError(
                             "stream event named an implausible tool_call index (" +
                             std::to_string(openai_index) + ")");

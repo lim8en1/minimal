@@ -1,4 +1,5 @@
 #include "stage_normalize.hpp"
+#include "policy.hpp"
 
 #include <algorithm>
 #include <array>
@@ -65,7 +66,8 @@ std::string Basename(const std::string& word) {
 // flag's value for the wrapped program.
 struct Wrapper {
     std::string_view name;
-    std::array<std::string_view, 8> value_flags;
+    // Capacity, not policy: the longest wrapper's flag list fits.
+    std::array<std::string_view, 8> value_flags;  // NOLINT(readability-magic-numbers)
     // Positional words the wrapper itself takes before the program
     // (timeout's duration).
     int leading_args = 0;
@@ -138,7 +140,7 @@ std::vector<std::string> NormalizedStageVariants(std::string_view stage) {
     std::vector<std::string> words = Words(stage);
     std::size_t at = 0;
     // Bounded: wrappers nest (`sudo env X=1 nice rm`), but never deeply.
-    for (int depth = 0; depth < 6 && at < words.size(); ++depth) {
+    for (int depth = 0; depth < kMaxWrapperPeelDepth && at < words.size(); ++depth) {
         add(Join(words, at));  // unquoted spelling
         std::vector<std::string> by_basename(words.begin() + static_cast<long>(at), words.end());
         by_basename[0] = Basename(by_basename[0]);

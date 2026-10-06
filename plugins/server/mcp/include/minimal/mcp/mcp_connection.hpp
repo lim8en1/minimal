@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/mcp/mcp_tool.hpp"
+#include "policy.hpp"
 
 namespace minimal::mcp {
 
@@ -35,16 +36,16 @@ struct McpEndpoint {
 };
 
 struct McpLimits {
-    std::chrono::milliseconds connect{10000};
-    std::chrono::milliseconds request{60000};
+    std::chrono::milliseconds connect = kDefaultConnectTimeout;
+    std::chrono::milliseconds request = kDefaultRequestTimeout;
     // tools/list pagination cap (http transport). 0 is never legal: the
-    // settings loader rejects it; the default matches settings_config.hpp.
-    std::int64_t max_list_pages{100};
+    // settings loader rejects it.
+    std::int64_t max_list_pages = kDefaultMaxListPages;
     // McpClientManager-only (not read by McpConnection/the transports below):
     // the floor between restart ATTEMPTS for one server after a failure.
     // Carried here rather than as its own constructor parameter because
     // McpLimits is already the one settings-derived bundle the manager holds.
-    std::chrono::milliseconds restart_cooldown{30000};
+    std::chrono::milliseconds restart_cooldown = kDefaultRestartCooldown;
 };
 
 // The server-originated-notification seam (signal channels). The sink
@@ -141,7 +142,7 @@ private:
     std::shared_ptr<WorkerState> worker_;
     std::shared_ptr<Transport> transport_;  // shared: every queued job captures a copy
     std::thread loop_;
-    std::chrono::milliseconds request_timeout_{60000};
+    std::chrono::milliseconds request_timeout_ = kDefaultRequestTimeout;
 };
 
 }  // namespace minimal::mcp

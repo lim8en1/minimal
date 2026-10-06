@@ -6,6 +6,8 @@
 #include <nlohmann/json.hpp>
 #include "minimal/common/units.hpp"
 #include "minimal/common/http_status.hpp"
+#include "minimal/llm/policy.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::provider_anthropic {
 
@@ -26,19 +28,17 @@ struct ParsedError {
 // the HTTP client's caps (net::kMaxResponseBodyBytes for a GET,
 // net::kMaxPostBodyBytes for a completion -- net/policy.hpp), so handing all of it to nlohmann to
 // extract one string is a self-inflicted stall on a hostile (or merely
-// absurd) error body. Same bound as provider-openai's HeadOf.
-constexpr std::size_t kMaxErrorBodyParse = 64 * common::kKiB;
+// absurd) error body (llm::kMaxErrorBodyBytes).
 
 std::string_view HeadOf(const std::string& body) {
     std::string_view slice(body);
-    if (slice.size() > kMaxErrorBodyParse) slice = slice.substr(0, kMaxErrorBodyParse);
+    if (slice.size() > llm::kMaxErrorBodyBytes) slice = slice.substr(0, llm::kMaxErrorBodyBytes);
     return slice;
 }
 
 ParsedError ParseErrorBody(const std::string& body) {
     // The extracted message is server-authored; cap it too so no
     // classification path can embed more than this into an exception.
-    constexpr std::size_t kMaxMessage = 2000;
     ParsedError parsed;
     try {
         auto json = nlohmann::json::parse(HeadOf(body));
@@ -46,8 +46,8 @@ ParsedError ParseErrorBody(const std::string& body) {
         const auto& error = json.at("error");
         parsed.type = error.value("type", "");
         parsed.message = error.value("message", "");
-        if (parsed.message.size() > kMaxMessage) {
-            parsed.message.resize(kMaxMessage);
+        if (parsed.message.size() > common::kMaxQuotedErrorBytes) {
+            parsed.message.resize(common::kMaxQuotedErrorBytes);
             parsed.message += " …[truncated]";
         }
         parsed.ok = true;
@@ -98,7 +98,7 @@ std::optional<std::chrono::milliseconds> ParseRetryAfter(
         const long long seconds = std::stoll(*value, &consumed);
         if (seconds <= 0 || consumed != value->size()) return std::nullopt;
         const auto duration = std::chrono::seconds(seconds);
-        if (duration > std::chrono::minutes(10)) return std::nullopt;
+        if (duration > llm::kMaxRetryAfter) return std::nullopt;
         return std::chrono::duration_cast<std::chrono::milliseconds>(duration);
     } catch (const std::exception&) {
         return std::nullopt;  // non-numeric (e.g. an HTTP-date) -- leave unset
@@ -139,10 +139,9 @@ llm::LlmError ClassifyErrorEventData(std::string_view data) {
     // and bounded only by the SSE parser's 1 MiB line cap, so an unbounded
     // embed would put a mebibyte of remote text into the exception message
     // -- and through it, into the session error the model and user see.
-    constexpr std::size_t kMaxEmbeddedError = 2000;
     std::string message = parsed.ok && !parsed.message.empty() ? parsed.message : std::string(data);
-    if (message.size() > kMaxEmbeddedError) {
-        message.resize(kMaxEmbeddedError);
+    if (message.size() > common::kMaxQuotedErrorBytes) {
+        message.resize(common::kMaxQuotedErrorBytes);
         message += " …[truncated]";
     }
     return llm::LlmError(category, message);

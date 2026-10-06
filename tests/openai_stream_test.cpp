@@ -343,7 +343,7 @@ TEST_CASE("accumulated stream content is capped, however slowly it drips",
         }
     } catch (const OpenAiParseError& error) {
         threw = true;
-        CHECK(std::string(error.what()).find("64 MiB") != std::string::npos);
+        CHECK(std::string(error.what()).find("exceeded") != std::string::npos);
     }
     CHECK(threw);
 }

@@ -8,6 +8,7 @@
 #include "minimal/mcp/env_interpolation.hpp"
 #include "minimal/mcp/naming.hpp"
 #include "minimal/mcp/signal_protocol.hpp"
+#include "policy.hpp"
 
 namespace minimal::mcp {
 
@@ -197,7 +198,7 @@ void McpClientManager::ReaperMain() {
             // The periodic timeout is a belt-and-suspenders wakeup in case a
             // notify races the wait (a push between the stop check above and
             // the wait below); nothing here depends on it firing promptly.
-            graveyard_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] {
+            graveyard_cv_.wait_for(lock, kReaperBackstop, [this] {
                 return stop_reaper_.load(std::memory_order_acquire) || !graveyard_.empty();
             });
             doomed.swap(graveyard_);
@@ -220,8 +221,7 @@ namespace {
 // a server that died 3 s ago must still be caught by the next session's
 // check -- the TTL is a dedup for near-simultaneous callers, not a general
 // liveness cache. (A server that dies inside the window is still surfaced
-// immediately by the next tool call, which respawns the handle.)
-constexpr auto kVerifiedTtl = std::chrono::seconds(2);
+// immediately by the next tool call, which respawns the handle.) kVerifiedTtl.
 
 std::optional<config::McpServerEntry> ResolveEndpoint(const config::McpServerEntry& entry,
                                                       std::string& error,

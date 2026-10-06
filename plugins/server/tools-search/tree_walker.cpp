@@ -8,6 +8,7 @@
 
 #include <sys/stat.h>
 #include "minimal/common/units.hpp"
+#include "policy.hpp"
 
 namespace minimal::tools_search {
 namespace {
@@ -25,7 +26,9 @@ std::int64_t MtimeNs(const struct stat& st) {
 #else
     const auto& ts = st.st_mtim;
 #endif
-    return static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+    return std::chrono::nanoseconds(std::chrono::seconds(ts.tv_sec) +
+                                    std::chrono::nanoseconds(ts.tv_nsec))
+        .count();
 }
 
 // Component-wise, not a string prefix: "/foo/ba" is not an ancestor of
@@ -39,15 +42,14 @@ bool IsAncestorOf(const std::filesystem::path& ancestor, const std::filesystem::
     return true;
 }
 
-// The walk's allocation ceilings (disclosed via WalkStats, never silent):
-constexpr int kMaxWalkDepth = 1024;
-constexpr int kMaxDirEntries = 10000;
+// The walk's allocation ceilings (kMaxWalkDepth, kMaxDirEntries) are
+// disclosed via WalkStats, never silent.
 
 // .gitignore read bound. The read used to be an unbounded
 // istreambuf_iterator slurp: a generated ignore file of arbitrary size was
 // materialized whole before parsing. Rules past the cap simply do not apply
-// (the same degradation as one untranslatable line), never a walk failure.
-constexpr std::streamoff kMaxGitignoreBytes = common::kMiB;
+// (the same degradation as one untranslatable line), never a walk failure
+// (kMaxGitignoreBytes).
 
 // The walk state. Three conditions stop a walk -- cancellation, timeout, and
 // the callback's own "I have enough" -- and they are kept apart only so the
