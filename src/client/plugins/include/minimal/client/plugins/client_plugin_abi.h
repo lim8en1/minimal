@@ -27,7 +27,6 @@
 // landed).
 
 #include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/session_client.hpp"
 #include "minimal/common/abi_tag.hpp"
 
 namespace minimal::client::plugins {
