@@ -1,6 +1,7 @@
 #include "minimal/client/server_spawn.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -9,6 +10,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 
 #include <grpcpp/create_channel.h>
@@ -45,12 +47,19 @@ bool ExecutableFile(const std::filesystem::path& path) {
     return (perms & std::filesystem::perms::owner_exec) != std::filesystem::perms::none;
 }
 
+// The fd number the server's liveness pipe end is placed at in the child
+// (passed as --spawn-status-fd). Any fd above stderr works; a fixed one keeps
+// the post-fork code allocation-free.
+constexpr int kStatusFd = 3;
+
 // Double fork: the intermediate child exits immediately (the client's waitpid
 // below never blocks), the real server is orphaned into init's care and holds
-// no controlling terminal. Its exit is therefore never observable from here --
-// startup diagnostics live in the log, which is why the failure path names it.
-bool SpawnDetached(const std::filesystem::path& binary,
-                   const std::filesystem::path& socket_path, const std::string& log_path) {
+// no controlling terminal. Its exit is observable only through the liveness
+// pipe: the server holds the write end (fd kStatusFd, --spawn-status-fd) and
+// never writes, so the returned read end hits EOF exactly when it exits.
+// Returns the read end, or -1 when the spawn failed.
+int SpawnDetached(const std::filesystem::path& binary, const std::filesystem::path& socket_path,
+                  const std::string& log_path) {
     // Mark every inherited/long-lived descriptor close-on-exec BEFORE the
     // fork: the exec'd server would otherwise inherit whatever this client
     // holds (gRPC channel fds, log handles, plugin fds). Marking is harmless
@@ -60,8 +69,19 @@ bool SpawnDetached(const std::filesystem::path& binary,
     // after listen; this covers the one descriptor source it cannot see.
     (void)common::MarkInheritedFdsCloseOnExec();
 
+    int status_pipe[2] = {-1, -1};
+    if (::pipe(status_pipe) != 0) return -1;
+    // Both ends CLOEXEC in the client (another thread's fork+exec must not
+    // inherit them); the grandchild's dup2 below makes its copy inheritable.
+    ::fcntl(status_pipe[0], F_SETFD, FD_CLOEXEC);
+    ::fcntl(status_pipe[1], F_SETFD, FD_CLOEXEC);
+
     const pid_t middle = ::fork();
-    if (middle < 0) return false;
+    if (middle < 0) {
+        ::close(status_pipe[0]);
+        ::close(status_pipe[1]);
+        return -1;
+    }
     if (middle == 0) {
         ::signal(SIGHUP, SIG_IGN);
         if (::setsid() < 0) _exit(126);
@@ -80,8 +100,17 @@ bool SpawnDetached(const std::filesystem::path& binary,
                 if (null_fd != STDIN_FILENO) ::close(null_fd);
             }
             [[maybe_unused]] const int chdir_rc = ::chdir("/");
+            // The write end at a fixed fd, inheritable across exec (dup2
+            // clears FD_CLOEXEC on the new descriptor).
+            if (status_pipe[1] != kStatusFd) {
+                ::dup2(status_pipe[1], kStatusFd);
+                ::close(status_pipe[1]);
+            } else {
+                ::fcntl(kStatusFd, F_SETFD, 0);
+            }
             ::execl(binary.c_str(), binary.filename().c_str(), "--listen",
-                    socket_path.c_str(), static_cast<char*>(nullptr));
+                    socket_path.c_str(), "--spawn-status-fd", "3",
+                    static_cast<char*>(nullptr));
             // execl failed. stderr IS the log (redirected above), so one
             // line here turns "25 s of silence, empty log" into a diagnosis.
             // Plain write() + manual formatting only: post-fork in a
@@ -107,10 +136,39 @@ bool SpawnDetached(const std::filesystem::path& binary,
         }
         _exit(0);
     }
+    ::close(status_pipe[1]);  // only the server holds the write end now
     int status = 0;
     while (::waitpid(middle, &status, 0) < 0 && errno == EINTR) {
     }
-    return true;
+    return status_pipe[0];
+}
+
+// True once the server holding the pipe's write end has exited (EOF/HUP).
+bool ServerExited(int status_fd) {
+    pollfd entry{status_fd, POLLIN, 0};
+    if (::poll(&entry, 1, 0) <= 0) return false;
+    if (entry.revents & (POLLHUP | POLLERR)) return true;
+    char byte = 0;
+    return ::read(status_fd, &byte, 1) == 0;
+}
+
+// What the spawned server wrote to its log in THIS run (from `offset`), its
+// FATAL lines first -- the reason it exited.
+std::string NewLogTail(const std::string& log_path, std::uintmax_t offset) {
+    std::ifstream in(log_path);
+    if (!in) return {};
+    in.seekg(static_cast<std::streamoff>(offset));
+    std::string line, fatal, rest;
+    while (std::getline(in, line)) {
+        if (line.find("FATAL") != std::string::npos || line.find("startup aborted") != std::string::npos ||
+            line.find("failed to exec") != std::string::npos) {
+            fatal += line + "\n";
+        } else if (line.find("[warning]") == std::string::npos &&
+                   line.find("[info]") == std::string::npos) {
+            rest += line + "\n";
+        }
+    }
+    return fatal.empty() ? rest : fatal;
 }
 
 // A probe channel of our own: the caller's SessionClient may not exist yet, and
@@ -154,7 +212,9 @@ std::string LocateServerBinary() {
 }
 
 bool EnsureServerRunning(const std::string& target, const SpawnOptions& options,
-                         const std::function<void(const std::string&)>& progress) {
+                         const std::function<void(const std::string&)>& progress,
+                         bool* spawned) {
+    if (spawned != nullptr) *spawned = false;
     const auto say = [&progress](const std::string& line) {
         if (progress) progress(line);
     };
@@ -178,10 +238,21 @@ bool EnsureServerRunning(const std::string& target, const SpawnOptions& options,
         std::error_code ec;
         std::filesystem::create_directories(common::DataDir(), ec);
     }
-    if (!SpawnDetached(binary, *socket_path, SpawnedServerLogPath())) {
+    const std::string log_path = SpawnedServerLogPath();
+    std::error_code size_ec;
+    const auto log_offset = std::filesystem::exists(log_path, size_ec)
+                                ? std::filesystem::file_size(log_path, size_ec)
+                                : std::uintmax_t{0};
+    const int status_fd = SpawnDetached(binary, *socket_path, log_path);
+    if (status_fd < 0) {
         say("failed to spawn minimal-server");
         return false;
     }
+    if (spawned != nullptr) *spawned = true;
+    struct CloseFd {
+        int fd;
+        ~CloseFd() { ::close(fd); }
+    } close_status{status_fd};
 
     // The socket appears only once the server has finished config load, plugin
     // load and the sanity check -- give that the full budget. One channel is
@@ -192,8 +263,18 @@ bool EnsureServerRunning(const std::string& target, const SpawnOptions& options,
     const auto deadline = std::chrono::steady_clock::now() + options.startup_timeout;
     for (;;) {
         if (poll_channel->WaitForConnected(std::chrono::system_clock::now() +
-                                            std::chrono::milliseconds(500))) {
+                                            std::chrono::milliseconds(250))) {
             return true;
+        }
+        if (ServerExited(status_fd)) {
+            // It is gone: say why now, instead of after the whole timeout.
+            say("minimal-server exited during startup:");
+            const std::string tail = NewLogTail(log_path, size_ec ? 0 : log_offset);
+            if (!tail.empty()) {
+                if (progress) progress(tail.substr(0, tail.size() - 1));
+            }
+            say("(full log: " + log_path + "; or run `minimal-server --check`)");
+            return false;
         }
         if (std::chrono::steady_clock::now() >= deadline) break;
     }

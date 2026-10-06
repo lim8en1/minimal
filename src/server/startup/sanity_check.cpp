@@ -268,8 +268,8 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
         // No session can be created at all -- the cold-start case. Loud by
         // design: there is no onboarding wizard, just a check with a reason.
         results.push_back(Fatal("presets", "no agent preset available -- create agents/<name>.md "
-                             "(frontmatter: name, model: <provider>/<model>; body: system prompt) and set "
-                             "settings.json default_agent_preset"));
+                             "(frontmatter: name; body: system prompt) -- bundled/agents/ has "
+                             "examples"));
     }
 
     // Whether `model_text` resolves the way AgentPresetRegistry would resolve

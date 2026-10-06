@@ -175,6 +175,14 @@ static int RunServer(int argc, char** argv) {
             socket_path = argv[++i];
         } else if (std::strcmp(argv[i], "--check") == 0) {
             check_only = true;
+        } else if (std::strcmp(argv[i], "--spawn-status-fd") == 0 && i + 1 < argc) {
+            // The auto-spawning client's liveness pipe (server_spawn.cpp):
+            // held open, never written, so the client sees EOF the moment this
+            // process exits -- a startup failure is reported at once instead
+            // of after the reachability timeout. CLOEXEC so no child the
+            // server or a plugin spawns keeps it open past our exit.
+            const int fd = std::atoi(argv[++i]);
+            if (fd > STDERR_FILENO) ::fcntl(fd, F_SETFD, ::fcntl(fd, F_GETFD) | FD_CLOEXEC);
         } else if (std::strcmp(argv[i], "--plugin-call") == 0) {
             if (i + 2 >= argc) {
                 std::fprintf(stderr,
