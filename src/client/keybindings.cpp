@@ -116,6 +116,10 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         // ctrl+z: the terminal's suspend key.
         {"prompt.undo", "alt+z"},
         {"prompt.redo", "ctrl+alt+z"},
+        // Clear the whole prompt (undoable). Not escape: that is
+        // turn.cancel. ctrl+alt+u: readline's ctrl+u (kill to line start)
+        // widened to the whole buffer, in the ctrl+alt+letter family.
+        {"prompt.clear", "ctrl+alt+u"},
         {"app.quit", "ctrl+q"},
     };
     return kDefaults;

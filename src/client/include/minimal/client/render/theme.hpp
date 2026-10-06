@@ -94,6 +94,13 @@ private:
 // partial theme, or ColorDepth::None) -- a cursor must never vanish.
 ftxui::Decorator SelectionStyle(const Theme& theme);
 
+// The prompt caret's cell: the `cursor` role (falling back to row_focused) as
+// the BACKGROUND, status_bar_bg on top -- a block painted into the frame
+// itself, so the caret stays visible whatever the terminal's own cursor
+// shape, blink phase or window focus. Falls back to `inverted` like
+// SelectionStyle -- a caret must never vanish either.
+ftxui::Decorator CaretStyle(const Theme& theme);
+
 // Secondary text -- hints, footers, gutters, collapse affordances: the `muted`
 // role, falling back to system_message. This replaces SGR `dim`, which the
 // terminal renders however it likes (unreadable in practice). With neither

@@ -344,7 +344,7 @@ ftxui::Component TuiApp::BuildPromptEditor(PromptEditorState& state) {
         // Recall is app-scoped: every tab's editor records into and recalls
         // from the ONE timeline (see prompt_editor.hpp's PromptHistory).
         &prompt_history_,
-        // The editor's own actions (prompt.newline / undo / redo), so a
+        // The editor's own actions (prompt.newline / undo / redo / clear), so a
         // user's rebind takes effect -- e.g. moving the newline key away
         // from Alt+Enter (see prompt_editor.hpp's NEWLINE comment for why a
         // macOS user might need to -- Option+Enter is byte-ambiguous with

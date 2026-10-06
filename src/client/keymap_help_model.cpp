@@ -69,6 +69,7 @@ constexpr KnownAction kKnown[] = {
     {"prompt.newline", "insert a newline"},
     {"prompt.undo", "undo the last prompt edit"},
     {"prompt.redo", "redo the undone prompt edit"},
+    {"prompt.clear", "clear the prompt"},
     {"turn.cancel", "interrupt the turn"},
     {"permission.cycle", "cycle the permission mode"},
     {"session.pause", "pause / resume the agent (stops at the next tool boundary)"},

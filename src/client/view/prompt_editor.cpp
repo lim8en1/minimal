@@ -154,12 +154,14 @@ std::string CommandPrefixOf(const std::string& text) {
 bool DefaultPromptKeyMatches(std::string_view action, const Event& event) {
     static const std::vector<Event> kUndo = ParseKeySpec("alt+z");
     static const std::vector<Event> kRedo = ParseKeySpec("ctrl+alt+z");
+    static const std::vector<Event> kClear = ParseKeySpec("ctrl+alt+u");
     const auto any_of = [&event](const std::vector<Event>& keys) {
         return std::find(keys.begin(), keys.end(), event) != keys.end();
     };
     if (action == "prompt.newline") return IsNewlineEvent(event);
     if (action == "prompt.undo") return any_of(kUndo);
     if (action == "prompt.redo") return any_of(kRedo);
+    if (action == "prompt.clear") return any_of(kClear);
     return false;
 }
 
@@ -394,6 +396,8 @@ ftxui::Component MakePromptEditor(
     if (!key_matches) key_matches = DefaultPromptKeyMatches;
     const std::function<bool(const Event&)> newline_check =
         [key_matches](const Event& event) { return key_matches("prompt.newline", event); };
+    const std::function<bool(const Event&)> clear_check =
+        [key_matches](const Event& event) { return key_matches("prompt.clear", event); };
     // Null (every pre-existing call site): a private timeline, same behavior
     // as before, no cross-editor sharing. OWNED BY THE CLOSURES (a shared_ptr
     // captured below), never a factory stack local -- the component outlives
@@ -507,7 +511,8 @@ ftxui::Component MakePromptEditor(
     // which outlives this component.
     auto with_events = CatchEvent(
         input, [&state, &hist, owned_history, accept_suggestion, on_text, on_command,
-                command_catalog, pasting, mouse_map, newline_check](const Event& event) {
+                command_catalog, pasting, mouse_map, newline_check,
+                clear_check](const Event& event) {
         // Bracketed paste (DECSET 2004): the terminal wraps a paste in
         // \x1b[200~ ... \x1b[201~ and every line break inside it arrives as
         // a plain Return, which used to submit each pasted line as its own
@@ -578,6 +583,23 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
             } else {
                 state.content.erase(pos);
             }
+            return true;
+        }
+
+        // The "prompt.clear" action: the whole buffer, wherever the caret is
+        // (ctrl+u/ctrl+k only kill one side of it). One undo step like any
+        // other edit -- UndoableEditor records it -- so prompt.undo brings an
+        // accidental clear back. Not mid-paste: there a matching byte is
+        // content. Consumed even when already empty, never typed as text.
+        if (!*pasting && clear_check(event)) {
+            state.content.clear();
+            state.cursor_position = 0;
+            state.history_cursor.reset();
+            state.history_draft.clear();
+            state.list_open = false;
+            state.suggestions.clear();
+            state.completions.clear();
+            state.suggestion_selected = 0;
             return true;
         }
 
@@ -1027,8 +1049,13 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
         const std::size_t first_row = wrap.cursor_row >= cap ? wrap.cursor_row - cap + 1 : 0;
         const std::size_t last_row = std::min(wrap.lines.size(), first_row + cap);
 
+        // Focused: the terminal's bar cursor AND a painted cell (CaretStyle).
+        // The bar alone was easy to lose -- thin, blinking, hollow or gone
+        // while the window is unfocused. The painted cell is frame content,
+        // so it is always where the caret is. Not a block cursor: on top of
+        // the painted cell it would invert it straight back.
         const ftxui::Decorator caret_deco =
-            input->Focused() ? ftxui::Decorator(ftxui::focusCursorBarBlinking)
+            input->Focused() ? CaretStyle(theme) | ftxui::Decorator(ftxui::focusCursorBarBlinking)
                              : ftxui::Decorator(ftxui::focus);
 
         // text() draws a tab as nothing, while the wrap math counts it as
@@ -1041,8 +1068,11 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
         Elements body;
         if (state.content.empty()) {
             // Placeholder, decorated the way FTXUI's own Input renders one:
-            // dim text with the caret parked at the row start.
-            body.push_back(text(kPromptPlaceholder) | Muted(theme) | caret_deco);
+            // dim text with the caret parked at the row start -- on the first
+            // glyph only, so the painted caret is one cell, not the line.
+            const std::string placeholder = kPromptPlaceholder;
+            body.push_back(hbox({text(placeholder.substr(0, 1)) | Muted(theme) | caret_deco,
+                                 text(placeholder.substr(1)) | Muted(theme)}));
         } else {
             const auto cursor_byte = static_cast<std::size_t>(
                 std::clamp(state.cursor_position, 0, static_cast<int>(state.content.size())));
