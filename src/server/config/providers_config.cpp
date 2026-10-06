@@ -2,6 +2,7 @@
 #include "minimal/config/providers_internal.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <stdexcept>
 #include <string_view>
@@ -438,7 +439,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
         }
         // Transport timeouts, all optional, all in milliseconds.
         if (auto timeouts = provider.MaybeObject("timeouts")) {
-            constexpr std::int64_t kMaxMs = 24LL * 3600 * 1000;
+            constexpr std::int64_t kMaxMs = std::chrono::milliseconds(std::chrono::hours(24)).count();
             const auto read_ms = [&](const char* key, std::chrono::milliseconds& target) {
                 if (const auto ms = timeouts->MaybeInt(key, 1, kMaxMs)) {
                     target = std::chrono::milliseconds(*ms);

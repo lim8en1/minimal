@@ -93,7 +93,8 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
     };
     // CPU and file-size backstops behind the wall-clock deadline, like the
     // bash tool's; none when there is no budget to back up.
-    spec.cpu_seconds = budgeted ? effective.count() / 1000 + 5 : 0;
+    spec.cpu_seconds =
+        budgeted ? std::chrono::duration_cast<std::chrono::seconds>(effective).count() + 5 : 0;
     spec.file_size_bytes = budgeted ? kMaxHookFileSizeBytes : 0;
 
     sidecar::Launched launched = sidecar::Launch(spec);

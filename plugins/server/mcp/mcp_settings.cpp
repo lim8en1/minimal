@@ -1,12 +1,14 @@
 #include "mcp_settings.hpp"
 
+#include <chrono>
+
 #include "minimal/common/config_reader.hpp"
 
 namespace minimal::mcp {
 
 McpLimits ParseMcpLimits(const nlohmann::json& config) {
     McpLimits limits;
-    constexpr std::int64_t kMaxMs = 24LL * 3600 * 1000;
+    constexpr std::int64_t kMaxMs = std::chrono::milliseconds(std::chrono::hours(24)).count();
     config::Reader reader(config, "plugins.json", "mcp.config");
     limits.connect = std::chrono::milliseconds(
         reader.Int("connect_timeout_ms", limits.connect.count(), 1, kMaxMs));

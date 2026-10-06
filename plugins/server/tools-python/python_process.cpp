@@ -6,6 +6,7 @@
 
 #include "minimal/sidecar/drain.hpp"
 #include "minimal/common/units.hpp"
+#include "minimal/common/clock.hpp"
 
 namespace minimal::tools_python {
 
@@ -85,7 +86,7 @@ CapturedRun RunCaptured(const std::vector<std::string>& argv, const std::filesys
     sinks[0].cap = static_cast<std::int64_t>(max_output_bytes);
 
     minimal::sidecar::DrainOptions options;
-    options.timeout_ms = timeout_seconds * 1000;
+    options.timeout_ms = common::SecondsToMillis(timeout_seconds);
 
     const auto outcome = minimal::sidecar::DrainAndReap(
         std::move(launched), std::move(sinks), options, {});

@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 #include "minimal/common/units.hpp"
+#include "minimal/common/clock.hpp"
 
 namespace minimal::provider_openai {
 
@@ -70,13 +71,13 @@ std::optional<std::chrono::milliseconds> ParseRetryAfter(const std::vector<net::
         // "9999999999999999" seconds) overflowed the signed 64-bit
         // multiply -- UB -- before a post-multiply `duration > minutes(10)`
         // check ever ran. 10 minutes is above any real rate-limit window.
-        constexpr long long kMaxMs = 10 * 60 * 1000LL;
+        constexpr long long kMaxMs = std::chrono::milliseconds(std::chrono::minutes(10)).count();
         if (is_ms) {
             if (parsed > kMaxMs) return std::nullopt;
             return std::chrono::milliseconds(parsed);
         }
-        if (parsed > kMaxMs / 1000) return std::nullopt;
-        return std::chrono::milliseconds(parsed * 1000LL);
+        if (parsed > common::MillisToSeconds(kMaxMs)) return std::nullopt;
+        return std::chrono::seconds(parsed);
     } catch (const std::exception&) {
         return std::nullopt;  // non-numeric (e.g. an HTTP-date) -- leave unset
     }

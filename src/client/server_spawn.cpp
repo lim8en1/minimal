@@ -280,7 +280,8 @@ bool EnsureServerRunning(const std::string& target, const SpawnOptions& options,
     }
 
     say("spawned minimal-server did not become reachable within " +
-        std::to_string(std::chrono::milliseconds(options.startup_timeout).count() / 1000) +
+        std::to_string(
+            std::chrono::duration_cast<std::chrono::seconds>(options.startup_timeout).count()) +
         "s; see " + SpawnedServerLogPath());
     return false;
 }

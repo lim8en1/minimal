@@ -73,12 +73,17 @@ inline ftxui::Element ToolHeadline(ToolStatus status, const std::string& name,
 // started_at_unix_ms). Was plugins-local (core_display_renderers.cpp); lifted
 // here so all three read the same number the same way.
 inline std::string FormatDuration(std::int64_t ms) {
-    if (ms < 1000) return std::to_string(ms) + "ms";
-    if (ms < 60'000) {
-        const auto tenths = ms / 100;
+    using std::chrono::duration_cast;
+    const std::chrono::milliseconds elapsed(ms);
+    if (elapsed < std::chrono::seconds(1)) return std::to_string(ms) + "ms";
+    if (elapsed < std::chrono::minutes(1)) {
+        using Tenths = std::chrono::duration<std::int64_t, std::deci>;
+        const auto tenths = duration_cast<Tenths>(elapsed).count();
         return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + "s";
     }
-    return std::to_string(ms / 60'000) + "m " + std::to_string((ms % 60'000) / 1000) + "s";
+    const auto minutes = duration_cast<std::chrono::minutes>(elapsed);
+    return std::to_string(minutes.count()) + "m " +
+           std::to_string(duration_cast<std::chrono::seconds>(elapsed - minutes).count()) + "s";
 }
 
 // The leading disclosure glyph of a collapsible row ("▸ " collapsed, "▾ "

@@ -1,5 +1,7 @@
 #include "minimal/config/permissions_config.hpp"
 
+#include <chrono>
+
 #include "minimal/common/config_reader.hpp"
 #include "minimal/common/json_config_loader.hpp"
 #include "minimal/config/permission_codec.hpp"
@@ -93,7 +95,8 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
     config.advisor = root.MaybeString("advisor", /*allow_empty=*/false);
     config.advisor_inherit = root.Bool("advisor_inherit", config.advisor_inherit);
     config.advisor_timeout_ms = static_cast<int>(
-        root.Int("advisor_timeout_ms", config.advisor_timeout_ms, 0, 24LL * 3600 * 1000));
+        root.Int("advisor_timeout_ms", config.advisor_timeout_ms, 0,
+                 std::chrono::milliseconds(std::chrono::hours(24)).count()));
     root.Finish();
     return config;
 }

@@ -10,11 +10,12 @@
 #include "memory_runtime.hpp"
 
 #include "minimal/tools/tool.hpp"
+#include "minimal/common/clock.hpp"
 
 namespace minimal::memory::detail {
 
 inline std::string Iso8601(std::int64_t ms) {
-    const std::time_t seconds = static_cast<std::time_t>(ms / 1000);
+    const std::time_t seconds = common::UnixMillisToTimeT(ms);
     std::tm tm{};
     gmtime_r(&seconds, &tm);
     char buffer[32];

@@ -12,12 +12,13 @@
 
 #include "minimal/client/utf8.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/clock.hpp"
 
 namespace minimal::client {
 
 std::string FormatClockTime(int64_t unix_ms) {
     if (unix_ms <= 0) return "";
-    const std::time_t seconds = static_cast<std::time_t>(unix_ms / 1000);
+    const std::time_t seconds = common::UnixMillisToTimeT(unix_ms);
     std::tm local{};
 #if defined(_WIN32)
     localtime_s(&local, &seconds);

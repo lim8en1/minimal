@@ -42,6 +42,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/common/logging_setup.hpp"
 #include "minimal/common/model_ref.hpp"
+#include "minimal/common/clock.hpp"
 
 namespace minimal::client::app {
 
@@ -566,7 +567,7 @@ int RunListSessions(const minimal::client::HeadlessOptions& options) {
     // name -- which truncates, being the only column of unbounded width.
     const auto human_time = [](int64_t unix_ms) {
         if (unix_ms <= 0) return std::string("-");
-        const std::time_t seconds = static_cast<std::time_t>(unix_ms / 1000);
+        const std::time_t seconds = common::UnixMillisToTimeT(unix_ms);
         std::tm local{};
         localtime_r(&seconds, &local);
         char buffer[32];
