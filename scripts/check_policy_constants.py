@@ -16,8 +16,8 @@ NOLINTBEGIN/NOLINTEND region: the marker for an external fact, whose comment
 cites its source.
 
 Every hit must end up as an external fact (named or cited where used), a
-derivation written as one, or a policy.hpp entry. Until the sweep is finished
-this is an inventory tool, not a gate: it exits 1 whenever anything is listed.
+derivation written as one, or a policy.hpp entry. It exits 1 whenever anything
+is listed: the ctest `policy_constants` runs it as a gate.
 
 Usage:
   check_policy_constants.py [--build-dir build] [--unit PREFIX] [--tsv | --markdown FILE]

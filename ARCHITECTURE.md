@@ -115,6 +115,8 @@ Not unit-tested: FTXUI render output (visual, low yield) and live provider calls
 
 **Promotion, not copies.** When a second unit needs the same concept, it moves to an SDK header beside the mechanism it parameterizes (`agent::kEstimatedBytesPerToken` sits with `estimate_tokens`), and both use it. Two plugins carrying their own value for one concept is a defect.
 
+**Enforced.** `ctest -R policy_constants` runs `scripts/check_policy_constants.py`: clang-tidy's `readability-magic-numbers` (`.clang-tidy`) for bare literals, plus a pass for what clang-tidy exempts -- a `const`/`constexpr` name initialized with a number, or a bare `kMiB`-style size, outside a `*policy.hpp`. `--tsv` / `--markdown FILE` list the hits by unit.
+
 ## High-level architecture
 
 - **Server** (C++): owns the agent turn loop, tool-calling machinery, skills, LLM provider dispatch, session persistence, command dispatch, plugin loading.
