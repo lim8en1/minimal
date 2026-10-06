@@ -1,6 +1,9 @@
 #include "minimal/common/config_reader.hpp"
 
 #include <cmath>
+#include <limits>
+#include <map>
+#include <vector>
 
 namespace minimal::config {
 
@@ -21,12 +24,85 @@ bool HasCrLf(const std::string& text) {
 
 }  // namespace
 
+// The fields one describe-mode run has seen, in read order. One per
+// SchemaRecording; every Reader over the recorded file shares it.
+class SchemaRecorder {
+public:
+    explicit SchemaRecorder(std::string file) : file_(std::move(file)) {}
+
+    const std::string& file() const { return file_; }
+
+    // The field at `path`, created on first sight. Later notes merge into it:
+    // MaybeEnum notes "string" first, then "enum".
+    nlohmann::json& Field(const std::string& path) {
+        const auto it = index_.find(path);
+        if (it != index_.end()) return fields_[it->second];
+        index_.emplace(path, fields_.size());
+        fields_.push_back({{"path", path}, {"apply", "restart"}});
+        return fields_.back();
+    }
+
+    // A field only Describe()d or Default()ed -- read through MaybeObject,
+    // an opaque subtree -- is "json": edited as a JSON value.
+    nlohmann::json Schema() const {
+        nlohmann::json fields = nlohmann::json::array();
+        for (const auto& field : fields_) {
+            fields.push_back(field);
+            if (!field.contains("type")) fields.back()["type"] = "json";
+        }
+        return {{"file", file_}, {"fields", std::move(fields)}};
+    }
+
+private:
+    std::string file_;
+    std::vector<nlohmann::json> fields_;
+    std::map<std::string, std::size_t> index_;
+};
+
+namespace {
+
+// The recording a Reader constructed on this thread attaches to.
+thread_local std::shared_ptr<SchemaRecorder> t_recorder;
+
+}  // namespace
+
+SchemaRecording::SchemaRecording(std::string file_label)
+    : recorder_(std::make_shared<SchemaRecorder>(std::move(file_label))),
+      previous_(std::move(t_recorder)) {
+    t_recorder = recorder_;
+}
+
+SchemaRecording::~SchemaRecording() { t_recorder = std::move(previous_); }
+
+nlohmann::json SchemaRecording::Schema() const { return recorder_->Schema(); }
+
 Reader::Reader(const nlohmann::json& node, std::string file, std::string path, WarningSink warn)
     : node_(&node), file_(std::move(file)), path_(std::move(path)), warn_(std::move(warn)) {
     if (!node.is_object()) {
         throw ConfigError(file_ + ": " + (path_.empty() ? "the top level" : path_) +
                           ": must be an object, got " + Quoted(node));
     }
+    if (t_recorder && t_recorder->file() == file_) recorder_ = t_recorder;
+}
+
+void Reader::Note(std::string_view key, const char* type, nlohmann::json extra) {
+    if (!recorder_) return;
+    nlohmann::json& field = recorder_->Field(Join(key));
+    field["type"] = type;
+    if (extra.is_object()) field.update(extra);
+}
+
+void Reader::Describe(std::string_view key, FieldMeta meta) {
+    if (!recorder_) return;
+    nlohmann::json& field = recorder_->Field(Join(key));
+    if (!meta.doc.empty()) field["doc"] = std::move(meta.doc);
+    field["apply"] = meta.apply == ApplyPolicy::kLive ? "live" : "restart";
+    if (meta.secret) field["secret"] = true;
+}
+
+void Reader::Default(std::string_view key, nlohmann::json value) {
+    if (!recorder_) return;
+    recorder_->Field(Join(key))["default"] = std::move(value);
 }
 
 std::string Reader::Join(std::string_view key) const {
@@ -58,7 +134,10 @@ const nlohmann::json* Reader::Find(std::string_view key) {
     return &*it;
 }
 
-const nlohmann::json* Reader::Raw(std::string_view key) { return Find(key); }
+const nlohmann::json* Reader::Raw(std::string_view key) {
+    Note(key, "json");
+    return Find(key);
+}
 
 void Reader::Accept(std::string_view key) {
     queried_.emplace(key);
@@ -66,6 +145,7 @@ void Reader::Accept(std::string_view key) {
 }
 
 std::optional<bool> Reader::MaybeBool(std::string_view key) {
+    Note(key, "boolean");
     const auto* value = Find(key);
     if (value == nullptr) return std::nullopt;
     if (!value->is_boolean()) Fail(key, "must be true or false, got " + Quoted(*value));
@@ -73,6 +153,7 @@ std::optional<bool> Reader::MaybeBool(std::string_view key) {
 }
 
 std::optional<std::string> Reader::MaybeString(std::string_view key, bool allow_empty) {
+    Note(key, "string");
     const auto* value = Find(key);
     if (value == nullptr) return std::nullopt;
     if (!value->is_string()) Fail(key, "must be a string, got " + Quoted(*value));
@@ -82,17 +163,25 @@ std::optional<std::string> Reader::MaybeString(std::string_view key, bool allow_
 }
 
 std::string Reader::String(std::string_view key, std::string fallback, bool allow_empty) {
+    if (recorder_) Default(key, fallback);
     auto value = MaybeString(key, allow_empty);
     return value ? std::move(*value) : std::move(fallback);
 }
 
 std::string Reader::RequireString(std::string_view key) {
+    Note(key, "string", {{"required", true}});
     if (!Has(key)) Fail(key, "is required");
     return *MaybeString(key, /*allow_empty=*/false);
 }
 
 std::optional<std::int64_t> Reader::MaybeInt(std::string_view key, std::int64_t min,
                                              std::int64_t max) {
+    if (recorder_) {
+        nlohmann::json range = nlohmann::json::object();
+        if (min != std::numeric_limits<std::int64_t>::min()) range["minimum"] = min;
+        if (max != std::numeric_limits<std::int64_t>::max()) range["maximum"] = max;
+        Note(key, "integer", std::move(range));
+    }
     const auto* value = Find(key);
     if (value == nullptr) return std::nullopt;
     if (!value->is_number_integer()) Fail(key, "must be an integer, got " + Quoted(*value));
@@ -112,10 +201,17 @@ std::optional<std::int64_t> Reader::MaybeInt(std::string_view key, std::int64_t 
 
 std::int64_t Reader::Int(std::string_view key, std::int64_t fallback, std::int64_t min,
                          std::int64_t max) {
+    if (recorder_) Default(key, fallback);
     return MaybeInt(key, min, max).value_or(fallback);
 }
 
 std::optional<double> Reader::MaybeDouble(std::string_view key, double min, double max) {
+    if (recorder_) {
+        nlohmann::json range = nlohmann::json::object();
+        if (std::isfinite(min)) range["minimum"] = min;
+        if (std::isfinite(max)) range["maximum"] = max;
+        Note(key, "number", std::move(range));
+    }
     const auto* value = Find(key);
     if (value == nullptr) return std::nullopt;
     if (!value->is_number()) Fail(key, "must be a number, got " + Quoted(*value));
@@ -128,12 +224,18 @@ std::optional<double> Reader::MaybeDouble(std::string_view key, double min, doub
 }
 
 double Reader::Double(std::string_view key, double fallback, double min, double max) {
+    if (recorder_) Default(key, fallback);
     return MaybeDouble(key, min, max).value_or(fallback);
 }
 
 std::optional<std::string> Reader::MaybeEnum(std::string_view key,
                                              std::initializer_list<std::string_view> choices) {
     auto value = MaybeString(key);
+    if (recorder_) {
+        nlohmann::json list = nlohmann::json::array();
+        for (const auto choice : choices) list.push_back(std::string(choice));
+        Note(key, "enum", {{"choices", std::move(list)}});
+    }
     if (!value) return std::nullopt;
     for (const auto choice : choices) {
         if (*value == choice) return value;
@@ -147,12 +249,14 @@ std::optional<std::string> Reader::MaybeEnum(std::string_view key,
 
 std::string Reader::Enum(std::string_view key, std::string fallback,
                          std::initializer_list<std::string_view> choices) {
+    if (recorder_) Default(key, fallback);
     auto value = MaybeEnum(key, choices);
     return value ? std::move(*value) : std::move(fallback);
 }
 
 std::optional<std::vector<std::string>> Reader::MaybeStringList(std::string_view key,
                                                                 bool allow_empty_entries) {
+    Note(key, "string_list");
     const auto* value = Find(key);
     if (value == nullptr) return std::nullopt;
     if (!value->is_array()) Fail(key, "must be a list of strings, got " + Quoted(*value));
@@ -168,10 +272,12 @@ std::optional<std::vector<std::string>> Reader::MaybeStringList(std::string_view
 }
 
 std::vector<std::string> Reader::StringList(std::string_view key, bool allow_empty_entries) {
+    if (recorder_) Default(key, nlohmann::json::array());
     return MaybeStringList(key, allow_empty_entries).value_or(std::vector<std::string>{});
 }
 
 std::optional<std::map<std::string, std::string>> Reader::MaybeStringMap(std::string_view key) {
+    Note(key, "string_map");
     const auto* value = Find(key);
     if (value == nullptr) return std::nullopt;
     if (!value->is_object()) Fail(key, "must be an object of strings, got " + Quoted(*value));
@@ -201,6 +307,7 @@ Reader Reader::Object(std::string_view key) {
 }
 
 std::vector<std::pair<std::string, const nlohmann::json*>> Reader::Entries(std::string_view key) {
+    Note(key, "json");
     std::vector<std::pair<std::string, const nlohmann::json*>> out;
     const auto* value = Find(key);
     if (value == nullptr) return out;

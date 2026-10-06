@@ -16,6 +16,42 @@ MemorySettings ParseMemorySettings(const nlohmann::json& config) {
         target = static_cast<int>(reader.Int(key, target, lo, hi));
     };
 
+    // Every field is restart: the embedding backend and model are load-bearing
+    // (vectors already stored were made by them), and the rest are read once
+    // into the runtime the plugin builds at registration.
+    reader.Describe("strategy", {"Embedding backend: auto (sidecar if sidecar_model is set, "
+                                 "else http if api_base is set, else lexical), http, sidecar, "
+                                 "none."});
+    reader.Describe("api_base", {"OpenAI-compatible embeddings endpoint (http strategy)."});
+    reader.Describe("api_key", {"Key reference for api_base.", config::ApplyPolicy::kRestart,
+                                /*secret=*/true});
+    reader.Describe("model", {"Embedding model at api_base. Changing it invalidates stored "
+                              "vectors."});
+    reader.Describe("timeout_ms", {"HTTP embedding request timeout."});
+    reader.Describe("sidecar_python_path",
+                    {"Interpreter with fastembed installed; empty = python3 on PATH."});
+    reader.Describe("sidecar_model", {"fastembed model, e.g. BAAI/bge-small-en-v1.5. Changing "
+                                      "it invalidates stored vectors."});
+    reader.Describe("sidecar_startup_timeout_ms", {"Sidecar spawn + model load window."});
+    reader.Describe("sidecar_request_timeout_ms", {"One sidecar embedding request's bound."});
+    reader.Describe("tagger_model", {"<provider>/<model> that files entries under tags; empty = "
+                                     "entries stay untagged."});
+    reader.Describe("tagger_max_tokens", {"Output cap for one tagging request."});
+    reader.Describe("tagger_timeout_ms", {"One tagging request's bound."});
+    reader.Describe("max_tags", {"Tag vocabulary cap per scope."});
+    reader.Describe("max_tags_per_entry", {"Tags one entry may carry."});
+    reader.Describe("tag_merge_similarity",
+                    {"Embedding similarity at which a new tag merges into an existing one."});
+    reader.Describe("allow_inline", {"false = file-only: entries enter only through "
+                                     "memory_store(path=...)."});
+    reader.Describe("max_text_bytes", {"Largest entry text."});
+    reader.Describe("batch_size", {"Entries embedded per backend call."});
+    reader.Describe("default_limit", {"Search results when the model supplies no limit."});
+    reader.Describe("writes_prompt", {"false = memory writes go through without a prompt."});
+    reader.Describe("index_enabled", {"Inject the memory index into each session's context."});
+    reader.Describe("index_budget_bytes", {"Size budget of that index."});
+    reader.Describe("index_in_subagents", {"Inject the index into subagents too."});
+
     const std::string strategy =
         reader.Enum("strategy", "auto", {"auto", "http", "sidecar", "none"});
     if (strategy == "http") out.strategy = StrategyKind::kHttp;

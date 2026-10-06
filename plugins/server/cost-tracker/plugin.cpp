@@ -41,6 +41,8 @@
 // OnSessionEnded -- the checklist precedent: a resumed session keeps its
 // history, and there is no session-deleted signal to hook.
 
+#include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/plugin_abi.h"
 
 #include <fstream>
@@ -171,6 +173,12 @@ void EnsureSharedState(const minimal::plugins::PluginRegistrationContext& contex
 }
 
 }  // namespace
+
+MINIMAL_PLUGIN_CONFIG_SCHEMA(
+    minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "cost-tracker"),
+    [](const nlohmann::json& config) {
+        (void)minimal::cost_tracker::ParseCostSettings(config);
+    })
 
 extern "C" {
 

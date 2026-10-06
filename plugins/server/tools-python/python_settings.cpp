@@ -8,6 +8,21 @@ namespace minimal::tools_python {
 PythonSettings ParsePythonSettings(const nlohmann::json& config) {
     PythonSettings settings;
     config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "tools-python"));
+    reader.Describe("python", {"Fallback interpreter (bare python and venv creation), "
+                               "resolved on PATH."});
+    reader.Describe("sync_wait_ceiling_s", {"Ceiling on a model-supplied sync timeout; reaching "
+                                            "it demotes the wait to async. 0 = unlimited."});
+    reader.Describe("startup_timeout_s", {"Spawn + handshake window for a new interpreter."});
+    reader.Describe("install_timeout_s", {"Bound on venv creation / package installation."});
+    reader.Describe("grace_s", {"How long an interrupt waits before escalating to a kill."});
+    reader.Describe("background_max_runtime_s",
+                    {"Default deadline for background requests. 0 = off."});
+    reader.Describe("rlimit_cpu_s", {"RLIMIT_CPU backstop for the interpreter. 0 = off."});
+    reader.Describe("max_output_bytes", {"Bounds the persisted result text per request."});
+    reader.Describe("max_capture_bytes", {"Per-field capture cap (stdout, stderr, result, ...)."});
+    reader.Describe("max_file_size_bytes", {"RLIMIT_FSIZE backstop for files the code writes."});
+    reader.Describe("stream_head_bytes", {"Live-output ring: the first bytes kept."});
+    reader.Describe("stream_tail_bytes", {"Live-output ring: the last bytes kept."});
     settings.python = reader.String("python", settings.python, /*allow_empty=*/false);
     // Every duration is in SECONDS and says so in its key.
     settings.sync_wait_ceiling =

@@ -8,10 +8,18 @@
 // path_confinement_supported() and ExtractPath(), and ToolExecutor does the
 // out-of-workdir classification centrally, so that rule cannot drift per tool.
 
+#include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/plugin_abi.h"
 
 #include "fs_settings.hpp"
 #include "fs_tools.hpp"
+
+MINIMAL_PLUGIN_CONFIG_SCHEMA(
+    minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "tools-fs"),
+    [](const nlohmann::json& config) {
+        (void)minimal::tools_fs::ParseFsSettings(config);
+    })
 
 extern "C" {
 

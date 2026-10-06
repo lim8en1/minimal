@@ -80,8 +80,9 @@ std::optional<std::string> AbsoluteRedirectTarget(const std::vector<net::HttpHea
 
 class WebFetchTool : public tools::Tool {
 public:
-    WebFetchTool(WebSettings settings, net::HttpClient http)
-        : settings_(std::move(settings)), http_(std::move(http)) {
+    WebFetchTool(std::shared_ptr<const common::LiveValue<WebSettings>> live, net::HttpClient http)
+        : live_(std::move(live)), http_(std::move(http)) {
+        const auto initial = live_->Get();
         spec_.name = "web_fetch";
         // ReadOnly: it runs nothing locally. The network dimension
         // (network_access_required) is its gate -- as Execute it also
@@ -101,8 +102,8 @@ public:
                {{"type", "integer"},
                 {"description",
                  "Maximum bytes of text to return; default " +
-                     std::to_string(settings_.fetch_default_max_bytes) + ", capped at " +
-                     std::to_string(settings_.fetch_max_bytes) + ". Anything over the limit is "
+                     std::to_string(initial->fetch_default_max_bytes) + ", capped at " +
+                     std::to_string(initial->fetch_max_bytes) + ". Anything over the limit is "
                      "saved to a file you can read with the read tool -- the result footer "
                      "names it."}}}}},
             {"required", nlohmann::json::array({"url"})}};
@@ -116,6 +117,7 @@ public:
     bool accepts_pattern_rules() const override { return false; }
 
     ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override {
+        const auto settings = live_->Get();
         if (!input.contains("url") || !input.at("url").is_string()) {
             return Error("web_fetch: 'url' is required");
         }
@@ -124,7 +126,7 @@ public:
         // Clamped like read's window: 0 and over-the-ceiling both mean the
         // ceiling (disclosed in the footer), an out-of-range value is the
         // model's mistake to see, not a silent wrap.
-        int max_bytes = settings_.fetch_default_max_bytes;
+        int max_bytes = settings->fetch_default_max_bytes;
         if (input.contains("max_bytes")) {
             if (!input.at("max_bytes").is_number_integer()) {
                 return Error("web_fetch: 'max_bytes' must be an integer");
@@ -133,20 +135,20 @@ public:
             if (raw < 0 || raw > std::numeric_limits<int>::max()) {
                 return Error("web_fetch: 'max_bytes' is out of range");
             }
-            max_bytes = raw == 0 ? settings_.fetch_max_bytes
+            max_bytes = raw == 0 ? settings->fetch_max_bytes
                                  : static_cast<int>(std::min<std::int64_t>(
-                                       raw, settings_.fetch_max_bytes));
+                                       raw, settings->fetch_max_bytes));
         }
 
-        for (int hop = 0; hop <= settings_.fetch_max_redirects; ++hop) {
+        for (int hop = 0; hop <= settings->fetch_max_redirects; ++hop) {
             if (ctx.is_cancelled && ctx.is_cancelled()) return Error("web_fetch: cancelled");
 
-            const UrlCheck check = CheckUrl(url, settings_.fetch_allow_private_hosts);
+            const UrlCheck check = CheckUrl(url, settings->fetch_allow_private_hosts);
             if (!check.ok) return Error("web_fetch: refused (" + check.reason + ")");
 
             net::HttpRequest request;
             request.url = url;
-            request.request_timeout = std::chrono::milliseconds(settings_.fetch_timeout_ms);
+            request.request_timeout = std::chrono::milliseconds(settings->fetch_timeout_ms);
             // The check just resolved this hop's host; pin the connection to
             // the addresses it vetted so libcurl's connect-time resolution
             // cannot pick a different one (rebinding TOCTOU). Empty when the
@@ -200,7 +202,7 @@ public:
                           max_bytes);
         }
         return Error("web_fetch: too many redirects (" +
-                     std::to_string(settings_.fetch_max_redirects) + ")");
+                     std::to_string(settings->fetch_max_redirects) + ")");
     }
 
 private:
@@ -245,14 +247,19 @@ private:
     }
 
     ToolSpec spec_;
-    WebSettings settings_;
+    std::shared_ptr<const common::LiveValue<WebSettings>> live_;
     net::HttpClient http_;  // stateless -- see HttpClient's own contract
 };
 
 }  // namespace
 
+std::unique_ptr<tools::Tool> MakeWebFetchTool(std::shared_ptr<const common::LiveValue<WebSettings>> live, net::HttpClient http) {
+    return std::make_unique<WebFetchTool>(std::move(live), std::move(http));
+}
+
 std::unique_ptr<tools::Tool> MakeWebFetchTool(WebSettings settings, net::HttpClient http) {
-    return std::make_unique<WebFetchTool>(std::move(settings), std::move(http));
+    return MakeWebFetchTool(std::make_shared<common::LiveValue<WebSettings>>(std::move(settings)),
+              std::move(http));
 }
 
 }  // namespace minimal::tools_web

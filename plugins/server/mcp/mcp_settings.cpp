@@ -9,6 +9,10 @@ McpLimits ParseMcpLimits(const nlohmann::json& config) {
     McpLimits limits;
     constexpr std::int64_t kMaxMs = 24LL * 3600 * 1000;
     config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "mcp"));
+    reader.Describe("connect_timeout_ms", {"Bound on connecting to one MCP server."});
+    reader.Describe("request_timeout_ms", {"Bound on one MCP request."});
+    reader.Describe("max_list_pages", {"Page cap when listing a server's tools."});
+    reader.Describe("restart_cooldown_ms", {"Wait before restarting a server that exited."});
     limits.connect = std::chrono::milliseconds(
         reader.Int("connect_timeout_ms", limits.connect.count(), 1, kMaxMs));
     limits.request = std::chrono::milliseconds(

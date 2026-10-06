@@ -48,6 +48,8 @@
 #include "background_registry.hpp"
 #include "bash_session_state.hpp"
 #include "bash_settings.hpp"
+#include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "bash_tool.hpp"
 #include "restart_shell.hpp"
 #include "tasks_command.hpp"
@@ -102,6 +104,10 @@ public:
 };
 
 }  // namespace
+
+MINIMAL_PLUGIN_CONFIG_SCHEMA(
+    minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "tools-bash"),
+    [](const nlohmann::json& config) { (void)minimal::tools_bash::ParseBashSettings(config); })
 
 extern "C" {
 

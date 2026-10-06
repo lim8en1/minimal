@@ -16,6 +16,8 @@
 
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/plugin_abi.h"
 
 namespace {
@@ -45,6 +47,12 @@ std::shared_ptr<minimal::memory::MemoryRuntime> Runtime(
 }
 
 }  // namespace
+
+MINIMAL_PLUGIN_CONFIG_SCHEMA(
+    minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "memory"),
+    [](const nlohmann::json& config) {
+        (void)minimal::memory::ParseMemorySettings(config);
+    })
 
 extern "C" {
 

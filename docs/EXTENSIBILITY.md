@@ -29,6 +29,8 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `minimal_plugin_register_model_catalogs(ModelCatalogRegistry&)` | **live** | `"discover": true` providers list their models from the backend, lazily at first resolve; keyed by the same kind string as the provider factory |
 | `minimal_plugin_register_compaction_strategies(CompactionStrategyRegistry&)` | **live (S4)** | plugin compaction strategies keyed by name — `memory.compaction_strategy` in settings.json selects one. Core registers its built-in `"summarize"` strategy directly in `main.cpp` (never through this hook), and always snaps a strategy's proposed cut to a safe tool-call boundary before using it |
 | `minimal_plugin_register_hook_points(HookDispatcher&)` | **live** | named, veto-capable or observe-only events the plugin emits; hooks.json actions answer them — see §5 |
+| `minimal_plugin_config_schema(json&)` / `minimal_plugin_validate_config(const json&, string&)` | **live** | the plugin's `plugins.d/<name>.json` schema and a dry-run check, recorded from its own `config::Reader` parser (`MINIMAL_PLUGIN_CONFIG_SCHEMA`); called without registration, so the schema cannot drift from the code that reads the file |
+| `minimal_plugin_reconfigure(const json&, string&)` | **live** | takes a changed config without a restart; the host calls it only when every changed field is declared `live` |
 
 Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`, `ContextContributor`, `PermissionAdvisor` (composing above the wire checker — see §3), and the service interfaces a provider ships (abstract, header-only — see §2.2).
 

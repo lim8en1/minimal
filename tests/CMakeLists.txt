@@ -59,6 +59,7 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     aliased_tool_test.cpp
     provider_factory_registry_test.cpp
     model_catalog_test.cpp
+    config_schema_test.cpp
     model_catalog_live_test.cpp
     permission_codec_test.cpp
     providers_config_test.cpp
@@ -411,6 +412,7 @@ target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"
     MINIMAL_USER_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures-deployed"
     MINIMAL_BUNDLED_DIR="${CMAKE_SOURCE_DIR}/bundled"
+    MINIMAL_BUNDLED_SERVER_PLUGIN_DIR="${CMAKE_BINARY_DIR}/plugins/server"
     MINIMAL_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples"
     MINIMAL_DOCS_DIR="${CMAKE_SOURCE_DIR}/docs"
     MINIMAL_LOGO_PLUGIN="$<TARGET_FILE:minimal_logo>"

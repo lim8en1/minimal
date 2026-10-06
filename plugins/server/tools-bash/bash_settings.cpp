@@ -7,10 +7,24 @@ namespace minimal::tools_bash {
 
 BashSettings ParseBashSettings(const nlohmann::json& config) {
     BashSettings settings;
-    // The plugin's own plugins.json "config" object -- flat, because every
-    // knob belongs to this one tool. Timeouts are configured in SECONDS (the
-    // unit the model-facing tool input uses) and stored in ms.
+    // The plugin's own plugins.d/tools-bash.json -- flat, because every knob
+    // belongs to this one tool. Timeouts are configured in SECONDS (the unit
+    // the model-facing tool input uses) and stored in ms. Every field is
+    // restart: the timeouts are quoted in the tool's own description, and
+    // the rest are read by code that holds them for the process lifetime.
     config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "tools-bash"));
+    reader.Describe("timeout_s", {"Default wall-clock cap per command, seconds; the whole "
+                                  "process group is killed at the deadline."});
+    reader.Describe("max_timeout_s", {"Ceiling on a model-supplied timeout, seconds."});
+    reader.Describe("background_max_timeout_s",
+                    {"Ceiling for detached (background) commands, seconds."});
+    reader.Describe("max_background_tasks", {"Per-session cap on live background tasks."});
+    reader.Describe("max_output_bytes", {"Bounds the persisted result the model sees."});
+    reader.Describe("max_file_size_bytes",
+                    {"RLIMIT_FSIZE backstop for files a command writes."});
+    reader.Describe("shell", {"The POSIX shell (or a wrapper entering a container)."});
+    reader.Describe("inherit_env", {"How the session environment is seeded: \"allowlist\" "
+                                    "($HOME, $PATH, ...) or \"all\" (includes API keys)."});
     constexpr std::int64_t kMaxSeconds = 7LL * 24 * 3600;
     settings.timeout_ms = reader.Int("timeout_s", settings.timeout_ms / 1000, 1, kMaxSeconds) * 1000;
     settings.max_timeout_ms =

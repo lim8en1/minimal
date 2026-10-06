@@ -111,6 +111,16 @@ std::string_view DefaultPrompt() { return kDefaultPrompt; }
 TitlerConfig ParseTitlerConfig(const nlohmann::json& config) {
     TitlerConfig out;
     config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "session-titler"));
+    // All live: each title request reads the current values.
+    reader.Describe("model", {"<provider>/<model> for titles; empty = the session's own model.",
+                              config::ApplyPolicy::kLive});
+    reader.Describe("max_tokens", {"Output cap for the title request (a reasoning model needs "
+                                   "far more than the default).",
+                                   config::ApplyPolicy::kLive});
+    reader.Describe("input_char_budget", {"The first user message is cut to this before sending.",
+                                          config::ApplyPolicy::kLive});
+    reader.Describe("prompt", {"Replaces the built-in titling instruction; empty = built-in.",
+                               config::ApplyPolicy::kLive});
     out.model = reader.String("model", out.model);
     if (!out.model.empty() && !common::SplitModelRef(out.model)) {
         reader.Fail("model", "must be <provider>/<model>, got \"" + out.model + "\"");
@@ -165,6 +175,11 @@ std::string CleanTitle(std::string_view text) {
 
 TitlerObserver::TitlerObserver(TitlerConfig config, plugins::ServiceRegistry* services,
                                common::Logger& logger)
+    : TitlerObserver(std::make_shared<common::LiveValue<TitlerConfig>>(std::move(config)),
+                     services, logger) {}
+
+TitlerObserver::TitlerObserver(std::shared_ptr<const common::LiveValue<TitlerConfig>> config,
+                               plugins::ServiceRegistry* services, common::Logger& logger)
     : config_(std::move(config)),
       services_(services),
       logger_(logger),
@@ -211,6 +226,7 @@ void TitlerObserver::OnSessionEnded(const agent::SessionInfo& info) {
 
 void TitlerObserver::ProcessJob(const std::string& session_id) const {
     try {
+        const auto config = config_->Get();
         if (services_ == nullptr) return;
         auto* support = static_cast<agent::SessionSupportService*>(
             services_->Find(agent::kSessionSupportServiceName));
@@ -218,7 +234,7 @@ void TitlerObserver::ProcessJob(const std::string& session_id) const {
 
         std::string first_text;
         if (const auto reader = support->HistoryFor(session_id); reader != nullptr) {
-            first_text = FirstUserText(session_id, *reader, config_.input_char_budget);
+            first_text = FirstUserText(session_id, *reader, config->input_char_budget);
         }
         if (first_text.empty()) {
             // Nothing to title from (the default rule found none either, so the
@@ -230,13 +246,13 @@ void TitlerObserver::ProcessJob(const std::string& session_id) const {
         // The session's own model unless the config overrode it. nullopt on an
         // unknown session or an unresolvable override: no title.
         const std::optional<agent::SessionLlm> llm =
-            config_.model.empty() ? support->LlmForSession(session_id)
-                                  : support->ResolveModelRef(config_.model);
+            config->model.empty() ? support->LlmForSession(session_id)
+                                  : support->ResolveModelRef(config->model);
         if (!llm || llm->provider == nullptr) {
             logger_.debug("session {}: no provider available for titling", session_id);
             return;
         }
-        GenerateTitle(config_, logger_, *llm->provider, llm->model, session_id, first_text,
+        GenerateTitle(*config, logger_, *llm->provider, llm->model, session_id, first_text,
                       *support);
     } catch (const std::exception& error) {
         // A failed title degrades to the free default name -- never an error

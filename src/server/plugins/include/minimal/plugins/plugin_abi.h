@@ -463,6 +463,27 @@ void minimal_plugin_register_compaction_strategies(
 void minimal_plugin_register_hook_points(minimal::hooks::HookDispatcher&,
                                           const minimal::plugins::PluginRegistrationContext&);
 
+// OPTIONAL: this plugin's config schema -- config::SchemaRecording's shape
+// ({"file", "fields": [{"path", "type", "default", ...}]}), recorded by
+// running its own parser against {}. Called WITHOUT registration (the
+// `minimal plugin` CLI, the config view): no context, no side effects.
+// Define both this and the next through MINIMAL_PLUGIN_CONFIG_SCHEMA
+// (minimal/common/plugin_config_schema.hpp).
+void minimal_plugin_config_schema(nlohmann::json& out);
+
+// OPTIONAL: parses `config` exactly as registration would, with no side
+// effects; leaves `error` empty when it is accepted, else sets the message.
+// What the CLI and the config view check a value with before saving it.
+void minimal_plugin_validate_config(const nlohmann::json& config, std::string& error);
+
+// OPTIONAL: take a changed config without a restart. The host calls it only
+// when every changed field is "apply": "live" in the schema, with the WHOLE
+// new config; a plugin with live fields must define it. Concurrent with
+// every other call into the plugin (tools mid-execution included): swap the
+// new settings in atomically. Return false with `error` set to keep the old
+// config -- the change then waits for a restart.
+bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error);
+
 // Frozen-surface note (track M): ToolContext::history is a
 // session::HistoryWindow -- a bound, windowed slice of SessionReader exposing
 // only keyset-paged GetMessages. Both headers above are the surface; a plugin

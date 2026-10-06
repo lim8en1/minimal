@@ -65,7 +65,9 @@ minimal/common/clock.hpp
 minimal/common/config_reader.hpp
 minimal/common/event_queue.hpp
 minimal/common/json_config_loader.hpp
+minimal/common/live_value.hpp
 minimal/common/plugin_config_label.hpp
+minimal/common/plugin_config_schema.hpp
 minimal/common/model_ref.hpp
 minimal/common/read_file.hpp
 minimal/common/utf8.hpp

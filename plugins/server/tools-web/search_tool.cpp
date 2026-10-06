@@ -51,8 +51,9 @@ std::string PercentEncode(std::string_view text) {
 
 class WebSearchTool : public tools::Tool {
 public:
-    WebSearchTool(WebSettings settings, net::HttpClient http)
-        : settings_(std::move(settings)), http_(std::move(http)) {
+    WebSearchTool(std::shared_ptr<const common::LiveValue<WebSettings>> live, net::HttpClient http)
+        : live_(std::move(live)), http_(std::move(http)) {
+        const auto initial = live_->Get();
         spec_.name = "web_search";
         // ReadOnly: it runs nothing locally. The network dimension
         // (network_access_required) is its gate -- as Execute it also
@@ -70,8 +71,8 @@ public:
                {"max_results",
                 {{"type", "integer"},
                  {"description", "How many results to return (default " +
-                                     std::to_string(settings_.search_default_max_results) +
-                                     ", capped at " + std::to_string(settings_.search_max_results) +
+                                     std::to_string(initial->search_default_max_results) +
+                                     ", capped at " + std::to_string(initial->search_max_results) +
                                      ")"}}}}},
             {"required", nlohmann::json::array({"query"})}};
     }
@@ -82,17 +83,18 @@ public:
     bool accepts_pattern_rules() const override { return false; }
 
     ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override {
-        if (settings_.search_api_url.empty()) {
+        const auto settings = live_->Get();
+        if (settings->search_api_url.empty()) {
             return Error(
-                "web_search: not configured -- set tools-web's plugin config "
-                "search.api_url (see bundled/providers.example.json-style docs)");
+                "web_search: not configured -- set search.api_url in "
+                "plugins.d/tools-web.json (see plugins/server/tools-web/README.md)");
         }
         if (!input.contains("query") || !input.at("query").is_string()) {
             return Error("web_search: 'query' is required");
         }
         const std::string query = input.at("query").get<std::string>();
 
-        int max_results = settings_.search_default_max_results;
+        int max_results = settings->search_default_max_results;
         if (input.contains("max_results") && !input.at("max_results").is_number_integer()) {
             // Rejected, not silently defaulted: a model that passed a string
             // ("5") would otherwise get the default count believing its
@@ -110,28 +112,28 @@ public:
             }
             max_results = static_cast<int>(raw);
         }
-        max_results = std::clamp(max_results, 1, settings_.search_max_results);
+        max_results = std::clamp(max_results, 1, settings->search_max_results);
 
         if (ctx.is_cancelled && ctx.is_cancelled()) return Error("web_search: cancelled");
 
-        const UrlCheck check = CheckUrl(settings_.search_api_url, /*allow_private_hosts=*/true);
+        const UrlCheck check = CheckUrl(settings->search_api_url, /*allow_private_hosts=*/true);
         // allow_private_hosts=true here: the search BACKEND is an operator's
         // own configured endpoint (often a local SearXNG instance), not a
         // URL the model chose -- unlike web_fetch, there is nothing to guard
         // the operator's own choice against. The scheme check still applies.
         if (!check.ok) return Error("web_search: refused (" + check.reason + ")");
 
-        std::string url = settings_.search_api_url;
+        std::string url = settings->search_api_url;
         url += (url.find('?') == std::string::npos) ? '?' : '&';
         url += "q=" + PercentEncode(query) + "&count=" + std::to_string(max_results);
 
         net::HttpRequest request;
         request.url = url;
-        request.request_timeout = std::chrono::milliseconds(settings_.search_timeout_ms);
-        if (settings_.search_api_key.configured()) {
+        request.request_timeout = std::chrono::milliseconds(settings->search_timeout_ms);
+        if (settings->search_api_key.configured()) {
             try {
                 request.headers.push_back(
-                    {"Authorization", "Bearer " + settings_.search_api_key.Get().value});
+                    {"Authorization", "Bearer " + settings->search_api_key.Get().value});
             } catch (const std::exception& error) {
                 return Error(std::string("web_search: api key: ") + error.what());
             }
@@ -184,14 +186,19 @@ public:
 
 private:
     ToolSpec spec_;
-    WebSettings settings_;
+    std::shared_ptr<const common::LiveValue<WebSettings>> live_;
     net::HttpClient http_;  // stateless -- see HttpClient's own contract
 };
 
 }  // namespace
 
+std::unique_ptr<tools::Tool> MakeWebSearchTool(std::shared_ptr<const common::LiveValue<WebSettings>> live, net::HttpClient http) {
+    return std::make_unique<WebSearchTool>(std::move(live), std::move(http));
+}
+
 std::unique_ptr<tools::Tool> MakeWebSearchTool(WebSettings settings, net::HttpClient http) {
-    return std::make_unique<WebSearchTool>(std::move(settings), std::move(http));
+    return MakeWebSearchTool(std::make_shared<common::LiveValue<WebSettings>>(std::move(settings)),
+              std::move(http));
 }
 
 }  // namespace minimal::tools_web

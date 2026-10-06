@@ -36,6 +36,8 @@
 // "model error, not malice" threat model as bash applies: against an
 // adversarial model holding an interpreter, only a container helps.
 
+#include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/plugin_abi.h"
 
 #include "python_command.hpp"
@@ -68,6 +70,12 @@ public:
 };
 
 }  // namespace
+
+MINIMAL_PLUGIN_CONFIG_SCHEMA(
+    minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "tools-python"),
+    [](const nlohmann::json& config) {
+        (void)minimal::tools_python::ParsePythonSettings(config);
+    })
 
 extern "C" {
 

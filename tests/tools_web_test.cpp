@@ -630,6 +630,24 @@ TEST_CASE("web_search: an unexpected backend shape is a clear tool error",
     CHECK(result.content_text.find("results") != std::string::npos);
 }
 
+TEST_CASE("web_search: a swapped live config applies from the next call", "[tools_web][search]") {
+    // What minimal_plugin_reconfigure does: Set on the cell both tools read.
+    LoopbackServer server({HttpResponseOf(
+        200, "OK", "application/json",
+        R"({"results":[{"title":"Example","url":"https://example.com","snippet":"a page"}]})")});
+    auto live = std::make_shared<common::LiveValue<WebSettings>>(WebSettings{});
+    auto tool = MakeWebSearchTool(live, net::HttpClient{});
+    auto ctx = Context();
+    CHECK(tool->execute({{"query", "q"}}, ctx).is_error);  // unconfigured
+
+    WebSettings configured;
+    configured.search_api_url = server.url();
+    live->Set(configured);
+    const auto result = tool->execute({{"query", "q"}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.find("Example") != std::string::npos);
+}
+
 TEST_CASE("web_search: 'query' is required", "[tools_web][search]") {
     WebSettings settings;
     settings.search_api_url = "http://127.0.0.1:1/";

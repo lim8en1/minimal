@@ -114,6 +114,21 @@ Settings ParseSettings(const nlohmann::json& bundled, const nlohmann::json& conf
     Overlay(merged, profile->second);
     Overlay(merged, overrides);
     if (!merged.contains("retry")) merged["retry"] = nlohmann::json::object();
+
+    // Describe mode only (no-ops otherwise): the operator file's defaults are
+    // what the bundled layers resolve to for the selected backend.
+    entry.Default("backend", settings.backend);
+    entry.Describe("backend", {"Profile under backends in decision-advisor.json."});
+    entry.Describe("api_key", {"Key reference for the selected backend.",
+                               config::ApplyPolicy::kRestart, /*secret=*/true});
+    for (const auto& [key, value] : merged.items()) {
+        if (key == "retry" && value.is_object()) {
+            for (const auto& [field, inner] : value.items()) entry.Default("retry." + field, inner);
+        } else {
+            entry.Default(key, value);
+        }
+    }
+
     config::Reader resolved(merged, std::string(kBundledSettingsFile) + " + " + kPluginsFile);
     const std::string unset = "is not set for backend \"" + settings.backend + "\" (set it in " +
                               kBundledSettingsFile + " or " + kPluginsFile + ")";

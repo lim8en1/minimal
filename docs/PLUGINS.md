@@ -238,6 +238,20 @@ object code.
 - `minimal_plugin_register_model_catalogs` — lazy model discovery
 - `minimal_plugin_register_compaction_strategies`
 - `minimal_plugin_register_hook_points` — new veto-capable hook events
+- `minimal_plugin_config_schema` / `minimal_plugin_validate_config` — the
+  plugin's `plugins.d` schema and a dry-run check, both from its own parser:
+  one `MINIMAL_PLUGIN_CONFIG_SCHEMA(label, parse)` line
+  (`minimal/common/plugin_config_schema.hpp`). Called with no registration
+  context (the `minimal plugin` CLI, the config view), so the parser must
+  be side-effect free. Describe mode records every field the parser reads
+  through `config::Reader` (path, type, default, range, choices);
+  `reader.Describe(key, {doc, apply, secret})` adds the rest
+- `minimal_plugin_reconfigure` — take a changed config without a restart.
+  Only fields declared `ApplyPolicy::kLive` change this way; the host calls
+  it only when every changed field is live. Keep the settings in a
+  `common::LiveValue<T>` (`minimal/common/live_value.hpp`) and read one
+  snapshot per call. A field that model-visible text quotes (a tool
+  description) is `restart`: the model would keep reading the old value
 
 A plugin that owns a config file validates it itself and reports problems
 through `PluginRegistrationContext::report_warning`; the startup sanity check

@@ -21,3 +21,4 @@ minimal/common/abi_tag.hpp
 minimal/common/config_reader.hpp
 minimal/common/logger.hpp
 minimal/common/plugin_config_label.hpp
+minimal/common/plugin_config_schema.hpp

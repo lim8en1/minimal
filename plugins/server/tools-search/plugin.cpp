@@ -16,11 +16,19 @@
 // wedge the session worker thread -- the hang bash's timeout_ms exists to
 // bound. Linear time makes that failure mode unreachable instead of bounded.
 
+#include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/plugin_abi.h"
 
 #include "glob_tool.hpp"
 #include "grep_tool.hpp"
 #include "search_settings.hpp"
+
+MINIMAL_PLUGIN_CONFIG_SCHEMA(
+    minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "tools-search"),
+    [](const nlohmann::json& config) {
+        (void)minimal::tools_search::ParseSearchSettings(config);
+    })
 
 extern "C" {
 

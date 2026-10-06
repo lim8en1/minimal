@@ -19,6 +19,9 @@
 // result at one central chokepoint (agent_loop.cpp, "cap tool RESULTS"),
 // regardless of which tool produced it.
 
+#include "minimal/common/live_value.hpp"
+#include "minimal/common/plugin_config_label.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/plugin_abi.h"
 #include "minimal/plugins/service_registry.hpp"
 
@@ -26,6 +29,28 @@
 #include "host_permission_model.hpp"
 #include "search_tool.hpp"
 #include "web_settings.hpp"
+
+namespace {
+
+using minimal::tools_web::WebSettings;
+
+// The settings both tools read per call, and the secret resolver the parse
+// binds search.api_key through -- kept for reconfigure, which gets no context.
+struct Live {
+    std::shared_ptr<minimal::common::LiveValue<WebSettings>> settings;
+    const minimal::config::SecretResolver* secrets = nullptr;
+};
+
+Live& State() {
+    static Live state;
+    return state;
+}
+
+}  // namespace
+
+MINIMAL_PLUGIN_CONFIG_SCHEMA(
+    minimal::common::PluginConfigLabel(minimal::common::kPluginConfigDirName, "tools-web"),
+    [](const nlohmann::json& config) { (void)minimal::tools_web::ParseWebSettings(config); })
 
 extern "C" {
 
@@ -40,10 +65,31 @@ void minimal_plugin_register_tools(
             ? static_cast<const minimal::config::SecretResolver*>(
                   context.services->Find(minimal::config::kSecretsServiceName))
             : nullptr;
-    const auto settings = minimal::tools_web::ParseWebSettings(context.config, secrets);
+    State().secrets = secrets;
+    State().settings = std::make_shared<minimal::common::LiveValue<WebSettings>>(
+        minimal::tools_web::ParseWebSettings(context.config, secrets));
 
-    registry.Register(minimal::tools_web::MakeWebFetchTool(settings, minimal::net::HttpClient{}));
-    registry.Register(minimal::tools_web::MakeWebSearchTool(settings, minimal::net::HttpClient{}));
+    registry.Register(
+        minimal::tools_web::MakeWebFetchTool(State().settings, minimal::net::HttpClient{}));
+    registry.Register(
+        minimal::tools_web::MakeWebSearchTool(State().settings, minimal::net::HttpClient{}));
+}
+
+// Only "live" fields reach here (fetch.timeout_ms, fetch.max_redirects,
+// search.timeout_ms), so swapping the whole parsed struct changes nothing
+// else: the descriptions the tools were built with stay true.
+bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error) {
+    if (!State().settings) {
+        error = "tools-web is not registered";
+        return false;
+    }
+    try {
+        State().settings->Set(minimal::tools_web::ParseWebSettings(config, State().secrets));
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
 }
 
 // Per-host rules for this plugin's own tools (host_permission_model.hpp):
