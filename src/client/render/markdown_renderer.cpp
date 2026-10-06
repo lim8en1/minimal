@@ -98,27 +98,10 @@ std::string DecodeEntity(std::string_view entity) {
         }
         cp = cp * (hex ? 16u : 10u) + static_cast<char32_t>(value);
     }
-    // Surrogates and out-of-range values would encode to invalid UTF-8 (and 0
-    // has no glyph); render them verbatim instead of corrupting the output.
-    if (cp == 0 || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
-        return std::string(entity);
-    }
+    // Surrogates and out-of-range values have no UTF-8 encoding (and 0 has
+    // no glyph); render them verbatim instead of corrupting the output.
     std::string out;
-    if (cp < 0x80) {
-        out.push_back(static_cast<char>(cp));
-    } else if (cp < 0x800) {
-        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp < 0x10000) {
-        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else {
-        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    }
+    if (cp == 0 || !common::AppendUtf8(out, cp)) return std::string(entity);
     return out;
 }
 

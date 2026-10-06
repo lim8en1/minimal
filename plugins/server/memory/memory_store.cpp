@@ -226,7 +226,7 @@ std::string FtsOrQuery(std::string_view query) {
     };
     for (const char raw : query) {
         const unsigned char c = static_cast<unsigned char>(raw);
-        if (std::isalnum(c) || c >= 0x80) {
+        if (std::isalnum(c) || !common::IsAscii(raw)) {
             current += static_cast<char>(std::tolower(c));
         } else {
             flush();
@@ -362,7 +362,7 @@ std::string NormalizeTagName(std::string_view raw) {
         const unsigned char c = static_cast<unsigned char>(ch);
         if (std::isalnum(c)) {
             out += static_cast<char>(std::tolower(c));
-        } else if (c >= 0x80) {
+        } else if (!common::IsAscii(ch)) {
             out += ch;  // UTF-8 letters pass through; ASCII case-folding only
         } else if (c == ' ' || c == '_' || c == '-' || c == '.' || c == '/' || c == ':') {
             if (!out.empty() && out.back() != '-') out += '-';

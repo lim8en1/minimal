@@ -38,6 +38,13 @@ inline std::string TruncateUtf8(const std::string& text, std::size_t max_bytes) 
     return common::TruncateUtf8Bytes(text, max_bytes);
 }
 using common::Utf8CeilToBoundary;
+using common::Utf8Decode;
+
+// Unicode control characters: C0 (U+0000-001F), DEL, and C1 (U+0080-009F).
+// They draw nothing, and ESC in particular must never reach a terminal raw.
+inline bool IsControlCodePoint(char32_t cp) {
+    return cp < U'\x20' || cp == U'\x7F' || (cp >= U'\x80' && cp <= U'\x9F');
+}
 
 // Terminal display columns for one code point -- FTXUI's own table, the one
 // its renderer lays glyphs out by. The hand-kept range list this replaced
@@ -47,65 +54,13 @@ using common::Utf8CeilToBoundary;
 // budgets -- drifted from what was actually drawn on such text. Negative
 // (control characters) reads as 0: they draw nothing.
 inline std::size_t Utf8CharColumnWidth(char32_t cp) {
-    if (cp < 0x80) return cp < 0x20 || cp == 0x7F ? (cp == U'\t' ? 1 : 0) : 1;
-    char buf[4];
-    std::size_t n = 0;
-    if (cp < 0x800) {
-        buf[n++] = static_cast<char>(0xC0 | (cp >> 6));
-        buf[n++] = static_cast<char>(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-        buf[n++] = static_cast<char>(0xE0 | (cp >> 12));
-        buf[n++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        buf[n++] = static_cast<char>(0x80 | (cp & 0x3F));
-    } else {
-        buf[n++] = static_cast<char>(0xF0 | (cp >> 18));
-        buf[n++] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-        buf[n++] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        buf[n++] = static_cast<char>(0x80 | (cp & 0x3F));
-    }
-    const int width = ftxui::string_width(std::string_view(buf, n));
+    if (cp == U'\t') return 1;
+    if (IsControlCodePoint(cp)) return 0;
+    if (cp < U'\x80') return 1;
+    std::string encoded;
+    if (!common::AppendUtf8(encoded, cp)) encoded = common::kUtf8Replacement;
+    const int width = ftxui::string_width(encoded);
     return width > 0 ? static_cast<std::size_t>(width) : 0;
-}
-
-// Decodes the UTF-8 code point at text[*i] and advances *i past it. Malformed
-// sequences (a truncated or non-continuation tail) are consumed one byte at a
-// time as U+FFFD: measurement must never walk off the end of a bad label, and
-// a width-1 approximation for each stray byte is the same treatment the old
-// byte-counting code effectively gave them.
-inline char32_t Utf8Decode(std::string_view text, std::size_t& i) {
-    const unsigned char lead = static_cast<unsigned char>(text[i]);
-    std::size_t length = 0;
-    char32_t cp = 0;
-    if (lead < 0x80) {
-        length = 1;
-        cp = lead;
-    } else if ((lead & 0xE0) == 0xC0) {
-        length = 2;
-        cp = lead & 0x1F;
-    } else if ((lead & 0xF0) == 0xE0) {
-        length = 3;
-        cp = lead & 0x0F;
-    } else if ((lead & 0xF8) == 0xF0) {
-        length = 4;
-        cp = lead & 0x07;
-    } else {
-        ++i;   // stray continuation byte
-        return 0xFFFD;
-    }
-    if (i + length > text.size()) {
-        ++i;
-        return 0xFFFD;
-    }
-    for (std::size_t k = 1; k < length; ++k) {
-        const unsigned char cont = static_cast<unsigned char>(text[i + k]);
-        if ((cont & 0xC0) != 0x80) {
-            ++i;
-            return 0xFFFD;
-        }
-        cp = (cp << 6) | (cont & 0x3F);
-    }
-    i += length;
-    return cp;
 }
 
 // Drops C0 controls (0x00-0x1F), DEL (0x7F), and C1 controls (0x80-0x9F) --
@@ -121,13 +76,13 @@ inline std::string StripControlChars(std::string_view text) {
     while (i < text.size()) {
         const std::size_t start = i;
         const char32_t cp = Utf8Decode(text, i);
-        if (cp < 0x20 || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F)) continue;
+        if (IsControlCodePoint(cp)) continue;
         out.append(text.substr(start, i - start));
     }
     return out;
 }
 
-// Repairs invalid UTF-8 byte-for-byte: each malformed sequence Utf8Decode
+// Repairs invalid UTF-8 byte-for-byte: each malformed sequence common::Utf8Decode
 // would report as U+FFFD is re-encoded as the real U+FFFD replacement
 // character (valid input, including a genuine pre-existing U+FFFD, passes
 // through byte-identical). Used at the one place outside a JSON/proto
@@ -142,7 +97,7 @@ inline std::string SanitizeUtf8(std::string_view text) {
     while (i < text.size()) {
         const std::size_t start = i;
         const char32_t cp = Utf8Decode(text, i);
-        out.append(cp == 0xFFFD ? "\xEF\xBF\xBD" : std::string(text.substr(start, i - start)));
+        out.append(cp == U'\uFFFD' ? common::kUtf8Replacement : text.substr(start, i - start));
     }
     return out;
 }
@@ -153,7 +108,7 @@ inline std::size_t Utf8LastCodepointBytes(std::string_view text) {
     if (text.empty()) return 0;
     std::size_t end = text.size() - 1;
     // Back up over continuation bytes to the lead byte.
-    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) --end;
+    while (end > 0 && common::IsUtf8Continuation(text[end])) --end;
     return text.size() - end;
 }
 
@@ -164,10 +119,12 @@ inline std::size_t Utf8LastCodepointBytes(std::string_view text) {
 // glyph and the intermediate states render as bare components. Heuristic,
 // not full UAX #29: handles ZWJ sequences, U+FE0E/U+FE0F selectors, and
 // combining marks (which contribute no column -- see Utf8CharColumnWidth).
+inline constexpr char32_t kZeroWidthJoiner = U'\u200D';
+
 inline std::string_view Utf8PopGrapheme(std::string_view text) {
     const auto is_glue = [](char32_t cp) {
-        return cp == 0x200D /* ZWJ */ || cp == 0xFE0E || cp == 0xFE0F ||
-               (cp >= 0x0300 && cp <= 0x036F) /* combining marks */;
+        return cp == kZeroWidthJoiner || cp == U'\uFE0E' || cp == U'\uFE0F' ||
+               (cp >= U'\u0300' && cp <= U'\u036F') /* combining diacritical marks */;
     };
     std::size_t len = Utf8LastCodepointBytes(text);
     while (len > 0) {
@@ -188,7 +145,7 @@ inline std::string_view Utf8PopGrapheme(std::string_view text) {
             const std::size_t prev = Utf8LastCodepointBytes(text);
             if (prev > 0) {
                 std::size_t j = text.size() - prev;
-                continue_popping = Utf8Decode(text, j) == 0x200D;
+                continue_popping = Utf8Decode(text, j) == kZeroWidthJoiner;
             }
         }
         if (!continue_popping) break;
@@ -259,7 +216,7 @@ inline std::string ExpandTabs(std::string_view text, bool strip_cr = true) {
             continue;
         } else {
             out += c;
-            if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) ++column;
+            if (!common::IsUtf8Continuation(c)) ++column;
         }
     }
     return out;

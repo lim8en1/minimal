@@ -26,14 +26,6 @@ constexpr double kSimilarThreshold = 0.92;
 // with thousands of chunks).
 constexpr std::uintmax_t kMaxIngestFileBytes = 2u << 20;
 
-std::size_t CodePoints(std::string_view text) {
-    std::size_t count = 0;
-    for (const char c : text) {
-        if ((static_cast<unsigned char>(c) & 0xC0) != 0x80) ++count;
-    }
-    return count;
-}
-
 // Titles and descriptions are single lines: they render in lists and in the
 // context index.
 std::string OneLine(std::string_view text) {
@@ -60,7 +52,7 @@ std::optional<std::string> OptionalString(const nlohmann::json& input, const cha
 std::string CheckedTitle(const std::string& raw) {
     std::string title = OneLine(raw);
     if (title.empty()) throw std::runtime_error("title is empty");
-    if (CodePoints(title) > kTitleMaxChars) {
+    if (common::CountCodePoints(title) > kTitleMaxChars) {
         throw std::runtime_error("title is longer than " + std::to_string(kTitleMaxChars) +
                                  " characters -- keep it a short name; detail belongs in the body");
     }
@@ -72,7 +64,7 @@ std::string CheckedDescription(const std::string& raw) {
     if (description.empty()) {
         throw std::runtime_error("description is empty -- one line saying what this entry is about");
     }
-    if (CodePoints(description) > kDescriptionMaxChars) {
+    if (common::CountCodePoints(description) > kDescriptionMaxChars) {
         throw std::runtime_error("description is longer than " +
                                  std::to_string(kDescriptionMaxChars) +
                                  " characters -- one line; detail belongs in the body");

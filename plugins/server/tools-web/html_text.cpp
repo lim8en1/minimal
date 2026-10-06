@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "minimal/common/utf8.hpp"
+
 namespace minimal::tools_web {
 
 namespace {
@@ -56,34 +58,19 @@ const std::unordered_set<std::string>& BlockTags() {
     return tags;
 }
 
-void AppendUtf8(std::string& out, std::uint32_t codepoint) {
+void AppendEntityCodepoint(std::string& out, std::uint32_t codepoint) {
     // Surrogates (UTF-16 code units with no Unicode scalar value) and C0
     // control characters never belong in the text: a numeric entity naming
     // them produced INVALID UTF-8 (D800-DFFF as 3-byte sequences) or a raw
     // NUL byte (&#0;) -- the first corrupts every downstream UTF-8 consumer,
     // the second truncates C-string handling. Both are dropped; the model
-    // loses nothing it could have used.
-    if (codepoint >= 0xD800 && codepoint <= 0xDFFF) return;
-    if (codepoint < 0x20 && codepoint != '\t' && codepoint != '\n' && codepoint != '\r') {
+    // loses nothing it could have used. Surrogates and out-of-range
+    // codepoints have no encoding, so AppendUtf8 drops them -- cosmetic, not
+    // a correctness boundary (see html_text.hpp's header comment).
+    if (codepoint < ' ' && codepoint != '\t' && codepoint != '\n' && codepoint != '\r') {
         return;
     }
-    if (codepoint <= 0x7F) {
-        out += static_cast<char>(codepoint);
-    } else if (codepoint <= 0x7FF) {
-        out += static_cast<char>(0xC0 | (codepoint >> 6));
-        out += static_cast<char>(0x80 | (codepoint & 0x3F));
-    } else if (codepoint <= 0xFFFF) {
-        out += static_cast<char>(0xE0 | (codepoint >> 12));
-        out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (codepoint & 0x3F));
-    } else if (codepoint <= 0x10FFFF) {
-        out += static_cast<char>(0xF0 | (codepoint >> 18));
-        out += static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (codepoint & 0x3F));
-    }
-    // Out-of-range codepoints are dropped silently -- cosmetic, not a
-    // correctness boundary (see html_text.hpp's header comment).
+    common::AppendUtf8(out, codepoint);
 }
 
 const std::unordered_map<std::string, std::uint32_t>& NamedEntities() {
@@ -138,7 +125,7 @@ std::size_t DecodeEntity(std::string_view html, std::size_t pos, std::string& ou
                 out += '&';
                 return 1;
             }
-            AppendUtf8(out, static_cast<std::uint32_t>(value));
+            AppendEntityCodepoint(out, static_cast<std::uint32_t>(value));
             return semi - pos + 1;
         } catch (const std::exception&) {
             out += '&';
@@ -150,7 +137,7 @@ std::size_t DecodeEntity(std::string_view html, std::size_t pos, std::string& ou
         out += '&';
         return 1;
     }
-    AppendUtf8(out, it->second);
+    AppendEntityCodepoint(out, it->second);
     return semi - pos + 1;
 }
 

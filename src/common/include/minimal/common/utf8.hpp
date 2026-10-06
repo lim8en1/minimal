@@ -3,16 +3,106 @@
 // UTF-8 helpers for text that reaches a model, a terminal or a proto3
 // string: a byte cut could split a multi-byte sequence and render U+FFFD (or
 // fail a proto parse). Shared by server, client and plugins.
+//
+// The ONE home of UTF-8's bit layout (RFC 3629, Unicode Table 3-7): code
+// elsewhere asks these helpers instead of masking bytes itself.
 
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <string>
 #include <string_view>
 
+// NOLINTBEGIN(readability-magic-numbers) -- the encoding's own constants.
+
 namespace minimal::common {
 
-namespace utf8_detail {
-inline bool IsContinuation(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
-}  // namespace utf8_detail
+// U+FFFD REPLACEMENT CHARACTER, encoded.
+inline constexpr std::string_view kUtf8Replacement = "\xEF\xBF\xBD";
+
+// A 7-bit ASCII byte: never part of a multi-byte sequence, so byte-wise
+// classification (isspace, isalnum) is safe on it and only on it.
+inline bool IsAscii(char c) { return static_cast<unsigned char>(c) < 0x80; }
+
+// ASCII whitespace only: a multi-byte sequence's bytes are never treated as
+// spaces, so trimming or splitting on this never cuts a character.
+inline bool IsAsciiSpace(char c) {
+    return IsAscii(c) && std::isspace(static_cast<unsigned char>(c)) != 0;
+}
+
+// A continuation byte (10xxxxxx): never the start of a character.
+inline bool IsUtf8Continuation(char c) {
+    return (static_cast<unsigned char>(c) & 0xC0) == 0x80;
+}
+
+// The sequence length a lead byte announces (1..4), by bit pattern alone; 0
+// for a byte that cannot lead (a continuation byte, F8..FF). Says nothing
+// about whether the continuation bytes are there or well-formed.
+inline std::size_t Utf8LeadLength(char lead) {
+    const unsigned char c = static_cast<unsigned char>(lead);
+    if (c < 0x80) return 1;
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 0;
+}
+
+// Code points in `text`, counting each byte that is not a continuation byte.
+inline std::size_t CountCodePoints(std::string_view text) {
+    std::size_t count = 0;
+    for (const char c : text) {
+        if (!IsUtf8Continuation(c)) ++count;
+    }
+    return count;
+}
+
+// Appends the UTF-8 encoding of `cp`. A surrogate or a value past U+10FFFF
+// has no encoding: nothing is appended and false is returned, so the caller
+// decides between dropping it and keeping its source text.
+inline bool AppendUtf8(std::string& out, char32_t cp) {
+    if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) return false;
+    if (cp < 0x80) {
+        out += static_cast<char>(cp);
+    } else if (cp < 0x800) {
+        out += static_cast<char>(0xC0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += static_cast<char>(0xE0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else {
+        out += static_cast<char>(0xF0 | (cp >> 18));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    }
+    return true;
+}
+
+// Decodes the code point at text[i] and advances i past it. LENIENT, for
+// measuring and display: a bad lead, a truncated sequence or a
+// non-continuation tail consumes one byte as U+FFFD, so a walk always
+// terminates and never over-reads. Overlong forms and encoded surrogates are
+// NOT rejected -- use ScrubUtf8 where validity matters.
+inline char32_t Utf8Decode(std::string_view text, std::size_t& i) {
+    const std::size_t length = Utf8LeadLength(text[i]);
+    if (length == 0 || i + length > text.size()) {
+        ++i;
+        return U'�';
+    }
+    const unsigned char lead = static_cast<unsigned char>(text[i]);
+    char32_t cp = length == 1 ? lead : lead & (0x7F >> length);
+    for (std::size_t k = 1; k < length; ++k) {
+        if (!IsUtf8Continuation(text[i + k])) {
+            ++i;
+            return U'�';
+        }
+        cp = (cp << 6) | (static_cast<unsigned char>(text[i + k]) & 0x3F);
+    }
+    i += length;
+    return cp;
+}
+
 
 // The largest index <= pos that does not split a character, for cutting the
 // END of a kept head. Walks back at most 3 continuation bytes (the longest a
@@ -20,7 +110,7 @@ inline bool IsContinuation(char c) { return (static_cast<unsigned char>(c) & 0xC
 inline std::size_t Utf8FloorToBoundary(std::string_view text, std::size_t pos) {
     if (pos >= text.size()) return text.size();
     for (std::size_t back = 0; back <= 3 && back <= pos; ++back) {
-        if (!utf8_detail::IsContinuation(text[pos - back])) return pos - back;
+        if (!IsUtf8Continuation(text[pos - back])) return pos - back;
     }
     return pos;
 }
@@ -30,7 +120,7 @@ inline std::size_t Utf8FloorToBoundary(std::string_view text, std::size_t pos) {
 inline std::size_t Utf8CeilToBoundary(std::string_view text, std::size_t pos) {
     for (std::size_t ahead = 0; ahead <= 3; ++ahead) {
         if (pos + ahead >= text.size()) return text.size();
-        if (!utf8_detail::IsContinuation(text[pos + ahead])) return pos + ahead;
+        if (!IsUtf8Continuation(text[pos + ahead])) return pos + ahead;
     }
     return pos;
 }
@@ -46,10 +136,7 @@ inline std::string TruncateUtf8Bytes(std::string_view text, std::size_t max_byte
 inline std::string TruncateCodePoints(std::string_view text, std::size_t max_chars) {
     std::size_t chars = 0, i = 0;
     while (i < text.size() && chars < max_chars) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-        std::size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2
-                          : (c & 0xF0) == 0xE0 ? 3
-                          : (c & 0xF8) == 0xF0 ? 4 : 1;
+        std::size_t len = std::max<std::size_t>(Utf8LeadLength(text[i]), 1);
         if (i + len > text.size()) len = text.size() - i;
         i += len;
         ++chars;
@@ -117,7 +204,7 @@ inline std::string ScrubUtf8(std::string_view text) {
             out.append(text.substr(i, n));
             i += n;
         } else {
-            out.append("\xEF\xBF\xBD");
+            out.append(kUtf8Replacement);
             i += prefix;
         }
     }
@@ -130,8 +217,7 @@ inline std::string ScrubUtf8(std::string_view text) {
 inline std::size_t IncompleteUtf8Tail(std::string_view text) {
     const std::size_t floor = text.size() > 3 ? text.size() - 3 : 0;
     for (std::size_t start = text.size(); start-- > floor;) {
-        const unsigned char c = static_cast<unsigned char>(text[start]);
-        if ((c & 0xC0) == 0x80) continue;   // a continuation byte: keep looking for its lead
+        if (IsUtf8Continuation(text[start])) continue;   // keep looking for its lead
         std::size_t prefix = 0;
         bool cut = false;
         utf8_detail::SequenceAt(text, start, prefix, cut);
@@ -141,3 +227,5 @@ inline std::size_t IncompleteUtf8Tail(std::string_view text) {
 }
 
 }  // namespace minimal::common
+
+// NOLINTEND(readability-magic-numbers)

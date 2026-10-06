@@ -59,16 +59,11 @@ std::string ResponseText(const llm::ChatResponse& response) {
     return {};
 }
 
-bool IsAsciiSpace(char c) {
-    const auto u = static_cast<unsigned char>(c);
-    return u < 0x80 && std::isspace(u) != 0;
-}
-
 void Trim(std::string& s) {
     std::size_t begin = 0;
     std::size_t end = s.size();
-    while (begin < end && IsAsciiSpace(s[begin])) ++begin;
-    while (end > begin && IsAsciiSpace(s[end - 1])) --end;
+    while (begin < end && common::IsAsciiSpace(s[begin])) ++begin;
+    while (end > begin && common::IsAsciiSpace(s[end - 1])) --end;
     s = s.substr(begin, end - begin);
 }
 
@@ -132,7 +127,7 @@ std::string CleanTitle(std::string_view text) {
     bool pending_space = false;
     for (const char ch : text) {
         const auto c = static_cast<unsigned char>(ch);
-        if (IsAsciiSpace(ch)) {
+        if (common::IsAsciiSpace(ch)) {
             pending_space = !out.empty();
         } else if (c < 0x20 || c == 0x7F) {
             continue;  // control byte: dropped, not rendered
