@@ -411,27 +411,16 @@ void TuiApp::BuildModals() {
     });
     modals_.Set(ModalId::kQuitConfirm, confirm_modal_);
 
-    // --- pickers (inner rebuilt on each open) ------------------------------------
-    // The theme picker reads themes from disk per open, so a theme dropped
-    // into the themes dir shows up without a restart.
-    modals_.Set(ModalId::kSessionPicker, MakeModalHost(picker_child_, show_picker_));
-    modals_.Set(ModalId::kAgentPicker, MakeModalHost(agent_picker_child_, show_agent_picker_));
-    modals_.Set(ModalId::kModelPicker, MakeModalHost(model_picker_child_, show_model_picker_));
-    modals_.Set(ModalId::kSubagentPicker,
-                MakeModalHost(subagent_picker_child_, show_subagent_picker_));
-
-    // Owns picker_data/agent_picker_presets and the fetch/rebuild/open flows
-    // privately; writes rebuilt components into the picker slots above.
+    // The pickers are plugin views (sessions, subagents, agents, models,
+    // subagent-models); core keeps what their choices do.
     picker_controller_.emplace(PickerController::Dependencies{
-        *client_, *app_, theme, picker_child_, agent_picker_child_, model_picker_child_,
-        subagent_picker_child_, show_picker_, show_agent_picker_, show_model_picker_,
-        show_subagent_picker_, staged_delete_id_, show_delete_confirm_,
-        [this] { OpenNewSession(); },
-        // The desired-state pickers stage onto this -- the focused tab, or
+        *client_, *app_,
+        // The desired-state choices stage onto this -- the focused tab, or
         // (the empty startup app, zero tabs) a fresh sessionless one, so a
         // /agent //model choice made before any tab exists lands on the tab
         // the first message will use.
-        [this] { return FocusedOrNewTab(); }});
+        [this] { return FocusedOrNewTab(); },
+        [this](const std::string& role) { return OpenRoleView(role); }});
 
     // --- plugin views (panel region + modal layer) -----------------------------
     // Panels: rendered in the frame beside the tools panel; one shared
@@ -446,44 +435,6 @@ void TuiApp::BuildModals() {
         ClosePluginModal(env_.plugin_views, plugin_modal_child_, show_plugin_modal_);
     });
     modals_.Set(ModalId::kPluginModal, plugin_modal_host_);
-
-    // --- session picker delete confirmation ------------------------------------
-    // Built once, like the quit confirmation; delete_request_ is mutated when
-    // a delete is staged (single-threaded loop, so the write is safe).
-    delete_request_.kind = "session_delete";
-    delete_request_.title = "delete session?";
-    delete_request_.detail = "the transcript and its subagent sessions are removed permanently";
-    delete_request_.options = {"delete", "cancel"};
-    delete_modal_ = MakeConfirmationModal(delete_request_, theme, [this](const std::string& chosen) {
-        const bool confirmed = chosen == "delete";
-        const std::string id = staged_delete_id_;
-        if (confirmed && !id.empty()) {
-            // Off the loop thread: DeleteSession carries a 2 s deadline
-            // (session_client.cpp), and this callback fires from inside the
-            // event loop. `client` is captured by shared_ptr: the job may
-            // still be queued when this callback returns, and StopRpcQueue
-            // (Shutdown) joins the worker before client_ itself goes away.
-            // NOT stderr on failure: the alternate screen is live, and an
-            // out-of-band write from the worker would desync the repaint --
-            // logged instead, same as every other background-job failure.
-            app_->RunOnRpcQueue(
-                [client = client_, id] {
-                    if (const auto status = client->DeleteSession(id); !status.ok()) {
-                        common::DefaultLogger().error("delete failed: {}", status.error_message());
-                    }
-                },
-                /*must_run=*/true, AppState::RpcLane::kBulk);
-        }
-        staged_delete_id_.clear();
-        show_delete_confirm_ = false;
-        // The confirm is only ever staged FROM the session picker (which it
-        // hides for its duration), so resolving it returns there. Cancel:
-        // nothing changed, so the picker's filter/cursor/sort survive.
-        // Confirmed delete: re-fetch so the removed row drops out of the list.
-        show_picker_ = true;
-        if (confirmed && !id.empty()) picker_controller_->RefreshSessionPicker();
-    });
-    modals_.Set(ModalId::kDeleteConfirm, delete_modal_);
 }
 
 void TuiApp::BuildFrame() {
@@ -502,11 +453,7 @@ void TuiApp::BuildFrame() {
     // unclosable).
     tab_maintenance_.emplace(TabMaintenance::Dependencies{
         *app_, *env_.engine, registries.views, env_.plugin_views, plugin_modal_child_,
-        show_plugin_modal_, [this] { picker_controller_->OpenSessionPicker(); },
-        [this] { picker_controller_->OpenAgentPicker(); },
-        [this] { picker_controller_->OpenModelPicker(/*refresh=*/false); },
-        [this] { picker_controller_->OpenSubagentModelPicker(); },
-        [this](const std::string& parent) { picker_controller_->OpenSubagentsPicker(parent); },
+        show_plugin_modal_,
         // Loop-thread work queued from other threads: picker fetch results,
         // plugins' HostUi view requests (show/close/focus), and the plugin
         // observers' events.
@@ -517,6 +464,7 @@ void TuiApp::BuildFrame() {
                 ApplyViewRequest(env_.plugin_views, request, *plugin_modal_child_,
                                  show_plugin_modal_);
             }
+            picker_controller_->WatchPendingView(ShownPluginModal());
             observer_pump_->Run();
         },
         tab_ui_, theme, registries.message_renderers, registries.tool_renderers,
@@ -610,9 +558,9 @@ KeyContext TuiApp::MakeKeyContext() {
     return KeyContext{
         *app_, env_.keymap, tab_maintenance_->Focused(), show_panel_, show_plugin_modal_,
         env_.plugin_views, plugin_modal_child_,
-        [this] { picker_controller_->OpenSessionPicker(); },
+        [this] { OpenRoleView("sessions"); },
         [this] { picker_controller_->OpenAgentPicker(); },
-        [this] { picker_controller_->OpenModelPicker(/*refresh=*/false); },
+        [this] { picker_controller_->OpenModelPicker(); },
         [this] { RequestQuit(); },
         [this](const std::string& id) { CloseTab(id); },
         // ChatView::ScrollBy, if the tab has one yet (a ChatView is built
@@ -835,6 +783,40 @@ AppState::CommandScope TuiApp::CommandScope() const {
     return scope;
 }
 
+bool TuiApp::OpenRoleView(const std::string& role) {
+    for (auto& entry : env_.plugin_views) {
+        if (entry.surface_id != role) continue;
+        ShowPluginView(env_.plugin_views, entry, *plugin_modal_child_, show_plugin_modal_);
+        return true;
+    }
+    FocusedNotice("nothing to choose with: no view is registered as '" + role +
+                  "' (a bundled plugin provides it -- is it disabled in client-plugins.json?)");
+    return false;
+}
+
+std::string TuiApp::ShownPluginModal() const {
+    if (!show_plugin_modal_) return {};
+    for (const auto& entry : env_.plugin_views) {
+        if (entry.visible && entry.view->spec().placement == plugins::ViewPlacement::Modal) {
+            return entry.surface_id;
+        }
+    }
+    return {};
+}
+
+void TuiApp::ChooseAgent(const std::string& name) { picker_controller_->ChooseAgent(name); }
+void TuiApp::ChooseModel(const std::string& ref) { picker_controller_->ChooseModel(ref); }
+void TuiApp::ChooseDefaultModel(const std::string& default_ref) {
+    picker_controller_->ChooseDefaultModel(default_ref);
+}
+void TuiApp::SetSubagentModel(const std::string& ref) { picker_controller_->SetSubagentModel(ref); }
+void TuiApp::OpenSession(const std::string& session_id, bool is_live) {
+    picker_controller_->OpenSession(session_id, is_live);
+}
+void TuiApp::OpenSubagent(const std::string& session_id, const std::string& parent, bool is_live) {
+    picker_controller_->OpenSubagent(session_id, parent, is_live);
+}
+
 void TuiApp::InsertPrompt(const std::string& text) {
     // The focused tab's editor (CurrentState("") on an empty app = the
     // pre-tab editor, the same resolution the host itself uses).
@@ -1034,8 +1016,7 @@ void TuiApp::FocusedNotice(const std::string& text) {
 // The picker's "+ new session" row: the same action as typing on an empty
 // app, reached from inside the modal with no text to send yet. The tab it
 // opens is SESSIONLESS, so an abandoned "+ new" tab leaves no row behind.
-void TuiApp::OpenNewSession() {
-    show_picker_ = false;
+void TuiApp::NewTab() {
     if (const auto tab = app_->OpenTab(NewTabOptions()); !tab.empty()) {
         app_->SetFocusedTab(tab);
     }

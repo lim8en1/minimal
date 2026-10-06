@@ -20,6 +20,7 @@ namespace {
 struct SelectorState {
     std::mutex mtx;
     std::vector<v1::ModelSummary> models;
+    std::string default_model;  // the answer's, "" when it names none
     bool loading = true;
     std::string error;
     std::uint64_t generation = 1;  // bumped by every change
@@ -55,6 +56,7 @@ private:
             std::lock_guard<std::mutex> lock(state->mtx);
             if (answer) {
                 state->models.assign(answer->models().begin(), answer->models().end());
+                state->default_model = answer->default_model();
                 state->error.clear();
             } else {
                 state->error = error.empty() ? "the model list is unavailable" : error;
@@ -69,22 +71,30 @@ private:
     // a rebuild there would free the component being drawn).
     void Sync() {
         std::vector<v1::ModelSummary> models;
+        std::string default_model;
         MenuStatus status;
         {
             std::lock_guard<std::mutex> lock(state_->mtx);
             if (shown_ && state_->generation == built_generation_) return;
             built_generation_ = state_->generation;
             models = state_->models;
+            default_model = state_->default_model;
             status.loading = state_->loading;
             status.error = state_->error;
         }
         status.memory = memory_;
+        std::string leading_label = spec_.leading_row_label;
+        std::string leading_id = spec_.leading_row_id;
+        if (spec_.leading_row_is_default) {
+            leading_label = "default (" + default_model + ")";
+            if (default_model.empty()) leading_id.clear();  // no default: no row
+        }
         ModelPickerCallbacks picker{
             .on_select = callbacks_.on_select,
             .on_refresh_discovery = [this] { Fetch(/*refresh=*/true); },
             .on_close = callbacks_.on_close,
-            .leading_row_label = spec_.leading_row_label,
-            .leading_row_id = spec_.leading_row_id,
+            .leading_row_label = std::move(leading_label),
+            .leading_row_id = std::move(leading_id),
             .allow_custom = spec_.allow_custom,
             .window_title = spec_.window_title,
             .select_hint = spec_.select_hint,

@@ -383,6 +383,18 @@ public:
         for (const char* ref : {"main/alpha", "main/beta"}) response.add_models()->set_ref(ref);
         return response;
     }
+    std::optional<minimal::v1::ListAgentPresetsResponse> ListAgentPresets(std::string*) override {
+        return std::nullopt;
+    }
+    std::optional<minimal::v1::ListSessionsResponse> ListSessions(const SessionQuery&,
+                                                                  std::string*) override {
+        return std::nullopt;
+    }
+    std::optional<std::vector<minimal::v1::SessionSummary>> ListSubagents(const std::string&,
+                                                                          std::string*) override {
+        return std::nullopt;
+    }
+    bool DeleteSession(const std::string&, std::string*) override { return false; }
     client::SubscribeOutcome PluginSubscribe(const std::string&, const std::string&,
                                              const std::string&,
                                              const std::function<bool(const std::string&)>&) override {

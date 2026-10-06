@@ -20,10 +20,10 @@ ftxui::Component Label(const std::string& text) {
 TEST_CASE("modal stack: AnyOpen reflects every flag", "[modal_stack]") {
     ModalStack stack;
     CHECK_FALSE(stack.AnyOpen());
-    stack.Flag(ModalId::kAgentPicker) = true;
+    stack.Flag(ModalId::kQuitConfirm) = true;
     CHECK(stack.AnyOpen());
-    CHECK(stack.Open(ModalId::kAgentPicker));
-    stack.Flag(ModalId::kAgentPicker) = false;
+    CHECK(stack.Open(ModalId::kQuitConfirm));
+    stack.Flag(ModalId::kQuitConfirm) = false;
     CHECK_FALSE(stack.AnyOpen());
 }
 
@@ -31,7 +31,7 @@ TEST_CASE("modal stack: the permission prompt draws above everything else",
           "[modal_stack]") {
     ModalStack stack;
     stack.Set(ModalId::kPluginModal, Label("plugin-modal"));
-    stack.Set(ModalId::kSessionPicker, Label("session-picker"));
+    stack.Set(ModalId::kQuitConfirm, Label("quit-confirm"));
     stack.Set(ModalId::kPermission, Label("permission-prompt"));
     auto tree = stack.Build(Label("frame"));
 

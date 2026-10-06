@@ -175,3 +175,32 @@ TEST_CASE("a model selector closed while its fetch is out goes away cleanly",
     }
     CHECK(redraws.load() <= 1);
 }
+
+TEST_CASE("a default row is offered only when the server names a default, and names it",
+          "[model_selector]") {
+    const auto theme = TestTheme();
+    for (const bool has_default : {true, false}) {
+        INFO("has_default " << has_default);
+        client::ModelSelectorSpec spec;
+        spec.fetch = [has_default](bool, std::string&) {
+            auto response = Models({"main/alpha", "main/beta"});
+            if (has_default) response.set_default_model("main/beta");
+            return std::optional<v1::ListModelsResponse>(response);
+        };
+        spec.leading_row_id = "<default>";
+        spec.leading_row_is_default = true;
+        std::vector<std::string> picked;
+        auto selector = client::MakeModelSelector(
+            spec, {.on_select = [&](const std::string& ref) { picked.push_back(ref); }}, theme);
+        REQUIRE(Eventually([&] {
+            return minimal_test::RenderFrame(selector, 80, 24).find("beta") != std::string::npos;
+        }));
+        const std::string frame = minimal_test::RenderFrame(selector, 80, 24);
+        CHECK((frame.find("default (main/beta)") != std::string::npos) == has_default);
+        CHECK((frame.find("default (") != std::string::npos) == has_default);
+        minimal_test::SendEvent(selector, ftxui::Event::Return);
+        if (has_default) {
+            CHECK(picked == std::vector<std::string>{"<default>"});
+        }
+    }
+}

@@ -256,18 +256,6 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         const auto& view = views[i];
         // Users address the SURFACE id (the alias, if one renamed the view).
         const std::string& surface = view_surfaces[i];
-        // A command's view_hint resolves the core overlays first
-        // (TabMaintenance::HandleNotice), so a plugin view with one of their
-        // names can never be opened by a hint.
-        for (const char* core_view : {"sessions", "agents", "models", "subagent-models",
-                                      "subagents"}) {
-            if (surface == core_view) {
-                std::fprintf(stderr,
-                             "minimal: warning: plugin view '%s' shares a core view name; "
-                             "command view hints open the core view instead\n",
-                             core_view);
-            }
-        }
         keys.EnsureDefault(surface, view->spec().default_keybinding);
         const std::string bound = keys.KeyFor(surface);
         if (const auto clash = core_keys.find(NormalizeKeySpec(bound));
