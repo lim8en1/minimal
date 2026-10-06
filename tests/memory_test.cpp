@@ -163,29 +163,32 @@ const std::string& PromptOf(const minimal::llm::ChatRequest& request) {
 
 // ------------------------------------------------------------------ settings
 
-TEST_CASE("memory settings: defaults and clamps", "[memory]") {
+TEST_CASE("memory settings: defaults, and out-of-range values are refused", "[memory]") {
     const auto defaults = ParseMemorySettings(nlohmann::json::object());
     CHECK(defaults.tagger_model.empty());
     CHECK(defaults.max_tags == 100);
     CHECK(defaults.writes_prompt);
     CHECK(defaults.index_enabled);
 
-    const auto clamped = ParseMemorySettings({{"batch_size", -3},
-                                              {"default_limit", 1000},
-                                              {"max_text_bytes", 1},
-                                              {"timeout_ms", -1},
-                                              {"tag_merge_similarity", 5.0}});
-    CHECK(clamped.batch_size == 1);
-    CHECK(clamped.default_limit == 64);
-    CHECK(clamped.max_text_bytes == 256);
-    CHECK(clamped.timeout_ms == 1);
-    CHECK(clamped.tag_merge_similarity == 1.0);
-    CHECK(ParseMemorySettings({{"strategy", "bogus"}}).strategy == StrategyKind::kAuto);
+    const auto tuned = ParseMemorySettings(
+        {{"batch_size", 1}, {"default_limit", 64}, {"tag_merge_similarity", 1.0}});
+    CHECK(tuned.batch_size == 1);
+    CHECK(tuned.default_limit == 64);
+    CHECK(tuned.tag_merge_similarity == 1.0);
+
+    CHECK_THROWS_WITH(ParseMemorySettings({{"batch_size", -3}}),
+                      ContainsSubstring("memory.config.batch_size: must be at least 1"));
+    CHECK_THROWS_WITH(ParseMemorySettings({{"default_limit", 1000}}),
+                      ContainsSubstring("default_limit: must be at most 64"));
+    CHECK_THROWS_WITH(ParseMemorySettings({{"tag_merge_similarity", 5.0}}),
+                      ContainsSubstring("tag_merge_similarity: must be between"));
+    CHECK_THROWS_WITH(ParseMemorySettings({{"strategy", "bogus"}}),
+                      ContainsSubstring("strategy: must be one of"));
 }
 
 TEST_CASE("memory settings: an unknown field is a named error", "[memory][settings]") {
     CHECK_THROWS_WITH(ParseMemorySettings({{"api_key_env", "K"}}),
-                      ContainsSubstring("memory: config has unknown field \"api_key_env\""));
+                      ContainsSubstring("memory.config.api_key_env: unknown field"));
     CHECK_NOTHROW(ParseMemorySettings({{"//", "comment"}, {"api_key", "secret:embeddings"}}));
 }
 
@@ -460,14 +463,18 @@ TEST_CASE("memory embeddings: an unusable sidecar throws its reason", "[memory]"
     CHECK(MakeEmbeddingPlan(MemorySettings{}, fs::temp_directory_path()).strategy == "none");
 }
 
-TEST_CASE("memory embeddings: an http key that can never resolve fails the plan",
+TEST_CASE("memory embeddings: a malformed http key fails the plan; an unresolved one binds",
           "[memory]") {
     MemorySettings settings;
     settings.api_base = "http://127.0.0.1:1/v1";
-    settings.api_key = "env:MEMORY_TEST_DEFINITELY_UNSET_KEY";
+    settings.api_key = "secrets:typo";
     CHECK_THROWS_WITH(MakeEmbeddingPlan(settings, fs::temp_directory_path()),
-                      ContainsSubstring("unset"));
-    settings.api_key = "secret:not-stored-yet";  // binds; fails per request instead
+                      ContainsSubstring("unknown key reference scheme"));
+    // Not resolvable YET binds and fails per request instead: a secret not
+    // stored, or an unset env variable.
+    settings.api_key = "secret:not-stored-yet";
+    CHECK(MakeEmbeddingPlan(settings, fs::temp_directory_path()).strategy == "http");
+    settings.api_key = "env:MEMORY_TEST_DEFINITELY_UNSET_KEY";
     CHECK(MakeEmbeddingPlan(settings, fs::temp_directory_path()).strategy == "http");
 }
 

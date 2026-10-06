@@ -277,11 +277,6 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
                 vocabulary.config_aliases = inputs_.registries.tools->ConfigAliasPermissionKeys();
                 vocabulary.no_pattern_rules = inputs_.registries.tools->NoPatternRulePermissionKeys();
                 presets_[preset_name] = agent::LoadAgentPresetFrontmatter(entry.path(), vocabulary);
-                for (const auto& key : presets_[preset_name].unknown_permission_keys) {
-                    results.push_back(Warning("presets", "agents/" + preset_name +
-                                                             ".md: unknown permission_mode key '" +
-                                                             key + "' is ignored (typo?)"));
-                }
             } catch (const std::exception& e) {
                 results.push_back(Warning("presets", "agents/" + preset_name + ".md: " + e.what()));
             }

@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "logo_generator.hpp"
+#include "minimal/common/config_reader.hpp"
 #include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/common/abi_tag.hpp"
 
@@ -84,14 +85,15 @@ bool IsPrintableUtf8Glyph(const std::string& glyph) {
     return true;
 }
 
+// Strict about shape (wrong types and unknown fields are named errors, like
+// every plugin config); lenient only about content that is cosmetic -- a
+// non-printable charset byte or an unknown style name warns and is dropped.
 LogoConfig ParseConfig(const nlohmann::json& config) {
     LogoConfig out;
-    if (!config.is_object()) return out;
-    if (auto it = config.find("text"); it != config.end() && it->is_string()) {
-        out.text = it->get<std::string>();
-    }
-    if (auto it = config.find("charset"); it != config.end() && it->is_string()) {
-        std::string charset = it->get<std::string>();
+    minimal::config::Reader reader(config, "client-plugins.json", "logo.config");
+    out.text = reader.String("text", out.text);
+    if (auto charset_value = reader.MaybeString("charset")) {
+        std::string charset = std::move(*charset_value);
         // The charset is sliced PER GLYPH downstream, so it must be a
         // sequence of single valid printable UTF-8 characters. Filter
         // character by character: control bytes and fragments are dropped,
@@ -113,14 +115,10 @@ LogoConfig ParseConfig(const nlohmann::json& config) {
         }
         out.charset = std::move(cleaned);
     }
-    if (auto it = config.find("regenerate_per_session");
-        it != config.end() && it->is_boolean()) {
-        out.regenerate_per_session = it->get<bool>();
-    }
-    if (auto it = config.find("styles"); it != config.end() && it->is_array()) {
-        for (const auto& entry : *it) {
-            if (entry.is_string()) out.styles.push_back(entry.get<std::string>());
-        }
+    out.regenerate_per_session =
+        reader.Bool("regenerate_per_session", out.regenerate_per_session);
+    if (auto styles = reader.MaybeStringList("styles")) {
+        out.styles = std::move(*styles);
         // Names that match nothing built in are dropped with a startup
         // warning; an empty RESULT means the pool is empty, which would make
         // every render fail -- treat that as "no restriction" instead.
@@ -137,6 +135,7 @@ LogoConfig ParseConfig(const nlohmann::json& config) {
         }
         out.styles = allowed;
     }
+    reader.Finish();
     return out;
 }
 

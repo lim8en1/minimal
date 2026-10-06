@@ -4,101 +4,49 @@
 #include <stdexcept>
 #include <utility>
 
-#include "minimal/config/parse_util.hpp"
+#include "minimal/common/config_reader.hpp"
 
 namespace minimal::tools_web {
-namespace {
-
-template <typename T>
-T ValueOr(const nlohmann::json& parent, const char* section, const char* key, T fallback) {
-    auto section_it = parent.find(section);
-    if (section_it == parent.end() || !section_it->is_object()) return fallback;
-    // config::ReadClampedInt64: `is_number()` accepted a float (1500.7,
-    // silently truncated by get<T>()) and a value like 4294967297 wrapped to
-    // 1 when narrowed to `int` -- rejecting non-integers and clamping into
-    // T's range before narrowing closes both. Floor 0 is harmless: every
-    // field here is a non-negative count/timeout, same as PositiveOr's own
-    // `value > 0` check already required.
-    const auto value =
-        config::ReadClampedInt64(*section_it, key, static_cast<std::int64_t>(fallback), 0,
-                                 static_cast<std::int64_t>(std::numeric_limits<T>::max()));
-    return static_cast<T>(value);
-}
-
-template <typename T>
-T PositiveOr(const nlohmann::json& parent, const char* section, const char* key, T fallback) {
-    const auto value = ValueOr(parent, section, key, fallback);
-    return value > 0 ? value : fallback;
-}
-
-std::string StringOr(const nlohmann::json& parent, const char* section, const char* key,
-                     std::string fallback) {
-    auto section_it = parent.find(section);
-    if (section_it == parent.end() || !section_it->is_object()) return fallback;
-    auto key_it = section_it->find(key);
-    if (key_it == section_it->end() || !key_it->is_string()) return fallback;
-    return key_it->get<std::string>();
-}
-
-bool BoolOr(const nlohmann::json& parent, const char* section, const char* key, bool fallback) {
-    auto section_it = parent.find(section);
-    if (section_it == parent.end() || !section_it->is_object()) return fallback;
-    auto key_it = section_it->find(key);
-    if (key_it == section_it->end() || !key_it->is_boolean()) return fallback;
-    return key_it->get<bool>();
-}
-
-}  // namespace
 
 WebSettings ParseWebSettings(const nlohmann::json& config,
                              const config::SecretResolver* secrets) {
     WebSettings settings;
-    if (!config.is_object()) return settings;
-    config::RejectUnknownKeys(config, {"fetch", "search"}, "tools-web: config");
-    if (const auto it = config.find("fetch"); it != config.end()) {
-        config::RejectUnknownKeys(*it,
-                                  {"timeout_ms", "max_redirects", "default_max_bytes", "max_bytes",
-                                   "allow_private_hosts"},
-                                  "tools-web: config.fetch");
-    }
-    if (const auto it = config.find("search"); it != config.end()) {
-        config::RejectUnknownKeys(*it,
-                                  {"api_url", "api_key", "default_max_results", "max_results",
-                                   "timeout_ms"},
-                                  "tools-web: config.search");
-    }
+    constexpr std::int64_t kIntMax = std::numeric_limits<int>::max();
+    config::Reader root(config, "plugins.json", "tools-web.config");
+    const auto positive_int = [&](config::Reader& section, const char* key, int& target) {
+        target = static_cast<int>(section.Int(key, target, 1, kIntMax));
+    };
 
-    settings.fetch_timeout_ms = PositiveOr(config, "fetch", "timeout_ms", settings.fetch_timeout_ms);
-    settings.fetch_max_redirects =
-        PositiveOr(config, "fetch", "max_redirects", settings.fetch_max_redirects);
-    settings.fetch_default_max_bytes =
-        PositiveOr(config, "fetch", "default_max_bytes", settings.fetch_default_max_bytes);
-    settings.fetch_max_bytes = PositiveOr(config, "fetch", "max_bytes", settings.fetch_max_bytes);
-    // A ceiling below the default would clamp every fetch that supplied no
-    // max_bytes, which is not what configuring a maximum means.
-    if (settings.fetch_max_bytes < settings.fetch_default_max_bytes) {
-        settings.fetch_max_bytes = settings.fetch_default_max_bytes;
-    }
+    config::Reader fetch = root.Object("fetch");
+    positive_int(fetch, "timeout_ms", settings.fetch_timeout_ms);
+    positive_int(fetch, "max_redirects", settings.fetch_max_redirects);
+    positive_int(fetch, "default_max_bytes", settings.fetch_default_max_bytes);
+    positive_int(fetch, "max_bytes", settings.fetch_max_bytes);
     settings.fetch_allow_private_hosts =
-        BoolOr(config, "fetch", "allow_private_hosts", settings.fetch_allow_private_hosts);
+        fetch.Bool("allow_private_hosts", settings.fetch_allow_private_hosts);
+    fetch.Finish();
+    // A ceiling below the default would clamp every fetch that supplied no
+    // max_bytes -- the configuration contradicting itself.
+    if (settings.fetch_max_bytes < settings.fetch_default_max_bytes) {
+        root.Fail("fetch.max_bytes", "must not be below fetch.default_max_bytes");
+    }
 
-    settings.search_api_url = StringOr(config, "search", "api_url", settings.search_api_url);
-    settings.search_api_key_ref = StringOr(config, "search", "api_key", settings.search_api_key_ref);
-    settings.search_default_max_results =
-        PositiveOr(config, "search", "default_max_results", settings.search_default_max_results);
-    settings.search_max_results =
-        PositiveOr(config, "search", "max_results", settings.search_max_results);
-    settings.search_timeout_ms =
-        PositiveOr(config, "search", "timeout_ms", settings.search_timeout_ms);
+    config::Reader search = root.Object("search");
+    settings.search_api_url = search.String("api_url", settings.search_api_url);
+    settings.search_api_key_ref = search.String("api_key", settings.search_api_key_ref);
+    positive_int(search, "default_max_results", settings.search_default_max_results);
+    positive_int(search, "max_results", settings.search_max_results);
+    positive_int(search, "timeout_ms", settings.search_timeout_ms);
+    search.Finish();
+    root.Finish();
 
     static const config::SecretResolver kDefaultSecrets;
     try {
         settings.search_api_key = (secrets != nullptr ? *secrets : kDefaultSecrets)
                                       .Bind(settings.search_api_key_ref, settings.search_api_url);
     } catch (const std::exception& error) {
-        throw std::runtime_error(std::string("tools-web: search.api_key: ") + error.what());
+        search.Fail("api_key", error.what());
     }
-
     return settings;
 }
 

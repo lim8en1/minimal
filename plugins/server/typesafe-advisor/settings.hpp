@@ -9,7 +9,7 @@ namespace minimal::typesafe_advisor {
 
 // Which Jev surface the advisor calls. Both carry the systemone body
 // {"state", "model", "questions"} -- verified live 2026-01-14 -- so the
-// backend changes the endpoint, the key-env default and the model-id VALUE,
+// backend changes the endpoint and the model-id VALUE,
 // never the request or response shape.
 enum class Backend {
     Typesafe,    // POST <endpoint>, default model "jev-latest"
@@ -17,16 +17,12 @@ enum class Backend {
 };
 
 // This plugin's own config, the "config" object on its plugins.json entry.
-// Same rules as every bundled plugin's settings: every field optional, missing
-// or wrong-typed values keep the struct's defaults.
 struct Settings {
     Backend backend = Backend::Typesafe;
 
     // A key reference (config/secrets.hpp: "env:NAME", "secret:NAME", ...),
-    // bound at registration: an unset env variable is a startup error, not a
-    // silent 401 on the first prompt. The default follows the backend when
-    // the entry names none.
-    std::string api_key = "env:TYPESAFE_API_KEY";
+    // bound at registration. Required: nothing is picked up implicitly.
+    std::string api_key;
     std::string endpoint;  // empty = the backend's default URL
     std::string model;     // empty = the backend's default model id
 
@@ -75,8 +71,9 @@ struct Settings {
     std::string EffectiveModel() const;
 };
 
-// Never throws: every field is optional, and the key reference is bound (and
-// refused) at registration, not here.
+// Strict: `api_key` is required, every other field optional; a wrong type, an
+// out-of-range value or an unknown field throws config::ConfigError naming it.
+// The key reference is bound (and refused) at registration, not here.
 Settings ParseSettings(const nlohmann::json& config);
 
 }  // namespace minimal::typesafe_advisor

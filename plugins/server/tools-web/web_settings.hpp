@@ -13,7 +13,8 @@ namespace minimal::tools_web {
 // This plugin's own config, the "config" object on its plugins.json entry --
 // {"fetch": {...}, "search": {...}}. Same shape and rules as tools-search's
 // SearchSettings: every field optional, missing values keep the struct's
-// defaults, and the search half is legitimately absent (see below).
+// defaults, wrong values are errors, and the search half is legitimately
+// absent (see below).
 struct WebSettings {
     // web_fetch.
     int fetch_timeout_ms = 15000;
@@ -53,9 +54,9 @@ struct WebSettings {
     common::SecretHandle search_api_key;
 };
 
-// Throws std::runtime_error if search.api_key can never resolve (malformed,
-// an unset "env:" variable) -- a silently empty key fails later as a cryptic
-// 401 instead of a clear startup error. Never throws for search being simply
+// Strict (config::ConfigError naming the field, unknown fields included).
+// Throws if search.api_key is malformed -- a silently empty key fails later
+// as a cryptic 401 instead of a clear startup error. Never throws for search being simply
 // unconfigured (search_api_url empty). `secrets` null = the default resolver
 // (the operator's store, no plugin namespaces).
 WebSettings ParseWebSettings(const nlohmann::json& config,

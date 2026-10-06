@@ -4,6 +4,7 @@
 // over, so nothing here fakes the filesystem.
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <chrono>
 #include <fstream>
@@ -858,24 +859,24 @@ TEST_CASE("grep: streams output through the tool context", "[tools_search][grep_
 
 // --- settings ------------------------------------------------------------------
 
-TEST_CASE("search settings: absent or invalid values keep defaults",
+TEST_CASE("search settings: absent values keep defaults, invalid ones are refused",
           "[tools_search][settings]") {
     CHECK(tools_search::ParseSearchSettings(nlohmann::json::object()).grep_max_results == 1000);
-    CHECK(tools_search::ParseSearchSettings(nlohmann::json{}).glob_default_limit == 200);
 
     const auto custom = tools_search::ParseSearchSettings(nlohmann::json{
-        {"grep", {{"timeout_ms", 5000}, {"max_results", -3}}},
-        {"glob", {{"default_limit", 42}}}});
+        {"grep", {{"timeout_ms", 5000}}}, {"glob", {{"default_limit", 42}}}});
     CHECK(custom.grep_timeout_ms == 5000);
-    CHECK(custom.grep_max_results == 1000);  // non-positive falls back
     CHECK(custom.glob_default_limit == 42);
 
-    // Regression: is_number() accepted a float and get<T>() silently
-    // truncated it (99.9 -> 99) instead of falling back to the default
-    // (250) -- a distinct value from the truncation proves which happened.
-    const auto fractional = tools_search::ParseSearchSettings(
-        nlohmann::json{{"grep", {{"default_head_limit", 99.9}}}});
-    CHECK(fractional.grep_default_head_limit == 250);
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(tools_search::ParseSearchSettings({{"grep", {{"max_results", -3}}}}),
+                      ContainsSubstring("tools-search.config.grep.max_results: must be at least 1"));
+    // A float is refused, never truncated (99.9 -> 99).
+    CHECK_THROWS_WITH(
+        tools_search::ParseSearchSettings({{"grep", {{"default_head_limit", 99.9}}}}),
+        ContainsSubstring("grep.default_head_limit: must be an integer"));
+    CHECK_THROWS_WITH(tools_search::ParseSearchSettings({{"grap", nlohmann::json::object()}}),
+                      ContainsSubstring("grap: unknown field"));
 }
 
 // --- executor integration ------------------------------------------------------

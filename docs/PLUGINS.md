@@ -150,9 +150,19 @@ Enablement is recorded in `<config>/plugins.json` (client:
   enabled default from its own build: `minimal_add_plugin(<name>
   DISABLED_BY_DEFAULT ...)` installs a `<name>.disabled-by-default` marker
   beside the module (`session-titler` and `typesafe-advisor` do). Once an
-  entry exists in `plugins.json`, your `enabled` value wins forever.
+  entry says `enabled`, your value wins forever.
+- A hand-written entry may omit `provenance` (the file name picks the
+  plugin; an error when both directories ship that name) and `enabled` (the
+  default above). Both are written back once resolved.
 - **`config`** is a per-plugin JSON object forwarded verbatim to the plugin
-  (e.g. the `logo` plugin's `text`/`styles`/`charset` options).
+  (e.g. the `logo` plugin's `text`/`styles`/`charset` options). Every bundled
+  plugin parses its `config` strictly: an unknown field or a bad value is a
+  startup error naming `plugins.json: <plugin>.config.<field>`.
+- **The file is strict.** Invalid JSON, or any entry with a wrong type or an
+  unknown field, is fatal on the server (no plugin loads, the file is not
+  rewritten) and a warning on the client (that entry is skipped, the file is
+  not rewritten). Degrading to defaults would silently re-enable a plugin
+  you disabled.
 - A failed **bundled** plugin is a fatal startup error (losing `tools-fs` or
   the provider is a useless harness); a failed **user** plugin only warns.
 - To replace a bundled plugin with your own version of the same name: disable

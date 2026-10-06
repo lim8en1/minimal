@@ -271,19 +271,6 @@ TEST_CASE("each core config file must parse, and a broken one is fatal", "[sanit
     }
 }
 
-TEST_CASE("a malformed plugins.json warns but does not block startup", "[sanity_check][config_parse]") {
-    Fixture f;
-    WriteGoodConfig(f.config_dir);
-    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
-    f.Write("plugins.json", "{ not json");
-
-    const auto results = RunChecks(f);
-    const auto hits = ByCheck(results, "config_parse");
-    REQUIRE(hits.size() == 1);
-    CHECK(hits[0]->severity == CheckSeverity::Warning);
-    CHECK_FALSE(HasFatal(results));
-}
-
 TEST_CASE("a loaded plugin's reported config warnings print under its name",
           "[sanity_check][plugin_warnings]") {
     // The mcp plugin validates its own mcps.json/channels.json and reports

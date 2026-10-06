@@ -7,7 +7,7 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/read_file.hpp"
-#include "minimal/config/json_config_loader.hpp"
+#include "minimal/common/json_config_loader.hpp"
 
 namespace minimal::config {
 

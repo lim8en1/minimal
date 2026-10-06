@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/config_reader.hpp"
 #include "minimal/common/env.hpp"
 #include "minimal/common/read_file.hpp"
 #include "minimal/config/provider_config_extensions.hpp"
@@ -92,20 +93,24 @@ std::vector<std::pair<std::string, SecretEntry>> ParseSecretStore(const std::str
     try {
         doc = nlohmann::json::parse(contents);
     } catch (const std::exception& error) {
-        throw std::runtime_error(std::string("secrets.json is malformed: ") + error.what());
+        throw ConfigError(std::string("secrets.json: invalid JSON: ") + error.what());
     }
-    if (!doc.is_object()) throw std::runtime_error("secrets.json must be an object keyed by name");
+    // Strict: an entry that is not {"value": "...", "hosts": [...]} is an
+    // error, never skipped -- a skipped entry reads as "not set", and a
+    // skipped `hosts` would let a host-bound key go anywhere.
+    Reader root(doc, "secrets.json");
     for (const auto& [name, node] : doc.items()) {
-        if (!node.is_object() || !node.contains("value") || !node.at("value").is_string()) continue;
-        SecretEntry entry;
-        entry.value = node.at("value").get<std::string>();
-        if (node.contains("hosts") && node.at("hosts").is_array()) {
-            for (const auto& host : node.at("hosts")) {
-                if (host.is_string() && !host.get<std::string>().empty()) {
-                    entry.hosts.push_back(host.get<std::string>());
-                }
-            }
+        if (IsCommentKey(name)) continue;
+        root.Accept(name);
+        if (!node.is_object()) {
+            root.Fail(name, "must be an object {\"value\": \"...\", \"hosts\": [...]}, got " +
+                                std::string(node.is_string() ? "a bare string" : node.type_name()));
         }
+        Reader entry_reader = root.Child(node, name);
+        SecretEntry entry;
+        entry.value = entry_reader.RequireString("value");
+        entry.hosts = entry_reader.StringList("hosts");
+        entry_reader.Finish();
         out.emplace_back(name, std::move(entry));
     }
     return out;
@@ -133,9 +138,15 @@ common::SecretHandle SecretResolver::Bind(const std::string& ref,
     if (ref.rfind(kEnvPrefix, 0) == 0) {
         const std::string name = ref.substr(kEnvPrefix.size());
         if (name.empty()) throw std::runtime_error("'" + ref + "' names no environment variable");
+        // Read once, here. Unset is not a load error: requests through this
+        // reference fail naming the variable, and nothing else is affected.
         const auto value = common::LookupEnv(name);
         if (!value) {
-            throw std::runtime_error("'" + ref + "' names an environment variable that is unset");
+            const std::string message =
+                "'" + ref + "' names an environment variable that is unset";
+            return common::SecretHandle(ref, "env " + name, [message]() -> common::SecretValue {
+                throw std::runtime_error(message);
+            });
         }
         common::SecretValue fixed{*value, "env " + name};
         return common::SecretHandle(ref, "env " + name, [fixed] { return fixed; });

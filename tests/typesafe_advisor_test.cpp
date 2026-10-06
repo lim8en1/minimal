@@ -182,8 +182,9 @@ nlohmann::json BodyOf(const std::string& raw_request) {
 
 // --- Settings ----------------------------------------------------------------
 
-TEST_CASE("typesafe-advisor settings default and degrade", "[typesafe_advisor][settings]") {
-    const auto defaults = ParseSettings(nlohmann::json::object());
+TEST_CASE("typesafe-advisor settings: defaults, required key, named refusals",
+          "[typesafe_advisor][settings]") {
+    const auto defaults = ParseSettings(nlohmann::json{{"api_key", "env:TYPESAFE_API_KEY"}});
     CHECK(defaults.backend == minimal::typesafe_advisor::Backend::Typesafe);
     CHECK(defaults.api_key == "env:TYPESAFE_API_KEY");
     CHECK(defaults.EffectiveEndpoint() == "https://api.typesafe.ai/v1/systemone");
@@ -197,52 +198,48 @@ TEST_CASE("typesafe-advisor settings default and degrade", "[typesafe_advisor][s
     CHECK(defaults.min_margin == 0.25);
     CHECK(defaults.questions.empty());
 
-    // A non-object config degrades to defaults, like every bundled plugin.
-    const auto degraded = ParseSettings(nlohmann::json::array());
-    CHECK(degraded.api_key == "env:TYPESAFE_API_KEY");
-
-    // An unknown field (top level or retry) is a named error, not a default.
-    CHECK_THROWS_WITH(ParseSettings(nlohmann::json{{"apikey", "k"}}),
-                      Catch::Matchers::ContainsSubstring("unknown field \"apikey\""));
-    CHECK_THROWS_WITH(ParseSettings(nlohmann::json{{"retry", {{"retries", 3}}}}),
-                      Catch::Matchers::ContainsSubstring("config.retry has unknown field"));
-
-    // Wrong-typed fields keep the default; the struct's own defaults survive.
-    const auto wrong_types = ParseSettings(nlohmann::json{
-        {"api_key", 42},
-        {"budget_ms", "soon"},
-        {"min_margin", "wide"},
-    });
-    CHECK(wrong_types.api_key == "env:TYPESAFE_API_KEY");
-    CHECK(wrong_types.budget_ms == 2000);
-    CHECK(wrong_types.min_margin == 0.25);
+    using Catch::Matchers::ContainsSubstring;
+    // Nothing is picked up implicitly: the key must be named.
+    CHECK_THROWS_WITH(ParseSettings(nlohmann::json::object()),
+                      ContainsSubstring("typesafe-advisor.config.api_key: is required"));
+    CHECK_THROWS_WITH(ParseSettings(nlohmann::json::array()),
+                      ContainsSubstring("must be an object"));
+    CHECK_THROWS_WITH(ParseSettings(nlohmann::json{{"api_key", "k"}, {"apikey", "k"}}),
+                      ContainsSubstring("apikey: unknown field"));
+    CHECK_THROWS_WITH(
+        ParseSettings(nlohmann::json{{"api_key", "k"}, {"retry", {{"retries", 3}}}}),
+        ContainsSubstring("retry.retries: unknown field"));
+    CHECK_THROWS_WITH(ParseSettings(nlohmann::json{{"api_key", 42}}),
+                      ContainsSubstring("api_key: must be a string"));
+    CHECK_THROWS_WITH(ParseSettings(nlohmann::json{{"api_key", "k"}, {"budget_ms", "soon"}}),
+                      ContainsSubstring("budget_ms: must be an integer"));
+    CHECK_THROWS_WITH(ParseSettings(nlohmann::json{{"api_key", "k"}, {"min_margin", "wide"}}),
+                      ContainsSubstring("min_margin: must be a number"));
 }
 
-TEST_CASE("typesafe-advisor openrouter backend swaps endpoint, key env and model id",
+TEST_CASE("typesafe-advisor openrouter backend swaps endpoint and model id",
           "[typesafe_advisor][settings]") {
-    const auto settings = ParseSettings(nlohmann::json{{"backend", "openrouter"}});
+    const auto settings = ParseSettings(
+        nlohmann::json{{"backend", "openrouter"}, {"api_key", "env:OPENROUTER_API_KEY"}});
     CHECK(settings.backend == minimal::typesafe_advisor::Backend::OpenRouter);
     CHECK(settings.api_key == "env:OPENROUTER_API_KEY");
     CHECK(settings.EffectiveEndpoint() == "https://openrouter.ai/api/alpha/decisions");
     CHECK(settings.EffectiveModel() == "~typesafe/jev-latest");
 
-    // An explicit api_key survives on either backend.
-    const auto pinned = ParseSettings(
-        nlohmann::json{{"backend", "openrouter"}, {"api_key", "secret:typesafe"}});
-    CHECK(pinned.api_key == "secret:typesafe");
-
-    // An unknown backend name degrades to the default, not to a broken URL.
-    const auto unknown = ParseSettings(nlohmann::json{{"backend", "anthropic"}});
-    CHECK(unknown.backend == minimal::typesafe_advisor::Backend::Typesafe);
+    // An unknown backend name is refused: degrading it would route a key
+    // meant for one service to the other.
+    CHECK_THROWS_WITH(
+        ParseSettings(nlohmann::json{{"backend", "open-router"}, {"api_key", "k"}}),
+        Catch::Matchers::ContainsSubstring("backend: must be one of \"typesafe\", \"openrouter\""));
 }
 
-TEST_CASE("typesafe-advisor request_timeout is clamped to the budget", "[typesafe_advisor]") {
-    const auto settings =
-        ParseSettings(nlohmann::json{{"budget_ms", 500}, {"request_timeout_ms", 90000}});
-    CHECK(settings.request_timeout_ms == 500);
-    // Non-positive values fall back to the default rather than disabling.
-    const auto zero = ParseSettings(nlohmann::json{{"budget_ms", 0}});
-    CHECK(zero.budget_ms == 2000);
+TEST_CASE("typesafe-advisor request_timeout may not exceed the budget", "[typesafe_advisor]") {
+    using Catch::Matchers::ContainsSubstring;
+    CHECK_THROWS_WITH(ParseSettings(nlohmann::json{
+                          {"api_key", "k"}, {"budget_ms", 500}, {"request_timeout_ms", 90000}}),
+                      ContainsSubstring("request_timeout_ms: must not exceed budget_ms"));
+    CHECK_THROWS_WITH(ParseSettings(nlohmann::json{{"api_key", "k"}, {"budget_ms", 0}}),
+                      ContainsSubstring("budget_ms: must be at least 1"));
 }
 
 // --- Decision rule -----------------------------------------------------------

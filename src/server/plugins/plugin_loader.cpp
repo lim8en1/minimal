@@ -213,10 +213,9 @@ std::string_view ToString(LoadStatus status) {
     return "unknown";
 }
 
-PluginLoader::PluginLoader(HostRegistries registries, nlohmann::json tools_settings,
-                           PluginStorage* storage, std::filesystem::path plugin_data_root)
+PluginLoader::PluginLoader(HostRegistries registries, PluginStorage* storage,
+                           std::filesystem::path plugin_data_root)
     : registries_(registries),
-      tools_settings_(std::move(tools_settings)),
       storage_(storage),
       plugin_data_root_(std::move(plugin_data_root)) {
     BuildTargets();
@@ -403,8 +402,9 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // object plus THIS plugin's own plugins.json `config` slice. Built once per
     // plugin, before any hook runs.
     PluginRegistrationContext context;
-    context.tools_settings = tools_settings_;
-    context.config = candidate.config;
+    // Always an object: "no config" is {}, never null, so every plugin parser
+    // sees one shape.
+    context.config = candidate.config.is_null() ? nlohmann::json::object() : candidate.config;
     // The consumer side of the service channel: the same registry that
     // register_services below dispatches into, so a plugin capturing this
     // pointer at registration resolves services from this process's registry.

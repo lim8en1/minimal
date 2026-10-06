@@ -64,10 +64,9 @@ struct PythonSettings {
     std::int64_t background_max_runtime = 0;
 };
 
-// Every field optional; missing values keep the struct defaults. A negative
-// sync_wait_ceiling is not clamped to the default but to 0 (unlimited): the
-// only value a "smaller is stricter" edit can produce is "no ceiling", and
-// that is safe because demotion never destroys.
+// Every field optional; a missing field keeps the struct's default. A present
+// field of the wrong type or out of range, or an unknown field, throws
+// config::ConfigError naming it -- the plugin then fails to load, loudly.
 PythonSettings ParsePythonSettings(const nlohmann::json& config);
 
 // The preset's `tool_config.python` slice -- the per-preset DECLARED package

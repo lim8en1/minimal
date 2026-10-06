@@ -1,84 +1,48 @@
 #include "minimal/mcp/mcps_config.hpp"
 
-#include <stdexcept>
+#include <map>
+#include <optional>
 #include <unordered_set>
 
-#include "minimal/config/json_config_loader.hpp"
-#include "minimal/config/parse_util.hpp"
+#include "minimal/common/json_config_loader.hpp"
+#include "minimal/common/config_reader.hpp"
 
 namespace minimal::config {
 
 namespace {
 
-std::string EntryLabel(const nlohmann::json& entry, std::size_t index) {
-    // Name first so the diagnostic reads like the other config loaders'; fall
-    // back to the position for an entry whose name is itself the problem.
-    if (entry.contains("name") && entry.at("name").is_string() &&
+// The entry's name when it has a usable one (diagnostics read like the other
+// loaders'), else its position -- for an entry whose name is the problem.
+std::string EntryPath(const nlohmann::json& entry, std::size_t index) {
+    if (entry.is_object() && entry.contains("name") && entry.at("name").is_string() &&
         !entry.at("name").get<std::string>().empty()) {
-        return "entry '" + entry.at("name").get<std::string>() + "'";
+        return entry.at("name").get<std::string>();
     }
-    return "entry #" + std::to_string(index);
+    return "#" + std::to_string(index);
 }
 
-// No index parameter: the caller catches and labels every failure with
-// EntryLabel(entry, i), so this throws bare reasons and never has to know where
-// it sits in the array.
-McpServerEntry ParseEntry(const nlohmann::json& entry) {
-    if (!entry.is_object()) throw std::runtime_error("must be an object");
+std::unordered_map<std::string, std::string> ToUnordered(
+    std::optional<std::map<std::string, std::string>> map) {
+    if (!map) return {};
+    return {map->begin(), map->end()};
+}
 
+McpServerEntry ParseEntry(Reader& entry) {
     McpServerEntry result;
-    // contains + type checks, not entry.at(): .at() throws a raw
-    // json.exception.out_of_range ("key 'name' not found") which the blanket
-    // catch below would hand to the user verbatim, while every neighbouring
-    // field has a hand-written message. Same for "transport".
-    if (!entry.contains("name") || !entry.at("name").is_string()) {
-        throw std::runtime_error("name is required and must be a string");
-    }
-    result.name = entry.at("name").get<std::string>();
-    if (result.name.empty()) throw std::runtime_error("name must be a non-empty string");
-
-    if (!entry.contains("transport") || !entry.at("transport").is_string()) {
-        throw std::runtime_error("transport is required and must be \"stdio\" or \"http\"");
-    }
-    const std::string transport = entry.at("transport").get<std::string>();
+    result.name = entry.RequireString("name");
+    const std::string transport = *entry.MaybeEnum("transport", {"stdio", "http"});
     if (transport == "stdio") {
         result.transport = McpTransport::Stdio;
-        // contains + type check, not entry.at(): same reasoning as
-        // "name"/"transport" above -- a missing "command" must not surface a
-        // raw json.exception.out_of_range through the blanket catch below.
-        if (!entry.contains("command") || !entry.at("command").is_string()) {
-            throw std::runtime_error("stdio entry needs a non-empty command");
-        }
-        result.command = entry.at("command").get<std::string>();
-        if (result.command.empty()) throw std::runtime_error("stdio entry needs a non-empty command");
-        if (entry.contains("args")) {
-            // is_array() first: nlohmann's range-for over a non-array value
-            // still "works" (a scalar iterates once over itself; an object
-            // iterates its VALUES in key-sorted order), so without this check
-            // a typo'd object or string silently became a one-element or
-            // reordered args list instead of the intended rejection.
-            if (!entry.at("args").is_array()) {
-                throw std::runtime_error("args must be an array of strings");
-            }
-            for (const auto& arg : entry.at("args")) {
-                if (!arg.is_string()) throw std::runtime_error("args must be an array of strings");
-                result.args.push_back(arg.get<std::string>());
-            }
-        }
-        if (entry.contains("env")) result.env = ParseStringMap(entry.at("env"), "env");
-    } else if (transport == "http") {
-        result.transport = McpTransport::Http;
-        if (!entry.contains("url") || !entry.at("url").is_string()) {
-            throw std::runtime_error("http entry needs a non-empty url");
-        }
-        result.url = entry.at("url").get<std::string>();
-        if (result.url.empty()) throw std::runtime_error("http entry needs a non-empty url");
-        if (entry.contains("headers")) result.headers = ParseStringMap(entry.at("headers"), "headers");
+        result.command = entry.RequireString("command");
+        result.args = entry.StringList("args", /*allow_empty_entries=*/true);
+        result.env = ToUnordered(entry.MaybeStringMap("env"));
     } else {
-        throw std::runtime_error("transport must be \"stdio\" or \"http\", got '" + transport + "'");
+        result.transport = McpTransport::Http;
+        result.url = entry.RequireString("url");
+        result.headers = ToUnordered(entry.MaybeStringMap("headers"));
     }
-
-    result.enabled = entry.value("enabled", result.enabled);
+    result.enabled = entry.Bool("enabled", result.enabled);
+    entry.Finish();
     return result;
 }
 
@@ -92,19 +56,26 @@ const McpServerEntry* McpsConfig::Find(const std::string& name) const {
 }
 
 McpsConfig ParseMcpsConfig(const nlohmann::json& doc) {
-    if (!doc.is_array()) throw std::runtime_error("mcps.json: expected a top-level array");
+    if (!doc.is_array()) throw ConfigError("mcps.json: expected a top-level array");
 
     McpsConfig config;
     std::unordered_set<std::string> seen_names;
     for (std::size_t i = 0; i < doc.size(); ++i) {
+        // A bad entry degrades to a recorded reason; the good ones survive.
         try {
-            McpServerEntry entry = ParseEntry(doc.at(i));
+            const auto& node = doc.at(i);
+            if (!node.is_object()) {
+                throw ConfigError("mcps.json: " + EntryPath(node, i) + ": must be an object");
+            }
+            Reader reader(node, "mcps.json", EntryPath(node, i));
+            if (!reader.Has("transport")) reader.Fail("transport", "is required");
+            McpServerEntry entry = ParseEntry(reader);
             if (!seen_names.insert(entry.name).second) {
-                throw std::runtime_error("duplicate server name '" + entry.name + "'");
+                reader.Fail("name", "duplicate server name '" + entry.name + "'");
             }
             config.entries.push_back(std::move(entry));
-        } catch (const std::exception& error) {
-            config.errors.push_back(EntryLabel(doc.at(i), i) + ": " + error.what());
+        } catch (const ConfigError& error) {
+            config.errors.push_back(error.what());
         }
     }
     return config;
@@ -112,7 +83,7 @@ McpsConfig ParseMcpsConfig(const nlohmann::json& doc) {
 
 McpsConfig LoadMcpsConfig(const std::filesystem::path& path) {
     // Absence is the normal "no MCP" state, not an error.
-    return LoadJsonConfig<McpsConfig>(path, "mcps", AbsencePolicy::kDefaultOnMissing,
+    return LoadJsonConfig<McpsConfig>(path, "mcps.json", AbsencePolicy::kDefaultOnMissing,
                                       EmptyFilePolicy::kTreatAsMalformed, ParseMcpsConfig);
 }
 

@@ -3318,7 +3318,7 @@ TEST_CASE("the typesafe-advisor answers a confident Ask and abstains below the m
 
     // Load the REAL advisor through the REAL loader, with the stub URL riding
     // the config slice -- a plugins.json entry in miniature.
-    fixture.LoadAdvisorPlugin(nlohmann::json{{"endpoint", stub.url()}},
+    fixture.LoadAdvisorPlugin(nlohmann::json{{"endpoint", stub.url()}, {"api_key", "test-key"}},
                               "typesafe-advisor-fixture.so");
     fixture.service_permissions.advisor = "typesafe-advisor-fixture";
     fixture.Script(testing::ToolUseResponse("call-1", "auto_tool", nlohmann::json::object()));

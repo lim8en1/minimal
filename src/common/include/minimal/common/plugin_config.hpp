@@ -12,6 +12,7 @@
 
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -34,8 +35,12 @@ struct PluginFileCandidate {
 struct PluginConfigFile {
     struct Entry {
         std::string file;  // basename, resolved against its provenance directory
-        PluginProvenance provenance = PluginProvenance::User;
-        bool enabled = false;
+        // Absent in a hand-written entry: discovery resolves it by file name
+        // (an error when both directories ship that name), then persists it.
+        std::optional<PluginProvenance> provenance;
+        // Absent: the discovery default (bundled on unless marked
+        // disabled-by-default, user off), persisted once resolved.
+        std::optional<bool> enabled;
         nlohmann::json config = nlohmann::json::object();
     };
     std::vector<Entry> plugins;
@@ -57,6 +62,11 @@ struct PluginConfigFile {
     // degraded-to-empty default over the user's actual bytes would destroy every
     // enablement decision and per-plugin config in a hand-edited file.
     bool malformed = false;
+    // Per-entry problems (a wrong type, an unknown field, an ambiguous
+    // provenance), fully worded. Never silently defaulted: a plugin the user
+    // disabled must not come back because its entry had a typo. The server
+    // treats any as fatal; the client warns.
+    std::vector<std::string> problems;
 };
 
 // What differs between hosts.

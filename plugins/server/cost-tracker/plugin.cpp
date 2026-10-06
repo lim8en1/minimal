@@ -141,9 +141,7 @@ void EnsureSharedState(const minimal::plugins::PluginRegistrationContext& contex
     if (!SharedRates()) {
         minimal::cost_tracker::RateSources sources;
         sources.bundled_models = LoadBundledRates();
-        if (const auto it = context.config.find("rates"); it != context.config.end()) {
-            sources.config_rates = *it;
-        }
+        sources.config_rates = SharedSettings()->rates;
         SharedRates() = std::make_shared<minimal::cost_tracker::RateTable>(
             std::move(sources), context.storage);
         // Pick up a snapshot fetched by an earlier process run.

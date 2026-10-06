@@ -1,5 +1,7 @@
 #include "project_context.hpp"
 
+#include "minimal/common/config_reader.hpp"
+
 #include "minimal/common/logger.hpp"
 
 #include <cstdint>
@@ -128,43 +130,22 @@ std::string RenderProjectContextSection(const ProjectContext& context) {
 
 ProjectContextSettings ParseProjectContextSettings(const nlohmann::json& config) {
     ProjectContextSettings result;
-    if (config.is_null()) return result;
-    if (!config.is_object()) throw std::runtime_error("project-context: config must be an object");
-    if (config.contains("search_ancestors")) {
-        if (!config.at("search_ancestors").is_boolean()) {
-            throw std::runtime_error("project-context: search_ancestors must be a boolean");
-        }
-        result.search_ancestors = config.at("search_ancestors").get<bool>();
-    }
-    if (config.contains("max_bytes")) {
-        const auto& value = config.at("max_bytes");
-        if (!value.is_number_integer() || value.get<std::int64_t>() < 0) {
-            throw std::runtime_error("project-context: max_bytes must be a non-negative integer");
-        }
-        result.max_bytes = value.get<std::int64_t>();
-    }
-    if (config.contains("files")) {
-        const auto& files = config.at("files");
-        if (!files.is_array()) {
-            throw std::runtime_error("project-context: files must be an array of file names");
-        }
-        result.files.clear();
-        for (const auto& entry : files) {
-            if (!entry.is_string() || entry.get<std::string>().empty()) {
-                throw std::runtime_error("project-context: files must contain non-empty strings");
-            }
+    config::Reader reader(config, "plugins.json", "project-context.config");
+    result.search_ancestors = reader.Bool("search_ancestors", result.search_ancestors);
+    result.max_bytes = reader.Int("max_bytes", result.max_bytes, 0);
+    if (auto files = reader.MaybeStringList("files")) {
+        for (const auto& name : *files) {
             // File NAMES, not paths: the loader composes them against
             // project_root (and, with search_ancestors, its ancestors). A
             // separator would silently redefine the search, and an absolute
             // path would not follow the session at all.
-            const std::string name = entry.get<std::string>();
             if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
-                throw std::runtime_error("project-context: files entries must be plain file names, "
-                                         "not paths ('" + name + "')");
+                reader.Fail("files", "entries must be plain file names, not paths ('" + name + "')");
             }
-            result.files.push_back(name);
         }
+        result.files = std::move(*files);
     }
+    reader.Finish();
     return result;
 }
 

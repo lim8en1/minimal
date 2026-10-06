@@ -1,152 +1,105 @@
 #include "minimal/config/permissions_config.hpp"
 
-#include <algorithm>
-#include <initializer_list>
-#include <stdexcept>
-#include <string_view>
-
-#include "minimal/config/json_config_loader.hpp"
+#include "minimal/common/config_reader.hpp"
+#include "minimal/common/json_config_loader.hpp"
 #include "minimal/config/permission_codec.hpp"
 
 namespace minimal::config {
 
 namespace {
 
-void ParseFallback(const nlohmann::json& doc, tools::PermissionOverrideLayer& layer) {
-    if (!doc.contains("fallback")) return;
-    const auto& fallback = doc.at("fallback");
-    if (fallback.contains("read_only"))
-        layer.read_only = ParsePermissionMode(fallback.at("read_only").get<std::string>());
-    if (fallback.contains("file_write"))
-        layer.file_write = ParsePermissionMode(fallback.at("file_write").get<std::string>());
-    if (fallback.contains("execute"))
-        layer.execute = ParsePermissionMode(fallback.at("execute").get<std::string>());
-    if (fallback.contains("out_of_workdir"))
-        layer.out_of_workdir = ParsePermissionMode(fallback.at("out_of_workdir").get<std::string>());
-    if (fallback.contains("network"))
-        layer.network = ParsePermissionMode(fallback.at("network").get<std::string>());
-}
-
-void ParsePerToolOverrides(const nlohmann::json& doc, tools::PermissionOverrideLayer& layer) {
-    if (!doc.contains("per_tool_overrides")) return;
-    for (const auto& [key, value] : doc.at("per_tool_overrides").items()) {
-        if (key.empty()) {
-            throw std::runtime_error("permissions.json: per_tool_overrides has an empty-string key");
-        }
-        layer.per_tool_overrides[key] = ParsePermissionMode(value.get<std::string>());
+tools::PermissionMode ModeAt(Reader& reader, const std::string& key, const nlohmann::json& value) {
+    if (!value.is_string()) {
+        reader.Fail(key, "must be \"allow\", \"ask\" or \"deny\", got " + value.dump());
+    }
+    try {
+        return ParsePermissionMode(value.get<std::string>());
+    } catch (const std::exception& error) {
+        reader.Fail(key, error.what());
     }
 }
 
-void ParsePatternOverrides(const nlohmann::json& doc, tools::PermissionOverrideLayer& layer) {
-    if (!doc.contains("pattern_overrides")) return;
-    const auto& patterns = doc.at("pattern_overrides");
-    if (!patterns.is_object()) {
-        throw std::runtime_error("permissions.json: pattern_overrides must be an object");
-    }
-    for (const auto& [tool, rules] : patterns.items()) {
-        if (tool.empty()) {
-            throw std::runtime_error("permissions.json: pattern_overrides has an empty-string key");
-        }
-        if (!rules.is_object()) {
-            throw std::runtime_error("permissions.json: pattern_overrides." + tool +
-                                     " must be an object of {glob: mode}");
-        }
-        auto& out = layer.pattern_overrides[tool];
-        for (const auto& [glob, mode] : rules.items()) {
-            if (glob.empty()) {
-                throw std::runtime_error("permissions.json: pattern_overrides." + tool +
-                                         " has an empty glob");
-            }
-            out.push_back({glob, ParsePermissionMode(mode.get<std::string>())});
-        }
-    }
+std::optional<tools::PermissionMode> MaybeMode(Reader& reader, const char* key) {
+    const auto* value = reader.Raw(key);
+    if (value == nullptr) return std::nullopt;
+    return ModeAt(reader, key, *value);
 }
 
-void ParseExternalDirectoryPatterns(const nlohmann::json& doc,
-                                    tools::PermissionOverrideLayer& layer) {
-    if (!doc.contains("external_directory_patterns")) return;
-    const auto& patterns = doc.at("external_directory_patterns");
-    if (!patterns.is_object()) {
-        throw std::runtime_error(
-            "permissions.json: external_directory_patterns must be an object of {glob: mode}");
-    }
-    for (const auto& [glob, mode] : patterns.items()) {
-        if (glob.empty()) {
-            throw std::runtime_error("permissions.json: external_directory_patterns has an empty glob");
-        }
-        layer.out_of_workdir_patterns.push_back({glob, ParsePermissionMode(mode.get<std::string>())});
-    }
+void ParseFallback(Reader& root, tools::PermissionOverrideLayer& layer) {
+    Reader fallback = root.Object("fallback");
+    layer.read_only = MaybeMode(fallback, "read_only");
+    layer.file_write = MaybeMode(fallback, "file_write");
+    layer.execute = MaybeMode(fallback, "execute");
+    layer.out_of_workdir = MaybeMode(fallback, "out_of_workdir");
+    layer.network = MaybeMode(fallback, "network");
+    fallback.Finish();
 }
 
-void CollectUnknownKeys(const nlohmann::json& object, std::string_view prefix,
-                        std::initializer_list<std::string_view> known,
-                        std::vector<std::string>& out) {
-    if (!object.is_object()) return;
-    for (const auto& [key, value] : object.items()) {
-        if (!key.empty() && (key[0] == '_' || key[0] == '$')) continue;  // comment convention
-        if (std::find(known.begin(), known.end(), key) == known.end()) {
-            out.push_back(std::string(prefix) + key);
-        }
+// {glob: mode} rules, in file order.
+std::vector<tools::PermissionPatternRule> ParseRules(Reader& rules) {
+    std::vector<tools::PermissionPatternRule> out;
+    for (const auto& [glob, mode] : rules.node().items()) {
+        if (IsCommentKey(glob)) continue;
+        rules.Accept(glob);
+        if (glob.empty()) rules.Fail("", "has an empty glob");
+        out.push_back({glob, ModeAt(rules, glob, mode)});
     }
+    return out;
 }
 
 }  // namespace
 
 PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
     PermissionsConfig config;
-    try {
-        if (doc.contains("default_run_mode")) {
-            config.default_run_mode = ParsePermissionRunMode(doc.at("default_run_mode").get<std::string>());
+    Reader root(doc, "permissions.json");
+    if (const auto mode = root.MaybeString("default_run_mode")) {
+        try {
+            config.default_run_mode = ParsePermissionRunMode(*mode);
+        } catch (const std::exception& error) {
+            root.Fail("default_run_mode", error.what());
         }
-        ParseFallback(doc, config.global_layer);
-        ParsePerToolOverrides(doc, config.global_layer);
-        ParsePatternOverrides(doc, config.global_layer);
-        ParseExternalDirectoryPatterns(doc, config.global_layer);
-        if (doc.contains("pattern_precedence")) {
-            config.global_layer.pattern_precedence =
-                ParsePatternPrecedence(doc.at("pattern_precedence").get<std::string>());
-        }
-        if (doc.contains("plugins")) {
-            const auto& slices = doc.at("plugins");
-            if (!slices.is_object()) {
-                throw std::runtime_error(
-                    "permissions.json: plugins must be an object of {model: {...}}");
-            }
-            config.plugin_slices = slices;
-        }
-        if (doc.contains("advisor")) {
-            config.advisor = doc.at("advisor").get<std::string>();
-        }
-        if (doc.contains("advisor_inherit")) {
-            config.advisor_inherit = doc.at("advisor_inherit").get<bool>();
-        }
-        if (doc.contains("advisor_timeout_ms")) {
-            const auto value = doc.at("advisor_timeout_ms").get<int>();
-            if (value < 0) {
-                throw std::runtime_error(
-                    "permissions.json: advisor_timeout_ms must be >= 0 (0 disables the budget)");
-            }
-            config.advisor_timeout_ms = value;
-        }
-        CollectUnknownKeys(doc, "",
-                           {"default_run_mode", "fallback", "per_tool_overrides",
-                            "pattern_overrides", "external_directory_patterns",
-                            "pattern_precedence", "plugins", "advisor",
-                            "advisor_inherit", "advisor_timeout_ms"},
-                           config.unknown_keys);
-        if (doc.contains("fallback")) {
-            CollectUnknownKeys(doc.at("fallback"), "fallback.",
-                               {"read_only", "file_write", "execute", "out_of_workdir", "network"},
-                               config.unknown_keys);
-        }
-    } catch (const nlohmann::json::exception& error) {
-        throw std::runtime_error(std::string("permissions.json: ") + error.what());
     }
+    ParseFallback(root, config.global_layer);
+
+    Reader per_tool = root.Object("per_tool_overrides");
+    for (const auto& [key, value] : per_tool.node().items()) {
+        if (IsCommentKey(key)) continue;
+        per_tool.Accept(key);
+        if (key.empty()) per_tool.Fail("", "has an empty-string key");
+        config.global_layer.per_tool_overrides[key] = ModeAt(per_tool, key, value);
+    }
+
+    Reader patterns = root.Object("pattern_overrides");
+    for (const auto& [tool, unused] : patterns.node().items()) {
+        (void)unused;
+        if (IsCommentKey(tool)) continue;
+        if (tool.empty()) patterns.Fail("", "has an empty-string key");
+        auto tool_rules = patterns.MaybeObject(tool);
+        config.global_layer.pattern_overrides[tool] = ParseRules(*tool_rules);
+    }
+
+    Reader external = root.Object("external_directory_patterns");
+    config.global_layer.out_of_workdir_patterns = ParseRules(external);
+
+    if (const auto precedence = root.MaybeString("pattern_precedence")) {
+        try {
+            config.global_layer.pattern_precedence = ParsePatternPrecedence(*precedence);
+        } catch (const std::exception& error) {
+            root.Fail("pattern_precedence", error.what());
+        }
+    }
+    // Each plugin permission model's slice, verbatim: the model owns its shape.
+    if (auto slices = root.MaybeObject("plugins")) config.plugin_slices = slices->node();
+    config.advisor = root.MaybeString("advisor", /*allow_empty=*/false);
+    config.advisor_inherit = root.Bool("advisor_inherit", config.advisor_inherit);
+    config.advisor_timeout_ms = static_cast<int>(
+        root.Int("advisor_timeout_ms", config.advisor_timeout_ms, 0, 24LL * 3600 * 1000));
+    root.Finish();
     return config;
 }
 
 PermissionsConfig LoadPermissionsConfig(const std::filesystem::path& path) {
-    return LoadJsonConfig<PermissionsConfig>(path, "permissions", AbsencePolicy::kThrow,
+    return LoadJsonConfig<PermissionsConfig>(path, "permissions.json", AbsencePolicy::kThrow,
                                              EmptyFilePolicy::kTreatAsMalformed,
                                              ParsePermissionsConfig);
 }

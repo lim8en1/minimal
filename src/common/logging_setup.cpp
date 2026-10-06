@@ -16,7 +16,7 @@ spdlog::level::level_enum ParseLevel(const std::string& name, std::string& error
     if (name == "trace") return spdlog::level::trace;
     if (name == "debug") return spdlog::level::debug;
     if (name == "info") return spdlog::level::info;
-    if (name == "warn" || name == "warning") return spdlog::level::warn;
+    if (name == "warn") return spdlog::level::warn;
     if (name == "error") return spdlog::level::err;
     if (name == "critical") return spdlog::level::critical;
     if (name == "off") return spdlog::level::off;

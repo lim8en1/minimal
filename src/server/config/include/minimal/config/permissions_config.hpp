@@ -41,16 +41,13 @@ struct PermissionsConfig {
     // bounded only by its cancellation contract). Negative values are refused
     // at parse -- silently disabling a safety timeout is never intended.
     int advisor_timeout_ms = 30000;
-    // Keys the parser did not recognise ("fallback.file_writes", a top-level
-    // "pattern"): collected, not thrown, and reported by the startup sanity
-    // check as warnings -- a typo'd rule used to be silently ignored, which
-    // for a permission file means silently LESS protection than written.
-    // Keys starting with '_' or '$' are treated as comments and skipped.
-    std::vector<std::string> unknown_keys;
 };
 
-// Pure. Throws on an empty-string key inside per_tool_overrides -- reserved as
-// the category-only-resolution sentinel used by agent::BuildPermissionPolicy.
+// Pure and strict: an unknown key, a wrong type or an invalid mode is a
+// ConfigError naming its path (a typo'd permission rule silently ignored is
+// less protection than written). An empty-string key inside
+// per_tool_overrides is refused -- reserved as the category-only-resolution
+// sentinel used by agent::BuildPermissionPolicy.
 PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc);
 
 // Thin: reads the file and parses it. Throws if the file is missing or isn't

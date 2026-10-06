@@ -235,11 +235,15 @@ static int RunServer(int argc, char** argv) {
     // decision and per-plugin config in a file they are explicitly invited to
     // edit. Warn now and skip the rewrite below -- the client host applies the
     // same discipline (tui_bootstrap.cpp).
+    // A plugins.json that cannot be used as written -- malformed, or an entry
+    // with a typo -- is FATAL (reported by the sanity check at stage 3), and
+    // no plugin loads in the meantime: degrading it to the discovery defaults
+    // would silently re-enable a plugin the user disabled. Never rewritten.
+    std::vector<std::string> plugin_config_problems = plugin_config.problems;
     if (plugin_config.malformed) {
-        std::fprintf(stderr,
-                     "minimal: warning: %s is malformed -- it was NOT rewritten; fix or "
-                     "remove it to enable plugin config management\n",
-                     plugins_json.c_str());
+        plugin_config_problems.insert(plugin_config_problems.begin(),
+                                      "plugins.json: invalid JSON or not an object; it was not "
+                                      "rewritten and no plugin was loaded");
     }
 
     // Read settings.json ONCE, tolerantly, ahead of the sanity check's own
@@ -299,13 +303,19 @@ static int RunServer(int argc, char** argv) {
     const auto user_dir = config_dir / "plugins";
     std::printf("  plugin dir: %s\n\n", bundled_dir.c_str());
 
-    auto candidates =
-        minimal::plugins::DiscoverPlugins(bundled_dir, user_dir, plugin_config);
+    std::vector<minimal::plugins::PluginCandidate> candidates;
+    if (plugin_config_problems.empty()) {
+        candidates = minimal::plugins::DiscoverPlugins(bundled_dir, user_dir, plugin_config);
+        // Discovery itself can find a problem (an entry whose provenance is
+        // ambiguous); the same rule applies.
+        for (const auto& problem : plugin_config.problems) plugin_config_problems.push_back(problem);
+        if (!plugin_config_problems.empty()) candidates.clear();
+    }
 
     // Persist anything newly discovered, so its enablement is user-editable.
-    // Skipped on a malformed source file -- see the warning at stage 1: writing
-    // the degraded-to-empty default back would erase the user's actual config.
-    if (!plugin_config.malformed) {
+    // Skipped on any problem: writing a degraded default back would erase the
+    // user's actual config.
+    if (plugin_config_problems.empty()) {
         WriteConfigIfChanged(plugins_json, minimal::plugins::SerializePluginConfig(plugin_config),
                              plugins_json_before);
     }
@@ -467,8 +477,6 @@ static int RunServer(int argc, char** argv) {
     // settings.json were absent when the stage-1 preload above failed --
     // a missing or malformed settings.json must not stop plugins from
     // loading, the startup sanity check is what will report it.
-    const nlohmann::json tools_settings =
-        settings_preload ? settings_preload->tools.raw : nlohmann::json::object();
 
     // Every registry above, handed as one bundle to each consumer: the loader
     // here, and the session registry and RPC service at serve stage.
@@ -492,7 +500,7 @@ static int RunServer(int argc, char** argv) {
         .provider_config = &provider_config_extensions,
         .preset_extensions = &preset_extensions,
     };
-    minimal::plugins::PluginLoader loader(registries, tools_settings, plugin_storage.get(),
+    minimal::plugins::PluginLoader loader(registries, plugin_storage.get(),
                                           plugin_data_root);
     const auto records = loader.LoadAll(candidates);
     // Plugins that load project-local content (commands-md) report it for the
@@ -580,6 +588,9 @@ static int RunServer(int argc, char** argv) {
         config_dir, minimal::config::MakeVariantParamsHook(&variant_params),
         &provider_config_extensions);
     std::vector<minimal::config::CheckResult> check_results = bundle.problems;
+    for (const auto& problem : plugin_config_problems) {
+        check_results.push_back({minimal::config::CheckSeverity::Fatal, "config_parse", problem});
+    }
     auto session_db = minimal::startup::OpenSessionDatabase(bundle, check_results);
     {
         minimal::startup::StartupSanityCheck sanity(

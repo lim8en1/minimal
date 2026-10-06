@@ -1,6 +1,7 @@
 add_library(minimal_common STATIC
     abi_tag.cpp
     bundled_assets.cpp
+    config_reader.cpp
     config_paths.cpp
     env.cpp
     fd_hygiene.cpp

@@ -53,7 +53,7 @@ struct HooksConfig {
     std::vector<HookActionConfig> hooks;
 };
 
-// Strict. Throws std::runtime_error naming the offending entry when the
+// Strict (unknown fields included). Throws ConfigError naming the offending path when the
 // document is not an object, `hooks` is not an array, an entry is missing
 // `on`/`command`, `on` or `command` is not a non-empty string, a filter is not
 // an object of string->string, or a timeout is negative. A missing file is NOT

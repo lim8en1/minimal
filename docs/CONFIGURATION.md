@@ -24,26 +24,36 @@ runtime. Copyable example agents, prompts, skills, and commands live in
 | `providers.json` | server | **required** | malformed → **fatal**; `{}` is valid but "no usable model" is fatal |
 | `permissions.json` | server | **required** | malformed → **fatal** |
 | `hooks.json` | server | optional | missing → no hooks; empty file treated as absent; malformed → **fatal** |
-| `mcps.json` | server (`mcp` plugin) | optional | read by the `mcp` plugin; missing → no MCP; malformed entries → warning, degrade to no MCP |
+| `mcps.json` | server (`mcp` plugin) | optional | read by the `mcp` plugin; missing → no MCP; an invalid entry (unknown field included) → warning naming it, that server is skipped, the others load |
 | `channels.json` | server (`mcp` plugin) | optional | same degrade-to-warning behavior as `mcps.json` |
-| `plugins.json` | server | optional | malformed → warning, treated as empty (see docs/PLUGINS.md) |
+| `plugins.json` | server | optional | malformed, or any entry invalid → **fatal**, no plugin loads and the file is not rewritten (see docs/PLUGINS.md) |
 | `agents/<name>.md` | server | **at least one required** | none resolvable → **fatal** |
 | `prompts/<name>.md` | server | optional | missing `prompts/compression.md` → warning |
 | `cost-rates.json` | server | optional | cost-tracker's fallback price table |
 | `plugins/` (dir) | server | optional | user plugins scanned here (docs/PLUGINS.md) |
-| `client-plugins.json` | client | optional | malformed → warning, treated as empty |
+| `client-plugins.json` | client | optional | malformed or an invalid entry → warning; that entry is skipped and the file is not rewritten |
 | `client-plugins/` (dir) | client | optional | user client plugins scanned here |
 | `keybindings.json` | client | optional | missing → built-in defaults; malformed → load fails (named path) |
-| `ui.json` | client | optional | malformed → warning + all defaults |
+| `ui.json` | client | optional | malformed → warning + all defaults; a bad or unknown field → warning, that field keeps its default |
 | `themes/<name>.json` | client | optional | unknown theme name → terminal defaults + warning |
 
 Startup errors are gathered by a sanity check: **fatal** problems abort the
-server; **warnings** are logged and startup continues. Unless noted otherwise
-below, unknown fields are silently ignored and wrong-typed or out-of-range
-values are fatal (the file is refused, not patched). Exception: unknown keys in `permissions.json` (top level and `fallback`)
-and in a preset's `permission_mode:` block are **warnings** — a typo'd
-permission rule otherwise means silently less protection than written. Keys
-starting with `_` or `$` are treated as comments.
+server; **warnings** are logged and startup continues.
+
+**Every config file is strict.** An unknown field, a wrong-typed value, a
+fractional number where an integer belongs, or an out-of-range value is an
+error naming the file and the full path to the field:
+
+```
+settings.json: memory.auto_compact: must be true or false, got "yes"
+providers.json: providers.local.models.qwen4.max_tokens: must be an integer, got 4096.5
+plugins.json: tools-bash.config.timeout_ms: unknown field (known: background_max_timeout_s, ...)
+```
+
+Nothing falls back to a default silently. This covers the server files,
+every plugin's `config` object in `plugins.json`, `secrets.json`, agent
+preset frontmatter, and (as warnings) the client files. Keys starting with
+`//` are comments, in every JSON file.
 
 ---
 
@@ -77,8 +87,8 @@ Full example (`bundled/settings.json`):
 | `default_agent_preset` | string | `""` | file stem of an `agents/<name>.md` preset; unresolvable value → **fatal** |
 | `default_model` | string | `""` | `"<provider>/<model>"` (see providers.json); a typo → warning at startup, first use fails |
 | `small_model` | string | `""` | opencode-compat: `"<provider>/<model>"` for the compaction summarizer only; unset/unresolvable → each session compacts on its own model. The summarizer reads the whole working history, so the small model's window must fit the compaction trigger; a different model also gets no prompt-cache reuse |
-| `default_theme` | string | `""` | client theme name (`themes/<name>.json`) |
-| `max_concurrent_subagents` | int | `4` | `<= 0` or `> 8` → warning |
+| `default_subagent_model` | string | `""` | `"<provider>/<model>"` for spawned subagents whose preset declares no `model:`; unset/unresolvable → children run on the parent's model |
+| `max_concurrent_subagents` | int | `4` | ≥ 0; `0` (subagents disabled) or `> 8` → warning |
 | `background_wake` | bool | `false` | |
 | `pause_auto_resume_on_submit` | bool | `true` | a user turn submitted while the session is paused clears the pause instead of waiting for an explicit resume (`sessions.pause_auto_resume_on_submit`) |
 | `session_db_path` | string | `""` | empty → resolved under the data dir |
@@ -88,12 +98,12 @@ Full example (`bundled/settings.json`):
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `auto_compact` | bool | `true` | |
-| `context_compaction_trigger` | object | absent = never | **exactly one** of `percent` (1–100), `tokens` (> 0), `buffer_tokens` (> 0) |
+| `context_compaction_trigger` | object | absent = **never** (auto-compaction then never fires; the bundled file sets `percent: 80`) | **exactly one** of `percent` (1–100), `tokens` (> 0), `buffer_tokens` (> 0) |
 | `compaction_keep_recent_tokens` | int | `0` | absolute keep-verbatim budget (estimated tokens, newest first); when > 0 it overrides `compaction_replace_percent`. Keep it well below the trigger |
 | `compaction_replace_percent` | int | `80` | 1–100. Share of the working history (by estimated tokens, oldest first) that a compaction **replaces** with the summary; the rest stays verbatim after it. The summarizer always reads the **whole** history — its request is the session's own system prompt, tools and messages plus one appended instruction, so a provider with prefix caching serves it from cache. `100` replaces everything but the newest message. On the Anthropic provider, thinking blocks in the kept part are dropped from the working set (newer Claude models reject replaying thinking after the preceding context changed); chat-completions backends never replay thinking, so nothing changes there |
 | `compaction_strategy` | string | `"summarize"` (seeded: `"structured"`) | name of a registered strategy (core built-in `summarize`, or plugin-registered — `structured` is the `compaction-structured` plugin); unknown name → warning, falls back. An agent preset's `compaction_strategy:` frontmatter overrides this per agent. `structured` asks the model to call the strict `record_summary` tool, which is therefore declared on every request (names and types only, ~190 tokens; the field guidance is sent with the compaction instruction; a stray call outside compaction is a no-op); a model that answers in text instead degrades to the free-text summary. A custom `compression_prompt:` (preset frontmatter or `/compact <name>`) always runs as free text |
 | `estimate_zero_usage` | bool | `true` | when a turn's backend usage is all zero (some OpenAI-compatible proxies), seed occupancy from the request's bytes/4 estimate so the compaction trigger arms, and flag the turn's wire usage `usage_estimated`. Estimates are never priced by cost tracking and never enter cumulative totals |
-| `scrollback_page_size` | int | `0` | |
+| `scrollback_page_size` | int | `0` | ≥ 0; `0` = the built-in page size |
 
 Compaction instructions are prompt files in the config dir, sent verbatim as
 the last message of the summarizer request: `prompts/compression.md` (free
@@ -120,8 +130,9 @@ scrollback, and appear on the headless `compaction` JSONL line.
 
 ### `tools.*`
 
-`tools` is also passed **verbatim to plugins** as `tools_settings` — unknown
-subkeys are legal and plugin-owned. Core recognizes:
+Core's own limits on tool calls. Nothing else belongs here (an unknown key is
+an error): tool plugins take their knobs from their own `config` object in
+`plugins.json`.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
@@ -129,14 +140,6 @@ subkeys are legal and plugin-owned. Core recognizes:
 | `max_input_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
 | `max_result_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
 | `max_display_bytes` | int | `131072` | ≥ 0; a tool result's client-only display payload over this is dropped (the client shows the text); `0` disables the limit |
-
-**No bundled tool plugin reads a `tools.read` / `tools.edit` / `tools.bash`
-slice from settings.json.** The `tools-fs` and `tools-bash` plugins take their
-knobs from their own `config` object in `plugins.json` (the per-plugin channel
-of EXTENSIBILITY §2.3). Core does not parse a `tools.read`/`edit`/`bash` slice
-into anything typed at all — the whole `tools` object forwards to every plugin
-verbatim as `tools.raw`; put tool settings in `plugins.json`'s per-plugin
-`config`, not here.
 
 ### Per-plugin tool settings (`plugins.json` `config`)
 
@@ -154,28 +157,36 @@ verbatim as `tools.raw`; put tool settings in `plugins.json`'s per-plugin
 
 | Key | Type | Default |
 |---|---|---|
-| `timeout_ms` | int | `120000` |
-| `max_timeout_ms` | int | `600000` — ceiling on a model-supplied `timeout_ms` |
-| `background_max_timeout_ms` | int | `600000` |
+| `timeout_s` | int | `120` — default per-command timeout, seconds |
+| `max_timeout_s` | int | `600` — ceiling on a model-supplied `timeout`; must be ≥ `timeout_s` |
+| `background_max_timeout_s` | int | `600` — ceiling for background commands; must be ≥ `timeout_s` |
 | `max_background_tasks` | int | `4` — per-session cap on live background tasks |
 | `max_output_bytes` | int | `1048576` (1 MiB) — bounds the persisted result |
 | `max_file_size_bytes` | int | `1073741824` (1 GiB) — RLIMIT_FSIZE backstop |
 | `shell` | string | `"/bin/sh"` |
-| `inherit_env` | string | `"allowlist"` — or `"all"`; anything else is a named parse error |
+| `inherit_env` | string | `"allowlist"` — or `"all"` |
 
-**`tools-python`** — flat object (every field optional; ALL times in SECONDS):
+**`tools-python`** — flat object (every field optional; every duration key ends in `_s`, seconds):
 
 | Key | Type | Default |
 |---|---|---|
 | `python` | string | `"python3"` — fallback interpreter (bare path + venv creation) |
-| `sync_wait_ceiling` | int | `300` — ceiling on a model-supplied sync `timeout`; `0` = unlimited; expiring DEMOTES to async, never kills |
-| `startup_timeout` | int | `10` — spawn + ready-handshake window (a broken venv is caught here) |
-| `install_timeout` | int | `300` — venv creation / package installation |
-| `grace_seconds` | int | `2` — how long `python_interrupt` waits for evidence the SIGINT landed |
+| `sync_wait_ceiling_s` | int | `300` — ceiling on a model-supplied sync `timeout`; `0` = unlimited; expiring DEMOTES to async, never kills |
+| `startup_timeout_s` | int | `10` — spawn + ready-handshake window (a broken venv is caught here) |
+| `install_timeout_s` | int | `300` — venv creation / package installation |
+| `grace_s` | int | `2` — how long `python_interrupt` waits for evidence the SIGINT landed |
+| `background_max_runtime_s` | int | `0` (= unlimited) — default kill deadline for background requests |
+| `rlimit_cpu_s` | int | `0` (= disabled) — RLIMIT_CPU backstop for the interpreter process |
 | `max_output_bytes` | int | `1048576` (1 MiB) — persisted result cap per request |
 | `max_capture_bytes` | int | `1048576` (1 MiB) — driver-side per-stream stdout/stderr capture cap |
-| `rlimit_cpu_seconds` | int | `0` (= disabled) — RLIMIT_CPU backstop for the interpreter process |
+| `stream_head_bytes` / `stream_tail_bytes` | int | `262144` / `786432` — head/tail windows kept of a long stream |
 | `max_file_size_bytes` | int | `1073741824` (1 GiB) — RLIMIT_FSIZE backstop |
+
+**`tools-search`** — `{"grep": {...}, "glob": {...}}`, every field a positive integer:
+`grep.default_head_limit` (250), `grep.max_results` (1000), `grep.max_file_bytes`
+(1 MiB), `grep.timeout_ms` (10000), `grep.max_context_lines` (10),
+`grep.max_line_length` (2000), `glob.default_limit` (200), `glob.max_results`
+(2000), `glob.timeout_ms` (10000).
 
 The per-preset DECLARED package contract is NOT plugin config — it lives in
 `agents/<name>.md` frontmatter under `tool_config.python`
@@ -231,10 +242,10 @@ keep plugin load order. A contributor that declares its own size cap
 
 | Field | Type | Default | Allowed values |
 |---|---|---|---|
-| `level` | string | `"info"` | `trace` \| `debug` \| `info` \| `warn` \| `warning` \| `error` |
-| `path` | string | `""` | |
-| `max_size_mb` | int | `10` | |
-| `max_files` | int | `5` | |
+| `level` | string | `"info"` | `trace` \| `debug` \| `info` \| `warn` \| `error` \| `critical` \| `off` |
+| `path` | string | `""` | empty → `minimal.log` in the data dir; relative → under the data dir |
+| `max_size_mb` | int | `10` | ≥ 1 |
+| `max_files` | int | `5` | ≥ 1 |
 
 ### `sessions.*` and `server.*`
 
@@ -272,8 +283,7 @@ Top level is exactly `{"providers": { "<name>": {...} }}` — the key is the
 provider name (no `/` allowed, in provider or model names). Provider and model
 names are addressed everywhere as `"<provider>/<model>"`. `{}` is valid (but
 then no model is usable). The schema is strict: an unknown field at any level
-(top, provider, model, `timeouts`) is a named startup error; keys starting
-with `//` are comments and allowed anywhere. `bundled/providers.example.json`
+(top, provider, model, `timeouts`, variant body) is a named startup error. `bundled/providers.example.json`
 is a commented starting point.
 
 ### Per provider
@@ -282,18 +292,22 @@ is a commented starting point.
 |---|---|---|---|---|
 | `backend` | **yes** | string | — | a provider *kind*: `"openai"`, `"anthropic"` (bundled) or anything a plugin registered. Unknown kind → warning |
 | `url` | **yes** | string | — | `openai` backend: includes `/v1`. `anthropic` backend: **without** `/v1` — the provider appends `/v1/messages` itself |
-| `api_key` | no | string | — | a key reference — see [Secrets](#secrets): `"secret:NAME"`, `"secret:<plugin>:NAME"`, `"env:NAME"` (unset → startup error), or a literal key (keep the file private if you use one). Absent: no auth header, which a local server needs |
+| `api_key` | no | string | — | a key reference — see [Secrets](#secrets): `"secret:NAME"`, `"secret:<plugin>:NAME"`, `"env:NAME"`, or a literal key (keep the file private if you use one). A reference that does not resolve yet is a startup warning and that provider's requests fail naming it; other providers are unaffected. Absent: no auth header, which a local server needs |
 | `discover` | no | bool | `false` | `true`: models are listed lazily from the backend (`GET <url>/models`) instead of a `models` object; never written back; failures fall back to any static entries; the cache is warmed in the background at server start (`server.discovery_warmup_timeout_seconds`), and the `/model` picker's refresh (ctrl+r) re-fetches |
 | `models` | yes (unless `discover`) | object | — | keyed by model name |
 | `parameters` | no | object | `{}` | arbitrary sampling/generation knobs passed through to the backend (e.g. `temperature`, `top_p`, `cache_ttl` for anthropic: `"5m"` or `"1h"`). Model-level `parameters` **replaces** (does not merge) the provider's. Two consumed keys steer routing/caching instead of passing through: `session_id` (below) and, for the `openai` backend, `cache_control: true` (opt-in Anthropic-style content-part caching) with `cache_ttl: "5m"`/`"1h"` |
 | `session_id` (inside `parameters`) | no | bool/string | `true` | default **on**: each request (turns, subagents, compaction) carries the harness session id for provider sticky routing — OpenRouter routes the session to the endpoint whose prompt cache is warm and groups the requests in its Logs "Sessions" view. `openai` backend: top-level body field; `anthropic` backend: `x-session-id` header (the real API rejects unknown body fields but ignores custom headers). `false` opts out — use it for OpenAI-compatible backends that reject unknown body fields. A **string** value passes through the body verbatim as a static routing key |
-| `headers` | no | object | `{}` | extra HTTP headers sent on every request to this provider — chat *and* `GET <url>/models` discovery (e.g. `{"X-Title": "my-app"}`). Values must be scalars; a name duplicating one the backend already sets (Content-Type, Authorization) is yours to avoid |
+| `headers` | no | object or list | `{}` | extra HTTP headers sent on every request to this provider — chat *and* `GET <url>/models` discovery (e.g. `{"X-Title": "my-app"}`, or `[["X-Title", "my-app"]]`). Values must be scalars (numbers/bools are sent as text); a name duplicating one the backend already sets (Content-Type, Authorization) is yours to avoid |
 | `openrouter_app_id` | no | bool | `false` | `true`: every request carries OpenRouter's app-attribution headers (`X-Title: minimal`, `HTTP-Referer: https://github.com/lim8en1/minimal`) so usage is credited to the project on OpenRouter's app leaderboard. A same-named `headers` entry wins per name; any other type is a parse error |
 | `max_tokens` | no | int | — | required for the `anthropic` backend (here or per-model) or every request fails |
 | `timeouts` | no | object | see right | transport timeouts in milliseconds, each a positive integer: `connect_ms` (5000), `request_ms` (120000, non-streaming calls), `stream_idle_ms` (60000, silence between bytes once the response started), `first_byte_ms` (600000, wait for the first response byte after the request was sent — raise for local backends prefilling very large prompts) |
 | `max_tokens_field` | no | string | `"max_tokens"` | the JSON body key the output cap is emitted under (`openai` backend only). Newer OpenAI models reject the legacy `max_tokens` key and require `"max_completion_tokens"` — set that here. Any other value is a parse error. Ignored by the `anthropic` backend |
 | `context_window_tokens` | no | int | — | per provider = default for all its models |
-| `variants` | no | array or object | — | effort variants applied to EVERY model under the entry — see [Reasoning-effort variants](#reasoning-effort-variants) below. For a `discover: true` entry this is the autodiscovery recipe (with none, discovery autodetects: every model whose catalog advertises an effort ladder gets that ladder verbatim) |
+| `variants` | no | array or object | — | effort variants applied to every model under the entry that declares none of its own — see [Reasoning-effort variants](#reasoning-effort-variants) below. For a `discover: true` entry this is the autodiscovery recipe (with none, discovery autodetects: every model whose catalog advertises an effort ladder gets that ladder verbatim) |
+| `whitelist` / `blacklist` | no | string list | — | picker filters on base model ids (see Filtering below) |
+| `metadata` | no | bool | `true` | enrich models missing a window/effort ladder from the model catalog |
+| `metadata_match` | no | string | `"full"` | `"full"` or `"substring"` id matching against the catalog |
+| `metadata_provider` | no | string | — | pin the catalog's provider table |
 
 ### Per model (`models.<name>`)
 
@@ -340,10 +354,12 @@ same list-or-map convention the skills plugin's slice uses):
 - **List form** — known effort names: `low`, `medium`, `high`, `xhigh`, `max`,
   `minimal`, `none`. Wire parameters are derived per backend: `anthropic`
   entries get `thinking: {type: "enabled", budget_tokens: N}` from a fixed
-  per-name budget scale (clamped to fit `max_tokens` — the API rejects
-  `budget_tokens >= max_tokens`); everything else gets
-  `reasoning_effort: "<name>"` (`xhigh`/`max` normalize to `high`, the top of
-  OpenAI's ladder; `none` means reasoning off where the backend has a switch).
+  per-name scale (low 4096, medium 8192, high 16384, xhigh 32768, max 65536;
+  clamped to leave 1k of `max_tokens` for output — the API rejects
+  `budget_tokens >= max_tokens`; `none` omits thinking; `minimal` is refused);
+  everything else gets `reasoning_effort: "<name>"` (`xhigh`/`max` send
+  `high`, the top of OpenAI's ladder; `none` sends `minimal`, the lowest rung
+  every backend accepts).
   An unknown name is a parse error naming the valid ones.
 - **Map form** — opencode-style per-variant bodies: `parameters` (passed
   through verbatim, model-parameter rules apply), plus optional
@@ -382,10 +398,13 @@ plugin settings that send one (`memory`'s `api_key`, `tools-web`'s
 
 A stored secret is reached only by naming it: nothing is picked up
 implicitly, so an entry with no `api_key` sends no key. A `secret:` reference
-that is not stored yet is a startup **warning**, and each use fails naming the
-`/secret set` that fixes it.
+that is not stored yet, or an `env:` variable that is unset, is a startup
+**warning**, and each use fails naming the fix.
 
-`secrets.json` is written by `/secret` (or by hand; it is re-read on use):
+`secrets.json` is written by `/secret` (or by hand; it is re-read on use).
+Every entry must be an object with a string `value` and an optional `hosts`
+list; anything else (a bare string, `hosts` given as a string) is an error,
+never skipped — a skipped `hosts` would let a host-bound key go anywhere:
 
 ```json
 { "anthropic":  { "value": "sk-...", "hosts": ["api.anthropic.com"] },
@@ -435,7 +454,7 @@ Mode vocabulary:
 |---|---|---|---|
 | `default_run_mode` | string | `"normal"` | one of the run modes |
 | `fallback` | object | harness defaults | five categories, each a permission mode: `read_only`, `file_write`, `execute`, `out_of_workdir`, `network`. Unset categories keep the harness default (bundled: `read_only=allow`, rest `ask`) |
-| `per_tool_overrides` | object | `{}` | tool permission key (bare tool name or `plugin.tool`) → permission mode. Keys that resolve to no registered tool → warning. Aliased tools keep their **original** name here (see docs/PLUGINS.md). MCP tools are keyed by their full name (`mcp__<server>__<tool>`) and refine the server's mode. Precedence: a preset's per-tool rule wins; a preset's category (or per-server MCP mode) and a global per-tool rule that both apply resolve to the **more restrictive** of the two; then the global category |
+| `per_tool_overrides` | object | `{}` | tool permission key (bare tool name or `plugin.tool`) → permission mode (`allow`/`ask`/`deny`, lower-case). Keys that resolve to no registered tool → warning. Aliased tools keep their **original** name here (see docs/PLUGINS.md). MCP tools are keyed by their full name (`mcp__<server>__<tool>`) and refine the server's mode. Precedence: a preset's per-tool rule wins; a preset's category (or per-server MCP mode) and a global per-tool rule that both apply resolve to the **more restrictive** of the two; then the global category |
 | `pattern_overrides` | object | `{}` | tool permission key → **glob → mode** rules matched against the tool's subject (bash: the command line **and its stages** — see below; `read`/`write`/`edit`/`grep`/`glob`: the canonical path). Semantics: when any rule matches, the **most restrictive matching rule** replaces the category default, folded most-restrictively with an exact `per_tool_overrides` entry if there is one (so `"bash": "allow"` cannot defeat a matching deny); zero matches leave the exact entry or category default. Downstream folds (out-of-workdir, network, subagent ceilings, run modes) apply as always — a pattern can never bypass the substrate. An `ask` rule is never satisfied by a session grant: a held grant on `/usr/bin/git` does not carry `git push --force` past `"git push *": ask`. What most-restrictive folding cannot express: a strict broad rule plus a more-specific allow (`"git *": ask` + `"git status": allow` stays ask) — set `pattern_precedence: "specific"` for that |
 | `pattern_precedence` | string | `"restrictive"` | how matching pattern rules for one tool combine. `"restrictive"`: the most restrictive match wins. `"specific"`: a matching **deny** still wins outright; otherwise the most specific match wins (most literal characters; ties go to the stricter rule), so `"git *": ask` + `"git status": allow` allows `git status` and asks for everything else. For bash, every stage needs an allow winner and any ask or deny winner decides; normalized respellings still only tighten. Also settable per preset (`permission_mode.pattern_precedence`); a project-local preset cannot choose `"specific"` |
 | `external_directory_patterns` | object | `{}` | glob → mode rules on the `out_of_workdir` dimension, matched against the canonical **absolute** path of an invocation that resolved outside the project root; the most restrictive matching rule replaces the scalar `out_of_workdir` for that invocation |
@@ -525,7 +544,7 @@ a commented template.
 
 | Field | Required | Notes |
 |---|---|---|
-| `default_timeout_ms` | no | int, default `10000`; must be ≥ 0 (`0` = no budget) |
+| `default_timeout_ms` | no | int, default `10000`; must be ≥ 0 (`0` = no budget; a cancellable emission can still be abandoned, an uncancellable one gets a 60 s floor) |
 | `hooks` | no | array of actions |
 
 Each action:
@@ -536,6 +555,9 @@ Each action:
 | `command` | **yes** | run via `/bin/sh -c` with the JSON payload on stdin; never argv-interpolated |
 | `timeout_ms` | no | int ≥ 0; default = `default_timeout_ms` |
 | `filter` | no | object of string→string, exact-match, ANDed; only on fields the point declares filterable |
+
+Any other field in an action is an error — including Claude Code's `matcher`,
+which here is spelled `filter: {"tool_name": "..."}`.
 
 Core hook points (plugins may register more, e.g. `tools-bash.before_command`):
 
@@ -828,11 +850,19 @@ shows through.
   patterns, unless the tool takes no patterns). A key naming neither warns and
   is ignored; a native `permission_mode` field wins over the block. Note that
   `permission_mode` (native or aliased) only sets ask/allow/deny for tools the
-  preset already admits — see `allowed_tools` above. Any OTHER frontmatter key
-  is passed through to the provider as a request parameter (`temperature`,
-  `top_p`, `reasoningEffort`, ...), overriding the model config's value —
-  except request fields the harness owns (`tools`, `tool_choice`, `messages`,
-  `stream`), which are ignored with a warning.
+  preset already admits — see `allowed_tools` above.
+- **`parameters:`** — provider request parameters for this preset, a map
+  passed through verbatim and overriding the model config's values
+  (`parameters: {reasoning_effort: high, seed: 7}`). opencode's top-level
+  `temperature`, `top_p` and `reasoningEffort` are accepted too (`parameters:`
+  wins on a clash). Request fields the harness owns (`tools`, `tool_choice`,
+  `messages`, `stream`, `model`) are refused. Values keep their YAML type, and a
+  quoted value stays a string (`"007"` is not 7).
+- **Every other frontmatter key is an error.** A typo'd key (`allowed-tools`)
+  used to ride to the provider as a request field; `tools:` (opencode / Claude
+  Code) is refused with a pointer to `allowed_tools` and `permission_mode`.
+  List fields (`allowed_tools`, `plugins`, ...) must be lists: `allowed_tools: "*"`
+  is an error, not "no tools".
 - **`tool_sources:`** — dynamic tool members a plugin offers, per source:
   `tool_sources: {mcp: [github, search]}` allows those `mcps.json` servers'
   tools. Each member is brought up at session start and on `/agent`; one that
