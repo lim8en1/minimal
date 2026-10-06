@@ -6,15 +6,14 @@
 // RATE SOURCES, in resolution order (first hit wins):
 //   1. the plugin's own config slice in plugins.json ("rates") -- the user's
 //      explicit prices, so they outrank everything;
-//   2. the fetched OpenRouter snapshot (its own /api/v1/models list), cached
-//      in this plugin's storage by the startup auto-refresh (a server start
-//      fetches when the cached snapshot is older than rates_refresh_days;
-//      --plugin-call cost-tracker refresh_rates and the .rpc refresh_rates method fetch on
-//      demand);
-//   3. the fetched LiteLLM snapshot, the same paths, the same rule;
-//   4. the seeded bundled snapshot (cost-rates.json in the config dir).
+//   2. the fetched snapshots, one tier per entry of CostSettings::rate_sources
+//      in list order, each cached in this plugin's storage under its own key
+//      by the startup auto-refresh (a server start fetches when a cached
+//      snapshot is older than rates_refresh_days; --plugin-call cost-tracker
+//      refresh_rates and the .rpc refresh_rates method fetch on demand);
+//   3. the seeded bundled snapshot (cost-rates.json in the config dir).
 //
-// The OpenRouter tier sits above LiteLLM because the wire ids an
+// The default list puts OpenRouter above LiteLLM because the wire ids an
 // OpenRouter-shaped provider sends ARE OpenRouter slugs ("z-ai/glm-5.3-flash"
 // -- the key inside providers.json's models map, whatever the provider is
 // named), so OpenRouter's own price for that exact string is the authoritative
@@ -51,12 +50,15 @@ inline constexpr char kPluginName[] = "cost-tracker";
 inline constexpr char kStorageNamespace[] = "cost-tracker";
 
 // Storage layout keys. Session history is one blob per session under
-// "sessions/<session_id>"; the two fetched-rates snapshots the startup
-// auto-refresh writes and RateTable's middle tiers read live at
-// "rates/fetched" (LiteLLM) and "rates/fetched_openrouter".
+// "sessions/<session_id>"; each fetched-rates snapshot the startup
+// auto-refresh writes and RateTable's middle tiers read lives at
+// "rates/fetched/<source name>" (FetchedRatesKey).
 inline constexpr char kSessionKeyPrefix[] = "sessions/";
-inline constexpr char kFetchedRatesKey[] = "rates/fetched";
-inline constexpr char kOpenRouterFetchedRatesKey[] = "rates/fetched_openrouter";
+inline constexpr char kFetchedRatesKeyPrefix[] = "rates/fetched/";
+
+inline std::string FetchedRatesKey(const std::string& source_name) {
+    return kFetchedRatesKeyPrefix + source_name;
+}
 
 // USD per million tokens. Absent fields are 0, which is correct for models
 // without cache pricing -- it is also what a genuinely free tier looks like,
@@ -147,6 +149,23 @@ std::map<std::string, Rate> IngestLiteLlmPrices(const nlohmann::json& document);
 // per-mtok on the way in.
 std::map<std::string, Rate> IngestOpenRouterPrices(const nlohmann::json& document);
 
+// A LiteLLM proxy's /model/info reply: the catalog's per-token fields nested
+// one level down under model_info, keyed by model_name (the proxy's alias --
+// the wire id its clients send): {"data": [{"model_name": "glm-flash",
+// "model_info": {"input_cost_per_token": 1.5e-07, ...}}, ...]}. Kept entries
+// need only a usable INPUT cost -- output and cache prices may be absent (0):
+// an internal gateway serving free models is the case this source exists
+// for, and a zero rate from the meter itself is a known rate, not "unknown".
+std::map<std::string, Rate> IngestLiteLlmProxyPrices(const nlohmann::json& document);
+
+// The snapshot shapes a rate source can serve -- one Ingest* above each.
+enum class RateFormat { kLiteLlm, kOpenRouter, kLiteLlmProxy };
+
+// The config spelling: "litellm", "openrouter", "litellm-proxy".
+const char* RateFormatName(RateFormat format);
+
+std::map<std::string, Rate> IngestPrices(RateFormat format, const nlohmann::json& document);
+
 struct FetchedRates {
     // ISO-8601 UTC, diagnostic only.
     std::string fetched_at;
@@ -165,14 +184,15 @@ std::optional<FetchedRates> FetchedFromJson(std::string_view json);
 // Bundled/config rate tables as raw "models" objects -- ParseRateTable
 // consumes them. Kept as JSON rather than pre-parsed maps so the table is
 // re-derivable and the resolver stays the single decision point.
+// `fetched_sources` names the fetched tiers, highest priority first; their
+// snapshots are read from storage by RefreshFetched.
 struct RateSources {
     nlohmann::json bundled_models = nlohmann::json::object();
     nlohmann::json config_rates = nlohmann::json::object();
-    std::optional<FetchedRates> fetched;
-    std::optional<FetchedRates> openrouter_fetched;
+    std::vector<std::string> fetched_sources;
 };
 
-// Resolution: config > openrouter-fetched > litellm-fetched > bundled.
+// Resolution: config > each fetched source in list order > bundled.
 // Thread-safe: /cost and the .rpc service read from command-pool and gRPC
 // threads while the startup auto-refresh (and any on-demand fetch) swaps the
 // fetched tables.
@@ -182,11 +202,11 @@ public:
 
     std::optional<Rate> Resolve(const std::string& model) const;
 
-    // Re-reads both fetched snapshots from storage and swaps them in. Called
+    // Re-reads every fetched snapshot from storage and swaps them in. Called
     // at registration and after every fetch (the startup auto-refresh, the
     // --plugin-call cost-tracker refresh_rates one-shot, the .rpc refresh_rates method). A
     // missing or corrupt blob clears only THAT tier -- one corrupt snapshot
-    // must not lose the other.
+    // must not lose the others.
     void RefreshFetched();
 
     // Replaces the config tier (the plugin's `rates`): a live reconfigure.
@@ -197,8 +217,8 @@ private:
     mutable std::mutex mu_;
     std::map<std::string, Rate> bundled_;
     std::map<std::string, Rate> config_;
-    std::map<std::string, Rate> fetched_;
-    std::map<std::string, Rate> openrouter_fetched_;
+    const std::vector<std::string> fetched_sources_;
+    std::vector<std::map<std::string, Rate>> fetched_;  // parallel to fetched_sources_
     plugins::PluginStorage* storage_;  // borrowed; may be null
 };
 

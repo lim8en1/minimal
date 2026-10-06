@@ -27,14 +27,23 @@ std::string Iso8601UtcNow() {
     return out.str();
 }
 
-// One source: HTTP GET, parse, ingest. On ANY failure returns an empty map
-// and fills `error` -- never throws, never touches storage.
-std::map<std::string, Rate> FetchSource(
-    const std::string& url, int timeout_ms, const std::string& label,
-    std::map<std::string, Rate> (*ingest)(const nlohmann::json&), std::string& error) {
+// One source: HTTP GET (with its bearer, when configured), parse, ingest. On
+// ANY failure returns an empty map and fills `error` -- never throws, never
+// touches storage.
+std::map<std::string, Rate> FetchSource(const RateSourceSettings& source, int timeout_ms,
+                                        std::string& error) {
+    const std::string& label = source.name;
     net::HttpRequest request;
-    request.url = url;
+    request.url = source.url;
     request.request_timeout = std::chrono::milliseconds(timeout_ms);
+    if (source.api_key.configured()) {
+        try {
+            request.headers.push_back({"Authorization", "Bearer " + source.api_key.Get().value});
+        } catch (const std::exception& err) {
+            error = label + " api key: " + err.what();
+            return {};
+        }
+    }
     net::HttpResponse response;
     try {
         response = net::HttpClient{}.Get(request);
@@ -53,9 +62,10 @@ std::map<std::string, Rate> FetchSource(
         error = label + " snapshot is not valid JSON: " + err.what();
         return {};
     }
-    auto rates = ingest(document);
+    auto rates = IngestPrices(source.format, document);
     if (rates.empty()) {
-        error = "the " + label + " snapshot contained no per-token-priced models";
+        error = "the " + label + " snapshot contained no per-token-priced models (is it " +
+                RateFormatName(source.format) + "-shaped?)";
     }
     return rates;
 }
@@ -74,85 +84,70 @@ std::int64_t UnixSecondsNow() {
 RatesFetchOutcome FetchAndUpdateRates(const CostSettings& settings, CostStore& store,
                                       RateTable& rates) {
     RatesFetchOutcome outcome;
+    const auto& sources = settings.rate_sources;
+    if (sources.empty()) {
+        outcome.error = "no rate_sources configured";
+        return outcome;
+    }
 
     // Fetched CONCURRENTLY, not sequentially: each is an independent
     // blocking HTTP GET (own socket, own net::HttpClient instance -- no
-    // shared state between the two calls), so running them one after the
-    // other doubled worst-case latency for no reason. This matters most on
-    // the paths that block a human or the whole process on the result:
-    // startup auto-refresh, `--plugin-call cost-tracker refresh_rates`, and the `.rpc
+    // shared state between the calls), so running them one after the other
+    // would sum worst-case latency for no reason. This matters most on the
+    // paths that block a human or the whole process on the result: startup
+    // auto-refresh, `--plugin-call cost-tracker refresh_rates`, and the `.rpc
     // refresh_rates` handler thread all run through here.
-    std::string litellm_error;
-    std::string openrouter_error;
-    std::map<std::string, Rate> litellm;
-    std::map<std::string, Rate> openrouter;
-    std::thread litellm_thread([&] {
-        litellm = FetchSource(settings.rates_fetch_url, settings.rates_fetch_timeout_ms, "LiteLLM",
-                              IngestLiteLlmPrices, litellm_error);
-    });
-    openrouter = FetchSource(settings.openrouter_rates_fetch_url, settings.rates_fetch_timeout_ms,
-                             "OpenRouter", IngestOpenRouterPrices, openrouter_error);
-    litellm_thread.join();
-
-    if (litellm.empty() && openrouter.empty()) {
-        outcome.error = litellm_error + "; " + openrouter_error;
-        return outcome;
+    std::vector<std::map<std::string, Rate>> fetched(sources.size());
+    outcome.sources.resize(sources.size());
+    {
+        std::vector<std::thread> workers;
+        workers.reserve(sources.size());
+        for (std::size_t i = 0; i < sources.size(); ++i) {
+            outcome.sources[i].name = sources[i].name;
+            workers.emplace_back([&, i] {
+                fetched[i] = FetchSource(sources[i], settings.rates_fetch_timeout_ms,
+                                         outcome.sources[i].error);
+            });
+        }
+        for (auto& worker : workers) worker.join();
     }
 
     outcome.fetched_at = Iso8601UtcNow();
     const std::int64_t fetched_at_unix = UnixSecondsNow();
-    // Each cache write is its own try/catch (not one try wrapping both): a
-    // single shared try meant a LiteLLM write that succeeded was silently
-    // discarded from the caller's point of view whenever the SUBSEQUENT
-    // OpenRouter write threw -- `RefreshFetched()` sat after the catch and
-    // never ran, so the live RateTable kept stale prices even though storage
-    // already had the fresh LiteLLM snapshot. Whichever snapshot persists
-    // should take effect regardless of what happens to the other.
-    std::string litellm_store_error;
-    if (!litellm.empty()) {
+    // Each cache write is its own try/catch: whichever snapshot persists
+    // takes effect regardless of what happens to the others -- one shared
+    // try once meant a written snapshot never reached the live RateTable
+    // because a LATER write threw before RefreshFetched() ran.
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        if (fetched[i].empty()) continue;
+        auto& result = outcome.sources[i];
         try {
-            FetchedRates fetched;
-            fetched.fetched_at = outcome.fetched_at;
-            fetched.fetched_at_unix = fetched_at_unix;
-            const int count = static_cast<int>(litellm.size());
-            fetched.models = std::move(litellm);
-            store.SetFetchedRates(fetched);
-            outcome.litellm_updated = count;
+            FetchedRates snapshot;
+            snapshot.fetched_at = outcome.fetched_at;
+            snapshot.fetched_at_unix = fetched_at_unix;
+            const int count = static_cast<int>(fetched[i].size());
+            snapshot.models = std::move(fetched[i]);
+            store.SetFetchedRates(result.name, snapshot);
+            result.updated = count;
+            outcome.updated += count;
         } catch (const std::exception& err) {
-            litellm_store_error = std::string("caching the LiteLLM rates failed: ") + err.what();
-        }
-    }
-    std::string openrouter_store_error;
-    if (!openrouter.empty()) {
-        try {
-            FetchedRates fetched;
-            fetched.fetched_at = outcome.fetched_at;
-            fetched.fetched_at_unix = fetched_at_unix;
-            const int count = static_cast<int>(openrouter.size());
-            fetched.models = std::move(openrouter);
-            store.SetOpenRouterFetchedRates(fetched);
-            outcome.openrouter_updated = count;
-        } catch (const std::exception& err) {
-            openrouter_store_error =
-                std::string("caching the OpenRouter rates failed: ") + err.what();
+            result.error = "caching the " + result.name + " rates failed: " + err.what();
         }
     }
 
-    const bool any_stored = outcome.litellm_updated > 0 || outcome.openrouter_updated > 0;
+    const bool any_stored = outcome.updated > 0;
     if (any_stored) rates.RefreshFetched();
-
     outcome.ok = any_stored;
-    outcome.updated = outcome.litellm_updated + outcome.openrouter_updated;
-    // A degraded success: the fresh tier takes effect while the other stays
-    // stale -- the same rule a total failure obeys, just per source. Fetch
-    // errors and store errors are both reported here, whichever occurred.
+    // A degraded success: each fresh tier takes effect while the failed ones
+    // stay stale -- the same rule a total failure obeys, just per source.
+    // Fetch errors and store errors are both reported here.
     std::string notes;
-    for (const std::string* note :
-        {&litellm_error, &openrouter_error, &litellm_store_error, &openrouter_store_error}) {
-        if (note->empty()) continue;
-        notes += notes.empty() ? *note : "; " + *note;
+    for (const auto& result : outcome.sources) {
+        if (result.error.empty()) continue;
+        notes += notes.empty() ? result.error : "; " + result.error;
     }
     if (!any_stored) {
+        outcome.fetched_at.clear();
         outcome.error = notes;
     } else if (!notes.empty()) {
         outcome.warning = notes;

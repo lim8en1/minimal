@@ -158,28 +158,16 @@ std::vector<std::string> CostStore::SessionIds() const {
     return ids;
 }
 
-std::optional<FetchedRates> CostStore::GetFetchedRates() const {
+std::optional<FetchedRates> CostStore::GetFetchedRates(const std::string& source_name) const {
     if (storage_ == nullptr) return std::nullopt;
-    const auto blob = storage_->Get(kStorageNamespace, kFetchedRatesKey);
+    const auto blob = storage_->Get(kStorageNamespace, FetchedRatesKey(source_name));
     if (!blob) return std::nullopt;
     return FetchedFromJson(*blob);
 }
 
-void CostStore::SetFetchedRates(const FetchedRates& rates) {
+void CostStore::SetFetchedRates(const std::string& source_name, const FetchedRates& rates) {
     if (storage_ == nullptr) return;
-    storage_->Set(kStorageNamespace, kFetchedRatesKey, FetchedToJson(rates).dump());
-}
-
-std::optional<FetchedRates> CostStore::GetOpenRouterFetchedRates() const {
-    if (storage_ == nullptr) return std::nullopt;
-    const auto blob = storage_->Get(kStorageNamespace, kOpenRouterFetchedRatesKey);
-    if (!blob) return std::nullopt;
-    return FetchedFromJson(*blob);
-}
-
-void CostStore::SetOpenRouterFetchedRates(const FetchedRates& rates) {
-    if (storage_ == nullptr) return;
-    storage_->Set(kStorageNamespace, kOpenRouterFetchedRatesKey, FetchedToJson(rates).dump());
+    storage_->Set(kStorageNamespace, FetchedRatesKey(source_name), FetchedToJson(rates).dump());
 }
 
 }  // namespace minimal::cost_tracker

@@ -109,8 +109,7 @@ class Arena:
     def set_plugins(self, enabled):
         # cost-tracker fetches pricing at startup; point it at a closed port
         # so the matrix never touches the network.
-        offline = {"rates_fetch_url": "http://127.0.0.1:9/x",
-                   "openrouter_rates_fetch_url": "http://127.0.0.1:9/x",
+        offline = {"rate_sources": [{"format": "litellm", "url": "http://127.0.0.1:9/x"}],
                    "rates_fetch_timeout_ms": 200}
         os.makedirs(os.path.join(self.config, "plugins.d"), exist_ok=True)
         self.write(os.path.join("plugins.d", "cost-tracker.json"), offline)

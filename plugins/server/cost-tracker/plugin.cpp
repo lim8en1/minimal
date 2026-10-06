@@ -12,8 +12,8 @@
 //     PluginCall channel -- the data path the future UI view consumes -- and
 //     its refresh_rates method is what the server's --plugin-call
 //     flag drives;
-//   - the startup auto-refresh (rates_refresh.hpp) fetches the LiteLLM and
-//     OpenRouter pricing snapshots when the cached ones are older than
+//   - the startup auto-refresh (rates_refresh.hpp) fetches the configured
+//     rate_sources' pricing snapshots when the cached ones are older than
 //     CostSettings::rates_refresh_days -- the opt-in network rule's
 //     replacement, bounded and background, with the join parked on the
 //     RatesRefresherOwner observer.
@@ -26,14 +26,13 @@
 // (ARCHITECTURE.md names usage tracking among SessionObserver's uses, and
 // TurnSummary::model exists so a per-model rate is resolvable at all).
 //
-// PRICING. Four sources, config > openrouter-fetched > litellm-fetched >
-// bundled: the user's "rates" slice in plugins.json, the OpenRouter snapshot
-// (its slugs ARE the wire model ids an OpenRouter-shaped provider sends, so
-// no provider naming is consulted), the LiteLLM snapshot (both cached by the
-// startup auto-refresh, the --plugin-call cost-tracker refresh_rates flag, or the .rpc service's
-// refresh_rates), and the seeded cost-rates.json in the config dir
-// (bundled/ treatment: user-editable text, never overwritten, never compiled
-// in). Keys are model ids -- the ccusage convention. A model with no rate
+// PRICING. config > each fetched rate source in list order > bundled: the
+// user's "rates" slice in plugins.json, the snapshots of rate_sources
+// (OpenRouter then LiteLLM by default, each cached by the startup
+// auto-refresh, the --plugin-call cost-tracker refresh_rates flag, or the
+// .rpc service's refresh_rates), and the seeded cost-rates.json in the
+// config dir (bundled/ treatment: user-editable text, never overwritten,
+// never compiled in). Keys are model ids -- the ccusage convention. A model with no rate
 // anywhere, and a turn whose usage the backend reported as all zeros (the
 // known proxy gap), render as "unknown", never as $0.00.
 //
@@ -88,6 +87,13 @@ std::shared_ptr<minimal::cost_tracker::CostSettings>& SharedSettings() {
     return settings;
 }
 
+// The resolver rate_sources' api_key references bind through -- kept for
+// reconfigure, which gets no context. Null when the host provides none.
+const minimal::config::SecretResolver*& SharedSecrets() {
+    static const minimal::config::SecretResolver* secrets = nullptr;
+    return secrets;
+}
+
 std::shared_ptr<minimal::cost_tracker::SessionIndex>& SharedIndex() {
     static std::shared_ptr<minimal::cost_tracker::SessionIndex> index;
     return index;
@@ -138,12 +144,20 @@ nlohmann::json LoadBundledRates() {
 }
 
 void EnsureSharedState(const minimal::plugins::PluginRegistrationContext& context) {
-    if (!SharedSettings()) SharedSettings() = std::make_shared<minimal::cost_tracker::CostSettings>(
-        minimal::cost_tracker::ParseCostSettings(context.config));
+    if (!SharedSettings()) {
+        // core.secrets is core-provided before any plugin loads.
+        SharedSecrets() = context.services != nullptr
+                              ? static_cast<const minimal::config::SecretResolver*>(
+                                    context.services->Find(minimal::config::kSecretsServiceName))
+                              : nullptr;
+        SharedSettings() = std::make_shared<minimal::cost_tracker::CostSettings>(
+            minimal::cost_tracker::ParseCostSettings(context.config, SharedSecrets()));
+    }
     if (!SharedRates()) {
         minimal::cost_tracker::RateSources sources;
         sources.bundled_models = LoadBundledRates();
         sources.config_rates = SharedSettings()->rates;
+        sources.fetched_sources = SharedSettings()->RateSourceNames();
         SharedRates() = std::make_shared<minimal::cost_tracker::RateTable>(
             std::move(sources), context.storage);
         // Pick up a snapshot fetched by an earlier process run.
@@ -193,7 +207,8 @@ bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error
         return false;
     }
     try {
-        SharedRates()->SetConfigRates(minimal::cost_tracker::ParseCostSettings(config).rates);
+        SharedRates()->SetConfigRates(
+            minimal::cost_tracker::ParseCostSettings(config, SharedSecrets()).rates);
         return true;
     } catch (const std::exception& e) {
         error = e.what();
