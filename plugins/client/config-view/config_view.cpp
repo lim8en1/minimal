@@ -409,13 +409,14 @@ void ConfigView::OnShow() const {
     }
 }
 
-void ConfigCommand::Run(const std::vector<std::string>& positional, const std::string&) {
+bool ConfigCommand::Run(const std::vector<std::string>& positional, const std::string&) {
     if (!positional.empty()) {
         view_->feed().Open(positional[0]);
     } else {
         view_->feed().Back();
     }
     if (ui_ != nullptr) ui_->ShowView(kViewId);
+    return true;
 }
 
 }  // namespace minimal::config_view

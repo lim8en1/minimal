@@ -75,6 +75,7 @@ struct LoadedFixtures {
     std::unique_ptr<ClientApi> client_api;
     std::unique_ptr<FocusProvider> focus_provider;
     std::unique_ptr<WidgetKit> widgets;  // the host's proxy over registries.widget_kit
+    std::unique_ptr<HostActionQueue> actions;
 
     // `candidates` loaded against fresh registries. unique_ptr, not a value:
     // AttentionState holds a mutex, so the struct cannot move, and NRVO still
@@ -85,10 +86,14 @@ struct LoadedFixtures {
         f->client_api = MakeHostClientApi(nullptr);
         f->focus_provider = MakeHostFocusProvider();
         f->widgets = MakeHostWidgetKit(f->registries.widget_kit);
+        auto* host_ui = static_cast<HostFocusProvider*>(f->focus_provider.get());
+        f->actions = std::make_unique<HostActionQueue>(host_ui);
         ClientPluginLoader loader(f->registries, {.attention = f->attention_sink.get(),
                                                   .client_api = f->client_api.get(),
                                                   .focus = f->focus_provider.get(),
-                                                  .widgets = f->widgets.get()});
+                                                  .ui = host_ui,
+                                                  .widgets = f->widgets.get(),
+                                                  .actions = f->actions.get()});
         f->records = loader.LoadAll(candidates);
         // As the bootstrap does once names resolve: core's kit, if unclaimed.
         RegisterDefaultWidgetKit(f->registries.widget_kit);
@@ -366,6 +371,64 @@ TEST_CASE("the widget kit: a plugin's kit draws for every view; core's fills an 
     const auto core_widgets = MakeHostWidgetKit(unclaimed);
     CHECK(ToText(core_widgets->ModalFrame(theme, "core frame", {ftxui::text("row")}, {}, ""))
               .find("core frame") != std::string::npos);
+}
+
+namespace {
+
+// The TUI's half of HostActions, recording what was applied to it.
+class RecordingActions final : public HostActions {
+public:
+    void InsertPrompt(const std::string& text) override { inserted.push_back(text); }
+    void SetTheme(const std::string& name) override { themes.push_back(name); }
+    std::vector<std::string> inserted;
+    std::vector<std::string> themes;
+};
+
+class CountingUi final : public HostUi {
+public:
+    void RequestRedraw() override { ++redraws; }
+    void ShowView(const std::string&) override {}
+    void CloseView(const std::string&) override {}
+    void SetPanelVisible(const std::string&, bool) override {}
+    void FocusPanel(const std::string&) override {}
+    std::vector<KeyBindingInfo> KeyBindings() const override { return {}; }
+    std::vector<CommandCatalogEntry> CommandCatalog() const override { return {}; }
+    std::vector<std::string> ThemeNames() const override { return {}; }
+    int redraws = 0;
+};
+
+}  // namespace
+
+TEST_CASE("host actions: queued from any thread, applied to the TUI in order, with a redraw",
+          "[client_plugins][host_actions]") {
+    CountingUi ui;
+    HostActionQueue queue(&ui);
+    std::thread worker([&] { queue.InsertPrompt("/first "); });
+    worker.join();
+    queue.InsertPrompt("/second ");
+    queue.SetTheme("light");
+    CHECK(ui.redraws == 3);  // one frame asked for per verb
+
+    RecordingActions tui;
+    for (auto& action : queue.Take()) action(tui);
+    CHECK(tui.inserted == std::vector<std::string>{"/first ", "/second "});
+    CHECK(tui.themes == std::vector<std::string>{"light"});
+    CHECK(queue.Take().empty());  // drained
+}
+
+TEST_CASE("host reads answer empty until the TUI attaches them, then through every plugin's ui",
+          "[client_plugins][host_actions]") {
+    auto provider = MakeHostFocusProvider();
+    HostUi* bound = provider->UiFor("some-plugin");
+    CHECK(bound->KeyBindings().empty());
+    CHECK(bound->CommandCatalog().empty());
+    provider->AttachReads(
+        {.key_bindings = [] { return std::vector<KeyBindingInfo>{{"tab.next", "alt+down", "next tab", "tabs", 0}}; },
+         .command_catalog = [] { return std::vector<CommandCatalogEntry>{{.name = "cost"}}; }});
+    REQUIRE(bound->KeyBindings().size() == 1);
+    CHECK(bound->KeyBindings()[0].key == "alt+down");
+    REQUIRE(provider->CommandCatalog().size() == 1);
+    CHECK(provider->CommandCatalog()[0].name == "cost");
 }
 
 TEST_CASE("attention state: plugin raise wins until cleared", "[client_plugins]") {
@@ -902,6 +965,47 @@ TEST_CASE("the bundled config-view plugin registers its view and /config",
         found = found || command->name() == "config";
     }
     CHECK(found);
+}
+
+#ifndef MINIMAL_HELP_VIEW_PLUGIN
+#error "MINIMAL_HELP_VIEW_PLUGIN must name the built help-view plugin"
+#endif
+
+// help-view as the real artifact: both overlays and both commands register,
+// the keymap under core's old action id with its default key.
+TEST_CASE("the bundled help-view plugin registers its overlays, /keymap and /help",
+          "[client_plugins][help_view]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_HELP_VIEW_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    INFO(fixtures->records.front().error);
+    REQUIRE(fixtures->records.front().ok());
+    const View* keymap = fixtures->registries.views.Find("help.overlay");
+    REQUIRE(keymap != nullptr);
+    CHECK(keymap->spec().default_keybinding == "alt+h");
+    CHECK(fixtures->registries.views.Find("help.commands") != nullptr);
+    std::vector<std::string> commands;
+    for (const auto& command : fixtures->registries.client_commands.All()) {
+        commands.emplace_back(command->name());
+    }
+    std::sort(commands.begin(), commands.end());
+    CHECK(commands == std::vector<std::string>{"help", "keymap"});
+}
+
+#ifndef MINIMAL_THEME_VIEW_PLUGIN
+#error "MINIMAL_THEME_VIEW_PLUGIN must name the built theme-view plugin"
+#endif
+
+TEST_CASE("the bundled theme-view plugin registers its picker and a read-only /theme",
+          "[client_plugins][theme_view]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_THEME_VIEW_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    INFO(fixtures->records.front().error);
+    REQUIRE(fixtures->records.front().ok());
+    CHECK(fixtures->registries.views.Find("theme") != nullptr);
+    REQUIRE(fixtures->registries.client_commands.Find("theme") != nullptr);
+    CHECK(fixtures->registries.client_commands.Find("theme")->read_only());
 }
 
 // regenerate_per_session=false must share one banner across every session

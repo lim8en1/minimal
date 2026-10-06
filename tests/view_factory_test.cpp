@@ -31,7 +31,6 @@
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/view/chat_view.hpp"
-#include "minimal/client/view/commands_help.hpp"
 #include "minimal/client/view/prompt_editor.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/session_picker.hpp"
@@ -2661,52 +2660,6 @@ TEST_CASE("prompt editor: arrowing past the suggestion viewport scrolls the "
     const std::string frame = RenderFrame(editor);
     CHECK(frame.find("cmd10") != std::string::npos);   // the selection is visible
     CHECK(frame.find("cmd0 ") == std::string::npos);   // the head scrolled away
-}
-
-// ---------------------------------------------------------------------------
-// /help overlay (commands help view)
-// ---------------------------------------------------------------------------
-
-TEST_CASE("commands help overlay lists the whole catalog and closes on Escape",
-          "[commands_help]") {
-    // Regression: /help's server-side listing reached the transient notice
-    // line, capped at a handful of rows with no way to scroll -- a catalog
-    // larger than the viewport was unreachable. The overlay is built from
-    // the client's ListCommands catalog, so the LAST entry below must be
-    // rendered too.
-    const auto theme = TestTheme();
-    const std::vector<CommandCatalogEntry> catalog = [] {
-        std::vector<CommandCatalogEntry> entries;
-        for (int i = 0; i < 15; ++i) {
-            entries.push_back({"cmd" + std::to_string(i), "summary " + std::to_string(i), false,
-                               false});
-        }
-        return entries;
-    }();
-    bool closed = false;
-    auto view = MakeCommandsHelpView(SnapshotOf(catalog), theme, [&] { closed = true; });
-
-    const std::string frame = RenderFrame(view);
-    CHECK(frame.find("cmd0") != std::string::npos);   // the head
-    CHECK(frame.find("cmd14") != std::string::npos);  // ...and the tail, unreachable before
-
-    REQUIRE(SendEvent(view, ftx::Event::Escape));
-    CHECK(closed);
-}
-
-TEST_CASE("commands help overlay: Enter hands the command to on_pick, then closes",
-          "[commands_help]") {
-    const auto theme = TestTheme();
-    const std::vector<CommandCatalogEntry> catalog = {{"compact", "summarize", false, false},
-                                                      {"clear", "start over", false, false}};
-    bool closed = false;
-    std::string picked;
-    auto view = MakeCommandsHelpView(SnapshotOf(catalog), theme, [&] { closed = true; }, nullptr, nullptr,
-                                     nullptr, [&](const std::string& name) { picked = name; });
-    CHECK(RenderFrame(view).find("enter: insert") != std::string::npos);
-    REQUIRE(SendEvent(view, ftx::Event::Return));
-    CHECK(picked == "compact");   // the first row
-    CHECK(closed);
 }
 
 // ---------------------------------------------------------------------------

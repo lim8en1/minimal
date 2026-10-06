@@ -49,7 +49,9 @@
 
 namespace minimal::client::app {
 
-class TuiApp {
+// Also the TUI's own HostActions: what plugins queue (HostActionQueue) is
+// applied to it on the UI thread.
+class TuiApp final : private plugins::HostActions {
 public:
     explicit TuiApp(const ParsedArgs& args) : args_(args) {}
     ~TuiApp() { Shutdown(); }
@@ -99,6 +101,13 @@ private:
 
     // --- operations (what RunTui's lambdas were) ---
     CommandCatalogCache::Snapshot CurrentCatalog();
+
+    // HostActions, applied on the UI thread.
+    void InsertPrompt(const std::string& text) override;
+    void SetTheme(const std::string& name) override { ApplyTheme(name); }
+    // HostUi's reads (HostFocusProvider::AttachReads).
+    std::vector<plugins::KeyBindingInfo> KeyBindingsForPlugins() const;
+    std::vector<CommandCatalogEntry> CatalogForPlugins();
     AppState::CommandScope CommandScope() const;
     void CloseTab(const std::string& id);
     std::string FocusedOrNewTab();
@@ -113,8 +122,6 @@ private:
     void ClearFocusedNotice();
     void FocusedNotice(const std::string& text);
     void OpenNewSession();
-    void OpenThemePicker();
-    void OpenKeymapHelp();
     void RequestQuit();
     void StageClose(std::vector<std::string> ids, bool quit);
     void ToggleFold(const std::string& tab_id, bool thinking);
@@ -157,9 +164,6 @@ private:
     bool& show_agent_picker_ = modals_.Flag(ModalId::kAgentPicker);
     bool& show_model_picker_ = modals_.Flag(ModalId::kModelPicker);
     bool& show_subagent_picker_ = modals_.Flag(ModalId::kSubagentPicker);
-    bool& show_theme_picker_ = modals_.Flag(ModalId::kThemePicker);
-    bool& show_keymap_help_ = modals_.Flag(ModalId::kKeymapHelp);
-    bool& show_commands_help_ = modals_.Flag(ModalId::kCommandsHelp);
     bool& show_quit_confirm_ = modals_.Flag(ModalId::kQuitConfirm);
     bool& show_permission_ = modals_.Flag(ModalId::kPermission);
     bool& show_confirmation_ = modals_.Flag(ModalId::kConfirmation);
@@ -191,17 +195,12 @@ private:
     std::shared_ptr<ftxui::Component> model_picker_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> subagent_picker_child_ =
         std::make_shared<ftxui::Component>();
-    std::shared_ptr<ftxui::Component> theme_picker_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> plugin_modal_child_ = std::make_shared<ftxui::Component>();
     PendingConfirmation confirm_request_;
     ftxui::Component confirm_modal_;
     std::optional<PickerController> picker_controller_;
     // Reset slots for the two help overlays: they are built once, so without
     // these the typed filter survived across opens.
-    std::function<void()> keymap_help_reset_;
-    std::function<void()> commands_help_reset_;
-    ftxui::Component keymap_help_view_;
-    ftxui::Component commands_help_view_;
     ftxui::Component plugin_modal_host_;
 
     // --- frame ---

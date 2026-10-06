@@ -92,6 +92,8 @@ struct TuiEnvironment {
     std::unique_ptr<plugins::HostFocusProvider> host_focus_provider;
     std::unique_ptr<plugins::AttentionSink> attention_sink;
     std::unique_ptr<plugins::ClientApi> host_client_api;
+    // Concrete type: the TUI drains it (Take) in its pump.
+    std::unique_ptr<plugins::HostActionQueue> host_actions;
 
     plugins::ClientRegistries registries;
     // The WidgetKit plugins get (forwarding to registries.widget_kit, which it

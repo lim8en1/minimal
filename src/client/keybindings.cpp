@@ -44,11 +44,6 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"session.picker", "ctrl+o"},
         {"agent.picker", "alt+g"},
         {"model.picker", "alt+m"},
-        // Not f1: on Mac keyboards F1 is a hardware brightness key by
-        // default (needs Fn held, or "Use F1, F2, etc. keys as standard
-        // function keys" enabled in System Settings) -- alt+h reaches every
-        // keyboard with no configuration, and "h" for help is mnemonic.
-        {"help.overlay", "alt+h"},
         {"permission.cycle", "shift+tab"},
         {"session.pause", "alt+p"},
         {"panel.toggle", "ctrl+t"},

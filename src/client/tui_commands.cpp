@@ -23,23 +23,6 @@ namespace minimal::client::app {
 void TuiApp::RegisterClientCommands() {
     CommandRouter& router = command_router_;
 
-    // "/help <command>" still goes to the server: one command's usage is a
-    // short notice. The bare listing is the filterable overlay -- the notice
-    // line's handful of rows could not hold it.
-    router.Add({"help", "", true, false, [this](const CommandInvocationText& parsed) {
-        if (!parsed.positional.empty()) return false;
-        ClearFocusedNotice();   // an overlay sets no notice; drop a stale one
-        if (commands_help_reset_) commands_help_reset_();
-        show_commands_help_ = true;
-        return true;
-    }});
-    // Arguments are accepted and ignored: there is no per-binding detail.
-    router.Add({"keymap", "show all configured key bindings", true, false,
-                [this](const CommandInvocationText&) {
-        ClearFocusedNotice();
-        OpenKeymapHelp();
-        return true;
-    }});
     for (const bool pause : {true, false}) {
         router.Add({pause ? "pause" : "resume",
                     pause ? "pause the agent (stops after its current tool call)"
@@ -134,18 +117,6 @@ void TuiApp::RegisterClientCommands() {
         FocusedNotice("detached -- /sessions reattaches a live session");
         return true;
     }});
-    // Decoration, not session state: works on any tab. Bare opens the picker,
-    // named swaps directly.
-    router.Add({"theme", "switch the UI theme", true, false,
-                [this](const CommandInvocationText& parsed) {
-        if (parsed.positional.empty()) {
-            ClearFocusedNotice();
-            OpenThemePicker();
-        } else {
-            ApplyTheme(parsed.positional.front());
-        }
-        return true;
-    }});
     // THE DESIRED-STATE COMMANDS, identical on every tab: bare opens the
     // client-owned picker; named sets the tab's desired state (riding
     // CreateSessionRequest on a sessionless tab, converging at the next turn
@@ -228,7 +199,11 @@ void TuiApp::RegisterClientCommands() {
             continue;
         }
         const bool needs_session = plugin_command->requires_session();
-        router.Add({name, std::string(plugin_command->summary()), false, needs_session,
+        // An unlisted command intercepts a server command's forms: no
+        // summary, so the catalog keeps the server's entry for the name.
+        const std::string summary =
+            plugin_command->listed() ? std::string(plugin_command->summary()) : std::string();
+        router.Add({name, summary, plugin_command->read_only(), needs_session,
                     [this, command = plugin_command.get(), name,
                      needs_session](const CommandInvocationText& parsed) {
             if (needs_session && app_->FocusedSessionId().empty()) {
@@ -236,7 +211,7 @@ void TuiApp::RegisterClientCommands() {
                 return true;
             }
             try {
-                command->Run(parsed.positional, parsed.raw);
+                return command->Run(parsed.positional, parsed.raw);
             } catch (const std::exception& error) {
                 FocusedNotice("/" + name + " failed: " + error.what());
             } catch (...) {

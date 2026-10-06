@@ -40,3 +40,13 @@ add_subdirectory(ask-view)
 # `plugins` endpoint, built on client core's reusable schema form.
 
 add_subdirectory(config-view)
+
+# help-view is the key bindings and /-commands overlays (alt+h, /keymap, a
+# bare /help), over the host's own reads; core keeps only the vocabulary.
+
+add_subdirectory(help-view)
+
+# theme-view is the theme picker and /theme, over the host's ThemeNames read
+# and SetTheme action.
+
+add_subdirectory(theme-view)

@@ -48,6 +48,7 @@
 #include <tree_sitter/api.h>
 
 #include "minimal/client/chat_model.hpp"
+#include "minimal/client/command_catalog_entry.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/render/syntax_highlighter.hpp"
 #include "minimal/client/view/widget_types.hpp"
@@ -75,6 +76,16 @@ using LanguageFnPtr = minimal::client::LanguageFnPtr;
 // until some unrelated event happened to redraw. RequestRedraw asks for the
 // next frame. Thread-safe, never blocks, cheap (a counter bump); calling it
 // with nothing new is harmless.
+// One key binding as the TUI has it: the action or view it triggers, the
+// key, and -- core's vocabulary -- what it does and where it belongs.
+struct KeyBindingInfo {
+    std::string id;           // "chat.scroll_up", or a plugin view's id
+    std::string key;          // "ctrl+alt+k"
+    std::string description;  // "scroll the chat up"
+    std::string group;        // "chat", ..., "plugins"
+    int order = 0;            // within the group, as core lists it
+};
+
 class HostUi {
 public:
     virtual ~HostUi() = default;
@@ -91,6 +102,39 @@ public:
     virtual void SetPanelVisible(const std::string& view_id, bool visible) = 0;
     // Panels only, and only a visible one: it receives key events next.
     virtual void FocusPanel(const std::string& view_id) = 0;
+
+    // --- Reads: what the TUI knows. UI thread only (render, an event, a
+    // view's OnShow), where the host's own state is consistent.
+
+    // Every key binding in force -- core's actions and the plugin views' --
+    // with what core says each does: its own vocabulary, the plugin view's
+    // title for a view.
+    virtual std::vector<KeyBindingInfo> KeyBindings() const = 0;
+    // The /-commands the focused tab offers: the server's (for the tab's
+    // project and session), the client's and the plugins', filtered as the
+    // prompt's autocomplete filters them -- without a session only what
+    // runs without one, on a subagent only what is read-only there.
+    virtual std::vector<CommandCatalogEntry> CommandCatalog() const = 0;
+    // The themes there are to switch to (the themes dir's files, by name).
+    virtual std::vector<std::string> ThemeNames() const = 0;
+};
+
+// --- Host actions -------------------------------------------------------------
+
+// What a plugin asks the TUI to do, instead of touching its state: verbs on
+// the host's own model. Callable from any thread; each is queued and applied
+// on the UI thread before the next frame, in call order. A verb whose target
+// is gone by then (no tab) does nothing.
+class HostActions {
+public:
+    virtual ~HostActions() = default;
+    // Replaces the focused tab's prompt with `text`, the caret at its end
+    // (the commands overlay's pick: "/name ", ready for arguments).
+    virtual void InsertPrompt(const std::string& text) = 0;
+    // Switches the UI theme to `name` (themes/<name>.json) and remembers it
+    // for the next start; a theme that fails to load changes nothing and
+    // says why in the focused tab's notice.
+    virtual void SetTheme(const std::string& name) = 0;
 };
 
 class AttentionSink {
@@ -684,9 +728,19 @@ public:
     virtual std::string_view name() const = 0;      // without the leading '/'
     virtual std::string_view summary() const = 0;   // the autocomplete line
     virtual bool requires_session() const { return false; }
+    // Changes nothing a session holds (it opens a view, switches the theme):
+    // offered on a subagent tab, whose command surface is read-only.
+    virtual bool read_only() const { return false; }
+    // False: the command only intercepts some forms of a SERVER command of
+    // the same name (the bare `/model` that opens a picker, while
+    // `/model <ref>` stays the server's) -- not listed on its own; the
+    // catalog lists the server's entry.
+    virtual bool listed() const { return true; }
     // `positional`: whitespace-split arguments; `raw`: everything after the
-    // name, untouched.
-    virtual void Run(const std::vector<std::string>& positional, const std::string& raw) = 0;
+    // name, untouched. Returns whether it handled the line; false passes it
+    // on to the server's command of that name (an intercept declining a
+    // form it does not own).
+    virtual bool Run(const std::vector<std::string>& positional, const std::string& raw) = 0;
 };
 
 // --- Registries -------------------------------------------------------------

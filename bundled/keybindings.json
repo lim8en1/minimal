@@ -18,7 +18,6 @@
   "session.picker": "ctrl+o",
   "agent.picker": "alt+g",
   "model.picker": "alt+m",
-  "help.overlay": "alt+h",
   "permission.cycle": "shift+tab",
   "panel.toggle": "ctrl+t",
   "panel.focus.next": "ctrl+alt+n",
