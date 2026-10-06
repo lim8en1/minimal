@@ -104,6 +104,7 @@ private:
 
     // HostActions, applied on the UI thread.
     void InsertPrompt(const std::string& text) override;
+    void SetTheme(const std::string& name) override { ApplyTheme(name); }
     // HostUi's reads (HostFocusProvider::AttachReads).
     std::vector<plugins::KeyBindingInfo> KeyBindingsForPlugins() const;
     std::vector<CommandCatalogEntry> CatalogForPlugins();
@@ -121,7 +122,6 @@ private:
     void ClearFocusedNotice();
     void FocusedNotice(const std::string& text);
     void OpenNewSession();
-    void OpenThemePicker();
     void RequestQuit();
     void StageClose(std::vector<std::string> ids, bool quit);
     void ToggleFold(const std::string& tab_id, bool thinking);
@@ -164,7 +164,6 @@ private:
     bool& show_agent_picker_ = modals_.Flag(ModalId::kAgentPicker);
     bool& show_model_picker_ = modals_.Flag(ModalId::kModelPicker);
     bool& show_subagent_picker_ = modals_.Flag(ModalId::kSubagentPicker);
-    bool& show_theme_picker_ = modals_.Flag(ModalId::kThemePicker);
     bool& show_quit_confirm_ = modals_.Flag(ModalId::kQuitConfirm);
     bool& show_permission_ = modals_.Flag(ModalId::kPermission);
     bool& show_confirmation_ = modals_.Flag(ModalId::kConfirmation);
@@ -196,7 +195,6 @@ private:
     std::shared_ptr<ftxui::Component> model_picker_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> subagent_picker_child_ =
         std::make_shared<ftxui::Component>();
-    std::shared_ptr<ftxui::Component> theme_picker_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> plugin_modal_child_ = std::make_shared<ftxui::Component>();
     PendingConfirmation confirm_request_;
     ftxui::Component confirm_modal_;

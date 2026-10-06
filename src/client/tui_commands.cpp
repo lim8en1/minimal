@@ -117,18 +117,6 @@ void TuiApp::RegisterClientCommands() {
         FocusedNotice("detached -- /sessions reattaches a live session");
         return true;
     }});
-    // Decoration, not session state: works on any tab. Bare opens the picker,
-    // named swaps directly.
-    router.Add({"theme", "switch the UI theme", true, false,
-                [this](const CommandInvocationText& parsed) {
-        if (parsed.positional.empty()) {
-            ClearFocusedNotice();
-            OpenThemePicker();
-        } else {
-            ApplyTheme(parsed.positional.front());
-        }
-        return true;
-    }});
     // THE DESIRED-STATE COMMANDS, identical on every tab: bare opens the
     // client-owned picker; named sets the tab's desired state (riding
     // CreateSessionRequest on a sessionless tab, converging at the next turn
@@ -215,7 +203,7 @@ void TuiApp::RegisterClientCommands() {
         // summary, so the catalog keeps the server's entry for the name.
         const std::string summary =
             plugin_command->listed() ? std::string(plugin_command->summary()) : std::string();
-        router.Add({name, summary, false, needs_session,
+        router.Add({name, summary, plugin_command->read_only(), needs_session,
                     [this, command = plugin_command.get(), name,
                      needs_session](const CommandInvocationText& parsed) {
             if (needs_session && app_->FocusedSessionId().empty()) {

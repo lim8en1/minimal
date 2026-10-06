@@ -97,12 +97,14 @@ public:
     void FocusPanel(const std::string& view_id) override;
     std::vector<KeyBindingInfo> KeyBindings() const override;
     std::vector<CommandCatalogEntry> CommandCatalog() const override;
+    std::vector<std::string> ThemeNames() const override;
 
     // The TUI's half of the reads, once it is built (after Attach); until
     // then both answer empty. UI thread, like the reads themselves.
     struct UiReads {
         std::function<std::vector<KeyBindingInfo>()> key_bindings;
         std::function<std::vector<CommandCatalogEntry>()> command_catalog;
+        std::function<std::vector<std::string>()> theme_names;
     };
     void AttachReads(UiReads reads);
 
@@ -140,6 +142,7 @@ class HostActionQueue final : public HostActions {
 public:
     explicit HostActionQueue(HostUi* ui) : ui_(ui) {}
     void InsertPrompt(const std::string& text) override;
+    void SetTheme(const std::string& name) override;
 
     // The UI thread's half: every verb queued since the last call, oldest
     // first, each to be applied to the TUI's own HostActions.

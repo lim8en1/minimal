@@ -115,6 +115,8 @@ public:
     // prompt's autocomplete filters them -- without a session only what
     // runs without one, on a subagent only what is read-only there.
     virtual std::vector<CommandCatalogEntry> CommandCatalog() const = 0;
+    // The themes there are to switch to (the themes dir's files, by name).
+    virtual std::vector<std::string> ThemeNames() const = 0;
 };
 
 // --- Host actions -------------------------------------------------------------
@@ -129,6 +131,10 @@ public:
     // Replaces the focused tab's prompt with `text`, the caret at its end
     // (the commands overlay's pick: "/name ", ready for arguments).
     virtual void InsertPrompt(const std::string& text) = 0;
+    // Switches the UI theme to `name` (themes/<name>.json) and remembers it
+    // for the next start; a theme that fails to load changes nothing and
+    // says why in the focused tab's notice.
+    virtual void SetTheme(const std::string& name) = 0;
 };
 
 class AttentionSink {
@@ -722,6 +728,9 @@ public:
     virtual std::string_view name() const = 0;      // without the leading '/'
     virtual std::string_view summary() const = 0;   // the autocomplete line
     virtual bool requires_session() const { return false; }
+    // Changes nothing a session holds (it opens a view, switches the theme):
+    // offered on a subagent tab, whose command surface is read-only.
+    virtual bool read_only() const { return false; }
     // False: the command only intercepts some forms of a SERVER command of
     // the same name (the bare `/model` that opens a picker, while
     // `/model <ref>` stays the server's) -- not listed on its own; the

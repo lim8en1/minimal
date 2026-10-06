@@ -51,7 +51,6 @@ add_library(minimal_client_core SHARED
     view/model_selector.cpp
     view/agent_picker.cpp
     view/subagent_picker.cpp
-    view/theme_picker.cpp
     view/picker_controller.cpp
     view/tab_ui.cpp
     view/frame_renderer.cpp

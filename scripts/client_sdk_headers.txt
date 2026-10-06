@@ -15,6 +15,7 @@ minimal/client/utf8.hpp
 minimal/client/command_catalog_entry.hpp
 minimal/client/view/schema_form_model.hpp
 minimal/client/view/widget_types.hpp
+minimal/client/view/rebuilding.hpp
 minimal/client/view/tool_status.hpp
 
 # Shared utilities.

@@ -20,10 +20,10 @@ ftxui::Component Label(const std::string& text) {
 TEST_CASE("modal stack: AnyOpen reflects every flag", "[modal_stack]") {
     ModalStack stack;
     CHECK_FALSE(stack.AnyOpen());
-    stack.Flag(ModalId::kThemePicker) = true;
+    stack.Flag(ModalId::kAgentPicker) = true;
     CHECK(stack.AnyOpen());
-    CHECK(stack.Open(ModalId::kThemePicker));
-    stack.Flag(ModalId::kThemePicker) = false;
+    CHECK(stack.Open(ModalId::kAgentPicker));
+    stack.Flag(ModalId::kAgentPicker) = false;
     CHECK_FALSE(stack.AnyOpen());
 }
 

@@ -1,54 +1,14 @@
 #include "help_view.hpp"
 
 #include <algorithm>
-#include <functional>
 #include <tuple>
 #include <utility>
 
-#include <ftxui/component/component_base.hpp>
-
 #include "minimal/client/policy.hpp"
 #include "minimal/client/utf8.hpp"
+#include "minimal/client/view/rebuilding.hpp"
 
 namespace minimal::help_view {
-
-namespace {
-
-// A menu built afresh whenever the view is shown again: `stale` is set by
-// the view's OnShow (the host's UI thread) and honoured at the start of the
-// next render or event -- never mid-frame, where freeing the menu being
-// drawn would leave the frame writing into it.
-class ReloadingMenu final : public ftxui::ComponentBase {
-public:
-    ReloadingMenu(std::shared_ptr<std::atomic<bool>> stale, std::function<ftxui::Component()> build)
-        : stale_(std::move(stale)), build_(std::move(build)) {}
-
-private:
-    void Sync() {
-        if (menu_ && !stale_->exchange(false)) return;
-        stale_->store(false);
-        if (menu_) DetachAllChildren();
-        menu_ = build_();
-        Add(menu_);
-    }
-    ftxui::Element OnRender() override {
-        Sync();
-        return menu_->Render();
-    }
-    bool OnEvent(ftxui::Event event) override {
-        Sync();
-        const ftxui::Component target = menu_;  // a callback may mark it stale
-        return target->OnEvent(std::move(event));
-    }
-    bool Focusable() const override { return true; }
-    ftxui::Component ActiveChild() override { return menu_; }
-
-    std::shared_ptr<std::atomic<bool>> stale_;
-    std::function<ftxui::Component()> build_;
-    ftxui::Component menu_;
-};
-
-}  // namespace
 
 std::vector<client::MenuRow> BuildKeymapRows(std::vector<plugins::KeyBindingInfo> bindings,
                                              const std::string& filter) {
@@ -107,7 +67,7 @@ const plugins::ViewSpec& KeymapView::spec() const {
 }
 
 ftxui::Component KeymapView::component() {
-    return ftxui::Make<ReloadingMenu>(stale_, [seams = seams_, theme = &theme_] {
+    return ftxui::Make<client::RebuildingComponent>(stale_, [seams = seams_, theme = &theme_] {
         // Read once per open (UI thread): the filter runs over this copy.
         auto bindings = seams.ui->KeyBindings();
         const auto close = [ui = seams.ui] { ui->CloseView(kKeymapViewId); };
@@ -132,7 +92,7 @@ const plugins::ViewSpec& CommandsView::spec() const {
 }
 
 ftxui::Component CommandsView::component() {
-    return ftxui::Make<ReloadingMenu>(stale_, [seams = seams_, theme = &theme_] {
+    return ftxui::Make<client::RebuildingComponent>(stale_, [seams = seams_, theme = &theme_] {
         auto entries = seams.ui->CommandCatalog();
         const auto close = [ui = seams.ui] { ui->CloseView(kCommandsViewId); };
         return seams.widgets->FilterableMenuModal(

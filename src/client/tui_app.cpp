@@ -23,7 +23,6 @@
 #include "minimal/client/keymap_help_model.hpp"
 #include "minimal/client/view/modal_host.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
-#include "minimal/client/view/theme_picker.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/client/policy.hpp"
@@ -239,7 +238,8 @@ void TuiApp::BuildState() {
     // only ever called on the UI thread.
     env_.host_focus_provider->AttachReads(
         {.key_bindings = [this] { return KeyBindingsForPlugins(); },
-         .command_catalog = [this] { return CatalogForPlugins(); }});
+         .command_catalog = [this] { return CatalogForPlugins(); },
+         .theme_names = [this] { return ListThemeNames(); }});
     // Memory bounds (track R2): ui.json's values, or the built-in defaults
     // (SetUiBounds treats 0 as "keep the default"). Applied before any tab can
     // open, so every SessionState starts bounded.
@@ -419,7 +419,6 @@ void TuiApp::BuildModals() {
     modals_.Set(ModalId::kModelPicker, MakeModalHost(model_picker_child_, show_model_picker_));
     modals_.Set(ModalId::kSubagentPicker,
                 MakeModalHost(subagent_picker_child_, show_subagent_picker_));
-    modals_.Set(ModalId::kThemePicker, MakeModalHost(theme_picker_child_, show_theme_picker_));
 
     // Owns picker_data/agent_picker_presets and the fetch/rebuild/open flows
     // privately; writes rebuilt components into the picker slots above.
@@ -1040,18 +1039,6 @@ void TuiApp::OpenNewSession() {
     if (const auto tab = app_->OpenTab(NewTabOptions()); !tab.empty()) {
         app_->SetFocusedTab(tab);
     }
-}
-
-void TuiApp::OpenThemePicker() {
-    const Theme& theme = *env_.theme;
-    *theme_picker_child_ = MakeThemePicker(
-        ListThemeNames(), theme.name(), theme,
-        ThemePickerCallbacks{[this](const std::string& name) {
-                                 show_theme_picker_ = false;
-                                 ApplyTheme(name);
-                             },
-                             [this] { show_theme_picker_ = false; }});
-    show_theme_picker_ = true;
 }
 
 // Quit = close every tab, with ONE confirmation if any work is in flight

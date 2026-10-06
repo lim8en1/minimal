@@ -42,7 +42,9 @@ public:
     void FocusPanel(const std::string&) override {}
     std::vector<client::plugins::KeyBindingInfo> KeyBindings() const override { return Bindings(keys); }
     std::vector<client::CommandCatalogEntry> CommandCatalog() const override { return catalog; }
+    std::vector<std::string> ThemeNames() const override { return {}; }
     void InsertPrompt(const std::string& text) override { inserted.push_back(text); }
+    void SetTheme(const std::string&) override {}
 
     std::unordered_map<std::string, std::string> keys = kKeys;
     std::vector<client::CommandCatalogEntry> catalog;

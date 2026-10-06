@@ -379,7 +379,9 @@ namespace {
 class RecordingActions final : public HostActions {
 public:
     void InsertPrompt(const std::string& text) override { inserted.push_back(text); }
+    void SetTheme(const std::string& name) override { themes.push_back(name); }
     std::vector<std::string> inserted;
+    std::vector<std::string> themes;
 };
 
 class CountingUi final : public HostUi {
@@ -391,6 +393,7 @@ public:
     void FocusPanel(const std::string&) override {}
     std::vector<KeyBindingInfo> KeyBindings() const override { return {}; }
     std::vector<CommandCatalogEntry> CommandCatalog() const override { return {}; }
+    std::vector<std::string> ThemeNames() const override { return {}; }
     int redraws = 0;
 };
 
@@ -403,11 +406,13 @@ TEST_CASE("host actions: queued from any thread, applied to the TUI in order, wi
     std::thread worker([&] { queue.InsertPrompt("/first "); });
     worker.join();
     queue.InsertPrompt("/second ");
-    CHECK(ui.redraws == 2);  // one frame asked for per verb
+    queue.SetTheme("light");
+    CHECK(ui.redraws == 3);  // one frame asked for per verb
 
     RecordingActions tui;
     for (auto& action : queue.Take()) action(tui);
     CHECK(tui.inserted == std::vector<std::string>{"/first ", "/second "});
+    CHECK(tui.themes == std::vector<std::string>{"light"});
     CHECK(queue.Take().empty());  // drained
 }
 
@@ -985,6 +990,22 @@ TEST_CASE("the bundled help-view plugin registers its overlays, /keymap and /hel
     }
     std::sort(commands.begin(), commands.end());
     CHECK(commands == std::vector<std::string>{"help", "keymap"});
+}
+
+#ifndef MINIMAL_THEME_VIEW_PLUGIN
+#error "MINIMAL_THEME_VIEW_PLUGIN must name the built theme-view plugin"
+#endif
+
+TEST_CASE("the bundled theme-view plugin registers its picker and a read-only /theme",
+          "[client_plugins][theme_view]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_THEME_VIEW_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    INFO(fixtures->records.front().error);
+    REQUIRE(fixtures->records.front().ok());
+    CHECK(fixtures->registries.views.Find("theme") != nullptr);
+    REQUIRE(fixtures->registries.client_commands.Find("theme") != nullptr);
+    CHECK(fixtures->registries.client_commands.Find("theme")->read_only());
 }
 
 // regenerate_per_session=false must share one banner across every session

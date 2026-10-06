@@ -122,6 +122,10 @@ std::vector<CommandCatalogEntry> HostFocusProvider::CommandCatalog() const {
     return reads_.command_catalog ? reads_.command_catalog() : std::vector<CommandCatalogEntry>{};
 }
 
+std::vector<std::string> HostFocusProvider::ThemeNames() const {
+    return reads_.theme_names ? reads_.theme_names() : std::vector<std::string>{};
+}
+
 void HostFocusProvider::Detach() {
     std::lock_guard lk(mtx_);
     app_ = nullptr;
@@ -207,6 +211,7 @@ public:
     std::vector<CommandCatalogEntry> CommandCatalog() const override {
         return host_.CommandCatalog();
     }
+    std::vector<std::string> ThemeNames() const override { return host_.ThemeNames(); }
 
 private:
     HostFocusProvider& host_;
@@ -289,6 +294,10 @@ std::unique_ptr<HostFocusProvider> MakeHostFocusProvider() {
 
 void HostActionQueue::InsertPrompt(const std::string& text) {
     Enqueue([text](HostActions& host) { host.InsertPrompt(text); });
+}
+
+void HostActionQueue::SetTheme(const std::string& name) {
+    Enqueue([name](HostActions& host) { host.SetTheme(name); });
 }
 
 void HostActionQueue::Enqueue(std::function<void(HostActions&)> action) {

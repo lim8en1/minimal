@@ -45,3 +45,8 @@ add_subdirectory(config-view)
 # bare /help), over the host's own reads; core keeps only the vocabulary.
 
 add_subdirectory(help-view)
+
+# theme-view is the theme picker and /theme, over the host's ThemeNames read
+# and SetTheme action.
+
+add_subdirectory(theme-view)
