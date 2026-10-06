@@ -435,7 +435,7 @@ TEST_CASE("web_fetch: an oversized response is truncated, and the full text is s
     const auto result = tool->execute({{"url", server.url()}}, ctx);
     CHECK_FALSE(result.is_error);
     CHECK(result.content_text.substr(0, 1000) == std::string(1000, 'x'));
-    CHECK(result.content_text.find("the first 1000 of 10000 bytes") != std::string::npos);
+    CHECK(result.content_text.find("the first 1000 of 10000 bytes (the default; pass max_bytes for more, up to ") != std::string::npos);
 
     // The footer names a project-relative path, and that file holds the FULL
     // text -- exactly what `read` would page into.
@@ -518,17 +518,17 @@ TEST_CASE("web_fetch: max_bytes is honoured, clamped, and type-checked",
         const auto result = tool->execute({{"url", server.url()}, {"max_bytes", 200}}, ctx);
         CHECK_FALSE(result.is_error);
         CHECK(result.content_text.substr(0, 200) == std::string(200, 'y'));
-        CHECK(result.content_text.find("the first 200 of 10000 bytes") != std::string::npos);
+        CHECK(result.content_text.find("the first 200 of 10000 bytes.") != std::string::npos);
     }
     SECTION("zero means the ceiling, not everything") {
         const auto result = tool->execute({{"url", server.url()}, {"max_bytes", 0}}, ctx);
         CHECK_FALSE(result.is_error);
-        CHECK(result.content_text.find("the first 500 of 10000 bytes") != std::string::npos);
+        CHECK(result.content_text.find("the first 500 of 10000 bytes (the ceiling)") != std::string::npos);
     }
     SECTION("a value past the ceiling is clamped, not honoured") {
         const auto result = tool->execute({{"url", server.url()}, {"max_bytes", 99999}}, ctx);
         CHECK_FALSE(result.is_error);
-        CHECK(result.content_text.find("the first 500 of 10000 bytes") != std::string::npos);
+        CHECK(result.content_text.find("the first 500 of 10000 bytes (asked for 99999; capped at the ceiling)") != std::string::npos);
     }
     SECTION("a non-integer is a named error") {
         const auto result = tool->execute({{"url", server.url()}, {"max_bytes", "lots"}}, ctx);
@@ -628,6 +628,36 @@ TEST_CASE("web_search: an unexpected backend shape is a clear tool error",
     const auto result = tool->execute({{"query", "test"}}, ctx);
     CHECK(result.is_error);
     CHECK(result.content_text.find("results") != std::string::npos);
+}
+
+TEST_CASE("web tool definitions do not depend on the config", "[tools_web]") {
+    // The limits apply live; the definitions sit in every cached prompt prefix.
+    WebSettings changed;
+    changed.fetch_default_max_bytes = 11;
+    changed.fetch_max_bytes = 22;
+    changed.search_default_max_results = 3;
+    changed.search_max_results = 4;
+    const auto same = [](const auto& a, const auto& b) {
+        return a->spec().definition.description == b->spec().definition.description &&
+               a->spec().definition.input_schema == b->spec().definition.input_schema;
+    };
+    CHECK(same(MakeWebFetchTool(WebSettings{}, net::HttpClient{}),
+               MakeWebFetchTool(changed, net::HttpClient{})));
+    CHECK(same(MakeWebSearchTool(WebSettings{}, net::HttpClient{}),
+               MakeWebSearchTool(changed, net::HttpClient{})));
+}
+
+TEST_CASE("web_search: a request over the cap says so", "[tools_web][search]") {
+    LoopbackServer server({HttpResponseOf(
+        200, "OK", "application/json",
+        R"({"results":[{"title":"Example","url":"https://example.com","snippet":"a page"}]})")});
+    WebSettings settings;
+    settings.search_api_url = server.url();
+    settings.search_max_results = 3;
+    auto tool = MakeWebSearchTool(settings, net::HttpClient{});
+    auto ctx = Context();
+    const auto result = tool->execute({{"query", "q"}, {"max_results", 50}}, ctx);
+    CHECK(result.content_text.find("[asked for 50 results; capped at 3]") != std::string::npos);
 }
 
 TEST_CASE("web_search: a swapped live config applies from the next call", "[tools_web][search]") {

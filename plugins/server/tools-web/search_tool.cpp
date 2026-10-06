@@ -53,7 +53,6 @@ class WebSearchTool : public tools::Tool {
 public:
     WebSearchTool(std::shared_ptr<const common::LiveValue<WebSettings>> live, net::HttpClient http)
         : live_(std::move(live)), http_(std::move(http)) {
-        const auto initial = live_->Get();
         spec_.name = "web_search";
         // ReadOnly: it runs nothing locally. The network dimension
         // (network_access_required) is its gate -- as Execute it also
@@ -70,10 +69,11 @@ public:
               {{"query", {{"type", "string"}, {"description", "The search query"}}},
                {"max_results",
                 {{"type", "integer"},
-                 {"description", "How many results to return (default " +
-                                     std::to_string(initial->search_default_max_results) +
-                                     ", capped at " + std::to_string(initial->search_max_results) +
-                                     ")"}}}}},
+                 // No configured numbers: the definition must not change
+                 // with the config. A capped request says so in the result.
+                 {"description",
+                  "How many results to return; omitted, a default applies, and a larger "
+                  "request is capped (the result says so)."}}}}},
             {"required", nlohmann::json::array({"query"})}};
     }
 
@@ -112,7 +112,13 @@ public:
             }
             max_results = static_cast<int>(raw);
         }
+        const int requested = max_results;
         max_results = std::clamp(max_results, 1, settings->search_max_results);
+        const std::string capped_note =
+            requested > max_results ? "[asked for " + std::to_string(requested) +
+                                          " results; capped at " + std::to_string(max_results) +
+                                          "]\n"
+                                    : "";
 
         if (ctx.is_cancelled && ctx.is_cancelled()) return Error("web_search: cancelled");
 
@@ -181,7 +187,7 @@ public:
             ++count;
         }
         if (count == 0) return ToolResult{false, "no results"};
-        return ToolResult{false, out.str()};
+        return ToolResult{false, out.str() + capped_note};
     }
 
 private:

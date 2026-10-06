@@ -196,13 +196,35 @@ std::optional<std::filesystem::path> ResolveOnPath(const SessionShellState& stat
     return std::nullopt;
 }
 
+// What a timed-out foreground result adds after "timed out after N s": which
+// limit applied and the ceiling -- the definition carries no numbers (see the
+// tool's `timeout` description), so this is where the model learns them.
+// "120 s", or "300 ms" for a duration that is not whole seconds (tests).
+std::string Duration(std::int64_t ms) {
+    return ms % 1000 == 0 ? std::to_string(ms / 1000) + " s" : std::to_string(ms) + " ms";
+}
+
+std::string TimeoutLimits(const BashSettings& settings, bool timeout_supplied,
+                          std::int64_t requested_ms) {
+    const std::string ceiling = Duration(settings.max_timeout_ms);
+    if (!timeout_supplied) {
+        return " (the default; pass timeout for longer, up to " + ceiling + ")";
+    }
+    if (requested_ms > settings.max_timeout_ms) {
+        return " (asked for " + Duration(requested_ms) + "; capped at the " + ceiling +
+               " ceiling -- for longer, use detach=true)";
+    }
+    return "";
+}
+
 // --- The tool ------------------------------------------------------------------------
 
 class BashTool : public tools::Tool {
 public:
-    BashTool(BashSettings settings, BashSessionStateStore& store,
-             BackgroundTaskRegistry& background, hooks::HookPoint before_command)
-        : settings_(std::move(settings)),
+    BashTool(std::shared_ptr<const common::LiveValue<BashSettings>> live,
+             BashSessionStateStore& store, BackgroundTaskRegistry& background,
+             hooks::HookPoint before_command)
+        : live_(std::move(live)),
           store_(store),
           background_(background),
           before_command_(std::move(before_command)) {
@@ -226,10 +248,14 @@ public:
              {{"command", {{"type", "string"}, {"description", "The shell command to run"}}},
               {"timeout",
                {{"type", "integer"},
-                {"description", "Wall-clock limit in seconds; defaults to " +
-                                    std::to_string(settings_.timeout_ms / 1000) + ", capped at " +
-                                    std::to_string(settings_.max_timeout_ms / 1000) + ". " +
-                                    "Foreground tasks are killed (process group) on timeout."}}},
+                // No configured numbers here: the definition must not change
+                // with the config (a live change, and the prompt cache). A
+                // timed-out result states the limit that applied and the
+                // ceiling -- the moment the model needs them.
+                {"description",
+                 "Wall-clock limit in seconds. Omitted, a default applies; a longer request is "
+                 "capped. A timed-out result states both. Foreground tasks are killed "
+                 "(process group) on timeout."}}},
               {"restart",
                {{"type", "boolean"},
                 {"description", "Reset cwd and environment to their defaults before running"}}},
@@ -402,7 +428,9 @@ public:
         }
         const bool background = run_in_background || detach;
 
-        std::int64_t timeout_ms = settings_.timeout_ms;
+        // One snapshot for the whole call: a reconfigure lands between calls.
+        const std::shared_ptr<const BashSettings> settings = live_->Get();
+        std::int64_t timeout_ms = settings->timeout_ms;
         bool timeout_supplied = false;
         if (input.contains("timeout")) {
             if (!input.at("timeout").is_number_integer()) {
@@ -476,12 +504,15 @@ public:
         // wiped the session's cwd and environment on its way out.
         if (restart) store_.Reset(ctx.session_id, ctx.project_root);
 
-        if (background) return ExecuteBackground(ctx, command, timeout_ms, timeout_supplied);
+        if (background) {
+            return ExecuteBackground(ctx, *settings, command, timeout_ms, timeout_supplied);
+        }
 
-        timeout_ms = std::min(timeout_ms, settings_.max_timeout_ms);
+        const std::int64_t requested_ms = timeout_ms;
+        timeout_ms = std::min(timeout_ms, settings->max_timeout_ms);
         const auto state = store_.Snapshot(ctx.session_id, ctx.project_root);
 
-        auto proc = LaunchProcess(WrapCommand(command), state, settings_, timeout_ms);
+        auto proc = LaunchProcess(WrapCommand(command), state, *settings, timeout_ms);
         if (!proc.ok) {
             const auto duration_ms = ElapsedMs(started);
             ctx.logger.warn("bash[{}] spawn failed: {} ({} ms)", ctx.session_id, proc.spawn_error,
@@ -495,7 +526,7 @@ public:
                             proc.warnings);
         }
 
-        const auto outcome = RunProcess(std::move(proc), settings_, timeout_ms, ctx);
+        const auto outcome = RunProcess(std::move(proc), *settings, timeout_ms, ctx);
         const auto duration_ms = ElapsedMs(started);
 
         if (outcome.io_error) {
@@ -539,9 +570,11 @@ public:
         if (outcome.timed_out) {
             ctx.logger.warn("bash[{}] timed out: '{}' ({} ms)", ctx.session_id, command,
                             duration_ms);
-            return WithDisplay(Error(with_output("[timed out after " + std::to_string(timeout_ms) +
-                                                 " ms; process group killed]")),
-                               display({{"timed_out", true}}));
+            return WithDisplay(
+                Error(with_output("[timed out after " + Duration(timeout_ms) +
+                                  TimeoutLimits(*settings, timeout_supplied, requested_ms) +
+                                  "; process group killed]")),
+                display({{"timed_out", true}}));
         }
 
         // Adoption happens only AFTER the failure returns above, and that
@@ -613,8 +646,9 @@ private:
     // adopted from a background command: its final cwd/env is stale by the time
     // it reports, and adopting it would stomp whatever foreground calls set up
     // in between.
-    ToolResult ExecuteBackground(ToolContext& ctx, const std::string& command,
-                                 std::int64_t timeout_ms, bool timeout_supplied) {
+    ToolResult ExecuteBackground(ToolContext& ctx, const BashSettings& settings,
+                                 const std::string& command, std::int64_t timeout_ms,
+                                 bool timeout_supplied) {
         if (!ctx.schedule_injection) {
             // Without the injection channel the result would be silently lost
             // at completion. The synchronous path always works; refuse this
@@ -629,8 +663,8 @@ private:
         // never holds. When the model supplies no timeout, the ceiling IS the
         // budget -- a long-running build is the entire point of the mode.
         const std::int64_t bg_timeout =
-            std::min(timeout_supplied ? timeout_ms : settings_.background_max_timeout_ms,
-                     settings_.background_max_timeout_ms);
+            std::min(timeout_supplied ? timeout_ms : settings.background_max_timeout_ms,
+                     settings.background_max_timeout_ms);
 
         const auto state = store_.Snapshot(ctx.session_id, ctx.project_root);
 
@@ -644,7 +678,7 @@ private:
 
         std::string error;
         auto started_task =
-            background_.Start(ctx.session_id, command, state, settings_, bg_timeout,
+            background_.Start(ctx.session_id, command, state, settings, bg_timeout,
                               std::move(handles), &error);
         if (!started_task) {
             ctx.logger.warn("bash[{}] background start rejected: {} ({})", ctx.session_id, error,
@@ -663,7 +697,11 @@ private:
             false,
             "running detached as task " + started_task->id + " (pid " +
                 std::to_string(started_task->pid) + ", timeout " +
-                std::to_string(bg_timeout / 1000) + " s). The result will be reported "
+                std::to_string(bg_timeout / 1000) + " s" +
+                (timeout_supplied && timeout_ms > bg_timeout
+                     ? " -- capped: the ceiling for detached tasks"
+                     : "") +
+                "). The result will be reported "
                 "automatically at a turn boundary once it finishes; this session ends, so does "
                 "the task. To follow progress mid-run, redirect output to a file and read it "
                 "with later calls; to stop the task: kill -- -" +
@@ -696,7 +734,7 @@ private:
     }
 
     ToolSpec spec_;
-    BashSettings settings_;
+    std::shared_ptr<const common::LiveValue<BashSettings>> live_;
     BashSessionStateStore& store_;
     BackgroundTaskRegistry& background_;
     // This plugin's veto-capable hook point. See plugin.cpp for registration
@@ -706,11 +744,18 @@ private:
 
 }  // namespace
 
+std::unique_ptr<tools::Tool> MakeBashTool(
+    std::shared_ptr<const common::LiveValue<BashSettings>> live, BashSessionStateStore& store,
+    BackgroundTaskRegistry& background, hooks::HookPoint before_command) {
+    return std::make_unique<BashTool>(std::move(live), store, background,
+                                      std::move(before_command));
+}
+
 std::unique_ptr<tools::Tool> MakeBashTool(BashSettings settings, BashSessionStateStore& store,
                                           BackgroundTaskRegistry& background,
                                           hooks::HookPoint before_command) {
-    return std::make_unique<BashTool>(std::move(settings), store, background,
-                                      std::move(before_command));
+    return MakeBashTool(std::make_shared<common::LiveValue<BashSettings>>(std::move(settings)),
+                        store, background, std::move(before_command));
 }
 
 }  // namespace minimal::tools_bash

@@ -18,15 +18,17 @@ WebSettings ParseWebSettings(const nlohmann::json& config,
         target = static_cast<int>(section.Int(key, target, 1, kIntMax));
     };
 
-    // Live: the timeouts and the redirect limit, read per call and never
-    // quoted to the model. Restart: everything a tool description quotes
-    // (the byte and result limits), the URL and its key (the permission
-    // model is keyed by the backend's host), and the SSRF switch.
+    // Live: the limits, read per call; the tool definitions quote none of
+    // them (a result states the limit it applied). Restart: the URL and its
+    // key (the permission model is keyed by the backend's host) and the SSRF
+    // switch.
     config::Reader fetch = root.Object("fetch");
     fetch.Describe("timeout_ms", {"Hard wall-clock bound on one fetch.", config::ApplyPolicy::kLive});
     fetch.Describe("max_redirects", {"Redirect follow limit.", config::ApplyPolicy::kLive});
-    fetch.Describe("default_max_bytes", {"Text returned when the model supplies no max_bytes."});
-    fetch.Describe("max_bytes", {"Ceiling on the model-supplied max_bytes."});
+    fetch.Describe("default_max_bytes", {"Text returned when the model supplies no max_bytes.",
+                                         config::ApplyPolicy::kLive});
+    fetch.Describe("max_bytes", {"Ceiling on the model-supplied max_bytes.",
+                                 config::ApplyPolicy::kLive});
     fetch.Describe("allow_private_hosts",
                    {"Allow loopback/private/link-local hosts (incl. cloud metadata) -- the URL "
                     "comes from the model. Only for a trusted internal network."});
@@ -49,8 +51,9 @@ WebSettings ParseWebSettings(const nlohmann::json& config,
                                 "http://localhost:8888/search?format=json"});
     search.Describe("api_key", {"Key reference sent as Authorization: Bearer; unset = no header.",
                                 config::ApplyPolicy::kRestart, /*secret=*/true});
-    search.Describe("default_max_results", {"Result count when the model supplies none."});
-    search.Describe("max_results", {"Ceiling on the result count."});
+    search.Describe("default_max_results", {"Result count when the model supplies none.",
+                                            config::ApplyPolicy::kLive});
+    search.Describe("max_results", {"Ceiling on the result count.", config::ApplyPolicy::kLive});
     search.Describe("timeout_ms", {"Hard wall-clock bound on one search.",
                                    config::ApplyPolicy::kLive});
     settings.search_api_url = search.String("api_url", settings.search_api_url);

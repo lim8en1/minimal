@@ -282,8 +282,11 @@ object code.
   Only fields declared `ApplyPolicy::kLive` change this way; the host calls
   it only when every changed field is live. Keep the settings in a
   `common::LiveValue<T>` (`minimal/common/live_value.hpp`) and read one
-  snapshot per call. A field that model-visible text quotes (a tool
-  description) is `restart`: the model would keep reading the old value
+  snapshot per call. Keep configured values out of tool definitions: a
+  definition sits in every cached prompt prefix, so quoting a limit there
+  leaves the model a stale number after a live change and invalidates the
+  cache on every edit. State the limit in the result where it applied
+  instead (bash's timed-out result, web_fetch's truncation footer)
 
 A plugin that owns a config file validates it itself and reports problems
 through `PluginRegistrationContext::report_warning`; the startup sanity check

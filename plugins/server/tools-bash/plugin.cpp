@@ -72,6 +72,12 @@ minimal::tools_bash::BashSessionStateStore& BashStore(
     return store;
 }
 
+// What the bash tool reads per call; swapped by minimal_plugin_reconfigure.
+std::shared_ptr<minimal::common::LiveValue<minimal::tools_bash::BashSettings>>& LiveSettings() {
+    static std::shared_ptr<minimal::common::LiveValue<minimal::tools_bash::BashSettings>> live;
+    return live;
+}
+
 minimal::tools_bash::BackgroundTaskRegistry& BackgroundTasks() {
     static minimal::tools_bash::BackgroundTaskRegistry registry;
     return registry;
@@ -116,12 +122,31 @@ MINIMAL_PLUGIN_ABI_SYMBOLS("tools-bash")
 void minimal_plugin_register_tools(
     minimal::tools::ToolRegistry& registry,
     const minimal::plugins::PluginRegistrationContext& context) {
-    // The plugin's own `config` object from its plugins.json entry, verbatim;
-    // core imposes no schema, this plugin owns the shape of its own slice.
+    // The plugin's own plugins.d/tools-bash.json, verbatim; core imposes no
+    // schema, this plugin owns the shape of its own file.
     const auto settings = minimal::tools_bash::ParseBashSettings(context.config);
+    LiveSettings() = std::make_shared<minimal::common::LiveValue<minimal::tools_bash::BashSettings>>(
+        settings);
     registry.Register(
-        minimal::tools_bash::MakeBashTool(settings, BashStore(&settings.inherit_env),
+        minimal::tools_bash::MakeBashTool(LiveSettings(), BashStore(&settings.inherit_env),
                                           BackgroundTasks(), BeforeCommandPoint()));
+}
+
+// Only "live" fields reach here (the limits; not the shell or inherit_env,
+// which seed state held for the process), so swapping the whole parsed
+// struct changes nothing else.
+bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error) {
+    if (!LiveSettings()) {
+        error = "tools-bash is not registered";
+        return false;
+    }
+    try {
+        LiveSettings()->Set(minimal::tools_bash::ParseBashSettings(config));
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
 }
 
 // The worked example for plugin-declared hook points (docs/EXTENSIBILITY.md):

@@ -82,7 +82,6 @@ class WebFetchTool : public tools::Tool {
 public:
     WebFetchTool(std::shared_ptr<const common::LiveValue<WebSettings>> live, net::HttpClient http)
         : live_(std::move(live)), http_(std::move(http)) {
-        const auto initial = live_->Get();
         spec_.name = "web_fetch";
         // ReadOnly: it runs nothing locally. The network dimension
         // (network_access_required) is its gate -- as Execute it also
@@ -100,12 +99,13 @@ public:
              {{"url", {{"type", "string"}, {"description", "The URL to fetch"}}},
               {"max_bytes",
                {{"type", "integer"},
+                // No configured numbers: the definition must not change with
+                // the config. The truncation footer states the limit applied.
                 {"description",
-                 "Maximum bytes of text to return; default " +
-                     std::to_string(initial->fetch_default_max_bytes) + ", capped at " +
-                     std::to_string(initial->fetch_max_bytes) + ". Anything over the limit is "
-                     "saved to a file you can read with the read tool -- the result footer "
-                     "names it."}}}}},
+                 "Maximum bytes of text to return; omitted, a default applies, and a larger "
+                 "request is capped (0 = the cap). Anything over the limit is saved to a file "
+                 "you can read with the read tool -- the result footer names it and the "
+                 "limits."}}}}},
             {"required", nlohmann::json::array({"url"})}};
     }
 
@@ -127,6 +127,10 @@ public:
         // ceiling (disclosed in the footer), an out-of-range value is the
         // model's mistake to see, not a silent wrap.
         int max_bytes = settings->fetch_default_max_bytes;
+        // Which limit applied, for a truncation footer: the definition
+        // carries no numbers, so this is where the model learns them.
+        std::string limit_note = " (the default; pass max_bytes for more, up to " +
+                                 std::to_string(settings->fetch_max_bytes) + ")";
         if (input.contains("max_bytes")) {
             if (!input.at("max_bytes").is_number_integer()) {
                 return Error("web_fetch: 'max_bytes' must be an integer");
@@ -138,6 +142,10 @@ public:
             max_bytes = raw == 0 ? settings->fetch_max_bytes
                                  : static_cast<int>(std::min<std::int64_t>(
                                        raw, settings->fetch_max_bytes));
+            limit_note = raw == 0 ? " (the ceiling)"
+                         : raw > settings->fetch_max_bytes
+                             ? " (asked for " + std::to_string(raw) + "; capped at the ceiling)"
+                             : "";
         }
 
         for (int hop = 0; hop <= settings->fetch_max_redirects; ++hop) {
@@ -199,7 +207,7 @@ public:
             return Finish(ctx, url, ContentTypeIsHtml(response.headers)
                                         ? HtmlToText(response.body)
                                         : response.body,
-                          max_bytes);
+                          max_bytes, limit_note);
         }
         return Error("web_fetch: too many redirects (" +
                      std::to_string(settings->fetch_max_redirects) + ")");
@@ -213,7 +221,7 @@ private:
     // model-named, and the same URL overwrites its file instead of
     // accumulating one per fetch.
     ToolResult Finish(const ToolContext& ctx, const std::string& url, std::string text,
-                      int max_bytes) {
+                      int max_bytes, const std::string& limit_note) {
         if (text.size() <= static_cast<std::size_t>(max_bytes)) {
             return ToolResult{false, std::move(text)};
         }
@@ -232,7 +240,8 @@ private:
             return ToolResult{false,
                               std::move(text) + "\n[Showing the first " +
                                   std::to_string(max_bytes) + " of " + std::to_string(total) +
-                                  " bytes. The full response is saved at .minimal/web-fetch/" +
+                                  " bytes" + limit_note +
+                                  ". The full response is saved at .minimal/web-fetch/" +
                                   name + " -- use the read tool (offset/limit) to page through "
                                   "the rest.]"};
         }
@@ -242,7 +251,8 @@ private:
         return ToolResult{false,
                           std::move(text) + "\n[Truncated to the first " +
                               std::to_string(max_bytes) + " of " + std::to_string(total) +
-                              " bytes; saving the full response failed (" + outcome.error +
+                              " bytes" + limit_note + "; saving the full response failed (" +
+                              outcome.error +
                               ") -- re-fetch with a larger max_bytes if you need more.]"};
     }
 

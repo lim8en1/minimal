@@ -981,6 +981,21 @@ TEST_CASE("a streaming grandchild keeps the run alive",
 
 // --- timeout, cancellation, and bounded reaping --------------------------------------
 
+TEST_CASE("the tool definition does not depend on the config", "[tools_bash][timeout]") {
+    // The limits apply live and the definition sits in every cached prompt
+    // prefix: quoting a configured number there would leave the model with a
+    // stale one after a change, and invalidate the cache on every edit.
+    Fixture f;
+    auto defaults = tools_bash::MakeBashTool(f.settings, f.store, f.background);
+    BashSettings changed;
+    changed.timeout_ms = 7000;
+    changed.max_timeout_ms = 9000;
+    changed.max_output_bytes = 17;
+    auto reconfigured = tools_bash::MakeBashTool(changed, f.store, f.background);
+    CHECK(defaults->spec().definition.description == reconfigured->spec().definition.description);
+    CHECK(defaults->spec().definition.input_schema == reconfigured->spec().definition.input_schema);
+}
+
 TEST_CASE("timeout kills the process group and reports it", "[tools_bash][timeout]") {
     Fixture f;
     f.settings.timeout_ms = 300;
@@ -988,7 +1003,7 @@ TEST_CASE("timeout kills the process group and reports it", "[tools_bash][timeou
     const auto out = f.Run({{"command", "sleep 10"}});
 
     CHECK(out.result.is_error);
-    CHECK(out.result.content_text.find("timed out after 300 ms") != std::string::npos);
+    CHECK(out.result.content_text.find("timed out after 300 ms (the default; pass timeout for longer, up to 600 s)") != std::string::npos);
     CHECK(out.elapsed_ms >= 290);   // the deadline is a hard floor on when we may kill
     CHECK(out.elapsed_ms < 5000);   // and the command's own 10 s never governs
 }
@@ -1058,11 +1073,11 @@ TEST_CASE("timeout is honoured and clamped to the ceiling", "[tools_bash][timeou
 
     SECTION("the model's shorter value wins") {
         const auto out = f.Run({{"command", "sleep 8"}, {"timeout", 1}});
-        CHECK(out.result.content_text.find("timed out after 1000 ms") != std::string::npos);
+        CHECK(out.result.content_text.find("timed out after 1 s;") != std::string::npos);
     }
     SECTION("a value past the ceiling is clamped, not honoured") {
         const auto out = f.Run({{"command", "sleep 8"}, {"timeout", 10}});
-        CHECK(out.result.content_text.find("timed out after 2000 ms") != std::string::npos);
+        CHECK(out.result.content_text.find("timed out after 2 s (asked for 10 s; capped at the 2 s ceiling") != std::string::npos);
         CHECK(out.elapsed_ms < 4000);
     }
     SECTION("a non-positive value is rejected rather than silently clamped") {
