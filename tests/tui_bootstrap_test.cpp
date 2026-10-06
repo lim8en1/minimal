@@ -3,7 +3,10 @@
 #include <cstdlib>
 #include <string>
 
+#include <ftxui/component/component.hpp>
+
 #include "minimal/client/session_client.hpp"
+#include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/tui_bootstrap.hpp"
 #include "temp_dir.hpp"
 
@@ -70,6 +73,28 @@ TEST_CASE("BuildTuiEnvironment's highlighter outlives the call and highlights co
 
 namespace {
 using Policy = minimal::plugins::NameTable::Policy;
+
+class StubEngine final : public plugins::MarkdownEngine {
+public:
+    ftxui::Element Render(std::string_view, const Theme&) const override {
+        return ftxui::text("stub engine");
+    }
+    std::unique_ptr<Stream> MakeStream() const override { return nullptr; }
+};
+
+class StubSurface final : public plugins::ChatSurface {
+public:
+    const Spec& spec() const override { return spec_; }
+    ftxui::Component component(const std::string&) override {
+        return ftxui::Renderer([] { return ftxui::text("stub surface"); });
+    }
+    void OnEvent(const minimal::v1::ServerEvent&) override {}
+    void OnTheme(const Theme&) override {}
+
+private:
+    Spec spec_{"stub", "Stub"};
+};
+
 bool AnyContains(const std::vector<std::string>& messages, const std::string& needle) {
     for (const auto& m : messages) {
         if (m.find(needle) != std::string::npos) return true;
@@ -108,6 +133,42 @@ TEST_CASE("ResolveClientNames: a slot is never aliased -- the collision stays fa
                                           {{"b.diff", "diff2"}});
     CHECK(AnyContains(names.fatal, "display renderer 'diff'"));
     CHECK(AnyContains(names.warnings, "'b.diff' names a renderer"));
+}
+
+TEST_CASE("two plugins claiming one exclusive slot is fatal at startup, naming both",
+          "[tui_bootstrap][names][regression]") {
+    // The bug: first registration won with a warning, so which chat view or
+    // markdown engine ran depended on load order -- and bundled plugins load
+    // first, so a bundled default could never be replaced by enabling another.
+    plugins::ClientRegistries registries;
+    registries.markdown_engine.SetAttribution("bundled-md");
+    registries.markdown_engine.Register(std::make_unique<StubEngine>());
+    registries.markdown_engine.SetAttribution("user-md");
+    registries.markdown_engine.Register(std::make_unique<StubEngine>());
+    registries.markdown_engine.ClearAttribution();
+
+    std::vector<NameFeed> feeds;
+    for (const auto& hook : plugins::RegistryHooks(registries)) {
+        if (hook.name_space.empty()) continue;
+        feeds.push_back({hook.name_space, hook.policy, &hook.registry->attributions()});
+    }
+    const auto names = ResolveClientNames(feeds, {});
+    REQUIRE(names.fatal.size() == 1);
+    CHECK(AnyContains(names.fatal, "exclusive slot 'markdown_engine'"));
+    CHECK(AnyContains(names.fatal, "'bundled-md', 'user-md'"));
+    CHECK(AnyContains(names.fatal, "disable one of the plugins"));
+
+    // One claimant -- and the core default filling an empty slot -- is fine.
+    plugins::ClientRegistries single;
+    single.chat_surface.SetAttribution("my-chat");
+    single.chat_surface.Register(std::make_unique<StubSurface>());
+    single.chat_surface.ClearAttribution();
+    std::vector<NameFeed> single_feeds;
+    for (const auto& hook : plugins::RegistryHooks(single)) {
+        if (hook.name_space.empty()) continue;
+        single_feeds.push_back({hook.name_space, hook.policy, &hook.registry->attributions()});
+    }
+    CHECK(ResolveClientNames(single_feeds, {}).fatal.empty());
 }
 
 TEST_CASE("ResolveClientNames: an alias naming nothing is a warning", "[tui_bootstrap][names]") {

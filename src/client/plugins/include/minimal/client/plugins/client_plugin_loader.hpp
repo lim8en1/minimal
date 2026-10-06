@@ -49,7 +49,7 @@ struct PluginRecord {
     // ORIGINAL keys, as the plugin declared them, by RegistryHook::label
     // ("views", "tool_renderers", ...) -- collision detection and diagnostics
     // are computed from "who provided what". An exclusive slot is listed
-    // only when this plugin holds it.
+    // under its own name for every plugin that claimed it.
     std::map<std::string, std::vector<std::string>> registered;
 
     bool ok() const { return status == LoadStatus::Loaded; }
@@ -76,9 +76,9 @@ struct RegistryHook {
     std::string_view label;   // PluginRecord::registered's key
     const char* symbol;       // the optional minimal_client_plugin_register_* export
     RegistryBase* registry;
-    // The namespace its keys collide in; empty where keys never collide (an
-    // exclusive slot's rule is its own: first wins, the rest warn). Registries
-    // sharing a namespace (views and start views) collide with each other.
+    // The namespace its keys collide in; empty where keys never collide.
+    // Registries sharing a namespace (views and start views) collide with
+    // each other; the exclusive slots share one, keyed by slot name.
     std::string_view name_space;
     // kName: a name users address (a view id, a status segment id); a
     // client-plugins.json alias renames the entry. kSlot: a key that is a

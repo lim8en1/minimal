@@ -49,8 +49,8 @@ bool RegistryBase::Admit() const {
 
 void WarnTaken(const std::string& holder, const std::string& claimant) {
     common::DefaultLogger().warn(
-        "client plugin '{}': exclusive slot already claimed by '{}' -- registration ignored "
-        "(the exclusive-slot rule: first registration wins)",
+        "client plugin '{}': exclusive slot already claimed by '{}' -- recorded and ignored; "
+        "two claimants are fatal at startup (disable one)",
         claimant, holder.empty() ? "the core default" : holder);
 }
 

@@ -27,6 +27,7 @@
 // load BEFORE the theme does (theme `sections` need to know which plugins are
 // loaded), so nothing renderable can capture a theme at registration.
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -749,19 +750,22 @@ private:
 // Warns that `claimant` lost the exclusive slot to `holder`.
 void WarnTaken(const std::string& holder, const std::string& claimant);
 
-// One holder: the first registration wins, a later one warns and is ignored
-// -- the MentionResolver/AuthProvider pattern. The core default registers
-// only when no plugin claimed the slot, which is what "exclusive" protects.
+// One holder. Every claimant is recorded under the slot's own name (KeyOf
+// answers a constant), so two plugins claiming the slot collide in the
+// startup name resolution -- fatal, naming both: which implementation stands
+// must not depend on load order, and bundled plugins load first. Replacing a
+// bundled default means disabling it. The first claimant holds the slot
+// until then. The core default registers only when no plugin claimed it.
 template <typename T, typename KeyOf>
 class ExclusiveSlot : public RegistryBase {
 public:
     void Register(std::unique_ptr<T> candidate) {
         if (!Admit() || candidate == nullptr) return;
+        attributions_.push_back({attribution_, std::string(KeyOf{}(*candidate))});
         if (held_) {
             WarnTaken(holder_, attribution_);
             return;
         }
-        attributions_.push_back({attribution_, std::string(KeyOf{}(*candidate))});
         held_ = true;
         holder_ = attribution_;
         entry_ = std::move(candidate);
@@ -772,14 +776,16 @@ public:
     // Who holds the slot: a plugin's name, or "" for core.
     const std::string& holder() const { return holder_; }
 
-    // Releases the slot IF `plugin_name` holds it -- a plugin that failed a
-    // LATER hook without ever claiming this slot must not release another's.
+    // Drops `plugin_name`'s claims, and releases the slot only IF it holds
+    // it -- a plugin that failed a LATER hook must not release another's.
     void RemoveByAttribution(const std::string& plugin_name) override {
+        std::erase_if(attributions_, [&](const Attribution& attribution) {
+            return attribution.plugin_name == plugin_name;
+        });
         if (!held_ || holder_ != plugin_name) return;
         entry_.reset();
         held_ = false;
         holder_.clear();
-        attributions_.clear();
     }
 
 private:
@@ -812,8 +818,9 @@ struct StatusSegmentKey {
 struct SyntaxGrammarKey {
     std::string_view operator()(const SyntaxGrammar& grammar) const { return grammar.Language(); }
 };
+// An exclusive slot's key is the slot itself: every claimant collides.
 struct ChatSurfaceKey {
-    std::string_view operator()(const ChatSurface& surface) const { return surface.spec().id; }
+    std::string_view operator()(const ChatSurface&) const { return "chat_surface"; }
 };
 // Observers have no identity to collide on: one constant key.
 struct ObserverKey {
