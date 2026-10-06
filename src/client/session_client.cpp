@@ -1,11 +1,13 @@
 #include "minimal/client/session_client.hpp"
-#include "minimal/common/units.hpp"
 
 #include <chrono>
 #include <utility>
 
 #include <grpcpp/create_channel.h>
 #include <grpcpp/support/channel_arguments.h>
+
+#include "minimal/common/policy.hpp"
+#include "minimal/common/units.hpp"
 
 namespace minimal::client {
 
@@ -42,9 +44,8 @@ inline constexpr std::chrono::seconds kDetachJoinTimeout = std::chrono::seconds(
 // tool-output cap every producer applies.
 std::shared_ptr<grpc::Channel> MakeChannel(const std::string& target) {
     grpc::ChannelArguments args;
-    constexpr int kMaxMessageBytes = 64 * common::kMiB;
-    args.SetMaxReceiveMessageSize(kMaxMessageBytes);
-    args.SetMaxSendMessageSize(kMaxMessageBytes);
+    args.SetMaxReceiveMessageSize(static_cast<int>(common::kMaxWireMessageBytes));
+    args.SetMaxSendMessageSize(static_cast<int>(common::kMaxWireMessageBytes));
     return grpc::CreateCustomChannel(target, grpc::InsecureChannelCredentials(), args);
 }
 }  // namespace

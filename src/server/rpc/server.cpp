@@ -15,6 +15,7 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/units.hpp"
+#include "minimal/common/policy.hpp"
 
 namespace minimal::rpc {
 namespace {
@@ -62,14 +63,12 @@ Server::Server(SessionServiceImpl& service, std::filesystem::path socket_path,
     }
 
     grpc::ServerBuilder builder;
-    // EXPLICIT message limits, symmetric at 64 MiB to match the tool-output
-    // cap every producer already applies. The gRPC defaults were asymmetric
-    // and implicit: receive capped at 4 MB (a large tool_use input or a fat
-    // rewind payload failed with an opaque RESOURCE_EXHAUSTED), send
-    // unlimited (a runaway response was bounded by nothing on the wire).
-    constexpr int kMaxMessageBytes = 64 * common::kMiB;
-    builder.SetMaxReceiveMessageSize(kMaxMessageBytes);
-    builder.SetMaxSendMessageSize(kMaxMessageBytes);
+    // EXPLICIT message limits (common::kMaxWireMessageBytes, the client's
+    // too). The gRPC defaults were asymmetric and implicit: receive capped at
+    // 4 MB (a large tool_use input or a fat rewind payload failed with an
+    // opaque RESOURCE_EXHAUSTED), send unlimited.
+    builder.SetMaxReceiveMessageSize(static_cast<int>(common::kMaxWireMessageBytes));
+    builder.SetMaxSendMessageSize(static_cast<int>(common::kMaxWireMessageBytes));
     int selected_port = 0;
     builder.AddListeningPort(SocketTarget(socket_path_), grpc::InsecureServerCredentials(),
                              &selected_port);
@@ -80,7 +79,7 @@ Server::Server(SessionServiceImpl& service, std::filesystem::path socket_path,
         // single-user -- see server.hpp), so force it owner-only regardless of
         // the umask it was created under. Best-effort: a failure is logged, not
         // fatal, rather than refusing to serve over a socket that exists.
-        if (::chmod(socket_path_.c_str(), 0700) != 0) {
+        if (::chmod(socket_path_.c_str(), S_IRWXU) != 0) {
             common::DefaultLogger().warn("could not restrict permissions on {}: {}",
                                          socket_path_.string(), std::strerror(errno));
         }

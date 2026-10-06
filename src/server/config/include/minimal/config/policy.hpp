@@ -83,10 +83,4 @@ inline constexpr std::chrono::milliseconds kDefaultAdvisorTimeout = std::chrono:
 // seconds rather than stalling the turn.
 inline constexpr std::chrono::milliseconds kDefaultHookTimeout = std::chrono::seconds(10);
 
-// --- trust state ----------------------------------------------------------------
-
-// The trusted-directories file is a list of paths: far past any real one; a
-// file larger than this is not ours.
-inline constexpr std::size_t kMaxTrustStateFileBytes = common::kMiB;
-
 }  // namespace minimal::config

@@ -4,6 +4,8 @@
 #include <utility>
 #include <vector>
 
+#include "minimal/tools/match_policy.hpp"
+
 namespace minimal::tools {
 
 bool GlobMatchReference(std::string_view pattern, std::string_view text, bool slash_terminates) {
@@ -192,11 +194,10 @@ bool GlobMatch(std::string_view pattern, std::string_view text, bool slash_termi
     // the hot path, and a changed rule is simply a different key. Bounded -- a
     // process that matches an unbounded stream of distinct patterns starts over
     // rather than growing.
-    constexpr std::size_t kMaxCached = 2048;
     thread_local std::unordered_map<std::string, CompiledGlob> cache;
     auto it = cache.find(std::string(pattern));
     if (it == cache.end()) {
-        if (cache.size() >= kMaxCached) cache.clear();
+        if (cache.size() >= kMaxCachedGlobs) cache.clear();
         it = cache.emplace(std::string(pattern), CompiledGlob(pattern)).first;
     }
     return it->second.Match(text, slash_terminates);

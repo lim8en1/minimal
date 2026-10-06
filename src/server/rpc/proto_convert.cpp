@@ -31,7 +31,7 @@ bool IsExactInteger(double value) {
     // precise UB this guard was written to prevent. INT64_MIN is exactly -2^63
     // and needs no such care, so the bounds are deliberately not symmetric.
     // Reachable from the wire: any tool_use input carrying a number that large.
-    constexpr double kTwoToThe63 = 9223372036854775808.0;  // -static_cast<double>(INT64_MIN)
+    constexpr double kTwoToThe63 = -static_cast<double>(std::numeric_limits<std::int64_t>::min());
     return value >= static_cast<double>(std::numeric_limits<std::int64_t>::min()) &&
            value < kTwoToThe63;
 }

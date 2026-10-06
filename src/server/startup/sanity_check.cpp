@@ -26,6 +26,7 @@
 #include "minimal/tools/permission_model.hpp"
 #include "minimal/tools/tool_source.hpp"
 #include "minimal/tools/tool_registry.hpp"
+#include "minimal/startup/policy.hpp"
 
 namespace minimal::startup {
 
@@ -607,7 +608,7 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
             results.push_back(Warning("naming_model", where + " pattern_overrides key '" + key +
                                   "' resolves to no registered tool (typo, or the providing plugin is disabled)"));
         }
-        if (rules.size() > 200) {
+        if (rules.size() > kPatternRuleCountWarning) {
             results.push_back(Warning("naming_model", where + " pattern_overrides for '" + key +
                                   "' carries " + std::to_string(rules.size()) +
                                   " rules; resolve cost grows with the list"));
@@ -621,7 +622,8 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
             check_pattern_rules("agent preset '" + preset_name + "'", key, rules);
         }
     }
-    if (bundle_.permissions.global_layer.out_of_workdir_patterns.size() > 200) {
+    if (bundle_.permissions.global_layer.out_of_workdir_patterns.size() >
+        kPatternRuleCountWarning) {
         results.push_back(Warning("naming_model",
                                   "permissions.json external_directory_patterns carries " +
                                       std::to_string(bundle_.permissions.global_layer.out_of_workdir_patterns.size()) +
@@ -894,11 +896,11 @@ std::vector<CheckResult> StartupSanityCheck::check_subagent_limit() {
     if (limit <= 0) {
         results.push_back(Warning("subagent_limit", "settings.json max_concurrent_subagents is " +
                                  std::to_string(limit) + "; spawn_subagent will always fail"));
-    } else if (limit > 8) {
-        // Warns, does not block: past 8 the task has outgrown the harness, but
-        // that is the operator's call (ARCHITECTURE.md, "Subagents").
+    } else if (limit > kSubagentLimitWarning) {
         results.push_back(Warning("subagent_limit", "settings.json max_concurrent_subagents is " +
-                                 std::to_string(limit) + "; past 8 the task has outgrown the harness"));
+                                 std::to_string(limit) + "; past " +
+                                 std::to_string(kSubagentLimitWarning) +
+                                 " the task has outgrown the harness"));
     }
     return results;
 }

@@ -18,6 +18,7 @@
 
 #include "minimal/common/periodic_task.hpp"
 #include "minimal/config/policy.hpp"
+#include "minimal/rpc/policy.hpp"
 
 namespace minimal::rpc {
 
@@ -38,7 +39,7 @@ public:
         std::function<void()> on_idle_expired;
         // Called every tick, after the idle check. Empty: no periodic work.
         std::function<void()> periodic_checkpoint;
-        std::chrono::milliseconds tick = std::chrono::milliseconds(250);
+        std::chrono::milliseconds tick = kHousekeepingTick;
     };
 
     // Starts ticking immediately.

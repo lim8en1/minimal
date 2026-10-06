@@ -34,6 +34,28 @@ inline constexpr std::size_t kDefaultEventQueueMaxSize = 65536;
 // pathological.
 inline constexpr std::size_t kDefaultNotificationQueueCapacity = 1024;
 
+// Small config documents read whole and parsed at once -- agent presets,
+// commands, skills, themes, the trusted-directories file. Kilobytes in
+// practice; several of these come from untrusted project directories, and
+// their parsers have no size or depth limit of their own, so anything past
+// this is refused before parsing.
+inline constexpr std::size_t kMaxConfigFileBytes = kMiB;
+
+// gRPC message limit, the same both ways and on both ends: well above the
+// largest legitimate message (a capped tool result inside an event, a rewind
+// payload), where gRPC's own defaults were asymmetric (4 MB in, unlimited out).
+inline constexpr std::size_t kMaxWireMessageBytes = 64 * kMiB;
+
+// TCP connect budget for any HTTP request that does not set its own: a
+// reachable host connects in well under a second; an unreachable one is
+// reported in seconds.
+inline constexpr std::chrono::milliseconds kDefaultConnectTimeout = std::chrono::seconds(5);
+
+// Slice for a wait that polls a cancellation (retry backoff, a blocking
+// subagent, an advisor's answer): the bound on how late a cancel is noticed.
+// Human scale; shorter only multiplies wake-ups over a long wait.
+inline constexpr std::chrono::milliseconds kCancelPollSlice{100};
+
 // Log rotation defaults (settings.json logging.max_size_mb / max_files): disk
 // use is bounded by their product, and a few rotated files keep the
 // history before a problem without anyone pruning by hand.

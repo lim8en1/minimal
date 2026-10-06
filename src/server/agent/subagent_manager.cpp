@@ -1,10 +1,11 @@
 #include "minimal/agent/subagent_manager.hpp"
-#include "minimal/agent/policy.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <future>
 #include <utility>
+
+#include "minimal/common/policy.hpp"
 
 namespace minimal::agent {
 namespace {
@@ -455,7 +456,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     // the future. The slice only bounds cancel latency (the future itself wakes
     // the wait on completion).
     auto future = completion->get_future();
-    while (future.wait_for(kCancelPollSlice) != std::future_status::ready) {
+    while (future.wait_for(common::kCancelPollSlice) != std::future_status::ready) {
         if (ctx.is_cancelled && ctx.is_cancelled()) {
             sessions_.Terminate(child_id);
             break;

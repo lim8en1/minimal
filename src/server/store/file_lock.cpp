@@ -8,11 +8,14 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+#include "minimal/store/policy.hpp"
 
 namespace minimal::store {
 namespace {
@@ -41,7 +44,8 @@ FileId IdOf(const struct stat& st) {
 std::string ReadHolderPid(const std::filesystem::path& lock_path) {
     FILE* file = std::fopen(lock_path.c_str(), "r");
     if (file == nullptr) return "unknown";
-    char buffer[64];
+    // A decimal pid, sign, line ending and NUL.
+    char buffer[std::numeric_limits<pid_t>::digits10 + 4];
     const std::size_t n = std::fread(buffer, 1, sizeof(buffer) - 1, file);
     std::fclose(file);
     buffer[n] = '\0';
@@ -75,7 +79,6 @@ ExclusiveFileLock::ExclusiveFileLock(const std::filesystem::path& db_path)
     // the open fd with the path and only accept when they name the same file.
     // Each retry re-opens whatever now sits at the path; a path that keeps
     // churning is refused rather than raced indefinitely.
-    constexpr int kMaxIdentityAttempts = 3;
     for (int attempt = 0;; ++attempt) {
         const int fd = ::open(lock_path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
         if (fd < 0) {
@@ -118,7 +121,7 @@ ExclusiveFileLock::ExclusiveFileLock(const std::filesystem::path& db_path)
         }
 
         ::close(fd);  // release the ghost and try again
-        if (attempt == kMaxIdentityAttempts - 1) {
+        if (attempt == kMaxLockIdentityAttempts - 1) {
             throw std::runtime_error("lock file " + lock_path_.string() +
                                      " kept changing under the lock attempt; refusing to open");
         }

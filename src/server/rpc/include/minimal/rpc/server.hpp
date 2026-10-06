@@ -22,6 +22,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "minimal/rpc/session_service.hpp"
+#include "minimal/rpc/policy.hpp"
 
 namespace minimal::rpc {
 
@@ -34,10 +35,10 @@ public:
     // `socket_path` is a filesystem path, not a gRPC target string; the "unix://"
     // prefix is this class's business. `shutdown_grace` is how long in-flight
     // RPCs get to finish once shutdown is requested before they are cancelled
-    // (30 s in production; a test passes something short so a half-open stream
-    // cannot wedge process exit for half a minute).
+    // (kShutdownGrace in production; a test passes something short so a
+    // half-open stream cannot wedge its process exit).
     explicit Server(SessionServiceImpl& service, std::filesystem::path socket_path,
-                    std::chrono::milliseconds shutdown_grace = std::chrono::seconds(30));
+                    std::chrono::milliseconds shutdown_grace = kShutdownGrace);
     ~Server();
 
     Server(const Server&) = delete;

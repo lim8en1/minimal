@@ -17,6 +17,9 @@
 
 namespace minimal::common {
 
+// U+FEFF BYTE ORDER MARK, encoded: what a UTF-8 stream may start with.
+inline constexpr std::string_view kUtf8Bom = "\xEF\xBB\xBF";
+
 // U+FFFD REPLACEMENT CHARACTER, encoded.
 inline constexpr std::string_view kUtf8Replacement = "\xEF\xBF\xBD";
 

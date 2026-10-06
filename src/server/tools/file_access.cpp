@@ -1,23 +1,19 @@
 #include "minimal/tools/file_access.hpp"
-#include "minimal/common/units.hpp"
 
 #include <algorithm>
 #include <array>
 #include <fstream>
 
+#include "minimal/common/units.hpp"
+#include "minimal/tools/policy.hpp"
+
 namespace minimal::tools {
 namespace {
 
-constexpr std::size_t kBinarySniffBytes = 8192;
 constexpr const char* kTruncationMarker = "... [line truncated]";
-constexpr const char* kNulMarker =
-    "... [line truncated at a NUL byte; file may be binary past the first 8 KiB]";
+const std::string kNulMarker = "... [line truncated at a NUL byte; file may be binary past the first " +
+                               std::to_string(kBinarySniffBytes / common::kKiB) + " KiB]";
 
-// The ceiling when no max_line_length is configured. There has to be one: the
-// promise this function makes is that memory tracks `limit`, and "no configured
-// truncation" is not the same as "willing to allocate a whole file for one
-// line". Generous enough that no real source line reaches it.
-constexpr std::size_t kHardLineCap = common::kMiB;
 
 bool LooksBinary(std::ifstream& in) {
     std::array<char, kBinarySniffBytes> buffer{};
@@ -81,7 +77,7 @@ FileWindow read_window(const std::filesystem::path& confined_abs_path, int offse
     // a 500 MB allocation to display 2000 characters. Reading into a bounded
     // buffer and discarding the remainder keeps the peak at the buffer size.
     const std::size_t keep =
-        max_line_length > 0 ? static_cast<std::size_t>(max_line_length) : kHardLineCap;
+        max_line_length > 0 ? static_cast<std::size_t>(max_line_length) : kHardLineCapBytes;
     std::vector<char> buffer(keep + 2);  // room for the delimiter slot getline needs
 
     std::string line;

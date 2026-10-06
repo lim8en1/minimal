@@ -47,6 +47,7 @@
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
+#include "minimal/rpc/policy.hpp"
 
 namespace minimal::agent {
 class SignalRouter;  // signal subscriptions + delivery (borrowed via setter)
@@ -221,7 +222,7 @@ private:
     // Runs read-only commands off the reader thread. Its destructor joins the
     // pool, and a task may borrow `sessions_`/`commands_` -- both outlive this
     // service (main declares them first), so a task can never dangle.
-    CommandExecutor command_executor_{/*threads=*/4, /*max_backlog=*/64};
+    CommandExecutor command_executor_{kCommandExecutorThreads, kCommandExecutorBacklog};
 
     agent::SessionRegistry& sessions_;
     // Borrowed and optional: a service built without commands answers every

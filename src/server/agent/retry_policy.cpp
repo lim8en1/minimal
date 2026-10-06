@@ -1,10 +1,11 @@
 #include "minimal/agent/retry_policy.hpp"
-#include "minimal/agent/policy.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <string>
 #include <thread>
+
+#include "minimal/common/policy.hpp"
 
 namespace minimal::agent {
 
@@ -36,9 +37,9 @@ bool RetryPolicy::SleepForBackoff(int attempt,
     // Slept in slices, polling cancellation. Sleeping the whole delay would
     // make CancelTurn wait out a backoff the user just asked to abandon --
     // the same argument that put a cancel-polling sink in the compactor.
-    for (std::chrono::milliseconds slept{0}; slept < delay; slept += kCancelPollSlice) {
+    for (std::chrono::milliseconds slept{0}; slept < delay; slept += common::kCancelPollSlice) {
         if (Cancelled()) return false;
-        std::this_thread::sleep_for(std::min(kCancelPollSlice, delay - slept));
+        std::this_thread::sleep_for(std::min(common::kCancelPollSlice, delay - slept));
     }
     return !Cancelled();
 }

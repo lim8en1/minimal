@@ -758,7 +758,7 @@ TEST_CASE("terminating a session whose subscriber never drains returns instead o
         (void)testing::Transport(*fixture.session).queue().Publish(std::move(filler));
     }
     // The cap is real and reachable, and drop-oldest held it.
-    CHECK(wedged.queued() == rpc::EventBroadcaster::kDefaultMaxEvents);
+    CHECK(wedged.queued() == common::kDefaultEventQueueMaxSize);
 
     // The turn runs to completion anyway -- the worker is never gated on a
     // client.

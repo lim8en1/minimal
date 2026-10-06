@@ -117,7 +117,7 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
             outcome.error = "cannot stat target to preserve its mode: " + Errno();
             return outcome;
         }
-        if (::fchmod(fd, st.st_mode & 07777) != 0) {
+        if (::fchmod(fd, st.st_mode & static_cast<mode_t>(std::filesystem::perms::mask)) != 0) {
             outcome.error = "cannot preserve file mode: " + Errno();
             return outcome;
         }
@@ -134,10 +134,18 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
         }
     } else {
         // mkstemp creates 0600; give the file what a normal create would:
-        // 0666 filtered by the process umask (a user with umask 077 must not
-        // get world-readable files from the write tool).
+        // read-write for all, filtered by the process umask (a user with
+        // umask 077 must not get world-readable files from the write tool).
+        constexpr auto kCreateMode = std::filesystem::perms::owner_read |
+                                     std::filesystem::perms::owner_write |
+                                     std::filesystem::perms::group_read |
+                                     std::filesystem::perms::group_write |
+                                     std::filesystem::perms::others_read |
+                                     std::filesystem::perms::others_write;
         std::filesystem::permissions(
-            temp.path(), static_cast<std::filesystem::perms>(0666 & ~kProcessUmask & 0777),
+            temp.path(),
+            kCreateMode & ~static_cast<std::filesystem::perms>(kProcessUmask) &
+                std::filesystem::perms::all,
             std::filesystem::perm_options::replace, ec);
         if (ec) {
             // Fail the write rather than rename silently-wrong modes in: a

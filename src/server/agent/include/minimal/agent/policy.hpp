@@ -46,11 +46,6 @@ inline constexpr std::size_t kMaxPendingInjections = 64;
 
 // --- waits -------------------------------------------------------------------
 
-// Slice for a wait that polls the turn's cancellation (retry backoff, a
-// blocking subagent): the bound on how late a cancel is noticed there. Human
-// scale; shorter only multiplies wake-ups over a long wait.
-inline constexpr std::chrono::milliseconds kCancelPollSlice{100};
-
 // Retry backoff (exponential, equal jitter): the first wait and the ceiling.
 // Half a second rides out a momentary blip; eight seconds keeps a rate-limited
 // turn moving without hammering the backend. A Retry-After hint overrides.

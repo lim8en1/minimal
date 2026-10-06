@@ -6,23 +6,17 @@
 #include <utility>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/common/policy.hpp"
+#include "minimal/tools/policy.hpp"
 
 namespace minimal::tools {
 namespace {
 
-// The poll slice of the bounded wait: small enough that a cancel or terminate
-// unblocks the session worker promptly, coarse enough not to matter at human
-// decision scale.
-constexpr std::chrono::milliseconds kWaitSlice{25};
 
-// Ceiling on advisor threads launched and not yet exited (a normal call
-// returns to zero; an abandoned one stays counted until its thread finishes).
-// Each abandoned thread is self-contained and harmless, but an advisor that
-// wedges on EVERY call would otherwise accumulate one thread per Ask,
-// unboundedly. Past the ceiling the checker stops spawning: the advisor is
-// skipped and the human is prompted directly, which is the same fallback an
-// abandoned wait already takes.
-constexpr int kMaxAbandonedAdvisors = 8;
+// kMaxAbandonedAdvisors caps advisor threads launched and not yet exited (a
+// normal call returns to zero; an abandoned one stays counted until its thread
+// finishes). Past it the advisor is skipped and the human is prompted
+// directly, the same fallback an abandoned wait already takes.
 
 // An advisor answers ONE invocation; it never mints session grants. A grant is
 // blanket ("this binary, any arguments") and is copied into every subagent,
@@ -154,7 +148,7 @@ PermissionResponse AdvisedPermissionChecker::CheckWithTimeout(const PermissionRe
 
     const auto deadline = std::chrono::steady_clock::now() + timeout_;
     for (;;) {
-        if (future.wait_for(kWaitSlice) == std::future_status::ready) break;
+        if (future.wait_for(common::kCancelPollSlice) == std::future_status::ready) break;
         if (cancel_source->is_cancelled()) {
             worker.detach();
             common::DefaultLogger().warn(

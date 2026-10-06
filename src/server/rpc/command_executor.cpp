@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/rpc/policy.hpp"
 
 namespace minimal::rpc {
 
@@ -135,10 +136,10 @@ void CommandExecutor::WorkerMain() {
 }
 
 void CommandExecutor::WatchdogMain() {
-    const auto tick = std::min(options_.deadline / 4, std::chrono::milliseconds(250));
+    const auto tick = std::min(options_.deadline / kWatchdogTicksPerDeadline, kMaxWatchdogTick);
     std::unique_lock<std::mutex> lock(mutex_);
     while (!stopping_) {
-        watchdog_cv_.wait_for(lock, std::max(tick, std::chrono::milliseconds(10)),
+        watchdog_cv_.wait_for(lock, std::max(tick, kMinWatchdogTick),
                               [this] { return stopping_; });
         if (stopping_) break;
         if (!finished_.empty()) {

@@ -22,10 +22,8 @@ struct ParsedError {
 };
 
 // Only the head of an error body is ever parsed. The body can be as large as
-// the HTTP client's actual caps (kMaxResponseBodyBytes: 8 MiB for a GET,
-// kMaxBodyBytes: 64 MiB for a completion -- see src/server/net/http_client.cpp;
-// there is no 64 KiB cap anywhere on this path, unlike what an earlier
-// version of this comment claimed), so handing all of it to nlohmann to
+// the HTTP client's caps (net::kMaxResponseBodyBytes for a GET,
+// net::kMaxPostBodyBytes for a completion -- net/policy.hpp), so handing all of it to nlohmann to
 // extract one string is a self-inflicted stall on a hostile (or merely
 // absurd) error body. Same bound as provider-openai's HeadOf.
 constexpr std::size_t kMaxErrorBodyParse = 64 * common::kKiB;

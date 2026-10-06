@@ -68,6 +68,7 @@
 #include "minimal/common/serial_executor.hpp"
 #include "minimal/config/hooks_config.hpp"
 #include "minimal/llm/chat.hpp"
+#include "minimal/config/policy.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -232,7 +233,7 @@ public:
 private:
     struct Action {
         std::string command;
-        std::chrono::milliseconds timeout{10000};
+        std::chrono::milliseconds timeout = config::kDefaultHookTimeout;
         // (field, expected value), ANDed, exact match on string payload fields.
         std::vector<std::pair<std::string, std::string>> filter;
     };

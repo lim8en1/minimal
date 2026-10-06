@@ -20,5 +20,6 @@ minimal/client/view/tool_status.hpp
 minimal/common/abi_tag.hpp
 minimal/common/config_reader.hpp
 minimal/common/logger.hpp
+minimal/common/policy.hpp
 minimal/common/utf8.hpp
 minimal/common/units.hpp
