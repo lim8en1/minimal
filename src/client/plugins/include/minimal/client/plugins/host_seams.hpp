@@ -52,6 +52,12 @@ std::unique_ptr<AttentionSink> MakeHostAttentionSink(AttentionState* state, Host
 // same way.
 std::unique_ptr<ClientApi> MakeHostClientApi(SessionClient* client);
 
+// The WidgetKit handed to plugins: forwards each call to whichever kit holds
+// `registry` at that moment -- a plugin keeps this pointer from its
+// registration context, and the kit (a plugin's, or core's default) is in
+// place only once every plugin has registered.
+std::unique_ptr<WidgetKit> MakeHostWidgetKit(const WidgetKitRegistry& registry);
+
 // The FocusProvider handed to plugins: which tab/session the user is looking
 // at, read from AppState's own thread-safe accessors. CREATED BEFORE AppState
 // EXISTS -- the plugin-load step (BuildTuiEnvironment) precedes app

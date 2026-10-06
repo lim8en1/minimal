@@ -50,6 +50,7 @@ std::vector<AskQuestion> ParsePayload(const nlohmann::json& payload);
 // main agent).
 ftxui::Component MakeAskModal(std::vector<AskQuestion> questions, std::string asker,
                               const minimal::client::Theme& theme,
+                              const minimal::client::plugins::WidgetKit& widgets,
                               std::function<void(minimal::client::plugins::PromptReply)> on_reply);
 
 // Whether ONE row of a single-pick question wears the "current choice"
@@ -67,10 +68,16 @@ ftxui::Element WrappedOptionEntry(const ftxui::EntryState& s, const char* marker
 
 class AskPromptRenderer final : public minimal::client::plugins::PromptRenderer {
 public:
+    // `widgets`: the host's kit, for the modal chrome (non-null; host-owned).
+    explicit AskPromptRenderer(const minimal::client::plugins::WidgetKit* widgets)
+        : widgets_(widgets) {}
     std::string_view kind() const override { return "ask"; }
     ftxui::Component Make(
         const minimal::client::plugins::PromptView& prompt, const minimal::client::Theme& theme,
         std::function<void(minimal::client::plugins::PromptReply)> on_reply) const override;
+
+private:
+    const minimal::client::plugins::WidgetKit* widgets_;
 };
 
 }  // namespace minimal::ask_view

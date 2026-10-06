@@ -12,6 +12,7 @@
 
 #include "config_view.hpp"
 #include "ftxui_harness.hpp"
+#include "widget_kit_fixture.hpp"
 #include "minimal/client/view/modal_host.hpp"
 #include "minimal/client/view/schema_form.hpp"
 #include "minimal/client/view/schema_form_model.hpp"
@@ -480,7 +481,7 @@ TEST_CASE("config-view drops what it showed when a refetch fails", "[schema_form
 // input: several events can land between two frames). Run it under ASan.
 TEST_CASE("config-view survives random navigation, keys and mouse", "[schema_form][config_view]") {
     EndpointApi api;
-    config_view::ConfigView view(&api, nullptr);
+    config_view::ConfigView view(&api, &minimal_test::CoreWidgetKit(), nullptr);
     view.OnTheme(TestTheme());
     auto component = view.component();
     view.OnShow();

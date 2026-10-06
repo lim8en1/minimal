@@ -44,6 +44,8 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     //   3. PLUGIN LOAD (contexts carry the attention sink and the data path;
     //      registries record what each plugin claimed)
     //   4. Name resolution: collisions fatal, dangling/slot aliases warned
+    //      -- then the widget kit's core default, if unclaimed (step 6 builds
+    //      plugin view components, which may use it)
     //   5. THEME (sections may reference loaded plugin names)
     //   6. keybindings (+ plugin view defaults, only where nothing binds)
     //   7. core defaults fill every unclaimed slot, then the frame is assembled
@@ -61,6 +63,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     out.attention_sink =
         plugins::MakeHostAttentionSink(&out.attention_state, out.host_focus_provider.get());
     out.host_client_api = plugins::MakeHostClientApi(&client);
+    out.host_widget_kit = plugins::MakeHostWidgetKit(out.registries.widget_kit);
 
     plugins::RegisterCoreSyntaxGrammars(out.registries.grammars);
 
@@ -133,6 +136,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                              .client_api = out.host_client_api.get(),
                              .focus = out.host_focus_provider.get(),
                              .ui = out.host_focus_provider.get(),
+                             .widgets = out.host_widget_kit.get(),
                              .ui_for_plugin = [provider = out.host_focus_provider.get()](
                                                   const std::string& plugin_name) {
                                  return provider->UiFor(plugin_name);
@@ -193,6 +197,12 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             hook.registry->ApplyAliases(plugin_config.aliases);
         }
     }
+
+    // The widget kit before anything can ask for it: the plugin views'
+    // component()s, built with the keybindings below, may already build
+    // their widgets. Core's own kit when no plugin claimed the slot; the
+    // theme travels with every call, so it need not be loaded yet.
+    plugins::RegisterDefaultWidgetKit(out.registries.widget_kit);
 
     // ui.json's "theme" selects the file (themes/<name>.json); empty means
     // the built-in default. Previously hardcoded to "dark" regardless of

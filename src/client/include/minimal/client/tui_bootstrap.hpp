@@ -94,6 +94,9 @@ struct TuiEnvironment {
     std::unique_ptr<plugins::ClientApi> host_client_api;
 
     plugins::ClientRegistries registries;
+    // The WidgetKit plugins get (forwarding to registries.widget_kit, which it
+    // refers to: declared after it).
+    std::unique_ptr<plugins::WidgetKit> host_widget_kit;
 
     // The raw action->key-STRING table (core defaults + the user's file +
     // every plugin view's EnsureDefault), kept alongside `keymap` below for

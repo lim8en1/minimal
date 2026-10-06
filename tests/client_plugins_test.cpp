@@ -74,6 +74,7 @@ struct LoadedFixtures {
     std::unique_ptr<AttentionSink> attention_sink;
     std::unique_ptr<ClientApi> client_api;
     std::unique_ptr<FocusProvider> focus_provider;
+    std::unique_ptr<WidgetKit> widgets;  // the host's proxy over registries.widget_kit
 
     // `candidates` loaded against fresh registries. unique_ptr, not a value:
     // AttentionState holds a mutex, so the struct cannot move, and NRVO still
@@ -83,10 +84,14 @@ struct LoadedFixtures {
         f->attention_sink = MakeHostAttentionSink(&f->attention);
         f->client_api = MakeHostClientApi(nullptr);
         f->focus_provider = MakeHostFocusProvider();
+        f->widgets = MakeHostWidgetKit(f->registries.widget_kit);
         ClientPluginLoader loader(f->registries, {.attention = f->attention_sink.get(),
                                                   .client_api = f->client_api.get(),
-                                                  .focus = f->focus_provider.get()});
+                                                  .focus = f->focus_provider.get(),
+                                                  .widgets = f->widgets.get()});
         f->records = loader.LoadAll(candidates);
+        // As the bootstrap does once names resolve: core's kit, if unclaimed.
+        RegisterDefaultWidgetKit(f->registries.widget_kit);
         return f;
     }
 };
@@ -308,6 +313,55 @@ TEST_CASE("exclusive registries: the first claimant holds until startup refuses 
     CHECK(engines.attributions().size() == 2);
     // The FIRST engine is still the active one (the second was discarded).
     CHECK(ToText(engines.get()->Render("x", Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor))) == "stub engine");
+}
+
+namespace {
+
+// A kit whose every widget says so -- enough to tell whose kit drew.
+class StubKit final : public WidgetKit {
+public:
+    ftxui::Component FilterableMenuModal(std::function<std::vector<MenuRow>(const std::string&)>,
+                                         const FilterableMenuSpec&, FilterableMenuCallbacks,
+                                         const Theme&) const override {
+        return ftxui::Renderer([] { return ftxui::text("stub menu"); });
+    }
+    ftxui::Component SchemaForm(std::function<SchemaFormState()>, SchemaFormCallbacks,
+                                const Theme&) const override {
+        return ftxui::Renderer([] { return ftxui::text("stub form"); });
+    }
+    ftxui::Element ModalFrame(const Theme&, const std::string&, ftxui::Elements, ftxui::Elements,
+                              const std::string&) const override {
+        return ftxui::text("stub frame");
+    }
+    ftxui::Element ModalRule(const Theme&) const override { return ftxui::text("stub rule"); }
+};
+
+}  // namespace
+
+TEST_CASE("the widget kit: a plugin's kit draws for every view; core's fills an empty slot",
+          "[client_plugins][widget_kit]") {
+    const Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
+    WidgetKitRegistry slot;
+    const auto widgets = MakeHostWidgetKit(slot);
+    // During registration the slot is empty: the proxy refuses (the plugin's
+    // guard contains it), it does not crash.
+    CHECK_THROWS_AS(widgets->ModalRule(theme), std::logic_error);
+
+    slot.SetAttribution("my-kit");
+    slot.Register(std::make_unique<StubKit>());
+    slot.ClearAttribution();
+    RegisterDefaultWidgetKit(slot);  // claimed: core's default stays out
+    CHECK(slot.holder() == "my-kit");
+    CHECK(ToText(widgets->ModalRule(theme)) == "stub rule");
+    CHECK(ToText(widgets->ModalFrame(theme, "t", {}, {}, "")) == "stub frame");
+
+    WidgetKitRegistry unclaimed;
+    RegisterDefaultWidgetKit(unclaimed);
+    REQUIRE(unclaimed.held());
+    CHECK(unclaimed.holder().empty());  // core's
+    const auto core_widgets = MakeHostWidgetKit(unclaimed);
+    CHECK(ToText(core_widgets->ModalFrame(theme, "core frame", {ftxui::text("row")}, {}, ""))
+              .find("core frame") != std::string::npos);
 }
 
 TEST_CASE("attention state: plugin raise wins until cleared", "[client_plugins]") {

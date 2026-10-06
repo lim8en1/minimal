@@ -4,8 +4,6 @@
 
 #include <ftxui/component/component_base.hpp>
 
-#include "minimal/client/view/filterable_menu.hpp"
-#include "minimal/client/view/modal_host.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::config_view {
@@ -57,10 +55,10 @@ std::string ListLabel(const json& row) {
 // says is showing. Implements EscapeAware for the form's inline editor.
 class ConfigComponent final : public ftxui::ComponentBase, public client::EscapeAware {
 public:
-    ConfigComponent(std::shared_ptr<ConfigFeed> feed, const client::Theme* theme,
-                    plugins::HostUi* ui)
-        : feed_(std::move(feed)), theme_(theme), ui_(ui) {
-        form_ = client::MakeSchemaForm(
+    ConfigComponent(std::shared_ptr<ConfigFeed> feed, const plugins::WidgetKit* widgets,
+                    const client::Theme* theme, plugins::HostUi* ui)
+        : feed_(std::move(feed)), widgets_(widgets), theme_(theme), ui_(ui) {
+        form_ = widgets_->SchemaForm(
             [feed = feed_] { return feed->form(); },
             client::SchemaFormCallbacks{
                 .on_set = [feed = feed_](const std::string& path,
@@ -139,11 +137,12 @@ private:
                 },
         };
         if (list_) DetachAllChildren();
-        list_ = client::MakeFilterableMenuModal(build_rows, spec, callbacks, *theme_);
+        list_ = widgets_->FilterableMenuModal(build_rows, spec, callbacks, *theme_);
         Add(list_);
     }
 
     std::shared_ptr<ConfigFeed> feed_;
+    const plugins::WidgetKit* widgets_;
     const client::Theme* theme_;
     plugins::HostUi* ui_;
     ftxui::Component form_;
@@ -280,8 +279,9 @@ std::string ConfigFeed::open_plugin() const {
     return open_;
 }
 
-ConfigView::ConfigView(plugins::ClientApi* api, plugins::HostUi* ui)
-    : feed_(std::make_shared<ConfigFeed>(api, ui)), ui_(ui) {}
+ConfigView::ConfigView(plugins::ClientApi* api, const plugins::WidgetKit* widgets,
+                       plugins::HostUi* ui)
+    : feed_(std::make_shared<ConfigFeed>(api, ui)), widgets_(widgets), ui_(ui) {}
 
 const plugins::ViewSpec& ConfigView::spec() const {
     static const plugins::ViewSpec kSpec{kViewId, "plugin configuration",
@@ -290,7 +290,7 @@ const plugins::ViewSpec& ConfigView::spec() const {
 }
 
 ftxui::Component ConfigView::component() {
-    return ftxui::Make<ConfigComponent>(feed_, &theme_, ui_);
+    return ftxui::Make<ConfigComponent>(feed_, widgets_, &theme_, ui_);
 }
 
 void ConfigView::OnShow() const {

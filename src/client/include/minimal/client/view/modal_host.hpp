@@ -5,6 +5,8 @@
 
 #include <ftxui/component/component.hpp>
 
+#include "minimal/client/view/widget_types.hpp"
+
 namespace minimal::client {
 
 // A modal layer's host: a STABLE component in the FTXUI tree whose inner
@@ -41,13 +43,5 @@ ftxui::Component MakeModalHost(const std::shared_ptr<ftxui::Component>& child,
 // to cancel an inline edit -- and the host closes on Escape otherwise.
 ftxui::Component MakePluginModalHost(const std::shared_ptr<ftxui::Component>& child,
                                      const bool& show, std::function<void()> close);
-
-// Implemented by a plugin modal's root component that has a use for Escape
-// of its own while some state lasts (an open inline editor). Asked per key.
-class EscapeAware {
-public:
-    virtual ~EscapeAware();
-    virtual bool WantsEscape() const = 0;
-};
 
 }  // namespace minimal::client

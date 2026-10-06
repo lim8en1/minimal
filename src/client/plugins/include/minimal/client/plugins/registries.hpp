@@ -50,6 +50,7 @@
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/render/syntax_highlighter.hpp"
+#include "minimal/client/view/widget_types.hpp"
 #include "minimal/v1/session_service.pb.h"
 #include "minimal/client/policy.hpp"
 
@@ -343,7 +344,47 @@ public:
     virtual std::unique_ptr<Stream> MakeStream() const = 0;
 };
 
-// --- Chat surface (EXCLUSIVE -- the one wholesale-replacement slot) ---------
+// --- Widget kit (EXCLUSIVE) ------------------------------------------------
+
+// The standard widgets views are built from: the filterable menu every
+// picker is, the schema form, the modal chrome. A view asks the kit
+// (ClientPluginRegistrationContext::widgets) rather than building its own,
+// so replacing the kit -- disable the default, register another -- restyles
+// every view built on it at once. The contracts (rows, specs, callbacks,
+// state) are view/widget_types.hpp; a kit owns only how they look and
+// behave. Core registers its own default into an unclaimed slot.
+//
+// The theme comes with every call: plugins load before the theme does.
+class WidgetKit {
+public:
+    virtual ~WidgetKit() = default;
+
+    // A type-to-filter list in a modal window. `build_rows` runs on every
+    // keystroke and every rebuild: cheap and side-effect free.
+    virtual ftxui::Component FilterableMenuModal(
+        std::function<std::vector<MenuRow>(const std::string& filter)> build_rows,
+        const FilterableMenuSpec& spec, FilterableMenuCallbacks callbacks,
+        const Theme& theme) const = 0;
+
+    // A form over a config schema (SchemaFormState::describe). `source` is
+    // read on every render and event: cheap. The component implements
+    // EscapeAware -- its inline editor wants Escape while it is open.
+    virtual ftxui::Component SchemaForm(std::function<SchemaFormState()> source,
+                                        SchemaFormCallbacks callbacks,
+                                        const Theme& theme) const = 0;
+
+    // A titled modal window: `rows` scroll within the screen's height,
+    // `pinned` stays visible below them (details, the last outcome), and
+    // `footer` -- the key hints -- is pinned last. Empty parts are omitted.
+    virtual ftxui::Element ModalFrame(const Theme& theme, const std::string& title,
+                                      ftxui::Elements rows, ftxui::Elements pinned,
+                                      const std::string& footer) const = 0;
+
+    // A divider between sections of a modal's body.
+    virtual ftxui::Element ModalRule(const Theme& theme) const = 0;
+};
+
+// --- Chat surface (EXCLUSIVE) ---------------------------------------------
 
 // One plugin may replace the whole chat view. Exclusive deliberately: the
 // interface is big (streaming lifecycle, event push, scrollback, focus) and
@@ -838,6 +879,9 @@ struct ObserverKey {
 struct MarkdownEngineKey {
     std::string_view operator()(const MarkdownEngine&) const { return "markdown_engine"; }
 };
+struct WidgetKitKey {
+    std::string_view operator()(const WidgetKit&) const { return "widget_kit"; }
+};
 
 using ViewRegistry = AdditiveRegistry<View, ViewKey>;
 using StartViewRegistry = AdditiveRegistry<StartView, StartViewKey>;
@@ -853,6 +897,9 @@ using ObserverRegistry = AdditiveRegistry<Observer, ObserverKey>;
 using ChatSurfaceRegistry = ExclusiveSlot<ChatSurface, ChatSurfaceKey>;
 // Null get(): the host registers the core md4c default.
 using MarkdownEngineRegistry = ExclusiveSlot<MarkdownEngine, MarkdownEngineKey>;
+// Null get() only during registration: the host registers the core default
+// into an unclaimed slot before any view's component() is built.
+using WidgetKitRegistry = ExclusiveSlot<WidgetKit, WidgetKitKey>;
 
 // Keyed by the ChatRowKind a plugin claims, not by the renderer, so it keeps
 // its own Register. First claimant stays active; a second claim is recorded
@@ -892,6 +939,7 @@ struct ClientRegistries {
     ObserverRegistry observers;
     ChatSurfaceRegistry chat_surface;
     MarkdownEngineRegistry markdown_engine;
+    WidgetKitRegistry widget_kit;
 };
 
 }  // namespace minimal::client::plugins

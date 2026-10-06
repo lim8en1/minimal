@@ -29,7 +29,8 @@ None.
 
 ## Built on
 
-`client::MakeSchemaForm` (`minimal/client/view/schema_form.hpp`): the form is
-client core's, reusable by any view with a `describe`-shaped description —
+The widget kit (`ClientPluginRegistrationContext::widgets`): its schema form
+and filterable menu. The form is reusable by any view with a
+`describe`-shaped description —
 `{schema, config, pending}`, the schema being what
 `minimal_plugin_config_schema` records.
