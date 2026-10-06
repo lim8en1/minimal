@@ -326,7 +326,7 @@ The "write a different frontend" tier shrinks to exactly this list. Not on it, u
 | Widget kit (filterable menu, schema form, model selector, modal chrome; a confirm dialog to come) | **exclusive** (required once the default leaves core) | core kit | live: config-view, mcp-view and ask-view build on it; core's own pickers move onto it with Phase 6, the default to a bundled `ui-kit` after |
 | Prompt editor | **exclusive, required** | core prompt editor | planned — its own design pass |
 | Tab bar | **exclusive** | core tab bar | planned |
-| Status-bar segments (keyed by segment id) | additive; **format string orders/selects** | core segments | live; default moving |
+| Status-bar segments (keyed by segment id) | additive; **format string orders/selects** | bundled `session-status` | live: every segment is a plugin's; a segment renders from the focused tab's `TabStatus`, tints by theme role, and declares its priority and an optional column cap |
 | Views (Panel/Modal) | additive | — | live; every picker is a bundled plugin view, opened by role id -- the server's view_hint names -- by core's commands and keys: `help-view` (`help.overlay`, `help.commands`), `theme-view` (`theme`), `selection-view` (`agents`, `models`, `subagent-models`), `session-view` (`sessions`, `subagents`) |
 | MentionResolver (server-side) | exclusive | `PrefixMentionResolver` — live: `SessionServiceImpl` resolves through `MentionResolverRegistry::Active()` | live |
 | Attention source | additive | core event derivation | live |

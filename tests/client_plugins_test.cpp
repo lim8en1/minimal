@@ -22,6 +22,7 @@
 #include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
+#include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/plugins/plugin_discovery.hpp"
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/markdown_renderer.hpp"
@@ -482,7 +483,7 @@ TEST_CASE("the client loader loads a real plugin through a real dlopen",
     REQUIRE(fixtures->registries.status_segments.All().size() == 1);
     // Config echo: the segment renders THIS plugin's own config slice, through
     // a real dlopen.
-    CHECK(fixtures->registries.status_segments.All().front()->Render("") == "hello");
+    CHECK(fixtures->registries.status_segments.All().front()->Render({}).text == "hello");
     CHECK(fixtures->registries.status_segments.Find("fixture_seg") != nullptr);
 
     REQUIRE(fixtures->registries.tool_renderers.Find("fixture_tool") != nullptr);
@@ -910,7 +911,7 @@ TEST_CASE("host seams survive the load: a plugin raises attention AFTER LoadAll"
     REQUIRE(segment != nullptr);
 
     // Post-load use: the load is long over; the sink must still be alive.
-    CHECK(segment->Render("") == "seam-check");
+    CHECK(segment->Render({}).text == "seam-check");
     CHECK(fixtures->attention.TabRaised("seam-session"));
 }
 
@@ -1047,6 +1048,28 @@ TEST_CASE("the bundled session-view plugin registers the sessions and subagents 
     REQUIRE(fixtures->records.front().ok());
     CHECK(fixtures->registries.views.Find("sessions") != nullptr);
     CHECK(fixtures->registries.views.Find("subagents") != nullptr);
+}
+
+#ifndef MINIMAL_SESSION_STATUS_PLUGIN
+#error "MINIMAL_SESSION_STATUS_PLUGIN must name the built session-status plugin"
+#endif
+
+// The default status format's ids are all this plugin's: with it loaded,
+// none of them is unknown.
+TEST_CASE("the bundled session-status plugin registers every segment the default format names",
+          "[client_plugins][session_status]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_SESSION_STATUS_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    INFO(fixtures->records.front().error);
+    REQUIRE(fixtures->records.front().ok());
+    // tui_bootstrap.cpp's kDefaultStatusFormat, and the two ids it leaves out.
+    for (const auto& id : minimal::client::FormatSegmentIds(
+             "{activity} · {tokens}{>}{model} · {agent} · {permission_mode} · {paused} "
+             "{session} {version}")) {
+        INFO(id);
+        CHECK(fixtures->registries.status_segments.Find(id) != nullptr);
+    }
 }
 
 // regenerate_per_session=false must share one banner across every session

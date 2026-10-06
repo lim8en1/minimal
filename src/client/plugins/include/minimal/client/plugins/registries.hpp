@@ -355,14 +355,48 @@ public:
 // registry already takes (see the file banner) -- a segment that cares about
 // THE focused tab (a per-session token/cost readout, say) has no other way to
 // learn which one that is; empty when no tab is focused.
+// The focused tab as the status bar sees it, computed by the host once per
+// frame and handed to every segment. All empty/zero when no tab is focused
+// (`focused` false); a tab without a session yet has an empty session_id.
+struct TabStatus {
+    bool focused = false;
+    std::string session_id;
+    std::string display_name;   // "" until the session is named
+    bool read_only = false;     // a finished subagent's transcript tab
+    std::int64_t tokens_used = 0;      // context occupancy: input + output + cache
+    std::int64_t context_window = 0;   // 0 = unknown
+    // Effective values (what the session runs with) and desired ones (the
+    // user's last choice, staged until the server confirms it; "" = none).
+    std::string model, desired_model;
+    std::string agent_preset, desired_agent_preset;
+    std::string permission_mode, desired_permission_mode;
+    bool paused = false;
+    // "idle", "thinking", "working", "waiting", "error" or "done".
+    std::string state;
+    std::string running_tool;          // the first tool running, while "working"
+    bool cancel_requested = false;     // interrupted, the turn not over yet
+    bool live_view_truncated = false;  // older live rows of this turn were dropped
+};
+
+// One segment's value for this frame: its text ("" = renders nothing) and
+// the theme role that tints it ("" = the bar's own color).
+struct StatusValue {
+    std::string text;
+    std::string role;
+};
+
 class StatusSegment {
 public:
     virtual ~StatusSegment() = default;
     virtual std::string_view id() const = 0;
-    virtual std::string Render(const std::string& focused_session_id) const = 0;
-    // Which segment gives way first when the bar overflows: lowest first
-    // (kStatusSegmentPriorities in client/policy.hpp has core's).
+    // Runs every frame, on the UI thread: cheap, never blocking.
+    virtual StatusValue Render(const TabStatus& focused) const = 0;
+    // Which segment gives way first when the bar overflows: lowest first.
     virtual int priority() const { return kPluginStatusSegmentPriority; }
+    // A value wider than this many columns is truncated -- and, short of
+    // room, truncated further before anything else gives way. 0: never
+    // truncated; it is dropped whole by priority instead.
+    virtual std::size_t max_columns() const { return 0; }
 };
 
 // --- Syntax grammars (additive, keyed by language) --------------------------

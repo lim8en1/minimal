@@ -372,6 +372,9 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/plugins/client/session-view/session_view.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/client/session-view/session_rows.cpp"
     session_view_test.cpp
+    # session-status: the status bar's usual segments.
+    "${CMAKE_SOURCE_DIR}/plugins/client/session-status/session_status.cpp"
+    session_status_test.cpp
     task_worker_test.cpp
     model_selector_test.cpp
     mcp_view_test.cpp)
@@ -385,6 +388,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/client/theme-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/selection-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/session-view"
+    "${CMAKE_SOURCE_DIR}/plugins/client/session-status"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")
 
 target_include_directories(minimal_tests PRIVATE
@@ -445,6 +449,7 @@ target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_THEME_VIEW_PLUGIN="$<TARGET_FILE:minimal_theme_view>"
     MINIMAL_SELECTION_VIEW_PLUGIN="$<TARGET_FILE:minimal_selection_view>"
     MINIMAL_SESSION_VIEW_PLUGIN="$<TARGET_FILE:minimal_session_view>"
+    MINIMAL_SESSION_STATUS_PLUGIN="$<TARGET_FILE:minimal_session_status>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto"
     # The captured live Jev responses (fixtures/decision-advisor/): the
     # response-shape contract the advisor parses, kept as data not literals.

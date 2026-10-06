@@ -21,8 +21,17 @@
 using minimal::client::ParseStatusFormat;
 using minimal::client::ResolveStatusBar;
 using minimal::client::StatusBarPart;
+using minimal::client::StatusLayout;
 
 namespace {
+// Core knows no segment by name: what a segment declares -- its priority,
+// its column cap -- comes with the call, as the frame passes it. These are
+// session-status's own for its segments.
+const StatusLayout kLayout = {
+    .priorities = {{"permission_mode", 100}, {"activity", 90}, {"model", 80}, {"tokens", 70},
+                   {"agent", 60}, {"paused", 50}, {"session", 20}, {"version", 10}},
+    .caps = {{"session", 24}}};
+
 std::vector<std::string> Texts(const std::vector<StatusBarPart>& parts) {
     std::vector<std::string> out;
     for (const auto& part : parts) out.push_back(part.text);
@@ -70,22 +79,22 @@ TEST_CASE("max_width <= 0 never clamps {session}", "[status_bar]") {
     const auto format = ParseStatusFormat("{session}");
     const std::map<std::string, std::string> values = {
         {"session", std::string(200, 'x')}};
-    const auto parts = ResolveStatusBar(format, values, /*max_width=*/0);
+    const auto parts = ResolveStatusBar(format, values, /*max_width=*/0, kLayout);
     REQUIRE(parts.size() == 1);
     CHECK(parts[0].text.size() == 200);
 }
 
-TEST_CASE("{session} is capped at 24 columns even with plenty of room", "[status_bar]") {
+TEST_CASE("a capped segment is cut to its cap even with plenty of room", "[status_bar]") {
     const auto format = ParseStatusFormat("{version} | {session}");
     const std::map<std::string, std::string> values = {
         {"version", "0.1.0"}, {"session", std::string(200, 'x')}};
-    const auto parts = ResolveStatusBar(format, values, /*max_width=*/500);
+    const auto parts = ResolveStatusBar(format, values, /*max_width=*/500, kLayout);
     REQUIRE(parts.size() == 3);
     CHECK(minimal::client::Utf8ColumnWidth(parts[2].text) == 24);
     CHECK(parts[2].text.back() != 'x');  // ellipsis, not a raw cut
 }
 
-TEST_CASE("other segments are NEVER truncated, only {session} gives way", "[status_bar]") {
+TEST_CASE("uncapped segments are NEVER truncated, only a capped one gives way", "[status_bar]") {
     // The regression this guards: at 80 columns the old renderer shrank
     // EVERY child proportionally, including the token count. This asserts
     // the model/tokens/version/agent/permission_mode values survive intact
@@ -99,7 +108,7 @@ TEST_CASE("other segments are NEVER truncated, only {session} gives way", "[stat
         {"model", "local/ornith-1.5-9b"},
         {"agent", "build"},
         {"permission_mode", "normal"}};
-    const auto parts = ResolveStatusBar(format, values, /*max_width=*/80);
+    const auto parts = ResolveStatusBar(format, values, /*max_width=*/80, kLayout);
     const auto texts = Texts(parts);
     CHECK(std::find(texts.begin(), texts.end(), "0.1.0") != texts.end());
     CHECK(std::find(texts.begin(), texts.end(), "186/262144 tok") != texts.end());
@@ -108,14 +117,14 @@ TEST_CASE("other segments are NEVER truncated, only {session} gives way", "[stat
     CHECK(std::find(texts.begin(), texts.end(), "normal") != texts.end());
 }
 
-TEST_CASE("{session} is dropped, along with its leading separator, when there is no room "
+TEST_CASE("a capped segment is dropped, with its leading separator, when there is no room "
           "at all", "[status_bar]") {
     const auto format = ParseStatusFormat("{version} | {session} | {tokens}");
     const std::map<std::string, std::string> values = {
         {"version", std::string(30, 'v')},
         {"session", "anything"},
         {"tokens", std::string(28, 't')}};
-    const auto parts = ResolveStatusBar(format, values, /*max_width=*/61);
+    const auto parts = ResolveStatusBar(format, values, /*max_width=*/61, kLayout);
     CHECK(Texts(parts) == std::vector<std::string>{std::string(30, 'v'), " | ", std::string(28, 't')});
 }
 
@@ -127,11 +136,11 @@ TEST_CASE("overflow drops whole segments by priority, never clips a value", "[st
     const std::map<std::string, std::string> values = {
         {"version", "0.1.0-long-build-tag"}, {"tokens", "62k/200k · 31%"},
         {"permission_mode", "bypass"}};
-    const auto parts = ResolveStatusBar(format, values, /*max_width=*/30);
+    const auto parts = ResolveStatusBar(format, values, /*max_width=*/30, kLayout);
     CHECK(Texts(parts) == std::vector<std::string>{"62k/200k · 31%", " | ", "bypass"});
 
     // Narrower still: tokens (70) goes before permission_mode (100).
-    const auto tighter = ResolveStatusBar(format, values, /*max_width=*/10);
+    const auto tighter = ResolveStatusBar(format, values, /*max_width=*/10, kLayout);
     CHECK(Texts(tighter) == std::vector<std::string>{"bypass"});
 }
 
@@ -152,56 +161,8 @@ TEST_CASE("{>} splits the bar; the right group's first value takes no separator"
                                                          {"agent", "build"}};
     CHECK(Texts(ResolveStatusBar(format, no_model, 0)) ==
           std::vector<std::string>{"thinking…", "", "build"});
-    CHECK(minimal::client::IsKnownStatusSegment(">"));
-}
-
-TEST_CASE("FormatTokenUsage is compact but never wrong", "[status_bar]") {
-    using minimal::client::FormatTokenUsage;
-    CHECK(FormatTokenUsage(551, 262144) == "551/262k · 0%");
-    CHECK(FormatTokenUsage(62000, 200000) == "62k/200k · 31%");
-    CHECK(FormatTokenUsage(4250, 0) == "4.2k tok");
-    CHECK(FormatTokenUsage(2000, 8000) == "2k/8k · 25%");
-    CHECK(FormatTokenUsage(1'500'000, 2'000'000) == "1.5M/2M · 75%");
-}
-
-TEST_CASE("PermissionModeSegmentValue shows the queued mode with the pending marker",
-          "[status_bar][run_mode]") {
-    using minimal::client::PermissionModeSegmentValue;
-
-    // Nothing queued: the applied wire truth alone.
-    CHECK(PermissionModeSegmentValue("normal", "", true) == "normal");
-    CHECK(PermissionModeSegmentValue("bypass", "", true) == "bypass");
-    // Applied but unknown (metadata never arrived): still renders.
-    CHECK(PermissionModeSegmentValue("", "", true) == "");
-
-    // Queued shift+tab: the desired value with the marker, matching the
-    // {model}/{agent} pending convention. Covers the metadata-never-arrived
-    // case too (empty applied, desired set).
-    CHECK(PermissionModeSegmentValue("normal", "bypass", true) == "→ bypass");
-    CHECK(PermissionModeSegmentValue("", "allow-only", true) == "→ allow-only");
-
-    // Already applied (the confirming metadata landed): the marker goes.
-    CHECK(PermissionModeSegmentValue("bypass", "bypass", true) == "bypass");
-
-    // A sessionless tab applies nothing -- no pending state to show.
-    CHECK(PermissionModeSegmentValue("", "bypass", false) == "");
-}
-
-TEST_CASE("WithHiddenRowsSuffix composes the live-view cut notice, never overriding",
-          "[status_bar][live_segments]") {
-    using minimal::client::WithHiddenRowsSuffix;
-
-    // Riding a state word: appended with the same " · " literal the bar
-    // renders between segments.
-    CHECK(WithHiddenRowsSuffix("working") == "working · earlier rows hidden");
-    CHECK(WithHiddenRowsSuffix("cancelling…") == "cancelling… · earlier rows hidden");
-    // An empty activity stands alone with the notice (unknown-segment rule
-    // would otherwise drop it, and a latched cut is never silent).
-    CHECK(WithHiddenRowsSuffix("") == "earlier rows hidden");
-    // Idempotent: a value already suffixed (a provider segment returned the
-    // composed form) is not double-appended.
-    CHECK(WithHiddenRowsSuffix("working · earlier rows hidden") ==
-          "working · earlier rows hidden");
+    CHECK(minimal::client::FormatSegmentIds("{activity}{>}{model?}{x}") ==
+          std::vector<std::string>{"activity", "x"});  // no split, no optional
 }
 
 TEST_CASE("a plugin segment gives way by its own declared priority", "[status_bar]") {
@@ -212,6 +173,6 @@ TEST_CASE("a plugin segment gives way by its own declared priority", "[status_ba
         {"low", "aaaaaaaa"}, {"model", "local/x"}, {"high", "bbbbbbbb"}};
     const std::map<std::string, int> priorities = {{"low", 5}, {"high", 95}};
     // Room for model + one plugin value: the lower-priority one goes.
-    const auto parts = ResolveStatusBar(format, values, /*max_width=*/22, priorities);
+    const auto parts = ResolveStatusBar(format, values, /*max_width=*/22, {.priorities = priorities});
     CHECK(Texts(parts) == std::vector<std::string>{"local/x", " | ", "bbbbbbbb"});
 }

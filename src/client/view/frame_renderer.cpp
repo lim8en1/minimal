@@ -34,28 +34,56 @@ namespace {
 // live-updating glyph already reads), so sourcing this from the deep
 // snapshot would have shown a stale activity a frame or more behind the
 // glyph right next to it.
-std::string ActivityLabel(SessionStateKind state,
-                          const std::vector<ToolExecutionState>& tools) {
+const char* StateWord(SessionStateKind state) {
     switch (state) {
-        case SessionStateKind::Thinking:
-            return "thinking…";
-        case SessionStateKind::Working:
-            // The gate-order-first tool, not necessarily the one that
-            // finishes first (parallel dispatch) -- good enough as "what's
-            // running" orientation, not a live ticker.
-            if (!tools.empty() && !tools.front().tool_name.empty()) {
-                return "running " + tools.front().tool_name + "…";
-            }
-            return "working…";
-        case SessionStateKind::Waiting:
-            return "waiting";
-        case SessionStateKind::Error:
-            return "error";
-        case SessionStateKind::Done:
-        case SessionStateKind::Idle:
-            return "";
+        case SessionStateKind::Thinking: return "thinking";
+        case SessionStateKind::Working: return "working";
+        case SessionStateKind::Waiting: return "waiting";
+        case SessionStateKind::Error: return "error";
+        case SessionStateKind::Done: return "done";
+        case SessionStateKind::Idle: return "idle";
     }
-    return "";
+    return "idle";
+}
+
+// The focused tab as the status segments see it (plugins::TabStatus).
+// Reads the focused tab's DEEP snapshot (focused_details) and its row in the
+// light tab list; a SESSIONLESS tab renders too -- it has a name ("new
+// session") and any staged /agent //model choices, lacking only the
+// server-side metadata, which fills in at EnsureSession.
+plugins::TabStatus FocusedTabStatus(const std::string& focused,
+                                    const std::vector<AppState::TabSnapshot>& tabs,
+                                    const SessionState::Snapshot& details) {
+    plugins::TabStatus status;
+    if (focused.empty()) return status;
+    status.focused = true;
+    status.session_id = details.session_id;
+    status.display_name = details.display_name;
+    // Cache tokens ARE occupancy: providers report input_tokens as the
+    // UNCACHED portion, so the four-field sum is what the server's
+    // compaction trigger (llm::context_occupancy) counts too.
+    status.tokens_used = details.input_tokens + details.output_tokens +
+                         details.cache_read_tokens + details.cache_write_tokens;
+    status.context_window = details.context_window_tokens;
+    status.model = details.model;
+    status.desired_model = details.desired_model;
+    status.agent_preset = details.agent_preset;
+    status.desired_agent_preset = details.desired_agent_preset;
+    status.permission_mode = details.permission_mode;
+    status.desired_permission_mode = details.desired_permission_mode;
+    status.paused = details.paused;
+    status.cancel_requested = details.cancel_requested;
+    status.live_view_truncated = details.live_view_truncated;
+    for (const auto& tab : tabs) {
+        if (tab.tab_id != focused) continue;
+        status.read_only = tab.view_only;
+        status.state = StateWord(tab.state);
+        // The gate-order-first tool, not necessarily the one that finishes
+        // first (parallel dispatch): orientation, not a live ticker.
+        if (!tab.tools.empty()) status.running_tool = tab.tools.front().tool_name;
+        break;
+    }
+    return status;
 }
 
 }  // namespace
@@ -402,179 +430,31 @@ ftxui::Element FrameRenderer::Render() {
 
     rows.push_back(deps_.editor->Render());
 
-    // Status bar. model/agent/permission_mode render from focused_details
-    // below (the E5 metadata emission); empty/unknown renders as nothing,
-    // per the format string's unknown-or-unfilled rule.
+    // Status bar: every value is a registered segment's (session-status ships
+    // the usual ones), each handed the focused tab's state, computed once.
+    // Render runs on the render thread at ~20 Hz -- the provider contract
+    // (cheap, never blocking) is stated on the interface; a THROW is
+    // contained (that segment renders nothing for this frame), never fatal.
+    const plugins::TabStatus status = FocusedTabStatus(focused, tabs, focused_details);
     std::map<std::string, std::string> values;
     std::map<std::string, ftxui::Color> emphasis;
-    values["version"] = std::string(common::Version());
-    // The focused tab's DEEP snapshot (see focused_details above) drives
-    // the status bar's values. A SESSIONLESS tab renders too: it has a name
-    // ("new session") and any staged /agent //model choices -- what it lacks
-    // is only the server-side metadata, which fills in at EnsureSession.
-    if (!focused.empty()) {
-        values["session"] = !focused_details.display_name.empty()
-                                ? focused_details.display_name
-                                : std::string("new session");
-        // A read-only transcript tab (OpenTranscriptTab) says so right in the
-        // session segment -- the one place the user looks before typing. The
-        // tab IS sessioned (its transcript renders); it just cannot be sent
-        // to, which has_session's stream-derived false already encodes for
-        // every consumer that acts on it.
-        for (const auto& tab : tabs) {
-            if (tab.tab_id == focused && tab.view_only) {
-                values["session"] += "  (read-only)";
-                break;
-            }
-        }
-        // {tokens} is used/max now that the metadata emission carries the
-        // window (E5a); max unknown (0) renders used-only, the E4 behavior.
-        // Cache tokens ARE occupancy: providers report input_tokens as the
-        // UNCACHED portion (Anthropic's semantics, which provider-openai's
-        // ParseUsage normalizes to), so summing input+output alone made the
-        // bar under-count heavily cached sessions -- the exact gap
-        // llm::context_occupancy (server/llm/token_accounting.cpp) fixed for
-        // the compaction trigger. Same four-field sum here, so the bar's
-        // used/max and the server's trigger agree.
-        const int64_t used = focused_details.input_tokens + focused_details.output_tokens +
-                             focused_details.cache_read_tokens +
-                             focused_details.cache_write_tokens;
-        if (used > 0) {
-            const int64_t window = focused_details.context_window_tokens;
-            values["tokens"] = FormatTokenUsage(used, window);
-            // Tinted as the window fills (kContextAttentionPercent,
-            // kContextErrorPercent).
-            if (window > 0) {
-                const int64_t percent = common::AsPercent(used, window);
-                if (percent >= kContextErrorPercent) {
-                    emphasis["tokens"] = deps_.theme.ColorFor("error");
-                } else if (percent >= kContextAttentionPercent) {
-                    emphasis["tokens"] = deps_.theme.ColorFor("attention");
-                }
-            }
-        }
-        // The metadata segments: empty = unknown = render nothing, the
-        // format string's unknown-or-unfilled rule. The {model}/{agent}
-        // values show the DESIRED state when one is staged (the user's last
-        // word, per the desired-state convergence rule): equal to effective
-        // it renders identically, divergent it renders the fresh value with
-        // a pending marker until the confirming metadata event lands -- on
-        // a sessionless tab there is nothing to converge into, so no
-        // marker (the create simply carries the choice).
-        const bool model_pending = !focused_details.session_id.empty() &&
-                                   !focused_details.desired_model.empty() &&
-                                   focused_details.desired_model != focused_details.model;
-        const bool agent_pending =
-            !focused_details.session_id.empty() &&
-            !focused_details.desired_agent_preset.empty() &&
-            focused_details.desired_agent_preset != focused_details.agent_preset;
-        const std::string model_value =
-            !focused_details.desired_model.empty() ? focused_details.desired_model
-                                                   : focused_details.model;
-        const std::string agent_value = !focused_details.desired_agent_preset.empty()
-                                            ? focused_details.desired_agent_preset
-                                            : focused_details.agent_preset;
-        // A staged change reads as "→ gpt-5" -- switching to -- where it
-        // used to be a bare "gpt-5~".
-        if (!model_value.empty()) {
-            values["model"] = (model_pending ? "→ " : "") + model_value;
-        }
-        if (!agent_value.empty()) {
-            values["agent"] = (agent_pending ? "→ " : "") + agent_value;
-        }
-        {
-            // The desired-state rule for the run mode: a shift+tab sent
-            // but not yet confirmed renders the requested value with the
-            // pending marker until the confirming metadata event lands
-            // (the server applies the change immediately). See
-            // PermissionModeSegmentValue.
-            const std::string permission_value = PermissionModeSegmentValue(
-                focused_details.permission_mode, focused_details.desired_permission_mode,
-                !focused_details.session_id.empty());
-            if (!permission_value.empty()) {
-                values["permission_mode"] = permission_value;
-                // bypass runs every tool unasked: the one mode that must never
-                // look like the others. Colored by the DISPLAYED mode (marker
-                // aside), so a pending bypass is already red -- it is about to
-                // be true.
-                const std::string& displayed_mode =
-                    focused_details.desired_permission_mode.empty()
-                        ? focused_details.permission_mode
-                        : focused_details.desired_permission_mode;
-                if (displayed_mode == "bypass") {
-                    emphasis["permission_mode"] = deps_.theme.ColorFor("error");
-                }
-            }
-        }
-        // The paused segment (session.pause / SetPausedEvent): empty = not
-        // paused = renders nothing, per the unknown-or-unfilled rule. Colored
-        // at attention -- "the agent is suspended" is exactly the state the
-        // user must notice before wondering why nothing is happening.
-        if (focused_details.paused) {
-            values["paused"] = "paused";
-            emphasis["paused"] = deps_.theme.ColorFor("attention");
-        }
-        for (const auto& tab : tabs) {
-            if (tab.tab_id != focused) continue;
-            const auto activity = ActivityLabel(tab.state, tab.tools);
-            if (!activity.empty()) values["activity"] = activity;
-            switch (tab.state) {
-                case SessionStateKind::Thinking:
-                    emphasis["activity"] = deps_.theme.ColorFor("thinking");
-                    break;
-                case SessionStateKind::Working:
-                    emphasis["activity"] = deps_.theme.ColorFor("working");
-                    break;
-                case SessionStateKind::Waiting:
-                    emphasis["activity"] = deps_.theme.ColorFor("attention");
-                    break;
-                case SessionStateKind::Error:
-                    emphasis["activity"] = deps_.theme.ColorFor("error");
-                    break;
-                case SessionStateKind::Done:
-                case SessionStateKind::Idle:
-                    break;
-            }
-            break;
-        }
-        // The interrupt press is never silent: from SendCancel until the
-        // turn actually ends, the focused session says so -- in {activity},
-        // which the default format always shows (it used to ride {session}).
-        if (focused_details.cancel_requested) {
-            values["activity"] = "cancelling…";
-            emphasis["activity"] = deps_.theme.ColorFor("attention");
-        }
-        // The live-segment count cap dropped older segments of this turn:
-        // the notice rides {activity} composed AFTER the state words above
-        // (never overriding them -- WithHiddenRowsSuffix appends). In chrome
-        // because it is about the session's live view, not a message; in the
-        // status bar because a synthetic row in the stream read as model
-        // output glued to whatever the page applies had not retired yet.
-        if (focused_details.live_view_truncated) {
-            values["activity"] = WithHiddenRowsSuffix(values["activity"]);
-        }
-    }
-    // Registered segment providers fill their own ids. Render runs on the
-    // render thread at ~20 Hz -- the provider contract (cheap, never
-    // blocking) is stated on the interface; a THROW is contained (that
-    // segment renders nothing for this frame), never fatal.
-    std::map<std::string, int> priorities;
+    StatusLayout layout;
     const auto& segments = deps_.status_registry.All();
     for (std::size_t i = 0; i < segments.size(); ++i) {
         const auto& segment = segments[i];
-        // Segments are SESSION-keyed (cost-view caches per focused session);
-        // the frame's focused handle is a TAB id, so the snapshot's session
-        // id goes out (empty = no tab / sessionless). The value lands under
-        // the SURFACE id -- what ui.json's status_format names.
+        // The value lands under the SURFACE id -- what ui.json's
+        // status_format names.
         const std::string& id = deps_.status_registry.surfaces()[i];
-        if (IsKnownStatusSegment(id)) continue;   // core ids are reserved (warned at startup)
         GuardPluginCall("segment:" + id, "status segment '" + id + "'", [&] {
-            values[id] = segment->Render(focused_details.session_id);
-            priorities[id] = segment->priority();
+            plugins::StatusValue value = segment->Render(status);
+            if (!value.role.empty()) emphasis[id] = deps_.theme.ColorFor(value.role);
+            values[id] = std::move(value.text);
+            layout.priorities[id] = segment->priority();
+            if (const std::size_t cap = segment->max_columns(); cap > 0) layout.caps[id] = cap;
         });
     }
     rows.push_back(RenderStatusBar(deps_.status_format, values, deps_.theme,
-                                   ftxui::Terminal::Size().dimx, emphasis, priorities));
+                                   ftxui::Terminal::Size().dimx, emphasis, layout));
 
     return vbox(std::move(rows));
 }

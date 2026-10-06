@@ -34,8 +34,8 @@ public:
 
     std::string_view id() const override { return id_; }
 
-    std::string Render(const std::string& focused_session_id) const override {
-        return feed_->Render(focused_session_id, field_);
+    plugins::StatusValue Render(const plugins::TabStatus& focused) const override {
+        return {feed_->Render(focused.session_id, field_), ""};
     }
     // Reference detail, but above the session name and version.
     int priority() const override { return minimal::client::cost_view::kStatusSegmentPriority; }

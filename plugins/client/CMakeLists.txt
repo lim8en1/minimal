@@ -62,3 +62,9 @@ add_subdirectory(selection-view)
 # hints open.
 
 add_subdirectory(session-view)
+
+# session-status is the status bar's usual segments ({version}, {session},
+# {tokens}, {model}, {agent}, {permission_mode}, {paused}, {activity}), over
+# the focused tab's state the host hands every segment.
+
+add_subdirectory(session-status)

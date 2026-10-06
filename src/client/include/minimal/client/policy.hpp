@@ -215,17 +215,8 @@ inline constexpr int kTabOverflowMarkerWidth = 5;
 inline constexpr std::int64_t kContextAttentionPercent = 80;
 inline constexpr std::int64_t kContextErrorPercent = 95;
 
-// Which status segment gives way first when the bar overflows: lowest first.
-// The live, decision-relevant state (mode, activity, model, context, a paused
-// session) outranks reference detail the user can get elsewhere (the tab
-// bar's own session name, the version). A plugin segment ranks by its own
-// priority, kPluginStatusSegmentPriority unless it says otherwise: below live
-// core state, above pure reference.
-inline constexpr std::pair<std::string_view, int> kStatusSegmentPriorities[] = {
-    {"permission_mode", 100}, {"activity", 90}, {"model", 80},        {"tokens", 70},
-    {"agent", 60},            {"paused", 50},   {"session", 20},      {"token_detail", 15},
-    {"version", 10},
-};
+// Where a status segment ranks when the bar overflows (lowest gives way
+// first) unless it declares its own priority.
 inline constexpr int kPluginStatusSegmentPriority = 30;
 
 // The schema form (/config): a field's label and value columns -- room for a

@@ -25,9 +25,9 @@ namespace {
 
 // Left: what is happening. Right ({>}): what it is running on. {version} and
 // {session} are out of the default -- the banner/help carry the one, the tab
-// bar the other -- but remain available ids. Core segments only: a plugin's
-// segments ({cost}, {todo}, ...) are placed by ui.json's status_format (the
-// seeded one includes them).
+// bar the other -- but remain available ids. session-status's segments only:
+// other plugins' ({cost}, {todo}, ...) are placed by ui.json's status_format
+// (the seeded one includes them).
 constexpr const char* kDefaultStatusFormat =
     "{activity} · {tokens}{>}{model} · {agent} · {permission_mode} · {paused}";
 
@@ -309,25 +309,15 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                      key.c_str());
     }
 
-    // The status format: ui.json's value, or the built-in default. Unknown ids
-    // warn UNLESS a registered segment answers to them -- the registry is part
-    // of the known-id set now.
+    // The status format: ui.json's value, or the built-in default. An id no
+    // registered segment answers to warns (the bundled ones are
+    // session-status's: with it disabled, every default id warns).
     const std::string status_format_string =
         !out.ui.status_format.empty() ? out.ui.status_format : std::string(kDefaultStatusFormat);
     out.status_format = minimal::client::ParseStatusFormat(status_format_string);
-    for (const auto& id : minimal::client::UnknownStatusSegments(status_format_string)) {
+    for (const auto& id : minimal::client::FormatSegmentIds(status_format_string)) {
         if (out.registries.status_segments.Find(id) == nullptr) {
             std::fprintf(stderr, "minimal: unknown status segment '{%s}'\n", id.c_str());
-        }
-    }
-    // Core segment ids are reserved: a plugin segment answering to one is
-    // ignored (the frame skips it), never overwriting the core value.
-    for (const auto& surface : out.registries.status_segments.surfaces()) {
-        if (minimal::client::IsKnownStatusSegment(surface)) {
-            std::fprintf(stderr,
-                         "minimal: warning: a plugin status segment reuses the core id "
-                         "'{%s}'; the core segment is kept\n",
-                         surface.c_str());
         }
     }
 
