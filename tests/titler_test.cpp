@@ -22,6 +22,7 @@
 
 #include "minimal/agent/session_support_service.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/service_registry.hpp"
 #include "minimal/session/session_database.hpp"
 #include "minimal/session/session_reader.hpp"
@@ -172,6 +173,24 @@ void WaitForRenames(const FakeSupportService& support, std::size_t n) {
 }
 
 }  // namespace
+
+TEST_CASE("the titler's model field is a model ref, empty meaning the session's own",
+          "[titler][config_schema]") {
+    // What lets /config offer the server's models instead of free text.
+    const auto schema = minimal::config::DescribeConfig(
+        "plugins.d/session-titler.json",
+        [](const nlohmann::json& config) { (void)session_titler::ParseTitlerConfig(config); });
+    const nlohmann::json* model = nullptr;
+    for (const auto& field : schema.at("fields")) {
+        if (field.at("path") == "model") model = &field;
+    }
+    REQUIRE(model != nullptr);
+    CHECK(model->at("format") == "model_ref");
+    CHECK(model->at("empty_label") == "the session's own model");
+    for (const auto& field : schema.at("fields")) {
+        if (field.at("path") != "model") CHECK_FALSE(field.contains("format"));
+    }
+}
 
 TEST_CASE("ParseTitlerConfig honors overrides and refuses junk by name", "[titler]") {
     // Missing config: every default stands.

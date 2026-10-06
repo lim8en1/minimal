@@ -23,8 +23,12 @@ extern "C" {
 MINIMAL_CLIENT_PLUGIN_ABI_SYMBOLS("ask-view")
 
 void minimal_client_plugin_register_prompt_renderers(
-    plugins::PromptRendererRegistry& registry, const plugins::ClientPluginRegistrationContext&) {
-    registry.Register(std::make_unique<minimal::ask_view::AskPromptRenderer>());
+    plugins::PromptRendererRegistry& registry,
+    const plugins::ClientPluginRegistrationContext& context) {
+    // No widget kit offered (a test host): no modal to draw, and an
+    // unclaimed kind answers UNAVAILABLE rather than leaving the tool parked.
+    if (context.widgets == nullptr) return;
+    registry.Register(std::make_unique<minimal::ask_view::AskPromptRenderer>(context.widgets));
 }
 
 void minimal_client_plugin_register_display_renderers(

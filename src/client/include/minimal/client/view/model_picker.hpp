@@ -37,6 +37,14 @@ struct ModelPickerCallbacks {
     // leading_row_id for it. Empty id = no leading row.
     std::string leading_row_label;
     std::string leading_row_id;
+    // Offers the typed filter itself as a choice ("use 'x/y'") when it reads
+    // as a `<provider>/<model>` ref and no listed model is exactly it -- a
+    // ref the catalog does not list (discovery offline, a provider not
+    // configured yet) stays choosable. on_select receives the typed text.
+    bool allow_custom = false;
+    // The window's title and the Enter hint ("switch model" / "switch").
+    std::string window_title = "switch model";
+    std::string select_hint = "switch";
 };
 
 ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,

@@ -1,11 +1,14 @@
 #include "config_view.hpp"
 
+#include <functional>
+#include <memory>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include <ftxui/component/component_base.hpp>
 
-#include "minimal/client/view/filterable_menu.hpp"
-#include "minimal/client/view/modal_host.hpp"
+#include "minimal/client/view/schema_form_model.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::config_view {
@@ -53,27 +56,39 @@ std::string ListLabel(const json& row) {
     return label;
 }
 
-// The view's root: the plugin list or one plugin's form, whichever the feed
-// says is showing. Implements EscapeAware for the form's inline editor.
+// The model chooser's "leave it empty" row: not a ref (no '/'), so no model
+// can collide with it.
+constexpr const char* kUnsetRowId = "<unset>";
+
+// The view's root: the plugin list, one plugin's form, or a chooser over one
+// field (an enum's choices, the server's models), whichever is showing.
+// Implements EscapeAware: the form's inline editor and an open chooser take
+// Escape (back to the form) instead of the host closing the view.
 class ConfigComponent final : public ftxui::ComponentBase, public client::EscapeAware {
 public:
-    ConfigComponent(std::shared_ptr<ConfigFeed> feed, const client::Theme* theme,
+    ConfigComponent(std::shared_ptr<ConfigFeed> feed, plugins::ClientApi* api,
+                    const plugins::WidgetKit* widgets, const client::Theme* theme,
                     plugins::HostUi* ui)
-        : feed_(std::move(feed)), theme_(theme), ui_(ui) {
-        form_ = client::MakeSchemaForm(
+        : feed_(std::move(feed)), api_(api), widgets_(widgets), theme_(theme), ui_(ui) {
+        form_ = widgets_->SchemaForm(
             [feed = feed_] { return feed->form(); },
             client::SchemaFormCallbacks{
                 .on_set = [feed = feed_](const std::string& path,
                                          const std::string& text) { feed->Set(path, text); },
                 .on_unset = [feed = feed_](const std::string& path) { feed->Unset(path); },
                 .on_back = [feed = feed_] { feed->Back(); },
+                // `this` owns form_, so the form never outlives it.
+                .on_pick = [this](const std::string& path,
+                                  const nlohmann::json& field) { OpenChooser(path, field); },
             },
             *theme_);
     }
 
     bool WantsEscape() const override {
+        if (feed_->open_plugin().empty()) return false;
+        if (choosing_) return true;
         const auto* aware = dynamic_cast<const client::EscapeAware*>(form_.get());
-        return !feed_->open_plugin().empty() && aware != nullptr && aware->WantsEscape();
+        return aware != nullptr && aware->WantsEscape();
     }
 
 private:
@@ -86,12 +101,99 @@ private:
     // component until the next Sync, so whatever a frame or an event started
     // on outlives it.
     void Sync() {
+        if (feed_->open_plugin().empty()) choosing_ = false;  // went back meanwhile
+        if (!choosing_) chooser_ = nullptr;  // not shown: safe to drop
+        if (choosing_) {
+            shown_ = chooser_;
+            return;
+        }
         if (!feed_->open_plugin().empty()) {
             shown_ = form_;
             return;
         }
         RebuildListIfStale();
         shown_ = list_;
+    }
+
+    // A chooser over `path`: the server's models for a model ref, the
+    // choices for an enum. Built here, on the UI thread, inside the form's
+    // event; shown from the next Sync. Choosing sends through the feed like
+    // any edit, and returns to the form.
+    void OpenChooser(const std::string& path, const nlohmann::json& field) {
+        const auto close = [this] { choosing_ = false; };
+        if (field.value("format", "") == "model_ref") {
+            client::ModelSelectorSpec spec;
+            spec.window_title = path;
+            spec.select_hint = "set";
+            spec.fetch = [api = api_](bool refresh, std::string& error) {
+                return api->ListModels(refresh, &error);
+            };
+            spec.redraw = [ui = ui_] {
+                if (ui != nullptr) ui->RequestRedraw();
+            };
+            const std::string empty = field.value("empty_label", "");
+            spec.leading_row_label = empty.empty() ? "(empty)" : "empty -- " + empty;
+            spec.leading_row_id = kUnsetRowId;
+            spec.allow_custom = true;
+            chooser_ = widgets_->ModelSelector(
+                std::move(spec),
+                {.on_select =
+                     [this, path, close](const std::string& ref) {
+                         if (ref == kUnsetRowId) {
+                             feed_->Unset(path);
+                         } else {
+                             feed_->Set(path, ref);
+                         }
+                         close();
+                     },
+                 .on_close = close},
+                *theme_);
+        } else {
+            chooser_ = EnumChooser(path, field, close);
+        }
+        choosing_ = true;
+    }
+
+    ftxui::Component EnumChooser(const std::string& path, const nlohmann::json& field,
+                                 const std::function<void()>& close) {
+        // The current value, as the form shows it, starts under the cursor.
+        std::string current;
+        for (const auto& row : client::BuildFormRows(feed_->form().describe)) {
+            if (row.path == path && row.value.is_string()) current = row.value.get<std::string>();
+        }
+        const std::string fallback = field.value("default", json()).is_string()
+                                         ? field.at("default").get<std::string>()
+                                         : std::string();
+        std::vector<std::string> choices;
+        for (const auto& choice : field.value("choices", json::array())) {
+            if (choice.is_string()) choices.push_back(choice.get<std::string>());
+        }
+        auto build_rows = [choices, current, fallback](const std::string& filter) {
+            std::vector<client::MenuRow> rows;
+            for (const auto& choice : choices) {
+                if (!filter.empty() && choice.find(filter) == std::string::npos) continue;
+                std::string label = choice;
+                if (choice == current) label += "  (current)";
+                if (choice == fallback) label += "  (default)";
+                rows.push_back({label, choice, /*header=*/false});
+            }
+            return rows;
+        };
+        client::FilterableMenuSpec spec{
+            .window_title = path,
+            .hint_line = " enter: set  ·  type to filter  ·  esc: back",
+            .empty_message = " (no choice matches)",
+        };
+        spec.status.memory = std::make_shared<client::MenuMemory>(client::MenuMemory{"", current});
+        return widgets_->FilterableMenuModal(
+            build_rows, spec,
+            {.on_select =
+                 [this, path, close](const client::MenuRow& row) {
+                     feed_->Set(path, row.id);
+                     close();
+                 },
+             .on_close = close},
+            *theme_);
     }
 
     ftxui::Element OnRender() override {
@@ -139,16 +241,20 @@ private:
                 },
         };
         if (list_) DetachAllChildren();
-        list_ = client::MakeFilterableMenuModal(build_rows, spec, callbacks, *theme_);
+        list_ = widgets_->FilterableMenuModal(build_rows, spec, callbacks, *theme_);
         Add(list_);
     }
 
     std::shared_ptr<ConfigFeed> feed_;
+    plugins::ClientApi* api_;
+    const plugins::WidgetKit* widgets_;
     const client::Theme* theme_;
     plugins::HostUi* ui_;
     ftxui::Component form_;
     ftxui::Component list_;
-    ftxui::Component shown_;  // form_ or list_, as of the last Sync
+    ftxui::Component chooser_;  // while choosing_, and until the next Sync after
+    bool choosing_ = false;
+    ftxui::Component shown_;  // list_, form_ or chooser_, as of the last Sync
     std::uint64_t built_generation_ = 0;
 };
 
@@ -280,8 +386,9 @@ std::string ConfigFeed::open_plugin() const {
     return open_;
 }
 
-ConfigView::ConfigView(plugins::ClientApi* api, plugins::HostUi* ui)
-    : feed_(std::make_shared<ConfigFeed>(api, ui)), ui_(ui) {}
+ConfigView::ConfigView(plugins::ClientApi* api, const plugins::WidgetKit* widgets,
+                       plugins::HostUi* ui)
+    : feed_(std::make_shared<ConfigFeed>(api, ui)), api_(api), widgets_(widgets), ui_(ui) {}
 
 const plugins::ViewSpec& ConfigView::spec() const {
     static const plugins::ViewSpec kSpec{kViewId, "plugin configuration",
@@ -290,7 +397,7 @@ const plugins::ViewSpec& ConfigView::spec() const {
 }
 
 ftxui::Component ConfigView::component() {
-    return ftxui::Make<ConfigComponent>(feed_, &theme_, ui_);
+    return ftxui::Make<ConfigComponent>(feed_, api_, widgets_, &theme_, ui_);
 }
 
 void ConfigView::OnShow() const {

@@ -18,6 +18,7 @@
 #include "ask_display.hpp"
 #include "ask_modal.hpp"
 #include "ftxui_harness.hpp"
+#include "widget_kit_fixture.hpp"
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/render/markdown_renderer.hpp"
@@ -67,7 +68,7 @@ TEST_CASE("ask modal: every question renders, numbered when there are several",
     Replies replies;
     auto modal = MakeAskModal({Q("Approach", "which approach?", {"one", "two"}),
                                Q("Scope", "how much scope?", {"small", "large"})},
-                              "", theme, replies.sink());
+                              "", theme, minimal_test::CoreWidgetKit(), replies.sink());
     const auto frame = RenderFrame(modal);
     CHECK(frame.find("1/2  Approach") != std::string::npos);
     CHECK(frame.find("which approach?") != std::string::npos);
@@ -82,7 +83,7 @@ TEST_CASE("ask modal: every question renders, numbered when there are several",
 TEST_CASE("ask modal: a subagent's ask names the agent", "[ask_view]") {
     const auto theme = TestTheme();
     Replies replies;
-    auto modal = MakeAskModal({Q("Scope", "which scope?", {"a"})}, "review", theme,
+    auto modal = MakeAskModal({Q("Scope", "which scope?", {"a"})}, "review", theme, minimal_test::CoreWidgetKit(),
                               replies.sink());
     CHECK(RenderFrame(modal).find("review asks") != std::string::npos);
 }
@@ -100,7 +101,7 @@ TEST_CASE("ask modal: long option descriptions and headers wrap instead of clipp
         "Identify the zone backing the buffer and size the free-list scan so the checker "
         "does not walk pages the allocator has already reclaimed ENDMARKTWO";
     Replies replies;
-    auto modal = MakeAskModal({single, multi}, "", theme, replies.sink());
+    auto modal = MakeAskModal({single, multi}, "", theme, minimal_test::CoreWidgetKit(), replies.sink());
     const auto frame = RenderFrame(modal, 60, 50);
     CHECK(frame.find("ENDMARKZERO") != std::string::npos);
     CHECK(frame.find("ENDMARKONE") != std::string::npos);
@@ -115,7 +116,7 @@ TEST_CASE("ask modal: Enter picks the highlighted row -- row 0 included", "[ask_
     // unanswered. And Enter used to go to review without picking anything.
     const auto theme = TestTheme();
     Replies replies;
-    auto modal = MakeAskModal({Q("Approach", "which approach?", {"one", "two"})}, "", theme,
+    auto modal = MakeAskModal({Q("Approach", "which approach?", {"one", "two"})}, "", theme, minimal_test::CoreWidgetKit(),
                               replies.sink());
     RenderFrame(modal);   // the clamp
     REQUIRE(SendEvent(modal, ftx::Event::Return));
@@ -130,7 +131,7 @@ TEST_CASE("ask modal: space on the clamped row 0 records a pick", "[ask_view]") 
     Replies replies;
     auto modal = MakeAskModal({Q("Approach", "which approach?", {"one", "two"}),
                                Q("Scope", "which scope?", {"a", "b"}, /*multiple=*/true)},
-                              "", theme, replies.sink());
+                              "", theme, minimal_test::CoreWidgetKit(), replies.sink());
     RenderFrame(modal);
     REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));
     REQUIRE(SendEvent(modal, ftx::Event::Tab));      // on to question 2, untouched
@@ -145,7 +146,7 @@ TEST_CASE("ask modal: digit keys pick a single row and toggle checkboxes", "[ask
     Replies replies;
     auto modal = MakeAskModal({Q("Approach", "which approach?", {"one", "two", "three"}),
                                Q("Zones", "which zones?", {"A", "B", "C"}, /*multiple=*/true)},
-                              "", theme, replies.sink());
+                              "", theme, minimal_test::CoreWidgetKit(), replies.sink());
     REQUIRE(SendEvent(modal, ftx::Event::Character("3")));   // pick "three", on to question 2
     REQUIRE(SendEvent(modal, ftx::Event::Character("1")));   // toggle A
     REQUIRE(SendEvent(modal, ftx::Event::Character("3")));   // toggle C
@@ -163,7 +164,7 @@ TEST_CASE("ask modal: a question skipped with Tab stays unanswered, not row 0",
     Replies replies;
     auto modal = MakeAskModal({Q("Approach", "which approach?", {"one", "two"}),
                                Q("Scope", "which scope?", {"small", "large"})},
-                              "", theme, replies.sink());
+                              "", theme, minimal_test::CoreWidgetKit(), replies.sink());
     RenderFrame(modal);
     REQUIRE(SendEvent(modal, ftx::Event::Tab));      // skip question 1
     REQUIRE(SendEvent(modal, ftx::Event::Return));   // pick "small" -> review
@@ -182,7 +183,7 @@ TEST_CASE("ask modal: the free-text line exists only while \"Type your own answe
           "[ask_view]") {
     const auto theme = TestTheme();
     Replies replies;
-    auto modal = MakeAskModal({Q("Approach", "which approach?", {"one", "two"})}, "", theme,
+    auto modal = MakeAskModal({Q("Approach", "which approach?", {"one", "two"})}, "", theme, minimal_test::CoreWidgetKit(),
                               replies.sink());
     // The placeholder ("your answer", no "own") is distinct from the row label.
     CHECK(RenderFrame(modal).find("your answer") == std::string::npos);
@@ -208,7 +209,7 @@ TEST_CASE("ask modal: Escape in the free-text line returns to the list; a real p
     // the text line threw every answer away.
     const auto theme = TestTheme();
     Replies replies;
-    auto modal = MakeAskModal({Q("Approach", "which approach?", {"one", "two"})}, "", theme,
+    auto modal = MakeAskModal({Q("Approach", "which approach?", {"one", "two"})}, "", theme, minimal_test::CoreWidgetKit(),
                               replies.sink());
     REQUIRE(SendEvent(modal, ftx::Event::Character("3")));   // "Type your own answer"
     REQUIRE(SendEvent(modal, ftx::Event::Character("h")));
@@ -225,7 +226,7 @@ TEST_CASE("ask modal: checking \"other\" clears real checkbox picks", "[ask_view
     const auto theme = TestTheme();
     Replies replies;
     auto modal = MakeAskModal({Q("Zones", "which zones?", {"zone A", "zone B"}, true)}, "",
-                              theme, replies.sink());
+                              theme, minimal_test::CoreWidgetKit(), replies.sink());
     REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));   // zone A
     REQUIRE(SendEvent(modal, ftx::Event::Character("3")));   // "other": clears zone A
     REQUIRE(SendEvent(modal, ftx::Event::Return));           // empty text: into the line
@@ -244,7 +245,7 @@ TEST_CASE("ask modal: allow_other=false offers no free-text row", "[ask_view]") 
     auto q = Q("Approach", "which approach?", {"one", "two"});
     q.allow_other = false;
     Replies replies;
-    auto modal = MakeAskModal({q}, "", theme, replies.sink());
+    auto modal = MakeAskModal({q}, "", theme, minimal_test::CoreWidgetKit(), replies.sink());
     CHECK(RenderFrame(modal).find("Type your own answer") == std::string::npos);
 }
 
@@ -255,7 +256,7 @@ TEST_CASE("ask modal: review freezes the picks; Escape peels one level", "[ask_v
     Replies replies;
     auto modal = MakeAskModal({Q("Approach", "which approach?", {"one", "two"}),
                                Q("Scope", "how much scope?", {"small", "large"})},
-                              "", theme, replies.sink());
+                              "", theme, minimal_test::CoreWidgetKit(), replies.sink());
     REQUIRE(SendEvent(modal, ftx::Event::Character("2")));   // "two", on to question 2
     REQUIRE(SendEvent(modal, ftx::Event::Tab));              // skip question 2 -> review
     const auto review = RenderFrame(modal);
@@ -278,7 +279,7 @@ TEST_CASE("ask modal: Escape dismisses at once when nothing is answered, and nee
     const auto theme = TestTheme();
     SECTION("nothing answered") {
         Replies replies;
-        auto modal = MakeAskModal({Q("A", "q?", {"one"}), Q("B", "q2?", {"x"})}, "", theme,
+        auto modal = MakeAskModal({Q("A", "q?", {"one"}), Q("B", "q2?", {"x"})}, "", theme, minimal_test::CoreWidgetKit(),
                                   replies.sink());
         REQUIRE(SendEvent(modal, ftx::Event::Escape));
         REQUIRE(replies.sent.size() == 1);
@@ -286,7 +287,7 @@ TEST_CASE("ask modal: Escape dismisses at once when nothing is answered, and nee
     }
     SECTION("an answer entered") {
         Replies replies;
-        auto modal = MakeAskModal({Q("A", "q?", {"one"}), Q("B", "q2?", {"x"})}, "", theme,
+        auto modal = MakeAskModal({Q("A", "q?", {"one"}), Q("B", "q2?", {"x"})}, "", theme, minimal_test::CoreWidgetKit(),
                                   replies.sink());
         REQUIRE(SendEvent(modal, ftx::Event::Character("1")));
         REQUIRE(SendEvent(modal, ftx::Event::Escape));   // armed
@@ -304,7 +305,7 @@ TEST_CASE("ask modal: Escape dismisses at once when nothing is answered, and nee
 TEST_CASE("ask modal: only one reply is ever sent", "[ask_view]") {
     const auto theme = TestTheme();
     Replies replies;
-    auto modal = MakeAskModal({Q("A", "q?", {"one", "two"})}, "", theme, replies.sink());
+    auto modal = MakeAskModal({Q("A", "q?", {"one", "two"})}, "", theme, minimal_test::CoreWidgetKit(), replies.sink());
     REQUIRE(SendEvent(modal, ftx::Event::Return));
     SendEvent(modal, ftx::Event::Return);
     SendEvent(modal, ftx::Event::Escape);
@@ -315,7 +316,7 @@ TEST_CASE("ask modal: only one reply is ever sent", "[ask_view]") {
 
 TEST_CASE("ask prompt renderer: a payload that is not an ask request throws", "[ask_view]") {
     const auto theme = TestTheme();
-    minimal::ask_view::AskPromptRenderer renderer;
+    minimal::ask_view::AskPromptRenderer renderer(&minimal_test::CoreWidgetKit());
     CHECK(renderer.kind() == "ask");
     const auto make = [&](const nlohmann::json& payload) {
         return renderer.Make(plugins::PromptView{.kind = "ask", .payload = payload, .asker = ""},

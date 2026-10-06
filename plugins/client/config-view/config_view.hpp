@@ -22,7 +22,6 @@
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/plugins/task_worker.hpp"
 #include "minimal/client/render/theme.hpp"
-#include "minimal/client/view/schema_form.hpp"
 
 namespace minimal::config_view {
 
@@ -72,7 +71,8 @@ private:
 
 class ConfigView final : public plugins::View {
 public:
-    ConfigView(plugins::ClientApi* api, plugins::HostUi* ui);
+    // `widgets`: the host's kit (non-null; host-owned).
+    ConfigView(plugins::ClientApi* api, const plugins::WidgetKit* widgets, plugins::HostUi* ui);
 
     const plugins::ViewSpec& spec() const override;
     ftxui::Component component() override;
@@ -84,6 +84,8 @@ public:
 
 private:
     std::shared_ptr<ConfigFeed> feed_;
+    plugins::ClientApi* api_;  // the model chooser's list
+    const plugins::WidgetKit* widgets_;
     plugins::HostUi* ui_;
     client::Theme theme_;
 };

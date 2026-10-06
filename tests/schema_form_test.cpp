@@ -12,6 +12,7 @@
 
 #include "config_view.hpp"
 #include "ftxui_harness.hpp"
+#include "widget_kit_fixture.hpp"
 #include "minimal/client/view/modal_host.hpp"
 #include "minimal/client/view/schema_form.hpp"
 #include "minimal/client/view/schema_form_model.hpp"
@@ -79,6 +80,16 @@ TEST_CASE("form rows: top-level fields first, then groups; set, default, pending
     CHECK(client::ActionFor(rows[3]) == client::FormAction::kEdit);
     CHECK(client::EditText(rows[3]) == "1000");
     CHECK(client::EditText(rows[4]).empty());  // nor is it put back in the editor
+
+    // With a chooser on offer, an enum and a formatted field are handed to it.
+    CHECK(client::ActionFor(rows[1], /*can_pick=*/true) == client::FormAction::kPick);
+    CHECK(client::ActionFor(rows[0], /*can_pick=*/true) == client::FormAction::kToggle);
+    CHECK(client::ActionFor(rows[3], /*can_pick=*/true) == client::FormAction::kEdit);
+    client::FormRow model = rows[3];
+    model.type = "string";
+    model.field["format"] = "model_ref";
+    CHECK(client::ActionFor(model, /*can_pick=*/true) == client::FormAction::kPick);
+    CHECK(client::ActionFor(model) == client::FormAction::kEdit);
 
     CHECK(client::NextFieldRow(rows, 1, +1) == 3);  // the header is skipped
     CHECK(client::NextFieldRow(rows, 3, -1) == 1);
@@ -362,13 +373,15 @@ public:
             }
             return rows.dump();
         }
-        if (method == "describe") return kDescribe.dump();
+        if (method == "describe") return describe_.dump();
         if (method == "set" && refuse_) return json{{"error", "limit: must be at least 1"}}.dump();
         if (method == "set") return json{{"applied", "live"}, {"changed", {"net.timeout_ms"}}}.dump();
         return std::nullopt;
     }
     std::optional<minimal::v1::ListModelsResponse> ListModels(bool, std::string*) override {
-        return std::nullopt;
+        minimal::v1::ListModelsResponse response;
+        for (const char* ref : {"main/alpha", "main/beta"}) response.add_models()->set_ref(ref);
+        return response;
     }
     client::SubscribeOutcome PluginSubscribe(const std::string&, const std::string&,
                                              const std::string&,
@@ -392,6 +405,7 @@ private:
 public:
     std::atomic<bool> down_{false};
     std::atomic<bool> hold_{false};    // `set` waits until cleared
+    json describe_ = kDescribe;        // what `describe` answers; set before use
     std::atomic<bool> refuse_{false};  // `set` answers an error
 };
 
@@ -474,13 +488,75 @@ TEST_CASE("config-view drops what it showed when a refetch fails", "[schema_form
     CHECK(feed.list().rows.empty());
 }
 
+TEST_CASE("config-view: an enum and a model ref are chosen from a list, not typed or stepped",
+          "[schema_form][config_view]") {
+    EndpointApi api;
+    api.describe_["schema"]["fields"].push_back(
+        {{"path", "model"}, {"type", "string"}, {"default", ""}, {"apply", "live"},
+         {"format", "model_ref"}, {"empty_label", "the session's own model"}});
+    config_view::ConfigView view(&api, &minimal_test::CoreWidgetKit(), nullptr);
+    view.OnTheme(TestTheme());
+    auto component = view.component();
+    const auto* aware = dynamic_cast<const client::EscapeAware*>(component.get());
+    REQUIRE(aware != nullptr);
+    view.feed().Open("sample");
+    REQUIRE(Eventually([&] { return !view.feed().form().describe.is_null(); }));
+    const auto frame = [&] { return minimal_test::RenderFrame(component, 100, 30); };
+    (void)frame();
+
+    // mode (an enum): its choices, the current one under the cursor.
+    minimal_test::SendEvent(component, ftxui::Event::ArrowDown);
+    minimal_test::SendEvent(component, ftxui::Event::Return);
+    std::string shown = frame();
+    CHECK(shown.find("slow  (current)") != std::string::npos);
+    CHECK(shown.find("fast  (default)") != std::string::npos);
+    CHECK(aware->WantsEscape());  // Escape goes back to the form, not out
+    minimal_test::SendEvent(component, ftxui::Event::ArrowDown);  // off
+    minimal_test::SendEvent(component, ftxui::Event::Return);
+    auto calls = api.WaitFor(3);  // describe, set, describe
+    REQUIRE(calls.size() >= 2);
+    CHECK(calls[1] == R"(plugins set {"key":"mode","name":"sample","text":"off"})");
+    REQUIRE(Eventually([&] { return !view.feed().form().busy; }));
+    CHECK(frame().find("timeout_ms") != std::string::npos);  // back on the form
+    CHECK_FALSE(aware->WantsEscape());
+
+    // model (a model ref; top-level, so right after mode): the server's
+    // models, and "empty" to unset.
+    minimal_test::SendEvent(component, ftxui::Event::ArrowDown);
+    minimal_test::SendEvent(component, ftxui::Event::Return);
+    REQUIRE(Eventually([&] { return frame().find("alpha") != std::string::npos; }));
+    CHECK(frame().find("empty -- the session's own model") != std::string::npos);
+    minimal_test::SendEvent(component, ftxui::Event::ArrowDown);  // onto the "main" header...
+    (void)frame();                                                 // ...a frame walks past it
+    minimal_test::SendEvent(component, ftxui::Event::Return);      // main/alpha
+    calls = api.WaitFor(5);
+    REQUIRE(calls.size() >= 4);
+    CHECK(calls[3] == R"(plugins set {"key":"model","name":"sample","text":"main/alpha"})");
+    REQUIRE(Eventually([&] { return !view.feed().form().busy; }));
+
+    minimal_test::SendEvent(component, ftxui::Event::Return);  // the chooser again
+    REQUIRE(Eventually([&] { return frame().find("alpha") != std::string::npos; }));
+    minimal_test::SendEvent(component, ftxui::Event::Return);  // the "empty" row: unset
+    calls = api.WaitFor(7);
+    REQUIRE(calls.size() >= 6);
+    CHECK(calls[5] == R"(plugins unset {"key":"model","name":"sample"})");
+
+    // Escape in a chooser returns to the form.
+    REQUIRE(Eventually([&] { return !view.feed().form().busy; }));
+    minimal_test::SendEvent(component, ftxui::Event::Return);
+    CHECK(aware->WantsEscape());
+    minimal_test::SendEvent(component, ftxui::Event::Escape);
+    CHECK(frame().find("timeout_ms") != std::string::npos);
+    CHECK_FALSE(aware->WantsEscape());
+}
+
 // A user reported a segfault while moving around /config. This drives the
 // whole view -- list and form, through the feed's worker -- with random keys
 // and mouse events, rendering only some of the time (a terminal batches
 // input: several events can land between two frames). Run it under ASan.
 TEST_CASE("config-view survives random navigation, keys and mouse", "[schema_form][config_view]") {
     EndpointApi api;
-    config_view::ConfigView view(&api, nullptr);
+    config_view::ConfigView view(&api, &minimal_test::CoreWidgetKit(), nullptr);
     view.OnTheme(TestTheme());
     auto component = view.component();
     view.OnShow();

@@ -57,6 +57,13 @@ struct ClientPluginRegistrationContext {
     // Ask the host to repaint (registries.hpp HostUi) after the plugin's own
     // data changed off the UI thread. Null on the same terms as `attention`.
     HostUi* ui = nullptr;
+
+    // The widget kit (registries.hpp WidgetKit) every view builds on --
+    // whichever implementation holds the slot, resolved per call, so it may
+    // be used from component() and later even when the kit's own plugin
+    // loads after this one. Not during registration: the slot is filled
+    // after every plugin has registered. Null on the same terms as `ui`.
+    WidgetKit* widgets = nullptr;
 };
 
 }  // namespace minimal::client::plugins
@@ -158,8 +165,8 @@ void minimal_client_plugin_register_observers(
     minimal::client::plugins::ObserverRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
-// OPTIONAL, EXCLUSIVE: replace the whole chat view. One plugin; a second
-// registration warns and is ignored.
+// OPTIONAL, EXCLUSIVE: replace the whole chat view. One plugin; two
+// claimants are fatal at startup (EXTENSIBILITY 4.2, slot semantics).
 void minimal_client_plugin_register_chat_surface(
     minimal::client::plugins::ChatSurfaceRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
@@ -170,6 +177,13 @@ void minimal_client_plugin_register_chat_surface(
 // authoritatively (EXTENSIBILITY 4.2).
 void minimal_client_plugin_register_markdown_engine(
     minimal::client::plugins::MarkdownEngineRegistry&,
+    const minimal::client::plugins::ClientPluginRegistrationContext&);
+
+// OPTIONAL, EXCLUSIVE: replace the widget kit -- the menus, form and modal
+// chrome every view builds on (registries.hpp WidgetKit; core's own is the
+// default).
+void minimal_client_plugin_register_widget_kit(
+    minimal::client::plugins::WidgetKitRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
 }  // extern "C"

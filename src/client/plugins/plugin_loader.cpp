@@ -130,6 +130,8 @@ std::vector<RegistryHook> RegistryHooks(ClientRegistries& r) {
              "exclusive slot", Policy::kSlot),
         Hook("markdown_engine", "minimal_client_plugin_register_markdown_engine",
              r.markdown_engine, "exclusive slot", Policy::kSlot),
+        Hook("widget_kit", "minimal_client_plugin_register_widget_kit", r.widget_kit,
+             "exclusive slot", Policy::kSlot),
     };
 }
 
@@ -230,6 +232,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     context.attention = seams_.attention;
     context.client_api = seams_.client_api;
     context.focus = seams_.focus;
+    context.widgets = seams_.widgets;
     context.ui = seams_.ui_for_plugin ? seams_.ui_for_plugin(record.name) : seams_.ui;
 
     // Partial-registration rollback, captured BEFORE the first hook runs

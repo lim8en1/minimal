@@ -35,4 +35,8 @@ void RegisterCoreSyntaxGrammars(SyntaxGrammarRegistry& registry);
 void RegisterDefaultMarkdownEngine(MarkdownEngineRegistry& registry,
                                    const MarkdownRenderer& renderer);
 
+// Registers core's widget kit (filterable_menu, schema_form, prompt_modal's
+// chrome) when no plugin claimed the exclusive slot.
+void RegisterDefaultWidgetKit(WidgetKitRegistry& registry);
+
 }  // namespace minimal::client::plugins

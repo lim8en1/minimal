@@ -69,7 +69,9 @@ private:
 
 class McpPickerView final : public plugins::View {
 public:
-    McpPickerView(plugins::ClientApi* api, plugins::HostUi* ui = nullptr);
+    // `widgets`: the host's kit (non-null; host-owned).
+    McpPickerView(plugins::ClientApi* api, const plugins::WidgetKit* widgets,
+                  plugins::HostUi* ui = nullptr);
 
     const plugins::ViewSpec& spec() const override;
     ftxui::Component component() override;
@@ -78,6 +80,7 @@ public:
 
 private:
     std::shared_ptr<McpFeed> feed_;
+    const plugins::WidgetKit* widgets_;
     plugins::HostUi* ui_;
     client::Theme theme_;
 };

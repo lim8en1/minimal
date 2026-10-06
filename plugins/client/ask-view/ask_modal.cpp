@@ -7,7 +7,6 @@
 
 #include <ftxui/component/event.hpp>
 
-#include "minimal/client/view/prompt_modal.hpp"
 
 namespace minimal::ask_view {
 
@@ -208,7 +207,7 @@ ftxui::Element WrappedOptionEntry(const ftxui::EntryState& s, const char* marker
 }
 
 ftxui::Component MakeAskModal(std::vector<AskQuestion> questions, std::string asker,
-                              const Theme& theme,
+                              const Theme& theme, const plugins::WidgetKit& widgets,
                               std::function<void(plugins::PromptReply)> on_reply) {
     using namespace ftxui;
 
@@ -418,7 +417,7 @@ ftxui::Component MakeAskModal(std::vector<AskQuestion> questions, std::string as
 
     const std::string title =
         state->asker.empty() ? std::string("the assistant asks") : state->asker + " asks";
-    auto body = Renderer(all, [all, state, &theme, title, count] {
+    auto body = Renderer(all, [all, state, &theme, &widgets, title, count] {
         Elements rows;
         rows.push_back(text(title) | bold | color(theme.ColorFor("attention")));
         const auto name_of = [count](int i, const AskQuestion& question) {
@@ -431,7 +430,7 @@ ftxui::Component MakeAskModal(std::vector<AskQuestion> questions, std::string as
             int first_line = -1;
             for (int i = 0; i < count; ++i) {
                 const auto& question = state->questions[i];
-                if (i > 0) rows.push_back(minimal::client::ModalRule(theme));
+                if (i > 0) rows.push_back(widgets.ModalRule(theme));
                 std::string name = name_of(i, question);
                 if (name.empty()) name = question.question;
                 rows.push_back(paragraph(name) | bold);
@@ -439,12 +438,12 @@ ftxui::Component MakeAskModal(std::vector<AskQuestion> questions, std::string as
                 if (first_line < 0) first_line = static_cast<int>(rows.size()) - 1;
             }
             if (!state->interacted && first_line >= 0) rows[first_line] |= focus;
-            return minimal::client::ModalFrame(theme, "review answers", std::move(rows),
-                                               "enter: submit  ·  esc: edit answers");
+            return widgets.ModalFrame(theme, "review answers", std::move(rows), {},
+                                      "enter: submit  ·  esc: edit answers");
         }
         for (int i = 0; i < count; ++i) {
             const auto& question = state->questions[i];
-            if (i > 0) rows.push_back(minimal::client::ModalRule(theme));
+            if (i > 0) rows.push_back(widgets.ModalRule(theme));
             const std::string name = name_of(i, question);
             if (!name.empty()) rows.push_back(paragraph(name) | bold);
             rows.push_back(paragraph(question.question));
@@ -458,7 +457,7 @@ ftxui::Component MakeAskModal(std::vector<AskQuestion> questions, std::string as
                   "tab: skip  ·  esc: dismiss";
         const std::string window_title =
             count > 1 ? std::to_string(count) + " questions" : std::string("question");
-        return minimal::client::ModalFrame(theme, window_title, std::move(rows), hints);
+        return widgets.ModalFrame(theme, window_title, std::move(rows), {}, hints);
     });
 
     const auto dismiss = [reply] { reply({v1::PROMPT_OUTCOME_DISMISSED, nullptr}); };
@@ -505,7 +504,7 @@ ftxui::Component MakeAskModal(std::vector<AskQuestion> questions, std::string as
 ftxui::Component AskPromptRenderer::Make(
     const plugins::PromptView& prompt, const Theme& theme,
     std::function<void(plugins::PromptReply)> on_reply) const {
-    return MakeAskModal(ParsePayload(prompt.payload), std::string(prompt.asker), theme,
+    return MakeAskModal(ParsePayload(prompt.payload), std::string(prompt.asker), theme, *widgets_,
                         std::move(on_reply));
 }
 

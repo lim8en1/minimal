@@ -108,8 +108,10 @@ TitlerConfig ParseTitlerConfig(const nlohmann::json& config) {
     TitlerConfig out;
     config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "session-titler"));
     // All live: each title request reads the current values.
-    reader.Describe("model", {"<provider>/<model> for titles; empty = the session's own model.",
-                              config::ApplyPolicy::kLive});
+    reader.Describe("model", {.doc = "<provider>/<model> for titles; empty = the session's own model.",
+                              .apply = config::ApplyPolicy::kLive,
+                              .format = config::FieldFormat::kModelRef,
+                              .empty_label = "the session's own model"});
     reader.Describe("max_tokens", {"Output cap for the title request (a reasoning model needs "
                                    "far more than the default).",
                                    config::ApplyPolicy::kLive});

@@ -1,6 +1,7 @@
 #include "minimal/client/plugins/host_seams.hpp"
 
 #include <chrono>
+#include <stdexcept>
 #include <utility>
 
 #include <grpcpp/client_context.h>
@@ -221,6 +222,51 @@ std::unique_ptr<AttentionSink> MakeHostAttentionSink(AttentionState* state, Host
 
 std::unique_ptr<ClientApi> MakeHostClientApi(SessionClient* client) {
     return std::make_unique<HostClientApi>(client);
+}
+
+namespace {
+
+class HostWidgetKit final : public WidgetKit {
+public:
+    explicit HostWidgetKit(const WidgetKitRegistry& registry) : registry_(registry) {}
+
+    ftxui::Component FilterableMenuModal(
+        std::function<std::vector<MenuRow>(const std::string& filter)> build_rows,
+        const FilterableMenuSpec& spec, FilterableMenuCallbacks callbacks,
+        const Theme& theme) const override {
+        return Kit().FilterableMenuModal(std::move(build_rows), spec, std::move(callbacks), theme);
+    }
+    ftxui::Component SchemaForm(std::function<SchemaFormState()> source,
+                                SchemaFormCallbacks callbacks, const Theme& theme) const override {
+        return Kit().SchemaForm(std::move(source), std::move(callbacks), theme);
+    }
+    ftxui::Element ModalFrame(const Theme& theme, const std::string& title,
+                              ftxui::Elements rows, ftxui::Elements pinned,
+                              const std::string& footer) const override {
+        return Kit().ModalFrame(theme, title, std::move(rows), std::move(pinned), footer);
+    }
+    ftxui::Element ModalRule(const Theme& theme) const override { return Kit().ModalRule(theme); }
+    ftxui::Component ModelSelector(ModelSelectorSpec spec, ModelSelectorCallbacks callbacks,
+                                   const Theme& theme) const override {
+        return Kit().ModelSelector(std::move(spec), std::move(callbacks), theme);
+    }
+
+private:
+    // Throws while the slot is empty -- only during registration, where the
+    // plugin's own guard contains it.
+    const WidgetKit& Kit() const {
+        const WidgetKit* kit = registry_.get();
+        if (kit == nullptr) throw std::logic_error("the widget kit is not available during registration");
+        return *kit;
+    }
+
+    const WidgetKitRegistry& registry_;
+};
+
+}  // namespace
+
+std::unique_ptr<WidgetKit> MakeHostWidgetKit(const WidgetKitRegistry& registry) {
+    return std::make_unique<HostWidgetKit>(registry);
 }
 
 std::unique_ptr<HostFocusProvider> MakeHostFocusProvider() {

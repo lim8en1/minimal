@@ -17,8 +17,10 @@ MINIMAL_CLIENT_PLUGIN_ABI_SYMBOLS("mcp-view")
 void minimal_client_plugin_register_views(plugins::ViewRegistry& registry,
                                           const plugins::ClientPluginRegistrationContext& context) {
     // No data path offered (a test host): nothing this view could show.
-    if (context.client_api == nullptr) return;
-    registry.Register(std::make_unique<minimal::mcp_view::McpPickerView>(context.client_api, context.ui));
+    // No data path or widget kit offered (a test host): nothing to show.
+    if (context.client_api == nullptr || context.widgets == nullptr) return;
+    registry.Register(std::make_unique<minimal::mcp_view::McpPickerView>(
+        context.client_api, context.widgets, context.ui));
 }
 
 }  // extern "C"

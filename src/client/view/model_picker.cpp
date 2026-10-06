@@ -15,15 +15,22 @@ ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
             rows.push_back({callbacks.leading_row_label, callbacks.leading_row_id,
                             /*header=*/false});
         }
+        bool exact = false;
         for (const auto& row : BuildModelPickerRows(models, filter)) {
             rows.push_back({row.label, row.ref, row.header});
+            exact = exact || (!row.header && row.ref == filter);
+        }
+        if (callbacks.allow_custom && !exact && filter.find('/') != std::string::npos &&
+            filter.find(' ') == std::string::npos) {
+            rows.push_back({"use '" + filter + "' (not listed)", filter, /*header=*/false});
         }
         return rows;
     };
 
     FilterableMenuSpec spec{
-        .window_title = "switch model",
-        .hint_line = " enter: switch  ·  ctrl+r: refresh discovery  ·  esc: close",
+        .window_title = callbacks.window_title,
+        .hint_line = " enter: " + callbacks.select_hint +
+                     "  ·  ctrl+r: refresh discovery  ·  esc: close",
         .empty_message = " (no models match)",
         // The leading row is always present; without this the "no models
         // match" message could never fire (rows is never empty).

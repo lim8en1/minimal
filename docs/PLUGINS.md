@@ -277,7 +277,10 @@ object code.
   context (the `minimal plugin` CLI, the config view), so the parser must
   be side-effect free. Describe mode records every field the parser reads
   through `config::Reader` (path, type, default, range, choices);
-  `reader.Describe(key, {doc, apply, secret})` adds the rest, and
+  `reader.Describe(key, {doc, apply, secret, format, empty_label})` adds the
+  rest (`format = FieldFormat::kModelRef` marks a `<provider>/<model>`
+  string, which `/config` offers from the server's models; `empty_label`
+  says what leaving it empty means), and
   `reader.RelevantWhen(key, field, {values})` / `RelevantWhenSet(key, field)`
   say a field matters only in some modes (memory's http fields under
   `strategy` http/auto). The CLI and `/config` show an unused field as such,

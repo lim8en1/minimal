@@ -16,27 +16,9 @@
 #include <ftxui/component/event.hpp>
 
 #include "minimal/client/render/theme.hpp"
+#include "minimal/client/view/widget_types.hpp"
 
 namespace minimal::client {
-
-// One row of the filtered list. `id` is caller-defined: session_id for the
-// session picker (empty => the synthetic "+ new session" row), preset name
-// for the agent picker, "<provider>/<model>" for the model picker.
-struct MenuRow {
-    std::string label;
-    std::string id;
-    // A header row is a group label (the model picker's provider names):
-    // rendered bold and never prefixed with the cursor, Enter on it is
-    // swallowed, and the cursor never RESTS on one -- ResolveSelectableRow
-    // (below) walks the selection to the nearest selectable row after every
-    // filter change and before every render, so FTXUI's Menu can keep owning
-    // the arrow keys without a header ever wearing (or hiding) the cursor.
-    bool header = false;
-    // Optional "#rrggbb" for the label (the agent picker's preset.color).
-    // Anything unparseable renders as the theme default -- a picker row must
-    // never throw over cosmetics.
-    std::string color = {};
-};
 
 // The index the cursor should occupy, given `from` and the direction the user
 // last moved (+1 down, -1 up): `from` itself when it is selectable (in bounds,
@@ -45,77 +27,6 @@ struct MenuRow {
 // the list has no selectable row at all (or is empty). Pure so the
 // header-skipping rules are directly testable (tests/filterable_menu_test.cpp).
 int ResolveSelectableRow(const std::vector<MenuRow>& rows, int from, int direction);
-
-// What on_extra_key needs to answer a key the generic handler doesn't
-// recognize: the session picker's ctrl+d (delete the highlighted row) and
-// arrow-down-at-end (load more, only when unfiltered and already on the
-// last row) both need the CURRENT row list, the highlighted index, and the
-// filter text, not just the event itself.
-struct MenuContext {
-    const std::vector<MenuRow>& rows;
-    int selected;
-    const std::string& filter;
-};
-
-struct FilterableMenuCallbacks {
-    // Return, with the highlighted row (rows is never empty when this
-    // fires -- Return is swallowed unconditionally on an empty list, same
-    // as the two pickers already did, so there is nothing to select).
-    std::function<void(const MenuRow&)> on_select;
-    std::function<void()> on_close;   // Escape
-
-    // Keys the generic handler doesn't recognize (session picker: ctrl+d,
-    // tab, ctrl+a, arrow-down-at-end; agent picker: nullptr, it has none).
-    // `rebuild` is the shell's OWN rebuild -- call it if the handler
-    // mutated something that changes what build_rows(filter) would return
-    // (e.g. the session picker's Tab cycling its own external sort state).
-    // Returns whether the event was consumed.
-    std::function<bool(const ftxui::Event&, const MenuContext&, const std::function<void()>& rebuild)>
-        on_extra_key;
-};
-
-// The menu input that must survive a component REBUILD. Pickers rebuild
-// their component whenever fetched data lands (a page, a load-more, a
-// refresh); a fresh component used to start with an empty filter and the
-// cursor on row 0, so type-ahead entered while the fetch was in flight --
-// and the cursor after "load more" -- were thrown away. The owner keeps one
-// per picker, resets it on open, and hands it to every rebuild.
-struct MenuMemory {
-    std::string filter;
-    std::string selected_id;   // the highlighted row's MenuRow::id ("" = none yet)
-};
-
-// What the list's data source is doing, rendered in place of the empty
-// message: without it an open-while-fetching picker read "(no models
-// match)", and a failed fetch said the same thing forever.
-struct MenuStatus {
-    bool loading = false;
-    std::string error;   // the last fetch's failure, "" when none
-    std::shared_ptr<MenuMemory> memory;
-};
-
-struct FilterableMenuSpec {
-    std::string window_title;    // "resume a session" / "switch agent preset"
-    std::string hint_line;       // caller-composed key hints, rendered as the footer
-    // Shown flush right on the filter line (a leading "  ·  " is dropped) --
-    // the session picker adds sort/all-dirs/more-below; the agent picker
-    // leaves this empty. Composed fresh each render so it reflects state
-    // (sort order, has_more) the shell has no access to.
-    std::function<std::string(const std::string& filter)> status_suffix;
-    std::string empty_message;   // "(no other stored sessions here)" / "(no agent presets match)"
-    // The empty message shows when build_rows(filter).size() <= this. The
-    // session picker always has its synthetic "+ new session" row, so it
-    // sets this to 1; the agent picker (no synthetic row) leaves it 0.
-    std::size_t empty_threshold = 0;
-    // If set, the factory stores a closure clearing the filter and the
-    // cursor selection. The help overlays are built ONCE (app.cpp), so
-    // without this the typed filter survived across opens -- reopening the
-    // help presented yesterday's needle as if it were a fresh search. The
-    // PICKERS deliberately do not reset (reopening with the filter intact
-    // is the feature there).
-    std::function<void()>* reset_state = nullptr;
-    MenuStatus status;
-};
 
 // `build_rows` is called on every filter keystroke and whenever an
 // on_extra_key handler invokes the rebuild callback it's given -- it must be

@@ -48,6 +48,7 @@ add_library(minimal_client_core SHARED
     view/filterable_menu.cpp
     view/session_picker.cpp
     view/model_picker.cpp
+    view/model_selector.cpp
     view/agent_picker.cpp
     view/subagent_picker.cpp
     view/theme_picker.cpp

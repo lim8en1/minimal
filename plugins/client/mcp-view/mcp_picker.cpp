@@ -4,7 +4,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include "minimal/client/view/filterable_menu.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::mcp_view {
@@ -18,9 +17,9 @@ constexpr const char* kServerPlugin = "mcp";
 // worker only publishes data, this component (UI thread) turns it into rows.
 class McpPickerComponent final : public ftxui::ComponentBase {
 public:
-    McpPickerComponent(std::shared_ptr<McpFeed> feed, const client::Theme* theme,
-                       plugins::HostUi* ui)
-        : feed_(std::move(feed)), theme_(theme), ui_(ui) {}
+    McpPickerComponent(std::shared_ptr<McpFeed> feed, const plugins::WidgetKit* widgets,
+                       const client::Theme* theme, plugins::HostUi* ui)
+        : feed_(std::move(feed)), widgets_(widgets), theme_(theme), ui_(ui) {}
 
     ftxui::Element OnRender() override {
         RebuildIfStale();
@@ -65,11 +64,12 @@ private:
                 },
         };
         if (menu_) DetachAllChildren();
-        menu_ = client::MakeFilterableMenuModal(build_rows, spec, callbacks, *theme_);
+        menu_ = widgets_->FilterableMenuModal(build_rows, spec, callbacks, *theme_);
         Add(menu_);
     }
 
     std::shared_ptr<McpFeed> feed_;
+    const plugins::WidgetKit* widgets_;
     const client::Theme* theme_;
     plugins::HostUi* ui_;
     ftxui::Component menu_;
@@ -182,8 +182,9 @@ std::string McpFeed::status() const {
     return status_;
 }
 
-McpPickerView::McpPickerView(plugins::ClientApi* api, plugins::HostUi* ui)
-    : feed_(std::make_shared<McpFeed>(api, ui)), ui_(ui) {}
+McpPickerView::McpPickerView(plugins::ClientApi* api, const plugins::WidgetKit* widgets,
+                             plugins::HostUi* ui)
+    : feed_(std::make_shared<McpFeed>(api, ui)), widgets_(widgets), ui_(ui) {}
 
 const plugins::ViewSpec& McpPickerView::spec() const {
     static const plugins::ViewSpec kSpec{"mcp", "mcp servers", plugins::ViewPlacement::Modal};
@@ -191,7 +192,7 @@ const plugins::ViewSpec& McpPickerView::spec() const {
 }
 
 ftxui::Component McpPickerView::component() {
-    return ftxui::Make<McpPickerComponent>(feed_, &theme_, ui_);
+    return ftxui::Make<McpPickerComponent>(feed_, widgets_, &theme_, ui_);
 }
 
 }  // namespace minimal::mcp_view
