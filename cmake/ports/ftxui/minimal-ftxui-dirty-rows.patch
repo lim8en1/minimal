@@ -14,7 +14,7 @@ index 343bd49..ffe86ab 100644
    // Print the Screen on to the terminal.
    void Print() const;
 diff --git a/src/ftxui/component/app.cpp b/src/ftxui/component/app.cpp
-index a1e768e..b9061c6 100644
+index a1e768e..4630d73 100644
 --- a/src/ftxui/component/app.cpp
 +++ b/src/ftxui/component/app.cpp
 @@ -8,6 +8,7 @@
@@ -25,7 +25,13 @@ index a1e768e..b9061c6 100644
  #include <cstdlib>  // minimal-ftxui patch: getenv
  #include <ftxui/component/app.hpp>
  #include <ftxui/component/task.hpp>  // for Task, Closure, AnimationTask
-@@ -86,14 +87,14 @@ namespace ftxui {
+@@ -82,18 +83,19 @@ namespace ftxui {
+ //      explicit pass is dead work -- one whole-tree walk saved per frame.
+ //
+ //   A. Identical-frame skip: the composed frame is diffed against the
+-//      previous one; when equal, nothing is written at all. This kills the
++//      previous one; when equal, no cell is written (only B's cursor park,
++//      without which the caret is left in the top-left corner). This kills the
  //      redundant full-screen writes that input events (mouse move!) trigger
  //      without changing any pixel.
  //
@@ -48,7 +54,7 @@ index a1e768e..b9061c6 100644
  //
  // The previous-frame snapshot is main-thread-only (Draw runs on the render
  // loop) and is dropped by Install() -- after a suspend/resume the terminal's
-@@ -109,41 +110,53 @@ bool FrameDiffEnabled() {
+@@ -109,41 +111,53 @@ bool FrameDiffEnabled() {
    return enabled;
  }
  
@@ -135,7 +141,7 @@ index a1e768e..b9061c6 100644
  }
  }  // namespace
  
-@@ -258,9 +271,12 @@ struct App::Internal {
+@@ -258,9 +272,12 @@ struct App::Internal {
        std::chrono::steady_clock::now();
    std::string output_buffer;
  
@@ -151,7 +157,7 @@ index a1e768e..b9061c6 100644
  
    // minimal-ftxui-event-loop patch: wakeup pipe (App::Post from any thread
    // interrupts the blocked poll), EOF latch for the terminal fd, and the
-@@ -661,7 +677,7 @@ void App::Internal::Install() {
+@@ -661,7 +678,7 @@ void App::Internal::Install() {
  
    // minimal-ftxui patch: after a suspend/resume the alternate screen has been
    // torn down and re-entered (blank) -- the first frame must be a full write.
@@ -160,7 +166,7 @@ index a1e768e..b9061c6 100644
  
    // minimal-ftxui-event-loop patch: (re)create the wakeup pipe. Both ends
    // non-blocking: the writer must never block on a full pipe (a posted task
-@@ -1273,24 +1289,42 @@ void App::Internal::Draw(Component component) {
+@@ -1273,24 +1290,46 @@ void App::Internal::Draw(Component component) {
      }
    }
  
@@ -188,12 +194,13 @@ index a1e768e..b9061c6 100644
      if (frame_count_ == 0 || resized) {
 -      output_buffer += new_frame;
 -    } else if (new_frame == previous_frame_) {
+-      // Identical frame: nothing to write.
 +      public_->ToString(output_buffer);
-+    } else if (row_hashes_ == previous_row_hashes_) {
-       // Identical frame: nothing to write.
      } else {
 -      AppendFrameDiff(previous_frame_, new_frame, public_->dimy(), public_->dimx(),
 -                      output_buffer);
++      // An identical frame (no row hash changed) writes no row here, only
++      // the park below.
 +      const int previous_rows = static_cast<int>(previous_row_hashes_.size());
 +      for (int y = 0; y < rows; ++y) {
 +        if (y < previous_rows && row_hashes_[y] == previous_row_hashes_[y]) {
@@ -205,7 +212,11 @@ index a1e768e..b9061c6 100644
 +      }
 +      // Park the cursor where a full-frame write would have left it
 +      // (bottom-right), so the relative cursor handling after the frame
-+      // (ResetPosition, set_cursor_position_) stays correct.
++      // (ResetPosition, set_cursor_position_) stays correct. The identical
++      // frame needs it too: ResetPosition above already walked the cursor
++      // to the TOP-LEFT, and set_cursor_position_'s relative up/left moves
++      // clamp there -- the caret showed, blinking, in the top-left corner
++      // until the next frame that changed a pixel.
 +      output_buffer +=
 +          "\x1b[" + std::to_string(rows) + ";" + std::to_string(public_->dimx()) + "H";
      }
