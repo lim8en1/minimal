@@ -100,7 +100,7 @@ struct LaunchSpec {
     // fd 0 blocks until the deadline.
     std::int64_t cpu_seconds = 0;  // 0 = unlimited; clamped to the host's hard cap by Launch()
                                    // (CpuBackstopSeconds sizes it from a deadline)
-    std::int64_t file_size_bytes = common::kGiB;  // RLIMIT_FSIZE backstop, 0 = unlimited; clamped likewise
+    std::int64_t file_size_bytes = kFileSizeBackstopBytes;  // RLIMIT_FSIZE backstop, 0 = unlimited; clamped likewise
 };
 
 // The parent-side handles of a launched process. All fds are O_CLOEXEC and

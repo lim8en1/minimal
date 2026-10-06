@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 #include "minimal/common/units.hpp"
+#include "minimal/sidecar/policy.hpp"
 
 namespace minimal::tools_python {
 
@@ -50,7 +51,7 @@ struct PythonSettings {
     // "timeouts demote, never destroy".
     std::int64_t rlimit_cpu_seconds = 0;
     // RLIMIT_FSIZE backstop for files the executed code writes.
-    std::int64_t max_file_size_bytes = common::kGiB;
+    std::int64_t max_file_size_bytes = sidecar::kFileSizeBackstopBytes;
     // The live-output ring for python_output polling (head+tail windows over
     // the running request's stdout stream; see stream_ring.hpp). The ring
     // exists only while a request is running and is discarded on completion.

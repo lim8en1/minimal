@@ -71,7 +71,6 @@ CapturedRun RunCaptured(const std::vector<std::string>& argv, const std::filesys
         minimal::sidecar::PipePlan::ChildEnd::kWrite,
         {{STDOUT_FILENO, false}, {STDERR_FILENO, false}}}};
     spec.cpu_seconds = minimal::sidecar::CpuBackstopSeconds(std::chrono::seconds(timeout_seconds));
-    spec.file_size_bytes = common::kGiB;
 
     auto launched = minimal::sidecar::Launch(spec);
     if (!launched.ok) {

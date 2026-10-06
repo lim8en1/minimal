@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 #include "minimal/common/units.hpp"
+#include "minimal/sidecar/policy.hpp"
 
 namespace minimal::tools_bash {
 
@@ -40,7 +41,7 @@ struct BashSettings {
     // design, this one is the record.
     std::int64_t max_output_bytes = common::kMiB;
     // RLIMIT_FSIZE backstop, reachable now that redirection works (`cmd > big`).
-    std::int64_t max_file_size_bytes = common::kGiB;
+    std::int64_t max_file_size_bytes = sidecar::kFileSizeBackstopBytes;
     // Operator-swappable, like everything else here: a different POSIX shell, or
     // a wrapper that enters a container, needs no code change.
     std::string shell = "/bin/sh";

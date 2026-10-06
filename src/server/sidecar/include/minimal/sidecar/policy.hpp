@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 
 #include "minimal/common/units.hpp"
 
@@ -40,6 +41,13 @@ inline constexpr std::size_t kPipeReadChunkBytes = 8 * common::kKiB;
 // time unevenly, so the margin is generous: python runs under load were the
 // case that needed it.
 inline constexpr std::chrono::seconds kCpuBackstopGrace{30};
+
+// RLIMIT_FSIZE backstop: the largest file a launched child may write. Far
+// past any file a command or script legitimately produces in a session, low
+// enough that a runaway `yes > out` stops long before it fills the disk.
+// Every launcher shares it; the bash and python plugins expose it as a
+// config default.
+inline constexpr std::int64_t kFileSizeBackstopBytes = common::kGiB;
 
 // Finished background-task records kept per session for /tasks; running ones
 // are never dropped. Enough to look back over a working session; the oldest

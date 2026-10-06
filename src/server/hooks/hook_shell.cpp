@@ -24,10 +24,6 @@ namespace {
 // is still drained (head and tail kept), so the child never blocks writing.
 constexpr std::int64_t kMaxCapturedBytes = common::kMiB;
 constexpr std::size_t kMaxBlockReasonBytes = 500;
-// Matches the bash tool's default filesize backstop (bash_settings.hpp): a
-// hook script redirecting to a file is bounded the same way its model-driven
-// cousin is.
-constexpr std::int64_t kMaxHookFileSizeBytes = common::kGiB;
 
 std::string FirstLine(std::string_view captured) {
     std::string_view line;
@@ -94,7 +90,7 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
     // CPU and file-size backstops behind the wall-clock deadline, like the
     // bash tool's; none when there is no budget to back up.
     spec.cpu_seconds = sidecar::CpuBackstopSeconds(effective);
-    spec.file_size_bytes = budgeted ? kMaxHookFileSizeBytes : 0;
+    spec.file_size_bytes = budgeted ? sidecar::kFileSizeBackstopBytes : 0;
 
     sidecar::Launched launched = sidecar::Launch(spec);
     result.warnings = launched.warnings;

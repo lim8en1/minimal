@@ -8,6 +8,8 @@ Two passes over src/ and plugins/ (tests excluded):
   named    -- a const/constexpr k-name initialized with a number OUTSIDE a
               policy.hpp. clang-tidy exempts these by design, which is exactly
               how a judgment call hides behind a name.
+  size     -- a bare kKiB/kMiB/kGiB outside policy.hpp: a size whose count of
+              one is a judgment call no literal shows.
 
 Both passes honor NOLINT(readability-magic-numbers), on the line or as a
 NOLINTBEGIN/NOLINTEND region: the marker for an external fact, whose comment
@@ -36,6 +38,9 @@ TIDY_RE = re.compile(r"^(/\S+):(\d+):\d+: warning: (\S+) is a magic number")
 NAMED_RE = re.compile(
     r"\b(?:constexpr|const)\b[^=;(]*?\b(k[A-Z]\w*)\s*(?:=|\{)\s*([^;]*)")
 HAS_NUMBER = re.compile(r"(?<![\w.])\d")
+# A bare unit is a size whose count (1) is invisible to clang-tidy; `N * kMiB`
+# is already caught through its N.
+BARE_UNIT = re.compile(r"(?:(?<![<>=!])=|,)\s*(?:common::)?(k[KMG]iB)\s*[;,)]")
 STRING_LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
@@ -114,6 +119,10 @@ def named_pass(files):
                 match = NAMED_RE.search(code)
                 if match and HAS_NUMBER.search(match.group(2)):
                     hits.add((rel, number, "named", match.group(1)))
+                elif os.path.basename(rel) != "units.hpp":
+                    unit = BARE_UNIT.search(code)
+                    if unit:
+                        hits.add((rel, number, "size", unit.group(1)))
     return hits
 
 
@@ -145,10 +154,11 @@ def write_markdown(hits, target):
            "reviewed against ARCHITECTURE.md \"Policy constants\" and ends as a cited fact,",
            "a written derivation, a policy.hpp entry, an explicit \"no limit\", a shared",
            "home (duplicates), or a deletion; reviewed units drop out on regeneration.", "",
-           "| unit | literal | named |", "|---|---:|---:|"]
+           "| unit | literal | named | size |", "|---|---:|---:|---:|"]
     for unit in units:
         kinds = [h[2] for h in by_unit[unit]]
-        out.append(f"| {unit} | {kinds.count('literal')} | {kinds.count('named')} |")
+        out.append(f"| {unit} | {kinds.count('literal')} | {kinds.count('named')} "
+                   f"| {kinds.count('size')} |")
     for unit in units:
         out += ["", f"## {unit}", "", "| where | kind | value | code |", "|---|---|---|---|"]
         for path, number, kind, what in by_unit[unit]:
@@ -187,13 +197,14 @@ def main():
     else:
         counts = {}
         for path, _, kind, _ in hits:
-            entry = counts.setdefault(unit_of(path), {"literal": 0, "named": 0})
+            entry = counts.setdefault(unit_of(path), {"literal": 0, "named": 0, "size": 0})
             entry[kind] += 1
-        print(f"{'unit':40} {'literal':>8} {'named':>6}")
+        print(f"{'unit':40} {'literal':>8} {'named':>6} {'size':>5}")
         for unit, entry in sorted(counts.items(), key=lambda kv: -sum(kv[1].values())):
-            print(f"{unit:40} {entry['literal']:8} {entry['named']:6}")
+            print(f"{unit:40} {entry['literal']:8} {entry['named']:6} {entry['size']:5}")
         print(f"{'total':40} {sum(e['literal'] for e in counts.values()):8} "
-              f"{sum(e['named'] for e in counts.values()):6}")
+              f"{sum(e['named'] for e in counts.values()):6} "
+              f"{sum(e['size'] for e in counts.values()):5}")
     return 1 if hits else 0
 
 
