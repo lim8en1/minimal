@@ -14,7 +14,8 @@ color: "#7aa2f7"                 # agent picker colour
 # disable: true                  # refuses to resolve, not listed
 
 # --- model ----------------------------------------------------------------------
-# A <provider>/<model> ref from providers.json; omit to inherit
+# A <provider>/<model> ref from providers.json, applied only when this preset
+# runs as a SUBAGENT; a primary session runs the user's pick, else
 # settings.default_model. A reasoning variant is addressed with @<name>.
 # model: anthropic/claude-opus-4-5@high
 compaction_strategy: structured  # summarize | a plugin's strategy (compaction-structured)
@@ -68,10 +69,12 @@ tool_config:
   python:
     packages: [numpy]            # ensured into the per-project venv
 
-# --- anything else is a provider request parameter --------------------------
-# Unrecognized keys go to the provider verbatim (overriding the model's
-# providers.json parameters). Request fields the harness owns are ignored.
-temperature: 0.3
+# --- provider request parameters -------------------------------------------
+# Sent verbatim, overriding the model's providers.json parameters. Any other
+# unknown frontmatter key is a load error. (opencode's top-level temperature,
+# top_p and reasoningEffort are accepted too.)
+parameters:
+  temperature: 0.3
 ---
 
 You are a general assistant configured from the reference preset. This body is

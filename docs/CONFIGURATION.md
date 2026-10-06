@@ -391,7 +391,7 @@ plugin settings that send one (`memory`'s `api_key`, `tools-web`'s
 |---|---|---|
 | `"secret:NAME"` | `NAME` in the data dir's `secrets.json` | at every use: `/secret set` reaches the next request, no restart |
 | `"secret:<plugin>:NAME"` | `NAME` from that plugin's secret source (e.g. `secret:opencode-compat:anthropic` = opencode's `auth.json`) | at every use |
-| `"env:NAME"` | the environment variable | once, at startup; unset → error |
+| `"env:NAME"` | the environment variable | once, at startup; unset → startup warning, each use fails |
 | `"word:..."` (any other letters-only scheme) | refused at startup — a typo'd scheme like `secrets:` is never sent as the key; store a literal of that shape with `/secret set` | — |
 | anything else | the literal key | — |
 

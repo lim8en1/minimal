@@ -62,8 +62,9 @@ EmbeddingPlan MakeEmbeddingPlan(const MemorySettings& settings,
     if (strategy == StrategyKind::kHttp && !settings.api_base.empty()) {
         plan.strategy = "http";
         plan.signature = HttpEmbeddingFunction::SignatureFor(settings);
-        // Bound here, at load: a reference that can never resolve (an unset
-        // env: variable) fails the plugin's load rather than every embedding.
+        // Bound here, at load: a malformed reference fails the plugin's load
+        // rather than every embedding; one not resolvable yet (a secret not
+        // stored, an unset env: variable) fails per request.
         static const config::SecretResolver kDefaultSecrets;
         const auto& resolver = secrets != nullptr ? *secrets : kDefaultSecrets;
         common::SecretHandle api_key =
