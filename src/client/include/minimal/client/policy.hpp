@@ -225,6 +225,12 @@ inline constexpr std::pair<std::string_view, int> kStatusSegmentPriorities[] = {
 };
 inline constexpr int kPluginStatusSegmentPriority = 30;
 
+// The schema form (/config): a field's label and value columns -- room for a
+// dotted key and a typical value; longer ones are clipped, the full value is
+// one keypress away in the editor.
+inline constexpr std::size_t kSchemaFormLabelWidth = 28;
+inline constexpr std::size_t kSchemaFormValueWidth = 30;
+
 // --- plugins -------------------------------------------------------------------------
 
 // A plugin view's data feed (checklist, cost): after its push subscription

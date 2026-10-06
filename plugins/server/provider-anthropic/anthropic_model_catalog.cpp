@@ -4,30 +4,23 @@
 #include <stdexcept>
 
 #include "anthropic_error_mapping.hpp"
+#include "api_limits.hpp"
+#include "policy.hpp"
+#include "minimal/common/http_status.hpp"
+#include "minimal/llm/policy.hpp"
 
 namespace minimal::provider_anthropic {
 namespace {
 
 using nlohmann::json;
 
-// Same bound and reasoning as provider-openai's listing: discovery serves
-// users (--model resolution, the /model picker), so a hung backend must not
-// wedge a caller for a chat-length timeout.
-constexpr std::chrono::milliseconds kListRequestTimeout{10000};
-
-// The API's own page-size ceiling: the whole catalog is one request today.
-constexpr int kPageLimit = 1000;
-
-// A runaway guard, not a real limit: a backend whose `has_more` never turns
-// false (or that repeats a cursor) would otherwise loop forever.
-constexpr int kMaxPages = 50;
 
 constexpr const char* kAnthropicVersion = "2023-06-01";
 
 std::string ModelsUrl(const std::string& base_url, const std::optional<std::string>& after_id) {
     std::string url = base_url;
     while (!url.empty() && url.back() == '/') url.pop_back();
-    url += "/v1/models?limit=" + std::to_string(kPageLimit);
+    url += "/v1/models?limit=" + std::to_string(kModelsPageLimit);
     if (after_id) url += "&after_id=" + *after_id;
     return url;
 }
@@ -86,11 +79,11 @@ std::vector<llm::DiscoveredModel> AnthropicModelCatalog::List(
     const llm::ProviderConfig& config) const {
     std::vector<llm::DiscoveredModel> out;
     std::optional<std::string> after_id;
-    for (int page_number = 0; page_number < kMaxPages; ++page_number) {
+    for (int page_number = 0; page_number < kMaxModelPages; ++page_number) {
         net::HttpRequest request;
         request.url = ModelsUrl(config.base_url, after_id);
         request.connect_timeout = config.connect_timeout;
-        request.request_timeout = kListRequestTimeout;
+        request.request_timeout = llm::kListModelsTimeout;
         request.headers.push_back({"anthropic-version", kAnthropicVersion});
         if (const auto key = llm::RequestApiKey(config)) {
             request.headers.push_back({"x-api-key", *key});
@@ -102,7 +95,7 @@ std::vector<llm::DiscoveredModel> AnthropicModelCatalog::List(
         }
 
         const net::HttpResponse response = http_.Get(request);
-        if (response.status < 200 || response.status >= 300) {
+        if (!common::IsSuccessStatus(response.status)) {
             throw ClassifyHttpFailure(response.status, response.body, response.headers);
         }
         ModelListPage page = ParseModelListPage(response.body);

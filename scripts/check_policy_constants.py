@@ -51,7 +51,7 @@ def unit_of(rel):
     if parts[0] == "plugins":
         return "/".join(parts[:3])
     if parts[1] == "server":
-        return "src/server/" + parts[2]
+        return "src/server/" + parts[2] if len(parts) > 3 else "src/server"
     if parts[1] == "client":
         rest = parts[2:]
         if rest[:3] == ["include", "minimal", "client"]:

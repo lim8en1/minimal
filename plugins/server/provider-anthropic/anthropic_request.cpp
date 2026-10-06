@@ -1,4 +1,6 @@
 #include "anthropic_request.hpp"
+#include "api_limits.hpp"
+#include "policy.hpp"
 
 #include <optional>
 #include <set>
@@ -78,10 +80,8 @@ std::optional<nlohmann::json> FitThinking(const nlohmann::json& thinking, int ma
         !thinking.contains("budget_tokens") || !thinking.at("budget_tokens").is_number_integer()) {
         return Fitted(std::in_place, thinking);
     }
-    constexpr int kMinBudgetTokens = 1024;
-    constexpr int kReservedVisibleOutput = 1024;
-    if (max_tokens < kMinBudgetTokens + kReservedVisibleOutput) return std::nullopt;
-    const int ceiling = max_tokens - kReservedVisibleOutput;
+    if (max_tokens < kMinThinkingBudgetTokens + kReservedVisibleOutputTokens) return std::nullopt;
+    const int ceiling = max_tokens - kReservedVisibleOutputTokens;
     if (thinking.at("budget_tokens").get<long long>() <= ceiling) {
         return Fitted(std::in_place, thinking);
     }

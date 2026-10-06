@@ -11,6 +11,7 @@
 #include "minimal/common/plugin_config_store.hpp"
 #include "minimal/common/read_file.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
+#include "minimal/config/policy.hpp"
 
 namespace minimal::server {
 namespace {
@@ -180,7 +181,8 @@ int Show(const Target& target, bool as_json) {
     for (const auto& row : rows) {
         shown.push_back(common::DisplayValue(*row.field, row.value));
         path_width = std::max(path_width, row.path.size());
-        value_width = std::max(value_width, std::min<std::size_t>(shown.back().size(), 40));
+        value_width = std::max(value_width,
+                               std::min<std::size_t>(shown.back().size(), config::kPluginCliValueColumnCap));
     }
     std::printf("%s%s\n", target.label.c_str(), target.plugin.enabled ? "" : "  (plugin disabled)");
     for (std::size_t i = 0; i < rows.size(); ++i) {

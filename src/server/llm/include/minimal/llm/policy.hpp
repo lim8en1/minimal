@@ -51,4 +51,10 @@ inline constexpr std::size_t kMaxStreamBlocks = 4096;
 // real rate-limit window, and a server must not park a turn for hours.
 inline constexpr std::chrono::milliseconds kMaxRetryAfter = std::chrono::minutes(10);
 
+// GET <base>/models for model discovery: off the chat path, serving users
+// (--model resolution, the /model picker), so a hung backend must not wedge a
+// caller for a chat-length timeout. Local servers answer in milliseconds,
+// remote catalogs in well under this.
+inline constexpr std::chrono::milliseconds kListModelsTimeout = std::chrono::seconds(10);
+
 }  // namespace minimal::llm

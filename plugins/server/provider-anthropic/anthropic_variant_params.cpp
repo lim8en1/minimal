@@ -4,6 +4,7 @@
 #include <string>
 
 #include "policy.hpp"
+#include "api_limits.hpp"
 
 namespace minimal::provider_anthropic {
 
@@ -118,8 +119,7 @@ std::pair<json, bool> AnthropicVariantParams::DeriveParameters(const std::string
         // the reserved output can't be salvaged by clamping: skip thinking
         // for this request rather than send a budget guaranteed invalid
         // either way, the same degrade "none"/"minimal" already use above.
-        constexpr int kAnthropicMinBudgetTokens = 1024;  // NOLINT(readability-magic-numbers): the API's minimum
-        if (*max_tokens < kAnthropicMinBudgetTokens + kReservedVisibleOutputTokens) {
+        if (*max_tokens < kMinThinkingBudgetTokens + kReservedVisibleOutputTokens) {
             return {out, false};
         }
         const int ceiling = *max_tokens - kReservedVisibleOutputTokens;

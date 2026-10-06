@@ -12,14 +12,13 @@
 #include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/schema_form_model.hpp"
 #include "minimal/common/utf8.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client {
 namespace {
 
 using namespace ftxui;
 
-constexpr std::size_t kMaxLabelWidth = 28;
-constexpr std::size_t kMaxValueWidth = 30;
 
 std::string Clip(const std::string& text, std::size_t width) {
     if (text.size() <= width) return text;
@@ -66,7 +65,7 @@ private:
         std::size_t label_width = 0;
         for (const auto& row : rows_) {
             const std::size_t indent = row.header ? 0 : (row.path.find('.') == std::string::npos ? 0 : 2);
-            label_width = std::max(label_width, std::min(row.label.size() + indent, kMaxLabelWidth));
+            label_width = std::max(label_width, std::min(row.label.size() + indent, kSchemaFormLabelWidth));
         }
 
         Elements lines;
@@ -78,11 +77,11 @@ private:
                 continue;
             }
             const bool nested = row.path.find('.') != std::string::npos;
-            const std::string label = (nested ? "  " : "") + Clip(row.label, kMaxLabelWidth);
+            const std::string label = (nested ? "  " : "") + Clip(row.label, kSchemaFormLabelWidth);
             Element value = editing_ && i == selected_
-                                ? input_->Render() | size(WIDTH, EQUAL, kMaxValueWidth)
-                                : text(Clip(row.shown, kMaxValueWidth)) |
-                                      size(WIDTH, EQUAL, kMaxValueWidth);
+                                ? input_->Render() | size(WIDTH, EQUAL, kSchemaFormValueWidth)
+                                : text(Clip(row.shown, kSchemaFormValueWidth)) |
+                                      size(WIDTH, EQUAL, kSchemaFormValueWidth);
             if (!row.overridden && !(editing_ && i == selected_)) value = value | Muted(theme_);
             Element name = text(label) | size(WIDTH, EQUAL, static_cast<int>(label_width));
             // An unused field: dimmed, and its tag says why instead of how

@@ -22,4 +22,9 @@ inline constexpr std::pair<std::string_view, int> kThinkingBudgets[] = {
 // max_tokens: a thinking-heavy turn still has room to say something.
 inline constexpr int kReservedVisibleOutputTokens = 1024;
 
+// Model discovery pages followed: a runaway guard, not a real limit -- the
+// whole catalog is one page today, and a backend whose `has_more` never turns
+// false (or that repeats a cursor) must not loop forever.
+inline constexpr int kMaxModelPages = 50;
+
 }  // namespace minimal::provider_anthropic
