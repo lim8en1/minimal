@@ -422,6 +422,7 @@ target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples"
     MINIMAL_DOCS_DIR="${CMAKE_SOURCE_DIR}/docs"
     MINIMAL_LOGO_PLUGIN="$<TARGET_FILE:minimal_logo>"
+    MINIMAL_CONFIG_VIEW_PLUGIN="$<TARGET_FILE:minimal_config_view>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto"
     # The captured live Jev responses (fixtures/decision-advisor/): the
     # response-shape contract the advisor parses, kept as data not literals.

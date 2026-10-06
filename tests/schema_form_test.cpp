@@ -3,9 +3,11 @@
 // `plugins` endpoint.
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <random>
 #include <thread>
 
 #include "config_view.hpp"
@@ -201,10 +203,18 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
         calls_.push_back(plugin + " " + method + " " + payload);
         cv_.notify_all();
+        if (down_) return std::nullopt;  // the server restarting: no answer
         if (method == "list") {
-            return json::array({{{"name", "sample"}, {"configurable", true}, {"enabled", true}},
-                                {{"name", "plain"}, {"configurable", false}}})
-                .dump();
+            json rows = json::array({{{"name", "sample"}, {"configurable", true}, {"enabled", true}},
+                                     {{"name", "plain"}, {"configurable", false}}});
+            // Every other list grows: a rebuilt menu with more rows than the
+            // last frame drew.
+            if (++lists_ % 2 == 0) {
+                for (const char* name : {"extra-a", "extra-b", "extra-c"}) {
+                    rows.push_back({{"name", name}, {"configurable", true}, {"enabled", true}});
+                }
+            }
+            return rows.dump();
         }
         if (method == "describe") return kDescribe.dump();
         if (method == "set") return json{{"applied", "live"}, {"changed", {"net.timeout_ms"}}}.dump();
@@ -227,6 +237,10 @@ private:
     std::mutex mtx_;
     std::condition_variable cv_;
     std::vector<std::string> calls_;
+    int lists_ = 0;
+
+public:
+    std::atomic<bool> down_{false};
 };
 
 template <typename Pred>
@@ -263,4 +277,65 @@ TEST_CASE("config-view's feed: lists configurable plugins, opens one, sets throu
 
     feed.Back();
     CHECK(feed.open_plugin().empty());
+}
+
+TEST_CASE("config-view drops what it showed when a refetch fails", "[schema_form][config_view]") {
+    // Regression: across a server restart the first fetch can fail, and the
+    // feed kept the old server's rows ("6 set · restart pending") beside the
+    // error -- changes the new server had already applied read as pending.
+    EndpointApi api;
+    config_view::ConfigFeed feed(&api, nullptr);
+    feed.RefreshList();
+    REQUIRE(Eventually([&] { return !feed.list().rows.empty(); }));
+    feed.Open("sample");
+    REQUIRE(Eventually([&] { return !feed.form().describe.is_null(); }));
+
+    api.down_ = true;
+    feed.Open("sample");
+    REQUIRE(Eventually([&] { return feed.form().status_is_error; }));
+    CHECK(feed.form().describe.is_null());
+    feed.Back();
+    REQUIRE(Eventually([&] { return !feed.list().status.empty() && feed.list().status != "loading"; }));
+    CHECK(feed.list().rows.empty());
+}
+
+// A user reported a segfault while moving around /config. This drives the
+// whole view -- list and form, through the feed's worker -- with random keys
+// and mouse events, rendering only some of the time (a terminal batches
+// input: several events can land between two frames). Run it under ASan.
+TEST_CASE("config-view survives random navigation, keys and mouse", "[schema_form][config_view]") {
+    EndpointApi api;
+    config_view::ConfigView view(&api, nullptr);
+    view.OnTheme(TestTheme());
+    auto component = view.component();
+    view.OnShow();
+
+    std::mt19937 rng(1234);
+    const auto pick = [&](int n) { return static_cast<int>(rng() % static_cast<unsigned>(n)); };
+    const auto mouse = [&] {
+        ftxui::Mouse m;
+        const ftxui::Mouse::Button buttons[] = {ftxui::Mouse::Left, ftxui::Mouse::None,
+                                                ftxui::Mouse::WheelUp, ftxui::Mouse::WheelDown};
+        const ftxui::Mouse::Motion motions[] = {ftxui::Mouse::Pressed, ftxui::Mouse::Released,
+                                                ftxui::Mouse::Moved};
+        m.button = buttons[pick(4)];
+        m.motion = motions[pick(3)];
+        m.x = pick(100);
+        m.y = pick(30);
+        return ftxui::Event::Mouse("", m);
+    };
+    const ftxui::Event keys[] = {
+        ftxui::Event::ArrowUp,   ftxui::Event::ArrowDown, ftxui::Event::ArrowDown,
+        ftxui::Event::Return,    ftxui::Event::Return,    ftxui::Event::ArrowLeft,
+        ftxui::Event::Backspace, ftxui::Event::Escape,    ftxui::Event::Character('d'),
+        ftxui::Event::Character('s'), ftxui::Event::Character('7'), ftxui::Event::PageDown,
+        ftxui::Event::Home,      ftxui::Event::End,       ftxui::Event::Tab,
+    };
+    for (int i = 0; i < 3000; ++i) {
+        const ftxui::Event event = pick(3) == 0 ? mouse() : keys[pick(15)];
+        minimal_test::SendEvent(component, event);
+        if (pick(3) == 0) (void)minimal_test::RenderFrame(component, 100, 30);
+        if (pick(50) == 0) std::this_thread::sleep_for(2ms);  // let answers land
+    }
+    SUCCEED("no crash");
 }

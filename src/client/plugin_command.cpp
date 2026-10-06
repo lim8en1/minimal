@@ -96,8 +96,9 @@ std::optional<int> EditThroughServer(const std::vector<std::string>& args) {
             why = "; the plugin refused it live: " + answer->value("reconfigure_error", std::string());
         }
         std::printf("%s (restart the server to apply%s)\n", what.c_str(), why.c_str());
-    } else if (applied == "disabled") {
-        std::printf("%s (the plugin is disabled; applies when it is enabled)\n", what.c_str());
+    } else if (applied == "not_running") {
+        std::printf("%s (saved; %s -- it takes effect when it starts)\n", what.c_str(),
+                    answer->value("reason", std::string("the plugin is not running")).c_str());
     } else if (const auto unused = answer->value("unused", nlohmann::json::object());
                unused.contains(args[2])) {
         std::printf("%s (saved; not used while %s)\n", what.c_str(),
