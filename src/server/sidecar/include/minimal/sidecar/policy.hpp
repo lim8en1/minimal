@@ -32,6 +32,15 @@ inline constexpr std::chrono::milliseconds kPostKillReapCeiling{5000};
 // cancellation between reads.
 inline constexpr std::size_t kPipeReadChunkBytes = 8 * common::kKiB;
 
+// How far RLIMIT_CPU sits past a wall-clock deadline it backs up. The limit
+// only exists for what the deadline's group kill cannot reach (a descendant
+// that left the group keeps the inherited limit); it must never fire first on
+// a healthy child, or the run dies of SIGXCPU instead of reporting "timed
+// out". CPU time is summed over threads and a loaded machine stretches wall
+// time unevenly, so the margin is generous: python runs under load were the
+// case that needed it.
+inline constexpr std::chrono::seconds kCpuBackstopGrace{30};
+
 // Finished background-task records kept per session for /tasks; running ones
 // are never dropped. Enough to look back over a working session; the oldest
 // go first.

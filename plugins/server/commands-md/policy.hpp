@@ -24,14 +24,6 @@ inline constexpr std::size_t kDefaultCapTokens = 50000;
 // carry a chatty generator's final lines, where the failure usually is.
 inline constexpr std::int64_t kStderrCapBytes = 4000;
 
-// RLIMIT_CPU is a backstop for what the wall-clock deadline's group kill
-// cannot reach (a descendant that left the process group keeps the inherited
-// limit). It sits a margin PAST the deadline so the deadline fires first and
-// the run reports "timed out" rather than dying of SIGXCPU. CPU time is summed
-// over threads, so no fixed margin can guarantee that ordering for a generator
-// running many threads.
-inline constexpr std::int64_t kCpuBackstopGraceSeconds = 30;
-
 // Command files include PROJECT-LOCAL content (a cloned repo), read at every
 // startup and listing: past this a file is a broken command, skipped with a
 // warning. A command file is a prompt plus frontmatter; 1 MiB is orders of

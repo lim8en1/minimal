@@ -98,11 +98,7 @@ RunOutcome RunProcess(const std::vector<std::string>& argv, const std::filesyste
         sidecar::PipePlan{sidecar::PipePlan::ChildEnd::kWrite, {{STDOUT_FILENO, false}}},
         sidecar::PipePlan{sidecar::PipePlan::ChildEnd::kWrite, {{STDERR_FILENO, false}}},
     };
-    // int64 throughout: a declared timeout near INT_MAX must not overflow on
-    // its way to seconds-plus-grace or milliseconds.
-    if (timeout_seconds > 0) {
-        spec.cpu_seconds = std::int64_t{timeout_seconds} + kCpuBackstopGraceSeconds;
-    }
+    spec.cpu_seconds = sidecar::CpuBackstopSeconds(std::chrono::seconds(timeout_seconds));
 
     auto launched = sidecar::Launch(spec);
     if (!launched.ok) {

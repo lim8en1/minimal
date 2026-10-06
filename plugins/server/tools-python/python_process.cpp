@@ -70,9 +70,7 @@ CapturedRun RunCaptured(const std::vector<std::string>& argv, const std::filesys
     spec.pipes = {minimal::sidecar::PipePlan{
         minimal::sidecar::PipePlan::ChildEnd::kWrite,
         {{STDOUT_FILENO, false}, {STDERR_FILENO, false}}}};
-    // RLIMIT_CPU backstop: the wall-clock deadline normally fires first; the
-    // grace keeps the two from racing on a slow-but-healthy install.
-    spec.cpu_seconds = timeout_seconds + 30;
+    spec.cpu_seconds = minimal::sidecar::CpuBackstopSeconds(std::chrono::seconds(timeout_seconds));
     spec.file_size_bytes = common::kGiB;
 
     auto launched = minimal::sidecar::Launch(spec);

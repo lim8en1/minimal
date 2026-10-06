@@ -1,7 +1,6 @@
 #include "bash_process.hpp"
 
 #include <unistd.h>
-#include "minimal/common/clock.hpp"
 
 namespace minimal::tools_bash {
 
@@ -91,10 +90,7 @@ minimal::sidecar::LaunchSpec BuildLaunchSpec(const std::string& wrapped, const S
         minimal::sidecar::PipePlan{
             minimal::sidecar::PipePlan::ChildEnd::kWrite, {{kStateFd, true}}},
     };
-    // RLIMIT_CPU is a backstop for CPU-bound runaways; the wall-clock deadline
-    // normally fires first. The grace keeps the two from racing on a command
-    // that legitimately spends its budget.
-    spec.cpu_seconds = common::MillisToSeconds(timeout_ms) + 5;
+    spec.cpu_seconds = minimal::sidecar::CpuBackstopSeconds(std::chrono::milliseconds(timeout_ms));
     spec.file_size_bytes = settings.max_file_size_bytes;
     return spec;
 }
