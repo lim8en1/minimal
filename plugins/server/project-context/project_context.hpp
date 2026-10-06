@@ -22,6 +22,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/agent/context_contributor.hpp"
+#include "policy.hpp"
 
 namespace minimal::project_context {
 
@@ -40,7 +41,7 @@ namespace minimal::project_context {
 // that resolves outside the directory it was found in is ignored.
 struct ProjectContextSettings {
     std::vector<std::string> files = {"AGENTS.md", "CLAUDE.md"};
-    std::int64_t max_bytes = 262144;
+    std::int64_t max_bytes = kDefaultMaxBytes;
     bool search_ancestors = false;
 };
 

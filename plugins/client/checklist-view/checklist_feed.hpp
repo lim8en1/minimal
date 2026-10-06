@@ -42,6 +42,7 @@
 #include "checklist_model.hpp"
 #include "minimal/client/plugins/background_poller.hpp"
 #include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::checklist_view {
 
@@ -50,9 +51,9 @@ namespace plugins = minimal::client::plugins;
 class ChecklistFeed : private plugins::BackgroundPoller {
 public:
     struct Timing {
-        std::chrono::milliseconds poll_interval{std::chrono::seconds(3)};
-        std::chrono::milliseconds fallback_period{std::chrono::seconds(30)};
-        std::chrono::milliseconds max_fallback_period{std::chrono::minutes(5)};
+        std::chrono::milliseconds poll_interval = minimal::client::kPluginFeedPollInterval;
+        std::chrono::milliseconds fallback_period = minimal::client::kPluginFeedFallbackPeriod;
+        std::chrono::milliseconds max_fallback_period = minimal::client::kPluginFeedMaxFallbackPeriod;
     };
 
     // Borrowed; either may be null. No ClientApi: nothing ever fills. No

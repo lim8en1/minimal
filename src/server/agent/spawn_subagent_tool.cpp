@@ -191,8 +191,8 @@ tools::PermissionDisclosure SpawnSubagentTool::Disclose(const nlohmann::json& in
     // carry the whole thing anyway.
     const auto newline = task.find_first_of("\r\n");
     if (newline != std::string::npos) task.resize(newline);
-    if (task.size() > kMaxSubagentTaskPreviewChars) {
-        task = common::TruncateCodePoints(task, kMaxSubagentTaskPreviewChars) + "...";
+    if (task.size() > kPermissionPreviewChars) {
+        task = common::TruncateCodePoints(task, kPermissionPreviewChars) + "...";
     }
 
     disclosure.summary = std::string("spawn subagent") + (task.empty() ? "" : ": " + task);

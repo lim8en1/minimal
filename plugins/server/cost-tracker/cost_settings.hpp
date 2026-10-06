@@ -3,6 +3,7 @@
 #include <string>
 
 #include <nlohmann/json.hpp>
+#include "policy.hpp"
 
 namespace minimal::cost_tracker {
 
@@ -35,11 +36,11 @@ struct CostSettings {
     std::string openrouter_rates_fetch_url = "https://openrouter.ai/api/v1/models";
     // Every fetch (the startup auto-refresh included) is bounded even when
     // the transfer stalls.
-    int rates_fetch_timeout_ms = 30000;
+    int rates_fetch_timeout_ms = static_cast<int>(kDefaultRatesFetchTimeout.count());
     // How stale the cached snapshot may be before a server start fetches
     // again: 7 by default, 0 to fetch on every start. The CLI's
     // --plugin-call cost-tracker refresh_rates ignores this gate -- it always fetches.
-    int rates_refresh_days = 7;
+    int rates_refresh_days = kDefaultRatesRefreshDays;
     // The operator's own price table ({"<model>": {...}}), highest precedence
     // over the bundled and fetched ones; parsed by the rate table itself.
     nlohmann::json rates = nlohmann::json::object();

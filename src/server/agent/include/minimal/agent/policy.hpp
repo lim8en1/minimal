@@ -106,8 +106,8 @@ inline constexpr int kDefaultMentionSuggestLimit = 50;
 // A session's default name (from its first turn): a tab label, not a summary.
 inline constexpr std::size_t kDefaultSessionNameMaxChars = 60;
 
-// How much of a spawn_subagent task the permission prompt quotes: enough to
-// judge the spawn on one line.
-inline constexpr std::size_t kMaxSubagentTaskPreviewChars = 100;
+// How much of a tool's request a permission prompt quotes (a subagent's task,
+// an ask question): enough to judge the call on one line.
+inline constexpr std::size_t kPermissionPreviewChars = 100;
 
 }  // namespace minimal::agent

@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "minimal/common/logger.hpp"
+#include "policy.hpp"
 
 namespace minimal::checklist_view {
 
@@ -183,7 +184,7 @@ void ChecklistFeed::PollFallback(std::chrono::milliseconds period) {
                         it->second.stale = true;
                     }
                 }
-                if (++failures == 1 || failures % 10 == 0) {
+                if (++failures == 1 || failures % kLogEveryNthListFailure == 0) {
                     minimal::common::DefaultLogger().warn(
                         "checklist-view: list failed {} time(s)", failures);
                 }

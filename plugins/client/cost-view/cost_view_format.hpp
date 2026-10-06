@@ -16,12 +16,15 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <iomanip>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <type_traits>
 
 #include <nlohmann/json.hpp>
 #include "minimal/common/count_format.hpp"
+#include "policy.hpp"
 
 namespace minimal::client::cost_view {
 
@@ -62,9 +65,9 @@ T SafeValue(const nlohmann::json& j, const char* key, T fallback) {
 // reading as free when it is actually just small. The caller is responsible
 // for never handing a negative or unknown total here (see FormatTotals).
 inline std::string FormatCost(double usd) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), usd < 0.01 ? "$%.4f" : "$%.2f", usd);
-    return buf;
+    std::ostringstream out;
+    out << '$' << std::fixed << std::setprecision(usd < kSubCentUsd ? 4 : 2) << usd;
+    return out.str();
 }
 
 // The four token sums cost-tracker's totals RPC carries per model, summed

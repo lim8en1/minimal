@@ -1,4 +1,5 @@
 #include "line_diff.hpp"
+#include "policy.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -8,11 +9,7 @@
 namespace minimal::tools_fs {
 namespace {
 
-constexpr int kContextLines = 3;
-// Myers keeps one V slice per step, ~D^2 ints in total: 1000 bounds that at
-// ~4 MB, and a change this large is not reviewable as a diff anyway.
-constexpr int kMaxEditDistance = 1000;
-constexpr std::size_t kMaxHunkLines = 2000;
+constexpr int kContextLines = 3;  // NOLINT(readability-magic-numbers): diff -u's context
 
 enum class Op : char { kEqual = ' ', kDelete = '-', kInsert = '+' };
 
@@ -76,11 +73,11 @@ std::vector<Edit> Backtrack(const std::vector<std::vector<int>>& trace, const Li
     return {reversed.rbegin(), reversed.rend()};
 }
 
-// Myers' O(ND) shortest edit script; nullopt past kMaxEditDistance.
+// Myers' O(ND) shortest edit script; nullopt past kMaxDiffEditDistance.
 std::optional<std::vector<Edit>> Myers(const Lines& a, const Lines& b) {
     const int n = static_cast<int>(a.size());
     const int m = static_cast<int>(b.size());
-    const int max_d = std::min(n + m, kMaxEditDistance);
+    const int max_d = std::min(n + m, kMaxDiffEditDistance);
     const int offset = max_d + 1;
     std::vector<int> v(static_cast<std::size_t>(2 * max_d + 3), 0);
     std::vector<std::vector<int>> trace;
@@ -163,7 +160,7 @@ nlohmann::json Hunks(const std::vector<Edit>& edits) {
         // Capped BEFORE this hunk's lines are materialized: past the cap the
         // whole payload is dropped anyway, so building it first was waste.
         emitted += static_cast<std::size_t>(end - start);
-        if (emitted > kMaxHunkLines) return nullptr;
+        if (emitted > kMaxDiffHunkLines) return nullptr;
         nlohmann::json lines = nlohmann::json::array();
         for (int i = start; i < end; ++i) {
             lines.push_back({{"op", std::string(1, static_cast<char>(edits[i].op))},

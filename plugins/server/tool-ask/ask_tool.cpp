@@ -1,6 +1,9 @@
 #include "ask_tool.hpp"
 
 #include "ask_types.hpp"
+#include "policy.hpp"
+#include "minimal/agent/policy.hpp"
+#include "minimal/common/utf8.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -10,17 +13,6 @@
 namespace minimal::tool_ask {
 namespace {
 
-constexpr std::size_t kMaxQuestions = 4;
-constexpr std::size_t kMaxOptions = 5;
-// Byte caps on the model-authored strings. The header renders as a title and
-// the labels come back verbatim as answer keys, so both stay short; the
-// question and descriptions wrap and only need a bound.
-constexpr std::size_t kMaxHeaderBytes = 40;
-constexpr std::size_t kMaxQuestionBytes = 1000;
-constexpr std::size_t kMaxLabelBytes = 200;
-constexpr std::size_t kMaxDescriptionBytes = 500;
-// How much of the question text stands in for a missing header in the result.
-constexpr std::size_t kMaxQuestionEcho = 60;
 
 tools::ToolSpec MakeSpec() {
     tools::ToolSpec spec;
@@ -325,8 +317,9 @@ public:
             const auto& question = input.at("questions")[0].value("question", std::string{});
             first = question;
         }
-        constexpr std::size_t kMaxPreview = 100;
-        if (first.size() > kMaxPreview) first = first.substr(0, kMaxPreview) + "...";
+        if (first.size() > agent::kPermissionPreviewChars) {
+            first = common::TruncateCodePoints(first, agent::kPermissionPreviewChars) + "...";
+        }
         disclosure.summary =
             std::string("ask the user") + (first.empty() ? "" : ": " + first);
         disclosure.complete = true;

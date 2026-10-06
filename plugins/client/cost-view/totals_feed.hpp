@@ -38,6 +38,7 @@
 
 #include "minimal/client/plugins/background_poller.hpp"
 #include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/policy.hpp"
 
 namespace minimal::client::cost_view {
 
@@ -48,8 +49,8 @@ enum class TotalsField { kCost, kTokenDetail };
 class TotalsFeed : private plugins::BackgroundPoller {
 public:
     struct Timing {
-        std::chrono::milliseconds poll_interval{std::chrono::seconds(3)};
-        std::chrono::milliseconds fallback_period{std::chrono::seconds(30)};
+        std::chrono::milliseconds poll_interval = client::kPluginFeedPollInterval;
+        std::chrono::milliseconds fallback_period = client::kPluginFeedFallbackPeriod;
     };
 
     // Borrowed; may be null: nothing ever fills.

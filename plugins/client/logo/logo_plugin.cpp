@@ -36,6 +36,7 @@
 #include "minimal/common/utf8.hpp"
 #include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/common/abi_tag.hpp"
+#include "policy.hpp"
 
 namespace {
 
@@ -179,7 +180,7 @@ private:
         auto cached = cache_.find(cache_key);
         if (cached != cache_.end()) return cached->second;
 
-        if (cache_.size() >= kCacheCap && !cache_order_.empty()) {
+        if (cache_.size() >= minimal::logo::kCacheCap && !cache_order_.empty()) {
             cache_.erase(cache_order_.front());
             cache_order_.pop_front();
         }
@@ -258,13 +259,12 @@ private:
     // FIFO eviction order, kept alongside cache_ (regenerate_per_session=true
     // means one entry PER SESSION ID ever opened, unbounded for a
     // long-running client -- a session closed an hour ago has no other event
-    // that would ever remove its art). kCacheCap is generous for what a
+    // that would ever remove its art). minimal::logo::kCacheCap is generous for what a
     // process realistically has open or recently open at once; eviction
     // order is FIFO, not true LRU -- simplicity over precision for a cache
     // this cheap to regenerate and this small per entry (a handful of ASCII
     // lines).
     mutable std::deque<std::string> cache_order_;
-    static constexpr std::size_t kCacheCap = 200;
     mutable std::mt19937 rng_;  // Render is loop-thread only; the mutex covers it anyway
 
     static constexpr const char* kSharedKey = "";

@@ -35,6 +35,8 @@
 #include "checklist_store.hpp"
 #include "minimal/agent/session_observer.hpp"
 #include "minimal/plugins/plugin_abi.h"
+#include "minimal/plugins/policy.hpp"
+#include "policy.hpp"
 
 namespace minimal::checklist {
 
@@ -42,8 +44,8 @@ class ChecklistHub {
 public:
     // `store` is borrowed; process lifetime.
     explicit ChecklistHub(ChecklistStore& store,
-                          std::chrono::milliseconds heartbeat = std::chrono::milliseconds(500),
-                          std::chrono::milliseconds debounce = std::chrono::milliseconds(50));
+                          std::chrono::milliseconds heartbeat = plugins::kSubscriptionHeartbeat,
+                          std::chrono::milliseconds debounce = kPushDebounce);
     ~ChecklistHub();
 
     ChecklistHub(const ChecklistHub&) = delete;

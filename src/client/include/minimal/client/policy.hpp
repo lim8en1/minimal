@@ -227,6 +227,14 @@ inline constexpr int kPluginStatusSegmentPriority = 30;
 
 // --- plugins -------------------------------------------------------------------------
 
+// A plugin view's data feed (checklist, cost): after its push subscription
+// fails it marks the cache stale and polls every poll interval for the
+// fallback period before subscribing again; consecutive failures double the
+// period up to the ceiling, so a server without the plugin is not hammered.
+inline constexpr std::chrono::milliseconds kPluginFeedPollInterval = std::chrono::seconds(3);
+inline constexpr std::chrono::milliseconds kPluginFeedFallbackPeriod = std::chrono::seconds(30);
+inline constexpr std::chrono::milliseconds kPluginFeedMaxFallbackPeriod = std::chrono::minutes(5);
+
 // Consecutive throws from one plugin surface (a status segment, an observer)
 // before it is skipped for the rest of the session: a broken plugin must not
 // log an error per repaint, and one transient failure is forgiven.

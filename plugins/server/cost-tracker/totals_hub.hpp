@@ -45,6 +45,8 @@
 #include "minimal/agent/session_observer.hpp"
 #include "minimal/plugins/plugin_abi.h"
 #include "session_index.hpp"
+#include "minimal/plugins/policy.hpp"
+#include "policy.hpp"
 
 namespace minimal::cost_tracker {
 
@@ -55,8 +57,8 @@ public:
     using Compute = std::function<std::optional<nlohmann::json>(const std::string& session_id)>;
 
     TotalsHub(SessionIndex& index, Compute compute,
-              std::chrono::milliseconds heartbeat = std::chrono::milliseconds(500),
-              std::chrono::milliseconds debounce = std::chrono::milliseconds(200));
+              std::chrono::milliseconds heartbeat = plugins::kSubscriptionHeartbeat,
+              std::chrono::milliseconds debounce = kPushDebounce);
     ~TotalsHub();
 
     TotalsHub(const TotalsHub&) = delete;

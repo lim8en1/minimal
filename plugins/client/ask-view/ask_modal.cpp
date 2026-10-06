@@ -177,8 +177,9 @@ std::vector<AskQuestion> ParsePayload(const nlohmann::json& payload) {
             question.options.push_back(
                 {StringField(option, "label"), StringField(option, "description")});
         }
-        // Nine rows per list at most: every row keeps a digit key.
-        if (question.options.size() + (question.allow_other ? 1 : 0) > 9) {
+        // One row per digit key (1-9) at most.
+        constexpr std::size_t kDigitKeys = '9' - '0';
+        if (question.options.size() + (question.allow_other ? 1 : 0) > kDigitKeys) {
             throw std::invalid_argument("ask: too many options");
         }
         questions.push_back(std::move(question));

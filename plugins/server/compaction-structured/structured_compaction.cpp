@@ -363,7 +363,8 @@ std::optional<CompactionResult> compact_messages_structured(
                            summary.next_steps.empty() && summary.topics.empty() &&
                            summary.important.empty() && summary.lessons.empty() &&
                            summary.future_tasks.empty();
-    static_assert(sizeof(kFields) / sizeof(kFields[0]) == 7,
+    // NOLINTNEXTLINE(readability-magic-numbers): StructuredSummary's field count
+    static_assert(std::size(kFields) == 7,
                   "kFields must list every StructuredSummary field");
     if (all_empty) {
         logger.error("{}compaction: the summary tool call carried no usable fields; skipping",
