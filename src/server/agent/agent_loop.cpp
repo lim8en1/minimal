@@ -511,6 +511,26 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         std::vector<llm::ContentBlock>& results = round.results;
         const bool stop_requested = round.stop_requested;
 
+        // THE ROOM LEFT IN THE WINDOW. Each result is already under its own
+        // ceiling, but a round lands on whatever context there is: past the
+        // window minus the compaction headroom, the next request -- and the
+        // compaction that should rescue it, which re-sends the whole history
+        // -- would not fit, leaving a session that can neither continue nor
+        // compact. The round's results share what room is left instead.
+        if (const auto room = request_.ToolRoundRoomBytes()) {
+            if (const std::size_t cut = FitRoundResults(
+                    results, *room, [this](const std::string& tool_use_id) {
+                        return tools::ToolOutputSpill(
+                            session_.project_root, session_.session_id,
+                            tool_use_id.empty() ? std::string() : tool_use_id + ".result.txt");
+                    })) {
+                session_.logger.warn(
+                    "session {}: {} tool result(s) cut to fit the {} bytes left in the context "
+                    "window (the compaction headroom is kept free)",
+                    session_.session_id, cut, *room);
+            }
+        }
+
         // The round commits as one unit: the held assistant message and every
         // result, in a single store transaction (see tool_round above). A store
         // failure throws with NOTHING written and working_.messages() untouched, so the

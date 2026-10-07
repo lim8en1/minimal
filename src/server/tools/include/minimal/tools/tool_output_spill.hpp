@@ -54,6 +54,11 @@ public:
     bool Append(std::string_view chunk);
     // Closes the file and prunes the session dir. Idempotent.
     void Finish();
+    // When the file already exists (an earlier cut of the same result saved
+    // the fuller text), points at it instead of overwriting it: later
+    // appends are dropped and the note names the existing file. False when
+    // there is nothing to adopt.
+    bool AdoptExisting();
 
     bool started() const { return started_; }
     bool ok() const { return started_ && error_.empty(); }

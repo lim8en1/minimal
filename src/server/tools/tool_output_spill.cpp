@@ -172,6 +172,15 @@ void ToolOutputSpill::Finish() {
     if (started_) Prune(ToolOutputDir(project_root_, session_id_));
 }
 
+bool ToolOutputSpill::AdoptExisting() {
+    if (started_) return false;
+    std::error_code ec;
+    if (!fs::is_regular_file(ToolOutputDir(project_root_, session_id_) / name_, ec)) return false;
+    started_ = true;
+    finished_ = true;
+    return true;
+}
+
 std::string ToolOutputSpill::RelativePath() const {
     return (ToolOutputDir(fs::path(), session_id_) / name_).generic_string();
 }

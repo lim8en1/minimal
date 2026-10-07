@@ -337,6 +337,46 @@ std::optional<std::size_t> CompactionController::Compact(std::string_view trigge
     if (!chosen_cut) return std::nullopt;
     const std::size_t cut = *chosen_cut;
 
+    // THE SUMMARIZER MUST FIT. It re-sends the whole history, so a context
+    // already past the window (one oversized tool result is enough) makes
+    // the rescue fail exactly like the request it was meant to rescue, and
+    // the session can neither continue nor compact. Elide the largest tool
+    // results in place until the request fits with the headroom kept free --
+    // the persisted transcript and the spill files keep the full text, and
+    // eliding never moves a message, so `cut` stays valid. After a provider
+    // overflow the context's size is unknown but known to be too big: the
+    // estimate counts at kConservativeBytesPerToken there, since dense
+    // output is what undercounts.
+    {
+        const bool small = config_.small_model.has_value() && config_.small_model->provider != nullptr;
+        const std::optional<std::int64_t> window =
+            small ? config_.small_model->context_window_tokens : preset_.context_window_tokens;
+        if (window && *window > 0) {
+            const std::int64_t limit = *window - RequestBuilder::CompactionHeadroomTokens(*window);
+            const bool overflowed = trigger == "overflow";
+            const auto context_tokens = [&] {
+                const std::int64_t estimate = request_.EstimateContextTokens();
+                return overflowed ? estimate * kEstimatedBytesPerToken / kConservativeBytesPerToken
+                                  : std::max(estimate, working_.tokens().last_occupancy());
+            };
+            std::size_t elided = 0;
+            while (context_tokens() > limit &&
+                   working_.MutateInPlace([](std::vector<llm::Message>& messages) {
+                       return ElideLargestToolResult(messages);
+                   })) {
+                ++elided;
+                // The report described the context before this elision.
+                working_.tokens().SeedOccupancy(request_.EstimateContextTokens());
+            }
+            if (elided > 0) {
+                session_.logger.warn(
+                    "session {}: elided {} tool result(s) so the compaction request fits the "
+                    "{}-token window (the full text stays in the transcript and spill files)",
+                    session_.session_id, elided, *window);
+            }
+        }
+    }
+
     // The summarizer reads the WHOLE working history; only [0, cut) is
     // replaced by its summary. A summary written knowing the recent messages
     // describes the current state rather than the state at the cut, and the

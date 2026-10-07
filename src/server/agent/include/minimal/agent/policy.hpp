@@ -87,6 +87,19 @@ inline constexpr std::int64_t kOutputCapFloorTokens = 1024;
 inline constexpr std::int64_t kElisionTargetBytes = 500;
 inline constexpr std::int64_t kElisionMinBytes = 1000;
 
+// The room every request keeps free for a compaction to run in: the
+// summarizer re-sends the whole history plus its instruction and needs room
+// for the summary it writes. A tool round's results are shrunk to leave this
+// much of the window unused, and a compaction whose own request would not
+// fit with it elides tool results first -- otherwise one oversized result
+// leaves a session that can neither continue nor compact.
+inline constexpr std::int64_t kCompactionHeadroomPercent = 10;
+inline constexpr std::int64_t kCompactionHeadroomMinTokens = 8192;
+
+// What a tool result keeps, at least, when a round has to be shrunk to the
+// room left in the window: enough for an error line and the spill note.
+inline constexpr std::int64_t kMinFittedResultBytes = 1024;
+
 // A compaction whose history is still at least this percent of its old size
 // "freed little" and says so (the summary is about as large as what it
 // replaced, or the kept tail is most of the history).

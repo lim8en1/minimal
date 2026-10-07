@@ -153,6 +153,13 @@ result's note names the file, so the model reads or greps the part it needs
 instead of re-running the command. That directory carries its own
 `.gitignore` (`*`), and each session keeps only its newest 50 spills.
 
+**Tool output never takes the room compaction needs.** With the model's
+context window known, a tool round's results together may only use what is
+left of the window after the current context and a 10% compaction headroom;
+past that they are cut (and spilled) to share it. A compaction whose own
+request would not fit elides the largest tool results first, so a session can
+always compact instead of being stuck past its window.
+
 ### Per-plugin tool settings (`plugins.d/<name>.json`)
 
 **`tools-fs`** — object with one sub-object per tool

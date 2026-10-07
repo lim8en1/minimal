@@ -164,6 +164,19 @@ std::int64_t RequestBuilder::FixedBytes(const std::optional<std::string>& system
     return bytes;
 }
 
+std::int64_t RequestBuilder::CompactionHeadroomTokens(std::int64_t window) {
+    return std::max(kCompactionHeadroomMinTokens,
+                    common::PercentOf(window, kCompactionHeadroomPercent));
+}
+
+std::optional<std::int64_t> RequestBuilder::ToolRoundRoomBytes() const {
+    if (!preset_.context_window_tokens || *preset_.context_window_tokens <= 0) return std::nullopt;
+    const std::int64_t window = *preset_.context_window_tokens;
+    const std::int64_t occupancy = std::max(EstimateContextTokens(), tokens_.last_occupancy());
+    const std::int64_t room = window - occupancy - CompactionHeadroomTokens(window);
+    return std::max<std::int64_t>(room, 0) * kConservativeBytesPerToken;
+}
+
 std::int64_t RequestBuilder::ToolResultByteCap() const {
     std::int64_t cap = config_.max_tool_result_bytes;
     // The window term is a share of the window converted to BYTES at the
