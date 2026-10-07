@@ -181,40 +181,70 @@ TEST_CASE("EnsureServerRunning recognises an already-running server without spaw
     CHECK(info.info.abi_tag() == common::AbiTag());
     CHECK(info.info.version() == common::Version());
     CHECK(info.info.pid() == static_cast<std::int64_t>(::getpid()));
-    CHECK_FALSE(client::ServerBuildMismatch(info.status, info.info).has_value());
+    CHECK(client::CheckServerBuild(info.status, info.info, target, false).verdict ==
+          client::ServerBuildCheck::Verdict::kSame);
 }
 
 TEST_CASE("a server of another build is refused, naming both and the pid to stop",
           "[server_spawn]") {
+    using Verdict = client::ServerBuildCheck::Verdict;
+    const std::string local = "unix:///tmp/minimal-check.sock";
     v1::ServerInfo info;
     info.set_version("0.9.0b");
     info.set_abi_tag("Clang-old-deadbeef");
     info.set_pid(4242);
-    const auto mismatch = client::ServerBuildMismatch(grpc::Status::OK, info);
-    REQUIRE(mismatch.has_value());
-    CHECK(mismatch->find("Clang-old-deadbeef") != std::string::npos);
-    CHECK(mismatch->find(common::AbiTag()) != std::string::npos);
-    CHECK(mismatch->find("kill 4242") != std::string::npos);
+    const auto check = client::CheckServerBuild(grpc::Status::OK, info, local, false);
+    REQUIRE(check.verdict == Verdict::kOther);
+    CHECK(check.message.find("Clang-old-deadbeef") != std::string::npos);
+    CHECK(check.message.find(common::AbiTag()) != std::string::npos);
+    CHECK(check.message.find("kill 4242") != std::string::npos);
 
     // Same release, different build: still refused -- the rebuild-while-a-
     // server-idles case is the one the check exists for.
     info.set_version(common::Version());
-    CHECK(client::ServerBuildMismatch(grpc::Status::OK, info).has_value());
+    CHECK(client::CheckServerBuild(grpc::Status::OK, info, local, false).verdict == Verdict::kOther);
 }
 
-TEST_CASE("a server older than GetServerInfo is stale; other failures are unverified",
+TEST_CASE("a mismatch names a way out that works: the binary when this client spawned it",
           "[server_spawn]") {
-    const v1::ServerInfo empty;
-    const auto old = client::ServerBuildMismatch(
-        grpc::Status(grpc::StatusCode::UNIMPLEMENTED, ""), empty);
-    REQUIRE(old.has_value());
-    CHECK(old->find("older build") != std::string::npos);
+    // Regression: "kill it and run again" after a spawn only spawned the same
+    // stale binary again; a remote target got a pid on another host.
+    using Verdict = client::ServerBuildCheck::Verdict;
+    v1::ServerInfo info;
+    info.set_abi_tag("Clang-old-deadbeef");
+    info.set_pid(4242);
+    const auto spawned =
+        client::CheckServerBuild(grpc::Status::OK, info, "unix:///tmp/x.sock", true);
+    REQUIRE(spawned.verdict == Verdict::kOther);
+    CHECK(spawned.message.find("rebuild or reinstall minimal-server") != std::string::npos);
+    CHECK(spawned.message.find("kill") == std::string::npos);
 
-    const auto failed = client::ServerBuildMismatch(
-        grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "refused"), empty);
-    REQUIRE(failed.has_value());
-    CHECK(failed->find("could not verify") != std::string::npos);
-    CHECK(failed->find("refused") != std::string::npos);
+    const auto remote = client::CheckServerBuild(grpc::Status::OK, info, "dns:///host:7000", false);
+    REQUIRE(remote.verdict == Verdict::kOther);
+    CHECK(remote.message.find("kill") == std::string::npos);
+    CHECK(remote.message.find("dns:///host:7000") != std::string::npos);
+}
+
+TEST_CASE("a server older than GetServerInfo is refused; a failure to ask is only a warning",
+          "[server_spawn]") {
+    using Verdict = client::ServerBuildCheck::Verdict;
+    const v1::ServerInfo empty;
+    const auto old = client::CheckServerBuild(grpc::Status(grpc::StatusCode::UNIMPLEMENTED, ""),
+                                              empty, "unix:///tmp/old.sock", false);
+    REQUIRE(old.verdict == Verdict::kOther);
+    CHECK(old.message.find("older build") != std::string::npos);
+    CHECK(old.message.find("lsof -t /tmp/old.sock") != std::string::npos);
+
+    // Regression: an auth refusal or a missed deadline was refused as a
+    // version problem, with --allow-version-mismatch offered as the cure.
+    const auto auth = client::CheckServerBuild(
+        grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "bad token"), empty, "unix:///tmp/a.sock",
+        false);
+    CHECK(auth.verdict == Verdict::kUnverified);
+    CHECK(auth.message.find("credentials") != std::string::npos);
+    CHECK(client::CheckServerBuild(grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, ""), empty,
+                                   "unix:///tmp/a.sock", false)
+              .verdict == Verdict::kUnverified);
 }
 
 TEST_CASE("a client with no server spawns one, uses it, and the server exits on its own",

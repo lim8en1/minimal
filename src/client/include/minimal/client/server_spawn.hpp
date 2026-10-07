@@ -55,15 +55,28 @@ bool EnsureServerRunning(const std::string& target, const SpawnOptions& options,
                          const std::function<void(const std::string&)>& progress = {},
                          bool* spawned = nullptr);
 
-// Whether the server that answered GetServerInfo with (status, info) is a
-// different build from this client. nullopt = the same build; otherwise the
-// multi-line diagnostic to print, naming both builds and how to stop the old
-// server. Compares abi_tag (toolchain + git revision), not the release version:
-// the stale server that matters is the one left running across a rebuild at
-// the same release. UNIMPLEMENTED -- a server older than the RPC -- is stale
-// by definition; any other failure is reported as "could not verify".
-std::optional<std::string> ServerBuildMismatch(const grpc::Status& status,
-                                               const v1::ServerInfo& info);
+// Whether the server that answered GetServerInfo with (status, info) is the
+// same build as this client. Compares abi_tag (toolchain + git revision), not
+// the release version: the stale server that matters is the one left running
+// across a rebuild at the same release.
+//   kSame       -- connect.
+//   kOther      -- refuse (unless --allow-version-mismatch): a different tag,
+//                  or UNIMPLEMENTED (a server older than the RPC). `message`
+//                  names both builds and a way out that fits the case: the
+//                  binary to rebuild when this client spawned it (`spawned`;
+//                  rerunning would only spawn it again), `kill <pid>` for a
+//                  local socket, nothing local for a remote target.
+//   kUnverified -- any other failure (a timeout, an auth refusal): not a
+//                  version problem, so never refused as one -- `message` is a
+//                  warning, and the connection proceeds; the first real call
+//                  reports its own error.
+struct ServerBuildCheck {
+    enum class Verdict { kSame, kOther, kUnverified };
+    Verdict verdict = Verdict::kSame;
+    std::string message;
+};
+ServerBuildCheck CheckServerBuild(const grpc::Status& status, const v1::ServerInfo& info,
+                                  const std::string& target, bool spawned);
 
 // The log a spawned server's stdout/stderr lands in.
 std::string SpawnedServerLogPath();

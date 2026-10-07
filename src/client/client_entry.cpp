@@ -1,5 +1,7 @@
 #include "client_entry.hpp"
 
+#include <signal.h>
+
 #include <chrono>
 #include <cstdio>
 
@@ -27,12 +29,19 @@ std::shared_ptr<SessionClient> ConnectOrReport(const std::string& target, bool a
     auto client = std::make_shared<SessionClient>(target);
     if (reachable && client->WaitForConnected(kChannelConnectTimeout)) {
         const auto info = client->GetServerInfo();
-        const auto mismatch = ServerBuildMismatch(info.status, info.info);
-        if (!mismatch) return client;
-        std::fprintf(stderr, "minimal: %s\n", mismatch->c_str());
+        const auto check = CheckServerBuild(info.status, info.info, target, spawned);
+        using Verdict = ServerBuildCheck::Verdict;
+        if (check.verdict == Verdict::kSame) return client;
+        std::fprintf(stderr, "minimal: %s\n", check.message.c_str());
+        if (check.verdict == Verdict::kUnverified) return client;
         if (allow_version_mismatch) {
             std::fprintf(stderr, "minimal: continuing anyway (--allow-version-mismatch)\n");
             return client;
+        }
+        // The server this client just started is of no use to anyone: left
+        // running it would only answer the next run the same way.
+        if (spawned && info.status.ok() && info.info.pid() > 0) {
+            ::kill(static_cast<pid_t>(info.info.pid()), SIGTERM);
         }
         std::fprintf(stderr, "(or pass --allow-version-mismatch to connect regardless)\n");
         return nullptr;

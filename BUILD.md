@@ -279,17 +279,28 @@ it cannot do for you; see `providers.example.json` and
 
 ## Rebuilding plugins
 
+Plugins are **source-compatible, not binary-compatible**: they are rebuilt
+together with the harness, and both host and plugin bake the same ABI tag,
+`<compiler-id>-<compiler-version>-cxx20-<system>-<processor>-<build-type>-<git-revision>`.
+A mismatched tag refuses to load — after pulling a new revision, rebuild rather
+than reusing plugin artifacts from an old build tree.
+
 The same tag guards the client/server boundary. Every client asks the server
 for its build (`GetServerInfo`) right after connecting and refuses a different
-one. Typically that's a server still idling from before a rebuild. The refusal
-names both builds and the server's pid. Stop that server, or pass
-`--allow-version-mismatch` to connect anyway.
+one; the refusal names both builds and the way out. Because the tag carries the
+git revision and the build type, a refusal follows:
 
-Plugins are **source-compatible, not binary-compatible**: they are rebuilt
-together with the harness, and both host and plugin bake the same ABI tag
-(`<compiler-id>-<compiler-version>-cxx20-<system>`). A mismatched tag refuses
-to load — after pulling a new revision, rebuild rather than reusing plugin
-artifacts from an old build tree. Bundled plugins fail the server's startup
+- any new commit or branch checkout, once the client is rebuilt and a server
+  from before is still idling (stop it with the `kill <pid>` the refusal
+  prints, or wait for its idle exit);
+- a Debug and a Release tree sharing the default socket;
+- a client that spawned a `minimal-server` that was not rebuilt with it (a
+  stale sibling binary, or `MINIMAL_SERVER_BIN` pointing at another build) —
+  the refusal names the binary to rebuild, and stops the server it started.
+
+`--allow-version-mismatch` connects anyway. A failure to *ask* (a timeout, an
+auth refusal) is not a mismatch: the client warns and connects, and the first
+real call reports its own error. Bundled plugins fail the server's startup
 sanity check if they do not load; user plugins only warn.
 
 ## User plugins
