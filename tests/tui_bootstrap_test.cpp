@@ -212,6 +212,27 @@ bool AnyContains(const std::vector<std::string>& messages, const std::string& ne
 }
 }  // namespace
 
+TEST_CASE("the registries close as soon as plugins have loaded, before any plugin view runs",
+          "[tui_bootstrap][invariant]") {
+    // A plugin's component(), a slot's Actions() or OnTheme run AFTER this:
+    // a registration from there was recorded as core's and skipped the
+    // collision scan. Loading alone now seals, with the plain-text markdown
+    // fallback (core's own registration) already in place.
+    SessionClient client("unix:///nonexistent/minimal-tui-bootstrap-test.sock");
+    minimal::testing::TempDir config_dir;
+    SeedRequiredPlugins(config_dir.path());
+    ScopedEnv config_override("MINIMAL_CONFIG_DIR", config_dir.path().c_str());
+    TuiEnvironment env;
+    REQUIRE(LoadClientPluginEnvironment(&client, env, /*announce_loads=*/false));
+    const auto* engine = env.registries.markdown_engine.get();
+    REQUIRE(engine != nullptr);
+    const std::string holder = env.registries.markdown_engine.holder();
+    env.registries.markdown_engine.SetAttribution("late");
+    env.registries.markdown_engine.Register(std::make_unique<StubEngine>());
+    CHECK(env.registries.markdown_engine.get() == engine);   // refused: sealed
+    CHECK(env.registries.markdown_engine.holder() == holder);
+}
+
 TEST_CASE("ResolveClientNames: a duplicate view id is fatal and names both plugins",
           "[tui_bootstrap][names]") {
     // Views and start views share one namespace: a start view colliding with a

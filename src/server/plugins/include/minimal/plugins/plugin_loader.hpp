@@ -49,7 +49,8 @@ using Provenance = common::PluginProvenance;
 
 enum class LoadStatus {
     Loaded,
-    Disabled,               // plugins.json says enabled:false; never opened
+    Disabled,               // plugins.json says enabled:false; never loaded (/config opens
+                            // it for its config symbols only once a request names it)
     OpenFailed,             // dlopen failed (missing file, bad arch, unresolved symbol)
     MissingRequiredSymbol,  // not a minimal plugin, or built against a different ABI header
     AbiMismatch,            // built against a different toolchain; rebuild it

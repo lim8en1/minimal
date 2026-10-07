@@ -6,6 +6,7 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 #include <utility>
 
@@ -102,12 +103,20 @@ RatesFetchOutcome FetchAndUpdateRates(const CostSettings& settings, CostStore& s
     {
         std::vector<std::thread> workers;
         workers.reserve(sources.size());
+        const auto fetch = [&](std::size_t i) {
+            fetched[i] = FetchSource(sources[i], settings.rates_fetch_timeout_ms,
+                                     outcome.sources[i].error);
+        };
         for (std::size_t i = 0; i < sources.size(); ++i) {
             outcome.sources[i].name = sources[i].name;
-            workers.emplace_back([&, i] {
-                fetched[i] = FetchSource(sources[i], settings.rates_fetch_timeout_ms,
-                                         outcome.sources[i].error);
-            });
+            // A thread that cannot be started (EAGAIN under a thread limit)
+            // fetches inline instead: unwinding past the joinable workers
+            // already started would std::terminate the server.
+            try {
+                workers.emplace_back(fetch, i);
+            } catch (const std::system_error&) {
+                fetch(i);
+            }
         }
         for (auto& worker : workers) worker.join();
     }

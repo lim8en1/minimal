@@ -102,8 +102,12 @@ public:
                          BackendsInUse backends_in_use = {},
                          const ServiceRegistry* services = nullptr,
                          std::vector<CoreConfigFile> core_files = {});
-    // Cancels the check in flight and waits for it.
+    // Cancels the check in flight and waits for it (Stop).
     ~PluginConfigEndpoint() override;
+    // Cancels the check in flight, drops the queued ones and joins the check
+    // thread. Call it before the session registry and the plugins go away:
+    // a running check reaches both. Idempotent.
+    void Stop();
     PluginConfigEndpoint(const PluginConfigEndpoint&) = delete;
     PluginConfigEndpoint& operator=(const PluginConfigEndpoint&) = delete;
 
@@ -131,7 +135,16 @@ private:
         std::map<std::string, std::string> plugin_choices;  // CoreConfigFile's
         nlohmann::json schema;   // null: the plugin takes no configuration
         nlohmann::json applied;  // the config the plugin is running with
+        // False for a disabled plugin whose config symbols are not resolved
+        // yet: it is opened (from `module`) only when a request names it.
+        bool inspected = true;
+        std::filesystem::path module;
     };
+
+    // schema/validate from entry.symbols.
+    static void AdoptSymbols(Entry& entry);
+    // Opens a disabled plugin for its config symbols, once.
+    static void Inspect(Entry& entry);
 
     Entry& Require(const nlohmann::json& request);
     // The plugin by name, configurable or not.
