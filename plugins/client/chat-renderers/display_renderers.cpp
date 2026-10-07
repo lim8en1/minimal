@@ -12,7 +12,8 @@
 #include "chat_renderers.hpp"
 #include "minimal/client/sdk/utf8.hpp"
 #include "minimal/client/sdk/tool_status.hpp"
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
+#include "policy.hpp"
 
 namespace minimal::client::chat_renderers {
 

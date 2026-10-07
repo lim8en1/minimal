@@ -35,6 +35,7 @@
 #include "minimal/client/sdk/render.hpp"
 #include "minimal/client/sdk/chat.hpp"
 #include "minimal/client/sdk/theme.hpp"
+#include "policy.hpp"
 
 namespace minimal::client::chat_view {
 

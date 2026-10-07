@@ -5,7 +5,7 @@
 #include <string_view>
 #include <utility>
 
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/count_format.hpp"
 #include "minimal/common/units.hpp"
@@ -101,9 +101,9 @@ std::vector<std::unique_ptr<plugins::StatusSegment>> MakeSegments() {
         std::string role;
         if (tab.context_window > 0) {
             const std::int64_t percent = common::AsPercent(tab.tokens_used, tab.context_window);
-            if (percent >= client::kContextErrorPercent) {
+            if (percent >= kContextErrorPercent) {
                 role = "error";
-            } else if (percent >= client::kContextAttentionPercent) {
+            } else if (percent >= kContextAttentionPercent) {
                 role = "attention";
             }
         }

@@ -10,8 +10,9 @@
 
 #include "modal_chrome.hpp"
 #include "minimal/client/sdk/schema_form_model.hpp"
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
 #include "minimal/client/sdk/utf8.hpp"
+#include "policy.hpp"
 
 namespace minimal::client::ui_kit {
 namespace {

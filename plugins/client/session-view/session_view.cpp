@@ -10,7 +10,7 @@
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/event.hpp>
 
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
 #include "minimal/client/sdk/utf8.hpp"
 #include "minimal/client/sdk/rebuilding.hpp"
 #include "session_rows.hpp"

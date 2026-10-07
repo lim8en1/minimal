@@ -22,6 +22,3 @@ minimal/common/plugin_config_schema.hpp
 minimal/common/policy.hpp
 minimal/common/utf8.hpp
 minimal/common/units.hpp
-
-# Transitional: core's policy constants, until each plugin's own move out.
-minimal/client/policy.hpp

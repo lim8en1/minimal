@@ -39,7 +39,7 @@
 #include "minimal/client/sdk/background_poller.hpp"
 #include "minimal/client/sdk/host.hpp"
 #include "minimal/client/sdk/render.hpp"
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
 
 namespace minimal::client::cost_view {
 

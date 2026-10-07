@@ -11,7 +11,8 @@
 #include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/units.hpp"
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
+#include "policy.hpp"
 
 namespace minimal::client::chat_view {
 

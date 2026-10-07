@@ -53,7 +53,7 @@ TEST_CASE("StreamingMarkdownView renders immediately, then debounces") {
     CHECK(f.renderer->calls == 1);
 
     // Past the debounce with new text: reparse, and the new text is in it.
-    f.Advance(minimal::client::kMarkdownReparseDebounce);
+    f.Advance(kMarkdownReparseDebounce);
     f.view.Render();
     CHECK(f.renderer->calls == 2);
     CHECK(f.renderer->last_text == "hello world");
@@ -113,7 +113,7 @@ TEST_CASE("AppendDelta after Finalize resumes the view instead of freezing it") 
     // waited -- AppendDelta discarded the text outright once finalized_.
     f.view.AppendDelta(" block two");
     CHECK_FALSE(f.view.finalized());
-    f.Advance(minimal::client::kMarkdownReparseDebounce);
+    f.Advance(kMarkdownReparseDebounce);
     f.view.Render();
     CHECK(f.renderer->calls == 2);
     CHECK(f.renderer->last_text == "block one block two");
@@ -132,31 +132,31 @@ TEST_CASE("AppendDelta after Finalize resumes the view instead of freezing it") 
 TEST_CASE("EffectiveDebounce holds the floor below the threshold, "
           "scales and clamps above it") {
     using namespace std::chrono_literals;
-    CHECK(StreamingMarkdownView::EffectiveDebounce(0) == minimal::client::kMarkdownReparseDebounce);
-    CHECK(StreamingMarkdownView::EffectiveDebounce(minimal::client::kMarkdownReparseScaleThresholdBytes) ==
-         minimal::client::kMarkdownReparseDebounce);
+    CHECK(StreamingMarkdownView::EffectiveDebounce(0) == kMarkdownReparseDebounce);
+    CHECK(StreamingMarkdownView::EffectiveDebounce(kMarkdownReparseScaleThresholdBytes) ==
+         kMarkdownReparseDebounce);
 
     // 1 ms per 64 bytes past the threshold.
-    const auto over = minimal::client::kMarkdownReparseScaleThresholdBytes + 640;
+    const auto over = kMarkdownReparseScaleThresholdBytes + 640;
     CHECK(StreamingMarkdownView::EffectiveDebounce(over) ==
-         minimal::client::kMarkdownReparseDebounce + 10ms);
+         kMarkdownReparseDebounce + 10ms);
 
     // Never exceeds the cap, however large the buffer.
     CHECK(StreamingMarkdownView::EffectiveDebounce(10'000'000) ==
-         minimal::client::kMaxMarkdownReparseDebounce);
+         kMaxMarkdownReparseDebounce);
 }
 
 // The scaling is WIRED, not just computed: a large buffer's Render() must
 // actually wait longer than kReparseDebounce before reparsing again.
 TEST_CASE("Render honors the scaled debounce for a large buffer") {
     Fixture f;
-    const std::string big(minimal::client::kMarkdownReparseScaleThresholdBytes + 6400, 'x');
+    const std::string big(kMarkdownReparseScaleThresholdBytes + 6400, 'x');
     f.view.AppendDelta(big);
     f.view.Render();
     CHECK(f.renderer->calls == 1);
 
     f.view.AppendDelta("more");
-    f.Advance(minimal::client::kMarkdownReparseDebounce);   // the FLOOR: not enough now
+    f.Advance(kMarkdownReparseDebounce);   // the FLOOR: not enough now
     f.view.Render();
     CHECK(f.renderer->calls == 1);
 
@@ -181,10 +181,10 @@ TEST_CASE("a declined reparse asks for the frame that will do it") {
     f.view.AppendDelta(" world");
     f.view.Render();
     REQUIRE(f.redraws.size() == 1);
-    CHECK(f.redraws[0] == minimal::client::kMarkdownReparseDebounce - std::chrono::milliseconds(30));
+    CHECK(f.redraws[0] == kMarkdownReparseDebounce - std::chrono::milliseconds(30));
 
     // Once it reparses, nothing more is asked.
-    f.Advance(minimal::client::kMarkdownReparseDebounce);
+    f.Advance(kMarkdownReparseDebounce);
     f.view.Render();
     CHECK(f.redraws.size() == 1);
     // Unchanged text asks for nothing either.

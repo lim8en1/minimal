@@ -63,6 +63,12 @@ struct Attribution {
 // LATER used to bypass the collision rule, the attribution windows and (for
 // exclusive slots) the core default entirely, silently; a sealed Register
 // warns and is ignored instead.
+//
+// HOST-ONLY: Seal, SetAttribution, ClearAttribution, RemoveByAttribution and
+// ApplyAliases are the loader's and the bootstrap's, public for the same
+// reason the server's registries keep them public (one pattern on both
+// sides, and the tests drive them). A plugin calls Register /
+// RegisterFallback and reads; it never calls these.
 class RegistryBase {
 public:
     virtual ~RegistryBase() = default;

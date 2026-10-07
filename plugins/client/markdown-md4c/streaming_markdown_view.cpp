@@ -1,8 +1,9 @@
 #include "streaming_markdown_view.hpp"
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
 
 #include <algorithm>
 #include <utility>
+#include "policy.hpp"
 
 namespace minimal::client::markdown_md4c {
 
