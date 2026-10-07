@@ -317,8 +317,8 @@ The "write a different frontend" tier shrinks to exactly this list. Not on it, u
 | Slot | Kind | Default | Status |
 |---|---|---|---|
 | Tool-result renderer (keyed by tool name) | additive | generic collapsible row | live |
-| Display-kind renderer (keyed by display-payload kind) | additive | core renderers for the core kinds | live; the defaults stay core with the chat view (TODO below) |
-| Message-kind presentation (agent/thinking/tool-activity/system) | additive | core defaults (§ *Message-kind rendering*) | live; the defaults stay core with the chat view (TODO below) |
+| Display-kind renderer (keyed by display-payload kind) | additive, with fallbacks | bundled `chat-renderers` (fallbacks) | **live** |
+| Message-kind presentation (agent/thinking/tool-activity/system) | additive, with fallbacks | bundled `chat-renderers` (fallbacks) | **live** |
 | Chat surface (the whole chat view) | **exclusive, required** | core chat view | live; the default stays core (TODO below) |
 | Markdown engine | **exclusive**; absent → plain text | bundled `markdown-md4c` | live: fenced code through `ClientPluginRegistrationContext::highlighter` (the host's highlighter over every grammar); a debounced stream asks for its frame with `HostUi::RequestRedrawAfter`; core keeps only a plain-text fallback |
 | Syntax-highlight languages (keyed by language) | additive, collisions fatal | bundled `syntax-grammars` | live: a grammar brings its node-type table, its function-name positions and its fence aliases; core keeps only the highlighter |
@@ -343,7 +343,9 @@ The "write a different frontend" tier shrinks to exactly this list. Not on it, u
 
 The renderer's obligations are part of the kind's contract, like the markdown engine's streaming one: show the grant labels verbatim (they carry the blanket wording, § *Consent scoping*), say what an incomplete disclosure does not cover, never answer on the user's behalf. Core keeps the layering (the prompt layer is topmost, §4.3), the timeout and first-answer-wins, and fails closed: no renderer, a throw, or anything but an `ANSWERED` well-formed choice answers deny (permission) or `""`, the server's "do not proceed" (confirmation); granted keys are filtered to what the request offered.
 
-**TODO: the chat view and its built-in renderers.** The core chat view is the chat-surface slot's default, and the core message-kind and display-kind renderers are its own defaults: a kind no plugin claimed is drawn by core, and live rows of an unclaimed kind are drawn by the chat view itself (a plugin's claim routes them to the plugin). They move together, as one bundled chat plugin, once two things exist: a `ChatSurface` contract carrying core's data plane (the buffered, paged rows the chat view reads today -- the surface API gets raw events), and a *fallback* registration for additive slots, so a bundled default yields to a plugin's claim of one kind instead of colliding with it.
+**Fallback registration.** An additive registry takes a `RegisterFallback` beside `Register`: a bundled default for a key that yields to any claim of it -- `Find` answers the claim when there is one, the fallback otherwise -- with no collision; two fallbacks for one key do collide (they are recorded as `fallback:<key>`). The bundled `chat-renderers` registers every message kind and display kind this way, through the context's markdown engine and highlighter proxies; disabled, a row with no renderer reads as its plain text.
+
+**TODO: the chat view.** The core chat view is still the chat-surface slot's default. It moves to a bundled `chat-view` plugin once `ChatSurface` carries core's data plane (the buffered, paged rows the chat view reads today; the current surface API gets raw events).
 
 **Tab activity.** `HostUi::Activity()` answers every open tab -- id, name, state, attention, focus, subagent/view-only, nesting -- and its tool calls as `ToolActivity` (name, summary, running/failed, start, duration, the shared live-output buffer), in a `TabActivitySnapshot` whose `version` moves only when something in it changed, so a view keyed on it rebuilds on change, not at frame rate. Its first consumer is the bundled `tools-panel` (the `tools.panel` view, ctrl+t; `output_lines` in its config).
 
@@ -353,7 +355,7 @@ The renderer's obligations are part of the kind's contract, like the markdown en
 
 Details for the other slots:
 
-**Message-kind presentation.** Renderers keyed by message kind, same shape as `ToolResultRenderer`; core supplies the defaults the message-kind table already specifies. A plugin that claims `Thinking` or `ToolActivity` also draws the current turn's LIVE rows of that kind (`RowRenderContext::live` set: the text may be a partial prefix, and the row re-renders as it grows); live assistant text stays core's, which streams it through the markdown engine. The data plane — event demux, virtualization, streaming buffering — stays core regardless of who renders a row.
+**Message-kind presentation.** Renderers keyed by message kind, same shape as `ToolResultRenderer`; the bundled `chat-renderers` supplies the defaults the message-kind table specifies, as fallbacks. A plugin that claims `Thinking` or `ToolActivity` also draws the current turn's LIVE rows of that kind (`RowRenderContext::live` set: the text may be a partial prefix, and the row re-renders as it grows); live assistant text stays core's, which streams it through the markdown engine. The data plane — event demux, virtualization, streaming buffering — stays core regardless of who renders a row.
 
 Rows from an assistant message carry `ChatRow::agent` / `ChatRow::model` — the agent preset and `<provider>/<model>` that produced it, persisted per message (`StoredMessage.agent_preset`/`model`, schema v9; empty = unknown). `AssistantLabel()` formats the core speaker label (`build (sonnet-4-5)`). The synthetic `ChatRowKind::Switch` row sits before the first assistant message whose agent or model differs from the previous one's (`switch_from_agent`/`switch_from_model` hold the old pair); it is never collapsible, and a plugin may claim it like any other kind.
 

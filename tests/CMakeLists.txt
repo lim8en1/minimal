@@ -375,6 +375,9 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     # session-status: the status bar's usual segments.
     "${CMAKE_SOURCE_DIR}/plugins/client/session-status/session_status.cpp"
     session_status_test.cpp
+    # chat-renderers: every chat row and display payload kind.
+    "${CMAKE_SOURCE_DIR}/plugins/client/chat-renderers/message_renderers.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/chat-renderers/display_renderers.cpp"
     # tab-bar: the row of tabs.
     "${CMAKE_SOURCE_DIR}/plugins/client/tab-bar/tab_bar.cpp"
     # tools-panel: every tab's tool calls.
@@ -421,6 +424,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/client/prompt-editor"
     "${CMAKE_SOURCE_DIR}/plugins/client/tools-panel"
     "${CMAKE_SOURCE_DIR}/plugins/client/tab-bar"
+    "${CMAKE_SOURCE_DIR}/plugins/client/chat-renderers"
     "${CMAKE_SOURCE_DIR}/plugins/client/syntax-grammars"
     "${CMAKE_SOURCE_DIR}/plugins/client/markdown-md4c"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")

@@ -62,6 +62,10 @@ std::unique_ptr<ClientApi> MakeHostClientApi(SessionClient* client);
 // place only once every plugin has registered.
 std::unique_ptr<WidgetKit> MakeHostWidgetKit(const WidgetKitRegistry& registry);
 
+// The MarkdownEngine handed to plugins, the same way: forwards to whichever
+// engine holds `registry` at the call (core fills it after the plugins load).
+std::unique_ptr<MarkdownEngine> MakeHostMarkdownEngine(const MarkdownEngineRegistry& registry);
+
 // The FocusProvider handed to plugins: which tab/session the user is looking
 // at, read from AppState's own thread-safe accessors. CREATED BEFORE AppState
 // EXISTS -- the plugin-load step (BuildTuiEnvironment) precedes app

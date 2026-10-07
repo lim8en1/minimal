@@ -22,6 +22,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "chat_renderers_fixture.hpp"
 #include "ftxui_harness.hpp"
 #include "md4c_engine.hpp"
 #include "syntax_grammars.hpp"
@@ -297,8 +298,7 @@ TEST_CASE("chat view: a sent user message renders as markdown, typed lines kept"
     minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
 
@@ -320,8 +320,7 @@ TEST_CASE("chat view: with the plain engine a user message reads as typed",
     plugins::RegisterPlainMarkdownEngine(engine_registry);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
 
@@ -340,8 +339,7 @@ TEST_CASE("chat view: a session switch at an EQUAL transcript version re-renders
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -370,8 +368,7 @@ TEST_CASE("chat view: a new scrollback page for the SAME session is not served s
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -419,8 +416,7 @@ TEST_CASE("chat view: scrolling up mid-turn stays put while the streaming block 
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -480,8 +476,7 @@ TEST_CASE("chat view: live text and tool activity render interleaved, "
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -571,7 +566,7 @@ TEST_CASE("chat view: a throwing UserText renderer does not crash the echo row")
 TEST_CASE("chat view: a throwing live markdown stream renders a fallback, not a crash") {
     const auto theme = TestTheme();
     plugins::MessageRendererRegistry messages;
-    plugins::RegisterCoreMessageRenderers(messages);
+    minimal_test::RegisterPlainChatRenderers(messages);
     plugins::ToolResultRendererRegistry tool_renderers;
 
     plugins::DisplayRendererRegistry display_renderers;
@@ -598,7 +593,7 @@ TEST_CASE("chat view: has_earlier_messages renders a load-older hint") {
     // its full history unless the user already knew about chat.load_older.
     const auto theme = TestTheme();
     plugins::MessageRendererRegistry messages;
-    plugins::RegisterCoreMessageRenderers(messages);
+    minimal_test::RegisterPlainChatRenderers(messages);
     plugins::ToolResultRendererRegistry tool_renderers;
 
     plugins::DisplayRendererRegistry display_renderers;
@@ -663,8 +658,7 @@ struct DisplayHarness {
 
     DisplayHarness() {
         minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
-        plugins::RegisterCoreMessageRenderers(messages);
-        plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+        minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     }
 
     std::string Render(std::vector<v1::StoredMessage> page) {
@@ -718,7 +712,7 @@ TEST_CASE("chat view: the core diff and process renderers draw their payloads") 
     DisplayHarness h;
     static const auto languages = minimal::client::syntax_grammars::Definitions();
     const minimal::client::SyntaxHighlighter highlighter(h.theme, languages);
-    plugins::RegisterCoreDisplayRenderers(h.display_renderers, *h.engine_registry.get(),
+    minimal::client::chat_renderers::RegisterDisplayRenderers(h.display_renderers, *h.engine_registry.get(),
                                           highlighter);
 
     SECTION("diff: expanded by default, with markers and counts") {
@@ -761,8 +755,7 @@ TEST_CASE("chat view: a completed tool call with no name-specific renderer still
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;   // deliberately empty: no plugin
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -800,8 +793,7 @@ TEST_CASE("chat view: a tool result with one early newline and a long single-lin
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -838,8 +830,7 @@ TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest defau
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -881,8 +872,7 @@ TEST_CASE("chat view: ScrollToBottom resets the anchor directly, not just relati
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -924,8 +914,7 @@ TEST_CASE("agent markdown: a long response renders as multiple scroll-anchor chu
     plugins::MarkdownEngineRegistry engine_registry;
     minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     const auto* markdown = messages.Find(ChatRowKind::AgentMarkdown);
     REQUIRE(markdown != nullptr);
 
@@ -977,8 +966,7 @@ TEST_CASE("chat view: scrolling moves within one tall message, not just between 
     minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -1030,8 +1018,7 @@ TEST_CASE("chat view: ScrollWheelBy is time-gated, keyboard ScrollBy is not",
     minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -1071,8 +1058,7 @@ TEST_CASE("chat view: the row-cursor highlight moves after a render with no tran
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -1101,8 +1087,7 @@ TEST_CASE("chat view: toggling timestamps updates the render with no transcript 
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -1136,8 +1121,7 @@ TEST_CASE("chat view: a growing thinking segment renders its full text, not a st
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -1181,8 +1165,7 @@ TEST_CASE("chat view: clicking a thinking row toggles its collapse", "[chat_view
     minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -1234,8 +1217,7 @@ TEST_CASE("chat view: clicks that miss a collapsible row are not consumed",
     minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -1260,8 +1242,7 @@ TEST_CASE("chat view: clicking a tool-activity row toggles its collapse",
     minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
@@ -1295,8 +1276,7 @@ TEST_CASE("chat view: ui.json fold defaults set the startup collapse tier",
     minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     plugins::DisplayRendererRegistry display_renderers;
 
     SessionState::Snapshot snap;
@@ -1337,8 +1317,7 @@ TEST_CASE("chat view: the kind fold toggles flip the tier and yield to per-row "
     minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     plugins::DisplayRendererRegistry display_renderers;
 
     SessionState::Snapshot snap;
@@ -1380,8 +1359,7 @@ TEST_CASE("chat view: a kind fold toggle clears the global collapse choice",
     minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     plugins::DisplayRendererRegistry display_renderers;
 
     SessionState::Snapshot snap;
@@ -1416,8 +1394,7 @@ TEST_CASE("chat view: thinking fold toggle flips thinking rows only",
     minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     plugins::DisplayRendererRegistry display_renderers;
 
     // One thinking row persisted (the wire shape chat_model.cpp's
@@ -2095,8 +2072,7 @@ TEST_CASE("chat view: windowing elides off-viewport rows and marks the cut") {
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-window", 1, 40);
@@ -2137,8 +2113,7 @@ TEST_CASE("chat view: windowing survives resize while pinned to the newest row")
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-resize-pin", 1, 40);
@@ -2160,8 +2135,7 @@ TEST_CASE("chat view: windowing survives resize while scrolled up") {
     auto& engine = *engine_registry.get();
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, engine);
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-resize-scroll", 1, 40);

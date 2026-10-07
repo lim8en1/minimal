@@ -61,6 +61,7 @@ void MessageRendererRegistry::Register(ChatRowKind kind, std::unique_ptr<Message
     if (renderer == nullptr) return;   // a stored null would Find() as null and silently disable the kind
     attributions_.push_back({attribution_, std::string(ToString(kind))});
     kinds_.push_back(kind);
+    fallback_.push_back(false);
     // First claimant stays active; the duplicate is visible in attributions()
     // and the loader turns it fatal. Silently replacing would make
     // presentation depend on plugin load order -- exactly what the collision
@@ -75,16 +76,25 @@ void MessageRendererRegistry::Register(ChatRowKind kind, std::unique_ptr<Message
     }
 }
 
+void MessageRendererRegistry::RegisterFallback(ChatRowKind kind,
+                                               std::unique_ptr<MessageRenderer> renderer) {
+    if (!Admit() || renderer == nullptr) return;
+    // Recorded under its own key, so a fallback and a claim never collide
+    // and two fallbacks do.
+    attributions_.push_back({attribution_, "fallback:" + std::string(ToString(kind))});
+    kinds_.push_back(kind);
+    fallback_.push_back(true);
+    if (fallbacks_.find(kind) == fallbacks_.end()) fallbacks_.emplace(kind, std::move(renderer));
+}
+
 const MessageRenderer* MessageRendererRegistry::Find(ChatRowKind kind) const {
-    const auto it = renderers_.find(kind);
-    return it == renderers_.end() ? nullptr : it->second.get();
+    if (const auto it = renderers_.find(kind); it != renderers_.end()) return it->second.get();
+    const auto it = fallbacks_.find(kind);
+    return it == fallbacks_.end() ? nullptr : it->second.get();
 }
 
 bool MessageRendererRegistry::PluginClaimed(ChatRowKind kind) const {
-    for (std::size_t i = 0; i < kinds_.size(); ++i) {
-        if (kinds_[i] == kind) return !attributions_[i].plugin_name.empty();
-    }
-    return false;
+    return renderers_.find(kind) != renderers_.end();
 }
 
 void MessageRendererRegistry::RemoveByAttribution(const std::string& plugin_name) {
@@ -92,11 +102,13 @@ void MessageRendererRegistry::RemoveByAttribution(const std::string& plugin_name
     // recorded but never reaches renderers_): erase renderers_[kind] only
     // when THIS plugin is that first claimant, never for a losing duplicate
     // naming a kind an earlier plugin still owns.
-    std::map<ChatRowKind, bool> owner_decided;
+    std::map<std::pair<ChatRowKind, bool>, bool> owner_decided;
     for (std::size_t i = 0; i < kinds_.size(); ++i) {
-        if (owner_decided[kinds_[i]]) continue;
-        owner_decided[kinds_[i]] = true;
-        if (attributions_[i].plugin_name == plugin_name) renderers_.erase(kinds_[i]);
+        const auto key = std::make_pair(kinds_[i], static_cast<bool>(fallback_[i]));
+        if (owner_decided[key]) continue;
+        owner_decided[key] = true;
+        if (attributions_[i].plugin_name != plugin_name) continue;
+        (fallback_[i] ? fallbacks_ : renderers_).erase(kinds_[i]);
     }
     std::size_t write = 0;
     for (std::size_t read = 0; read < attributions_.size(); ++read) {
@@ -104,11 +116,13 @@ void MessageRendererRegistry::RemoveByAttribution(const std::string& plugin_name
         if (write != read) {
             attributions_[write] = std::move(attributions_[read]);
             kinds_[write] = kinds_[read];
+            fallback_[write] = fallback_[read];
         }
         ++write;
     }
     attributions_.resize(write);
     kinds_.resize(write);
+    fallback_.resize(write);
 }
 
 }  // namespace minimal::client::plugins

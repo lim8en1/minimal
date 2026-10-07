@@ -95,6 +95,8 @@ struct TuiEnvironment {
     std::unique_ptr<plugins::HostActionQueue> host_actions;
     // The CodeHighlighter plugins get; attached to `highlighter` once built.
     std::unique_ptr<plugins::HostCodeHighlighter> host_highlighter;
+    // The MarkdownEngine plugins get (forwarding to registries.markdown_engine).
+    std::unique_ptr<plugins::MarkdownEngine> host_markdown;
 
     plugins::ClientRegistries registries;
     // The WidgetKit plugins get (forwarding to registries.widget_kit, which it

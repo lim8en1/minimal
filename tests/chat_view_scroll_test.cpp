@@ -27,6 +27,7 @@
 #include <ftxui/screen/screen.hpp>
 
 #include "md4c_engine.hpp"
+#include "chat_renderers_fixture.hpp"
 #include "ftxui_harness.hpp"
 
 #include "minimal/client/chat_model.hpp"
@@ -125,8 +126,7 @@ void PassWheelGate() {
 struct ChatViewFixture {
     ChatViewFixture() {
         minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
-        plugins::RegisterCoreMessageRenderers(messages);
-        plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+        minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     }
 
     Theme theme{TestTheme()};
@@ -480,7 +480,7 @@ TEST_CASE("chat view: a plugin-claimed kind draws the live streaming row too") {
     messages.SetAttribution("probe-plugin");
     messages.Register(ChatRowKind::Thinking, std::make_unique<LiveProbeThinking>());
     messages.ClearAttribution();
-    plugins::RegisterCoreMessageRenderers(messages);   // core fills the rest
+    minimal_test::RegisterPlainChatRenderers(messages);   // core fills the rest
     ChatView view(fx.theme, messages, fx.tool_renderers, fx.display_renderers);
 
     auto snap = SnapshotWithNumberedLines("s", 1, 1);

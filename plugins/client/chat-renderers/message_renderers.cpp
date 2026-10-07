@@ -1,4 +1,4 @@
-#include "minimal/client/plugins/core_registrations.hpp"
+#include "chat_renderers.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -13,47 +13,11 @@
 #include "minimal/client/view/tool_status.hpp"
 #include "minimal/client/policy.hpp"
 
-namespace minimal::client::plugins {
+namespace minimal::client::chat_renderers {
+
+using namespace minimal::client::plugins;
 
 using ftxui::Element;
-
-// --- The plain-text fallback engine --------------------------------------------
-//
-// What markdown renders as with no markdown plugin loaded (the slot is
-// optional): the text itself, a line per line -- legible, never formatted.
-// Streaming needs no debounce: there is no parse to fall behind.
-class PlainMarkdownEngine final : public MarkdownEngine {
-public:
-    Element Render(std::string_view markdown_text, const Theme&) const override {
-        return Lines(markdown_text);
-    }
-    std::unique_ptr<Stream> MakeStream() const override { return std::make_unique<PlainStream>(); }
-
-private:
-    static Element Lines(std::string_view text) {
-        ftxui::Elements lines;
-        std::size_t start = 0;
-        while (start <= text.size()) {
-            const std::size_t end = text.find('\n', start);
-            const std::string_view line =
-                text.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start);
-            lines.push_back(ftxui::paragraph(std::string(line)));
-            if (end == std::string_view::npos) break;
-            start = end + 1;
-        }
-        return ftxui::vbox(std::move(lines));
-    }
-
-    class PlainStream final : public Stream {
-    public:
-        void AppendDelta(std::string_view text) override { text_.append(text); }
-        void Finalize() override {}
-        Element Render(const Theme&) const override { return Lines(text_); }
-
-    private:
-        std::string text_;
-    };
-};
 
 namespace {
 
@@ -541,48 +505,25 @@ private:
 
 }  // namespace
 
-void RegisterCoreMessageRenderers(MessageRendererRegistry& registry) {
-    // Core FILLS, it does not claim: kinds a plugin already took are skipped
-    // silently (the plugin's claim is the point). The warning in
-    // MessageRendererRegistry::Register is for plugin-vs-plugin duplicates,
-    // which the collision resolve turns fatal.
+void RegisterMessageRenderers(MessageRendererRegistry& registry, const MarkdownEngine& engine) {
+    // Fallbacks, not claims: a plugin claiming any one kind replaces just
+    // that one, with no collision.
     const auto fill = [&registry](ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer) {
-        if (registry.Find(kind) == nullptr) registry.Register(kind, std::move(renderer));
+        registry.RegisterFallback(kind, std::move(renderer));
     };
     fill(ChatRowKind::UserAttachment, std::make_unique<CoreUserAttachmentRenderer>());
     fill(ChatRowKind::Thinking, std::make_unique<CoreThinkingRenderer>());
     fill(ChatRowKind::ToolActivity, std::make_unique<CoreToolActivityRenderer>());
     fill(ChatRowKind::System, std::make_unique<CoreSystemRenderer>());
     fill(ChatRowKind::Switch, std::make_unique<CoreSwitchRenderer>());
-    // UserText and AgentMarkdown need the engine and are registered by the
-    // caller once the default engine is settled.
+    fill(ChatRowKind::Compaction, std::make_unique<CoreCompactionRenderer>(engine));
+    fill(ChatRowKind::AgentMarkdown,
+         std::make_unique<CoreMarkdownMessageRenderer>(
+             engine, "assistant_message",
+             [](const ChatRow& row) { return AssistantLabel(row.agent, row.model); }));
+    fill(ChatRowKind::UserText,
+         std::make_unique<CoreMarkdownMessageRenderer>(engine, "user_message",
+                                                       [](const ChatRow&) { return "you"; }));
 }
 
-void RegisterCoreMarkdownRenderers(MessageRendererRegistry& registry,
-                                   const MarkdownEngine& engine) {
-    // Compaction renders its summary through the same engine, so it is
-    // registered at the same point -- independently: a plugin claiming one
-    // kind must not suppress core's renderer for the other.
-    if (registry.Find(ChatRowKind::Compaction) == nullptr) {
-        registry.Register(ChatRowKind::Compaction,
-                          std::make_unique<CoreCompactionRenderer>(engine));
-    }
-    if (registry.Find(ChatRowKind::AgentMarkdown) == nullptr) {
-        registry.Register(ChatRowKind::AgentMarkdown,
-                          std::make_unique<CoreMarkdownMessageRenderer>(
-                              engine, "assistant_message",
-                              [](const ChatRow& row) { return AssistantLabel(row.agent, row.model); }));
-    }
-    if (registry.Find(ChatRowKind::UserText) == nullptr) {
-        registry.Register(ChatRowKind::UserText,
-                          std::make_unique<CoreMarkdownMessageRenderer>(
-                              engine, "user_message", [](const ChatRow&) { return "you"; }));
-    }
-}
-
-void RegisterPlainMarkdownEngine(MarkdownEngineRegistry& registry) {
-    if (registry.held()) return;  // a markdown plugin owns the slot
-    registry.Register(std::make_unique<PlainMarkdownEngine>());  // outside any window: core's
-}
-
-}  // namespace minimal::client::plugins
+}  // namespace minimal::client::chat_renderers
