@@ -1,4 +1,5 @@
 #include "minimal/client/keybinding_dispatch.hpp"
+#include "minimal/client/view/chat_frame.hpp"
 #include "minimal/client/view/tab_ui.hpp"
 
 #include <algorithm>
@@ -333,6 +334,7 @@ void TabMaintenance::Run() {
     }
     if (focused_.empty()) {
         focused_details_ = SessionState::Snapshot{};
+        focused_frame_ = plugins::ChatFrame{};
         deps_.show_permission = false;
         deps_.show_confirmation = false;
         deps_.show_prompt = false;
@@ -353,6 +355,7 @@ void TabMaintenance::Run() {
     // started with); HandleNotice and the renderer both read whatever
     // Maintain() settled on.
     focused_details_ = Maintain(focused_, deps_.app.GetDetails(focused_));
+    focused_frame_ = ChatFrameFrom(focused_details_);
     HandleNotice(focused_details_);
     MaintainModals(focused_details_);
 }

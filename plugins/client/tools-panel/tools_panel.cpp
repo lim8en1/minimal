@@ -145,8 +145,14 @@ ftxui::Component ToolsPanelView::component() {
             cache->theme_epoch = theme_.epoch();
             cache->second = second;
         }
-        // The elapsed time moves with no event: ask for the next second.
-        if (running) ui_->RequestRedrawAfter(std::chrono::seconds(1));
+        // The elapsed time moves with no event: ask for the next wall-clock
+        // second -- the boundary `second` above keys on. A flat second from
+        // now could land just short of it and show the next tick a whole
+        // second late. (The host keeps the earliest request: cheap per frame.)
+        if (running) {
+            const std::int64_t into_second = NowUnixMs() % 1000;  // NOLINT(readability-magic-numbers): ms per s
+            ui_->RequestRedrawAfter(std::chrono::milliseconds(1000 - into_second));  // NOLINT(readability-magic-numbers)
+        }
         return cache->element;
     });
 }

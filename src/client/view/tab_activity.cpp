@@ -59,7 +59,7 @@ plugins::ToolActivity ToolActivityOf(const ToolExecutionState& tool) {
     return out;
 }
 
-plugins::TabActivity ActivityOf(const AppState::TabSnapshot& tab) {
+plugins::TabActivity ActivityOf(const AppState::TabSnapshot& tab, bool with_tools) {
     plugins::TabActivity activity;
     activity.tab_id = tab.tab_id;
     activity.session_id = tab.session_id;
@@ -71,7 +71,9 @@ plugins::TabActivity ActivityOf(const AppState::TabSnapshot& tab) {
     activity.view_only = tab.view_only;
     activity.root_ordinal = tab.root_ordinal;
     activity.spawn_seq = tab.spawn_seq;
-    for (const auto& tool : tab.tools) activity.tools.push_back(ToolActivityOf(tool));
+    if (with_tools) {
+        for (const auto& tool : tab.tools) activity.tools.push_back(ToolActivityOf(tool));
+    }
     return activity;
 }
 
@@ -93,6 +95,13 @@ plugins::TabBarBadge ComputeTabBarBadge(const std::vector<AppState::TabSnapshot>
 }
 
 std::shared_ptr<const plugins::TabActivitySnapshot> TabActivityFeed::Get(const AppState& app) {
+    const std::uint64_t ui_version = app.UiVersion();
+    const std::uint64_t tools_version = app.ToolsVersion();
+    if (last_ != nullptr && ui_version == seen_ui_version_ && tools_version == seen_tools_version_) {
+        return last_;
+    }
+    seen_ui_version_ = ui_version;
+    seen_tools_version_ = tools_version;
     const std::uint64_t key = KeyOf(app, app.GetAllTabs(/*include_tool_output=*/false));
     if (last_ != nullptr && key == key_) return last_;
     auto snapshot = std::make_shared<plugins::TabActivitySnapshot>();

@@ -36,6 +36,7 @@
 // own inline storage, which lives at a fixed offset within `out` for as long
 // as `out` itself is never relocated.
 
+#include <set>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -111,6 +112,8 @@ struct TuiEnvironment {
     Keybindings keybindings;
     ResolvedKeymap keymap;
     std::vector<StatusSegment> status_format;
+    // Every segment id status_format names: the segments worth rendering.
+    std::set<std::string> status_segment_ids;
 
     // The assembled grammar table (vendored defaults plus plugin additions):
     // `highlighter` below stores a POINTER into this vector, so it must live

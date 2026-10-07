@@ -174,6 +174,9 @@ public:
 
     const std::string& Focused() const { return focused_; }
     const SessionState::Snapshot& FocusedDetails() const { return focused_details_; }
+    // The chat surface's view of FocusedDetails(), built with it -- once per
+    // pass, not per render (ftxui renders on every event, mouse moves too).
+    const plugins::ChatFrame& FocusedChatFrame() const { return focused_frame_; }
 
     // True once a scrollback refresh held back by the failure backoff is due
     // to retry. Nothing else wakes an idle frame for it (a failed fetch moves
@@ -194,6 +197,7 @@ private:
     Dependencies deps_;
     std::string focused_;
     SessionState::Snapshot focused_details_;
+    plugins::ChatFrame focused_frame_;
     // Sentinel, not 0: forces the first call (before the loop starts) to
     // run regardless of whatever OpenTab's own bumps left UiVersion at.
     uint64_t last_ui_version_ = static_cast<uint64_t>(-1);
