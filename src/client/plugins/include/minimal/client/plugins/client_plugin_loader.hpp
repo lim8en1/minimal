@@ -66,6 +66,7 @@ struct PluginHostSeams {
     WidgetKit* widgets = nullptr;
     HostActions* actions = nullptr;
     const CodeHighlighter* highlighter = nullptr;
+    const MarkdownEngine* markdown = nullptr;
     // When set, each plugin gets the HostUi this returns for its name instead
     // of `ui` (HostFocusProvider::UiFor), so its view requests carry it.
     std::function<HostUi*(const std::string& plugin_name)> ui_for_plugin;

@@ -29,8 +29,7 @@ add_library(minimal_client_core SHARED
     plugins/registries.cpp
     plugins/plugin_discovery.cpp
     plugins/plugin_loader.cpp
-    plugins/core_registrations.cpp
-    plugins/core_display_renderers.cpp
+    plugins/plain_markdown_engine.cpp
     plugins/host_seams.cpp
     plugins/observer_events.cpp
     plugins/task_worker.cpp

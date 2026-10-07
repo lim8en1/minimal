@@ -1087,6 +1087,11 @@ protected:
 // duplicate fatal, naming both claimants. Each entry also has a SURFACE name
 // -- its key, or the alias ApplyAliases gave it -- and Find() looks up the
 // surface.
+//
+// FALLBACKS (RegisterFallback): a bundled default for a key that yields to
+// any claim of it -- Find() answers the claim when there is one, the fallback
+// otherwise, and the two never collide. Two fallbacks for one key do (they
+// are recorded under "fallback:<key>").
 template <typename T, typename KeyOf>
 class AdditiveRegistry : public RegistryBase {
 public:
@@ -1100,48 +1105,96 @@ public:
         entries_.push_back(std::move(entry));
     }
 
-    // In registration order.
+    // A default for its key that any Register() of the same key replaces.
+    void RegisterFallback(std::unique_ptr<T> entry) {
+        if (!Admit() || entry == nullptr) return;
+        std::string key(KeyOf{}(*entry));
+        if (key.empty()) return;
+        attributions_.push_back({attribution_, std::string(kFallbackPrefix) + key});
+        fallback_keys_.push_back(std::move(key));
+        fallback_owners_.push_back(attribution_);
+        fallbacks_.push_back(std::move(entry));
+    }
+
+    // The claims, in registration order (fallbacks are not listed).
     const std::vector<std::unique_ptr<T>>& All() const { return entries_; }
-    bool empty() const override { return entries_.empty(); }
+    bool empty() const override { return entries_.empty() && fallbacks_.empty(); }
     // Index-aligned with All(): the name each entry answers to.
     const std::vector<std::string>& surfaces() const { return surfaces_; }
 
+    // The claim for `surface`, else its fallback, else null.
     T* Find(std::string_view surface) const {
         for (std::size_t i = 0; i < entries_.size(); ++i) {
             if (surfaces_[i] == surface) return entries_[i].get();
         }
+        for (std::size_t i = 0; i < fallbacks_.size(); ++i) {
+            if (fallback_keys_[i] == surface) return fallbacks_[i].get();
+        }
         return nullptr;
+    }
+    // Whether a claim (not a fallback) answers `surface`.
+    bool Claimed(std::string_view surface) const {
+        return std::find(surfaces_.begin(), surfaces_.end(), surface) != surfaces_.end();
     }
 
     void ApplyAliases(const std::map<std::string, std::string>& aliases) override {
-        for (std::size_t i = 0; i < attributions_.size(); ++i) {
+        std::size_t entry = 0;
+        for (const auto& attribution : attributions_) {
+            if (IsFallback(attribution)) continue;
             const auto it = aliases.find(minimal::plugins::StableIdentity(
-                attributions_[i].plugin_name, attributions_[i].original_name));
-            if (it != aliases.end()) surfaces_[i] = it->second;
+                attribution.plugin_name, attribution.original_name));
+            if (it != aliases.end()) surfaces_[entry] = it->second;
+            ++entry;
         }
     }
 
     void RemoveByAttribution(const std::string& plugin_name) override {
-        // entries_, surfaces_ and attributions_ are index-aligned: compact
-        // them together.
+        // Claims: entries_ and surfaces_ are index-aligned with the claim
+        // attributions (attributions_ minus the fallback ones).
         std::size_t write = 0;
-        for (std::size_t read = 0; read < attributions_.size(); ++read) {
-            if (attributions_[read].plugin_name == plugin_name) continue;
+        std::size_t entry = 0;
+        for (const auto& attribution : attributions_) {
+            if (IsFallback(attribution)) continue;
+            if (attribution.plugin_name != plugin_name) {
+                if (write != entry) {
+                    entries_[write] = std::move(entries_[entry]);
+                    surfaces_[write] = std::move(surfaces_[entry]);
+                }
+                ++write;
+            }
+            ++entry;
+        }
+        entries_.resize(write);
+        surfaces_.resize(write);
+        write = 0;
+        for (std::size_t read = 0; read < fallbacks_.size(); ++read) {
+            if (fallback_owners_[read] == plugin_name) continue;
             if (write != read) {
-                attributions_[write] = std::move(attributions_[read]);
-                entries_[write] = std::move(entries_[read]);
-                surfaces_[write] = std::move(surfaces_[read]);
+                fallbacks_[write] = std::move(fallbacks_[read]);
+                fallback_keys_[write] = std::move(fallback_keys_[read]);
+                fallback_owners_[write] = std::move(fallback_owners_[read]);
             }
             ++write;
         }
-        attributions_.resize(write);
-        entries_.resize(write);
-        surfaces_.resize(write);
+        fallbacks_.resize(write);
+        fallback_keys_.resize(write);
+        fallback_owners_.resize(write);
+        std::erase_if(attributions_, [&](const Attribution& attribution) {
+            return attribution.plugin_name == plugin_name;
+        });
     }
 
 private:
+    static constexpr std::string_view kFallbackPrefix = "fallback:";
+    static bool IsFallback(const Attribution& attribution) {
+        return attribution.original_name.rfind(kFallbackPrefix, 0) == 0;
+    }
+
     std::vector<std::unique_ptr<T>> entries_;
     std::vector<std::string> surfaces_;
+    std::vector<std::unique_ptr<T>> fallbacks_;
+    std::vector<std::string> fallback_keys_;
+    std::vector<std::string> fallback_owners_;
 };
 
 // Warns that `claimant` lost the exclusive slot to `holder`.
@@ -1267,19 +1320,24 @@ class MessageRendererRegistry : public RegistryBase {
 public:
     bool empty() const override { return renderers_.empty(); }
     void Register(ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer);
-    // The renderer for a kind, or null -- the caller falls back to the core
-    // default (which is itself registered here once core fills it).
+    // A default for `kind` that any Register() of it replaces (the bundled
+    // chat-renderers). Two fallbacks for one kind collide.
+    void RegisterFallback(ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer);
+    // The claim for a kind, else its fallback, else null.
     const MessageRenderer* Find(ChatRowKind kind) const;
-    // Whether the ACTIVE renderer for `kind` is a plugin's (the first claim),
-    // not core's default fill.
+    // Whether a claim (not a fallback) answers `kind`: the chat view routes
+    // a claimed kind's LIVE rows to it too.
     bool PluginClaimed(ChatRowKind kind) const;
 
     void RemoveByAttribution(const std::string& plugin_name) override;
 
 private:
     std::map<ChatRowKind, std::unique_ptr<MessageRenderer>> renderers_;
-    // Index-aligned with attributions_: the kind each claim named.
+    std::map<ChatRowKind, std::unique_ptr<MessageRenderer>> fallbacks_;
+    // Index-aligned with attributions_: the kind each registration named,
+    // and whether it was a fallback.
     std::vector<ChatRowKind> kinds_;
+    std::vector<bool> fallback_;
 };
 
 // Every registry the client offers plugins. The host owns one; the loader

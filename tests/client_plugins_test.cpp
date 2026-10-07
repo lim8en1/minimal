@@ -185,6 +185,50 @@ TEST_CASE("registries: first claimant wins, duplicates are recorded not applied"
     CHECK(registry.Find(ChatRowKind::Thinking) != nullptr);
 }
 
+TEST_CASE("registries: a fallback yields to a claim of its key, without colliding",
+          "[client_plugins][fallback]") {
+    MessageRendererRegistry messages;
+    messages.SetAttribution("chat-renderers");
+    auto fallback = std::make_unique<StubMessageRenderer>();
+    const auto* fallback_ptr = fallback.get();
+    messages.RegisterFallback(ChatRowKind::Thinking, std::move(fallback));
+    CHECK(messages.Find(ChatRowKind::Thinking) == fallback_ptr);
+    CHECK_FALSE(messages.PluginClaimed(ChatRowKind::Thinking));   // a fallback is no claim
+
+    messages.SetAttribution("my-thinking");
+    auto claim = std::make_unique<StubMessageRenderer>();
+    const auto* claim_ptr = claim.get();
+    messages.Register(ChatRowKind::Thinking, std::move(claim));
+    CHECK(messages.Find(ChatRowKind::Thinking) == claim_ptr);
+    CHECK(messages.PluginClaimed(ChatRowKind::Thinking));
+    // Recorded under different keys: the collision scan sees no duplicate.
+    REQUIRE(messages.attributions().size() == 2);
+    CHECK(messages.attributions()[0].original_name != messages.attributions()[1].original_name);
+
+    // The claimant gone (a failed load rolled back): the fallback stands again.
+    messages.RemoveByAttribution("my-thinking");
+    CHECK(messages.Find(ChatRowKind::Thinking) == fallback_ptr);
+    messages.RemoveByAttribution("chat-renderers");
+    CHECK(messages.Find(ChatRowKind::Thinking) == nullptr);
+}
+
+TEST_CASE("additive registries: fallbacks yield too, and roll back per plugin",
+          "[client_plugins][fallback]") {
+    StartViewRegistry registry;
+    registry.SetAttribution("bundled");
+    registry.RegisterFallback(std::make_unique<StubStartView>("stub.start"));
+    CHECK(registry.Find("stub.start") != nullptr);
+    CHECK_FALSE(registry.Claimed("stub.start"));
+    CHECK(registry.All().empty());   // All() lists claims only
+    registry.SetAttribution("mine");
+    registry.Register(std::make_unique<StubStartView>("stub.start"));
+    CHECK(registry.Claimed("stub.start"));
+    CHECK(registry.Find("stub.start") == registry.All().front().get());
+    registry.RemoveByAttribution("mine");
+    CHECK_FALSE(registry.Claimed("stub.start"));
+    CHECK(registry.Find("stub.start") != nullptr);   // the fallback again
+}
+
 TEST_CASE("start view registry: additive, attributed, id-addressable", "[client_plugins]") {
     StartViewRegistry registry;
     registry.SetAttribution("plugin-a");

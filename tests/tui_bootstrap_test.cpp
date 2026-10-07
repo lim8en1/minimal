@@ -18,6 +18,14 @@
 using namespace minimal::client;
 
 namespace {
+
+class NullMessageRenderer final : public plugins::MessageRenderer {
+public:
+    ftxui::Element Render(const minimal::client::ChatRow&, const minimal::client::Theme&,
+                          const plugins::RowRenderContext&) const override {
+        return ftxui::text("");
+    }
+};
 // RAII env var override, same pattern as config_paths_test.cpp.
 class ScopedEnv {
 public:
@@ -189,6 +197,24 @@ TEST_CASE("ResolveClientNames: a duplicate view id is fatal and names both plugi
     REQUIRE(names.fatal.size() == 1);
     CHECK(AnyContains(names.fatal, "view id 'files'"));
     CHECK(AnyContains(names.fatal, "'a', 'b'"));
+}
+
+TEST_CASE("ResolveClientNames: a claim over a fallback is fine, two fallbacks collide",
+          "[tui_bootstrap][names][fallback]") {
+    plugins::MessageRendererRegistry messages;
+    messages.SetAttribution("chat-renderers");
+    messages.RegisterFallback(ChatRowKind::Thinking, std::make_unique<NullMessageRenderer>());
+    messages.SetAttribution("mine");
+    messages.Register(ChatRowKind::Thinking, std::make_unique<NullMessageRenderer>());
+    CHECK(ResolveClientNames({{"message renderer", Policy::kSlot, &messages.attributions()}}, {})
+              .fatal.empty());
+
+    messages.SetAttribution("other-bundle");
+    messages.RegisterFallback(ChatRowKind::Thinking, std::make_unique<NullMessageRenderer>());
+    const auto names =
+        ResolveClientNames({{"message renderer", Policy::kSlot, &messages.attributions()}}, {});
+    REQUIRE(names.fatal.size() == 1);
+    CHECK(AnyContains(names.fatal, "'chat-renderers', 'other-bundle'"));
 }
 
 TEST_CASE("ResolveClientNames: aliasing one view resolves the collision", "[tui_bootstrap][names]") {

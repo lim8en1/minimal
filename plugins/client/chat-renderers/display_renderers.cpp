@@ -9,12 +9,14 @@
 #include <string>
 #include <string_view>
 
-#include "minimal/client/plugins/core_registrations.hpp"
+#include "chat_renderers.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/tool_status.hpp"
 #include "minimal/client/policy.hpp"
 
-namespace minimal::client::plugins {
+namespace minimal::client::chat_renderers {
+
+using namespace minimal::client::plugins;
 namespace {
 
 using ftxui::Element;
@@ -24,13 +26,13 @@ using ftxui::Elements;
 
 // The path's extension when a grammar supports it. The highlighter's alias
 // table already maps the common extensions ("py", "rs", "h") to languages.
-std::string LanguageOf(std::string_view path, const SyntaxHighlighter& highlighter) {
+std::string LanguageOf(std::string_view path, const CodeHighlighter& highlighter) {
     const auto slash = path.find_last_of('/');
     const auto name = slash == std::string_view::npos ? path : path.substr(slash + 1);
     const auto dot = name.find_last_of('.');
     if (dot == std::string_view::npos || dot + 1 >= name.size()) return {};
     std::string extension(name.substr(dot + 1));
-    return highlighter.Supports(extension) ? extension : std::string{};
+    return highlighter.CanonicalLanguageFor(extension).empty() ? std::string{} : extension;
 }
 
 std::string PadLeft(const std::string& text, std::size_t width) {
@@ -40,7 +42,7 @@ std::string PadLeft(const std::string& text, std::size_t width) {
 // Highlighted lines for `lines` (already Printable), one Element each; plain
 // text when the language is unknown or the highlighter disagrees on the count.
 Elements CodeLines(const std::vector<std::string>& lines, const std::string& language,
-                   const SyntaxHighlighter& highlighter, const Theme& theme) {
+                   const CodeHighlighter& highlighter, const Theme& theme) {
     using namespace ftxui;
     if (!language.empty() && !lines.empty()) {
         std::string code;
@@ -75,7 +77,7 @@ Element Header(const ToolResultView& result, Elements detail, const Theme& theme
 
 class DiffRenderer final : public DisplayRenderer {
 public:
-    explicit DiffRenderer(const SyntaxHighlighter& highlighter) : highlighter_(highlighter) {}
+    explicit DiffRenderer(const CodeHighlighter& highlighter) : highlighter_(highlighter) {}
 
     std::string_view kind() const override { return "diff"; }
 
@@ -170,14 +172,14 @@ private:
         }
     }
 
-    const SyntaxHighlighter& highlighter_;
+    const CodeHighlighter& highlighter_;
 };
 
 // --- file --------------------------------------------------------------------
 
 class FileRenderer final : public DisplayRenderer {
 public:
-    explicit FileRenderer(const SyntaxHighlighter& highlighter) : highlighter_(highlighter) {}
+    explicit FileRenderer(const CodeHighlighter& highlighter) : highlighter_(highlighter) {}
 
     std::string_view kind() const override { return "file"; }
 
@@ -216,7 +218,7 @@ public:
     }
 
 private:
-    const SyntaxHighlighter& highlighter_;
+    const CodeHighlighter& highlighter_;
 };
 
 // --- process -----------------------------------------------------------------
@@ -321,17 +323,13 @@ private:
 
 }  // namespace
 
-void RegisterCoreDisplayRenderers(DisplayRendererRegistry& registry, const MarkdownEngine& engine,
-                                  const SyntaxHighlighter& highlighter) {
-    // Core FILLS, it does not claim -- the RegisterCoreMessageRenderers rule:
-    // a kind a plugin already took is skipped silently (the claim is the point).
-    const auto fill = [&registry](std::unique_ptr<DisplayRenderer> renderer) {
-        if (registry.Find(renderer->kind()) == nullptr) registry.Register(std::move(renderer));
-    };
-    fill(std::make_unique<DiffRenderer>(highlighter));
-    fill(std::make_unique<FileRenderer>(highlighter));
-    fill(std::make_unique<ProcessRenderer>());
-    fill(std::make_unique<MarkdownDisplayRenderer>(engine));
+void RegisterDisplayRenderers(DisplayRendererRegistry& registry, const MarkdownEngine& engine,
+                              const CodeHighlighter& highlighter) {
+    // Fallbacks, like the message kinds: a plugin's claim of one kind wins.
+    registry.RegisterFallback(std::make_unique<DiffRenderer>(highlighter));
+    registry.RegisterFallback(std::make_unique<FileRenderer>(highlighter));
+    registry.RegisterFallback(std::make_unique<ProcessRenderer>());
+    registry.RegisterFallback(std::make_unique<MarkdownDisplayRenderer>(engine));
 }
 
-}  // namespace minimal::client::plugins
+}  // namespace minimal::client::chat_renderers

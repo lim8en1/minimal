@@ -75,6 +75,11 @@ struct ClientPluginRegistrationContext {
     // Usable from the first render (it is built after the plugins load).
     // Null on the same terms as `ui`.
     const CodeHighlighter* highlighter = nullptr;
+
+    // The markdown engine (the markdown_engine slot's holder, or core's plain
+    // one): a proxy resolving the slot per call, so it works whichever
+    // plugin loads first. Usable once registration is over (from render).
+    const MarkdownEngine* markdown = nullptr;
 };
 
 }  // namespace minimal::client::plugins

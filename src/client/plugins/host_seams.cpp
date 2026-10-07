@@ -413,7 +413,30 @@ private:
     const WidgetKitRegistry& registry_;
 };
 
+class HostMarkdownEngine final : public MarkdownEngine {
+public:
+    explicit HostMarkdownEngine(const MarkdownEngineRegistry& registry) : registry_(registry) {}
+    ftxui::Element Render(std::string_view markdown_text, const Theme& theme) const override {
+        return Engine().Render(markdown_text, theme);
+    }
+    std::unique_ptr<Stream> MakeStream() const override { return Engine().MakeStream(); }
+
+private:
+    // Throws while the slot is empty -- only during registration.
+    const MarkdownEngine& Engine() const {
+        const MarkdownEngine* engine = registry_.get();
+        if (engine == nullptr) throw std::logic_error("no markdown engine during registration");
+        return *engine;
+    }
+
+    const MarkdownEngineRegistry& registry_;
+};
+
 }  // namespace
+
+std::unique_ptr<MarkdownEngine> MakeHostMarkdownEngine(const MarkdownEngineRegistry& registry) {
+    return std::make_unique<HostMarkdownEngine>(registry);
+}
 
 std::unique_ptr<WidgetKit> MakeHostWidgetKit(const WidgetKitRegistry& registry) {
     return std::make_unique<HostWidgetKit>(registry);

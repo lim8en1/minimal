@@ -65,6 +65,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     out.host_client_api = plugins::MakeHostClientApi(&client);
     out.host_widget_kit = plugins::MakeHostWidgetKit(out.registries.widget_kit);
     out.host_highlighter = std::make_unique<plugins::HostCodeHighlighter>();
+    out.host_markdown = plugins::MakeHostMarkdownEngine(out.registries.markdown_engine);
     out.host_actions = std::make_unique<plugins::HostActionQueue>(out.host_focus_provider.get());
 
 
@@ -140,6 +141,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                              .widgets = out.host_widget_kit.get(),
                              .actions = out.host_actions.get(),
                              .highlighter = out.host_highlighter.get(),
+                             .markdown = out.host_markdown.get(),
                              .ui_for_plugin = [provider = out.host_focus_provider.get()](
                                                   const std::string& plugin_name) {
                                  return provider->UiFor(plugin_name);
@@ -374,16 +376,11 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // Plugins hold the proxy from registration; it reaches the real one now.
     out.host_highlighter->Attach(&*out.highlighter);
 
-    // Core defaults fill every slot no plugin claimed. The engine first (the
-    // agent-markdown default renders through it), then the kind defaults.
     // The markdown engine is a plugin's (the bundled markdown-md4c); with
     // none, markdown reads as plain text. Non-null by construction either
     // way.
     plugins::RegisterPlainMarkdownEngine(out.registries.markdown_engine);
     out.engine = out.registries.markdown_engine.get();
-    plugins::RegisterCoreMessageRenderers(out.registries.message_renderers);
-    plugins::RegisterCoreMarkdownRenderers(out.registries.message_renderers, *out.engine);
-    plugins::RegisterCoreDisplayRenderers(out.registries.display_renderers, *out.engine, *out.highlighter);
 
     // The exclusive chat surface, when a plugin claimed it.
     out.chat_surface = out.registries.chat_surface.get();

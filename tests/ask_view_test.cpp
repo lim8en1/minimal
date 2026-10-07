@@ -18,6 +18,7 @@
 #include "ask_display.hpp"
 #include "ask_modal.hpp"
 #include "md4c_engine.hpp"
+#include "chat_renderers_fixture.hpp"
 #include "ftxui_harness.hpp"
 #include "widget_kit_fixture.hpp"
 #include "minimal/client/chat_model.hpp"
@@ -401,8 +402,7 @@ TEST_CASE("chat view: an ask row starts expanded by its display kind, whatever t
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
     plugins::DisplayRendererRegistry display_renderers;
-    plugins::RegisterCoreMessageRenderers(messages);
-    plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
+    minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     display_renderers.Register(std::make_unique<minimal::ask_view::AskDisplayRenderer>());
 
     v1::StoredMessage call;

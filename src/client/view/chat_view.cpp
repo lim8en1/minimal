@@ -309,9 +309,11 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
             }
         } else {
             const auto* renderer = message_renderers_.Find(row.kind);
-            // Core fills every unclaimed kind, so null is unreachable in the
-            // wired host; kept as a guard so an unwired registry degrades to an
-            // empty row rather than a crash.
+            // No renderer for the kind (chat-renderers disabled, nothing else
+            // claims it): the row's own text, plainly -- never a blank.
+            if (renderer == nullptr && !row.text.empty()) {
+                parts = {ftxui::paragraph(row.text) | color(theme_.ColorFor("system_message"))};
+            }
             if (renderer != nullptr) {
                 try {
                     // RenderBlocks, not Render: a long row comes back as
