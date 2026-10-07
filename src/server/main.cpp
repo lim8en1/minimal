@@ -1038,6 +1038,9 @@ static int RunServer(int argc, char** argv) {
     // server.Wait() and the registry's destruction takes seconds -- a real
     // window, not a formality.
     housekeeping.Stop();
+    // A config check in flight reaches the session registry (model refs)
+    // and plugin code: both go away below, so the checks stop first.
+    plugin_config_endpoint.Stop();
     sessions.StopReaper();
     sessions.TerminateAll();
     // Plugins that own threads, processes or connections tied to host

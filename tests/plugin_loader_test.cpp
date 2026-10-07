@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <set>
 #include <fstream>
@@ -1249,6 +1250,44 @@ TEST_CASE("the plugins endpoint configures a disabled plugin without running it"
                                         {"value", 0}});
     CHECK(answer.contains("error"));
     CHECK(h.tool_registry.size() == 0);  // inspected, never registered
+}
+
+TEST_CASE("the plugins endpoint never opens a disabled plugin until a request names it",
+          "[plugin_loader][config_endpoint][regression]") {
+    // "Disabled" is the escape hatch for a plugin whose loading misbehaves:
+    // opening it at startup ran its static initializers inside the server.
+    // A disabled module that cannot be opened at all shows the timing: it is
+    // listed (configurable until named), and only describe finds it out.
+    TempDir config_dir;
+    Harness h;
+    PluginCandidate ghost{config_dir.path() / SharedLibName("ghost"), Provenance::User, false};
+    const std::vector<PluginCandidate> candidates = {ghost};
+    const auto records = h.loader.LoadAll(candidates);
+    REQUIRE(records[0].status == LoadStatus::Disabled);
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, candidates);
+
+    const auto list = CallJson(endpoint, "list", {});
+    REQUIRE(list.size() == 1);
+    CHECK(list[0].at("configurable") == true);   // not opened yet
+    CHECK(CallJson(endpoint, "describe", {{"name", "ghost"}}).contains("error"));
+    CHECK(CallJson(endpoint, "list", {})[0].at("configurable") == false);   // opened, nothing there
+}
+
+TEST_CASE("the plugins endpoint's Stop cancels a running check and joins",
+          "[plugin_loader][config_endpoint][checks]") {
+    // main() stops the checks before the session registry and the plugins
+    // go away: a check left running reached both after they were destroyed.
+    TempDir config_dir;
+    Harness h;
+    const std::vector<PluginCandidate> candidates = {Enabled("fixture-config")};
+    const auto records = h.loader.LoadAll(candidates);
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, candidates);
+    CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "mode"}, {"text", "slow"}});
+
+    const auto started = std::chrono::steady_clock::now();
+    endpoint.Stop();
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(1));  // slow runs 2 s
+    endpoint.Stop();   // idempotent; the destructor calls it again
 }
 
 TEST_CASE("the plugins endpoint after a restart: what the file says is what runs",

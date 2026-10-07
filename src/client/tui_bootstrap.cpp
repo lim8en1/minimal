@@ -277,6 +277,18 @@ bool LoadClientPluginEnvironment(SessionClient* client, TuiEnvironment& out,
     for (const auto& piece : out.status_format) {
         if (piece.is_segment && piece.text != kStatusSplitId) out.status_segment_ids.insert(piece.text);
     }
+
+    // The markdown engine is a plugin's (the bundled markdown-md4c); with
+    // none, markdown reads as plain text -- core's own registration, the
+    // last one.
+    plugins::RegisterPlainMarkdownEngine(out.registries.markdown_engine);
+
+    // Registration window closes here, before any plugin code beyond the
+    // register_* hooks runs (a slot's Actions(), a view's component(),
+    // OnTheme): a stashed registry reference that registers from there warns
+    // and is ignored, instead of being recorded as core's and bypassing the
+    // collision and attribution rules.
+    for (const auto& hook : plugins::RegistryHooks(out.registries)) hook.registry->Seal();
     return true;
 }
 
@@ -319,15 +331,32 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // The prompt editor's own actions (the required slot is filled by now):
     // their defaults, where the user's file binds nothing. Core actions never
     // share their ids (by convention "prompt.<name>").
+    // Plugin code, and both slots are required: a throw is fatal, but named
+    // -- never an escape that ends the process with no word of which plugin.
     std::set<std::string> slot_actions;   // for the unknown-id check below
-    for (const auto& action : out.registries.prompt_editor.get()->Actions()) {
-        keys.EnsureDefault(action.id, action.default_key);
-        slot_actions.insert(action.id);
-    }
-    // The chat surface's too ("chat.<name>").
-    for (const auto& action : out.registries.chat_surface.get()->Actions()) {
-        keys.EnsureDefault(action.id, action.default_key);
-        slot_actions.insert(action.id);
+    const auto slot_actions_of = [&](const char* slot, const std::string& holder,
+                                     const auto& actions_fn) {
+        try {
+            for (const auto& action : actions_fn()) {
+                keys.EnsureDefault(action.id, action.default_key);
+                slot_actions.insert(action.id);
+            }
+            return true;
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "minimal: FATAL: client plugin '%s' (the %s) threw on Actions(): %s\n",
+                         holder.c_str(), slot, error.what());
+        } catch (...) {
+            std::fprintf(stderr, "minimal: FATAL: client plugin '%s' (the %s) threw on Actions()\n",
+                         holder.c_str(), slot);
+        }
+        return false;
+    };
+    if (!slot_actions_of("prompt editor", out.registries.prompt_editor.holder(),
+                         [&] { return out.registries.prompt_editor.get()->Actions(); }) ||
+        // The chat surface's too ("chat.<name>").
+        !slot_actions_of("chat surface", out.registries.chat_surface.holder(),
+                         [&] { return out.registries.chat_surface.get()->Actions(); })) {
+        return false;
     }
 
     // Plugin views: register each id's suggested default keybinding only where
@@ -477,10 +506,8 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // Plugins hold the proxy from registration; it reaches the real one now.
     out.host_highlighter->Attach(&*out.highlighter);
 
-    // The markdown engine is a plugin's (the bundled markdown-md4c); with
-    // none, markdown reads as plain text. Non-null by construction either
-    // way.
-    plugins::RegisterPlainMarkdownEngine(out.registries.markdown_engine);
+    // Non-null by construction: a plugin's engine, or the plain-text one
+    // LoadClientPluginEnvironment registered.
     out.engine = out.registries.markdown_engine.get();
 
     // The chat surface (required: present by now).
@@ -490,12 +517,6 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // RunTui's /theme swap can re-run the identical sequence after replacing
     // out.theme's contents in place.
     PushThemeToPlugins(out);
-
-    // Registration window closes here: every plugin's register_* hook (and
-    // core's own registrations) has run. A stashed registry reference that
-    // registers after this point warns and is ignored instead of silently
-    // bypassing the collision and attribution rules.
-    for (const auto& hook : plugins::RegistryHooks(out.registries)) hook.registry->Seal();
 
     return true;
 }

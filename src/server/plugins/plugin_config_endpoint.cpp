@@ -79,28 +79,16 @@ PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
         entry.enabled = record.status != LoadStatus::Disabled;
         entry.loaded = record.ok();
         entry.symbols = record.config;
-        // A disabled plugin was never opened, so the loader resolved nothing:
-        // open it for its config symbols alone, so it can be configured
-        // before it is enabled. (Its reconfigure is never called: it is not
-        // running.)
+        // A disabled plugin was never opened, so the loader resolved nothing.
+        // It is opened for its config symbols alone -- but only when a
+        // request names it (Find), never at startup: "disabled" is the escape
+        // hatch for a plugin whose loading misbehaves, and opening it runs
+        // its static initializers inside the server.
         if (entry.symbols.schema == nullptr && record.status == LoadStatus::Disabled) {
-            const auto inspected = InspectPluginConfig(record.file);
-            if (inspected.error.empty()) entry.symbols = inspected.config;
+            entry.inspected = false;
+            entry.module = record.file;
         }
-        if (entry.symbols.schema != nullptr) {
-            try {
-                entry.symbols.schema(entry.schema);
-            } catch (...) {
-                entry.schema = nullptr;  // a broken describe: not configurable here
-            }
-        }
-        if (const auto validate = entry.symbols.validate; validate != nullptr) {
-            entry.validate = [validate](const json& next) {
-                std::string error;
-                validate(next, error);
-                return error;
-            };
-        }
+        AdoptSymbols(entry);
         entry.applied = json::object();
         for (const auto& candidate : candidates) {
             if (candidate.file == record.file) entry.applied = candidate.config;
@@ -109,7 +97,9 @@ PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
     }
 }
 
-PluginConfigEndpoint::~PluginConfigEndpoint() {
+PluginConfigEndpoint::~PluginConfigEndpoint() { Stop(); }
+
+void PluginConfigEndpoint::Stop() {
     {
         std::lock_guard<std::mutex> lock(checks_mutex_);
         stopping_ = true;
@@ -117,6 +107,32 @@ PluginConfigEndpoint::~PluginConfigEndpoint() {
     }
     checks_cv_.notify_all();
     if (check_thread_.joinable()) check_thread_.join();
+}
+
+void PluginConfigEndpoint::AdoptSymbols(Entry& entry) {
+    if (entry.symbols.schema != nullptr) {
+        try {
+            entry.symbols.schema(entry.schema);
+        } catch (...) {
+            entry.schema = nullptr;  // a broken describe: not configurable here
+        }
+    }
+    if (const auto validate = entry.symbols.validate; validate != nullptr) {
+        entry.validate = [validate](const json& next) {
+            std::string error;
+            validate(next, error);
+            return error;
+        };
+    }
+}
+
+void PluginConfigEndpoint::Inspect(Entry& entry) {
+    if (entry.inspected) return;
+    entry.inspected = true;
+    const auto inspected = InspectPluginConfig(entry.module);
+    if (!inspected.error.empty()) return;
+    entry.symbols = inspected.config;
+    AdoptSymbols(entry);
 }
 
 void PluginConfigEndpoint::CheckLoop() {
@@ -187,6 +203,7 @@ PluginConfigEndpoint::Entry& PluginConfigEndpoint::Find(const json& request) {
     const std::string name = Need(request, "name");
     const auto it = entries_.find(name);
     if (it == entries_.end()) throw std::invalid_argument("no plugin '" + name + "'");
+    Inspect(it->second);
     return it->second;
 }
 
@@ -427,7 +444,10 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
                                                     ? file_enabled->second
                                                     : entry.enabled},
                             {"loaded", entry.loaded},
-                            {"configurable", !entry.schema.is_null()},
+                            // A disabled plugin not yet opened (see
+                            // Inspect) is listed as configurable: naming
+                            // it opens it, and describe says if it is not.
+                            {"configurable", !entry.inspected || !entry.schema.is_null()},
                             {"provides", entry.provides},
                             {"set", 0},
                             {"pending", json::array()}};
