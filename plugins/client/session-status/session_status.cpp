@@ -1,4 +1,5 @@
 #include "session_status.hpp"
+#include "policy.hpp"
 
 #include <functional>
 #include <string_view>
@@ -12,20 +13,6 @@
 namespace minimal::session_status {
 
 namespace {
-
-// Which segment gives way first when the bar overflows: lowest first. The
-// live, decision-relevant state (mode, activity, model, context, a paused
-// session) outranks reference detail the user can get elsewhere (the tab
-// bar's own session name, the version); a plugin segment that declares
-// nothing sits at kPluginStatusSegmentPriority (30), between the two.
-constexpr int kPermissionModePriority = 100;
-constexpr int kActivityPriority = 90;
-constexpr int kModelPriority = 80;
-constexpr int kTokensPriority = 70;
-constexpr int kAgentPriority = 60;
-constexpr int kPausedPriority = 50;
-constexpr int kSessionPriority = 20;
-constexpr int kVersionPriority = 10;
 
 // One segment: an id, its priority and column cap, and how it reads the tab.
 class Segment final : public plugins::StatusSegment {
