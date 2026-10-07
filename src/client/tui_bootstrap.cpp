@@ -294,8 +294,12 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // warn, naming both, instead of leaving a silently dead key.
     std::map<std::string, std::string> core_keys;   // normalized key -> core action
     for (const auto& [action, key] : keys.all()) {
-        // Plugin view ids the user bound in keybindings.json are not core.
-        if (key.empty() || out.registries.views.Find(action) != nullptr) continue;
+        // Only what dispatches before a view: core's actions and the slots'
+        // declared ones. A view id is not core, and an id nothing answers to
+        // (a renamed action) holds no key -- it gets its own warning below.
+        if (key.empty() || (!Keybindings::IsCoreAction(action) && slot_actions.count(action) == 0)) {
+            continue;
+        }
         core_keys.emplace(NormalizeKeySpec(key), action);
     }
     const auto& views = out.registries.views.All();
