@@ -4,6 +4,7 @@
 
 #include "minimal/client/sdk/picker_model.hpp"
 #include "minimal/client/sdk/utf8.hpp"
+#include "minimal/common/count_format.hpp"
 #include "minimal/common/model_ref.hpp"
 
 namespace minimal::client::ui_kit {
@@ -46,7 +47,9 @@ std::vector<ModelPickerRow> BuildModelPickerRows(
             rows.push_back(ModelPickerRow{provider, "", /*header=*/true});
             header_emitted = true;
         }
-        rows.push_back(ModelPickerRow{ref->model, summary->ref(), /*header=*/false});
+        const std::int64_t window = summary->context_window_tokens();
+        rows.push_back(ModelPickerRow{ref->model, summary->ref(), /*header=*/false,
+                                      window > 0 ? common::CompactCount(window) : ""});
     }
     return rows;
 }

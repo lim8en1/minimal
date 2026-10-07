@@ -32,6 +32,12 @@ struct ProviderConfig {
     // providers.json's "max_tokens_field" sets it per entry; the OpenAI
     // provider consumes it, other backends ignore it.
     std::string max_tokens_field;
+    // Opt-in second discovery GET: after listing /models, the OpenAI-shaped
+    // catalog also fetches <base_url>/model/info (the LiteLLM-proxy endpoint)
+    // for what the listing does not carry -- the reasoning-effort flags the
+    // @effort variants are autodetected from. providers.json's "model_info"
+    // sets it per entry; other catalogs ignore it.
+    bool fetch_model_info = false;
     std::chrono::milliseconds connect_timeout = common::kDefaultConnectTimeout;
     std::chrono::milliseconds request_timeout = kDefaultRequestTimeout;
     std::chrono::milliseconds stream_idle_timeout = kDefaultStreamIdleTimeout;

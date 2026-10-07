@@ -17,6 +17,9 @@ struct ModelPickerRow {
     std::string label;
     std::string ref;      // "<provider>/<model>" -- empty => provider header row
     bool header = false;  // true => bold non-selectable provider header
+    // The context window in the status bar's units ("128k"); empty when the
+    // server sent none -- unknown renders nothing, as in the status bar.
+    std::string detail;
 };
 
 // Builds the picker's row list grouped by provider (2-tier): for each

@@ -1,6 +1,8 @@
 #include "minimal/llm/model_catalog.hpp"
 
 #include <algorithm>
+#include <optional>
+#include <utility>
 
 namespace minimal::llm {
 
@@ -66,6 +68,30 @@ std::vector<std::string> AdvertisedEfforts(const nlohmann::json& metadata) {
                     }
                 }
             }
+        }
+        return out;
+    }
+    // A LiteLLM proxy's /model/info row, attached as "model_info" by an
+    // opted-in discovery: `supports_reasoning` means the proxy maps
+    // reasoning_effort's standard low/medium/high for the model, and
+    // per-level flags add the model-specific rungs (none/minimal/xhigh/max)
+    // or, set false, withdraw a standard one. Flags present-but-null -- the
+    // proxy's spelling for "not a reasoning model" -- say nothing.
+    if (metadata.contains("model_info") && metadata.at("model_info").is_object()) {
+        const auto& info = metadata.at("model_info");
+        const auto flag = [&info](const std::string& name) -> std::optional<bool> {
+            const auto it = info.find(name);
+            if (it == info.end() || !it->is_boolean()) return std::nullopt;
+            return it->get<bool>();
+        };
+        if (flag("supports_reasoning") != true) return out;
+        static const std::pair<const char*, bool> kLadder[] = {
+            {"none", false}, {"minimal", false}, {"low", true},  {"medium", true},
+            {"high", true},  {"xhigh", false},   {"max", false},
+        };
+        for (const auto& [word, standard] : kLadder) {
+            const auto level = flag(std::string("supports_") + word + "_reasoning_effort");
+            if (level.value_or(standard)) out.push_back(word);
         }
     }
     return out;

@@ -181,6 +181,18 @@ TEST_CASE("max_tokens_field parses onto the connection and validates its value",
     }
 }
 
+TEST_CASE("model_info parses onto the connection, off by default", "[providers]") {
+    auto doc = TwoModelsOnOneProvider();
+    doc["providers"]["local"]["model_info"] = true;
+    CHECK(Require(ParseProvidersConfig(doc), "local/qwen4").provider.fetch_model_info);
+
+    const auto defaults = ParseProvidersConfig(TwoModelsOnOneProvider());
+    CHECK_FALSE(Require(defaults, "local/small").provider.fetch_model_info);
+
+    doc["providers"]["local"]["model_info"] = "yes";
+    CHECK_THROWS_AS(ParseProvidersConfig(doc), std::runtime_error);
+}
+
 TEST_CASE("a model's parameters replace the provider's rather than merging", "[providers]") {
     // Shallow on purpose: what a model declares is exactly what it sends. A deep
     // merge would make a model's effective settings depend on a block elsewhere

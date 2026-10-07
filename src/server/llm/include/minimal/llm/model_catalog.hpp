@@ -67,6 +67,11 @@ struct DiscoveredModel {
 // models.dev's normalized `reasoning_options` spelling
 // ([{"type":"effort","values":[...]}]) is ALSO read, so a Models.dev-style
 // catalog plugin (docs/EXTENSIBILITY.md deferred table) feeds this unchanged.
+//
+// A LiteLLM proxy's /model/info row (stored under "model_info" by an
+// opted-in OpenAI-shape discovery) is read too: `supports_reasoning` grants
+// low/medium/high, and `supports_<word>_reasoning_effort` flags add or
+// withdraw single rungs.
 std::vector<std::string> AdvertisedEfforts(const nlohmann::json& metadata);
 
 class ModelCatalog {

@@ -17,7 +17,7 @@ ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
         }
         bool exact = false;
         for (const auto& row : BuildModelPickerRows(models, filter)) {
-            rows.push_back({row.label, row.ref, row.header});
+            rows.push_back({row.label, row.ref, row.header, /*color=*/{}, row.detail});
             exact = exact || (!row.header && row.ref == filter);
         }
         if (callbacks.allow_custom && !exact && !filter.empty() &&
