@@ -58,6 +58,7 @@
 #include "minimal/llm/variant_params.hpp"
 #include "minimal/net/http_client.hpp"
 #include "minimal/net/sse_parser.hpp"
+#include "minimal/plugins/config_check.hpp"
 #include "minimal/plugins/plugin_rpc.hpp"
 #include "minimal/plugins/plugin_storage.hpp"
 #include "minimal/session/history_window.hpp"
@@ -483,6 +484,19 @@ void minimal_plugin_validate_config(const nlohmann::json& config, std::string& e
 // new settings in atomically. Return false with `error` set to keep the old
 // config -- the change then waits for a restart.
 bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error);
+
+// OPTIONAL: checks `config` against the world -- the URL answers, the model
+// is served, the key is accepted, the interpreter runs -- writing findings
+// to `out` (config_check.hpp's CheckReport::rows(): [{path, level: "ok" |
+// "warning" | "error", message}]). The host runs it off every request path,
+// after each save of the plugin's config and on demand (/config's `c`),
+// within `context.budget`, and shows each finding on its field. Findings are
+// information, never a refusal (validation refuses); no side effects beyond
+// the probes. Runs for a plugin that is not running too, with
+// `context.services` null. A throw is shown as one error.
+void minimal_plugin_check_config(const nlohmann::json& config,
+                                 const minimal::plugins::ConfigCheckContext& context,
+                                 nlohmann::json& out);
 
 // Frozen-surface note (track M): ToolContext::history is a
 // session::HistoryWindow -- a bound, windowed slice of SessionReader exposing

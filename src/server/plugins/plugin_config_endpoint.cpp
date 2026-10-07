@@ -8,6 +8,7 @@
 #include "minimal/common/plugin_config_label.hpp"
 #include "minimal/common/plugin_config_store.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
+#include "minimal/plugins/policy.hpp"
 
 namespace minimal::plugins {
 namespace {
@@ -41,8 +42,12 @@ json ProvidesOf(const PluginRecord& record) {
 PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
                                            const std::vector<PluginRecord>& records,
                                            const std::vector<PluginCandidate>& candidates,
-                                           BackendsInUse backends_in_use)
-    : config_dir_(std::move(config_dir)), backends_in_use_(std::move(backends_in_use)) {
+                                           BackendsInUse backends_in_use,
+                                           const ServiceRegistry* services)
+    : config_dir_(std::move(config_dir)),
+      backends_in_use_(std::move(backends_in_use)),
+      services_(services),
+      check_thread_([this] { CheckLoop(); }) {
     for (const auto& record : records) {
         Entry entry;
         entry.name = record.file.stem().string();
@@ -74,6 +79,80 @@ PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
         }
         entries_[entry.name] = std::move(entry);
     }
+}
+
+PluginConfigEndpoint::~PluginConfigEndpoint() {
+    {
+        std::lock_guard<std::mutex> lock(checks_mutex_);
+        stopping_ = true;
+        check_queue_.clear();
+    }
+    checks_cv_.notify_all();
+    if (check_thread_.joinable()) check_thread_.join();
+}
+
+void PluginConfigEndpoint::CheckLoop() {
+    for (;;) {
+        std::function<void()> task;
+        {
+            std::unique_lock<std::mutex> lock(checks_mutex_);
+            checks_cv_.wait(lock, [this] { return stopping_ || !check_queue_.empty(); });
+            if (stopping_) return;
+            task = std::move(check_queue_.front());
+            check_queue_.pop_front();
+        }
+        task();
+    }
+}
+
+void PluginConfigEndpoint::StartCheck(const Entry& entry, const json& file) {
+    if (entry.symbols.check == nullptr) return;
+    std::uint64_t generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(checks_mutex_);
+        CheckState& state = checks_[entry.name];
+        generation = ++state.generation;
+        state.state = "running";
+        check_queue_.push_back([this, name = entry.name, check = entry.symbols.check,
+                                services = entry.loaded ? services_ : nullptr, file, generation] {
+            ConfigCheckContext context;
+            context.services = services;
+            context.budget = kConfigCheckBudget;
+            context.cancelled = [this, name, generation] {
+                std::lock_guard<std::mutex> lock(checks_mutex_);
+                return stopping_ || checks_[name].generation != generation;
+            };
+            json out = json::array();
+            try {
+                check(file, context, out);
+                if (!out.is_array()) out = json::array();
+            } catch (const std::exception& error) {
+                out = json::array({{{"path", ""}, {"level", "error"},
+                                    {"message", std::string("the check failed: ") + error.what()}}});
+            } catch (...) {
+                out = json::array({{{"path", ""}, {"level", "error"}, {"message", "the check failed"}}});
+            }
+            std::lock_guard<std::mutex> lock(checks_mutex_);
+            CheckState& state = checks_[name];
+            if (state.generation != generation) return;   // a newer check superseded it
+            state.state = "done";
+            state.results = std::move(out);
+            state.at_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
+        });
+    }
+    checks_cv_.notify_one();
+}
+
+json PluginConfigEndpoint::ChecksOf(const Entry& entry) const {
+    if (entry.symbols.check == nullptr) return nullptr;
+    std::lock_guard<std::mutex> lock(checks_mutex_);
+    const auto it = checks_.find(entry.name);
+    if (it == checks_.end()) return {{"state", "idle"}, {"results", json::array()}};
+    return {{"state", it->second.state},
+            {"at", it->second.at_unix_ms},
+            {"results", it->second.results}};
 }
 
 PluginConfigEndpoint::Entry& PluginConfigEndpoint::Find(const json& request) {
@@ -186,7 +265,8 @@ json PluginConfigEndpoint::Describe(const Entry& entry) const {
             {"config", file},
             {"effective", std::move(effective)},
             {"unused", std::move(unused)},
-            {"pending", Pending(entry, file)}};
+            {"pending", Pending(entry, file)},
+            {"checks", ChecksOf(entry)}};
 }
 
 json PluginConfigEndpoint::Pending(const Entry& entry, const json& file) const {
@@ -244,7 +324,9 @@ json PluginConfigEndpoint::Save(Entry& entry, const json& next) {
         !failed.empty()) {
         return {{"error", failed}};
     }
-    return Apply(entry, next);
+    json applied = Apply(entry, next);
+    StartCheck(entry, next);   // what was saved, against the world
+    return applied;
 }
 
 std::string PluginConfigEndpoint::Call(const std::string& method, const std::string& payload) {
@@ -271,6 +353,19 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
                         const json file = ReadFile(entry);
                         row["set"] = file.empty() ? 0 : file.flatten().size();
                         row["pending"] = Pending(entry, file);
+                        // The last check, counted: the list says what needs a look.
+                        if (const json checks = ChecksOf(entry); !checks.is_null()) {
+                            int errors = 0;
+                            int warnings = 0;
+                            for (const auto& result : checks.value("results", json::array())) {
+                                const std::string level = result.value("level", "");
+                                errors += level == "error" ? 1 : 0;
+                                warnings += level == "warning" ? 1 : 0;
+                            }
+                            row["checks"] = {{"state", checks.value("state", "")},
+                                             {"errors", errors},
+                                             {"warnings", warnings}};
+                        }
                     } catch (const std::exception& e) {
                         row["error"] = e.what();
                     }
@@ -305,10 +400,21 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
         }
         if (method == "apply") {
             Entry& entry = Require(request);
-            return Apply(entry, ReadFile(entry)).dump();
+            const json file = ReadFile(entry);
+            json applied = Apply(entry, file);
+            StartCheck(entry, file);
+            return applied.dump();
+        }
+        if (method == "check") {
+            Entry& entry = Require(request);
+            if (entry.symbols.check == nullptr) {
+                return json{{"error", entry.name + " has no config check"}}.dump();
+            }
+            StartCheck(entry, ReadFile(entry));
+            return json{{"started", true}}.dump();
         }
         return json{{"error", "unknown method '" + method +
-                                  "' (known: list, describe, set, unset, apply, enable)"}}
+                                  "' (known: list, describe, set, unset, apply, check, enable)"}}
             .dump();
     } catch (const std::exception& error) {
         return json{{"error", error.what()}}.dump();

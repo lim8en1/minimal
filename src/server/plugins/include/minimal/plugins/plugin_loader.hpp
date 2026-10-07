@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/common/plugin_config.hpp"
+#include "minimal/plugins/config_check.hpp"
 #include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/agent/context_contributor.hpp"
 #include "minimal/agent/mention_resolver.hpp"
@@ -69,6 +70,8 @@ struct PluginConfigSymbols {
     void (*schema)(nlohmann::json& out) = nullptr;
     void (*validate)(const nlohmann::json& config, std::string& error) = nullptr;
     bool (*reconfigure)(const nlohmann::json& config, std::string& error) = nullptr;
+    void (*check)(const nlohmann::json& config, const ConfigCheckContext& context,
+                  nlohmann::json& out) = nullptr;
 };
 
 // What InspectPluginConfig found in one module.

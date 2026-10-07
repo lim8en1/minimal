@@ -2,6 +2,9 @@
 // tool that reports the values it is running with -- so the config endpoint's
 // tests can watch a live change land, and a restart change not land.
 
+#include <chrono>
+#include <thread>
+
 #include "minimal/common/config_reader.hpp"
 #include "minimal/common/live_value.hpp"
 #include "minimal/common/plugin_config_label.hpp"
@@ -81,3 +84,26 @@ bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error
 }
 
 }  // extern "C"
+
+// A config check the endpoint tests can watch: "limit" over 50 warns, "slow"
+// mode takes its time (until cancelled), and it reports whether it ran with
+// the host's services.
+extern "C" void minimal_plugin_check_config(const nlohmann::json& config,
+                                            const minimal::plugins::ConfigCheckContext& context,
+                                            nlohmann::json& out) {
+    minimal::plugins::CheckReport report;
+    const auto limit = config.value("limit", 5);
+    if (limit > 50) {
+        report.Warn("limit", "over 50 is a lot");
+    } else {
+        report.Ok("limit", "fine");
+    }
+    if (config.value("mode", std::string("fast")) == "slow") {
+        for (int i = 0; i < 200 && !context.cancelled(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        report.Ok("mode", context.cancelled() ? "cancelled" : "slow and done");
+    }
+    report.Ok("", context.services != nullptr ? "with services" : "without services");
+    out = report.rows();
+}

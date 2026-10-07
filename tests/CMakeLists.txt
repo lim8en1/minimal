@@ -55,6 +55,7 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     openai_stream_test.cpp
     openai_error_mapping_test.cpp
     plugin_loader_test.cpp
+    config_check_test.cpp
     plugin_discovery_test.cpp
     aliased_tool_test.cpp
     provider_factory_registry_test.cpp

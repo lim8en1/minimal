@@ -546,7 +546,7 @@ static int RunServer(int argc, char** argv) {
         return used;
     };
     minimal::plugins::PluginConfigEndpoint plugin_config_endpoint(config_dir, records, candidates,
-                                                                  backends_in_use);
+                                                                  backends_in_use, &services);
     services.Provide(minimal::plugins::PluginEndpointServiceName(
                          minimal::plugins::kPluginConfigEndpointName),
                      &plugin_config_endpoint);

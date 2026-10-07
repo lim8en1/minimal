@@ -38,6 +38,7 @@ public:
 
     std::optional<SessionLlm> LlmForSession(const std::string& session_id) override;
     std::optional<SessionLlm> ResolveModelRef(const std::string& provider_model) override;
+    std::string ModelRefProblem(const std::string& provider_model) override;
     std::shared_ptr<const session::SessionReader> HistoryFor(
         const std::string& session_id) override;
     bool RenameSession(const std::string& session_id, const std::string& name) override;

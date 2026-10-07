@@ -66,6 +66,12 @@ std::optional<SessionLlm> SessionSupport::ResolveModelRef(const std::string& pro
     return SessionLlm{std::move(resolved->provider), resolved->model->provider.model_name};
 }
 
+std::string SessionSupport::ModelRefProblem(const std::string& provider_model) {
+    if (sessions_ == nullptr) return "the server has no sessions to resolve it with";
+    std::string error;
+    return sessions_->resolver().ResolveLlm(provider_model, error) ? std::string() : error;
+}
+
 std::shared_ptr<const session::SessionReader> SessionSupport::HistoryFor(
     const std::string& session_id) {
     if (sessions_ == nullptr) return nullptr;

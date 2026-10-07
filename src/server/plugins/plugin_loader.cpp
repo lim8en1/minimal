@@ -87,6 +87,7 @@ PluginConfigSymbols ResolveConfigSymbols(void* handle) {
         Lookup<decltype(symbols.validate)>(handle, "minimal_plugin_validate_config");
     symbols.reconfigure =
         Lookup<decltype(symbols.reconfigure)>(handle, "minimal_plugin_reconfigure");
+    symbols.check = Lookup<decltype(symbols.check)>(handle, "minimal_plugin_check_config");
     return symbols;
 }
 

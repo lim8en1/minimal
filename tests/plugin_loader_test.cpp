@@ -1375,3 +1375,48 @@ TEST_CASE("the plugins endpoint toggles plugins.json and refuses to strand provi
               .at("applied") == "restart");
     CHECK(CallJson(endpoint, "enable", {{"name", "fixture-good"}}).contains("error"));
 }
+
+TEST_CASE("the plugins endpoint checks a saved config off the request, newest save winning",
+          "[plugin_loader][config_endpoint][config_check]") {
+    TempDir config_dir;
+    Harness h;
+    const std::vector<PluginCandidate> candidates = {Enabled("fixture-config")};
+    const auto records = h.loader.LoadAll(candidates);
+    REQUIRE(records[0].ok());
+    plugins::ServiceRegistry services;
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, candidates, {}, &services);
+    const auto checks = [&] {
+        return CallJson(endpoint, "describe", {{"name", "fixture-config"}}).at("checks");
+    };
+    const auto wait_done = [&] {
+        for (int i = 0; i < 500; ++i) {
+            if (checks().at("state") == "done") return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    };
+    CHECK(checks().at("state") == "idle");
+
+    // A slow check in flight: requests are answered meanwhile.
+    CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "mode"}, {"value", "slow"}});
+    CHECK(checks().at("state") == "running");
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(CallJson(endpoint, "list", {}).is_array());
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
+
+    // A newer save supersedes it: what lands is the newer one's findings.
+    CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "mode"}, {"value", "fast"}});
+    CallJson(endpoint, "set", {{"name", "fixture-config"}, {"key", "limit"}, {"value", 80}});
+    REQUIRE(wait_done());
+    const auto results = checks().at("results");
+    REQUIRE(results.size() == 2);
+    CHECK(results[0] == nlohmann::json({{"path", "limit"}, {"level", "warning"},
+                                        {"message", "over 50 is a lot"}}));
+    CHECK(results[1].at("message") == "with services");
+    const auto list = CallJson(endpoint, "list", {});
+    CHECK(list[0].at("checks").at("warnings") == 1);
+
+    // On demand.
+    CHECK(CallJson(endpoint, "check", {{"name", "fixture-config"}}).at("started") == true);
+    REQUIRE(wait_done());
+}
