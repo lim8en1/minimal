@@ -58,12 +58,8 @@ public:
         std::map<std::string, TabUi>& tab_ui;
 
         plugins::StartViewRegistry& start_view_registry;
-        plugins::MessageRendererRegistry& message_registry;
-        plugins::ToolResultRendererRegistry& renderer_registry;
-        plugins::DisplayRendererRegistry& display_registry;
         plugins::StatusSegmentRegistry& status_registry;
         const plugins::TabBarRegistry& tab_bar_registry;   // empty: no tab bar
-        plugins::MarkdownEngine& engine;
 
         int panel_height;   // rows for a plugin panel's content (ui.json panel_height)
         ftxui::Component editor;   // shared_ptr: cheap to copy, same ComponentBase as RunTui's own
@@ -71,20 +67,11 @@ public:
         const std::vector<StatusSegment>& status_format;
         std::vector<plugins::PluginViewEntry>& plugin_views;
 
-        // The resolved chat.toggle_collapse binding spec, passed through to
-        // ChatView so row-renderer hints follow the user's keymap instead of
-        // a hardcoded "alt+c".
-        std::string toggle_collapse_hint = "alt+c";
-        // Same rule for the other bindings the frame names in its own text:
-        // the empty state's session.picker, the chat's chat.load_older marker.
+        // The binding the empty state names (the user's keymap decides it).
         std::string session_picker_hint = "ctrl+o";
-        std::string load_older_hint = "pageup";
-        std::string scroll_bottom_hint = "pagedown";   // the "new output below" line
-        // Builds a tab's ChatView when a frame reaches a tab the maintenance
-        // pass has not processed yet (TabMaintenance::EnsureChatView -- the
-        // one builder, so this path gets the same hints, fold defaults and
-        // click-to-cancel handler).
-        std::function<void(const std::string& tab_id, TabUi& ui)> ensure_chat_view;
+        // Builds a tab's chat pane when a frame reaches a tab the maintenance
+        // pass has not processed yet (TabMaintenance::EnsureChatPane).
+        std::function<void(const std::string& tab_id, TabUi& ui)> ensure_chat_pane;
     };
 
     explicit FrameRenderer(Dependencies deps);

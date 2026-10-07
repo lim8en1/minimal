@@ -32,13 +32,16 @@
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
-#include "minimal/client/view/chat_view.hpp"
+#include "chat_view_fixture.hpp"
 #include "prompt_editor_fixture.hpp"
 #include "minimal/client/view/prompt_host.hpp"
 
 using namespace minimal::client;
 using namespace minimal_test;
 using minimal::client::prompt_editor::PromptEditorState;
+using minimal::client::chat_view::kFoldDefaultAuto;
+using minimal::client::chat_view::kFoldExpanded;
+using minimal::client::chat_view::kFoldCollapsed;
 namespace ftx = ftxui;
 namespace v1 = minimal::v1;
 
@@ -300,7 +303,7 @@ TEST_CASE("chat view: a sent user message renders as markdown, typed lines kept"
     plugins::ToolResultRendererRegistry tool_renderers;
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     const auto frame = RenderElement(view.Render(SnapshotWithText(
         "s", 1, "make it **bold** in snake_case_name\nsecond line\n\n```\nint x;\n```")));
@@ -322,7 +325,7 @@ TEST_CASE("chat view: with the plain engine a user message reads as typed",
     plugins::ToolResultRendererRegistry tool_renderers;
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     const auto frame = RenderElement(view.Render(SnapshotWithText("s", 1, "**raw** text")));
     CHECK(frame.find("**raw** text") != std::string::npos);
@@ -342,7 +345,7 @@ TEST_CASE("chat view: a session switch at an EQUAL transcript version re-renders
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     // Tab A, version 2. Then tab B, ALSO at version 2: the per-session
     // counter collides across tabs, so version alone cannot key the cache.
@@ -371,7 +374,7 @@ TEST_CASE("chat view: a new scrollback page for the SAME session is not served s
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     const auto snap_v1 = SnapshotWithText("session-fresh", 1, "first page");
     const auto frame_1 = RenderElement(view.Render(snap_v1));
@@ -419,7 +422,7 @@ TEST_CASE("chat view: scrolling up mid-turn stays put while the streaming block 
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     // 20 persisted rows; scroll up far enough (15 of 20) that the anchored
     // row sits well clear of the live streaming tail in a short viewport.
@@ -432,7 +435,7 @@ TEST_CASE("chat view: scrolling up mid-turn stays put while the streaming block 
     // directly), fed through its own stream slot exactly like
     // TabMaintenance::Maintain does -- slot keyed by the segment's stable
     // id, the same key the production lookup uses.
-    std::vector<LiveTextStreamSlot> streams(1);
+    std::vector<minimal_test::LiveTextStreamSlot> streams(1);
     streams[0].segment_id = 1;
     const auto append_segment = [&](const std::string& text) {
         snapshot.live_segments = {LiveTurnSegment{
@@ -479,7 +482,7 @@ TEST_CASE("chat view: live text and tool activity render interleaved, "
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "session-interleave";
@@ -498,7 +501,7 @@ TEST_CASE("chat view: live text and tool activity render interleaved, "
     tool.started = true;
     snap.tools = {tool};
 
-    std::vector<LiveTextStreamSlot> streams(3);
+    std::vector<minimal_test::LiveTextStreamSlot> streams(3);
     streams[0].segment_id = 1;
     streams[0].view = engine.MakeStream();
     streams[0].view->AppendDelta("opening remarks");
@@ -551,7 +554,7 @@ TEST_CASE("chat view: a throwing UserText renderer does not crash the echo row")
     plugins::ToolResultRendererRegistry tool_renderers;
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "session-echo-throws";
@@ -570,7 +573,7 @@ TEST_CASE("chat view: a throwing live markdown stream renders a fallback, not a 
     plugins::ToolResultRendererRegistry tool_renderers;
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "session-stream-throws";
@@ -579,7 +582,7 @@ TEST_CASE("chat view: a throwing live markdown stream renders a fallback, not a 
         LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .segment_id = 1,
                         .text_view = std::make_shared<const std::string>("partial")},
     };
-    std::vector<LiveTextStreamSlot> streams(1);
+    std::vector<minimal_test::LiveTextStreamSlot> streams(1);
     streams[0].segment_id = 1;
     streams[0].view = std::make_unique<ThrowingStream>();
 
@@ -597,7 +600,7 @@ TEST_CASE("chat view: has_earlier_messages renders a load-older hint") {
     plugins::ToolResultRendererRegistry tool_renderers;
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "session-earlier";
@@ -662,7 +665,7 @@ struct DisplayHarness {
     }
 
     std::string Render(std::vector<v1::StoredMessage> page) {
-        ChatView view(theme, messages, tool_renderers, display_renderers);
+        minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
         SessionState::Snapshot snap;
         snap.session_id = "session-display";
         snap.transcript_version = 1;
@@ -758,7 +761,7 @@ TEST_CASE("chat view: a completed tool call with no name-specific renderer still
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "session-tool";
@@ -796,7 +799,7 @@ TEST_CASE("chat view: a tool result with one early newline and a long single-lin
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     // Space-separated filler, not one giant unbroken token: paragraph() wraps
     // at word boundaries, so a single 6000-byte word would render as one
@@ -833,7 +836,7 @@ TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest defau
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-scroll", 1, 40);
 
     // A viewport far shorter than 40 rows: which slice is visible reflects
@@ -875,7 +878,7 @@ TEST_CASE("chat view: ScrollToBottom resets the anchor directly, not just relati
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-scroll-bottom", 1, 40);
 
     const auto pinned =
@@ -969,10 +972,10 @@ TEST_CASE("chat view: scrolling moves within one tall message, not just between 
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     // ONE message of 30 distinct single-screen lines. Scrolling is measured
-    // in SCREEN LINES (ScrollRegion), so the viewport always moves through
+    // in SCREEN LINES (minimal::client::chat_view::ScrollRegion), so the viewport always moves through
     // the message's interior -- pre-line-scrolling this transcript was one
     // focus anchor (whole-message snaps) and then one CHUNK anchor (leaps).
     std::string text;
@@ -1021,7 +1024,7 @@ TEST_CASE("chat view: ScrollWheelBy is time-gated, keyboard ScrollBy is not",
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-wheel-gate", 1, 40);
 
     view.ScrollWheelBy(1);
@@ -1061,7 +1064,7 @@ TEST_CASE("chat view: the row-cursor highlight moves after a render with no tran
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-cursor-move", 1, 5);
 
     RenderElement(view.Render(snapshot));   // first pass: builds row_keys_ for MoveRowFocus
@@ -1090,7 +1093,7 @@ TEST_CASE("chat view: toggling timestamps updates the render with no transcript 
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     v1::StoredMessage stored = StoredUserText(1, "hello");
     stored.set_created_at_unix_ms(1700000000000LL);
     SessionState::Snapshot snap;
@@ -1124,7 +1127,7 @@ TEST_CASE("chat view: a growing thinking segment renders its full text, not a st
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     SessionState::Snapshot snap;
     snap.session_id = "session-thinking-grow";
     snap.transcript_version = 1;
@@ -1168,7 +1171,7 @@ TEST_CASE("chat view: clicking a thinking row toggles its collapse", "[chat_view
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     // One user text row (seq 1) and one thinking row (seq 2, the newest --
     // pages are DESCENDING by seq). Thinking collapses BY DEFAULT.
@@ -1220,7 +1223,7 @@ TEST_CASE("chat view: clicks that miss a collapsible row are not consumed",
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     // A user text row is NOT click-collapsible; the filler above the
     // bottom-aligned short transcript belongs to no row at all.
@@ -1245,7 +1248,7 @@ TEST_CASE("chat view: clicking a tool-activity row toggles its collapse",
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, *engine_registry.get());
 
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "clicky-tool";
@@ -1287,7 +1290,7 @@ TEST_CASE("chat view: ui.json fold defaults set the startup collapse tier",
 
     // kFoldExpanded: the tool row STARTS expanded with no toggle at all.
     {
-        ChatView view(theme, messages, tool_renderers, display_renderers);
+        minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
         view.SetFoldDefaults(kFoldDefaultAuto, kFoldExpanded);
         const auto rendered = RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
         CHECK(rendered.find("ls output line") != std::string::npos);
@@ -1295,7 +1298,7 @@ TEST_CASE("chat view: ui.json fold defaults set the startup collapse tier",
     // kFoldCollapsed: the ask_user expanded exception is OVERridden by the
     // explicit user choice.
     {
-        ChatView view(theme, messages, tool_renderers, display_renderers);
+        minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
         view.SetFoldDefaults(kFoldDefaultAuto, kFoldCollapsed);
         const auto rendered = RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
         CHECK(rendered.find("ls output line") == std::string::npos);
@@ -1303,7 +1306,7 @@ TEST_CASE("chat view: ui.json fold defaults set the startup collapse tier",
     }
     // kFoldDefaultAuto: the built-in default stands (tool rows collapsed).
     {
-        ChatView view(theme, messages, tool_renderers, display_renderers);
+        minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
         const auto rendered = RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
         CHECK(rendered.find("ls output line") == std::string::npos);
     }
@@ -1326,7 +1329,7 @@ TEST_CASE("chat view: the kind fold toggles flip the tier and yield to per-row "
     snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
         StoredToolCallAndResult(1, "bash", "ls output line"));
 
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     // Tool rows are collapsed by the built-in default, so the first toggle
     // expands the kind.
     CHECK(view.ToggleToolFold() == kFoldExpanded);
@@ -1368,7 +1371,7 @@ TEST_CASE("chat view: a kind fold toggle clears the global collapse choice",
     snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
         StoredToolCallAndResult(1, "bash", "ls output line"));
 
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     // First ToggleCollapseAll flips the global choice to COLLAPSED
     // (IsCollapsed returns it verbatim): every row, tool rows included,
     // hides.
@@ -1412,7 +1415,7 @@ TEST_CASE("chat view: thinking fold toggle flips thinking rows only",
     snap.scrollback_page =
         std::make_shared<const std::vector<v1::StoredMessage>>(std::move(page));
 
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     // Thinking is collapsed by default, so the toggle expands the kind.
     CHECK(view.ToggleThinkingFold() == kFoldExpanded);
     CHECK(RenderElement(view.Render(snap), 60, 24).find("pondering the fold") !=
@@ -2074,7 +2077,7 @@ TEST_CASE("chat view: windowing elides off-viewport rows and marks the cut") {
     plugins::ToolResultRendererRegistry tool_renderers;
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-window", 1, 40);
 
     (void)RenderElement(view.Render(snapshot), 40, 10);   // full: measures
@@ -2115,7 +2118,7 @@ TEST_CASE("chat view: windowing survives resize while pinned to the newest row")
     plugins::ToolResultRendererRegistry tool_renderers;
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-resize-pin", 1, 40);
 
     // Tall -> short -> tall, pinned throughout: the newest row must be
@@ -2137,7 +2140,7 @@ TEST_CASE("chat view: windowing survives resize while scrolled up") {
     plugins::ToolResultRendererRegistry tool_renderers;
     minimal::client::chat_renderers::RegisterMessageRenderers(messages, engine);
     plugins::DisplayRendererRegistry display_renderers;
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-resize-scroll", 1, 40);
 
     (void)RenderElement(view.Render(snapshot), 80, 16);   // full: measures

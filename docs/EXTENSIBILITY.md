@@ -319,7 +319,7 @@ The "write a different frontend" tier shrinks to exactly this list. Not on it, u
 | Tool-result renderer (keyed by tool name) | additive | generic collapsible row | live |
 | Display-kind renderer (keyed by display-payload kind) | additive, with fallbacks | bundled `chat-renderers` (fallbacks) | **live** |
 | Message-kind presentation (agent/thinking/tool-activity/system) | additive, with fallbacks | bundled `chat-renderers` (fallbacks) | **live** |
-| Chat surface (the whole chat view) | **exclusive, required** | core chat view | live; the default stays core (TODO below) |
+| Chat surface (the whole chat view) | **exclusive, required** | bundled `chat-view` | **live** |
 | Markdown engine | **exclusive**; absent → plain text | bundled `markdown-md4c` | live: fenced code through `ClientPluginRegistrationContext::highlighter` (the host's highlighter over every grammar); a debounced stream asks for its frame with `HostUi::RequestRedrawAfter`; core keeps only a plain-text fallback |
 | Syntax-highlight languages (keyed by language) | additive, collisions fatal | bundled `syntax-grammars` | live: a grammar brings its node-type table, its function-name positions and its fence aliases; core keeps only the highlighter |
 | Prompt renderers (keyed by prompt kind) | additive; `permission` and `confirmation` **required** | plugin kinds: their pair's view; core kinds: bundled `consent-prompts` | **live** |
@@ -345,8 +345,6 @@ The renderer's obligations are part of the kind's contract, like the markdown en
 
 **Fallback registration.** An additive registry takes a `RegisterFallback` beside `Register`: a bundled default for a key that yields to any claim of it -- `Find` answers the claim when there is one, the fallback otherwise -- with no collision; two fallbacks for one key do collide (they are recorded as `fallback:<key>`). The bundled `chat-renderers` registers every message kind and display kind this way, through the context's markdown engine and highlighter proxies; disabled, a row with no renderer reads as its plain text.
 
-**TODO: the chat view.** The core chat view is still the chat-surface slot's default. It moves to a bundled `chat-view` plugin once `ChatSurface` carries core's data plane (the buffered, paged rows the chat view reads today; the current surface API gets raw events).
-
 **Tab activity.** `HostUi::Activity()` answers every open tab -- id, name, state, attention, focus, subagent/view-only, nesting -- and its tool calls as `ToolActivity` (name, summary, running/failed, start, duration, the shared live-output buffer), in a `TabActivitySnapshot` whose `version` moves only when something in it changed, so a view keyed on it rebuilds on change, not at frame rate. Its first consumer is the bundled `tools-panel` (the `tools.panel` view, ctrl+t; `output_lines` in its config).
 
 **Tab bar.** An exclusive, optional slot (`TabBar` in `registries.hpp`; bundled `tab-bar`; none registered = no bar). Each frame core hands it a `TabBarModel` -- the VISIBLE tabs as `TabActivity` (the tab filter is a core verb, so it is already applied), and the filter's `TabBarBadge` (what it hides, and how many of those carry attention) -- and the bar draws a row (null: no row; the bundled one hides for a lone tab) and reports each cell's box into `TabBarHits` for click-to-focus. A throwing bar draws no row for that frame. Obligation: a tab with `attention` shows a color-independent mark (the bundled bar's `!`).
@@ -359,26 +357,7 @@ Details for the other slots:
 
 Rows from an assistant message carry `ChatRow::agent` / `ChatRow::model` — the agent preset and `<provider>/<model>` that produced it, persisted per message (`StoredMessage.agent_preset`/`model`, schema v9; empty = unknown). `AssistantLabel()` formats the core speaker label (`build (sonnet-4-5)`). The synthetic `ChatRowKind::Switch` row sits before the first assistant message whose agent or model differs from the previous one's (`switch_from_agent`/`switch_from_model` hold the old pair); it is never collapsible, and a plugin may claim it like any other kind.
 
-**Chat surface.**
-
-```cpp
-// src/client/plugins/include/minimal/client/plugins/registries.hpp
-class ChatSurface {
-public:
-    struct Spec { std::string id; std::string title; };  // id names it in diagnostics
-    virtual const Spec& spec() const = 0;
-    virtual ftxui::Component component(const std::string& tab_id) = 0;  // tab_id's body (one per tab)
-    // The host pushes every ServerEvent for the session; the surface owns its
-    // own presentation and buffering. Scrollback pages are fetched through the
-    // same client API core uses -- exposed to client plugins as a utility. A
-    // surface never opens its own connection.
-    virtual void OnEvent(const v1::ServerEvent& event) = 0;
-    // The theme was (re)loaded -- at startup and on every /theme switch.
-    virtual void OnTheme(const Theme& theme) = 0;
-};
-```
-
-Exclusive because the interface is deliberately big — streaming lifecycle, scrollback, focus and attention integration — and this repo's rule is that an interface which grew that big needs a reason; a wholesale chat replacement is the reason. The prompt editor is the only other slot expected to grow this big, and gets the same scrutiny (§4.2). Message-kind slots cover the common case; this covers "a whole different chat UI". A second claimant is fatal at startup (*Slot semantics* above); with none registered, the core chat view stands -- planned: that default moves to a bundled plugin.
+**Chat surface.** The chat view itself, exclusive and required (`ChatSurface` in `registries.hpp`; bundled `chat-view`). The surface makes one `ChatPane` per tab; each frame core hands the focused tab's pane a `ChatFrame` built from its data plane -- the transcript window (raw stored messages, newest first; `ChatRowsFromMessages` materializes rows), the turn in flight as `ChatLiveSegment`s (text and thinking so far; tool calls as `ToolActivity`, resolved to their final state once the turn swept the live row), the queued messages, the paging flags, the effective and desired model and agent -- all on the UI thread. The pane owns everything presentational: the row cache, the live markdown streams (one `MarkdownEngine::Stream` per segment id, finalized when `streaming_finalized` says the block ended), scrolling, row focus, folding, timestamps, the "new output below" hint. Its keys are its own declared actions (`chat.scroll_up`, `chat.row_up`, `chat.toggle_collapse`, ... -- registered and listed like the prompt editor's); core routes a key bound to one to the focused pane (`OnAction`) and hands it mouse events (`OnMouse`; true = consumed). Through `ChatHost` it reads the renderer registries and the engine, names keys in its text (`KeyFor`), cancels a queued message (`CancelQueued`) and posts a tab notice. Core keeps the data (paging via `chat.load_older`, the live turn), the start views on a fresh session, the layout row, and containment: a pane that throws shows an error line for that tab. The fold preference is the plugin's: its config sets the start, a toggle flips every pane and is kept in the plugin's state (`HostUi::LoadState`/`SaveState`, a JSON file per plugin in the data dir).
 
 **Status-bar segments.**
 

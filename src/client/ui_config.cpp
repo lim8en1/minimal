@@ -67,19 +67,6 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
                 kMinToolOutputBufferBytes);
     bounded_int("panel_height", config.panel_height, 3);
 
-    // The fold defaults: an enum-as-string, not a bare int -- users hand-edit
-    // this file, and "expanded" is self-describing where 1 is not.
-    const auto fold_value = [&](const char* key, int& out) {
-        lenient([&] {
-            const auto name = reader.MaybeEnum(key, {"auto", "expanded", "collapsed"});
-            if (!name) return;
-            if (*name == "auto") out = kFoldDefaultAuto;
-            else if (*name == "expanded") out = kFoldExpanded;
-            else out = kFoldCollapsed;
-        });
-    };
-    fold_value("fold_thinking", config.fold_thinking);
-    fold_value("fold_tools", config.fold_tools);
     reader.Finish(config::UnknownKeys::kWarn);
     return config;
 }
@@ -140,28 +127,11 @@ bool UpdateUiJson(const std::filesystem::path& config_dir, const char* what,
     return true;
 }
 
-// "expanded"/"collapsed"/"auto" for kFoldExpanded/kFoldCollapsed/kFoldDefaultAuto.
-std::string FoldName(int value) {
-    switch (value) {
-        case kFoldExpanded: return "expanded";
-        case kFoldCollapsed: return "collapsed";
-        default: return "auto";
-    }
-}
-
 }  // namespace
 
 void SaveThemePreference(const std::filesystem::path& config_dir, const std::string& name) {
     UpdateUiJson(config_dir, "theme preference", [&](nlohmann::json& doc) {
         doc["theme"] = name;
-    });
-}
-
-bool SaveFoldDefaults(const std::filesystem::path& config_dir,
-                      std::optional<int> thinking, std::optional<int> tools) {
-    return UpdateUiJson(config_dir, "fold defaults", [&](nlohmann::json& doc) {
-        if (thinking.has_value()) doc["fold_thinking"] = FoldName(*thinking);
-        if (tools.has_value()) doc["fold_tools"] = FoldName(*tools);
     });
 }
 

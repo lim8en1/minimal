@@ -24,7 +24,6 @@
 
 namespace minimal::client::plugins {
 class AttentionState;
-class ChatSurface;
 }  // namespace minimal::client::plugins
 
 namespace minimal::client {
@@ -1170,26 +1169,6 @@ public:
         plugin_attention_ = attention;
     }
 
-    // The exclusive chat surface, when a plugin claimed the slot. DispatchToTab
-    // pushes EVERY ServerEvent to it (reader thread; OnEvent must not block)
-    // before core's own handling -- a surface owns its presentation, core keeps
-    // its data plane regardless.
-    void SetChatSurface(plugins::ChatSurface* surface) {
-        chat_surface_.store(surface, std::memory_order_release);
-    }
-
-    // The exclusive chat surface, unless a plugin threw out of it (catch +
-    // disable): null means the core chat view renders the tab body.
-    plugins::ChatSurface* EffectiveChatSurface() const {
-        return chat_surface_broken_.load(std::memory_order_acquire)
-                   ? nullptr
-                   : chat_surface_.load(std::memory_order_acquire);
-    }
-
-    // Disables a surface that threw mid-render (loop thread). `reason` may be
-    // null for a non-standard exception.
-    void DisableChatSurface(const char* reason);
-
     // Wakes the 20 Hz pump for state published OUTSIDE any AppState mutator
     // -- PickerController's async fetch completions, e.g. (ARCHITECTURE.md
     // review: picker RPCs used to run synchronously on the loop thread, up to
@@ -1384,19 +1363,6 @@ private:
 
     // E5 seams (see the setters above).
     plugins::AttentionState* plugin_attention_ = nullptr;
-    // Atomic: SetChatSurface can race a reader thread's DispatchToTab read
-    // via EffectiveChatSurface (e.g. late/dynamic plugin registration) --
-    // same unsynchronized-race class chat_surface_broken_ below was already
-    // fixed for.
-    std::atomic<plugins::ChatSurface*> chat_surface_{nullptr};
-    // A plugin surface that THREW is disabled for the process (catch +
-    // disable): the core chat view takes over, the process survives. Third
-    // thrown events downgrade to a logged error, not a dead tab. Atomic: every
-    // reader thread writes it via DispatchToTab (see .cpp), the loop thread
-    // writes it via DisableChatSurface, and both read it back through
-    // EffectiveChatSurface -- a plain bool here was an unsynchronized
-    // read/write race across threads (TSan-visible).
-    std::atomic<bool> chat_surface_broken_{false};
 
     // Teardown latch (fix for "subagent attached concurrently with quit is
     // never detached"): set as the FIRST act of CloseAllTabs/DetachAllTabs,

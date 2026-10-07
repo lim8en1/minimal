@@ -375,6 +375,11 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     # session-status: the status bar's usual segments.
     "${CMAKE_SOURCE_DIR}/plugins/client/session-status/session_status.cpp"
     session_status_test.cpp
+    # chat-view: the chat itself.
+    "${CMAKE_SOURCE_DIR}/plugins/client/chat-view/chat_view.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/chat-view/chat_scroll_region.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/chat-view/chat_surface.cpp"
+    chat_surface_test.cpp
     # chat-renderers: every chat row and display payload kind.
     "${CMAKE_SOURCE_DIR}/plugins/client/chat-renderers/message_renderers.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/client/chat-renderers/display_renderers.cpp"
@@ -425,6 +430,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/client/tools-panel"
     "${CMAKE_SOURCE_DIR}/plugins/client/tab-bar"
     "${CMAKE_SOURCE_DIR}/plugins/client/chat-renderers"
+    "${CMAKE_SOURCE_DIR}/plugins/client/chat-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/syntax-grammars"
     "${CMAKE_SOURCE_DIR}/plugins/client/markdown-md4c"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")
@@ -491,6 +497,7 @@ target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_UI_KIT_PLUGIN="$<TARGET_FILE:minimal_ui_kit>"
     MINIMAL_CONSENT_PROMPTS_PLUGIN="$<TARGET_FILE:minimal_consent_prompts>"
     MINIMAL_PROMPT_EDITOR_PLUGIN="$<TARGET_FILE:minimal_prompt_editor>"
+    MINIMAL_CHAT_VIEW_PLUGIN="$<TARGET_FILE:minimal_chat_view>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto"
     # The captured live Jev responses (fixtures/decision-advisor/): the
     # response-shape contract the advisor parses, kept as data not literals.

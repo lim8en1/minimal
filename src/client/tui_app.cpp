@@ -53,21 +53,6 @@ namespace {
 // which is exactly what remapping exists for -- and what the startup warning
 // names.
 
-// Looks up tab_id's TabUi and, if it exists and has a live ChatView yet
-// (a sessionless tab doesn't), calls fn(chat_view). Returns fn's result, or a
-// default-constructed one (false/nullptr/nothing) on a miss -- one home for
-// the guard every chat-addressed key action needs.
-template <typename Fn>
-auto WithChat(std::map<std::string, TabUi>& tab_ui, const std::string& tab_id, Fn&& fn) {
-    using Ret = std::invoke_result_t<Fn, ChatView&>;
-    if (auto it = tab_ui.find(tab_id); it != tab_ui.end() && it->second.chat) {
-        return fn(*it->second.chat);
-    }
-    if constexpr (!std::is_void_v<Ret>) {
-        return Ret{};
-    }
-}
-
 std::vector<CommandCatalogEntry> ToCatalogEntries(const v1::ListCommandsResponse& response) {
     std::vector<CommandCatalogEntry> entries;
     for (const auto& info : response.commands()) {
@@ -209,7 +194,6 @@ void TuiApp::BuildState() {
                     done(ToCatalogEntries(*response));
                 });
         });
-    app_->SetChatSurface(env_.chat_surface);
 
     // THE STARTUP RESUME, on the probed session (Connect's probe, before the
     // UI was built). LIVE opens the whole tab group -- the session plus every
@@ -322,6 +306,10 @@ void TuiApp::BuildEditor() {
     // submit paths follow via FocusedOrNewTab); "" serves the empty app.
     prompt_history_.SetCatalog([this] { return CurrentCatalog(); });
     editor_actions_ = env_.registries.prompt_editor.get()->Actions();
+    for (auto& action : env_.chat_surface->Actions()) {
+        chat_action_ids_.push_back(action.id);
+        editor_actions_.push_back(std::move(action));
+    }
     prompt_editors_.SetBuilder([this] {
         return env_.registries.prompt_editor.get()->Make(*this, *env_.theme);
     });
@@ -355,6 +343,51 @@ bool TuiApp::Matches(std::string_view action, const ftxui::Event& event) const {
 }
 
 void TuiApp::RequestRedraw() { env_.host_focus_provider->RequestRedraw(); }
+
+// --- ChatHost -------------------------------------------------------------------
+
+const plugins::MessageRendererRegistry& TuiApp::MessageRenderers() const {
+    return env_.registries.message_renderers;
+}
+const plugins::ToolResultRendererRegistry& TuiApp::ToolRenderers() const {
+    return env_.registries.tool_renderers;
+}
+const plugins::DisplayRendererRegistry& TuiApp::DisplayRenderers() const {
+    return env_.registries.display_renderers;
+}
+const plugins::MarkdownEngine& TuiApp::Markdown() const { return *env_.engine; }
+std::string TuiApp::KeyFor(std::string_view action) const {
+    return env_.keybindings.KeyFor(std::string(action));
+}
+void TuiApp::CancelQueued(const std::string& tab_id, std::uint64_t turn_id) {
+    // The tab's session, resolved at click time (a pane may predate it).
+    app_->SendCancelQueuedTurnByTab(tab_id, turn_id);
+}
+void TuiApp::Notice(const std::string& tab_id, const std::string& text) {
+    app_->TabNotice(tab_id, text);
+}
+
+std::unique_ptr<plugins::ChatPane> TuiApp::MakeChatPane(const std::string& tab_id) {
+    std::unique_ptr<plugins::ChatPane> pane;
+    GuardChat([&] { pane = env_.chat_surface->Make(*this, tab_id, *env_.theme); });
+    return pane;
+}
+
+plugins::ChatPane* TuiApp::PaneOf(const std::string& tab_id) {
+    const auto it = tab_ui_.find(tab_id);
+    return it != tab_ui_.end() ? it->second.chat.get() : nullptr;
+}
+
+void TuiApp::GuardChat(const std::function<void()>& call) {
+    // Plugin code: a throw is logged and that one call dropped, never the TUI.
+    try {
+        call();
+    } catch (const std::exception& error) {
+        common::DefaultLogger().error("chat view threw: {}", error.what());
+    } catch (...) {
+        common::DefaultLogger().error("chat view threw a non-standard exception");
+    }
+}
 
 void TuiApp::BuildModals() {
     using namespace ftxui;
@@ -422,7 +455,7 @@ void TuiApp::BuildFrame() {
     // that inside the renderer made the frame stall and the staged modal
     // unclosable).
     tab_maintenance_.emplace(TabMaintenance::Dependencies{
-        *app_, *env_.engine, registries.views, env_.plugin_views, plugin_modal_child_,
+        *app_, registries.views, env_.plugin_views, plugin_modal_child_,
         show_plugin_modal_,
         // Loop-thread work queued from other threads: picker fetch results,
         // plugins' HostUi view requests (show/close/focus), and the plugin
@@ -437,38 +470,20 @@ void TuiApp::BuildFrame() {
             picker_controller_->WatchPendingView(ShownPluginModal());
             observer_pump_->Run();
         },
-        tab_ui_, theme, registries.message_renderers, registries.tool_renderers,
-        registries.display_renderers, registries.prompt_renderers, permission_child_,
-        show_permission_, confirmation_child_, show_confirmation_, prompt_child_, show_prompt_,
-        // The chat views this builds name these keys in their own text; the
-        // user's keymap decides them.
-        env_.keybindings.KeyFor("chat.toggle_collapse", "alt+c"),
-        env_.keybindings.KeyFor("chat.load_older", "pageup"),
-        // ui.json's startup fold defaults (kFoldDefaultAuto when unset).
-        env_.ui.fold_thinking, env_.ui.fold_tools,
-        // Click-to-cancel for QUEUED message rows: resolve the tab's session
-        // at click time (a tab's ChatView may predate its session).
-        [app = app_](const std::string& tab_id, std::uint64_t turn_id) {
-            app->SendCancelQueuedTurnByTab(tab_id, turn_id);
-        }});
+        tab_ui_, theme, registries.prompt_renderers, permission_child_, show_permission_,
+        confirmation_child_, show_confirmation_, prompt_child_, show_prompt_,
+        [this](const std::string& tab_id) { return MakeChatPane(tab_id); }});
 
     // FrameRenderer owns the tab body / status-bar / plugin-panel assembly.
     const int panel_height = env_.ui.panel_height > 0 ? env_.ui.panel_height : 12;   // ui.json
     frame_renderer_.emplace(FrameRenderer::Dependencies{
         *app_, theme, tab_maintenance_->Focused(), tab_maintenance_->FocusedDetails(), tab_ui_,
-        registries.start_views, registries.message_renderers, registries.tool_renderers,
-        registries.display_renderers, registries.status_segments, registries.tab_bar, *env_.engine,
-        panel_height,
+        registries.start_views, registries.status_segments, registries.tab_bar, panel_height,
         editor_, env_.status_format, env_.plugin_views,
-        // Row-renderer collapse hints follow the user's keymap, not a
-        // hardcoded alt+c -- and so do the other key names the frame spells
-        // out.
-        env_.keybindings.KeyFor("chat.toggle_collapse", "alt+c"),
+        // The key the empty state names: the user's keymap decides it.
         env_.keybindings.KeyFor("session.picker", "ctrl+o"),
-        env_.keybindings.KeyFor("chat.load_older", "pageup"),
-        env_.keybindings.KeyFor("chat.scroll_bottom", "pagedown"),
         [this](const std::string& tab_id, TabUi& ui) {
-            tab_maintenance_->EnsureChatView(tab_id, ui);
+            tab_maintenance_->EnsureChatPane(tab_id, ui);
         }});
     auto session_view = Renderer(editor_, [this] { return frame_renderer_->Render(); });
 
@@ -533,62 +548,25 @@ KeyContext TuiApp::MakeKeyContext() {
         [this] { picker_controller_->OpenModelPicker(); },
         [this] { RequestQuit(); },
         [this](const std::string& id) { CloseTab(id); },
-        // ChatView::ScrollBy, if the tab has one yet (a ChatView is built
-        // lazily by the frame, so it may not exist on the very first frame of
-        // a freshly opened tab).
-        [this](const std::string& tab_id, int delta_rows) {
-            WithChat(tab_ui_, tab_id, [&](auto& chat) { chat.ScrollBy(delta_rows); });
-        },
-        // The wheel's own path: the gate in ScrollWheelBy bounds how fast a
-        // momentum flick can walk the transcript (keyboard scrolling above
-        // stays ungated).
-        [this](const std::string& tab_id, int delta_rows) {
-            WithChat(tab_ui_, tab_id, [&](auto& chat) { chat.ScrollWheelBy(delta_rows); });
-        },
-        [this](const std::string& tab_id) {
-            WithChat(tab_ui_, tab_id, [](auto& chat) {
-                chat.ScrollToBottom();
-                chat.ClearRowFocus();
-            });
-        },
         // tab.close with work in flight: stage ONE confirmation for the
         // whole closing group, same as RequestQuit's own busy branch.
         [this](std::vector<std::string> ids) { StageClose(std::move(ids), /*quit=*/false); },
-        [this](const std::string& tab_id, int delta) {
-            WithChat(tab_ui_, tab_id, [&](auto& chat) { chat.MoveRowFocus(delta); });
+        chat_action_ids_,
+        [this](const std::string& tab_id, std::string_view action) {
+            if (auto* pane = PaneOf(tab_id)) GuardChat([&] { pane->OnAction(action); });
         },
-        [this](const std::string& tab_id) {
-            WithChat(tab_ui_, tab_id, [](auto& chat) { chat.ToggleCollapseFocused(); });
+        [this](const std::string& tab_id, const ftxui::Event& event) {
+            auto* pane = PaneOf(tab_id);
+            bool consumed = false;
+            if (pane != nullptr) GuardChat([&] { consumed = pane->OnMouse(event); });
+            return consumed;
         },
-        [this](const std::string& tab_id) {
-            WithChat(tab_ui_, tab_id, [](auto& chat) { chat.ToggleCollapseAll(); });
-        },
-        // Mouse-click collapse: ToggleCollapseAt consumes the click only
-        // when it landed on a collapsible row; a miss falls through.
-        [this](const std::string& tab_id, int screen_y) -> bool {
-            return WithChat(tab_ui_, tab_id,
-                            [&](auto& chat) { return chat.ToggleCollapseAt(screen_y); });
-        },
-        // Mouse-click cancel of a QUEUED message: CancelPendingAt consumes
-        // the click only when a cancellable queued row is under it.
-        [this](const std::string& tab_id, int screen_y) -> bool {
-            return WithChat(tab_ui_, tab_id,
-                            [&](auto& chat) { return chat.CancelPendingAt(screen_y); });
-        },
-        [this](const std::string& tab_id) {
-            WithChat(tab_ui_, tab_id, [](auto& chat) { chat.ToggleTimestamps(); });
-        },
-        [this](const std::string& tab_id) { ToggleFold(tab_id, /*thinking=*/true); },
-        [this](const std::string& tab_id) { ToggleFold(tab_id, /*thinking=*/false); },
         // The focused editor's own keys outrank every binding (Claims).
         [this](const ftxui::Event& event) {
             const std::string tab = app_->FocusedTabId();
             if (!prompt_editors_.Built(tab)) return false;
             auto* editor = prompt_editors_.Editor(tab);
             return editor != nullptr && editor->Claims(event);
-        },
-        [this](const std::string& tab_id, int y) {
-            return WithChat(tab_ui_, tab_id, [y](auto& chat) { return chat.ViewportContainsY(y); });
         },
         [this](int x, int y) { return frame_renderer_->TabAt(x, y); }};
 }
@@ -878,10 +856,7 @@ void TuiApp::SubmitChat(const std::string& text) {
             // content would otherwise sit frozen while the reply streams in
             // somewhere below the visible viewport. Same for a row cursor left
             // over from browsing. (A sessionless tab has no chat view yet.)
-            WithChat(tab_ui_, tab, [](auto& chat) {
-                chat.ScrollToBottom();
-                chat.ClearRowFocus();
-            });
+            if (auto* pane = PaneOf(tab)) GuardChat([&] { pane->OnSubmitted(); });
             app_->SubmitChatTurn(tab, text);
         },
         [this, tab, text] {
@@ -954,17 +929,7 @@ void TuiApp::ApplyTheme(const std::string& name) {
     }
     *env_.theme = std::move(loaded);
     env_.highlighter->OnThemeChanged();
-    // PushThemeToPlugins disables a throwing chat surface only in `env_`
-    // (correct for the FIRST call, during BuildTuiEnvironment, before
-    // AppState exists). This is a LATER call, after AppState already has its
-    // own cached pointer and sticky broken-flag (EffectiveChatSurface) --
-    // without this sync, a surface that throws on a SWITCH stays the
-    // effective surface, still receiving events.
-    const bool surface_was_live = env_.chat_surface != nullptr;
     PushThemeToPlugins(env_);
-    if (surface_was_live && env_.chat_surface == nullptr) {
-        app_->DisableChatSurface("threw on theme switch");
-    }
     SaveThemePreference(env_.config_dir, name);
     FocusedNotice("theme switched to '" + name + "'");
 }
@@ -1081,28 +1046,5 @@ void TuiApp::StageClose(std::vector<std::string> ids, bool quit) {
     show_quit_confirm_ = true;
 }
 
-// The fold toggles are session-wide preferences: EVERY open tab's ChatView
-// flips, and the new state persists to ui.json (SaveFoldDefaults) so the next
-// launch starts there. Tabs opened AFTER a toggle start from it too:
-// TabMaintenance::SetFoldDefaults re-seeds the builder every new ChatView
-// comes from. The toggles return the same value from every view, so one
-// write.
-void TuiApp::ToggleFold(const std::string& tab_id, bool thinking) {
-    std::optional<int> next;
-    for (auto& [tab, ui] : tab_ui_) {
-        if (ui.chat) next = thinking ? ui.chat->ToggleThinkingFold() : ui.chat->ToggleToolFold();
-    }
-    if (!next.has_value()) return;
-    const std::optional<int> thinking_fold = thinking ? next : std::nullopt;
-    const std::optional<int> tool_fold = thinking ? std::nullopt : next;
-    const bool saved = SaveFoldDefaults(env_.config_dir, thinking_fold, tool_fold);
-    tab_maintenance_->SetFoldDefaults(thinking_fold, tool_fold);   // tabs opened later
-    // Same feedback shape /theme uses: a transient tab notice -- the rows
-    // just flipped visibly; the notice names the state and whether it
-    // persisted.
-    app_->TabNotice(tab_id, std::string(thinking ? "thinking rows: " : "tool rows: ") +
-                                (*next == kFoldCollapsed ? "collapsed" : "expanded") +
-                                (saved ? " (saved)" : " -- ui.json NOT updated"));
-}
 
 }  // namespace minimal::client::app

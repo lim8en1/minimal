@@ -930,18 +930,6 @@ void AppState::SetUiBounds(int scrollback_max_messages, int tool_output_buffer_b
     if (tool_output_buffer_bytes > 0) tool_output_buffer_bytes_ = tool_output_buffer_bytes;
 }
 
-void AppState::DisableChatSurface(const char* reason) {
-    chat_surface_broken_.store(true, std::memory_order_release);
-    if (reason != nullptr) {
-        common::DefaultLogger().error(
-            "chat surface plugin threw ({}) -- disabled; the core chat view takes over", reason);
-    } else {
-        common::DefaultLogger().error(
-            "chat surface plugin threw a non-standard exception -- disabled; the core chat "
-            "view takes over");
-    }
-}
-
 void AppState::ApplyUiBounds(SessionState& state) const {
     state.SetBounds(
         scrollback_max_messages_ > 0 ? scrollback_max_messages_
@@ -1324,32 +1312,6 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
     // Every wire event can change what the frame renders; bumped on the way
     // out, once the event has been applied.
     const UiVersionBumpOnExit bump{*this};
-    // The exclusive chat surface sees EVERY event for the session, before
-    // core's handling (docs/EXTENSIBILITY.md 4.2: the host pushes, the surface
-    // owns its presentation; core's data plane runs regardless). Reader
-    // thread -- OnEvent must not block; that is the surface's contract.
-    // Throwing is contained: the surface is disabled for the process (the
-    // core chat view takes over). An UNguarded throw here propagated out of
-    // the reader thread function and std::terminate'd the whole TUI -- and a
-    // blocking surface wedges the data plane AND the CloseAllTabs join; the
-    // block contract is documented, the throw is enforced.
-    plugins::ChatSurface* chat_surface = chat_surface_.load(std::memory_order_acquire);
-    if (chat_surface != nullptr && !chat_surface_broken_.load(std::memory_order_acquire)) {
-        try {
-            chat_surface->OnEvent(event);
-        } catch (const std::exception& error) {
-            chat_surface_broken_.store(true, std::memory_order_release);
-            common::DefaultLogger().error(
-                "chat surface plugin threw ({}) -- disabled; the core chat view takes over",
-                error.what());
-        } catch (...) {
-            chat_surface_broken_.store(true, std::memory_order_release);
-            common::DefaultLogger().error(
-                "chat surface plugin threw a non-standard exception -- disabled; the core "
-                "chat view takes over");
-        }
-    }
-
     // Owning copy out of the lookup: CloseTab can erase the TabEntry (dropping
     // the last shared_ptr) while this reader-thread dispatch is in flight — a
     // raw pointer here was a use-after-free on every tab close with a live

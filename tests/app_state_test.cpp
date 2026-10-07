@@ -1731,18 +1731,8 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Escape before "
         [] {}, [] {}, [] {},
         [&] { quit_requested = true; },
         [](const std::string&) {},
-        [](const std::string&, int) {},
-        [](const std::string&, int) {},
-        [](const std::string&) {},
         [](std::vector<std::string>) {},
-        [](const std::string&, int) {},
-        [](const std::string&) {},
-        [](const std::string&) {},
-        [](const std::string&, int) -> bool { return false; },
-        [](const std::string&, int) -> bool { return false; },
-        [](const std::string&) {},
-        [](const std::string&) {},   // chat.toggle_thinking_fold
-        [](const std::string&) {},   // chat.toggle_tool_fold
+        {}, nullptr, nullptr,   // the chat surface's actions and mouse: none here
         // The editor claims keys while its list is open (PromptEditor::Claims).
         [&](const ftxui::Event&) { return suggestions_open_value; }};
 
@@ -1791,18 +1781,8 @@ TEST_CASE("HandleGlobalKey: an idle Escape clears a lingering notice, but only "
         [] {}, [] {}, [] {},
         [&] { quit_requested = true; },
         [](const std::string&) {},
-        [](const std::string&, int) {},
-        [](const std::string&, int) {},
-        [](const std::string&) {},
         [](std::vector<std::string>) {},
-        [](const std::string&, int) {},
-        [](const std::string&) {},
-        [](const std::string&) {},
-        [](const std::string&, int) -> bool { return false; },
-        [](const std::string&, int) -> bool { return false; },
-        [](const std::string&) {},
-        [](const std::string&) {},   // chat.toggle_thinking_fold
-        [](const std::string&) {},   // chat.toggle_tool_fold
+        {}, nullptr, nullptr,   // the chat surface's actions and mouse: none here
         [](const ftxui::Event&) { return false; }};   // the editor claims nothing
 
     // A notice is showing: idle Escape claims the key and clears it.
@@ -1847,18 +1827,8 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Tab before a "
         plugin_views, plugin_modal_child,
         [] {}, [] {}, [] {}, [] {},
         [](const std::string&) {},
-        [](const std::string&, int) {},
-        [](const std::string&, int) {},
-        [](const std::string&) {},
         [](std::vector<std::string>) {},
-        [](const std::string&, int) {},
-        [](const std::string&) {},
-        [](const std::string&) {},
-        [](const std::string&, int) -> bool { return false; },
-        [](const std::string&, int) -> bool { return false; },
-        [](const std::string&) {},
-        [](const std::string&) {},   // chat.toggle_thinking_fold
-        [](const std::string&) {},   // chat.toggle_tool_fold
+        {}, nullptr, nullptr,   // the chat surface's actions and mouse: none here
         // The editor claims keys while its list is open (PromptEditor::Claims).
         [&](const ftxui::Event&) { return suggestions_open_value; }};
 

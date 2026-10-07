@@ -101,6 +101,9 @@ struct ToolActivity {
     // Its live output so far: lossy (head and tail of a capped buffer),
     // shared and immutable. Null when there is none.
     std::shared_ptr<const std::string> output;
+    std::string tool_use_id;
+    // The model's call arguments, shared and immutable; never null.
+    std::shared_ptr<const nlohmann::json> input = std::make_shared<const nlohmann::json>();
 };
 
 // One tab, for views that show every tab (the tools panel).
@@ -210,6 +213,12 @@ public:
     virtual std::vector<CommandCatalogEntry> CommandCatalog() const = 0;
     // The themes there are to switch to (the themes dir's files, by name).
     virtual std::vector<std::string> ThemeNames() const = 0;
+    // This plugin's own persisted state: what SaveState last stored, across
+    // restarts (null when nothing was). A small JSON document per plugin in
+    // the data dir; for preferences a view flips at run time. UI thread.
+    // (The defaults: nothing kept.)
+    virtual nlohmann::json LoadState() const { return nullptr; }
+    virtual void SaveState(const nlohmann::json& state) { (void)state; }
     // Every tab and its tool calls. Never null. (The default: no tabs.)
     virtual std::shared_ptr<const TabActivitySnapshot> Activity() const {
         static const auto kNone = std::make_shared<const TabActivitySnapshot>();
@@ -676,9 +685,11 @@ public:
     virtual void OnFocusLost() {}
 };
 
-// A key action an editor answers to: listed in the keymap help, bindable in
-// keybindings.json under `id` (by convention "prompt.<name>").
-struct PromptEditorAction {
+// A key action a slot implementation declares (the prompt editor's, the chat
+// surface's): registered into the keymap at startup -- `default_key` only
+// where keybindings.json binds nothing -- and listed in the keymap help with
+// `description`. Ids are prefixed by convention ("prompt.", "chat.").
+struct DeclaredAction {
     std::string id;
     std::string default_key;
     std::string description;
@@ -687,58 +698,16 @@ struct PromptEditorAction {
 class PromptEditorFactory {
 public:
     virtual ~PromptEditorFactory() = default;
-    virtual std::vector<PromptEditorAction> Actions() const = 0;
+    virtual std::vector<DeclaredAction> Actions() const = 0;
     // `host` and `theme` outlive the editor.
     virtual std::unique_ptr<PromptEditor> Make(PromptEditorHost& host,
                                                const Theme& theme) const = 0;
 };
 
-// --- Chat surface (EXCLUSIVE) ---------------------------------------------
+// The chat surface (EXCLUSIVE, REQUIRED): defined after the renderer
+// registries its host hands out (see below).
+class ChatSurface;
 
-// One plugin may replace the whole chat view. Exclusive deliberately: the
-// interface is big (streaming lifecycle, event push, scrollback, focus) and
-// this repo's rule is that an interface which grew that big needs a reason; a
-// wholesale chat replacement is that reason, taken once. Message-kind slots
-// cover the common case.
-class ChatSurface {
-public:
-    virtual ~ChatSurface() = default;
-
-    struct Spec {
-        std::string id;     // stable; how diagnostics and keybindings name it
-        std::string title;  // the tab body title, if shown
-    };
-    virtual const Spec& spec() const = 0;
-
-    // The body of tab `tab_id`. Built per open tab by the host; one
-    // component instance per tab. `tab_id` is FocusProvider's TabInfo::tab_id
-    // -- the key to that tab's session (Tabs(), or an Observer's events) and
-    // so to which of OnEvent's sessions this body shows. The host owns
-    // layout: a surface renders INSIDE the tab, it does not restructure the
-    // frame.
-    virtual ftxui::Component component(const std::string& tab_id) = 0;
-
-    // The host pushes EVERY ServerEvent for the session -- the same events core
-    // dispatches to its own state plane. A surface owns its presentation and
-    // buffering from there; scrollback pages come through ClientApi. A surface
-    // NEVER opens its own connection.
-    //
-    // THREADING: OnEvent runs on each attached session's gRPC READER thread --
-    // one concurrent caller per session, so several may be inside OnEvent at
-    // the same time, and none of them is the render thread that calls
-    // component()/Render (the host takes no lock across the call -- see
-    // AppState::DispatchToTab). It must not block (a wedged reader thread
-    // stalls that session's whole data plane) and must be internally
-    // synchronized, both against other OnEvent calls and against Render.
-    // Events arrive in order PER SESSION; calls for different sessions
-    // interleave arbitrarily.
-    virtual void OnEvent(const v1::ServerEvent& event) = 0;
-
-    // Called once after the theme is loaded (plugins register before it). The
-    // surface re-reads colors through it; Render paths receive the theme the
-    // same way core views do.
-    virtual void OnTheme(const Theme& theme) = 0;
-};
 
 // --- Views (additive: panel or modal) ---------------------------------------
 
@@ -1300,7 +1269,7 @@ using StatusSegmentRegistry = AdditiveRegistry<StatusSegment, StatusSegmentKey>;
 // The language table the highlighter consults, in registration order.
 using SyntaxGrammarRegistry = AdditiveRegistry<SyntaxGrammar, SyntaxGrammarKey>;
 using ObserverRegistry = AdditiveRegistry<Observer, ObserverKey>;
-// Null get(): core's chat view stands.
+// Required: the TUI's body.
 using ChatSurfaceRegistry = ExclusiveSlot<ChatSurface, ChatSurfaceKey>;
 // Null get(): the host registers the core md4c default.
 using MarkdownEngineRegistry = ExclusiveSlot<MarkdownEngine, MarkdownEngineKey>;
@@ -1338,6 +1307,100 @@ private:
     // and whether it was a fallback.
     std::vector<ChatRowKind> kinds_;
     std::vector<bool> fallback_;
+};
+
+// --- Chat surface (EXCLUSIVE, REQUIRED) -------------------------------------
+
+// A message queued behind the running turn, until the server takes it.
+struct ChatPendingMessage {
+    std::uint64_t turn_id = 0;
+    std::string text;
+};
+
+// One piece of the turn in flight, in arrival order: assistant text, a
+// thinking block, or a tool call.
+struct ChatLiveSegment {
+    enum class Kind { Text, Tool, Thinking };
+    Kind kind = Kind::Text;
+    // Stable for the segment's life and never reused: key per-segment state
+    // (a markdown stream) on it.
+    std::uint64_t segment_id = 0;
+    // Text and Thinking: everything so far, shared and immutable. Never null.
+    std::shared_ptr<const std::string> text = std::make_shared<const std::string>();
+    bool text_truncated = false;  // the live text was capped; the transcript has it all
+    // Tool: the call -- live, or its final state once the turn ended and the
+    // transcript has not caught up yet. Unset: nothing to draw yet.
+    std::optional<ToolActivity> tool;
+};
+
+// One tab's chat as it stands, built by core each frame from its data plane:
+// the transcript window (raw, newest first -- ChatRowsFromMessages
+// materializes rows), the turn in flight, the queue. UI thread.
+struct ChatFrame {
+    std::string session_id;
+    // Moves whenever the transcript window changed (per session: key caches
+    // on session_id too). rewind_epoch moves when a rewind cut it.
+    std::uint64_t transcript_version = 0;
+    std::uint64_t rewind_epoch = 0;
+    std::shared_ptr<const std::vector<v1::StoredMessage>> scrollback_page;
+    std::shared_ptr<const std::vector<v1::CompactionEvent>> compactions;
+    bool has_earlier_messages = false;  // older pages exist (chat.load_older)
+    bool scrollback_trimmed = false;    // the window evicted its newest pages
+    bool scrollback_gap = false;        // a hole between the window and the live turn
+    // Effective (what the session runs) and desired (staged, unconfirmed).
+    std::string model, agent_preset, desired_model, desired_agent_preset;
+    std::vector<ChatPendingMessage> pending_user_messages;
+    std::vector<ChatLiveSegment> live_segments;
+    // The latest text segment's block just ended: its markdown must be
+    // reparsed authoritatively (MarkdownEngine::Stream::Finalize).
+    bool streaming_finalized = false;
+    bool turn_busy = false;   // thinking, working or waiting
+};
+
+// What core gives a chat pane. UI thread.
+class ChatHost {
+public:
+    virtual ~ChatHost() = default;
+    // The row renderers (claims and the bundled fallbacks) and the engine.
+    virtual const MessageRendererRegistry& MessageRenderers() const = 0;
+    virtual const ToolResultRendererRegistry& ToolRenderers() const = 0;
+    virtual const DisplayRendererRegistry& DisplayRenderers() const = 0;
+    virtual const MarkdownEngine& Markdown() const = 0;
+    // The key `action` is bound to ("" when none), for hints in the text.
+    virtual std::string KeyFor(std::string_view action) const = 0;
+    // Cancels a queued message of tab `tab_id` before it runs.
+    virtual void CancelQueued(const std::string& tab_id, std::uint64_t turn_id) = 0;
+    // A transient line on tab `tab_id` (feedback for an action: "thinking
+    // rows: collapsed (saved)").
+    virtual void Notice(const std::string& tab_id, const std::string& text) = 0;
+    virtual void RequestRedraw() = 0;
+};
+
+// One tab's chat body. Core shows it in the tab's body row and feeds it.
+class ChatPane {
+public:
+    virtual ~ChatPane() = default;
+    virtual ftxui::Element Render(const ChatFrame& frame) = 0;
+    // One of the surface's declared actions (ChatSurface::Actions), pressed
+    // with this tab focused.
+    virtual void OnAction(std::string_view action) = 0;
+    // A mouse event (wheel, click) with this tab focused. True = consumed
+    // (it was over the chat and meant something there).
+    virtual bool OnMouse(const ftxui::Event& event) = 0;
+    // The user just sent a message on this tab: follow the newest.
+    virtual void OnSubmitted() = 0;
+};
+
+// The chat view: one pane per tab, made on the tab's first frame. Required:
+// the TUI shows nothing without it. A pane that throws shows an error line
+// for that tab instead.
+class ChatSurface {
+public:
+    virtual ~ChatSurface() = default;
+    virtual std::vector<DeclaredAction> Actions() const = 0;
+    // `host` and `theme` outlive the pane.
+    virtual std::unique_ptr<ChatPane> Make(ChatHost& host, const std::string& tab_id,
+                                           const Theme& theme) = 0;
 };
 
 // Every registry the client offers plugins. The host owns one; the loader

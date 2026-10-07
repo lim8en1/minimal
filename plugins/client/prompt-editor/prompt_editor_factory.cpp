@@ -52,7 +52,7 @@ private:
 
 }  // namespace
 
-std::vector<plugins::PromptEditorAction> Factory::Actions() const {
+std::vector<plugins::DeclaredAction> Factory::Actions() const {
     return {
         // Plain Enter submits; this inserts a line. See prompt_editor.hpp's
         // NEWLINE comment for why alt+enter, and the macOS caveat.
