@@ -88,6 +88,7 @@ FormRow FieldRow(const json& field, const json& describe, const std::string& lab
     const bool structured = row.type == "json_node" ||
                             (row.type == "json" && (row.value.is_object() || row.value.is_array()));
     row.shown = structured ? NodeSummary(row.value) : common::DisplayValue(field, row.value);
+    row.holds_secret = common::HoldsMaskedSecret(field, row.value);
     if (row.value.is_string() && row.shown == row.value.dump()) {
         row.shown = row.value.get<std::string>();  // plain text, not a JSON literal
         if (row.shown.empty()) row.shown = "\"\"";

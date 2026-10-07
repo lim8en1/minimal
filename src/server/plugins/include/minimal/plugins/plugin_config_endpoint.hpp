@@ -162,7 +162,9 @@ private:
     };
     // Queues a check of `file` for `entry`, cancelling the one in flight.
     // Cheap: called with mutex_ held, from the request that saved.
-    void StartCheck(const Entry& entry, const nlohmann::json& file);
+    // `on_demand`: the user asked (the `check` method), so probes that cost
+    // money run too (ConfigCheckContext::on_demand).
+    void StartCheck(const Entry& entry, const nlohmann::json& file, bool on_demand = false);
     nlohmann::json ChecksOf(const Entry& entry) const;
     void CheckLoop();
     nlohmann::json ReadFile(const Entry& entry) const;

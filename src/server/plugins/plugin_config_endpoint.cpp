@@ -149,7 +149,7 @@ void PluginConfigEndpoint::CheckLoop() {
     }
 }
 
-void PluginConfigEndpoint::StartCheck(const Entry& entry, const json& file) {
+void PluginConfigEndpoint::StartCheck(const Entry& entry, const json& file, bool on_demand) {
     if (entry.symbols.check == nullptr) return;
     std::uint64_t generation = 0;
     {
@@ -158,11 +158,16 @@ void PluginConfigEndpoint::StartCheck(const Entry& entry, const json& file) {
         generation = ++state.generation;
         state.state = "running";
         check_queue_.push_back([this, name = entry.name, check = entry.symbols.check,
-                                services = entry.loaded ? services_ : nullptr, file, generation] {
+                                services = entry.loaded ? services_ : nullptr, file, generation,
+                                on_demand] {
             ConfigCheckContext context;
             context.services = services;
             context.budget = kConfigCheckBudget;
-            context.cancelled = [this, name, generation] {
+            context.on_demand = on_demand;
+            // Counted from when the check STARTS, not when it was queued.
+            context.deadline = std::chrono::steady_clock::now() + kConfigCheckBudget;
+            context.cancelled = [this, name, generation, deadline = context.deadline] {
+                if (std::chrono::steady_clock::now() >= deadline) return true;
                 std::lock_guard<std::mutex> lock(checks_mutex_);
                 return stopping_ || checks_[name].generation != generation;
             };
@@ -389,8 +394,10 @@ json PluginConfigEndpoint::Apply(Entry& entry, const json& file) {
                 unused[path] = common::UnusedReason(entry.schema, *field, file).value_or("");
             }
         }
-        // Recorded as applied: nothing about these differs for the plugin.
-        entry.applied = file;
+        // NOT recorded as applied: a restart-only field saved while unused
+        // was never applied, and once a live condition field makes it used
+        // the diff must still show it (else "live" would skip a restart it
+        // needs). Pending already ignores fields unused on both sides.
         return {{"applied", "none"}, {"changed", json::array()}, {"unused", std::move(unused)}};
     }
     // Live only when the plugin is running, every changed field is live, and
@@ -516,7 +523,7 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
             if (entry.symbols.check == nullptr) {
                 return json{{"error", entry.name + " has no config check"}}.dump();
             }
-            StartCheck(entry, ReadFile(entry));
+            StartCheck(entry, ReadFile(entry), /*on_demand=*/true);
             return json{{"started", true}}.dump();
         }
         return json{{"error", "unknown method '" + method +

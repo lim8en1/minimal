@@ -127,9 +127,16 @@ void minimal_plugin_check_config(const nlohmann::json& config,
             return;
         }
     }
+    // A query may be billed (a paid search API): only when asked for (`c`).
+    if (!context.on_demand) {
+        report.Ok("search.api_url", "not queried on save (a search may cost) -- press c to check "
+                                    "it for real");
+        out = report.rows();
+        return;
+    }
     const std::string separator = settings.search_api_url.find('?') == std::string::npos ? "?" : "&";
     const auto probe = minimal::plugins::ProbeHttp(
-        settings.search_api_url + separator + "q=minimal&count=1", bearer, context.budget,
+        settings.search_api_url + separator + "q=minimal&count=1", bearer, context.remaining(),
         context.cancelled);
     if (probe.ok) {
         report.Ok("search.api_url", "answers a query");

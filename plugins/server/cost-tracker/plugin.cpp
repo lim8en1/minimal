@@ -276,9 +276,12 @@ void minimal_plugin_check_config(const nlohmann::json& config,
                   context.services->Find(minimal::config::kSecretsServiceName))
             : nullptr;
     const auto settings = minimal::cost_tracker::ParseCostSettings(config, resolver);
-    const auto timeout = std::min(context.budget, std::chrono::milliseconds(settings.rates_fetch_timeout_ms));
     for (std::size_t i = 0; i < settings.rate_sources.size(); ++i) {
         if (context.cancelled()) break;
+        // What is LEFT of the one budget: sources probed one after another
+        // never take a full budget each.
+        const auto timeout =
+            std::min(context.remaining(), std::chrono::milliseconds(settings.rates_fetch_timeout_ms));
         const auto& source = settings.rate_sources[i];
         const std::string at = "rate_sources[" + std::to_string(i) + "].";
         std::string bearer;

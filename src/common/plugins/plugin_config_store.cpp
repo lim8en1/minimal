@@ -139,8 +139,18 @@ json ParseFieldValue(const json& field, std::string_view text) {
     // string_list, string_map, json: the text is JSON.
     const json parsed = json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (parsed.is_discarded()) return fail("must be JSON, got " + Quote(text));
-    if (type == "string_list" && !parsed.is_array()) return fail("must be a JSON list of strings");
-    if (type == "string_map" && !parsed.is_object()) return fail("must be a JSON object");
+    const auto all_strings = [](const json& node) {
+        for (const auto& element : node) {
+            if (!element.is_string()) return false;
+        }
+        return true;
+    };
+    if (type == "string_list" && !(parsed.is_array() && all_strings(parsed))) {
+        return fail("must be a JSON list of strings");
+    }
+    if (type == "string_map" && !(parsed.is_object() && all_strings(parsed))) {
+        return fail("must be a JSON object of strings");
+    }
     if (type == "object_list" && !parsed.is_array()) return fail("must be a JSON list of objects");
     if (type == "object_map" && !parsed.is_object()) return fail("must be a JSON object of entries");
     return parsed;
@@ -230,15 +240,41 @@ ConfigChange DiffConfig(const json& schema, const json& before, const json& afte
     return change;
 }
 
-std::string DisplayValue(const json& field, const json& value) {
+json MaskSecrets(const json& field, const json& value) {
     if (field.value("secret", false) && value.is_string()) {
         const std::string text = value.get<std::string>();
-        if (text.empty() || text.rfind("secret:", 0) == 0 || text.rfind("env:", 0) == 0) {
-            return value.dump();
-        }
-        return "\"****\"";
+        const bool reference =
+            text.empty() || text.rfind("secret:", 0) == 0 || text.rfind("env:", 0) == 0;
+        return reference ? value : json("****");
     }
-    return value.is_null() ? "(unset)" : value.dump();
+    if (!field.contains("items") || !field.at("items").is_array()) return value;
+    // A list's or a map's items: each item field masked in place, at its
+    // path inside the item.
+    const auto mask_item = [&field](json item) {
+        if (!item.is_object()) return item;
+        for (const auto& item_field : field.at("items")) {
+            const std::string path = item_field.value("path", "");
+            if (const json* inner = ConfigGet(item, path)) {
+                ConfigSet(item, path, MaskSecrets(item_field, *inner));
+            }
+        }
+        return item;
+    };
+    json out = value;
+    if (out.is_array()) {
+        for (auto& item : out) item = mask_item(item);
+    } else if (out.is_object()) {
+        for (auto& [name, item] : out.items()) item = mask_item(item);
+    }
+    return out;
+}
+
+bool HoldsMaskedSecret(const json& field, const json& value) {
+    return MaskSecrets(field, value) != value;
+}
+
+std::string DisplayValue(const json& field, const json& value) {
+    return value.is_null() ? "(unset)" : MaskSecrets(field, value).dump();
 }
 
 json ReadPluginConfigFile(const std::filesystem::path& path, const std::string& label) {

@@ -132,7 +132,7 @@ void minimal_plugin_check_config(const nlohmann::json& config,
                                                               base + "/embeddings", key)) {
             report.Fail("api_key", *problem);
         } else {
-            const auto share = context.budget / 2;
+            const auto share = context.remaining() / 2;
             std::string listing_problem;
             if (const auto served = minimal::plugins::ListOpenAiModels(base, key, share,
                                                                        context.cancelled,

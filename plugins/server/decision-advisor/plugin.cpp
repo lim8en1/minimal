@@ -117,9 +117,17 @@ void minimal_plugin_check_config(const nlohmann::json& config,
         out = report.rows();
         return;
     }
-    // One attempt, the check's budget (a cold local model loads first).
+    // The real call is a billed completion: only when asked for (`c`), never
+    // on every save of any field.
+    if (!context.on_demand) {
+        report.Ok("endpoint", "key resolved; not called on save (a model call costs) -- press c "
+                              "to check it for real");
+        out = report.rows();
+        return;
+    }
+    // One attempt, the check's remaining budget (a cold local model loads first).
     settings.max_retries = 0;
-    settings.request_timeout_ms = static_cast<int>(context.budget.count());
+    settings.request_timeout_ms = static_cast<int>(context.remaining().count());
     settings.budget_ms = settings.request_timeout_ms;
     const nlohmann::json state = {{"tool_name", "read_file"},
                                   {"summary", "read README.md"},
@@ -156,7 +164,7 @@ void minimal_plugin_check_config(const nlohmann::json& config,
         if (slash != std::string::npos) {
             std::string problem;
             if (const auto served = minimal::plugins::ListOpenAiModels(
-                    settings.endpoint.substr(0, slash), key, context.budget, context.cancelled, problem)) {
+                    settings.endpoint.substr(0, slash), key, context.remaining(), context.cancelled, problem)) {
                 if (const auto missing = minimal::plugins::ModelNotServed(settings.model, *served)) {
                     report.Fail("model", *missing);
                 }

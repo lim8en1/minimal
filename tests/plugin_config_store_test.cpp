@@ -69,6 +69,9 @@ TEST_CASE("command-line text parses by the field's type, with the schema's limit
     CHECK(common::ParseFieldValue(Field("net.url"), "http://x?a=1") == "http://x?a=1");
     CHECK(common::ParseFieldValue(Field("names"), R"(["a","b"])") == json::array({"a", "b"}));
     CHECK_THROWS(common::ParseFieldValue(Field("names"), "a,b"));
+    // Elements too: [1, 2] is not a list of strings (it was accepted, and a
+    // list item's draft took it, only for the whole list to be refused later).
+    CHECK_THROWS(common::ParseFieldValue(Field("names"), "[1, 2]"));
 }
 
 TEST_CASE("the effective config is the file over the defaults", "[plugin_config_store]") {
@@ -144,6 +147,31 @@ TEST_CASE("a secret's literal is masked; a reference is shown", "[plugin_config_
     CHECK(common::DisplayValue(Field("key"), "secret:openai") == "\"secret:openai\"");
     CHECK(common::DisplayValue(Field("key"), "env:KEY") == "\"env:KEY\"");
     CHECK(common::DisplayValue(Field("limit"), 5) == "5");
+}
+
+TEST_CASE("a secret inside a list's or a map's items is masked too", "[plugin_config_store]") {
+    // Regression: only a top-level secret field was masked, so `minimal
+    // plugin cost-tracker` (and /config's raw editor) printed a rate
+    // source's literal api_key.
+    const json list_field = {{"path", "rate_sources"},
+                             {"type", "object_list"},
+                             {"items", json::array({{{"path", "url"}, {"type", "string"}},
+                                                    {{"path", "api_key"}, {"type", "string"},
+                                                     {"secret", true}}})}};
+    const json sources = json::array({{{"url", "https://a"}, {"api_key", "sk-live-1"}},
+                                      {{"url", "https://b"}, {"api_key", "env:KEY"}}});
+    const std::string shown = common::DisplayValue(list_field, sources);
+    CHECK(shown.find("sk-live-1") == std::string::npos);
+    CHECK(shown.find("****") != std::string::npos);
+    CHECK(shown.find("env:KEY") != std::string::npos);   // a reference is shown
+    CHECK(shown.find("https://a") != std::string::npos);
+    CHECK(common::HoldsMaskedSecret(list_field, sources));
+    CHECK_FALSE(common::HoldsMaskedSecret(list_field, json::array({{{"api_key", "env:KEY"}}})));
+
+    json map_field = list_field;
+    map_field["type"] = "object_map";
+    const json by_name = {{"one", {{"api_key", "sk-live-2"}}}};
+    CHECK(common::DisplayValue(map_field, by_name).find("sk-live-2") == std::string::npos);
 }
 
 TEST_CASE("the file: missing reads as {}, an empty config removes it", "[plugin_config_store]") {

@@ -11,6 +11,7 @@
 // The helpers below are the probes most checks need; each answers "fine" or
 // a sentence a user can act on.
 
+#include <algorithm>
 #include <chrono>
 #include <functional>
 #include <optional>
@@ -30,10 +31,24 @@ struct ConfigCheckContext {
     // host -- an HTTP probe, an executable -- and says what it skipped.
     const ServiceRegistry* services = nullptr;
     // True once the answer is no longer wanted (a newer save, the server
-    // stopping): a long probe should give up.
+    // stopping, the budget spent): a long probe should give up.
     std::function<bool()> cancelled = [] { return false; };
-    // The whole check's time; a single probe takes a share of it.
+    // The whole check's time; a single probe takes a share of it -- at most
+    // remaining(): probes one after another share ONE budget, they do not
+    // each get it.
     std::chrono::milliseconds budget{0};
+    // When the budget runs out (cancelled() turns true then too).
+    std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+    std::chrono::milliseconds remaining() const {
+        if (deadline == std::chrono::steady_clock::time_point::max()) return budget;
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        return std::max(left, std::chrono::milliseconds(0));
+    }
+    // The user asked for this check (/config's `c`), rather than a save
+    // starting it. A probe that costs money -- a model call, a paid search
+    // query -- runs only then: every save of any field would bill one.
+    bool on_demand = false;
 };
 
 // A check's findings: what minimal_plugin_check_config writes to `out`.
