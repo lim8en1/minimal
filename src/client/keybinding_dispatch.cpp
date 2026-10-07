@@ -584,10 +584,6 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         }
         return true;
     }
-    if (ctx.keymap.Matches("panel.toggle", event)) {
-        ctx.show_panel = !ctx.show_panel;
-        return true;
-    }
     if (ctx.keymap.Matches("chat.load_older", event)) {
         // Session-keyed fetch: a sessionless tab has no scrollback to page.
         if (const std::string session = ctx.app.FocusedSessionId(); !session.empty()) {

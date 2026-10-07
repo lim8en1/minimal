@@ -89,3 +89,4 @@ add_subdirectory(markdown-md4c)
 
 add_subdirectory(consent-prompts)
 add_subdirectory(prompt-editor)
+add_subdirectory(tools-panel)

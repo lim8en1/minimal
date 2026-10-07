@@ -639,7 +639,7 @@ renames it). Bundled actions (see `bundled/keybindings.json`):
 `tab.next`, `tab.previous`, `tab.goto.1` … `tab.goto.9` (`alt+1` … `alt+9`, the
 number the tab bar shows), `group.previous`, `group.next`, `jump.attention`,
 `session.picker`, `agent.picker`, `model.picker`,
-`permission.cycle`, `panel.toggle`, `panel.focus.next`, `panel.focus.prev`,
+`permission.cycle`, `panel.focus.next`, `panel.focus.prev`,
 `tab.close`, `chat.load_older`,
 `chat.scroll_up`, `chat.scroll_down`, `chat.scroll_bottom`, `chat.row_up`,
 `chat.row_down`, `chat.toggle_collapse`, `chat.toggle_collapse_all`,
@@ -710,8 +710,7 @@ One undo step — `prompt.undo` brings the text back. Prompt editor only.
 | `status_format` | string | built-in default | segment ids in braces with literal text between; the default is `{activity} · {tokens} · {cost?} · {token_detail?}{>}{model} · {agent} · {permission_mode}`. Core ids: `activity`, `tokens`, `model`, `agent`, `permission_mode`, `session`, `paused`, `version`; plugin ids (e.g. cost-view's `cost`, `token_detail`) too. An unknown id is warned about at startup unless it is written `{id?}` -- optional, for a plugin segment that may not be installed. A plugin segment cannot take a core id: it is ignored with a warning. `{>}` right-aligns everything after it. An empty segment takes its separator with it; when the bar overflows, whole segments drop lowest-priority first (`version`, `token_detail`, `session` … `permission_mode` last) — a value is never clipped |
 | `scrollback_window_max_messages` | int | `0` (= built-in) | must be positive if set |
 | `tool_output_buffer_bytes` | int | `0` | |
-| `tools_panel_stdout_buffer_lines` | int | `0` | distinct from the server's `tools_view.stdout_buffer_lines` |
-| `panel_height` | int | unset (12) | rows for the tools panel and plugin panels; minimum 3 |
+| `panel_height` | int | unset (12) | rows for a panel's content (the tools panel and every plugin panel); minimum 3 |
 | `fold_thinking` | string | `"auto"` | the startup auto-fold default for thinking rows: `auto` (built-in default), `expanded` or `collapsed`; anything else → warning + `auto`. `chat.toggle_thinking_fold` (`ctrl+alt+t`) flips it for every open tab and persists the new value back here |
 | `fold_tools` | string | `"auto"` | same for tool-activity rows; `chat.toggle_tool_fold` (`ctrl+alt+o`). `collapsed` also folds `ask_user` results — the explicit setting outranks the `ask` display kind's built-in "always show answers" default |
 | `theme` | string | `""` (= `"dark"`) | names `themes/<name>.json`; unknown name → terminal defaults + warning |

@@ -33,6 +33,7 @@
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/view/prompt_host.hpp"
+#include "minimal/client/view/tab_activity.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/rpc/server.hpp"
@@ -1717,7 +1718,6 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Escape before "
     const auto keys = minimal::client::Keybindings::Parse(R"({"turn.cancel": "escape"})");
     const auto keymap = minimal::client::ResolvedKeymap::Build(keys);
 
-    bool show_panel = false;
     bool show_plugin_modal = false;
     std::vector<minimal::client::plugins::PluginViewEntry> plugin_views;
     std::shared_ptr<ftxui::Component> plugin_modal_child;
@@ -1726,7 +1726,7 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Escape before "
 
     minimal::client::KeyContext ctx{
         app, keymap, tab,
-        show_panel, show_plugin_modal,
+        show_plugin_modal,
         plugin_views, plugin_modal_child,
         [] {}, [] {}, [] {},
         [&] { quit_requested = true; },
@@ -1779,7 +1779,6 @@ TEST_CASE("HandleGlobalKey: an idle Escape clears a lingering notice, but only "
     const auto keys = minimal::client::Keybindings::Parse(R"({"turn.cancel": "escape"})");
     const auto keymap = minimal::client::ResolvedKeymap::Build(keys);
 
-    bool show_panel = false;
     bool show_plugin_modal = false;
     std::vector<minimal::client::plugins::PluginViewEntry> plugin_views;
     std::shared_ptr<ftxui::Component> plugin_modal_child;
@@ -1787,7 +1786,7 @@ TEST_CASE("HandleGlobalKey: an idle Escape clears a lingering notice, but only "
 
     minimal::client::KeyContext ctx{
         app, keymap, tab,
-        show_panel, show_plugin_modal,
+        show_plugin_modal,
         plugin_views, plugin_modal_child,
         [] {}, [] {}, [] {},
         [&] { quit_requested = true; },
@@ -1836,7 +1835,6 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Tab before a "
     const auto keys = minimal::client::Keybindings::Parse("{}");
     const auto keymap = minimal::client::ResolvedKeymap::Build(keys);
 
-    bool show_panel = false;
     bool show_plugin_modal = false;
     std::vector<minimal::client::plugins::PluginViewEntry> plugin_views;
     plugin_views.push_back(ConsumingPanel("test.panel", /*visible=*/true, /*focused=*/true));
@@ -1845,7 +1843,7 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Tab before a "
 
     minimal::client::KeyContext ctx{
         app, keymap, tab,
-        show_panel, show_plugin_modal,
+        show_plugin_modal,
         plugin_views, plugin_modal_child,
         [] {}, [] {}, [] {}, [] {},
         [](const std::string&) {},
@@ -1971,4 +1969,25 @@ TEST_CASE("MakeMentionSuggestor: a bare @ queries the root listing, and tabs "
     REQUIRE(a_answer.has_value());
     REQUIRE(a_answer->size() == 1);
     CHECK((*a_answer)[0] == "src/");
+}
+
+TEST_CASE("TabActivityFeed: a new snapshot only when something in it changed",
+          "[app_state][tab_activity]") {
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+    AppState app(fixture.client);
+    client::TabActivityFeed feed;
+
+    const auto empty = feed.Get(app);
+    CHECK(empty->tabs.empty());
+    CHECK(feed.Get(app) == empty);   // nothing changed: the same snapshot
+
+    const auto tab = app.OpenTab(fixture.Options("first"));
+    const auto opened = feed.Get(app);
+    REQUIRE(opened->tabs.size() == 1);
+    CHECK(opened->version > empty->version);
+    CHECK(opened->tabs[0].tab_id == tab);
+    CHECK(opened->tabs[0].state == "idle");
+    CHECK(feed.Get(app) == opened);
 }

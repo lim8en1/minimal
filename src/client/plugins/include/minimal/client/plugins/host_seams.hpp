@@ -105,6 +105,7 @@ public:
     std::vector<KeyBindingInfo> KeyBindings() const override;
     std::vector<CommandCatalogEntry> CommandCatalog() const override;
     std::vector<std::string> ThemeNames() const override;
+    std::shared_ptr<const TabActivitySnapshot> Activity() const override;
 
     // The TUI's half of the reads, once it is built (after Attach); until
     // then both answer empty. UI thread, like the reads themselves.
@@ -112,6 +113,7 @@ public:
         std::function<std::vector<KeyBindingInfo>()> key_bindings;
         std::function<std::vector<CommandCatalogEntry>()> command_catalog;
         std::function<std::vector<std::string>()> theme_names;
+        std::function<std::shared_ptr<const TabActivitySnapshot>()> activity;
     };
     void AttachReads(UiReads reads);
 

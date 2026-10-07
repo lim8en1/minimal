@@ -70,7 +70,7 @@ minimal/
       startup/  # sanity_check: validates the loaded config against the registries
       session/  # SQLite store, migrations, SessionReader, message_codec, ulid
     client/
-      view/     # tab_bar, chat_view, prompt_editor, status_bar, session_picker, tools_panel
+      view/     # tab_bar, chat_view, prompt_host, status_bar, frame_renderer, tab_activity
       render/   # markdown_renderer, streaming_markdown_view, syntax_highlighter, theme
       plugins/  # client loader, view/renderer registries
       session_client.{hpp,cpp}  app.cpp
@@ -1430,11 +1430,11 @@ Blocking subagents auto-focus their tab (the parent is stuck waiting anyway); no
 
 ### Running-tools panel
 
-Cross-session (that is what distinguishes it from chat): command summary, agent/session, status, started-at, live stdout.
+Cross-session (that is what distinguishes it from chat): command summary, agent/session, status, started-at, live stdout. A bundled client plugin (`tools-panel`, the `tools.panel` view) over `HostUi::Activity` (EXTENSIBILITY.md §4.2).
 
 - `ToolExecutionEvent` carries `summary` and `started_at_unix_ms`.
 - `ToolOutputDeltaEvent{tool_use_id, chunk}` carries live output, produced via `ToolContext::emit_output`.
-- **Bounded at both ends**: the client keeps a ring buffer of `tools_view.stdout_buffer_lines` (default 100); the server coalesces on a ~100 ms timer and sends **only the tail that fits**, so a 50 MB `make` neither floods gRPC nor competes with turn traffic.
+- **Bounded at both ends**: the client keeps a capped live buffer per tool and the bundled `tools-panel` shows its last `output_lines` (default 100); the server coalesces on a ~100 ms timer and sends **only the tail that fits**, so a 50 MB `make` neither floods gRPC nor competes with turn traffic.
 - The live view is **lossy by design** — a tail, answering "is this progressing?". The authoritative record is the capped, persisted `ToolResultBlock`. Two artifacts, two jobs.
 
 With parallel tool dispatch (width 4 by default) the multi-row case is the common one, not just subagents and long bash commands; rows correlate on `tool_use_id`, so interleaved events from concurrent executions of one session render correctly.

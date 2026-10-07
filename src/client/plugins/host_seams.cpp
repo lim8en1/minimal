@@ -191,6 +191,13 @@ std::vector<CommandCatalogEntry> HostFocusProvider::CommandCatalog() const {
     return reads_.command_catalog ? reads_.command_catalog() : std::vector<CommandCatalogEntry>{};
 }
 
+std::shared_ptr<const TabActivitySnapshot> HostFocusProvider::Activity() const {
+    if (reads_.activity) {
+        if (auto snapshot = reads_.activity()) return snapshot;
+    }
+    return HostUi::Activity();
+}
+
 std::vector<std::string> HostFocusProvider::ThemeNames() const {
     return reads_.theme_names ? reads_.theme_names() : std::vector<std::string>{};
 }
@@ -330,6 +337,9 @@ public:
         return host_.CommandCatalog();
     }
     std::vector<std::string> ThemeNames() const override { return host_.ThemeNames(); }
+    std::shared_ptr<const TabActivitySnapshot> Activity() const override {
+        return host_.Activity();
+    }
     void RequestRedrawAfter(std::chrono::milliseconds delay) override {
         host_.RequestRedrawAfter(delay);
     }

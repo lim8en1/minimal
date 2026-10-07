@@ -65,12 +65,7 @@ public:
         plugins::StatusSegmentRegistry& status_registry;
         plugins::MarkdownEngine& engine;
 
-        bool& show_panel;
-        int panel_height;   // rows for the tools panel and plugin panels (ui.json panel_height)
-        // ui.json's tools_panel_stdout_buffer_lines, or the built-in default
-        // (100) -- already resolved by the caller (RunTui), same "0 means
-        // default" convention AppState::SetUiBounds uses.
-        int tools_panel_stdout_buffer_lines;
+        int panel_height;   // rows for a plugin panel's content (ui.json panel_height)
         ftxui::Component editor;   // shared_ptr: cheap to copy, same ComponentBase as RunTui's own
 
         const std::vector<StatusSegment>& status_format;
@@ -122,41 +117,6 @@ private:
     std::map<std::string, int> plugin_throws_;
     TabHitBoxes tab_hits_;   // the tab bar's cells, as last laid out   // consecutive, per key; -1 = disabled
 
-    // Tools-panel render cache: RenderToolsPanel's input fetches every tab's
-    // tool rows (state.hpp's copy-on-publish `buffered_output` -- cheap since
-    // the buffer became a shared pointer, but still an O(rows) rebuild), so
-    // it must not redo that on frames where nothing the panel shows moved.
-    // Keyed on what the panel ACTUALLY renders, not on UiVersion: UiVersion
-    // moves on every wire event -- every text/thinking delta included -- and
-    // with it the panel used to rebuild (and deep-copy tool output) on
-    // streaming frames that changed nothing here. The key:
-    //   - AppState::ToolsVersion(): any tab's tool-row/output/rename change;
-    //   - the tab count: rows appear/disappear with tabs, which bump no
-    //     per-session version;
-    //   - Theme::epoch(): the panel bakes colors into its Elements at build
-    //     time, so the /theme swap must force one rebuild.
-    // A missed-bump race (a change landing between key read and rebuild) is
-    // harmless: the key only gates a cache, and the next differing key
-    // rebuilds with the newer data.
-    struct PanelCacheKey {
-        uint64_t tools_version;
-        std::size_t tab_count;
-        uint64_t theme_epoch;
-        // Seconds-since-epoch, but ONLY while some tab is actively running a
-        // tool (else left at 0). ToolsVersion bumps on row MUTATIONS, never
-        // on the mere passage of time, so a silent long-running tool (no
-        // wire events) left the cached panel's "elapsed" column frozen even
-        // though the app's own pump thread keeps forcing repaints for it.
-        // Bucketing to whole seconds while running (and pinning to 0 when
-        // idle) invalidates the cache about once a second exactly when
-        // there's an elapsed counter to update, without reintroducing a
-        // rebuild-every-frame cost while nothing is running.
-        std::int64_t elapsed_bucket = 0;
-        bool operator==(const PanelCacheKey&) const = default;
-    };
-    ftxui::Element tools_panel_cache_;
-    PanelCacheKey tools_panel_cache_key_{};
-    bool tools_panel_cache_valid_ = false;
 };
 
 }  // namespace minimal::client

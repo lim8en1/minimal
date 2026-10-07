@@ -1,4 +1,5 @@
 #include "minimal/client/view/frame_renderer.hpp"
+#include "minimal/client/view/tab_activity.hpp"
 
 #include <chrono>
 #include <string_view>
@@ -7,7 +8,6 @@
 #include "minimal/client/view/chat_view.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/view/tab_bar.hpp"
-#include "minimal/client/view/tools_panel.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/client/policy.hpp"
@@ -18,32 +18,6 @@
 namespace minimal::client {
 
 namespace {
-
-// The {activity} status segment: short text for "is the model doing
-// something right now", distinct from the tab bar's glyph (tab_bar.cpp's
-// StateGlyph) -- this is the FOCUSED session's detail, spelled out, where the
-// glyph is a compact per-tab signal. Idle/unknown renders nothing, same rule
-// every other segment follows (an empty value = the segment isn't shown).
-//
-// Reads the LIGHT per-tab snapshot (TabSnapshot), not deps_.focused_details
-// (the DEEP snapshot): focused_details is TabMaintenance's CACHED output,
-// refreshed on its own schedule, not necessarily every render -- state and
-// tool name are exactly the "cheap facts" TakeLightSnapshot exists for
-// (fresh every single Render() call, the same source the tab bar's own
-// live-updating glyph already reads), so sourcing this from the deep
-// snapshot would have shown a stale activity a frame or more behind the
-// glyph right next to it.
-const char* StateWord(SessionStateKind state) {
-    switch (state) {
-        case SessionStateKind::Thinking: return "thinking";
-        case SessionStateKind::Working: return "working";
-        case SessionStateKind::Waiting: return "waiting";
-        case SessionStateKind::Error: return "error";
-        case SessionStateKind::Done: return "done";
-        case SessionStateKind::Idle: return "idle";
-    }
-    return "idle";
-}
 
 // The focused tab as the status segments see it (plugins::TabStatus).
 // Reads the focused tab's DEEP snapshot (focused_details) and its row in the
@@ -345,44 +319,8 @@ ftxui::Element FrameRenderer::Render() {
         }
     }
 
-    if (deps_.show_panel) {
-        // Rebuilt only when something the panel actually shows changed --
-        // keyed on ToolsVersion/tab-count/theme-epoch, NOT UiVersion (which
-        // moves on every text delta; see frame_renderer.hpp for the key's
-        // rationale). With the key matching, the fetch is still cheap: the
-        // per-tool output views are copy-on-publish shared pointers.
-        bool any_running = false;
-        for (const auto& snap : tabs) {
-            if (snap.state == SessionStateKind::Working) {
-                any_running = true;
-                break;
-            }
-        }
-        const std::int64_t elapsed_bucket =
-            any_running ? std::chrono::duration_cast<std::chrono::seconds>(
-                              std::chrono::system_clock::now().time_since_epoch())
-                              .count()
-                        : 0;
-        const PanelCacheKey key{deps_.app.ToolsVersion(), tabs.size(), deps_.theme.epoch(),
-                                 elapsed_bucket};
-        if (!tools_panel_cache_valid_ || !(key == tools_panel_cache_key_)) {
-            const auto panel_tabs = deps_.app.GetAllTabs(/*include_tool_output=*/true);
-            // vscroll_indicator: every other scrollable yframe region in the
-            // frame (chat, plugin panels below, the pickers) has one; this
-            // was the one silent exception.
-            tools_panel_cache_ =
-                RenderToolsPanel(panel_tabs, deps_.tools_panel_stdout_buffer_lines, deps_.theme) |
-                yframe | size(HEIGHT, LESS_THAN, deps_.panel_height) | vscroll_indicator;
-            tools_panel_cache_key_ = key;
-            tools_panel_cache_valid_ = true;
-        }
-        rows.push_back(tools_panel_cache_);
-    }
-
-    // Plugin PANEL views, beside the tools panel -- moved here (this used to
-    // sit after the status bar, rendering every plugin panel BELOW it,
-    // contradicting this very comment) so they actually land next to the
-    // tools panel they're described as beside. Events reach the FOCUSED one
+    // Plugin PANEL views (the tools panel is one), above the editor. Events
+    // reach the FOCUSED one
     // through the frame's CatchEvent (see with_keys and
     // keybinding_dispatch.cpp); here focus is presentation only: every panel
     // is framed and titled, the focused one's border in the focus color, the

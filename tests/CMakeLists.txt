@@ -375,6 +375,9 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     # session-status: the status bar's usual segments.
     "${CMAKE_SOURCE_DIR}/plugins/client/session-status/session_status.cpp"
     session_status_test.cpp
+    # tools-panel: every tab's tool calls.
+    "${CMAKE_SOURCE_DIR}/plugins/client/tools-panel/tools_panel.cpp"
+    tools_panel_test.cpp
     # prompt-editor: the prompt editor the editor tests drive.
     "${CMAKE_SOURCE_DIR}/plugins/client/prompt-editor/prompt_editor.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/client/prompt-editor/prompt_editor_factory.cpp"
@@ -414,6 +417,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit"
     "${CMAKE_SOURCE_DIR}/plugins/client/consent-prompts"
     "${CMAKE_SOURCE_DIR}/plugins/client/prompt-editor"
+    "${CMAKE_SOURCE_DIR}/plugins/client/tools-panel"
     "${CMAKE_SOURCE_DIR}/plugins/client/syntax-grammars"
     "${CMAKE_SOURCE_DIR}/plugins/client/markdown-md4c"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")

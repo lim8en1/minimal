@@ -39,9 +39,9 @@ add_library(minimal_client_core SHARED
     view/chat_view.cpp
     view/prompt_host.cpp
     view/status_bar.cpp
-    view/tools_panel.cpp
     view/picker_controller.cpp
     view/tab_ui.cpp
+    view/tab_activity.cpp
     view/frame_renderer.cpp
     view/modal_host.cpp
     view/schema_form_model.cpp

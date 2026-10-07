@@ -65,7 +65,6 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
     // past the cap.
     bounded_int("tool_output_buffer_bytes", config.tool_output_buffer_bytes,
                 kMinToolOutputBufferBytes);
-    bounded_int("tools_panel_stdout_buffer_lines", config.tools_panel_stdout_buffer_lines, 1);
     bounded_int("panel_height", config.panel_height, 3);
 
     // The fold defaults: an enum-as-string, not a bare int -- users hand-edit

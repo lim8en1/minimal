@@ -88,6 +88,43 @@ struct KeyBindingInfo {
     int order = 0;            // within the group, as core lists it
 };
 
+// One tool call a tab has seen, as the tools panel shows it. Running ones
+// and the recent finished ones; the persisted transcript is the record.
+struct ToolActivity {
+    std::string name;                     // "tool" when the server sent none
+    std::string summary;                  // one line: the tool's own, or its input's
+    bool running = false;
+    bool failed = false;                  // finished with an error
+    std::int64_t started_at_unix_ms = -1; // -1 = unknown
+    std::int64_t duration_ms = -1;        // -1 while running (or unknown)
+    // Its live output so far: lossy (head and tail of a capped buffer),
+    // shared and immutable. Null when there is none.
+    std::shared_ptr<const std::string> output;
+};
+
+// One tab, for views that show every tab (the tools panel).
+struct TabActivity {
+    std::string tab_id;
+    std::string session_id;     // "" while the tab has no session
+    std::string display_name;
+    // "idle", "thinking", "working", "waiting", "error" or "done".
+    std::string state;
+    bool attention = false;     // waiting on the user, or raised by a plugin
+    bool focused = false;
+    bool subagent = false;
+    bool view_only = false;     // a transcript tab: nothing to send on
+    std::int64_t root_ordinal = 0;   // which root session's tree, in open order
+    std::uint32_t spawn_seq = 0;     // within it: 0 the root, then children
+    std::vector<ToolActivity> tools;
+};
+
+// Every open tab, in tab order. `version` moves only when something here
+// changed: a view keyed on it rebuilds on change, not on every frame.
+struct TabActivitySnapshot {
+    std::uint64_t version = 0;
+    std::vector<TabActivity> tabs;
+};
+
 class HostUi {
 public:
     virtual ~HostUi() = default;
@@ -126,6 +163,11 @@ public:
     virtual std::vector<CommandCatalogEntry> CommandCatalog() const = 0;
     // The themes there are to switch to (the themes dir's files, by name).
     virtual std::vector<std::string> ThemeNames() const = 0;
+    // Every tab and its tool calls. Never null. (The default: no tabs.)
+    virtual std::shared_ptr<const TabActivitySnapshot> Activity() const {
+        static const auto kNone = std::make_shared<const TabActivitySnapshot>();
+        return kNone;
+    }
 };
 
 // --- Host actions -------------------------------------------------------------

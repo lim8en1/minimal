@@ -34,7 +34,6 @@
 #include "minimal/client/view/chat_view.hpp"
 #include "prompt_editor_fixture.hpp"
 #include "minimal/client/view/prompt_host.hpp"
-#include "minimal/client/view/tools_panel.hpp"
 
 using namespace minimal::client;
 using namespace minimal_test;
@@ -2076,38 +2075,6 @@ TEST_CASE("prompt editor: arrowing past the suggestion viewport scrolls the "
     const std::string frame = RenderFrame(editor);
     CHECK(frame.find("cmd10") != std::string::npos);   // the selection is visible
     CHECK(frame.find("cmd0 ") == std::string::npos);   // the head scrolled away
-}
-
-// ---------------------------------------------------------------------------
-// Running-tools panel
-// ---------------------------------------------------------------------------
-
-TEST_CASE("tools panel: the yframe scrolls to the newest tool, not stuck at the top",
-          "[tools_panel]") {
-    // The bug: RenderToolsPanel never called focus() on anything, so the
-    // yframe frame_renderer.cpp wraps it in had no descendant to auto-scroll
-    // to -- it stayed pinned at offset 0 (the header and the first tool)
-    // forever, and later tools never became visible.
-    const auto theme = TestTheme();
-    AppState::TabSnapshot tab;
-    tab.tab_id = "tab-1";
-    tab.display_name = "session";
-    for (int i = 0; i < 10; ++i) {
-        ToolExecutionState tool;
-        tool.tool_use_id = "t-" + std::to_string(i);
-        tool.tool_name = "tool" + std::to_string(i);
-        tool.started = true;
-        tab.tools.push_back(std::move(tool));
-    }
-    const std::vector<AppState::TabSnapshot> tabs = {tab};
-
-    // A viewport far shorter than the 11 rows (1 header + 10 tools) this
-    // produces.
-    const auto frame = RenderElement(
-        RenderToolsPanel(tabs, /*stdout_buffer_lines=*/5, theme) | ftx::yframe,
-        /*width=*/40, /*height=*/6);
-    CHECK(frame.find("tool9") != std::string::npos);
-    CHECK(frame.find("tool0") == std::string::npos);
 }
 
 // ============================================================================

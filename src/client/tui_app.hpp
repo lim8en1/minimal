@@ -45,6 +45,7 @@
 #include "minimal/client/view/modal_stack.hpp"
 #include "minimal/client/view/picker_controller.hpp"
 #include "minimal/client/view/prompt_host.hpp"
+#include "minimal/client/view/tab_activity.hpp"
 #include "minimal/client/view/tab_ui.hpp"
 
 namespace minimal::client::app {
@@ -176,7 +177,8 @@ private:
     // Shared: AppState's hooks (run on the RPC worker too) keep it alive.
     std::shared_ptr<const LastSelectionStore> last_selection_;
     MentionQuerySlots mention_slots_;
-    bool show_panel_ = false;
+    // HostUi::Activity's snapshot, rebuilt on change.
+    TabActivityFeed activity_feed_;
     // Every modal's visibility flag lives in the stack (view/modal_stack.hpp);
     // these names are references into it.
     ModalStack modals_;

@@ -68,7 +68,6 @@ constexpr KnownAction kKnown[] = {
     {"session.picker", "open or resume a session"},
     {"agent.picker", "switch agent"},
     {"model.picker", "switch model"},
-    {"panel.toggle", "show / hide the tools panel"},
     {"panel.focus.next", "focus the next panel"},
     {"panel.focus.prev", "focus the previous panel"},
     {"app.quit", "quit"},
