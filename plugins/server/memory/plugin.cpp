@@ -109,4 +109,71 @@ void minimal_plugin_register_context_contributors(
     registry.Register(minimal::memory::MakeMemoryIndexContributor(runtime));
 }
 
+// The embedding backend the strategy picks, for real: an http backend
+// lists the model (where it lists models at all) and embeds a word; a
+// sidecar's interpreter runs; the tagger's model ref resolves.
+void minimal_plugin_check_config(const nlohmann::json& config,
+                                 const minimal::plugins::ConfigCheckContext& context,
+                                 nlohmann::json& out) {
+    using minimal::memory::StrategyKind;
+    minimal::plugins::CheckReport report;
+    const auto settings = minimal::memory::ParseMemorySettings(config);
+    StrategyKind strategy = settings.strategy;
+    if (strategy == StrategyKind::kAuto) {
+        strategy = !settings.sidecar_model.empty() ? StrategyKind::kSidecar
+                   : !settings.api_base.empty()    ? StrategyKind::kHttp
+                                                   : StrategyKind::kNone;
+    }
+    if (strategy == StrategyKind::kHttp) {
+        std::string base = settings.api_base;
+        while (!base.empty() && base.back() == '/') base.pop_back();
+        std::string key;
+        if (const auto problem = minimal::plugins::ResolveKey(context.services, settings.api_key,
+                                                              base + "/embeddings", key)) {
+            report.Fail("api_key", *problem);
+        } else {
+            const auto share = context.budget / 2;
+            std::string listing_problem;
+            if (const auto served = minimal::plugins::ListOpenAiModels(base, key, share,
+                                                                       context.cancelled,
+                                                                       listing_problem)) {
+                if (const auto missing = minimal::plugins::ModelNotServed(settings.model, *served)) {
+                    report.Fail("model", *missing);
+                }
+            }
+            const nlohmann::json request = {{"model", settings.model}, {"input", {"check"}}};
+            const auto probe = minimal::plugins::ProbeHttp(base + "/embeddings", key, share,
+                                                           context.cancelled, true, request.dump());
+            if (probe.ok) {
+                report.Ok("api_base", "embeds with " + settings.model);
+            } else {
+                report.Fail(probe.status == 401 || probe.status == 403 ? "api_key" : "api_base",   // NOLINT(readability-magic-numbers): HTTP status codes
+                            probe.problem);
+            }
+        }
+    } else if (strategy == StrategyKind::kSidecar) {
+        const std::string python =
+            settings.sidecar_python_path.empty() ? "python3" : settings.sidecar_python_path;
+        if (const auto problem = minimal::plugins::ExecutableProblem(python)) {
+            report.Fail("sidecar_python_path", *problem);
+        } else {
+            report.Ok("sidecar_python_path", python + " runs (fastembed itself is checked when the sidecar starts)");
+        }
+    } else {
+        report.Ok("strategy", "no embedding backend: lexical search");
+    }
+    if (!settings.tagger_model.empty()) {
+        if (const auto problem = minimal::plugins::ModelRefProblem(context.services, settings.tagger_model)) {
+            if (problem->rfind("not checked", 0) == 0) {
+                report.Warn("tagger_model", *problem);
+            } else {
+                report.Fail("tagger_model", *problem);
+            }
+        } else {
+            report.Ok("tagger_model", settings.tagger_model + " resolves");
+        }
+    }
+    out = report.rows();
+}
+
 }  // extern "C"

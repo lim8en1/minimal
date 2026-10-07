@@ -101,4 +101,43 @@ void minimal_plugin_register_permission_models(
         minimal::tools_web::ParseWebSettings(context.config)));
 }
 
+// The search API answers a query, with its key, as JSON.
+void minimal_plugin_check_config(const nlohmann::json& config,
+                                 const minimal::plugins::ConfigCheckContext& context,
+                                 nlohmann::json& out) {
+    minimal::plugins::CheckReport report;
+    const auto* resolver =
+        context.services != nullptr
+            ? static_cast<const minimal::config::SecretResolver*>(
+                  context.services->Find(minimal::config::kSecretsServiceName))
+            : nullptr;
+    const auto settings = minimal::tools_web::ParseWebSettings(config, resolver);
+    if (settings.search_api_url.empty()) {
+        report.Ok("search.api_url", "web search is off (no search API)");
+        out = report.rows();
+        return;
+    }
+    std::string bearer;
+    if (settings.search_api_key.configured()) {
+        try {
+            bearer = settings.search_api_key.Get().value;
+        } catch (const std::exception& error) {
+            report.Fail("search.api_key", error.what());
+            out = report.rows();
+            return;
+        }
+    }
+    const std::string separator = settings.search_api_url.find('?') == std::string::npos ? "?" : "&";
+    const auto probe = minimal::plugins::ProbeHttp(
+        settings.search_api_url + separator + "q=minimal&count=1", bearer, context.budget,
+        context.cancelled);
+    if (probe.ok) {
+        report.Ok("search.api_url", "answers a query");
+    } else {
+        report.Fail(probe.status == 401 || probe.status == 403 ? "search.api_key" : "search.api_url",   // NOLINT(readability-magic-numbers): HTTP status codes
+                    probe.problem);
+    }
+    out = report.rows();
+}
+
 }  // extern "C"

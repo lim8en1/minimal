@@ -25,6 +25,7 @@
 #include "minimal/common/plugin_config_label.hpp"
 #include "minimal/common/plugin_config_schema.hpp"
 #include "minimal/plugins/plugin_abi.h"
+#include "systemone_client.hpp"
 #include "minimal/plugins/service_registry.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 
@@ -78,6 +79,76 @@ void minimal_plugin_register_permission_advisor(
 
     registry.Register(std::make_shared<minimal::decision_advisor::DecisionAdvisor>(
         settings, std::move(api_key), minimal::net::HttpClient{}));
+}
+
+// One real call, as a tool call would make it, with no retries: the
+// endpoint answers, the key is accepted, the answer parses, and the model
+// that answered is the one configured. A refusal is put on the field it is
+// about; where the backend lists its models (an OpenAI-shaped server beside
+// /systemone), a model it does not serve is named.
+void minimal_plugin_check_config(const nlohmann::json& config,
+                                 const minimal::plugins::ConfigCheckContext& context,
+                                 nlohmann::json& out) {
+    using minimal::decision_advisor::ParseSettings;
+    minimal::plugins::CheckReport report;
+    auto settings = ParseSettings(minimal::decision_advisor::LoadBundledSettings(
+                                      minimal::common::ConfigDir() /
+                                      minimal::decision_advisor::kBundledSettingsFile),
+                                  config);
+    std::string key;
+    if (const auto problem =
+            minimal::plugins::ResolveKey(context.services, settings.api_key, settings.endpoint, key)) {
+        report.Fail("api_key", *problem);
+        out = report.rows();
+        return;
+    }
+    // One attempt, the check's budget (a cold local model loads first).
+    settings.max_retries = 0;
+    settings.request_timeout_ms = static_cast<int>(context.budget.count());
+    settings.budget_ms = settings.request_timeout_ms;
+    const nlohmann::json state = {{"tool_name", "read_file"},
+                                  {"summary", "read README.md"},
+                                  {"tool_input", {{"path", "README.md"}}}};
+    const auto outcome = minimal::decision_advisor::AskSystemOne(
+        minimal::net::HttpClient{}, settings, key, state, context.cancelled);
+    if (outcome.ok) {
+        report.Ok("endpoint", "answers (" + std::to_string(outcome.total.count()) + " ms)");
+        if (!settings.api_key.empty()) report.Ok("api_key", "accepted");
+        if (!outcome.answered_model.empty() && outcome.answered_model != settings.model) {
+            report.Warn("model", "the backend answered as " + outcome.answered_model);
+        } else {
+            report.Ok("model", settings.model);
+        }
+        out = report.rows();
+        return;
+    }
+    const std::string& reason = outcome.abstain_reason;
+    // The reason carries the status first ("HTTP 401 (invalid key)").
+    if (reason.rfind("HTTP 401", 0) == 0 || reason.rfind("HTTP 403", 0) == 0) {
+        report.Fail("api_key", "the backend refused the key (" + reason + ")");
+    } else if (reason == "budget exhausted") {
+        report.Fail("endpoint", "no answer within " + std::to_string(context.budget.count() / 1000) + " s");
+    } else if (reason == "unparseable response body" ||
+               reason == "response carries no 'action' choice answer") {
+        report.Fail("endpoint", "answered, but not as a systemone API (" + reason + ") -- the wrong URL?");
+    } else {
+        report.Fail("endpoint", reason);
+    }
+    // A model the server does not serve is the usual cause of a 4xx from a
+    // local router: ask the server what it serves, where it says.
+    if (reason.rfind("HTTP 4", 0) == 0) {
+        const auto slash = settings.endpoint.rfind('/');
+        if (slash != std::string::npos) {
+            std::string problem;
+            if (const auto served = minimal::plugins::ListOpenAiModels(
+                    settings.endpoint.substr(0, slash), key, context.budget, context.cancelled, problem)) {
+                if (const auto missing = minimal::plugins::ModelNotServed(settings.model, *served)) {
+                    report.Fail("model", *missing);
+                }
+            }
+        }
+    }
+    out = report.rows();
 }
 
 }  // extern "C"

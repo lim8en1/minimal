@@ -45,6 +45,8 @@
 #include "minimal/plugins/plugin_abi.h"
 
 #include <fstream>
+#include <algorithm>
+#include <chrono>
 #include <memory>
 
 #include "cost_command.hpp"
@@ -259,6 +261,52 @@ void minimal_plugin_register_services(
     static minimal::cost_tracker::CostEndpoint endpoint(*SharedRpc(), *SharedHub());
     registry.Provide(
         minimal::plugins::PluginEndpointServiceName(minimal::cost_tracker::kPluginName), &endpoint);
+}
+
+// Each rate source fetched as the refresh would, without storing anything:
+// it answers, the key is accepted, and the snapshot holds prices in the
+// shape its format says -- each finding on that entry's url or api_key.
+void minimal_plugin_check_config(const nlohmann::json& config,
+                                 const minimal::plugins::ConfigCheckContext& context,
+                                 nlohmann::json& out) {
+    minimal::plugins::CheckReport report;
+    const auto* resolver =
+        context.services != nullptr
+            ? static_cast<const minimal::config::SecretResolver*>(
+                  context.services->Find(minimal::config::kSecretsServiceName))
+            : nullptr;
+    const auto settings = minimal::cost_tracker::ParseCostSettings(config, resolver);
+    const auto timeout = std::min(context.budget, std::chrono::milliseconds(settings.rates_fetch_timeout_ms));
+    for (std::size_t i = 0; i < settings.rate_sources.size(); ++i) {
+        if (context.cancelled()) break;
+        const auto& source = settings.rate_sources[i];
+        const std::string at = "rate_sources[" + std::to_string(i) + "].";
+        std::string bearer;
+        if (source.api_key.configured()) {
+            try {
+                bearer = source.api_key.Get().value;
+            } catch (const std::exception& error) {
+                report.Fail(at + "api_key", error.what());
+                continue;
+            }
+        }
+        const auto probe = minimal::plugins::ProbeHttp(source.url, bearer, timeout, context.cancelled);
+        if (!probe.ok) {
+            report.Fail(at + (probe.status == 401 || probe.status == 403 ? "api_key" : "url"),   // NOLINT(readability-magic-numbers): HTTP status codes
+                        probe.problem);
+            continue;
+        }
+        const auto rates = minimal::cost_tracker::IngestPrices(source.format, probe.body);
+        if (rates.empty()) {
+            report.Fail(at + "url", std::string("answered, but holds no prices in the ") +
+                                        minimal::cost_tracker::RateFormatName(source.format) +
+                                        " shape -- another format?");
+        } else {
+            report.Ok(at + "url", std::to_string(rates.size()) + " models priced");
+        }
+    }
+    if (settings.rate_sources.empty()) report.Ok("rate_sources", "nothing to fetch");
+    out = report.rows();
 }
 
 }  // extern "C"

@@ -137,4 +137,17 @@ bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error
     }
 }
 
+// The interpreter runs.
+void minimal_plugin_check_config(const nlohmann::json& config,
+                                 const minimal::plugins::ConfigCheckContext&, nlohmann::json& out) {
+    minimal::plugins::CheckReport report;
+    const auto settings = minimal::tools_python::ParsePythonSettings(config);
+    if (const auto problem = minimal::plugins::ExecutableProblem(settings.python)) {
+        report.Fail("python", *problem);
+    } else {
+        report.Ok("python", settings.python + " runs");
+    }
+    out = report.rows();
+}
+
 }  // extern "C"
