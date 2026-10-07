@@ -56,6 +56,9 @@ RateSourceSettings ParseRateSource(config::Reader& entry, std::set<std::string>&
         if (*format == RateFormatName(candidate)) source.format = candidate;
     }
     source.name = entry.String("name", *format, /*allow_empty=*/false);
+    // Its default is the item's own format, not a constant: none recorded
+    // (the sample's would label every unnamed source with the sample's).
+    entry.Default("name", nullptr);
     if (!ValidSourceName(source.name)) {
         entry.Fail("name", "may contain only letters, digits, '-', '_' and '.'");
     }

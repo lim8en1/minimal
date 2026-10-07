@@ -711,3 +711,146 @@ TEST_CASE("config-view: filters ignore case; reopening keeps the form and the se
     const std::string frame = minimal_test::RenderFrame(component, 100, 30);
     CHECK(frame.find("enter: choose") != std::string::npos);   // still on mode (an enum)
 }
+
+namespace {
+
+// A plugin whose config holds a list of objects (cost-tracker's rate_sources).
+const json kListDescribe = json::parse(R"({
+  "name": "lists", "file": "plugins.d/lists.json",
+  "schema": {"file": "plugins.d/lists.json", "fields": [
+    {"path": "sources", "type": "object_list", "apply": "restart",
+     "default": [{"format": "openrouter", "url": "https://or"}],
+     "item_template": {"format": "litellm-proxy", "url": "https://"},
+     "items": [
+       {"path": "format", "type": "enum", "choices": ["litellm", "openrouter", "litellm-proxy"]},
+       {"path": "url", "type": "string", "required": true},
+       {"path": "api_key", "type": "string", "default": "", "secret": true}
+     ]},
+    {"path": "timeout_ms", "type": "integer", "default": 10}
+  ]},
+  "config": {"sources": [{"format": "litellm", "url": "https://a", "api_key": "sk-live"},
+                        {"format": "openrouter", "url": "https://b"}]}
+})");
+
+void Type(ftxui::Component& form, const std::string& text) {
+    for (const char c : text) minimal_test::SendEvent(form, ftxui::Event::Character(c));
+}
+
+}  // namespace
+
+TEST_CASE("form rows: an object list shows a row per item, masked, and an add row",
+          "[schema_form][object_list]") {
+    const auto rows = client::BuildFormRows(kListDescribe);
+    REQUIRE(rows.size() == 5);
+    CHECK(rows[0].path == "sources");
+    CHECK(rows[0].shown == "2 entries");
+    CHECK(rows[1].item == 0);
+    CHECK(rows[1].shown == "litellm  https://a  \"****\"");   // a literal key never shows
+    CHECK(rows[2].item == 1);
+    CHECK(rows[2].shown == "openrouter  https://b");
+    CHECK(rows[3].add_item);
+    CHECK(rows[4].path == "timeout_ms");
+    CHECK(client::ActionFor(rows[1]) == client::FormAction::kOpen);
+    CHECK(client::ActionFor(rows[3]) == client::FormAction::kOpen);
+
+    CHECK(client::ItemDraft(rows[3]) == json({{"format", "litellm-proxy"}, {"url", "https://"}}));
+    CHECK(client::ListMoved(client::ListOf(rows[1]), 1, -1)[0]["url"] == "https://b");
+    CHECK(client::ListWithout(client::ListOf(rows[1]), 0).size() == 1);
+
+    json item = client::ItemDraft(rows[1]);
+    const auto item_rows = client::BuildFormRows(client::ItemDescribe(rows[0], item));
+    REQUIRE(item_rows.size() == 3);
+    std::string error;
+    CHECK_FALSE(client::SetItemField(item, item_rows[0], "nonsense", error));
+    CHECK(error.find("must be one of") != std::string::npos);
+    CHECK(client::SetItemField(item, item_rows[1], "https://c", error));
+    CHECK(item["url"] == "https://c");
+}
+
+TEST_CASE("schema form: an item opens as its own form and saves the whole list on leaving",
+          "[schema_form][object_list]") {
+    const auto theme = TestTheme();
+    auto state = FormState("plugins.d/lists.json", kListDescribe);
+    std::vector<std::pair<std::string, std::string>> sets;
+    auto form = client::ui_kit::MakeSchemaForm(
+        [&] { return state; },
+        {.on_set = [&](const std::string& path, const std::string& text) {
+             sets.emplace_back(path, text);
+             state.busy = true;
+         }},
+        theme);
+    (void)minimal_test::RenderFrame(form, 100, 30);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);   // item #1
+    minimal_test::SendEvent(form, ftxui::Event::Return);      // open it
+    std::string frame = minimal_test::RenderFrame(form, 100, 30);
+    CHECK(frame.find("›  sources #1") != std::string::npos);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);   // url
+    minimal_test::SendEvent(form, ftxui::Event::Return);      // edit
+    for (int i = 0; i < 9; ++i) minimal_test::SendEvent(form, ftxui::Event::Backspace);
+    Type(form, "https://z");
+    minimal_test::SendEvent(form, ftxui::Event::Return);      // into the draft only
+    CHECK(sets.empty());
+    minimal_test::SendEvent(form, ftxui::Event::Escape);      // save and back
+    REQUIRE(sets.size() == 1);
+    CHECK(sets[0].first == "sources");
+    const json sent = json::parse(sets[0].second);
+    REQUIRE(sent.size() == 2);
+    CHECK(sent[0]["url"] == "https://z");
+    CHECK(sent[0]["api_key"] == "sk-live");   // untouched fields go back as they were
+    CHECK(sent[1] == kListDescribe["config"]["sources"][1]);
+
+    // Refused: the item stays open with the plugin's reason.
+    state.busy = false;
+    state.generation = 2;
+    state.status = "sources[0].url: unreachable";
+    state.status_is_error = true;
+    frame = minimal_test::RenderFrame(form, 100, 30);
+    CHECK(frame.find("›  sources #1") != std::string::npos);
+    CHECK(frame.find("unreachable") != std::string::npos);
+
+    // Accepted: back on the list, the item selected.
+    minimal_test::SendEvent(form, ftxui::Event::Escape);
+    REQUIRE(sets.size() == 2);
+    state.busy = false;
+    state.generation = 3;
+    state.status = "saved";
+    state.status_is_error = false;
+    frame = minimal_test::RenderFrame(form, 100, 30);
+    CHECK(frame.find("›  sources #1") == std::string::npos);   // the item form's title
+    CHECK(frame.find("2 entries") != std::string::npos);
+}
+
+TEST_CASE("schema form: items are added, deleted on a second d, and moved",
+          "[schema_form][object_list]") {
+    const auto theme = TestTheme();
+    auto state = FormState("plugins.d/lists.json", kListDescribe);
+    std::vector<json> sent;
+    auto form = client::ui_kit::MakeSchemaForm(
+        [&] { return state; },
+        {.on_set = [&](const std::string&, const std::string& text) {
+             sent.push_back(json::parse(text));
+         }},
+        theme);
+    (void)minimal_test::RenderFrame(form, 100, 30);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);   // #1
+    minimal_test::SendEvent(form, ftxui::Event::Character('J'));
+    REQUIRE(sent.size() == 1);
+    CHECK(sent[0][0]["url"] == "https://b");
+    CHECK(sent[0][1]["url"] == "https://a");
+
+    minimal_test::SendEvent(form, ftxui::Event::Character('d'));
+    CHECK(sent.size() == 1);   // armed, not done
+    CHECK(minimal_test::RenderFrame(form, 100, 30).find("d again to delete") != std::string::npos);
+    minimal_test::SendEvent(form, ftxui::Event::Character('d'));
+    REQUIRE(sent.size() == 2);
+    CHECK(sent[1].size() == 1);
+
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);   // + add
+    minimal_test::SendEvent(form, ftxui::Event::Return);
+    CHECK(minimal_test::RenderFrame(form, 100, 30).find("(new)") != std::string::npos);
+    minimal_test::SendEvent(form, ftxui::Event::Escape);      // a new item saves as is
+    REQUIRE(sent.size() == 3);
+    CHECK(sent[2].size() == 3);
+    CHECK(sent[2][2] == json({{"format", "litellm-proxy"}, {"url", "https://"}}));
+}

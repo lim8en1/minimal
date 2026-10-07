@@ -38,6 +38,47 @@ FormRow FieldRow(const json& field, const json& describe, const std::string& lab
     return row;
 }
 
+// One item's line: its set values in schema order, secrets masked.
+std::string ItemSummary(const json& items, const json& item) {
+    std::string out;
+    for (const auto& field : items) {
+        const std::string key = field.value("path", "");
+        const json value = item.is_object() && item.contains(key) ? item.at(key)
+                                                                  : field.value("default", json());
+        if (value.is_null() || (value.is_string() && value.get<std::string>().empty())) continue;
+        std::string shown = common::DisplayValue(field, value);
+        if (value.is_string() && shown == value.dump()) shown = value.get<std::string>();
+        out += (out.empty() ? "" : "  ") + shown;
+    }
+    return out.empty() ? "(empty)" : out;
+}
+
+// `row`, and for an object list its item rows and add row.
+void AppendField(std::vector<FormRow>& rows, FormRow row) {
+    if (row.type != "object_list") {
+        rows.push_back(std::move(row));
+        return;
+    }
+    const json list = row.value.is_array() ? row.value : json::array();
+    const json items = row.field.value("items", json::array());
+    row.shown = list.empty() ? "(none)" : std::to_string(list.size()) + (list.size() == 1 ? " entry" : " entries");
+    const FormRow base = row;
+    rows.push_back(std::move(row));
+    for (std::size_t i = 0; i < list.size(); ++i) {
+        FormRow item = base;
+        item.item = static_cast<int>(i);
+        item.label = std::to_string(i + 1);
+        item.shown = ItemSummary(items, list[i]);
+        rows.push_back(std::move(item));
+    }
+    FormRow add = base;
+    add.add_item = true;
+    add.label = "+";
+    add.shown = "add an entry";
+    add.overridden = false;
+    rows.push_back(std::move(add));
+}
+
 }  // namespace
 
 std::vector<FormRow> BuildFormRows(const json& describe) {
@@ -49,12 +90,12 @@ std::vector<FormRow> BuildFormRows(const json& describe) {
         const std::string path = field.value("path", "");
         const auto dot = path.find('.');
         if (dot == std::string::npos) {
-            top.push_back(FieldRow(field, describe, path));
+            AppendField(top, FieldRow(field, describe, path));
             continue;
         }
         const std::string group = path.substr(0, dot);
         if (!groups.count(group)) group_order.push_back(group);
-        groups[group].push_back(FieldRow(field, describe, path.substr(dot + 1)));
+        AppendField(groups[group], FieldRow(field, describe, path.substr(dot + 1)));
     }
     std::vector<FormRow> rows = std::move(top);
     for (const auto& group : group_order) {
@@ -68,6 +109,7 @@ std::vector<FormRow> BuildFormRows(const json& describe) {
 }
 
 FormAction ActionFor(const FormRow& row, bool can_pick) {
+    if (row.item >= 0 || row.add_item) return FormAction::kOpen;
     if (row.type == "boolean") return FormAction::kToggle;
     if (can_pick && (row.type == "enum" || row.field.contains("format"))) return FormAction::kPick;
     if (row.type == "enum") return FormAction::kCycle;
@@ -100,6 +142,60 @@ int NextFieldRow(const std::vector<FormRow>& rows, int from, int step) {
         if (!rows[i].header) return i;
     }
     return from;
+}
+
+json ListOf(const FormRow& row) { return row.value.is_array() ? row.value : json::array(); }
+
+json ItemDraft(const FormRow& row) {
+    const json list = ListOf(row);
+    if (row.item >= 0 && row.item < static_cast<int>(list.size())) return list[row.item];
+    const json sample = row.field.value("item_template", json::object());
+    return sample.is_object() ? sample : json::object();
+}
+
+json ItemDescribe(const FormRow& list_row, const json& item) {
+    return {{"schema", {{"fields", list_row.field.value("items", json::array())}}},
+            {"config", item.is_object() ? item : json::object()}};
+}
+
+bool SetItemField(json& item, const FormRow& row, const std::string& text, std::string& error) {
+    try {
+        common::ConfigSet(item, row.path, common::ParseFieldValue(row.field, text));
+        return true;
+    } catch (const std::exception& failure) {
+        error = failure.what();
+        return false;
+    }
+}
+
+void UnsetItemField(json& item, const FormRow& row) { common::ConfigUnset(item, row.path); }
+
+json ListWithItem(const json& list, int index, const json& item) {
+    json out = list.is_array() ? list : json::array();
+    if (index >= 0 && index < static_cast<int>(out.size())) {
+        out[index] = item;
+    } else {
+        out.push_back(item);
+    }
+    return out;
+}
+
+json ListWithout(const json& list, int index) {
+    json out = list.is_array() ? list : json::array();
+    if (index >= 0 && index < static_cast<int>(out.size())) out.erase(out.begin() + index);
+    return out;
+}
+
+json ListMoved(const json& list, int index, int step) {
+    json out = list.is_array() ? list : json::array();
+    const int size = static_cast<int>(out.size());
+    if (index < 0 || index >= size) return out;
+    const int to = std::clamp(index + step, 0, size - 1);
+    if (to == index) return out;
+    json moved = out[index];
+    out.erase(out.begin() + index);
+    out.insert(out.begin() + to, std::move(moved));
+    return out;
 }
 
 }  // namespace minimal::client
