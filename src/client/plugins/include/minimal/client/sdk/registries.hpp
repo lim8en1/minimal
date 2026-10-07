@@ -374,7 +374,8 @@ using PromptEditorRegistry = ExclusiveSlot<PromptEditorFactory, PromptEditorKey>
 // fatal, like every additive key.
 class MessageRendererRegistry : public RegistryBase {
 public:
-    bool empty() const override { return renderers_.empty(); }
+    // Claims and fallbacks alike, as every additive registry counts them.
+    bool empty() const override { return renderers_.empty() && fallbacks_.empty(); }
     void Register(ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer);
     // A default for `kind` that any Register() of it replaces (the bundled
     // chat-renderers). Two fallbacks for one kind collide.
