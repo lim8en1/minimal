@@ -312,7 +312,11 @@ object code.
   within `ConfigCheckContext::budget`, and shows each finding on the field it
   names (`path`: a dotted field path, `list[i].field`, `map.<name>.field`,
   or `""` for the plugin) as ✓/⚠/✗ with its message. A newer save cancels a
-  check in flight (`context.cancelled()`). It also runs for a plugin that is
+  check in flight (`context.cancelled()`), and so does the budget running
+  out: probes made one after another share it -- give each
+  `context.remaining()`, never the whole `budget`. A probe that costs money
+  (a model call, a paid search query) runs only when `context.on_demand`
+  (the user pressed `c`); after a save, say it was skipped. It also runs for a plugin that is
   not running, with `context.services` null: probe what needs no host, say
   what was skipped. Findings are information -- never a refusal (validation
   refuses) -- and a check has no side effects beyond its probes.

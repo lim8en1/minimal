@@ -30,6 +30,9 @@ struct FormRow {
     std::string unused;
     nlohmann::json value;     // the effective value
     nlohmann::json field;     // the schema field
+    // The value carries a literal secret somewhere inside (an item's
+    // api_key): `shown` masks it, and nothing may open the raw value.
+    bool holds_secret = false;
     // An object_list field is followed by one row per item and an "add"
     // row. Those carry the LIST's path, field and value; `item` is the
     // item's index (-1 on every other row), `add_item` marks the add row.

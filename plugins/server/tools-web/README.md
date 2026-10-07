@@ -128,4 +128,4 @@ pointer is missing instead of returning one that leads nowhere.
 
 ## Config check
 
-`/config` checks this plugin's settings after each save and on `c` (docs/PLUGINS.md, "Config checks"). `search.api_url` answers a query (`?q=...&count=1`) as JSON, with `search.api_key` when set; a refused key is reported on the key.
+`/config` checks this plugin's settings after each save and on `c` (docs/PLUGINS.md, "Config checks"). A search may be billed, so the query runs on `c` alone, not after a save: `search.api_url` answers a query (`?q=...&count=1`) as JSON, with `search.api_key` when set; a refused key is reported on the key.

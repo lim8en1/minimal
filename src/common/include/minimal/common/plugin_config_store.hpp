@@ -64,7 +64,12 @@ ConfigChange DiffConfig(const nlohmann::json& schema, const nlohmann::json& befo
                         const nlohmann::json& after);
 
 // A value as shown to a person: a secret field's literal is masked ("sk-...
-// " -> "****"); a "secret:"/"env:" reference is shown as written.
+// " -> "****"); a "secret:"/"env:" reference is shown as written. Secrets
+// inside a structured value -- a list's or a map's items (`rate_sources[]`'s
+// api_key) -- are masked too, at every depth the schema describes.
+nlohmann::json MaskSecrets(const nlohmann::json& field, const nlohmann::json& value);
+// Whether showing `value` would need masking (a literal secret inside it).
+bool HoldsMaskedSecret(const nlohmann::json& field, const nlohmann::json& value);
 std::string DisplayValue(const nlohmann::json& field, const nlohmann::json& value);
 
 // The file: {} when it does not exist; throws config::ConfigError when it

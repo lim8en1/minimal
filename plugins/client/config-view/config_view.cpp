@@ -215,6 +215,7 @@ private:
             shown_ = form_;
             return;
         }
+        PollRunningListCheck();
         RebuildListIfStale();
         shown_ = list_;
     }
@@ -325,15 +326,23 @@ private:
     // A check in flight on the open plugin: its findings land in a later
     // describe, so ask again each second (and for the frame to show them).
     void PollRunningCheck() {
-        const auto form = feed_->form();
-        const bool running = form.describe.is_object() && form.describe.contains("checks") &&
-                             form.describe.at("checks").is_object() &&
-                             form.describe.at("checks").value("state", "") == "running";
-        if (!running || form.busy) return;
+        if (!feed_->form_check_running()) return;
         const auto now = std::chrono::steady_clock::now();
         if (now - last_check_poll_ >= kCheckPoll) {
             last_check_poll_ = now;
             feed_->Refresh();
+        }
+        if (ui_ != nullptr) ui_->RequestRedrawAfter(kCheckPoll);
+    }
+
+    // The same for the list: a row reads "checking..." until its check
+    // lands, which only a fresh list shows (going back right after a save).
+    void PollRunningListCheck() {
+        if (!feed_->list_check_running()) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_check_poll_ >= kCheckPoll) {
+            last_check_poll_ = now;
+            feed_->RefreshList();
         }
         if (ui_ != nullptr) ui_->RequestRedrawAfter(kCheckPoll);
     }
@@ -543,9 +552,16 @@ void ConfigFeed::RefreshList() {
 void ConfigFeed::FetchList() {
     const json answer = Call("list", json::object());
     std::lock_guard<std::mutex> lock(mu_);
+    list_check_running_ = false;
     if (answer.is_array()) {
         list_.rows = answer;   // every plugin: each can be toggled
         list_.status.clear();
+        for (const auto& row : list_.rows) {
+            if (row.is_object() && row.contains("checks") && row.at("checks").is_object() &&
+                row.at("checks").value("state", "") == "running") {
+                list_check_running_ = true;
+            }
+        }
     } else {
         // The previous answer is dropped, not kept beside the error: rows
         // from before a server restart showed "restart pending" for changes
@@ -606,7 +622,20 @@ void ConfigFeed::FetchDescribe(const std::string& name, std::string status,
         form_.status_is_error = !error_path.empty();
         form_.error_path = std::move(error_path);
     }
+    form_check_running_ = form_.describe.is_object() && form_.describe.contains("checks") &&
+                          form_.describe.at("checks").is_object() &&
+                          form_.describe.at("checks").value("state", "") == "running";
     ++form_.generation;
+}
+
+bool ConfigFeed::form_check_running() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return form_check_running_ && !form_.busy && !open_.empty();
+}
+
+bool ConfigFeed::list_check_running() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return list_check_running_;
 }
 
 void ConfigFeed::Edit(const std::string& method, json request) {

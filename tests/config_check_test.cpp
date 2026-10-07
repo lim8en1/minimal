@@ -112,11 +112,12 @@ decltype(plugins::PluginConfigSymbols::check) CheckOf(const std::string& stem) {
 }
 
 nlohmann::json Run(const std::string& stem, const nlohmann::json& config,
-                   std::chrono::milliseconds budget = 5s) {
+                   std::chrono::milliseconds budget = 5s, bool on_demand = false) {
     const auto check = CheckOf(stem);
     REQUIRE(check != nullptr);
     plugins::ConfigCheckContext context;
     context.budget = budget;
+    context.on_demand = on_demand;
     nlohmann::json out;
     check(config, context, out);
     return out;
@@ -189,8 +190,12 @@ TEST_CASE("bundled checks: the advisor puts a refused key on api_key", "[config_
     const std::string saved = previous != nullptr ? previous : "";
     ::setenv("MINIMAL_CONFIG_DIR", config_dir.path().c_str(), 1);
     test::LoopbackHttpServer server({Response(401, R"({"error": "invalid key"})")});
-    const auto results = Run("decision-advisor", {{"backend", "llama"},
-                                                  {"endpoint", server.url("/v1/systemone")}});
+    const auto results = Run("decision-advisor",
+                             {{"backend", "llama"}, {"endpoint", server.url("/v1/systemone")}}, 5s,
+                             /*on_demand=*/true);
+    // On a save (not asked for), the paid call is not made at all.
+    const auto on_save = Run("decision-advisor", {{"backend", "llama"},
+                                                  {"endpoint", "http://127.0.0.1:1/v1/systemone"}});
     if (previous != nullptr) {
         ::setenv("MINIMAL_CONFIG_DIR", saved.c_str(), 1);
     } else {
@@ -199,4 +204,9 @@ TEST_CASE("bundled checks: the advisor puts a refused key on api_key", "[config_
     INFO(results.dump());
     REQUIRE(At(results, "api_key").is_object());
     CHECK(At(results, "api_key").at("message") == "the backend refused the key (HTTP 401 (invalid key))");
+    INFO(on_save.dump());
+    REQUIRE(At(on_save, "endpoint").is_object());
+    CHECK(At(on_save, "endpoint").at("level") == "ok");
+    CHECK(At(on_save, "endpoint").at("message").get<std::string>().find("press c") !=
+          std::string::npos);
 }

@@ -58,6 +58,10 @@ public:
     };
     ListState list() const;
     client::SchemaFormState form() const;
+    // A check in flight, without copying any state (asked every frame): on
+    // the open plugin, idle (no edit awaiting its answer); on any listed one.
+    bool form_check_running() const;
+    bool list_check_running() const;
     // The plugin whose form is showing; "" on the list screen.
     std::string open_plugin() const;
     // Runs `task` on the feed's worker, after whatever is queued there.
@@ -77,6 +81,8 @@ private:
     ListState list_;
     std::string open_;
     client::SchemaFormState form_;
+    bool form_check_running_ = false;  // form_.describe's checks.state, kept beside it
+    bool list_check_running_ = false;  // any list_ row's
     // Last: destroyed first, so no task outlives the state above.
     plugins::TaskWorker worker_;
 };

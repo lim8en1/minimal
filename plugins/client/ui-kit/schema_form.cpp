@@ -622,8 +622,16 @@ private:
             return true;
         }
         // The raw JSON of a structured value, one line -- the escape hatch.
+        // Never over a literal secret inside it: the line would show the key
+        // the rows mask. Its items' own forms edit it, masked.
         if (raw_key && !IsEntryRow(*row) &&
             (row->type == "json" || row->type == "object_list" || row->type == "object_map")) {
+            if (row->holds_secret) {
+                armed_message_ = row->label +
+                                 " holds a secret: edit its items (Enter) -- the raw line would "
+                                 "show it";
+                return true;
+            }
             OpenEditor(*row, row->value.is_null() ? std::string() : row->value.dump());
             return true;
         }
