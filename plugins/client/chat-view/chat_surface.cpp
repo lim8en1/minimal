@@ -38,13 +38,9 @@ SurfaceConfig ParseSurfaceConfig(const nlohmann::json& config) {
                                                    "chat-view"));
     for (const auto& [key, field] : {std::pair{kFoldThinkingKey, &out.fold_thinking},
                                      std::pair{kFoldToolsKey, &out.fold_tools}}) {
-        const std::string name = reader.String(key, "auto");
-        const auto fold = FoldFrom(name);
-        if (!fold) {
-            throw std::runtime_error(std::string("chat-view: ") + key +
-                                     " must be \"auto\", \"expanded\" or \"collapsed\"");
-        }
-        *field = *fold;
+        // Reader's own enum: its location, its wording, and the recorded
+        // choices /config offers -- the same as every other plugin's.
+        *field = *FoldFrom(reader.Enum(key, "auto", {"auto", "expanded", "collapsed"}));
     }
     reader.Finish();
     return out;
@@ -101,15 +97,12 @@ void Surface::ToggleFold(Pane& origin, bool thinking) {
         next = thinking ? pane->view().ToggleThinkingFold() : pane->view().ToggleToolFold();
     }
     (thinking ? fold_thinking_ : fold_tools_) = next;
-    bool saved = false;
-    if (ui_ != nullptr) {
-        ui_->SaveState({{kFoldThinkingKey, FoldName(fold_thinking_)},
-                        {kFoldToolsKey, FoldName(fold_tools_)}});
-        saved = true;
-    }
+    const bool saved = ui_ != nullptr &&
+                       ui_->SaveState({{kFoldThinkingKey, FoldName(fold_thinking_)},
+                                       {kFoldToolsKey, FoldName(fold_tools_)}});
     origin.Notice(std::string(thinking ? "thinking rows: " : "tool rows: ") +
                   (next == kFoldCollapsed ? "collapsed" : "expanded") +
-                  (saved ? " (saved)" : ""));
+                  (saved ? " (saved)" : " -- NOT saved for the next start"));
 }
 
 // --- Pane -----------------------------------------------------------------------

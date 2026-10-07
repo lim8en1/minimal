@@ -136,9 +136,14 @@ public:
     // This plugin's own persisted state: what SaveState last stored, across
     // restarts (null when nothing was). A small JSON document per plugin in
     // the data dir; for preferences a view flips at run time. UI thread.
+    // SaveState answers whether the state is now on disk, so a view never
+    // claims "(saved)" for a preference the next start will not have.
     // (The defaults: nothing kept.)
     virtual nlohmann::json LoadState() const { return nullptr; }
-    virtual void SaveState(const nlohmann::json& state) { (void)state; }
+    virtual bool SaveState(const nlohmann::json& state) {
+        (void)state;
+        return false;
+    }
     // Every client plugin the TUI found, loaded or not. (The default: none.)
     virtual std::vector<ClientPluginInfo> ClientPlugins() const { return {}; }
     // Every tab and its tool calls. Never null. (The default: no tabs.)
@@ -194,8 +199,12 @@ public:
     // Turns client plugin `id` (ClientPluginInfo::id) on or off in
     // client-plugins.json, for the next TUI start; the focused tab's notice
     // says what happened. Refused for a plugin the TUI cannot start without
-    // (ClientPluginInfo::required).
-    virtual void SetClientPluginEnabled(const std::string& id, bool enabled) = 0;
+    // (ClientPluginInfo::required), or when the file cannot be read or
+    // written. `done` (optional) learns the outcome on the UI thread: "" when
+    // the file now says `enabled`, else why not -- an action is queued, so a
+    // view that opened over the tabs cannot see the notice it posts.
+    virtual void SetClientPluginEnabled(const std::string& id, bool enabled,
+                                        std::function<void(const std::string& refusal)> done) = 0;
 };
 
 // What a plugin may raise or clear. Core event derivation (the Waiting '!') is

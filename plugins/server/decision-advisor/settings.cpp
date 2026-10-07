@@ -46,6 +46,7 @@ nlohmann::json ReadLayer(config::Reader& reader) {
     for (const char* key : {"min_probability_allow", "min_probability_deny", "min_margin"}) {
         if (auto v = reader.MaybeDouble(key, 0.0, 1.0)) out[key] = *v;
     }
+    if (auto v = reader.MaybeBool("debug_decision_logging")) out["debug_decision_logging"] = *v;
     // Sent verbatim, so only their shape is the advisor's business.
     for (const char* key : {"questions", "extra_questions"}) {
         if (const auto* v = reader.Raw(key)) {
@@ -174,6 +175,9 @@ Settings ParseSettings(const nlohmann::json& bundled, const nlohmann::json& conf
     settings.min_margin = require_double(resolved, "min_margin");
 
     settings.deny_message = require_string(resolved, "deny_message");
+    const auto logging = resolved.MaybeBool("debug_decision_logging");
+    if (!logging) resolved.Fail("debug_decision_logging", unset);
+    settings.debug_decision_logging = *logging;
 
     // The rubric is sent verbatim, but the code acts on one answer of it: the
     // "action" choice over a fixed option set (decision.hpp). Check that

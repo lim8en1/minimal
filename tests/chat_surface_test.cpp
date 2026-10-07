@@ -44,7 +44,11 @@ public:
     std::vector<minimal::client::CommandCatalogEntry> CommandCatalog() const override { return {}; }
     std::vector<std::string> ThemeNames() const override { return {}; }
     nlohmann::json LoadState() const override { return state; }
-    void SaveState(const nlohmann::json& saved) override { state = saved; }
+    bool SaveState(const nlohmann::json& saved) override {
+        state = saved;
+        return saves_work;
+    }
+    bool saves_work = true;
 };
 
 class FakeChatHost final : public plugins::ChatHost {
@@ -121,6 +125,20 @@ TEST_CASE("chat surface: a fold toggle flips every pane and is kept", "[chat_sur
     chat_view::Surface next({}, &ui);
     CHECK(next.fold_thinking() ==
           (saved == "collapsed" ? chat_view::kFoldCollapsed : chat_view::kFoldExpanded));
+}
+
+TEST_CASE("chat surface: a fold toggle that could not be saved says so", "[chat_surface]") {
+    // Regression: the notice read "(saved)" whenever a host existed, so an
+    // unwritable data dir lost the preference while claiming to keep it.
+    StateUi ui;
+    ui.saves_work = false;
+    FakeChatHost host;
+    chat_view::Surface surface({}, &ui);
+    auto a = surface.Make(host, "tab-a", TestTheme());
+    a->OnAction("chat.toggle_tool_fold");
+    REQUIRE(host.notices.size() == 1);
+    CHECK(host.notices[0].find("(saved)") == std::string::npos);
+    CHECK(host.notices[0].find("NOT saved") != std::string::npos);
 }
 
 TEST_CASE("chat pane: draws a frame; the mouse outside the chat falls through",

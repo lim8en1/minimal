@@ -339,6 +339,12 @@ private:
     }
 
     void RebuildListIfStale() {
+        if (client_refused_->generation != seen_refusal_) {
+            seen_refusal_ = client_refused_->generation;
+            client_outcome_ = client_refused_->text;
+            client_outcome_newer_ = true;
+            ++client_outcome_generation_;
+        }
         const auto state = feed_->list();
         if (list_ && state.generation == built_generation_ &&
             client_outcome_generation_ == built_client_outcome_) {
@@ -458,7 +464,17 @@ private:
             } else if (actions_ == nullptr) {
                 client_outcome_ = "this TUI does not offer plugin toggles";
             } else {
-                actions_->SetClientPluginEnabled(plugin.id, !in_file);
+                // The host acts on its own queue; a refusal comes back here
+                // (its tab notice is behind this view) and undoes the toggle.
+                actions_->SetClientPluginEnabled(
+                    plugin.id, !in_file,
+                    [toggled = client_toggled_, refused = client_refused_,
+                     id = plugin.id](const std::string& refusal) {
+                        if (refusal.empty()) return;
+                        toggled->erase(id);
+                        refused->text = refusal;
+                        ++refused->generation;
+                    });
                 (*client_toggled_)[plugin.id] = !in_file;
                 client_outcome_ = plugin.name + (in_file ? " off" : " on") +
                                   (plugin.enabled == !in_file ? "" : " at the next TUI start");
@@ -481,6 +497,13 @@ private:
     // own list shows them; and what the last one did.
     std::shared_ptr<std::map<std::string, bool>> client_toggled_ =
         std::make_shared<std::map<std::string, bool>>();
+    // A toggle the host refused: why, and a count the list rebuild notices.
+    struct Refusal {
+        std::string text;
+        std::uint64_t generation = 0;
+    };
+    std::shared_ptr<Refusal> client_refused_ = std::make_shared<Refusal>();
+    std::uint64_t seen_refusal_ = 0;
     std::string client_outcome_;
     bool client_outcome_newer_ = false;   // newer than the feed's (server) outcome
     std::uint64_t client_outcome_generation_ = 0;

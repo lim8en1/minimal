@@ -521,9 +521,12 @@ public:
     void NewTab() override {}
     void OpenSession(const std::string&, bool) override {}
     void OpenSubagent(const std::string&, const std::string&, bool) override {}
-    void SetClientPluginEnabled(const std::string& id, bool enabled) override {
+    void SetClientPluginEnabled(const std::string& id, bool enabled,
+                                std::function<void(const std::string&)> done) override {
         toggles.emplace_back(id, enabled);
+        if (done) done(refusal);
     }
+    std::string refusal;   // what the next toggle answers ("" = done)
     std::vector<std::string> inserted;
     std::vector<std::string> themes;
     std::vector<std::pair<std::string, bool>> toggles;

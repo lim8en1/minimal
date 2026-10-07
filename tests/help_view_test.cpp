@@ -52,7 +52,8 @@ public:
     void NewTab() override {}
     void OpenSession(const std::string&, bool) override {}
     void OpenSubagent(const std::string&, const std::string&, bool) override {}
-    void SetClientPluginEnabled(const std::string&, bool) override {}
+    void SetClientPluginEnabled(const std::string&, bool,
+                                std::function<void(const std::string&)>) override {}
 
     std::unordered_map<std::string, std::string> keys = kKeys;
     std::vector<client::CommandCatalogEntry> catalog;

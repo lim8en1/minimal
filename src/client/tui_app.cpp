@@ -782,27 +782,39 @@ void TuiApp::OpenSubagent(const std::string& session_id, const std::string& pare
     picker_controller_->OpenSubagent(session_id, parent, is_live);
 }
 
-void TuiApp::SetClientPluginEnabled(const std::string& id, bool enabled) {
+void TuiApp::SetClientPluginEnabled(const std::string& id, bool enabled,
+                                    std::function<void(const std::string&)> done) {
+    // Every refusal is said twice: the focused tab's notice, and to the
+    // caller (a view open over the tabs hides the notice).
+    const auto refuse = [this, &done](const std::string& why) {
+        FocusedNotice(why);
+        if (done) done(why);
+    };
     const auto info = std::find_if(env_.client_plugins.begin(), env_.client_plugins.end(),
                                    [&id](const auto& plugin) { return plugin.id == id; });
     if (info == env_.client_plugins.end()) {
-        FocusedNotice("no client plugin '" + id + "'");
+        refuse("no client plugin '" + id + "'");
         return;
     }
     if (!enabled && !info->required.empty()) {
-        FocusedNotice("cannot turn " + info->name + " off: " + info->required +
-                      " -- the TUI would not start without it");
+        refuse("cannot turn " + info->name + " off: " + info->required +
+               " -- the TUI would not start without it");
         return;
     }
     // Re-read: the file may have been edited since startup. One that cannot
-    // be used as written is not rewritten over the user's bytes.
+    // be read, or used as written, is not rewritten over the user's bytes --
+    // "could not read it" must never become "it was empty".
     const auto path = env_.config_dir / "client-plugins.json";
     std::string contents;
-    (void)TryReadConfigFile(path, &contents);
+    std::error_code exists_ec;
+    if (std::filesystem::exists(path, exists_ec) && !TryReadConfigFile(path, &contents)) {
+        refuse("client-plugins.json could not be read -- not changed");
+        return;
+    }
     plugins::ClientPluginConfig file = plugins::ParseClientPluginConfig(contents);
     if (file.malformed || !file.problems.empty()) {
-        FocusedNotice("client-plugins.json cannot be used as written -- fix it first" +
-                      (file.problems.empty() ? std::string() : ": " + file.problems.front()));
+        refuse("client-plugins.json cannot be used as written -- fix it first" +
+               (file.problems.empty() ? std::string() : ": " + file.problems.front()));
         return;
     }
     const auto provenance = env_.client_plugin_provenance.at(id);
@@ -815,12 +827,13 @@ void TuiApp::SetClientPluginEnabled(const std::string& id, bool enabled) {
     }
     if (!found) file.plugins.push_back({id, provenance, enabled});
     if (!WriteConfigFileAtomic(path, plugins::SerializeClientPluginConfig(file))) {
-        FocusedNotice("could not write " + path.string());
+        refuse("could not write " + path.string());
         return;
     }
     info->enabled_in_file = enabled;
     FocusedNotice(info->name + (enabled ? " is on" : " is off") +
                   (enabled == info->enabled ? "" : " from the next TUI start"));
+    if (done) done("");
 }
 
 void TuiApp::InsertPrompt(const std::string& text) {
