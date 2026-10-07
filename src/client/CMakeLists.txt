@@ -64,12 +64,17 @@ target_link_libraries(minimal_client_core
         minimal::common
         minimal::proto
         nlohmann_json::nlohmann_json
-        # ftxui::component alone: it publicly links ftxui::dom and ftxui::screen,
-        # so naming them here too would put those archives on the link line
-        # twice (ld notes the duplicate).
-        ftxui::component
+        # ftxui's headers only: its code is linked into core whole, below.
+        $<COMPILE_ONLY:ftxui::component>
         minimal_tree_sitter
     PRIVATE
+        # ftxui is a static archive. Linked normally (and PUBLIC), every
+        # plugin module re-linked the archive and pulled in its own copy of
+        # each object core happened not to reference (CatchEvent, Checkbox,
+        # ...): four plugins carried several hundred duplicate ftxui symbols
+        # each. Whole, in core only, every ftxui symbol resolves against the
+        # one shared copy -- the reason core is SHARED in the first place.
+        "$<LINK_LIBRARY:WHOLE_ARCHIVE,ftxui::component,ftxui::dom,ftxui::screen>"
         spdlog::spdlog)
 
 set_target_properties(minimal_client_core PROPERTIES
