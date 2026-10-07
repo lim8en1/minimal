@@ -567,6 +567,14 @@ TEST_CASE("host reads answer empty until the TUI attaches them, then through eve
     CHECK(bound->KeyBindings()[0].key == "alt+down");
     REQUIRE(provider->CommandCatalog().size() == 1);
     CHECK(provider->CommandCatalog()[0].name == "cost");
+
+    // Detach drops them with app_: they reach into the TUI's own members,
+    // which unwind before the plugins (and their threads) do.
+    provider->Detach();
+    CHECK(bound->KeyBindings().empty());
+    CHECK(provider->CommandCatalog().empty());
+    CHECK(provider->Activity() != nullptr);  // the interface's "no tabs", never null
+    CHECK(provider->Activity()->tabs.empty());
 }
 
 TEST_CASE("attention state: plugin raise wins until cleared", "[client_plugins]") {
