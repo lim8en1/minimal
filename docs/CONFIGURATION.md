@@ -143,7 +143,7 @@ an error): tool plugins take their knobs from their own file,
 | `max_parallel_tool_calls` | int | `4` | 1..64; `1` = inline execution, no pool threads |
 | `max_input_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
 | `max_result_bytes` | int | `262144` (256 KiB) | ≥ 0; one tool result's text, the backstop for MCP and any tool that caps nothing; `0` disables the limit |
-| `max_result_window_percent` | int | `5` | 0..100; one result's share of the model's context window, converted to bytes at 2 bytes/token (5% of 1M tokens ≈ 100 KB); the cap is the smaller of this and `max_result_bytes`; `0` disables the window term |
+| `max_result_window_percent` | int | `10` | 0..100; one result's share of the model's context window, converted to bytes at 2 bytes/token (10% of 200k tokens ≈ 40 KB, of 1M ≈ 200 KB); the cap is the smaller of this and `max_result_bytes`; `0` disables the window term |
 | `max_display_bytes` | int | `131072` | ≥ 0; a tool result's client-only display payload over this is dropped (the client shows the text); `0` disables the limit |
 
 **Cut output is spilled, not lost.** A result over its cap (the tool's own, or

@@ -596,7 +596,7 @@ TEST_CASE("the result ceiling is a share of the context window, in bytes at 2 pe
           "[agent_loop][invariant]") {
     // Regression: the window's TOKEN count was used as a BYTE cap, so a 1M
     // window let one result take a megabyte -- the whole window or more.
-    // 5% of 1M tokens at 2 bytes/token is 100,000 bytes.
+    // 10% of 1M tokens at 2 bytes/token is 200,000 bytes.
     Harness h;
     std::string big;
     big.reserve(300000);
@@ -619,9 +619,9 @@ TEST_CASE("the result ceiling is a share of the context window, in bytes at 2 pe
     }
     REQUIRE(result != nullptr);
     const auto& text = std::get<llm::TextBlock>(result->content.front()).text;
-    const auto note = text.find("[Output cut to 100000 of ");
+    const auto note = text.find("[Output cut to 200000 of ");
     REQUIRE(note != std::string::npos);
-    CHECK(note < 100000 + 64);
+    CHECK(note < 200000 + 64);
     CHECK(text.rfind("row 0\n", 0) == 0);                       // the start
     CHECK(text.find(big.substr(big.size() - 40)) != std::string::npos);  // and the end
     // The whole result is spilled under the session's project root.
@@ -640,7 +640,7 @@ TEST_CASE("a tiny window still leaves the floor for a result", "[agent_loop][inv
     h.provider.PushResponse(TextResponse("done"));
 
     agent::AgentPreset preset;
-    preset.context_window_tokens = 1000;  // 5% = 50 tokens = 100 bytes: under the floor
+    preset.context_window_tokens = 1000;  // 10% = 100 tokens = 200 bytes: under the floor
     h.Build(std::move(preset), agent::LoopConfig{});
     h.loop->RunTurn(UserText("go"));
 

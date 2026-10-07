@@ -189,9 +189,9 @@ TEST_CASE("ParseSettingsConfig: max_result_bytes defaults to 256 KiB, must not b
                     std::runtime_error);
 }
 
-TEST_CASE("ParseSettingsConfig: max_result_window_percent defaults to 5, 0..100",
+TEST_CASE("ParseSettingsConfig: max_result_window_percent defaults to 10, 0..100",
          "[settings_config]") {
-    CHECK(ParseSettingsConfig(nlohmann::json::object()).tools.max_result_window_percent == 5);
+    CHECK(ParseSettingsConfig(nlohmann::json::object()).tools.max_result_window_percent == 10);
     CHECK(ParseSettingsConfig(nlohmann::json{{"tools", {{"max_result_window_percent", 0}}}})
               .tools.max_result_window_percent == 0);
     CHECK_THROWS_AS(ParseSettingsConfig(

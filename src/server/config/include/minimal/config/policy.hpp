@@ -28,10 +28,11 @@ inline constexpr std::int64_t kDefaultMaxToolInputBytes = 10 * common::kMiB;
 // that caps nothing.
 inline constexpr std::int64_t kDefaultMaxToolResultBytes = 256 * common::kKiB;
 // ...and one result's share of the model's context window, in percent: with
-// the window known, the cap is the smaller of the two (5% of 1M tokens is
-// ~100 KB at agent::kConservativeBytesPerToken; of 200k, ~20 KB). A few cut
-// results then leave the window to the conversation.
-inline constexpr std::int64_t kDefaultMaxToolResultWindowPercent = 5;
+// the window known, the cap is the smaller of the two (10% of 128k tokens is
+// ~26 KB at agent::kConservativeBytesPerToken, of 200k ~40 KB, of 1M ~200 KB).
+// Roughly the plugins' own 64 KiB on large windows, tighter on small ones, so
+// a few cut results still leave the window to the conversation.
+inline constexpr std::int64_t kDefaultMaxToolResultWindowPercent = 10;
 
 // The pool starts one thread per slot, per session: past this a value is a
 // resource-exhaustion typo, not a tuning choice.
