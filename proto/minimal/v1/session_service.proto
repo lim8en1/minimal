@@ -770,6 +770,9 @@ message ModelSummary {
   // 0 = unknown; the picker renders nothing for it, matching the
   // unknown-segment rule the status bar uses.
   int64 context_window_tokens = 2;
+  // The name the provider is sent for this model (its own id, which a
+  // per-model setting such as a price is keyed by); "" when unknown.
+  string model_name = 3;
 }
 
 message ListModelsRequest {

@@ -1482,3 +1482,21 @@ TEST_CASE("the endpoint answers calls like .rpc and serves only the totals strea
     CHECK(!endpoint.Subscribe("list", "{}", std::make_shared<RecordingSink>()));
     hub.Shutdown();
 }
+
+TEST_CASE("cost-tracker refuses a bad configured price, naming the entry; a partial one is fine",
+          "[cost_tracker][config]") {
+    // A negative or non-number price used to vanish silently in the rate
+    // table: the model then priced as unknown with no hint why.
+    const auto ok = ParseCostSettings(nlohmann::json::parse(
+        R"({"rates": {"gpt-x": {"input": 1.5}, "claude-y": {"input": 3, "output": 15}}})"));
+    CHECK(ok.rates.at("gpt-x").at("input") == 1.5);
+    CHECK_THROWS_WITH(
+        ParseCostSettings(nlohmann::json::parse(R"({"rates": {"gpt-x": {"input": -1}}})")),
+        Catch::Matchers::ContainsSubstring("rates.gpt-x.input"));
+    CHECK_THROWS_WITH(
+        ParseCostSettings(nlohmann::json::parse(R"({"rates": {"gpt-x": {"input": "cheap"}}})")),
+        Catch::Matchers::ContainsSubstring("rates.gpt-x.input"));
+    CHECK_THROWS_WITH(
+        ParseCostSettings(nlohmann::json::parse(R"({"rates": {"gpt-x": {"inptu": 1}}})")),
+        Catch::Matchers::ContainsSubstring("rates.gpt-x.inptu"));
+}

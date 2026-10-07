@@ -45,6 +45,7 @@ enum class ApplyPolicy { kRestart, kLive };
 enum class FieldFormat {
     kNone,
     kModelRef,  // "<provider>/<model>": a form offers the server's models
+    kModelId,   // a model's own name, as its provider sends it ("gpt-4.1")
 };
 
 struct FieldMeta {
@@ -80,8 +81,8 @@ public:
     // "maximum"?, "choices"?, "doc"?, "apply", "secret"?}, ...]}, in read
     // order. Types: "boolean", "integer", "number", "string", "enum",
     // "string_list", "string_map", "object_list" (with "items": the item's
-    // own fields, and "item_template"), "json" (an opaque value: edited as
-    // JSON).
+    // own fields, and "item_template"), "object_map" (the same, plus "key":
+    // what its names are), "json" (an opaque value: edited as JSON).
     nlohmann::json Schema() const;
 
 private:
@@ -184,6 +185,14 @@ public:
     // and `sample` as "item_template": what a form starts a new item from.
     void ObjectList(std::string_view key, const nlohmann::json& sample,
                     const std::function<void(Reader& item)>& each);
+    // An object of objects keyed by user-chosen names (a price per model
+    // id), each entry read by `each` through its own cursor (path
+    // "<key>.<name>"). Like ObjectList otherwise: in describe mode the field
+    // records as "object_map" with "items" (from `sample`), "item_template",
+    // and "key" -- what the names are (`key_meta`: doc, format, empty_label),
+    // so a form can offer a chooser for them.
+    void ObjectMap(std::string_view key, const nlohmann::json& sample, FieldMeta key_meta,
+                   const std::function<void(const std::string& name, Reader& item)>& each);
 
     // Reports every key not consumed (comments excluded): kError throws,
     // kWarn sends one warning per key.

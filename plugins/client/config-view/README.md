@@ -19,13 +19,29 @@ Plugin configuration in the TUI: `/config`.
   plugin's form.
 
 Keys in the form: up/down (`k`/`j`) select; enter toggles a boolean, opens a
-chooser for an enum (its choices) or a model ref (the server's models, an
-"empty" row that unsets it, and any typed `<provider>/<model>` the list does
-not have), or edits a value inline (enter saves, esc cancels; a secret is
-typed masked); `d` resets a field to its default (a set secret asks twice);
-left or esc goes back to the list (Backspace does not: a habitual delete
-right after the editor closed used to leave the form); esc on the list
-closes -- and in a chooser or the editor, goes back to the form.
+chooser for an enum (its choices -- space steps to the next one instead), a
+model ref (the server's models, an "empty" row that unsets it, and any typed
+`<provider>/<model>` the list does not have) or a model id (the same list,
+answering the name the provider is sent), or edits a value inline (enter
+saves, esc cancels; a secret is typed masked); `d` resets a field to its
+default (a set secret asks twice); left or esc goes back to the list
+(Backspace does not: a habitual delete right after the editor closed used to
+leave the form); esc on the list closes.
+
+Structured values open as forms of their own, level by level, edited as a
+draft and saved once, when the first level is left (`x` discards a level):
+
+- a **list** (rate_sources) shows a row per entry and an add row; `d` twice
+  deletes one, ctrl+up/down (`K`/`J`) moves it;
+- a **map** (rates) shows a row per entry, by name; its form starts with the
+  name -- chosen like any field (a model id from the model list) -- and a
+  name another entry has is refused;
+- anything **without a schema** (decision-advisor's rubric) opens as a form
+  inferred from its value: each key or item typed by what it holds, nested
+  objects and lists one Enter further in; `a` adds a key (its name, then a
+  value -- JSON when it parses, text otherwise) or an item, `d` twice deletes
+  one, `K`/`J` move an item; on the plugin's form, `e` edits the whole value
+  as one line of JSON instead.
 
 Edits go to core's `plugins` endpoint: the plugin's own parser checks the
 value (a refusal shows in red, nothing is written), the file

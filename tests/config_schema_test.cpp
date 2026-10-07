@@ -246,3 +246,40 @@ TEST_CASE("an object list records its item fields and a template; items read and
     CHECK_THROWS_WITH(parse({{"sources", "x"}}, nullptr),
                       Catch::Matchers::ContainsSubstring("must be a list of objects"));
 }
+
+TEST_CASE("an object map records its item fields, its key, and fails on an entry by name",
+          "[config_schema]") {
+    const auto parse = [](const json& config, std::vector<std::string>* names) {
+        config::Reader reader(config, "plugins.d/maps.json");
+        reader.ObjectMap("prices", {{"input", 0}},
+                         {.doc = "the model id", .format = config::FieldFormat::kModelId},
+                         [&](const std::string& name, config::Reader& entry) {
+                             (void)entry.MaybeDouble("input", 0.0);
+                             entry.Finish();
+                             if (names != nullptr) names->push_back(name);
+                         });
+        reader.Finish();
+    };
+    json schema;
+    {
+        config::SchemaRecording recording("plugins.d/maps.json");
+        parse(json::object(), nullptr);
+        schema = recording.Schema();
+    }
+    REQUIRE(schema.at("fields").size() == 1);
+    const json& map = schema.at("fields").at(0);
+    CHECK(map.at("type") == "object_map");
+    CHECK(map.at("key") == json({{"doc", "the model id"}, {"format", "model_id"}}));
+    CHECK(map.at("item_template") == json({{"input", 0}}));
+    REQUIRE(map.at("items").size() == 1);
+    CHECK(map.at("items").at(0).at("path") == "input");
+    CHECK(map.at("items").at(0).at("type") == "number");
+
+    std::vector<std::string> names;
+    parse({{"prices", {{"a", {{"input", 1}}}, {"//", "a comment"}, {"b", json::object()}}}}, &names);
+    CHECK(names == std::vector<std::string>{"a", "b"});
+    CHECK_THROWS_WITH(parse({{"prices", {{"gpt", {{"input", -1}}}}}}, nullptr),
+                      Catch::Matchers::ContainsSubstring("prices.gpt.input"));
+    CHECK_THROWS_WITH(parse({{"prices", {{"gpt", 3}}}}, nullptr),
+                      Catch::Matchers::ContainsSubstring("prices.gpt: must be an object"));
+}

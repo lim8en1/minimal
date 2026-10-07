@@ -98,13 +98,30 @@ private:
             leading_label = "default (" + default_model + ")";
             if (default_model.empty()) leading_id.clear();  // no default: no row
         }
+        // A model's own name when asked for one: the listed model's, else the
+        // ref's model part; the leading row and a typed value pass as they are.
+        auto on_select = callbacks_.on_select;
+        if (spec_.choose_model_name && on_select) {
+            on_select = [on_select, models](const std::string& ref) {
+                for (const auto& model : models) {
+                    if (model.ref() != ref) continue;
+                    const auto slash = ref.find('/');
+                    on_select(!model.model_name().empty() ? model.model_name()
+                              : slash != std::string::npos ? ref.substr(slash + 1)
+                                                           : ref);
+                    return;
+                }
+                on_select(ref);
+            };
+        }
         ModelPickerCallbacks picker{
-            .on_select = callbacks_.on_select,
+            .on_select = std::move(on_select),
             .on_refresh_discovery = [this] { Fetch(/*refresh=*/true); },
             .on_close = callbacks_.on_close,
             .leading_row_label = std::move(leading_label),
             .leading_row_id = std::move(leading_id),
             .allow_custom = spec_.allow_custom,
+            .custom_is_name = spec_.choose_model_name,
             .window_title = spec_.window_title,
             .select_hint = spec_.select_hint,
         };

@@ -960,6 +960,7 @@ grpc::Status SessionServiceImpl::ListModels(grpc::ServerContext* context,
                 if (model->context_window_tokens) {
                     proto_model->set_context_window_tokens(*model->context_window_tokens);
                 }
+                proto_model->set_model_name(model->provider.model_name);
             }
         }
     }
