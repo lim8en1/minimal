@@ -155,6 +155,41 @@ TEST_CASE("ParseModelList reads vLLM's max_model_len", "[model_catalog]") {
     CHECK(*models[0].context_window_tokens == 40960);
 }
 
+// --- ParseModelList: LiteLLM-gateway shape -----------------------------------
+
+TEST_CASE("ParseModelList reads a LiteLLM gateway's max_input_tokens/max_output_tokens",
+          "[model_catalog]") {
+    const auto models = ParseModelList(R"({"data":[
+        {"id": "glm-5.3-flash", "object": "model", "owned_by": "openai",
+         "max_input_tokens": 1050000, "max_output_tokens": 131100}
+    ]})");
+
+    REQUIRE(models.size() == 1);
+    REQUIRE(models[0].context_window_tokens.has_value());
+    CHECK(*models[0].context_window_tokens == 1050000);
+    REQUIRE(models[0].max_tokens.has_value());
+    CHECK(*models[0].max_tokens == 131100);
+}
+
+TEST_CASE("ParseModelList prefers a named window over max_input_tokens", "[model_catalog]") {
+    const auto models = ParseModelList(R"({"data":[
+        {"id": "both", "context_length": 16384, "max_input_tokens": 999999}
+    ]})");
+    REQUIRE(models.size() == 1);
+    CHECK(*models[0].context_window_tokens == 16384);
+}
+
+TEST_CASE("ParseModelList refuses a non-positive or fractional max_output_tokens",
+          "[model_catalog]") {
+    const auto models = ParseModelList(R"({"data":[
+        {"id": "neg", "max_output_tokens": 0},
+        {"id": "frac", "max_output_tokens": 4096.5}
+    ]})");
+    REQUIRE(models.size() == 2);
+    CHECK_FALSE(models[0].max_tokens.has_value());
+    CHECK_FALSE(models[1].max_tokens.has_value());
+}
+
 // --- ParseModelList: degradation and refusal ---------------------------------
 
 TEST_CASE("ParseModelList degrades a missing window to nullopt, never a guess",

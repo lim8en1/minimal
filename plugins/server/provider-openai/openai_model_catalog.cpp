@@ -27,13 +27,16 @@ std::string ModelsUrl(const std::string& base_url) {
     return url;
 }
 
-// The first numeric field present, in per-server precedence order. All three
-// names mean the same thing; the winner is whichever the backend serves.
+// The first numeric field present, in per-server precedence order. The names
+// mean the same thing; the winner is whichever the backend serves.
+// "max_input_tokens" (the LiteLLM-proxy spelling) is last: the input limit is
+// what compaction measures, but where a backend names the full window that is
+// the more specific answer.
 // A non-POSITIVE value is treated as absent: a negative context window is a
 // misparse or a hostile entry, and storing it would make the compaction
 // trigger fire on every turn (occupancy < negative threshold is never true).
 std::optional<std::int64_t> ContextWindow(const json& entry) {
-    static const char* kFields[] = {"context_length", "max_model_len"};
+    static const char* kFields[] = {"context_length", "max_model_len", "max_input_tokens"};
     // is_number_integer(), not is_number(): a catalog entry reporting
     // "context_length": 131072.9 is a misparse the same as a negative one,
     // and is_number() let get<int64_t>() silently truncate it instead of
@@ -54,23 +57,29 @@ std::optional<std::int64_t> ContextWindow(const json& entry) {
     return std::nullopt;
 }
 
-// The output cap, when the backend reports one. Only OpenRouter carries it
-// (`top_provider.max_completion_tokens`) -- a plain OpenAI-shape /models body
-// has no such field and yields nullopt, same as the absent-window case. The
-// same positive-only rule as ContextWindow: a non-positive value is a misparse
-// or a hostile entry, and storing it would cap every request at nothing.
-std::optional<int> MaxCompletionTokens(const json& entry) {
-    if (!entry.contains("top_provider") || !entry.at("top_provider").is_object()) {
-        return std::nullopt;
-    }
-    const json& top = entry.at("top_provider");
-    if (top.contains("max_completion_tokens") && top.at("max_completion_tokens").is_number_integer()) {
-        const std::int64_t value = top.at("max_completion_tokens").get<std::int64_t>();
+// A positive int-ranged integer field of `node`, or nullopt.
+std::optional<int> PositiveIntField(const json& node, const char* field) {
+    if (node.contains(field) && node.at(field).is_number_integer()) {
+        const std::int64_t value = node.at(field).get<std::int64_t>();
         if (value > 0 && value <= std::numeric_limits<int>::max()) {
             return static_cast<int>(value);
         }
     }
     return std::nullopt;
+}
+
+// The output cap, when the backend reports one. Two spellings: OpenRouter's
+// `top_provider.max_completion_tokens` and the LiteLLM-proxy top-level
+// `max_output_tokens`. A plain OpenAI-shape /models body has neither and
+// yields nullopt, same as the absent-window case. The same positive-only rule
+// as ContextWindow: a non-positive value is a misparse or a hostile entry,
+// and storing it would cap every request at nothing.
+std::optional<int> MaxCompletionTokens(const json& entry) {
+    if (const auto cap = PositiveIntField(entry, "max_output_tokens")) return cap;
+    if (!entry.contains("top_provider") || !entry.at("top_provider").is_object()) {
+        return std::nullopt;
+    }
+    return PositiveIntField(entry.at("top_provider"), "max_completion_tokens");
 }
 
 }  // namespace

@@ -6,9 +6,11 @@
 // base URL -- and the per-server differences are just the field that carries
 // the context window:
 //
-//   OpenRouter:  data[].context_length
-//   llama.cpp:   data[].meta.n_ctx_train
-//   vLLM:        data[].max_model_len
+//   OpenRouter:        data[].context_length
+//   llama.cpp:         data[].meta.n_ctx_train
+//   vLLM:              data[].max_model_len
+//   LiteLLM gateways:  data[].max_input_tokens (+ data[].max_output_tokens
+//                      as the output cap)
 //
 // Any of them may be absent -- a model without a discoverable window degrades
 // to nullopt (compaction stays off for it), never to a guessed number.
