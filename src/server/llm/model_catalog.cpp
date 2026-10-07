@@ -1,7 +1,6 @@
 #include "minimal/llm/model_catalog.hpp"
 
 #include <algorithm>
-#include <optional>
 #include <utility>
 
 namespace minimal::llm {
@@ -36,24 +35,6 @@ std::vector<std::string> AdvertisedEfforts(const nlohmann::json& metadata) {
         // ("mandatory": true with no efforts): no efforts either way.
         return out;
     }
-    // Anthropic's /v1/models shape: "capabilities.effort" is a tree of
-    // {"supported": bool} leaves, one per effort word, plus its own top-level
-    // "supported". Object keys carry no order, so the ladder is read in the
-    // vocabulary's own order.
-    if (metadata.contains("capabilities") && metadata.at("capabilities").is_object()) {
-        const auto& capabilities = metadata.at("capabilities");
-        const auto supported = [](const nlohmann::json& node) {
-            return node.is_object() && node.contains("supported") &&
-                   node.at("supported").is_boolean() && node.at("supported").get<bool>();
-        };
-        if (capabilities.contains("effort") && supported(capabilities.at("effort"))) {
-            const auto& effort = capabilities.at("effort");
-            for (const char* word : {"low", "medium", "high", "xhigh", "max"}) {
-                if (effort.contains(word) && supported(effort.at(word))) out.push_back(word);
-            }
-        }
-        return out;
-    }
     // models.dev's normalized shape: "reasoning_options" is an array of
     // {"type": "..."} records -- "effort" carries "values", "budget_tokens"
     // carries min/max (a budget, not a ladder), "toggle" is on/off.
@@ -70,29 +51,6 @@ std::vector<std::string> AdvertisedEfforts(const nlohmann::json& metadata) {
             }
         }
         return out;
-    }
-    // A LiteLLM proxy's /model/info row, attached as "model_info" by an
-    // opted-in discovery: `supports_reasoning` means the proxy maps
-    // reasoning_effort's standard low/medium/high for the model, and
-    // per-level flags add the model-specific rungs (none/minimal/xhigh/max)
-    // or, set false, withdraw a standard one. Flags present-but-null -- the
-    // proxy's spelling for "not a reasoning model" -- say nothing.
-    if (metadata.contains("model_info") && metadata.at("model_info").is_object()) {
-        const auto& info = metadata.at("model_info");
-        const auto flag = [&info](const std::string& name) -> std::optional<bool> {
-            const auto it = info.find(name);
-            if (it == info.end() || !it->is_boolean()) return std::nullopt;
-            return it->get<bool>();
-        };
-        if (flag("supports_reasoning") != true) return out;
-        static const std::pair<const char*, bool> kLadder[] = {
-            {"none", false}, {"minimal", false}, {"low", true},  {"medium", true},
-            {"high", true},  {"xhigh", false},   {"max", false},
-        };
-        for (const auto& [word, standard] : kLadder) {
-            const auto level = flag(std::string("supports_") + word + "_reasoning_effort");
-            if (level.value_or(standard)) out.push_back(word);
-        }
     }
     return out;
 }

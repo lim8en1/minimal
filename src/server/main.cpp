@@ -760,6 +760,8 @@ static int RunServer(int argc, char** argv) {
     // The STATIC "variants": [...] list form already resolved its parameters
     // when the bundle parsed providers.json, with the same registry.
     model_catalog.SetVariantParamsHook(minimal::config::MakeVariantParamsHook(&variant_params));
+    // ...and the backends' own reading of a model's advertised ladder.
+    model_catalog.SetEffortsHook(minimal::config::MakeEffortsHook(&variant_params));
 
     // Preset-scoped tool definitions: the builders run once per resolved
     // preset (inside the registry's resolve cache) and their results ride the

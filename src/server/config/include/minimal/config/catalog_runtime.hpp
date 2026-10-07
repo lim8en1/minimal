@@ -68,6 +68,7 @@ struct CatalogRuntime {
     // static list-form path reads its hook from a function parameter
     // instead (see VariantParametersFor/ParseProvidersConfig).
     VariantParamsHook variant_params_hook_;
+    EffortsHook efforts_hook_;
     std::uint64_t generation_ = 0;
     std::chrono::milliseconds discovery_retry_backoff_{30000};
     // One IMMUTABLE record per provider, published by swapping the pointer: a
@@ -109,6 +110,7 @@ struct CatalogRuntime {
         hook_ = std::move(other.hook_);
         metadata_hook_ = std::move(other.metadata_hook_);
         variant_params_hook_ = std::move(other.variant_params_hook_);
+        efforts_hook_ = std::move(other.efforts_hook_);
         generation_ = other.generation_;
         discovery_retry_backoff_ = other.discovery_retry_backoff_;
         discovery_ = std::move(other.discovery_);

@@ -43,6 +43,7 @@ public:
     void SetDiscoveryRetryBackoff(std::chrono::milliseconds backoff);
     void SetMetadataHook(MetadataHook hook);
     void SetVariantParamsHook(VariantParamsHook hook);
+    void SetEffortsHook(EffortsHook hook);
 
     // Takes over `other`'s runtime state (the catalog binding is untouched).
     // Config load only, before any thread can see either side.

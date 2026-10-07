@@ -15,6 +15,7 @@
 
 #include "openai_model_catalog.hpp"
 #include "openai_provider.hpp"
+#include "openai_variant_params.hpp"
 
 extern "C" {
 
@@ -37,6 +38,14 @@ void minimal_plugin_register_model_catalogs(
     // safe across concurrent resolvers.
     registry.Register("openai", std::make_shared<minimal::provider_openai::OpenAiModelCatalog>(
                                     minimal::net::HttpClient{}));
+}
+
+// The "@effort" ladder a LiteLLM proxy's /model/info advertises, and the
+// verbatim wire word for its rungs (openai_variant_params.hpp).
+void minimal_plugin_register_variant_params(
+    minimal::llm::VariantParamsRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
+    registry.Register("openai", std::make_shared<minimal::provider_openai::OpenAiVariantParams>());
 }
 
 }  // extern "C"

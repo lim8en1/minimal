@@ -106,6 +106,11 @@ void ModelCatalogService::SetVariantParamsHook(VariantParamsHook hook) {
     runtime_.variant_params_hook_ = std::move(hook);
 }
 
+void ModelCatalogService::SetEffortsHook(EffortsHook hook) {
+    std::lock_guard<std::mutex> lock(runtime_.mutex_);
+    runtime_.efforts_hook_ = std::move(hook);
+}
+
 // One Resolve call's working state. Owns the unique_lock on runtime_.mutex_ for
 // the call; the only places it is released are Unlocked scopes, which re-lock on
 // every exit path (a throwing hook included), so "the config lock is held
@@ -410,7 +415,8 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolution::ResolveVar
         if (name_it == metadata_it->second.end()) return nullptr;
         return runtime_
             .overlay_.emplace(ref_key, std::make_shared<const ResolvedModel>(MakeVariantResolved(
-                                           *base, *name_it, runtime_.variant_params_hook_)))
+                                           *base, *name_it, runtime_.variant_params_hook_,
+                                           base->declared_metadata)))
             .first->second;
     }
     // A static twin's explicit `variants: []` opt-out (see VariantsOf's
@@ -434,8 +440,8 @@ std::shared_ptr<const ResolvedModel> ModelCatalogService::Resolution::ResolveVar
     }
     if (!declared) return nullptr;  // undeclared (or the model advertises no efforts)
 
-    static const nlohmann::json kNoMetadata = nlohmann::json::object();
-    const nlohmann::json* metadata = &kNoMetadata;
+    // What discovery reported, else what the static entry declared.
+    const nlohmann::json* metadata = &base->declared_metadata;
     if (const auto model_it = record->models.find(base_id); model_it != record->models.end()) {
         metadata = &model_it->second.metadata;
     }
@@ -519,7 +525,8 @@ void ModelCatalogService::Resolution::EnrichFromMetadata(const ProviderEntry& en
     // base model with no trace why.
     std::vector<ModelVariant> ladder;
     if (!enriched.variants_declared) {
-        for (const auto& effort : llm::AdvertisedEfforts(answer->metadata)) {
+        for (const auto& effort :
+             EffortsFor(enriched.backend, answer->metadata, runtime_.efforts_hook_)) {
             if (!IsKnownEffortName(effort)) {
                 common::DefaultLogger().warn(
                     "providers.json: model '{}' advertises an unknown effort '{}' via metadata "
@@ -651,7 +658,7 @@ std::shared_ptr<const CatalogRuntime::ProviderDiscovery> ModelCatalogService::Pu
     for (const auto& [id, discovered] : cache.models) {
         std::vector<ModelVariant> declared = entry.variants;
         if (declared.empty()) {
-            const auto efforts = llm::AdvertisedEfforts(discovered.metadata);
+            const auto efforts = EffortsFor(entry.backend, discovered.metadata, runtime_.efforts_hook_);
             if (efforts.empty()) continue;  // no ladder advertised: no variants
             // The model's OWN ladder, in the catalog's order -- the rungs the
             // backend says exist, autodetected. AdvertisedEfforts returns

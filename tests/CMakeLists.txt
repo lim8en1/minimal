@@ -229,6 +229,7 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_stream_reassembler.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_error_mapping.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_model_catalog.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_variant_params.cpp"
     # Same pattern for provider-anthropic.
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_request.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-anthropic/anthropic_response.cpp"

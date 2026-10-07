@@ -165,6 +165,24 @@ VariantParamsHook MakeVariantParamsHook(const llm::VariantParamsRegistry* regist
     };
 }
 
+EffortsHook MakeEffortsHook(const llm::VariantParamsRegistry* registry) {
+    if (registry == nullptr) return {};
+    return [registry](const std::string& kind,
+                      const nlohmann::json& metadata) -> std::optional<std::vector<std::string>> {
+        auto* provider = registry->Find(kind);
+        if (provider == nullptr) return std::nullopt;
+        return provider->AdvertisedEfforts(metadata);
+    };
+}
+
+std::vector<std::string> EffortsFor(const std::string& backend_kind, const nlohmann::json& metadata,
+                                    const EffortsHook& hook) {
+    if (hook) {
+        if (auto own = hook(backend_kind, metadata)) return *own;
+    }
+    return llm::AdvertisedEfforts(metadata);
+}
+
 // The known effort ladder, sorted. Names follow the union of the live catalogs
 // (OpenRouter's `reasoning.supported_efforts`, models.dev's `reasoning_options`):
 // the six words between them, with "none" meaning reasoning off where the
@@ -335,6 +353,8 @@ void ProvidersConfig::SetMetadataHook(MetadataHook hook) {
 void ProvidersConfig::SetVariantParamsHook(VariantParamsHook hook) {
     service_.SetVariantParamsHook(std::move(hook));
 }
+
+void ProvidersConfig::SetEffortsHook(EffortsHook hook) { service_.SetEffortsHook(std::move(hook)); }
 std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& ref) const {
     return service_.Resolve(ref);
 }
@@ -513,6 +533,10 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
             resolved.context_window_tokens = model_window ? model_window
                                                           : entry.context_window_tokens;
             const auto model_variants = MaybeVariants(model);
+            if (const nlohmann::json* declared = model.Raw("metadata")) {
+                if (!declared->is_object()) model.Fail("metadata", "must be an object");
+                resolved.declared_metadata = *declared;
+            }
             model.Finish();
             resolved.variants_declared = model_variants.has_value() || provider_variants.has_value();
             // Effort variants: the model's own, else the provider's. Each
@@ -523,7 +547,8 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
                                                   : provider_variants.value_or(
                                                         std::vector<ModelVariant>{});
             for (const auto& variant : variants) {
-                ResolvedModel sibling = MakeVariantResolved(resolved, variant, variant_params_hook);
+                ResolvedModel sibling = MakeVariantResolved(resolved, variant, variant_params_hook,
+                                                            resolved.declared_metadata);
                 const ModelRef sibling_key = sibling.ref;
                 config.Add(sibling_key, std::move(sibling));
             }

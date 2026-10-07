@@ -20,16 +20,25 @@ field — no core change, no enum to keep in sync.
     plus `output_config: {effort: <word>}`, an unsupported word stepping
     down to the nearest lower one the model takes;
   - budget-only thinking (Haiku 4.5 and older) → `thinking: {type:
-    "enabled", budget_tokens: N}`, refit to each request's `max_tokens`;
+    "enabled", budget_tokens: N}`, refit to each request's `max_tokens`; such
+    a model's ladder is the budget rungs (`@low` … `@max`), since it takes no
+    effort word;
   - `@none` → no thinking field.
 
-  A model discovery never saw is treated as current (adaptive). That shape
-  is rejected by budget-only models, so a static (`discover: false`) entry
-  for Haiku 4.5 or older must either turn on `discover` or spell its
-  variants out in the map form (`{"high": {"thinking": {"type": "enabled",
-  "budget_tokens": 16384}}}`). A backend
-  with no registered provider here gets core's generic `reasoning_effort`
-  shape instead.
+  The plugin also reads the ladder itself from the capability report (core
+  reads only the cross-provider catalogs).
+
+  A model discovery never saw is treated as current (adaptive), and the
+  server says once how to declare otherwise. A static (`discover: false`)
+  entry declares its thinking instead:
+
+  ```json
+  "models": { "claude-haiku-4-5": { "thinking": "budget", "variants": ["high"] } }
+  ```
+
+  `"thinking"`: `"adaptive"` | `"budget"` | `"none"` — the plugin's entry
+  translator turns it into the capability report discovery would have
+  stored (the entry's `metadata`), so its variants get the right shape.
 
 ## Configuration
 

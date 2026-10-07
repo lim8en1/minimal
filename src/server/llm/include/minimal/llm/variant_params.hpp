@@ -39,12 +39,12 @@ public:
     // Derives {parameters, clamped} for one effort variant of this backend
     // kind -- VariantParametersFor's own return shape (a JSON object of extra
     // request parameters, and whether a value was clamped to fit max_tokens).
-    // `effort_word` arrives already normalized by the caller (core folds
-    // "xhigh"/"max" to "high" once, before dispatch, so it cannot drift
-    // between a plugin's mapping and the generic fallback); "none" and
-    // "minimal" both reach this call as-is, since whether/how "off" is
-    // spelled on the wire is itself backend-specific (Anthropic omits the
-    // thinking block entirely; most others send reasoning_effort:"minimal").
+    // `effort_word` arrives verbatim -- every rung, "none" and "minimal"
+    // included: whether and how a rung is spelled on the wire is the
+    // backend's call (Anthropic omits the thinking block for "none"; a
+    // LiteLLM proxy takes "xhigh" where the model advertises it). nullopt
+    // hands the word to core's generic reasoning_effort mapping, which folds
+    // "xhigh"/"max" to "high" and "none" to "minimal".
     // May throw std::runtime_error for a known-but-unusable effort name
     // (Anthropic's "minimal" has no budget reading) -- the caller does not
     // catch it, so the error surfaces exactly as it did when this lived in
@@ -55,9 +55,20 @@ public:
     // the backend said about the model, so a backend whose wire shape differs
     // per model (Anthropic: adaptive thinking vs a token budget) can read it
     // from the backend's own capability report instead of a per-model table.
-    virtual std::pair<nlohmann::json, bool> DeriveParameters(
+    virtual std::optional<std::pair<nlohmann::json, bool>> DeriveParameters(
         const std::string& effort_word, std::optional<int> max_tokens,
         const nlohmann::json& metadata) const = 0;
+
+    // The "@effort" ladder a model's metadata advertises in this backend's
+    // OWN shape (Anthropic's capability report, a LiteLLM proxy's
+    // /model/info row), in the order the selector lists it. nullopt: nothing
+    // of this backend's in `metadata` -- core reads the cross-provider
+    // catalog shapes (OpenRouter, models.dev) instead. (The default: none.)
+    virtual std::optional<std::vector<std::string>> AdvertisedEfforts(
+        const nlohmann::json& metadata) const {
+        (void)metadata;
+        return std::nullopt;
+    }
 };
 
 // Kind-string -> provider. Mirrors ModelCatalogRegistry: no closed enum, the

@@ -89,6 +89,17 @@ using VariantParamsHook = std::function<std::optional<std::pair<nlohmann::json, 
 // particular kind.
 VariantParamsHook MakeVariantParamsHook(const llm::VariantParamsRegistry* registry);
 
+// The ladder a model's metadata advertises, asked of the backend kind's
+// registered VariantParamsProvider first (its own metadata shapes), nullopt
+// when it has none or reads nothing there.
+using EffortsHook = std::function<std::optional<std::vector<std::string>>(
+    const std::string& backend_kind, const nlohmann::json& metadata)>;
+EffortsHook MakeEffortsHook(const llm::VariantParamsRegistry* registry);
+// The backend's reading (EffortsHook) when it has one, else core's
+// cross-provider catalog shapes (llm::AdvertisedEfforts).
+std::vector<std::string> EffortsFor(const std::string& backend_kind, const nlohmann::json& metadata,
+                                    const EffortsHook& hook);
+
 // The effort vocabulary and the derived parameters, per backend kind. Pure
 // (given `hook`); shared by the static parse, discovery synthesis, and (via
 // the same constants) the variant-name validation.
@@ -193,6 +204,12 @@ struct ResolvedModel {
     // shapes produce an empty ParseVariants() result, so the vector alone
     // cannot tell them apart.
     bool variants_declared = false;
+    // A static model entry's "metadata": what the model would report about
+    // itself, declared because nothing discovers it (discover: false). Opaque
+    // to core -- the backend's VariantParamsProvider reads it like discovered
+    // metadata (a plugin's entry translator usually writes it from a key of
+    // its own, e.g. provider-anthropic's "thinking").
+    nlohmann::json declared_metadata = nlohmann::json::object();
 };
 
 // The static entry's resolved model with its discovery twin's window / output

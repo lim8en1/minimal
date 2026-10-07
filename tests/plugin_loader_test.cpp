@@ -110,7 +110,7 @@ TEST_CASE("a well-formed plugin loads and contributes its registrations", "[plug
     auto* variant_params = h.variant_params_registry.Find("fixture");
     REQUIRE(variant_params != nullptr);
     const auto [params, clamped] =
-        variant_params->DeriveParameters("high", std::nullopt, nlohmann::json::object());
+        *variant_params->DeriveParameters("high", std::nullopt, nlohmann::json::object());
     CHECK_FALSE(clamped);
     CHECK(params.at("fixture_effort") == "high");
 }

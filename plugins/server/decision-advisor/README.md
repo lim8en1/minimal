@@ -146,6 +146,7 @@ field. Restore a deleted file from `bundled/`.
 | `deny_message` | "the call looks destructive or out of scope -- ask the user before retrying" | What a denied model reads, after `auto-denied by decision-advisor (model M): p(deny)=P; `. |
 | `questions` | the rubric in the file | The questions map sent verbatim. The answer is read from its `"action"` key: `"type": "choice"` with `criteria` for exactly `allow`, `deny` and `review` (checked at load). Changing the wording changes the probabilities: re-tune the thresholds after. |
 | `extra_questions` | `{}` | Merged into the same request (one round trip, the speculative fan-out pattern); answers are logged, never acted on. |
+| `debug_decision_logging` | `false` | Append one JSON line per judged call to `<data dir>/plugins/decision-advisor/decisions.jsonl` (see Decision log). Holds tool input verbatim. |
 
 ### Fixed in code
 
@@ -193,6 +194,31 @@ human prompt. A judge that cannot answer never blocks a turn.
 - **Every decision logged**, one line: chosen option, p1/p2, answering model,
   attempts, total milliseconds. The `total_ms` of first-attempt successes is
   the number to watch — it should sit in the 100–500 ms range.
+
+## Decision log
+
+With `debug_decision_logging` on, every call that reaches the judge appends
+one line to `decisions.jsonl` (a call cancelled before it is sent is not
+logged):
+
+```json
+{"ts_ms": 1791360000000, "session_id": "…", "tool_name": "bash",
+ "summary": "…", "tool_input": {"command": "make test"},
+ "backend": "llama", "model": "clef-flash", "answered_model": "clef-flash",
+ "thresholds": {"min_probability_allow": 0.45, "min_probability_deny": 0.5, "min_margin": 0.2},
+ "attempts": 1, "total_ms": 240, "answers": {"action": {…}},
+ "choice": "allow", "probabilities": {"allow": 0.52, "deny": 0.18, "review": 0.30},
+ "outcome": "allowed"}
+```
+
+`outcome` is `allowed`, `denied` or `abstained` (with `reason`). A call that
+never got an answer (HTTP trouble, spent budget, a bad key) has no `choice`,
+`probabilities` or `answers`. `answers` is the verbatim answer map, so
+`extra_questions` answers and the derived `confidence` are there too.
+
+The log does not record what you chose when an abstention reached the
+permission modal: an advisor never sees the human's answer. Re-tune by
+replaying the logged distributions against candidate thresholds.
 
 ## What this is not
 
