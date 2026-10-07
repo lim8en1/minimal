@@ -11,6 +11,7 @@
 #include <ftxui/component/event.hpp>
 
 #include "minimal/client/policy.hpp"
+#include "minimal/client/utf8.hpp"
 #include "minimal/client/view/rebuilding.hpp"
 #include "session_rows.hpp"
 
@@ -55,6 +56,50 @@ private:
     std::function<ftxui::Component()> build_;
     std::function<bool()> wants_escape_;
     ftxui::Component child_;
+};
+
+// The delete confirmation: the kit's modal chrome over a yes/no answered by
+// key. Not a filterable menu -- a "type to filter" line over two fixed rows
+// read as a picker, and Enter on whichever row the cursor rested on was one
+// keystroke from a permanent delete. Here only 'y' deletes; 'n' or Escape
+// cancels, and Enter does nothing.
+class DeleteConfirm final : public ftxui::ComponentBase {
+public:
+    DeleteConfirm(const plugins::WidgetKit* widgets, const client::Theme* theme,
+                  std::string session_label, std::function<void(bool)> on_answer)
+        : widgets_(widgets),
+          theme_(theme),
+          label_(std::move(session_label)),
+          on_answer_(std::move(on_answer)) {}
+
+private:
+    ftxui::Element OnRender() override {
+        using namespace ftxui;
+        return widgets_->ModalFrame(
+            *theme_, "delete session?",
+            {text(" " + label_) | bold,
+             text(" its transcript and its subagent sessions go, permanently")},
+            {}, "y: delete  ·  n / esc: cancel");
+    }
+    bool OnEvent(ftxui::Event event) override {
+        using ftxui::Event;
+        if (event == Event::Character('y') || event == Event::Character('Y')) {
+            on_answer_(true);
+            return true;
+        }
+        if (event == Event::Character('n') || event == Event::Character('N') ||
+            event == Event::Escape) {
+            on_answer_(false);
+            return true;
+        }
+        return !event.is_mouse();  // a modal: keys go nowhere else
+    }
+    bool Focusable() const override { return true; }
+
+    const plugins::WidgetKit* widgets_;
+    const client::Theme* theme_;
+    std::string label_;
+    std::function<void(bool)> on_answer_;
 };
 
 }  // namespace
@@ -179,23 +224,20 @@ ftxui::Component SessionsView::component() {
 
         if (!id.empty()) {
             // Destructive and permanent: it asks.
-            const auto back = [state] {
-                std::lock_guard<std::mutex> back_lock(state->mtx);
-                state->confirm_delete.clear();
-                state->stale->store(true);
-            };
-            return seams.widgets->FilterableMenuModal(
-                [](const std::string&) {
-                    return std::vector<client::MenuRow>{
-                        {"delete -- the transcript and its subagent sessions, permanently",
-                         "delete"},
-                        {"cancel", "cancel"}};
-                },
-                {.window_title = "delete session?", .hint_line = " enter: choose  ·  esc: cancel"},
-                {.on_select =
-                     [state, worker, api = seams.api, id, back](const client::MenuRow& row) {
-                         back();
-                         if (row.id != "delete") return;
+            std::string label = id;
+            for (const auto& session : sessions) {
+                if (session.session_id() != id) continue;
+                if (!session.name().empty()) label = client::StripControlChars(session.name());
+            }
+            return ftxui::Make<DeleteConfirm>(
+                seams.widgets, theme, std::move(label),
+                [state, worker, api = seams.api, id](bool confirmed) {
+                         {
+                             std::lock_guard<std::mutex> back_lock(state->mtx);
+                             state->confirm_delete.clear();
+                             state->stale->store(true);
+                         }
+                         if (!confirmed) return;
                          worker->Post([state, worker, api, id] {
                              std::string error;
                              const bool deleted = api->DeleteSession(id, &error);
@@ -206,9 +248,7 @@ ftxui::Component SessionsView::component() {
                                  state->error = "delete failed: " + error;
                              }
                          });
-                     },
-                 .on_close = back},
-                *theme);
+                });
         }
 
         client::FilterableMenuSpec spec{
