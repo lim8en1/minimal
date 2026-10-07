@@ -101,6 +101,20 @@ TEST_CASE("SaveThemePreference refuses to rewrite a ui.json it cannot read") {
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("status_segments that is not an object is ignored, and the rest of ui.json still reads") {
+    // Regression: Entries() threw outside the lenient wrapper -- the TUI
+    // exited with "internal error" and `minimal status-bar` terminated.
+    const auto dir = TestDir("status-segments-array");
+    {
+        std::ofstream out(dir / "ui.json");
+        out << R"({"theme": "light", "status_segments": []})";
+    }
+    UiConfig config;
+    REQUIRE_NOTHROW(config = LoadUiConfig(dir));
+    CHECK(config.theme == "light");
+    CHECK(config.status_segments.empty());
+}
+
 TEST_CASE("status_segments: false hides, an object moves field by field, a bad entry is skipped") {
     const auto dir = TestDir("status-segments");
     {

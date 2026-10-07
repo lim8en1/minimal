@@ -53,7 +53,12 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
             warn(error.what());
         }
     };
-    for (const auto& [id, value] : reader.Entries("status_segments")) {
+    // Lenient too: a status_segments that is not an object is warned about
+    // and ignored like any bad entry in it, never an escape that ends the
+    // TUI (or `minimal status-bar`) over a cosmetic file.
+    std::vector<std::pair<std::string, const nlohmann::json*>> segments;
+    lenient([&] { segments = reader.Entries("status_segments"); });
+    for (const auto& [id, value] : segments) {
         lenient([&] {
             if (value->is_boolean()) {
                 if (value->get<bool>()) {

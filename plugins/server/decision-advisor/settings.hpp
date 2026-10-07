@@ -83,6 +83,13 @@ struct Settings {
     // Merged into the same request (one round trip, the fan-out pattern);
     // answers are logged, never acted on.
     nlohmann::json extra_questions = nlohmann::json::object();
+
+    // Appends one JSON line per judged call to <data dir>/plugins/
+    // decision-advisor/decisions.jsonl: the tool input, the model, the full
+    // probability distribution and what the advisor did with it -- the raw
+    // material for tuning the thresholds. Off by default: the file holds
+    // tool input verbatim.
+    bool debug_decision_logging = false;
 };
 
 // Layers `config` (plugins.d/decision-advisor.json; null or empty = none) over

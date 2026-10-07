@@ -365,14 +365,16 @@ public:
         if (!TryReadConfigFile(StatePath(), &text)) return nullptr;
         return nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
     }
-    void SaveState(const nlohmann::json& state) override {
-        if (host_.state_dir_.empty()) return;
+    bool SaveState(const nlohmann::json& state) override {
+        if (host_.state_dir_.empty()) return false;
         std::error_code ec;
         std::filesystem::create_directories(host_.state_dir_, ec);
         if (!WriteConfigFileAtomic(StatePath(), state.dump(2))) {
             common::DefaultLogger().warn("client plugin '{}': could not save its state to {}",
                                          plugin_, StatePath().string());
+            return false;
         }
+        return true;
     }
 
 private:
@@ -518,8 +520,11 @@ void HostActionQueue::OpenSubagent(const std::string& session_id,
     });
 }
 
-void HostActionQueue::SetClientPluginEnabled(const std::string& id, bool enabled) {
-    Enqueue([id, enabled](HostActions& host) { host.SetClientPluginEnabled(id, enabled); });
+void HostActionQueue::SetClientPluginEnabled(const std::string& id, bool enabled,
+                                             std::function<void(const std::string&)> done) {
+    Enqueue([id, enabled, done = std::move(done)](HostActions& host) {
+        host.SetClientPluginEnabled(id, enabled, done);
+    });
 }
 
 void HostActionQueue::Enqueue(std::function<void(HostActions&)> action) {

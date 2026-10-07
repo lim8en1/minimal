@@ -62,7 +62,8 @@ public:
     void OpenSession(const std::string& id, bool live) override {
         Record("open " + id + (live ? " live" : ""));
     }
-    void SetClientPluginEnabled(const std::string&, bool) override {}
+    void SetClientPluginEnabled(const std::string&, bool,
+                                std::function<void(const std::string&)>) override {}
     void OpenSubagent(const std::string& id, const std::string& parent, bool live) override {
         Record("subagent " + id + " of " + parent + (live ? " live" : ""));
     }

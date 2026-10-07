@@ -195,7 +195,8 @@ public:
     void OpenSession(const std::string& session_id, bool is_live) override;
     void OpenSubagent(const std::string& session_id, const std::string& parent_session_id,
                       bool is_live) override;
-    void SetClientPluginEnabled(const std::string& id, bool enabled) override;
+    void SetClientPluginEnabled(const std::string& id, bool enabled,
+                                std::function<void(const std::string&)> done) override;
 
     // The UI thread's half: every verb queued since the last call, oldest
     // first, each to be applied to the TUI's own HostActions.

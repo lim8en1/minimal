@@ -33,7 +33,8 @@ public:
     void NewTab() override {}
     void OpenSession(const std::string&, bool) override {}
     void OpenSubagent(const std::string&, const std::string&, bool) override {}
-    void SetClientPluginEnabled(const std::string&, bool) override {}
+    void SetClientPluginEnabled(const std::string&, bool,
+                                std::function<void(const std::string&)>) override {}
 
     std::vector<std::string> names = {"dark", "light", "solarized"};
     std::vector<std::string> shown, closed, switched;
