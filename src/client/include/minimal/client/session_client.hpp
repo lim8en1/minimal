@@ -17,7 +17,7 @@
 
 #include <grpcpp/grpcpp.h>
 
-#include "minimal/client/subscribe_outcome.hpp"
+#include "minimal/client/sdk/subscribe_outcome.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
 #include "minimal/client/policy.hpp"
 

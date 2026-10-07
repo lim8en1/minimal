@@ -6,7 +6,7 @@
 // another that registers a kit; the widget-kit slot is required, so with
 // none the TUI refuses to start.
 
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/widgets.hpp"
 
 namespace minimal::client::ui_kit {
 

@@ -12,7 +12,9 @@
 #include <nlohmann/json.hpp>
 
 #include "chat_view.hpp"
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/host.hpp"
+#include "minimal/client/sdk/prompt_editor.hpp"
+#include "minimal/client/sdk/chat.hpp"
 
 namespace minimal::client::chat_view {
 

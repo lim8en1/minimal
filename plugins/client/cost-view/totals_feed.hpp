@@ -37,7 +37,8 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/client/sdk/background_poller.hpp"
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/host.hpp"
+#include "minimal/client/sdk/render.hpp"
 #include "minimal/client/policy.hpp"
 
 namespace minimal::client::cost_view {

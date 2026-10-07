@@ -5,7 +5,7 @@
 // Display()): every question and what the user answered. Keyed by display
 // kind, not tool name, so an aliased tool keeps it.
 
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/render.hpp"
 
 namespace minimal::ask_view {
 

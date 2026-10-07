@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/render.hpp"
 
 namespace minimal::session_status {
 

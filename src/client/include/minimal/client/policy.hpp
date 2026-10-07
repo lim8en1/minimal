@@ -10,6 +10,7 @@
 #include <string_view>
 #include <utility>
 
+#include "minimal/client/sdk/policy.hpp"
 #include "minimal/common/units.hpp"
 
 namespace minimal::client {
@@ -201,10 +202,6 @@ inline constexpr std::size_t kStatusSessionColumnCap = 24;
 // nears, error when the window is all but full.
 inline constexpr std::int64_t kContextAttentionPercent = 80;
 inline constexpr std::int64_t kContextErrorPercent = 95;
-
-// Where a status segment ranks when the bar overflows (lowest gives way
-// first) unless it declares its own priority.
-inline constexpr int kPluginStatusSegmentPriority = 30;
 
 // The schema form (/config): a field's label and value columns -- room for a
 // dotted key and a typical value; longer ones are clipped, the full value is

@@ -32,7 +32,9 @@
 
 #include "minimal/client/sdk/chat_model.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/plugins/attention_state.hpp"
+#include "minimal/client/plugins/plugin_view_entry.hpp"
+#include "minimal/client/sdk/client_registries.hpp"
 #include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/state.hpp"
 #include "chat_scroll_region.hpp"

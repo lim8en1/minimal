@@ -19,7 +19,9 @@
 #include <ftxui/component/component.hpp>
 #include <nlohmann/json.hpp>
 
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/host.hpp"
+#include "minimal/client/sdk/views.hpp"
+#include "minimal/client/sdk/widgets.hpp"
 #include "minimal/client/sdk/task_worker.hpp"
 #include "minimal/client/sdk/theme.hpp"
 

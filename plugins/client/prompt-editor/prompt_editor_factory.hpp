@@ -7,7 +7,7 @@
 #include <memory>
 #include <vector>
 
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/prompt_editor.hpp"
 
 namespace minimal::client::prompt_editor {
 

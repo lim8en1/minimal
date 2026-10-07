@@ -31,7 +31,9 @@
 
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/plugins/attention_state.hpp"
+#include "minimal/client/plugins/plugin_view_entry.hpp"
+#include "minimal/client/sdk/client_registries.hpp"
 #include "minimal/client/state.hpp"
 
 namespace minimal::client {

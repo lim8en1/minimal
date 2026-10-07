@@ -22,7 +22,9 @@
 
 #include "minimal/client/command_catalog.hpp"
 #include "minimal/client/sdk/key_event_parser.hpp"
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/plugins/attention_state.hpp"
+#include "minimal/client/plugins/plugin_view_entry.hpp"
+#include "minimal/client/sdk/client_registries.hpp"
 #include "minimal/client/view/prompt_host.hpp"
 
 namespace minimal_test {

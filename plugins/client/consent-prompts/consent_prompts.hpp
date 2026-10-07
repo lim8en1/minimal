@@ -18,7 +18,8 @@
 
 #include <memory>
 
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/views.hpp"
+#include "minimal/client/sdk/widgets.hpp"
 
 namespace minimal::client::consent_prompts {
 

@@ -11,7 +11,8 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 
-#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/host.hpp"
+#include "minimal/client/sdk/views.hpp"
 #include "minimal/client/sdk/theme.hpp"
 
 namespace minimal::tools_panel {
