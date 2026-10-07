@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/policy.hpp"
 

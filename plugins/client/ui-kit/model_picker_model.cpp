@@ -2,8 +2,8 @@
 
 #include <algorithm>
 
-#include "minimal/client/picker_model.hpp"
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/picker_model.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 #include "minimal/common/model_ref.hpp"
 
 namespace minimal::client::ui_kit {

@@ -6,8 +6,8 @@
 
 #include <ftxui/screen/terminal.hpp>
 
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/view/tool_status.hpp"
+#include "minimal/client/sdk/utf8.hpp"
+#include "minimal/client/sdk/tool_status.hpp"
 #include "policy.hpp"
 
 namespace minimal::client::tab_bar {

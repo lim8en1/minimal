@@ -19,7 +19,7 @@
 
 #include "checklist_panel_view.hpp"
 #include "checklist_feed.hpp"
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 
 namespace {
 

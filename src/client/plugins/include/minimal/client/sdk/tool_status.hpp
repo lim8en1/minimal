@@ -14,8 +14,8 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
 
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/policy.hpp"
 
 namespace minimal::client {

@@ -12,7 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "chat_view.hpp"
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 
 namespace minimal::client::chat_view {
 

@@ -11,7 +11,7 @@
 #include <string>
 
 #include "minimal/client/state.hpp"
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 
 using namespace minimal::client;
 namespace v1 = minimal::v1;

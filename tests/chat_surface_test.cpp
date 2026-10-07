@@ -16,7 +16,7 @@
 #include "ftxui_harness.hpp"
 
 #include "minimal/client/plugins/core_registrations.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 namespace plugins = minimal::client::plugins;
 namespace chat_view = minimal::client::chat_view;

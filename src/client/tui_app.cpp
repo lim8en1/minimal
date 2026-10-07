@@ -15,9 +15,9 @@
 #include <ftxui/dom/elements.hpp>
 
 #include "client_entry.hpp"
-#include "minimal/client/chat_model.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/keymap_help_model.hpp"
 #include "minimal/client/view/modal_host.hpp"

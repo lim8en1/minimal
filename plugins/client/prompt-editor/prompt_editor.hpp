@@ -57,8 +57,8 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
 
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 namespace minimal::client::prompt_editor {
 

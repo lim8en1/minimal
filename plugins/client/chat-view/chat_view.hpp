@@ -30,9 +30,9 @@
 #include <vector>
 
 #include "chat_scroll_region.hpp"
-#include "minimal/client/chat_model.hpp"
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
+#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 namespace minimal::client::chat_view {
 

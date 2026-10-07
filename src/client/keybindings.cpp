@@ -6,7 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "minimal/client/key_event_parser.hpp"
+#include "minimal/client/sdk/key_event_parser.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::client {

@@ -10,8 +10,8 @@
 
 #include <md4c.h>
 
-#include "minimal/client/render/syntax_highlighter.hpp"
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/highlighter.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 
 namespace minimal::client::markdown_md4c {
 

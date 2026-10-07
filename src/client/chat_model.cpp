@@ -1,4 +1,4 @@
-#include "minimal/client/chat_model.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/clock.hpp"
 #include "minimal/proto/struct_json.hpp"

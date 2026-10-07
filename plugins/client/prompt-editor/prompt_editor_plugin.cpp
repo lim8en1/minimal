@@ -1,7 +1,7 @@
 // prompt-editor -- the prompt editor (prompt_editor.hpp), in the required
 // prompt_editor slot.
 
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 #include "prompt_editor_factory.hpp"
 
 namespace plugins = minimal::client::plugins;

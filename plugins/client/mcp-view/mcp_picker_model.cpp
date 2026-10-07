@@ -4,7 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 
 namespace minimal::mcp_view {
 

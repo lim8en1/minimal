@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "ftxui_harness.hpp"
-#include "minimal/client/plugins/task_worker.hpp"
+#include "minimal/client/sdk/task_worker.hpp"
 #include "model_selector.hpp"
 
 using namespace minimal;

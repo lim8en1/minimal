@@ -1,4 +1,4 @@
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 #include <cmath>
 #include <fstream>

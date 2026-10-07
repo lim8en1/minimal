@@ -7,7 +7,7 @@
 
 #include <vector>
 
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 
 namespace minimal::client::syntax_grammars {
 

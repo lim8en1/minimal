@@ -26,7 +26,7 @@
 // 2.3 generalization re-swept every symbol once; this header starts where that
 // landed).
 
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 #include "minimal/common/abi_tag.hpp"
 
 namespace minimal::client::plugins {

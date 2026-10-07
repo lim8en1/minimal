@@ -12,7 +12,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "minimal/client/key_event_parser.hpp"
+#include "minimal/client/sdk/key_event_parser.hpp"
 
 using ftxui::Event;
 using minimal::client::NormalizeKeySpec;

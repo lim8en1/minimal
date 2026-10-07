@@ -10,8 +10,8 @@
 #include <ftxui/dom/elements.hpp>
 
 #include "minimal/client/policy.hpp"
-#include "minimal/client/render/theme.hpp"
-#include "minimal/client/view/widget_types.hpp"
+#include "minimal/client/sdk/theme.hpp"
+#include "minimal/client/sdk/widget_types.hpp"
 
 namespace minimal::client::ui_kit {
 

@@ -16,7 +16,7 @@
 #include <string>
 #include <utility>
 
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 #include "minimal/common/abi_tag.hpp"
 #include "totals_feed.hpp"
 #include "policy.hpp"

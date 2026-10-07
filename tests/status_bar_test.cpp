@@ -15,7 +15,7 @@
 
 #include <algorithm>
 
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 #include "minimal/client/view/status_bar.hpp"
 
 using minimal::client::ParseStatusFormat;

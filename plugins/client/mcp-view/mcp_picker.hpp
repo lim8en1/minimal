@@ -24,8 +24,8 @@
 #include <ftxui/component/component.hpp>
 
 #include "mcp_picker_model.hpp"
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 namespace minimal::mcp_view {
 

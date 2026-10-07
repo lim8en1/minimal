@@ -3,7 +3,7 @@
 // The chat surface's input (registries.hpp ChatFrame), built from a tab's
 // deep snapshot: what the chat view used to read from SessionState directly.
 
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 #include "minimal/client/state.hpp"
 
 namespace minimal::client {

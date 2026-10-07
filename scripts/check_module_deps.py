@@ -114,6 +114,12 @@ def check_plugins(root):
     return 1 if failed else 0
 
 
+def in_sdk(header, sdk):
+    """A manifest line names one header, or -- ending in '/' -- a directory
+    whose every header is SDK."""
+    return header in sdk or any(e.endswith("/") and header.startswith(e) for e in sdk)
+
+
 def check_plugin_tree(root, plugins_root, sdk):
     failed = False
     for plugin in sorted(os.listdir(plugins_root)):
@@ -132,7 +138,7 @@ def check_plugin_tree(root, plugins_root, sdk):
                         if not match:
                             continue
                         header = match.group(1)
-                        if os.path.exists(os.path.join(own_include, header)) or header in sdk:
+                        if os.path.exists(os.path.join(own_include, header)) or in_sdk(header, sdk):
                             continue
                         failed = True
                         print(f"not in the SDK: {os.path.relpath(path, root)}: {header}")

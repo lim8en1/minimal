@@ -15,8 +15,8 @@
 #include "widget_kit_fixture.hpp"
 #include "minimal/client/view/modal_host.hpp"
 #include "schema_form.hpp"
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/view/schema_form_model.hpp"
+#include "minimal/client/sdk/utf8.hpp"
+#include "minimal/client/sdk/schema_form_model.hpp"
 
 using namespace minimal;
 using nlohmann::json;

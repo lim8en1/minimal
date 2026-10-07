@@ -4,8 +4,8 @@
 
 #include <ftxui/dom/elements.hpp>
 
-#include "minimal/client/render/syntax_highlighter.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/highlighter.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 namespace minimal::client::markdown_md4c {
 

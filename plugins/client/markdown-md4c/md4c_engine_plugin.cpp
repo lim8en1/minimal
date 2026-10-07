@@ -1,7 +1,7 @@
 // markdown-md4c -- the bundled markdown engine (md4c_engine.hpp).
 
 #include "md4c_engine.hpp"
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 
 namespace plugins = minimal::client::plugins;
 

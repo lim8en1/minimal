@@ -2,7 +2,7 @@
 // kind (chat_renderers.hpp), as fallbacks.
 
 #include "chat_renderers.hpp"
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 
 namespace plugins = minimal::client::plugins;
 

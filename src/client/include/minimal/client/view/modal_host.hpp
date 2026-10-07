@@ -5,7 +5,7 @@
 
 #include <ftxui/component/component.hpp>
 
-#include "minimal/client/view/widget_types.hpp"
+#include "minimal/client/sdk/widget_types.hpp"
 
 namespace minimal::client {
 

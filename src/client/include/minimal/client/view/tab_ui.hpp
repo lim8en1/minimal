@@ -32,8 +32,8 @@
 
 #include <nlohmann/json.hpp>
 
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/scrollback_refresh.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/ui_config.hpp"

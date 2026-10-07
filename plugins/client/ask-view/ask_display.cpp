@@ -2,7 +2,7 @@
 
 #include <string>
 
-#include "minimal/client/view/tool_status.hpp"
+#include "minimal/client/sdk/tool_status.hpp"
 
 namespace minimal::ask_view {
 

@@ -1,4 +1,4 @@
-// Utf8ColumnWidth/TruncateUtf8Columns (src/client/include/minimal/client/utf8.hpp):
+// Utf8ColumnWidth/TruncateUtf8Columns (src/client/include/minimal/client/sdk/utf8.hpp):
 // DISPLAY-COLUMN measurement and ellipsis truncation. Originally added because
 // tab_bar.cpp and status_bar.cpp budgeted/truncated labels by raw UTF-8 BYTE
 // length (std::string::size()), which over-counts every non-ASCII character
@@ -8,7 +8,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 
 using minimal::client::SanitizeUtf8;
 using minimal::client::StripControlChars;

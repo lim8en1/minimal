@@ -5,8 +5,8 @@
 #include <utility>
 
 #include "minimal/client/policy.hpp"
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/view/rebuilding.hpp"
+#include "minimal/client/sdk/utf8.hpp"
+#include "minimal/client/sdk/rebuilding.hpp"
 
 namespace minimal::help_view {
 

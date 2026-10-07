@@ -8,8 +8,8 @@
 
 #include <ftxui/component/component_base.hpp>
 
-#include "minimal/client/picker_model.hpp"
-#include "minimal/client/view/schema_form_model.hpp"
+#include "minimal/client/sdk/picker_model.hpp"
+#include "minimal/client/sdk/schema_form_model.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::config_view {

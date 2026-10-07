@@ -30,10 +30,10 @@
 #include "chat_renderers_fixture.hpp"
 #include "ftxui_harness.hpp"
 
-#include "minimal/client/chat_model.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/state.hpp"
 #include "chat_scroll_region.hpp"
 #include "chat_view_fixture.hpp"

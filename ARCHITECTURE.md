@@ -1241,7 +1241,7 @@ public:
                                    std::string_view result_text, bool is_error) const = 0;
 };
 
-// src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h -- SHIPPED.
+// src/client/plugins/include/minimal/client/sdk/client_plugin_abi.h -- SHIPPED.
 // Every hook takes (Registry&, const ClientPluginRegistrationContext&) from the
 // first symbol: the context carries the per-plugin `config` slice, an
 // `AttentionSink*`, and the `ClientApi*` data path (GetMessages paging plus the

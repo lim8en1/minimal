@@ -7,7 +7,7 @@
 // The status segment echoes this plugin's own config ("echo_value") through
 // Render(), so loader tests can observe per-plugin config delivery through a
 // real dlopen.
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 
 namespace {
 

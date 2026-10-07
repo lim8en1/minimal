@@ -29,10 +29,11 @@
 #include "ui_kit.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/plugins/plugin_discovery.hpp"
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/render/syntax_highlighter.hpp"
+#include "minimal/client/sdk/registries.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/common/abi_tag.hpp"
-#include "minimal/client/chat_model.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
 #include "temp_dir.hpp"
 
 #ifndef MINIMAL_FIXTURE_DIR

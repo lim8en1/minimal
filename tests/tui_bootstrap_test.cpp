@@ -10,6 +10,7 @@
 
 #include <ftxui/component/component.hpp>
 
+#include "minimal/client/render/syntax_highlighter.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/tui_bootstrap.hpp"

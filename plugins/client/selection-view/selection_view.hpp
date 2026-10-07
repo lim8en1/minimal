@@ -15,9 +15,9 @@
 
 #include <ftxui/component/component.hpp>
 
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/plugins/task_worker.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/registries.hpp"
+#include "minimal/client/sdk/task_worker.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 namespace minimal::selection_view {
 

@@ -25,7 +25,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "minimal/rpc/session_wiring.hpp"
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 
 #include "bash_session_state.hpp"
 #include "bash_settings.hpp"

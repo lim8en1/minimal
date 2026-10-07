@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "minimal/client/config_file_io.hpp"
-#include "minimal/client/key_event_parser.hpp"
+#include "minimal/client/sdk/key_event_parser.hpp"
 #include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/host_seams.hpp"

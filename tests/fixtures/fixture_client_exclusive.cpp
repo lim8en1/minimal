@@ -1,7 +1,7 @@
 // The EXCLUSIVE-slot fixture: claims both the chat surface and the markdown
 // engine. Loading it twice (two candidates for the same .so) exercises
 // "second registration warns and is ignored" through a real dlopen.
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 
 namespace {
 

@@ -20,7 +20,7 @@
 #include <ftxui/component/component.hpp>
 
 #include "minimal/client/command_catalog.hpp"
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 #include "minimal/client/state.hpp"
 
 namespace minimal::client {

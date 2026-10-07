@@ -6,7 +6,7 @@
 
 #include <type_traits>
 
-#include "minimal/client/chat_model.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
 #include "minimal/client/scrollback_refresh.hpp"
 
 using namespace minimal;

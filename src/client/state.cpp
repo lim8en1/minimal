@@ -1,6 +1,6 @@
 #include "minimal/client/state.hpp"
 
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 
 #include <algorithm>
 #include <array>
@@ -11,7 +11,7 @@
 #include <utility>
 
 #include "minimal/client/command_line.hpp"
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/client/policy.hpp"
 #include "minimal/common/fnv.hpp"

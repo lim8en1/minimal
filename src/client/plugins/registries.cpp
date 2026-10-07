@@ -1,4 +1,4 @@
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 
 #include <algorithm>
 #include <utility>

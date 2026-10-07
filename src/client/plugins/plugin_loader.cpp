@@ -6,7 +6,7 @@
 #include <cstring>
 #include <utility>
 
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/logger.hpp"
 

@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <string_view>
 
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 
 namespace minimal::client::prompt_editor {
 

@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <memory>
 
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 #include "minimal/client/state.hpp"
 
 namespace minimal::client {

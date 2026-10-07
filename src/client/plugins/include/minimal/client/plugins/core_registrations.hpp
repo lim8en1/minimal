@@ -4,7 +4,7 @@
 // slot's default when no markdown plugin holds it (markdown then reads as
 // typed, never formatted). Every other default is a bundled plugin's.
 
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 
 namespace minimal::client::plugins {
 

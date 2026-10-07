@@ -50,11 +50,11 @@
 #include <nlohmann/json.hpp>
 #include <tree_sitter/api.h>
 
-#include "minimal/client/chat_model.hpp"
-#include "minimal/client/command_catalog_entry.hpp"
-#include "minimal/client/render/theme.hpp"
-#include "minimal/client/render/syntax_highlighter.hpp"
-#include "minimal/client/view/widget_types.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
+#include "minimal/client/sdk/command_catalog_entry.hpp"
+#include "minimal/client/sdk/theme.hpp"
+#include "minimal/client/sdk/highlighter.hpp"
+#include "minimal/client/sdk/widget_types.hpp"
 #include "minimal/v1/session_service.pb.h"
 #include "minimal/client/policy.hpp"
 

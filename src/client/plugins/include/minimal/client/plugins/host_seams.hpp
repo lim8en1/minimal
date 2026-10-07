@@ -14,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 #include "minimal/client/session_client.hpp"
 
 namespace minimal::client {

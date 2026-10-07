@@ -35,7 +35,7 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
 
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/status_format.hpp"

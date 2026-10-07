@@ -328,7 +328,7 @@ The pattern ("per-preset tool config"):
    merges per-key, preset wins). Bundled example: `tools-python` keys the
    declared package contract under `python`.
 
-**Optional client registration hooks** (`src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h`):
+**Optional client registration hooks** (`src/client/plugins/include/minimal/client/sdk/client_plugin_abi.h`):
 views, start views, client-side /-commands (run in the TUI, no server round
 trip; the client's own commands win a name collision), per-tool renderers,
 display renderers, prompt renderers

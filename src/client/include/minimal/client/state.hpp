@@ -15,7 +15,7 @@
 
 #include "minimal/v1/common.pb.h"
 #include "minimal/v1/session_service.pb.h"
-#include "minimal/client/chat_model.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
 #include "minimal/client/rpc_queue.hpp"
 #include "minimal/client/session_components.hpp"
 #include "minimal/client/session_client.hpp"

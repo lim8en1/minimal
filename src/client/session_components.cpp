@@ -4,7 +4,7 @@
 #include <array>
 #include <utility>
 
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 #include "minimal/proto/struct_json.hpp"
 
 namespace minimal::client {

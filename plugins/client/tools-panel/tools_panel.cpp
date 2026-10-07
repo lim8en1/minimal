@@ -7,8 +7,8 @@
 #include <utility>
 
 #include "policy.hpp"
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/view/tool_status.hpp"
+#include "minimal/client/sdk/utf8.hpp"
+#include "minimal/client/sdk/tool_status.hpp"
 
 namespace minimal::tools_panel {
 

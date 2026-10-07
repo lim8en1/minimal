@@ -8,7 +8,7 @@
 // separate-process fixture can leave when the wrong thing happened.
 #include <cstdlib>
 
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 
 extern "C" {
 const char* minimal_client_plugin_abi_tag() { return "definitely-not-this-toolchain"; }

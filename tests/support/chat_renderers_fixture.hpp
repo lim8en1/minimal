@@ -6,7 +6,7 @@
 #include "chat_renderers.hpp"
 
 #include "minimal/client/plugins/core_registrations.hpp"
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/registries.hpp"
 
 namespace minimal_test {
 

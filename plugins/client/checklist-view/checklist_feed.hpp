@@ -40,8 +40,8 @@
 #include <nlohmann/json.hpp>
 
 #include "checklist_model.hpp"
-#include "minimal/client/plugins/background_poller.hpp"
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/background_poller.hpp"
+#include "minimal/client/sdk/registries.hpp"
 #include "minimal/client/policy.hpp"
 
 namespace minimal::checklist_view {

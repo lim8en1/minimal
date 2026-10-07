@@ -11,8 +11,8 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/common/plugin_config.hpp"
-#include "minimal/client/plugins/client_plugin_abi.h"
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/client_plugin_abi.h"
+#include "minimal/client/sdk/registries.hpp"
 #include "minimal/plugins/name_table.hpp"
 
 namespace minimal::client::plugins {
