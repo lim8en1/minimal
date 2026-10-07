@@ -91,3 +91,18 @@ TEST_CASE("model picker rows: filter matching nothing returns an empty list") {
 TEST_CASE("model picker rows: an empty list yields no headers either") {
     CHECK(BuildModelPickerRows({}, "").empty());
 }
+
+TEST_CASE("model picker rows: the context window rides as the row's detail") {
+    const std::vector<ModelSummary> models = {
+        Model("p/a-unknown"), Model("p/b-small", 4096), Model("p/c-large", 1050000),
+    };
+    const auto rows = BuildModelPickerRows(models, "");
+    REQUIRE(rows.size() == 4);
+    CHECK(rows[0].header);
+    CHECK(rows[0].detail.empty());
+    // Unknown renders nothing -- the status bar's rule.
+    CHECK(rows[1].detail.empty());
+    // The status bar's units, so a model reads the same in both places.
+    CHECK(rows[2].detail == "4k");
+    CHECK(rows[3].detail == "1M");
+}

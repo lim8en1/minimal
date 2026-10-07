@@ -149,6 +149,11 @@ ftxui::Component MakeFilterableMenuModal(
                 RowColor(state->rows[entry.index].color, depth)) {
             e = e | color(*tint);
         }
+        // The detail hangs off the label's tail, muted: annotation, not
+        // selection state, so the tint above never reaches it.
+        if (const std::string& detail = state->rows[entry.index].detail; !detail.empty()) {
+            e = hbox(std::move(e), text("  " + detail) | Muted(theme));
+        }
         // Applied OUTSIDE the tint, so a preset's own color survives focus.
         if (entry.focused) e = e | selection;
         if (entry.active) e = e | bold;

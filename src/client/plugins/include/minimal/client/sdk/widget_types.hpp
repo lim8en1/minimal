@@ -48,6 +48,9 @@ struct MenuRow {
     // Anything unparseable renders as the theme default -- a picker row must
     // never throw over cosmetics.
     std::string color = {};
+    // Optional annotation rendered muted after the label (the model picker's
+    // context window). Empty renders nothing.
+    std::string detail = {};
 };
 
 // What on_extra_key needs to answer a key the generic handler doesn't
