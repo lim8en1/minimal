@@ -70,7 +70,7 @@ minimal/
       startup/  # sanity_check: validates the loaded config against the registries
       session/  # SQLite store, migrations, SessionReader, message_codec, ulid
     client/
-      view/     # tab_bar, chat_view, prompt_host, status_bar, frame_renderer, tab_activity
+      view/     # chat_view, prompt_host, status_bar, frame_renderer, tab_activity
       render/   # markdown_renderer, streaming_markdown_view, syntax_highlighter, theme
       plugins/  # client loader, view/renderer registries
       session_client.{hpp,cpp}  app.cpp
@@ -1202,7 +1202,7 @@ Core defines neither payload nor semantics; plugin authors define their own JSON
 |---|---|---|
 | New self-contained view (panel or modal) | register a `View` — placement + default keybinding, remappable | **v1** |
 | Fill a named slot | slot registry | **v1**: tool-result and display-kind renderers, message-kind presentation, status-bar segments, prompt renderers, markdown engine, syntax grammars, chat surface |
-| Replace a default presentation (chat view, prompt editor, widgets, tab bar, pickers, the permission prompt) | an exclusive slot or a bundled view; disable the bundled default | live for the chat surface, markdown engine, widget kit, prompt editor, pickers and the permission prompt; the tab bar **planned** (EXTENSIBILITY.md §4.2) |
+| Replace a default presentation (chat view, prompt editor, widgets, tab bar, pickers, the permission prompt) | an exclusive slot or a bundled view; disable the bundled default | live for every one but the chat view (EXTENSIBILITY.md §4.2) |
 | Restructure the frame, the state, the transport | — | **No** — write a different client |
 
 Slots:
@@ -1422,7 +1422,7 @@ Every state is derived client-side from events already on the wire — no server
 
 **Ordering is logical, not drawn**: sort key `(root_session_open_ordinal, is_subagent, spawn_seq)`, so subagents sit immediately after their parent in spawn order. Subagents are flat (one level), so no recursive flattening is needed. Adjacency alone conveys grouping — no `↳`/`│`/nesting glyphs, which cost width and clutter the bar.
 
-**Rendering is deliberately minimal**: session name (truncated) plus the active-tab highlight, with state carried by **color**, which costs zero width. The one exception to color-only encoding is `Waiting`, which gets a literal `!` — it is the single state demanding human action and must not depend on color alone (colorblind users, low-contrast terminals). Richer detail lives where there is room: the status bar for the focused session, the running-tools panel for cross-session detail. The tab bar's job is identity and attention, nothing more.
+**Rendering is deliberately minimal** (the bundled `tab-bar` plugin; the bar is an optional client slot): session name (truncated) plus the active-tab highlight, with state carried by **color**, which costs zero width. The one exception to color-only encoding is `Waiting`, which gets a literal `!` — it is the single state demanding human action and must not depend on color alone (colorblind users, low-contrast terminals). Richer detail lives where there is room: the status bar for the focused session, the running-tools panel for cross-session detail. The tab bar's job is identity and attention, nothing more.
 
 Blocking subagents auto-focus their tab (the parent is stuck waiting anyway); non-blocking ones open in the background. Navigation: `Ctrl+Tab`/`Ctrl+Shift+Tab` linear, `Alt+←/→` between root groups, plus **jump-to-next-attention** crossing everything. All remappable.
 
@@ -1466,7 +1466,7 @@ Three tiers:
 
 1. **Config** — no code: `themes/*.json` (now with namespaced plugin sections — `git_plugin.branch` — merged after core roles so a plugin can never shadow one); **`keybindings.json`** (not optional: terminals disagree on what they can even *encode* — `Shift+Enter` is indistinguishable from `Enter` without the kitty keyboard protocol / CSI-u — so remapping must be user config; default newline-in-prompt is the more portable `Alt+Enter`); status bar as a format string (`"{version} | {model} | {tokens} | {agent} | {permission_mode} | {session}"`) that orders and selects registered segments — every one a plugin's (the usual ones are the bundled `session-status`), core owning only the layout; layout ratios and collapse/timestamp toggles.
 2. **Server plugins extend UI *content* without touching UI code** — a plugin command appears in `/`-autocomplete via `ListCommands`, and its results surface as a view or status line, never as a chat message (§ `/-command system`); a plugin tool appears in chat and the tools panel automatically.
-3. **Client plugins** for all presentation — additive views, renderers and status segments, and exclusive slots for the chat surface, markdown engine, prompt editor and widget kit (and, planned, the tab bar) (EXTENSIBILITY.md §4); for anything beyond (frame, state, tab model, transport), **write a different frontend** against `SessionService` — language-agnostic, process-isolated. This is also why @-mention resolution lives server-side: every frontend inherits it.
+3. **Client plugins** for all presentation — additive views, renderers and status segments, and exclusive slots for the chat surface, markdown engine, prompt editor, widget kit and tab bar (EXTENSIBILITY.md §4); for anything beyond (frame, state, tab model, transport), **write a different frontend** against `SessionService` — language-agnostic, process-isolated. This is also why @-mention resolution lives server-side: every frontend inherits it.
 
 ## @-mention file references
 

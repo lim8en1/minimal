@@ -143,6 +143,8 @@ std::vector<RegistryHook> RegistryHooks(ClientRegistries& r) {
         // Required: the only way the TUI takes input.
         Hook("prompt_editor", "minimal_client_plugin_register_prompt_editor", r.prompt_editor,
              "exclusive slot", Policy::kSlot, /*required=*/true),
+        Hook("tab_bar", "minimal_client_plugin_register_tab_bar", r.tab_bar, "exclusive slot",
+             Policy::kSlot),
     };
 }
 

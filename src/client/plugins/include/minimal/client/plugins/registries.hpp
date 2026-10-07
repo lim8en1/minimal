@@ -38,6 +38,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <ftxui/component/component.hpp>
@@ -123,6 +124,52 @@ struct TabActivity {
 struct TabActivitySnapshot {
     std::uint64_t version = 0;
     std::vector<TabActivity> tabs;
+};
+
+// --- Tab bar (EXCLUSIVE, OPTIONAL) -----------------------------------------
+
+// What a tab filter (tab.filter_group / tab.filter_agents) keeps out of the
+// bar. A filter hides identity, so hidden ATTENTION has to surface here or a
+// filtered-out prompt would be invisible.
+struct TabBarBadge {
+    bool active = false;
+    std::string label;          // "group" | "agents"; "" while no filter is on
+    std::size_t hidden = 0;     // tabs the filter keeps out of the bar
+    std::size_t attention = 0;  // of those, carrying attention
+};
+
+// The bar's input, computed by core each frame: the VISIBLE tabs in order
+// (the filter applied -- the filter is a core verb), without tool rows, and
+// the badge.
+struct TabBarModel {
+    std::vector<TabActivity> tabs;
+    TabBarBadge badge;
+};
+
+// Where each drawn tab cell landed, for click-to-focus: the bar reports a box
+// per cell (ftxui::reflect into it), core hit-tests the next click.
+struct TabBarHits {
+    std::vector<std::pair<std::string, std::shared_ptr<ftxui::Box>>> cells;
+    std::string TabAt(int x, int y) const {
+        for (const auto& [tab_id, box] : cells) {
+            if (x >= box->x_min && x <= box->x_max && y >= box->y_min && y <= box->y_max) {
+                return tab_id;
+            }
+        }
+        return {};
+    }
+};
+
+// The row of tabs above the chat. Optional: with none registered there is no
+// bar. Render runs every frame, on the render thread: cheap, no blocking. A
+// null Element draws no row (the bundled bar hides itself for a lone tab).
+// Obligation: a tab with `attention` shows a color-independent mark (the
+// bundled bar's '!') -- the one signal that survives any theme.
+class TabBar {
+public:
+    virtual ~TabBar() = default;
+    virtual ftxui::Element Render(const TabBarModel& model, const Theme& theme,
+                                  TabBarHits& hits) const = 0;
 };
 
 class HostUi {
@@ -1183,6 +1230,9 @@ struct MarkdownEngineKey {
 struct WidgetKitKey {
     std::string_view operator()(const WidgetKit&) const { return "widget_kit"; }
 };
+struct TabBarKey {
+    std::string_view operator()(const TabBar&) const { return "tab_bar"; }
+};
 struct PromptEditorKey {
     std::string_view operator()(const PromptEditorFactory&) const { return "prompt_editor"; }
 };
@@ -1204,6 +1254,8 @@ using MarkdownEngineRegistry = ExclusiveSlot<MarkdownEngine, MarkdownEngineKey>;
 // Null get() only during registration: the host registers the core default
 // into an unclaimed slot before any view's component() is built.
 using WidgetKitRegistry = ExclusiveSlot<WidgetKit, WidgetKitKey>;
+// Null get(): no tab bar.
+using TabBarRegistry = ExclusiveSlot<TabBar, TabBarKey>;
 // Required: the TUI has no other way to take input.
 using PromptEditorRegistry = ExclusiveSlot<PromptEditorFactory, PromptEditorKey>;
 
@@ -1248,6 +1300,7 @@ struct ClientRegistries {
     MarkdownEngineRegistry markdown_engine;
     WidgetKitRegistry widget_kit;
     PromptEditorRegistry prompt_editor;
+    TabBarRegistry tab_bar;
 };
 
 }  // namespace minimal::client::plugins

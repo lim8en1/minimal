@@ -12,13 +12,14 @@
 
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
-#include "minimal/client/view/tab_bar.hpp"
+#include "tab_bar.hpp"
+#include "minimal/client/view/tab_activity.hpp"
 
 using minimal::client::AppState;
 using minimal::client::ComputeTabBarBadge;
-using minimal::client::ComputeTabBarWindow;
-using minimal::client::TabBarBadge;
-using minimal::client::TabBarWindow;
+using minimal::client::tab_bar::ComputeTabBarWindow;
+using minimal::client::plugins::TabBarBadge;
+using minimal::client::tab_bar::TabBarWindow;
 using minimal::client::TabFilter;
 
 namespace {
@@ -191,22 +192,73 @@ TEST_CASE("ComputeTabBarBadge: identical lists stay inactive regardless of filte
     CHECK(badge.attention == 0);
 }
 
-TEST_CASE("tab bar hit boxes map a click to the tab under it", "[tab_bar]") {
-    auto a = FilterTab("tab-a", false, 1);
-    a.display_name = "alpha";
-    a.is_focused = true;
-    auto b = FilterTab("tab-b", false, 2);
-    b.display_name = "beta";
-    const auto theme = minimal::client::Theme::Parse(R"({"name":"t","colors":{}})",
-                                                      minimal::client::ColorDepth::Truecolor);
-    minimal::client::TabHitBoxes hits;
-    auto bar = minimal::client::RenderTabBar({a, b}, theme, {}, &hits);
+namespace {
+
+minimal::client::plugins::TabActivity BarTab(std::string id, std::string name,
+                                             bool focused = false) {
+    minimal::client::plugins::TabActivity tab;
+    tab.tab_id = std::move(id);
+    tab.display_name = std::move(name);
+    tab.focused = focused;
+    tab.state = "idle";
+    return tab;
+}
+
+std::string Draw(const ftxui::Element& element) {
     auto screen = ftxui::Screen::Create(ftxui::Dimension::Fixed(80), ftxui::Dimension::Fixed(1));
-    ftxui::Render(screen, bar);   // the layout pass fills the boxes
+    ftxui::Render(screen, element);   // the layout pass fills the boxes
+    return screen.ToString();
+}
+
+const minimal::client::Theme& BarTheme() {
+    static const auto theme = minimal::client::Theme::Parse(R"({"name":"t","colors":{}})",
+                                                             minimal::client::ColorDepth::Truecolor);
+    return theme;
+}
+
+}  // namespace
+
+TEST_CASE("tab bar hit boxes map a click to the tab under it", "[tab_bar]") {
+    minimal::client::plugins::TabBarModel model;
+    model.tabs = {BarTab("tab-a", "alpha", /*focused=*/true), BarTab("tab-b", "beta")};
+    minimal::client::plugins::TabBarHits hits;
+    const auto bar = minimal::client::tab_bar::Bar().Render(model, BarTheme(), hits);
+    REQUIRE(bar != nullptr);
+    (void)Draw(bar);
     REQUIRE(hits.cells.size() == 2);
     const auto& first = *hits.cells[0].second;
     const auto& second = *hits.cells[1].second;
     CHECK(hits.TabAt(first.x_min, 0) == "tab-a");
     CHECK(hits.TabAt(second.x_max, 0) == "tab-b");
     CHECK(hits.TabAt(79, 0).empty());   // past the last cell
+}
+
+TEST_CASE("tab bar: hidden for a lone tab, shown for it under a filter", "[tab_bar]") {
+    minimal::client::plugins::TabBarModel model;
+    model.tabs = {BarTab("a", "alpha", true)};
+    minimal::client::plugins::TabBarHits hits;
+    CHECK(minimal::client::tab_bar::Bar().Render(model, BarTheme(), hits) == nullptr);
+    model.badge = {.active = true, .label = "agents", .hidden = 2, .attention = 1};
+    const auto bar = minimal::client::tab_bar::Bar().Render(model, BarTheme(), hits);
+    REQUIRE(bar != nullptr);
+    const std::string row = Draw(bar);
+    CHECK(row.find("agents ·2") != std::string::npos);
+    CHECK(row.find("!1") != std::string::npos);
+}
+
+TEST_CASE("tab bar: attention is a '!', a subagent a '↳'", "[tab_bar]") {
+    minimal::client::plugins::TabBarModel model;
+    auto waiting = BarTab("w", "waiter");
+    waiting.state = "waiting";
+    waiting.attention = true;
+    auto child = BarTab("c", "child");
+    child.subagent = true;
+    model.tabs = {BarTab("a", "alpha", true), waiting, child};
+    minimal::client::plugins::TabBarHits hits;
+    const std::string row = Draw(minimal::client::tab_bar::Bar().Render(model, BarTheme(), hits));
+    INFO(row);
+    const auto waiter = row.find("waiter");
+    REQUIRE(waiter != std::string::npos);
+    CHECK(row.find('!', waiter) < row.find("child"));   // the mark rides the waiting tab
+    CHECK(row.find("↳") != std::string::npos);
 }

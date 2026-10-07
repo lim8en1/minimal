@@ -194,9 +194,8 @@ inline constexpr int kMinModalBodyRows = 2;
 // A modal's pinned rows (ModalFrame's `pinned`: a selected row's details, the
 // last outcome) take at most this many rows.
 inline constexpr int kModalPinnedMaxRows = 8;
-// Status bar / tab bar columns.
+// Status bar columns.
 inline constexpr std::size_t kStatusSessionColumnCap = 24;
-inline constexpr int kTabOverflowMarkerWidth = 5;
 
 // Context occupancy that tints the token segment: attention as compaction
 // nears, error when the window is all but full.

@@ -36,7 +36,6 @@
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/status_format.hpp"
-#include "minimal/client/view/tab_bar.hpp"
 #include "minimal/client/view/tab_ui.hpp"
 #include "minimal/client/policy.hpp"
 
@@ -63,6 +62,7 @@ public:
         plugins::ToolResultRendererRegistry& renderer_registry;
         plugins::DisplayRendererRegistry& display_registry;
         plugins::StatusSegmentRegistry& status_registry;
+        const plugins::TabBarRegistry& tab_bar_registry;   // empty: no tab bar
         plugins::MarkdownEngine& engine;
 
         int panel_height;   // rows for a plugin panel's content (ui.json panel_height)
@@ -115,7 +115,7 @@ private:
     bool GuardPluginCall(const std::string& key, const std::string& what,
                          const std::function<void()>& call);
     std::map<std::string, int> plugin_throws_;
-    TabHitBoxes tab_hits_;   // the tab bar's cells, as last laid out   // consecutive, per key; -1 = disabled
+    plugins::TabBarHits tab_hits_;   // the tab bar's cells, as last laid out
 
 };
 

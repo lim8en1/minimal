@@ -1,5 +1,6 @@
 #include "minimal/client/view/tab_activity.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <string>
 #include <utility>
@@ -41,7 +42,7 @@ std::uint64_t KeyOf(const AppState& app, const std::vector<AppState::TabSnapshot
     return key;
 }
 
-plugins::ToolActivity ActivityOf(const ToolExecutionState& tool) {
+plugins::ToolActivity ToolActivityOf(const ToolExecutionState& tool) {
     plugins::ToolActivity out;
     out.name = LiveToolName(tool);
     out.summary = LiveToolSummary(tool);
@@ -55,25 +56,46 @@ plugins::ToolActivity ActivityOf(const ToolExecutionState& tool) {
 
 }  // namespace
 
+plugins::TabActivity ActivityOf(const AppState::TabSnapshot& tab) {
+    plugins::TabActivity activity;
+    activity.tab_id = tab.tab_id;
+    activity.session_id = tab.session_id;
+    activity.display_name = tab.display_name;
+    activity.state = StateWord(tab.state);
+    activity.attention = tab.attention_glyph != '\0';
+    activity.focused = tab.is_focused;
+    activity.subagent = tab.is_subagent;
+    activity.view_only = tab.view_only;
+    activity.root_ordinal = tab.root_ordinal;
+    activity.spawn_seq = tab.spawn_seq;
+    for (const auto& tool : tab.tools) activity.tools.push_back(ToolActivityOf(tool));
+    return activity;
+}
+
+plugins::TabBarBadge ComputeTabBarBadge(const std::vector<AppState::TabSnapshot>& all,
+                                        const std::vector<AppState::TabSnapshot>& visible,
+                                        TabFilter filter) {
+    if (filter == TabFilter::All) return {};
+    plugins::TabBarBadge badge;
+    badge.active = true;
+    badge.label = filter == TabFilter::Group ? "group" : "agents";
+    badge.hidden = all.size() >= visible.size() ? all.size() - visible.size() : 0;
+    for (const auto& tab : all) {
+        if (tab.attention_glyph == '\0') continue;
+        const bool shown = std::any_of(visible.begin(), visible.end(),
+                                       [&](const auto& v) { return v.tab_id == tab.tab_id; });
+        if (!shown) ++badge.attention;
+    }
+    return badge;
+}
+
 std::shared_ptr<const plugins::TabActivitySnapshot> TabActivityFeed::Get(const AppState& app) {
     const std::uint64_t key = KeyOf(app, app.GetAllTabs(/*include_tool_output=*/false));
     if (last_ != nullptr && key == key_) return last_;
     auto snapshot = std::make_shared<plugins::TabActivitySnapshot>();
     snapshot->version = last_ != nullptr ? last_->version + 1 : 1;
     for (const auto& tab : app.GetAllTabs(/*include_tool_output=*/true)) {
-        plugins::TabActivity activity;
-        activity.tab_id = tab.tab_id;
-        activity.session_id = tab.session_id;
-        activity.display_name = tab.display_name;
-        activity.state = StateWord(tab.state);
-        activity.attention = tab.attention_glyph != '\0';
-        activity.focused = tab.is_focused;
-        activity.subagent = tab.is_subagent;
-        activity.view_only = tab.view_only;
-        activity.root_ordinal = tab.root_ordinal;
-        activity.spawn_seq = tab.spawn_seq;
-        for (const auto& tool : tab.tools) activity.tools.push_back(ActivityOf(tool));
-        snapshot->tabs.push_back(std::move(activity));
+        snapshot->tabs.push_back(ActivityOf(tab));
     }
     key_ = key;
     last_ = std::move(snapshot);
