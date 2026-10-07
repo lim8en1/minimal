@@ -39,7 +39,7 @@ namespace {
 
 constexpr const char* kProtocolVersion = "2025-03-26";
 constexpr const char* kClientName = "minimal";
-constexpr const char* kClientVersion = "1.0.0b";
+constexpr const char* kClientVersion = MINIMAL_VERSION;  // the build's, never a copy
 
 // Completion slot for one call. Shared between caller and worker: the caller
 // may give up on deadline or cancellation while the job still runs, so the
