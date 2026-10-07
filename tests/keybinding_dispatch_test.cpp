@@ -472,8 +472,8 @@ plugins::PluginViewEntry Panel(const std::string& id, bool visible = false) {
 
 class ModalStubView final : public plugins::View {
 public:
-    explicit ModalStubView(std::string id)
-        : spec_{std::move(id), "", plugins::ViewPlacement::Modal, ""} {}
+    explicit ModalStubView(std::string id, std::string role = {})
+        : spec_{std::move(id), "", plugins::ViewPlacement::Modal, "", std::move(role)} {}
     const plugins::ViewSpec& spec() const override { return spec_; }
     ftxui::Component component() override { return nullptr; }
 
@@ -647,6 +647,24 @@ TEST_CASE("view requests: show, focus and hide panels; open and close a modal",
     CHECK_FALSE(minimal::client::ApplyViewRequest(views, {Op::kShow, "nope"}, slot, show_modal));
     CHECK_FALSE(minimal::client::ApplyViewRequest(views, {Op::kSetPanelVisible, "m1", true}, slot, show_modal));
     CHECK_FALSE(minimal::client::ApplyViewRequest(views, {Op::kFocusPanel, "p1"}, slot, show_modal));
+}
+
+TEST_CASE("view requests: a server hint naming a role reaches the view that fills it, aliased or not",
+          "[keybinding_dispatch][view_requests][names]") {
+    // The session picker fills the "sessions" role; client-plugins.json
+    // renamed its surface. The server's /sessions hint names the role.
+    using Op = plugins::ViewRequest::Op;
+    static std::vector<std::unique_ptr<plugins::View>> store;
+    store.push_back(std::make_unique<ModalStubView>("sessions", "sessions"));
+    std::vector<plugins::PluginViewEntry> views{
+        plugins::PluginViewEntry{store.back().get(), nullptr, false, false, "my-sessions", {}}};
+    views[0].component = ftxui::Renderer([] { return ftxui::text("sessions"); });
+    ftxui::Component slot;
+    bool show_modal = false;
+    CHECK(minimal::client::ApplyViewRequest(views, {Op::kShow, "sessions"}, slot, show_modal));
+    CHECK(show_modal);
+    CHECK(minimal::client::ApplyViewRequest(views, {Op::kClose, "my-sessions"}, slot, show_modal));
+    CHECK_FALSE(show_modal);
 }
 
 TEST_CASE("view requests: an aliased view answers to its surface, and to its own plugin by id",

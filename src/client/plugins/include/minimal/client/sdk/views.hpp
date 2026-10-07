@@ -70,6 +70,12 @@ struct ViewSpec {
     // Registered as the DEFAULT binding only if the user's keybindings.json
     // does not already name this id (Keybindings::EnsureDefault).
     std::string default_keybinding = {};
+    // The job core opens this view for, when it has one: "sessions",
+    // "subagents", "agents", "models", "subagent-models" (ctrl+o, /agent,
+    // /model, a first message waiting on a choice, the server's view hints).
+    // A role is not a name -- an alias renaming the view leaves it intact.
+    // "" = no role; core never opens the view on its own.
+    std::string role = {};
 };
 
 // A self-contained view. Panels render in the panel region; modals render in

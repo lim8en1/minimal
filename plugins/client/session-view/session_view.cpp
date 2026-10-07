@@ -188,7 +188,7 @@ SessionsView::~SessionsView() = default;
 
 const plugins::ViewSpec& SessionsView::spec() const {
     static const plugins::ViewSpec kSpec{kSessionsViewId, "resume a session",
-                                         plugins::ViewPlacement::Modal};
+                                         plugins::ViewPlacement::Modal, {}, kSessionsViewId};
     return kSpec;
 }
 
@@ -368,7 +368,7 @@ SubagentsView::~SubagentsView() = default;
 
 const plugins::ViewSpec& SubagentsView::spec() const {
     static const plugins::ViewSpec kSpec{kSubagentsViewId, "subagents",
-                                         plugins::ViewPlacement::Modal};
+                                         plugins::ViewPlacement::Modal, {}, kSubagentsViewId};
     return kSpec;
 }
 

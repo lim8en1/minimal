@@ -120,8 +120,9 @@ private:
     // Shows the plugin view registered as `role` ("agents", ...); false, with
     // a notice, when none is.
     bool OpenRoleView(const std::string& role);
-    // The surface id of the plugin modal showing, "" for none.
-    std::string ShownPluginModal() const;
+    // The role of the plugin modal showing ("" for none, or a modal with no
+    // role): what a first message waiting on a choice watches.
+    std::string ShownPluginModalRole() const;
     // HostUi's reads (HostFocusProvider::AttachReads).
     std::vector<plugins::KeyBindingInfo> KeyBindingsForPlugins() const;
     std::vector<CommandCatalogEntry> CatalogForPlugins();
