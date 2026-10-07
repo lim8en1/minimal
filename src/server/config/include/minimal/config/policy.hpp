@@ -19,12 +19,19 @@ namespace minimal::config {
 // the machine. 1 reproduces sequential dispatch.
 inline constexpr int kDefaultMaxParallelToolCalls = 4;
 
-// One tool call's serialized input, and one result's text. Far past any real
-// call or a useful result, small enough that a runaway model output or a
-// misbehaving MCP server cannot ride into every later request until
-// compaction.
+// One tool call's serialized input: far past any real call, small enough
+// that a runaway model output cannot ride into every later request.
 inline constexpr std::int64_t kDefaultMaxToolInputBytes = 10 * common::kMiB;
-inline constexpr std::int64_t kDefaultMaxToolResultBytes = 10 * common::kMiB;
+// One result's text, sized for a context window rather than a disk: ~64-128k
+// tokens of dense output at most, past any useful single result. Plugins cap
+// lower on their own (bash 64 KiB); this is the backstop for MCP and any tool
+// that caps nothing.
+inline constexpr std::int64_t kDefaultMaxToolResultBytes = 256 * common::kKiB;
+// ...and one result's share of the model's context window, in percent: with
+// the window known, the cap is the smaller of the two (5% of 1M tokens is
+// ~100 KB at agent::kConservativeBytesPerToken; of 200k, ~20 KB). A few cut
+// results then leave the window to the conversation.
+inline constexpr std::int64_t kDefaultMaxToolResultWindowPercent = 5;
 
 // The pool starts one thread per slot, per session: past this a value is a
 // resource-exhaustion typo, not a tuning choice.

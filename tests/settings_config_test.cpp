@@ -170,10 +170,10 @@ TEST_CASE("ParseSettingsConfig: max_parallel_tool_calls defaults to 4, must be p
                     std::runtime_error);
 }
 
-TEST_CASE("ParseSettingsConfig: max_result_bytes defaults to 10 MiB, must not be negative",
+TEST_CASE("ParseSettingsConfig: max_result_bytes defaults to 256 KiB, must not be negative",
          "[settings_config]") {
     auto config = ParseSettingsConfig(nlohmann::json::object());
-    CHECK(config.tools.max_result_bytes == 10 * 1024 * 1024);
+    CHECK(config.tools.max_result_bytes == 256 * 1024);
 
     auto overridden =
         ParseSettingsConfig(nlohmann::json{{"tools", {{"max_result_bytes", 4096}}}});
@@ -186,6 +186,16 @@ TEST_CASE("ParseSettingsConfig: max_result_bytes defaults to 10 MiB, must not be
 
     CHECK_THROWS_AS(ParseSettingsConfig(
                         nlohmann::json{{"tools", {{"max_result_bytes", -1}}}}),
+                    std::runtime_error);
+}
+
+TEST_CASE("ParseSettingsConfig: max_result_window_percent defaults to 5, 0..100",
+         "[settings_config]") {
+    CHECK(ParseSettingsConfig(nlohmann::json::object()).tools.max_result_window_percent == 5);
+    CHECK(ParseSettingsConfig(nlohmann::json{{"tools", {{"max_result_window_percent", 0}}}})
+              .tools.max_result_window_percent == 0);
+    CHECK_THROWS_AS(ParseSettingsConfig(
+                        nlohmann::json{{"tools", {{"max_result_window_percent", 101}}}}),
                     std::runtime_error);
 }
 

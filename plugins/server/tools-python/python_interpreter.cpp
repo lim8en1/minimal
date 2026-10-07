@@ -576,7 +576,9 @@ void Interpreter::DeliverResponse(const std::string& id, RequestOutcome outcome,
 
 void Interpreter::InjectAsync(const Pending& p) {
     const bool ok = p.outcome.ok;
-    std::string text = FormatOutcome(p.id, p.outcome, 0, settings_.max_output_bytes);
+    tools::ToolOutputSpill spill(p.handles.project_root, p.handles.session_id,
+                                 p.handles.tool_use_id.empty() ? "" : p.handles.tool_use_id + ".txt");
+    std::string text = FormatOutcome(p.id, p.outcome, 0, settings_.max_output_bytes, &spill);
     text = ok ? text + "\n[python " + p.id + " completed]"
               : "[python " + p.id + " failed]\n" + text;
     llm::ToolResultBlock block;
@@ -923,7 +925,8 @@ std::vector<Interpreter::PendingRow> Interpreter::PendingRows() {
 }
 
 std::string FormatOutcome(const std::string& id, const RequestOutcome& outcome,
-                          std::size_t queued_ahead, std::int64_t max_bytes) {
+                          std::size_t queued_ahead, std::int64_t max_bytes,
+                          tools::ToolOutputSpill* spill) {
     std::string text;
     if (outcome.ok) {
         text = id + (outcome.result.empty() ? " ok" : " ok: " + outcome.result);
@@ -954,17 +957,9 @@ std::string FormatOutcome(const std::string& id, const RequestOutcome& outcome,
         text += "\n[ran after " + std::to_string(queued_ahead) +
                 " earlier request(s) queued in this interpreter]";
     }
-    if (static_cast<std::int64_t>(text.size()) > max_bytes) {
-        const auto cap = static_cast<std::size_t>(max_bytes);
-        const auto head = cap / 4;
-        const auto tail = cap - head;
-        // UTF-8-safe cuts: never split a multi-byte sequence at either end.
-        std::string tail_text = text.substr(common::Utf8CeilToBoundary(text, text.size() - tail));
-        text = common::TruncateUtf8Bytes(text, head) + "\n[... " +
-               std::to_string(text.size() - cap) + " bytes omitted ...]\n" +
-               tail_text;
-    }
-    return text;
+    const auto cap = static_cast<std::size_t>(std::max<std::int64_t>(max_bytes, 0));
+    if (spill != nullptr) return tools::CapWithSpill(std::move(text), cap, *spill);
+    return tools::HeadTail(text, cap);
 }
 
 }  // namespace minimal::tools_python

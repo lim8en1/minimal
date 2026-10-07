@@ -17,11 +17,12 @@ namespace minimal::tools_web {
 // loop.
 inline constexpr std::chrono::milliseconds kDefaultFetchTimeout = std::chrono::seconds(15);
 inline constexpr int kDefaultFetchMaxRedirects = 5;
-// Text returned to the model: a long article by default; a model-supplied
-// max_bytes is clamped to the ceiling. The overflow spills to a file the read
-// tool pages through.
-inline constexpr int kDefaultFetchDefaultMaxBytes = 256 * static_cast<int>(common::kKiB);
-inline constexpr int kDefaultFetchMaxBytes = 2 * static_cast<int>(common::kMiB);
+// Text returned to the model: a long article by default (~16-32k tokens); a
+// model-supplied max_bytes is clamped to the ceiling, which is still a fair
+// share of a context window. The overflow spills to a file the read tool
+// pages through.
+inline constexpr int kDefaultFetchDefaultMaxBytes = 64 * static_cast<int>(common::kKiB);
+inline constexpr int kDefaultFetchMaxBytes = 256 * static_cast<int>(common::kKiB);
 
 // web_search: results shown by default and at most, and the API's budget.
 inline constexpr int kDefaultSearchDefaultMaxResults = 5;

@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -19,12 +20,20 @@ namespace minimal::sidecar {
 
 class CappedBuffer {
 public:
-    explicit CappedBuffer(std::int64_t cap)
+    // `spill` (optional): receives the WHOLE stream, in order, from the
+    // moment it first exceeds the cap -- what was held so far, then every
+    // later chunk -- so a caller can keep the full output on disk without
+    // holding it in memory. Output within the cap never reaches it.
+    using Spill = std::function<void(std::string_view)>;
+    explicit CappedBuffer(std::int64_t cap, Spill spill = {})
         : head_cap_(static_cast<std::size_t>(cap / 4)),
-          tail_cap_(static_cast<std::size_t>(cap - cap / 4)) {}
+          tail_cap_(static_cast<std::size_t>(cap - cap / 4)),
+          spill_(std::move(spill)) {}
 
     void Append(std::string_view chunk);
     std::string Render();
+    // Bytes appended in total (more than the cap: the render was cut).
+    std::size_t total() const { return total_; }
 
 private:
     void Compact();
@@ -32,6 +41,9 @@ private:
     std::size_t head_cap_, tail_cap_;
     std::string head_, tail_;
     std::size_t dropped_ = 0;
+    std::size_t total_ = 0;
+    Spill spill_;
+    bool spilling_ = false;
 };
 
 }  // namespace minimal::sidecar

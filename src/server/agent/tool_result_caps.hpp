@@ -12,6 +12,10 @@
 
 #include "minimal/llm/message.hpp"
 
+namespace minimal::tools {
+class ToolOutputSpill;
+}
+
 namespace minimal::agent {
 
 // The tool_use blocks of an assistant message, in block order (pointers into
@@ -25,8 +29,10 @@ std::vector<const llm::ToolUseBlock*> ToolUsesOf(const llm::Message& message);
 // guarantee, and an MCP tool or third-party plugin tool has no cap at all short
 // of this one. Truncation, not an error: a large result is not a refusal the
 // model needs to adapt its call to, just content it should know was cut.
-// `max_bytes <= 0` means no ceiling.
-void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes);
+// `max_bytes <= 0` means no ceiling. The start and the end are kept; with a
+// `spill` the whole text is saved there first and the note names the file.
+void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes,
+                   tools::ToolOutputSpill* spill = nullptr);
 
 // The display payload's ceiling (settings.json tools.max_display_bytes).
 // DROPPED whole over the cap, never truncated: a cut diff or file excerpt

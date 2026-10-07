@@ -24,6 +24,9 @@ FsSettings ParseFsSettings(const nlohmann::json& config) {
         read.Int("max_line_length", settings.read_max_line_length, 1, kIntMax));
     settings.read_max_lines = static_cast<decltype(settings.read_max_lines)>(
         read.Int("max_lines", settings.read_max_lines, 1, kIntMax));
+    read.Describe("max_bytes", {"Bytes one read returns at most; stops at a whole line.",
+                                config::ApplyPolicy::kLive});
+    settings.read_max_bytes = read.Int("max_bytes", settings.read_max_bytes, 1);
     read.Finish();
     config::Reader edit = root.Object("edit");
     edit.Describe("max_editable_file_bytes",

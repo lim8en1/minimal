@@ -8,7 +8,7 @@
 
 #include "html_text.hpp"
 #include "minimal/common/utf8.hpp"
-#include "minimal/common/atomic_write.hpp"
+#include "minimal/tools/tool_output_spill.hpp"
 #include "minimal/common/http_status.hpp"
 #include "url_policy.hpp"
 #include "minimal/common/fnv.hpp"
@@ -224,23 +224,23 @@ private:
             return ToolResult{false, std::move(text)};
         }
         const auto total = text.size();
-        std::error_code ec;
-        const auto dir = ctx.project_root / ".minimal" / "web-fetch";
-        std::filesystem::create_directories(dir, ec);
-        const std::string name = SpillName(url);
-        const auto outcome = ec ? common::WriteOutcome{} : common::write_file(dir / name, text);
+        // The shared tool-output spill (gitignored, pruned per session),
+        // named by URL hash so a refetch overwrites instead of accumulating.
+        tools::ToolOutputSpill spill(ctx.project_root, ctx.session_id, SpillName(url));
+        spill.Append(text);
+        spill.Finish();
         // Backed up to a UTF-8 boundary, not a raw byte cut: a cut landing
         // inside a multi-byte sequence emitted invalid UTF-8 into the
         // model's context.
         const auto safe_len = common::Utf8FloorToBoundary(text, static_cast<std::size_t>(max_bytes));
-        if (outcome.ok) {
+        if (spill.ok()) {
             text.resize(safe_len);
             return ToolResult{false,
                               std::move(text) + "\n[Showing the first " +
                                   std::to_string(max_bytes) + " of " + std::to_string(total) +
                                   " bytes" + limit_note +
-                                  ". The full response is saved at .minimal/web-fetch/" +
-                                  name + " -- use the read tool (offset/limit) to page through "
+                                  ". The full response is saved at " + spill.RelativePath() +
+                                  " -- use the read tool (offset/limit) to page through "
                                   "the rest.]"};
         }
         // The spill failed: truncate anyway, and say the pointer is missing
@@ -250,7 +250,7 @@ private:
                           std::move(text) + "\n[Truncated to the first " +
                               std::to_string(max_bytes) + " of " + std::to_string(total) +
                               " bytes" + limit_note + "; saving the full response failed (" +
-                              outcome.error +
+                              spill.error() +
                               ") -- re-fetch with a larger max_bytes if you need more.]"};
     }
 

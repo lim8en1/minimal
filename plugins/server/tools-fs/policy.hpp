@@ -17,6 +17,10 @@ namespace minimal::tools_fs {
 inline constexpr int kDefaultReadLimitLines = 2000;
 inline constexpr int kDefaultReadMaxLines = 2000;
 inline constexpr int kDefaultReadMaxLineLength = 2000;
+// ...and the bytes of one read, whatever the line limits allow: ~16-32k
+// tokens of dense text, so ordinary source reads are untouched while a
+// minified bundle or a log of long lines pages instead of flooding the context.
+inline constexpr std::int64_t kDefaultReadMaxBytes = 64 * static_cast<std::int64_t>(common::kKiB);
 
 // edit: the largest file edited in place. Source files are far smaller; a
 // file past this is generated or data, and a string replace over it is a

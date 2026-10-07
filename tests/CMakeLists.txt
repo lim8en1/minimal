@@ -41,6 +41,7 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     token_accounting_test.cpp
     cancel_token_test.cpp
     sidecar_test.cpp
+    tool_output_spill_test.cpp
     config_paths_test.cpp
     file_lock_test.cpp
     logger_test.cpp

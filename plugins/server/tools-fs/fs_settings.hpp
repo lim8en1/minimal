@@ -21,6 +21,9 @@ struct FsSettings {
     // 10 GB log was an OOM on the session worker. limit == 0 now means this
     // ceiling too, and clamping is disclosed in the result footer.
     int read_max_lines = kDefaultReadMaxLines;
+    // The bytes one read returns, whatever the line limits allow: 2000 lines
+    // of 2000 characters is ~4 MB, a context window's worth in one call.
+    std::int64_t read_max_bytes = kDefaultReadMaxBytes;
     // Bounds worst-case memory for the mutating edit commands, which (unlike
     // read) must hold the whole file to rewrite it. Past this, the model is told
     // to use a different approach rather than the server quietly allocating a

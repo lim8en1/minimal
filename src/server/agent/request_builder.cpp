@@ -4,6 +4,8 @@
 
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/context_compactor.hpp"
+#include "minimal/agent/policy.hpp"
+#include "minimal/common/units.hpp"
 #include "tool_result_caps.hpp"
 
 namespace minimal::agent {
@@ -164,8 +166,16 @@ std::int64_t RequestBuilder::FixedBytes(const std::optional<std::string>& system
 
 std::int64_t RequestBuilder::ToolResultByteCap() const {
     std::int64_t cap = config_.max_tool_result_bytes;
-    if (preset_.context_window_tokens && *preset_.context_window_tokens > 0) {
-        const std::int64_t window_cap = std::max<std::int64_t>(*preset_.context_window_tokens, 4096);
+    // The window term is a share of the window converted to BYTES at the
+    // conservative ratio -- the window itself is in tokens, and using it as a
+    // byte count let one result take the whole window or more.
+    if (config_.max_tool_result_window_percent > 0 && preset_.context_window_tokens &&
+        *preset_.context_window_tokens > 0) {
+        const std::int64_t window_cap = std::max<std::int64_t>(
+            common::PercentOf(*preset_.context_window_tokens,
+                              config_.max_tool_result_window_percent) *
+                kConservativeBytesPerToken,
+            kMinToolResultCapBytes);
         cap = cap > 0 ? std::min(cap, window_cap) : window_cap;
     }
     return cap;

@@ -56,7 +56,7 @@ to 0, which means disabled/unlimited).
   "startup_timeout": 10,
   "install_timeout": 300,
   "grace_seconds": 2,
-  "max_output_bytes": 1048576,
+  "max_output_bytes": 65536,
   "max_capture_bytes": 1048576,
   "rlimit_cpu_seconds": 0,
   "max_file_size_bytes": 1073741824,
@@ -73,7 +73,7 @@ to 0, which means disabled/unlimited).
 | `startup_timeout` | `10` | Spawn + handshake window for a new interpreter (a broken venv is caught here, not mid-use). |
 | `install_timeout` | `300` | Bounded venv creation / package installation. |
 | `grace_seconds` | `2` | How long `python_interrupt` (and a `max_runtime` expiry) waits before reporting "no reaction" / escalating to the hard kill. |
-| `max_output_bytes` | `1048576` (1 MiB) | Bounds the persisted result text per request. |
+| `max_output_bytes` | `65536` (64 KiB) | Bounds the persisted result text per request. Past it the start and the end are kept and the whole text is spilled to `.minimal/tool-output/<session>/<tool_use_id>.txt`, which the result names. |
 | `max_capture_bytes` | `1048576` (1 MiB) | Per-field capture cap (stdout, stderr, process output, result, exception message); the protocol-line limit is derived from it. |
 | `rlimit_cpu_seconds` | `0` (off) | RLIMIT_CPU backstop for the interpreter process. Off by default: the interpreter's clock is the session's clock, and a CPU-spinning live session is the model's/user's to interrupt. |
 | `max_file_size_bytes` | `1073741824` (1 GiB) | RLIMIT_FSIZE backstop for files the executed code writes. |

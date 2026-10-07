@@ -19,6 +19,15 @@ namespace minimal::agent {
 // heuristic, not a tokenizer: real counts vary by model and content, and
 // anything with a backend-reported count uses that instead.
 inline constexpr std::int64_t kEstimatedBytesPerToken = 4;
+// The ratio for SIZING a cap that must hold in tokens (a tool result's share
+// of the window), deliberately pessimistic: dense output -- paths, hex, JSON,
+// escaped control bytes -- tokenizes at 1-2 bytes per token, so a cap sized
+// at 4 would let through two to four times the tokens it was meant to allow.
+inline constexpr std::int64_t kConservativeBytesPerToken = 2;
+
+// The floor under a window-derived tool-result cap: a tiny or misreported
+// window must still leave room for an error message and a spill note.
+inline constexpr std::int64_t kMinToolResultCapBytes = 4096;
 
 // JsonSizeEstimate's size for a number (or binary): sized without printing
 // it. A fixed guess is within the noise of kEstimatedBytesPerToken.

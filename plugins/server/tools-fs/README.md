@@ -34,7 +34,8 @@ or partial config object is normal rather than an error.
   "read": {
     "default_limit_lines": 2000,
     "max_line_length": 2000,
-    "max_lines": 2000
+    "max_lines": 2000,
+    "max_bytes": 65536
   },
   "edit": {
     "max_editable_file_bytes": 5242880
@@ -47,6 +48,7 @@ or partial config object is normal rather than an error.
 | `read.default_limit_lines` | `2000` | Window size the model sees when it supplies no `limit` (capped at `read.max_lines`). |
 | `read.max_line_length` | `2000` | Per-line truncation length. |
 | `read.max_lines` | `2000` | The hard ceiling on any read window, whatever the model asked for. Bounds memory proportionally to the configured limit, not the file size. |
+| `read.max_bytes` | `65536` (64 KiB) | Bytes one read returns at most, whatever the line limits allow (2000 lines of 2000 characters is ~4 MB). Stops at a whole line — at least one — and the footer gives the offset to continue. |
 | `edit.max_editable_file_bytes` | `5242880` (5 MiB) | Worst-case memory bound for `write`/`edit`, which must hold the whole file to rewrite it. Past this the model is told to use a different approach. |
 
 Non-positive values fall back to the defaults rather than silently producing

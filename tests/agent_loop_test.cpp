@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -146,6 +147,9 @@ private:
 // destruction-safe order: the loop refers to the others, so it is destroyed
 // first.
 struct Harness {
+    // The session's project root: a cut tool result spills under it
+    // (.minimal/tool-output), which must never land in the source tree.
+    testing::TempDir project;
     // Skill support for tier-2 coverage of the lazy-load path. Declared first so
     // they are destroyed LAST: the registry below owns a SkillTool that holds a
     // reference into `skills`.
@@ -226,7 +230,7 @@ struct Harness {
                                                          PermissionRunMode::Normal);
         agent::SessionContext session{common::DefaultLogger()};
         session.session_id = "s1";
-        session.project_root = ".";
+        session.project_root = project.path();
         if (throwing_lifecycle_sink) {
             session.tool_lifecycle_sink = [](const agent::ToolLifecycleEvent&) {
                 throw std::runtime_error("simulated sink failure");
@@ -586,6 +590,69 @@ TEST_CASE("a result at or under max_tool_result_bytes is untouched",
     REQUIRE(result != nullptr);
     REQUIRE(result->content.size() == 1);
     CHECK(std::get<llm::TextBlock>(result->content.front()).text == std::string(50, 'x'));
+}
+
+TEST_CASE("the result ceiling is a share of the context window, in bytes at 2 per token",
+          "[agent_loop][invariant]") {
+    // Regression: the window's TOKEN count was used as a BYTE cap, so a 1M
+    // window let one result take a megabyte -- the whole window or more.
+    // 5% of 1M tokens at 2 bytes/token is 100,000 bytes.
+    Harness h;
+    std::string big;
+    big.reserve(300000);
+    for (int i = 0; big.size() < 300000; ++i) big += "row " + std::to_string(i) + "\n";
+    auto owned = std::make_unique<FakeTool>("big", ToolCategory::ReadOnly, big);
+    h.registry.Register(std::move(owned));
+    h.provider.PushResponse(ToolUseResponse("tu1", "big"));
+    h.provider.PushResponse(TextResponse("done"));
+
+    agent::AgentPreset preset;
+    preset.context_window_tokens = 1000000;
+    h.Build(std::move(preset), agent::LoopConfig{});
+    h.loop->RunTurn(UserText("go"));
+
+    const llm::ToolResultBlock* result = nullptr;
+    for (const auto& message : h.store.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* r = std::get_if<llm::ToolResultBlock>(&block)) result = r;
+        }
+    }
+    REQUIRE(result != nullptr);
+    const auto& text = std::get<llm::TextBlock>(result->content.front()).text;
+    const auto note = text.find("[Output cut to 100000 of ");
+    REQUIRE(note != std::string::npos);
+    CHECK(note < 100000 + 64);
+    CHECK(text.rfind("row 0\n", 0) == 0);                       // the start
+    CHECK(text.find(big.substr(big.size() - 40)) != std::string::npos);  // and the end
+    // The whole result is spilled under the session's project root.
+    std::ifstream spill(h.project.path() / ".minimal/tool-output/s1/tu1.result.txt",
+                        std::ios::binary);
+    const std::string spilled((std::istreambuf_iterator<char>(spill)),
+                              std::istreambuf_iterator<char>());
+    CHECK(spilled == big);
+}
+
+TEST_CASE("a tiny window still leaves the floor for a result", "[agent_loop][invariant]") {
+    Harness h;
+    auto owned = std::make_unique<FakeTool>("big", ToolCategory::ReadOnly, std::string(10000, 'x'));
+    h.registry.Register(std::move(owned));
+    h.provider.PushResponse(ToolUseResponse("tu1", "big"));
+    h.provider.PushResponse(TextResponse("done"));
+
+    agent::AgentPreset preset;
+    preset.context_window_tokens = 1000;  // 5% = 50 tokens = 100 bytes: under the floor
+    h.Build(std::move(preset), agent::LoopConfig{});
+    h.loop->RunTurn(UserText("go"));
+
+    const llm::ToolResultBlock* result = nullptr;
+    for (const auto& message : h.store.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* r = std::get_if<llm::ToolResultBlock>(&block)) result = r;
+        }
+    }
+    REQUIRE(result != nullptr);
+    CHECK(std::get<llm::TextBlock>(result->content.front()).text.find("[Output cut to 4096 of 10000") !=
+          std::string::npos);
 }
 
 namespace {

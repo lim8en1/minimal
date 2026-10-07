@@ -18,6 +18,7 @@
 #include "bash_process.hpp"
 #include "command_scanner.hpp"
 #include "stage_normalize.hpp"
+#include "minimal/tools/tool_output_spill.hpp"
 #include "minimal/common/utf8.hpp"
 #include "minimal/sidecar/drain.hpp"
 #include "minimal/common/units.hpp"
@@ -101,6 +102,10 @@ RunOutcome RunProcess(minimal::sidecar::Launched launched, const BashSettings& s
     // Live channel to the operator, lossy by design; the capped record is
     // the sink's rendered text below.
     if (ctx.emit_output) sinks[0].emit = ctx.emit_output;
+    // Past the cap the whole stream goes to a project-local file the model
+    // can read or grep, streamed -- never held in memory.
+    tools::ToolOutputSpill spill = tools::ToolOutputSpill::For(ctx);
+    sinks[0].spill = [&spill](std::string_view chunk) { spill.Append(chunk); };
     sinks[1].mode = minimal::sidecar::PipeSink::Mode::kBounded;
     sinks[1].cap = kMaxStatePayloadBytes;
     // The state channel is internal bookkeeping the user's command never
@@ -132,6 +137,11 @@ RunOutcome RunProcess(minimal::sidecar::Launched launched, const BashSettings& s
     outcome.detached_grandchild = drained.detached_grandchild;
     outcome.wait_status = drained.wait_status;
     outcome.output = std::move(drained.sinks[0].text);
+    if (drained.sinks[0].total > static_cast<std::size_t>(settings.max_output_bytes)) {
+        spill.Finish();
+        outcome.output += "\n" + spill.Note(static_cast<std::size_t>(settings.max_output_bytes),
+                                             drained.sinks[0].total);
+    }
     outcome.state_payload = std::move(drained.sinks[1].text);
     outcome.state_overflow = drained.sinks[1].overflow;
     return outcome;

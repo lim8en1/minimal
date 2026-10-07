@@ -119,7 +119,11 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
     std::vector<CappedBuffer> capped;
     capped.reserve(outcome.sinks.size());
     for (const auto& sink : outcome.sinks) {
-        capped.emplace_back(sink.mode == PipeSink::Mode::kCapped ? sink.cap : 1);
+        if (sink.mode == PipeSink::Mode::kCapped) {
+            capped.emplace_back(sink.cap, sink.spill);
+        } else {
+            capped.emplace_back(1);
+        }
     }
 
     const bool budgeted = options.timeout_ms > 0;
@@ -362,6 +366,7 @@ DrainOutcome DrainAndReap(Launched proc, std::vector<PipeSink> sinks,
     for (std::size_t i = 0; i < outcome.sinks.size(); ++i) {
         if (outcome.sinks[i].mode == PipeSink::Mode::kCapped) {
             outcome.sinks[i].text = capped[i].Render();
+            outcome.sinks[i].total = capped[i].total();
         }
     }
     return outcome;

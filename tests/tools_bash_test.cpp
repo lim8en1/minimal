@@ -645,7 +645,7 @@ TEST_CASE("bash settings: defaults, seconds-keyed overrides, and named refusals"
           "[tools_bash][settings]") {
     const auto defaults = tools_bash::ParseBashSettings(nlohmann::json::object());
     CHECK(defaults.timeout_ms == 120000);
-    CHECK(defaults.max_output_bytes == 1024 * 1024);
+    CHECK(defaults.max_output_bytes == 64 * 1024);
     CHECK(defaults.shell == "/bin/sh");
 
     // The plugin's own plugins.d/tools-bash.json, verbatim -- flat keys,
@@ -1157,10 +1157,22 @@ TEST_CASE("persisted output is capped head+tail; the live stream is not",
     const auto out = f.Run({{"command", "cat big.txt"}});
 
     CHECK_FALSE(out.result.is_error);
-    CHECK(out.result.content_text.find("bytes omitted") != std::string::npos);
-    CHECK(out.result.content_text.size() < 100 + 64);  // cap plus the marker
-    CHECK(out.result.content_text.rfind("line-0", 0) == 0);          // head survived
-    CHECK(out.result.content_text.find("line-199") != std::string::npos);  // tail too
+    const std::string& text = out.result.content_text;
+    CHECK(text.find("bytes omitted") != std::string::npos);
+    const auto note = text.find("[Output cut to 100 of ");
+    REQUIRE(note != std::string::npos);
+    CHECK(note < 100 + 64);  // cap plus the marker, then the note
+    CHECK(text.rfind("line-0", 0) == 0);          // head survived
+    CHECK(text.find("line-199") != std::string::npos);  // tail too
+
+    // The note names a project-relative spill holding the WHOLE output,
+    // streamed byte-exact.
+    const auto start = text.find(".minimal/tool-output/s1/tu-fixture.txt");
+    REQUIRE(start != std::string::npos);
+    std::ifstream spill(f.dir.path() / ".minimal/tool-output/s1/tu-fixture.txt");
+    const std::string spilled((std::istreambuf_iterator<char>(spill)), std::istreambuf_iterator<char>());
+    CHECK(spilled == big);
+    CHECK(std::filesystem::exists(f.dir.path() / ".minimal/tool-output/.gitignore"));
 
     CHECK(out.streamed == big);  // the live channel saw everything, uncapped
 }

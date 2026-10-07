@@ -69,6 +69,9 @@ ToolsSettings ParseTools(Reader& root) {
         "max_parallel_tool_calls", result.max_parallel_tool_calls, 1, kMaxParallelToolCalls));
     result.max_input_bytes = tools.Int("max_input_bytes", result.max_input_bytes, 0);
     result.max_result_bytes = tools.Int("max_result_bytes", result.max_result_bytes, 0);
+    result.max_result_window_percent =
+        tools.Int("max_result_window_percent", result.max_result_window_percent, 0,
+                  100);  // NOLINT(readability-magic-numbers): a percentage
     result.max_display_bytes = tools.Int("max_display_bytes", result.max_display_bytes, 0);
     tools.Finish();
     return result;

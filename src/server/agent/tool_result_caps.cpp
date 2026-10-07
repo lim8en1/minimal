@@ -5,6 +5,7 @@
 
 #include "minimal/agent/policy.hpp"
 #include "minimal/common/units.hpp"
+#include "minimal/tools/tool_output_spill.hpp"
 
 namespace minimal::agent {
 
@@ -18,7 +19,8 @@ std::vector<const llm::ToolUseBlock*> ToolUsesOf(const llm::Message& message) {
     return out;
 }
 
-void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes) {
+void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes,
+                   tools::ToolOutputSpill* spill) {
     if (max_bytes <= 0) return;
     const auto cap = static_cast<std::size_t>(max_bytes);
 
@@ -28,18 +30,18 @@ void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes) {
     }
     if (total <= cap) return;
 
-    std::string kept;
-    kept.reserve(cap);
-    for (auto& item : block.content) {
-        if (kept.size() >= cap) break;
-        if (auto* text = std::get_if<llm::TextBlock>(&item)) {
-            const auto take = std::min(cap - kept.size(), text->text.size());
-            kept.append(text->text, 0, take);
-        }
+    std::string full;
+    full.reserve(total);
+    for (const auto& item : block.content) {
+        if (const auto* text = std::get_if<llm::TextBlock>(&item)) full += text->text;
     }
-    kept += "\n... [" + std::to_string(total - cap) +
-            " bytes omitted; result exceeds the configured max_result_bytes (" +
-            std::to_string(cap) + ")]";
+    // Start and end, cut on UTF-8 boundaries: an error or a summary is as
+    // likely at the end of a long result as at its start.
+    std::string kept =
+        spill != nullptr
+            ? tools::CapWithSpill(std::move(full), cap, *spill)
+            : tools::HeadTail(full, cap) + "\n[Result cut to " + std::to_string(cap) + " of " +
+                  std::to_string(total) + " bytes (the start and the end).]";
     block.content.clear();
     block.content.push_back(llm::TextBlock{std::move(kept)});
 }
