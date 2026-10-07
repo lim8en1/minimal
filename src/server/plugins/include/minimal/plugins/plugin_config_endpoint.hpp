@@ -11,6 +11,9 @@
 //                              provides: {label: [names]}, set, pending}] -- every plugin;
 //                              enabled_in_file differs from enabled after a
 //                              toggle, until the restart that applies it
+//   check {name}              runs the plugin's config check again (also run
+//                             after every save): {started: true}, or an error
+//                             for a plugin with no check
 //   enable {name, enabled}    sets the plugin's plugins.json entry; applied at
 //                             the next server start ({applied: "restart"}). A
 //                             disable that would leave no usable provider for
@@ -35,11 +38,21 @@
 //
 // "pending" lists the fields whose file value differs from what the plugin
 // is running with: the changes a restart would bring.
+//
+// "checks" (describe; a summary in list) is the plugin's last config check
+// (minimal_plugin_check_config) -- {state: "running" | "done", at,
+// results: [{path, level, message}]} -- or null for a plugin without one.
+// Checks run on the endpoint's own thread, never inside a request: a slow
+// probe holds up nothing, and a newer save cancels the check in flight.
 
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <map>
 #include <set>
+#include <thread>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -60,9 +73,15 @@ public:
     using BackendsInUse = std::function<std::set<std::string>()>;
 
     // `records` and `candidates` from the same LoadAll, matched by file.
+    // `services`: the host's, handed to a running plugin's config check.
     PluginConfigEndpoint(std::filesystem::path config_dir, const std::vector<PluginRecord>& records,
                          const std::vector<PluginCandidate>& candidates,
-                         BackendsInUse backends_in_use = {});
+                         BackendsInUse backends_in_use = {},
+                         const ServiceRegistry* services = nullptr);
+    // Cancels the check in flight and waits for it.
+    ~PluginConfigEndpoint() override;
+    PluginConfigEndpoint(const PluginConfigEndpoint&) = delete;
+    PluginConfigEndpoint& operator=(const PluginConfigEndpoint&) = delete;
 
     std::string Call(const std::string& method, const std::string& json_payload) override;
     bool Subscribe(const std::string&, const std::string&,
@@ -90,6 +109,19 @@ private:
     // plugins.json's enabled value for each plugin, as the file says now.
     std::map<std::string, bool> EnabledInFile() const;
     nlohmann::json SetEnabled(Entry& entry, bool enabled);
+
+    // The plugin's last check, as describe/list show it (null: no check).
+    struct CheckState {
+        std::string state = "idle";
+        std::uint64_t generation = 0;
+        std::int64_t at_unix_ms = 0;
+        nlohmann::json results = nlohmann::json::array();
+    };
+    // Queues a check of `file` for `entry`, cancelling the one in flight.
+    // Cheap: called with mutex_ held, from the request that saved.
+    void StartCheck(const Entry& entry, const nlohmann::json& file);
+    nlohmann::json ChecksOf(const Entry& entry) const;
+    void CheckLoop();
     std::filesystem::path PathOf(const Entry& entry) const;
     nlohmann::json ReadFile(const Entry& entry) const;
     nlohmann::json Describe(const Entry& entry) const;
@@ -103,8 +135,18 @@ private:
 
     std::filesystem::path config_dir_;
     BackendsInUse backends_in_use_;
+    const ServiceRegistry* services_;
     std::mutex mutex_;  // RPC threads call concurrently; one edit at a time
     std::map<std::string, Entry> entries_;
+
+    // The checks: their own lock (never held with plugin code running), the
+    // queue the thread below drains, and each plugin's last state.
+    mutable std::mutex checks_mutex_;
+    std::condition_variable checks_cv_;
+    std::deque<std::function<void()>> check_queue_;
+    std::map<std::string, CheckState> checks_;
+    bool stopping_ = false;
+    std::thread check_thread_;  // last: starts once everything above exists
 };
 
 }  // namespace minimal::plugins

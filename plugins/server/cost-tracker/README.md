@@ -98,3 +98,7 @@ optional; an absent or partial config object is normal rather than an error.
   registry's drain, before plugin storage is destroyed), so an in-flight
   startup fetch can extend exit by up to roughly `rates_fetch_timeout_ms` —
   the same discipline as the discovery warm-up's exit join.
+
+## Config check
+
+`/config` checks this plugin's settings after each save and on `c` (docs/PLUGINS.md, "Config checks"). Each `rate_sources` entry is fetched as the refresh would, without storing anything: it answers, its key is accepted, and the snapshot holds prices in the shape its `format` says ("12 models priced") -- each finding on that entry's `url` or `api_key`.

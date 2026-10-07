@@ -59,6 +59,14 @@ public:
     // configured string must treat nullopt as "skip titling", not "fail".
     virtual std::optional<SessionLlm> ResolveModelRef(const std::string& provider_model) = 0;
 
+    // Why `provider_model` does not resolve -- a typo in the provider, a
+    // model it does not define, a backend no plugin provides -- or "" when it
+    // does: what ResolveModelRef's nullopt means, for a config check to say.
+    virtual std::string ModelRefProblem(const std::string& provider_model) {
+        return ResolveModelRef(provider_model) ? std::string()
+                                               : "it does not resolve through providers.json";
+    }
+
     // The session's transcript read side -- the same path GetMessages answers
     // from. Null when the session is unknown. The shared_ptr keeps the reader
     // (and the session that owns it) alive for as long as the caller holds it.

@@ -22,4 +22,9 @@ inline constexpr std::size_t kMaxPluginStorageValueBytes = common::kMiB;
 // next real push; the heartbeat bounds that to a blink.
 inline constexpr std::chrono::milliseconds kSubscriptionHeartbeat{500};
 
+// A plugin's config check (minimal_plugin_check_config), all its probes
+// together: room for a slow model listing or a cold local server, short
+// enough that "checking..." never looks hung.
+inline constexpr std::chrono::milliseconds kConfigCheckBudget = std::chrono::seconds(20);
+
 }  // namespace minimal::plugins

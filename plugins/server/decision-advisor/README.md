@@ -198,3 +198,7 @@ bash, the disclosure itself is only a lower bound). "Auto-allowed" means *Jev
 said yes above your thresholds* — an assistant for prompt fatigue, not a
 sandbox. The permission model — modes, ceilings, grant filtering — remains the
 boundary, exactly as with a human answering.
+
+## Config check
+
+`/config` checks this plugin's settings after each save and on `c` (docs/PLUGINS.md, "Config checks"). One real call, as a gated tool call would make it, with no retries: the endpoint answers, the key is accepted, the answer parses as systemone, and the model that answered is the one configured (a different one is a warning). A refused key is reported on `api_key`; on a 4xx, an OpenAI-shaped server beside `/systemone` (llama-server) is asked what it serves, and a `model` it does not serve is named.

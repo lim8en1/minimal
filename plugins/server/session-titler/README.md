@@ -47,3 +47,7 @@ Ships **DISABLED** (built with `minimal_add_plugin(... DISABLED_BY_DEFAULT)`): i
 the one bundled plugin whose entire job is to spend the user's tokens on its
 own initiative (~100 per session). Trusted code, but a cost the operator
 should opt into — enable it with one `plugins.json` edit (`"enabled": true`).
+
+## Config check
+
+`/config` checks this plugin's settings after each save and on `c` (docs/PLUGINS.md, "Config checks"). `model` must resolve through providers.json -- checked only while the server runs the plugin (it ships disabled: enable it first).

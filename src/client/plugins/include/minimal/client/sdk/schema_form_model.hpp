@@ -37,6 +37,11 @@ struct FormRow {
     bool add_item = false;
     // An object_map's entry row: the entry's name ("" on every other row).
     std::string item_key;
+    // The plugin's last config check about this row (describe "checks"):
+    // "ok" | "warning" | "error", and what it said; "" when it said nothing.
+    // An entry row carries the worst of its fields'.
+    std::string check_level;
+    std::string check_message;
 };
 
 // The synthetic field a map entry's form shows its name under (an entry's
@@ -80,6 +85,12 @@ int NextFieldRow(const std::vector<FormRow>& rows, int from, int step);
 
 // The list an item row (or the list row, or its add row) belongs to.
 nlohmann::json ListOf(const FormRow& row);
+// The check findings about one entry, its paths relative to it: what an
+// entry's own form shows. `prefix` is "list[2]." or "map.<name>.".
+nlohmann::json ChecksUnder(const nlohmann::json& checks, const std::string& prefix);
+// The describe's check summary for its header: "checking..." while one
+// runs, "checks: 1 error, 2 warnings" after, "" when there is none.
+std::string CheckSummary(const nlohmann::json& describe);
 // A schema-less value (an object or array) as a describe: one "member"
 // field per key or index, typed by its value; a nested object or array is a
 // "json_node" row that opens as a form of its own.

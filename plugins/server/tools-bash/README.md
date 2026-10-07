@@ -81,3 +81,7 @@ silently shorten every command that did not ask for a timeout.
 
 - Per-session cwd/env maps and the background registry live INSIDE this plugin
   (core holds no bash state) and are released on session end.
+
+## Config check
+
+`/config` checks this plugin's settings after each save and on `c` (docs/PLUGINS.md, "Config checks"). `shell` must be runnable: a path that exists and is executable, or a name on PATH.

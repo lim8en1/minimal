@@ -32,6 +32,14 @@ constexpr std::size_t kNestedIndent = 2;  // NOLINT(readability-magic-numbers): 
 // An item's line also takes the gap and the live/restart tag's columns.
 constexpr std::size_t kItemLineSlack = 12;  // NOLINT(readability-magic-numbers): "  " + "  " + "not used"
 
+// A check's mark: the glyph first (it reads without colour), then the role.
+Element CheckMark(const FormRow& row, const Theme& theme) {
+    if (row.check_level == "error") return text("✗ ") | color(theme.ColorFor("error"));
+    if (row.check_level == "warning") return text("⚠ ") | color(theme.ColorFor("attention"));
+    if (row.check_level == "ok") return text("✓ ") | color(theme.ColorFor("success"));
+    return text("  ");
+}
+
 bool IsEntryRow(const FormRow& row) {
     return row.item >= 0 || !row.item_key.empty() || row.add_item;
 }
@@ -107,6 +115,9 @@ public:
 
 private:
     void Sync(const SchemaFormState& state) {
+        checks_ = state.describe.is_object() && state.describe.contains("checks")
+                      ? state.describe.at("checks")
+                      : nlohmann::json();
         if (!frames_.empty()) {
             // The whole value went out when the first level was left: its
             // answer decides -- accepted, back to the form; refused, the
@@ -216,9 +227,17 @@ private:
     void RebuildFrameRows(bool keep_selection) {
         const Frame& frame = frames_.back();
         const int was = selected_;
-        rows_ = BuildFormRows(frame.kind == FrameKind::kNode
-                                  ? InferredDescribe(frame.draft)
-                                  : ItemDescribe(frame.owner, frame.draft));
+        json describe = frame.kind == FrameKind::kNode ? InferredDescribe(frame.draft)
+                                                       : ItemDescribe(frame.owner, frame.draft);
+        // The entry's own findings, on its fields (a first-level entry that
+        // the plugin has seen: an existing one, by index or name).
+        if (frames_.size() == 1 && frame.kind == FrameKind::kListItem && frame.index >= 0) {
+            describe["checks"] =
+                ChecksUnder(checks_, top_row_.path + "[" + std::to_string(frame.index) + "].");
+        } else if (frames_.size() == 1 && frame.kind == FrameKind::kMapEntry && !frame.key.empty()) {
+            describe["checks"] = ChecksUnder(checks_, top_row_.path + "." + frame.key + ".");
+        }
+        rows_ = BuildFormRows(describe);
         selected_ = keep_selection && was >= 0 && was < static_cast<int>(rows_.size())
                         ? was
                         : NextFieldRow(rows_, -1, +1);
@@ -329,6 +348,11 @@ private:
 
     // --- Rows and the editor ---------------------------------------------
 
+    // The selected row's check finding, as a line under its doc.
+    Element CheckLine(const FormRow& row) const {
+        return hbox({CheckMark(row, theme_), paragraph(row.check_message)});
+    }
+
     const FormRow* Selected() const {
         if (selected_ < 0 || selected_ >= static_cast<int>(rows_.size())) return nullptr;
         return rows_[selected_].header ? nullptr : &rows_[selected_];
@@ -394,6 +418,20 @@ private:
 
         Elements lines;
         if (state.describe.is_null()) lines.push_back(text(" loading...") | Muted(theme_));
+        // The plugin's config check, in a line above its fields.
+        if (frames_.empty()) {
+            if (const std::string summary = CheckSummary(state.describe); !summary.empty()) {
+                const bool bad = summary.find("error") != std::string::npos;
+                const bool warn = summary.find("warning") != std::string::npos;
+                Element line = text(" " + summary + (callbacks_.on_check && summary != "checking..."
+                                                         ? "  ·  c: check again"
+                                                         : ""));
+                line = bad    ? line | color(theme_.ColorFor("error"))
+                       : warn ? line | color(theme_.ColorFor("attention"))
+                              : line | Muted(theme_);
+                lines.push_back(std::move(line));
+            }
+        }
         if (!frames_.empty() && rows_.empty()) lines.push_back(text(" (empty)  ·  a: add") | Muted(theme_));
         for (int i = 0; i < static_cast<int>(rows_.size()); ++i) {
             const auto& row = rows_[i];
@@ -408,6 +446,7 @@ private:
                 const std::size_t width = label_width + kSchemaFormValueWidth + kItemLineSlack;
                 const std::string head = std::string(indent, ' ') + row.label + "  ";
                 Element line = hbox({text(row.overridden && !row.add_item ? "* " : "  "),
+                                     CheckMark(row, theme_),
                                      text(Clip(head + row.shown, width))});
                 if (row.add_item) line = line | Muted(theme_);
                 if (i == selected_) line = line | SelectionStyle(theme_) | focus;
@@ -428,6 +467,7 @@ private:
             if (!row.unused.empty()) name = name | Muted(theme_);
             Elements cells{
                 text(row.overridden ? "* " : "  "),
+                CheckMark(row, theme_),
                 std::move(name),
                 text("  "),
                 std::move(value),
@@ -456,6 +496,7 @@ private:
                                                            : row->path + " #" + std::to_string(row->item + 1)) |
                              Muted(theme_));
             if (!row->add_item) pinned.push_back(paragraph(row->shown));
+            if (!row->check_message.empty()) pinned.push_back(CheckLine(*row));
         } else if (row != nullptr) {
             std::string about = row->path == kMapKeyField ? "name" : row->label;
             about += " (" + row->type;
@@ -478,6 +519,7 @@ private:
                                  color(theme_.ColorFor("attention")));
             }
             if (!row->doc.empty()) pinned.push_back(paragraph(row->doc));
+            if (!row->check_message.empty()) pinned.push_back(CheckLine(*row));
         }
         if (!frame_error_.empty()) {
             pinned.push_back(paragraph(frame_error_) | color(theme_.ColorFor("error")));
@@ -554,6 +596,10 @@ private:
         // editor closed, used to leave the form.
         if (event == Event::ArrowLeft || (event == Event::Escape && callbacks_.on_back)) {
             if (callbacks_.on_back) callbacks_.on_back();
+            return true;
+        }
+        if (event == Event::Character('c') && callbacks_.on_check) {
+            callbacks_.on_check();
             return true;
         }
         if (row == nullptr) return false;
@@ -740,6 +786,7 @@ private:
     // The levels open over one field's value, and that value: as it was,
     // and as the levels change it.
     std::vector<Frame> frames_;
+    nlohmann::json checks_;   // the plugin's last config check (describe "checks")
     FormRow top_row_;
     json top_;
     json top_original_;

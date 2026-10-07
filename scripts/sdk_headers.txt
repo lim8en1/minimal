@@ -59,6 +59,7 @@ minimal/tools/tool_registry.hpp
 minimal/tools/tool_source.hpp
 minimal/tools/tool.hpp
 minimal/plugins/plugin_abi.h
+minimal/plugins/config_check.hpp   # minimal_plugin_check_config: the context, the report, the probes
 
 # Contracts reached through those hooks or through ServiceRegistry.
 minimal/config/providers_config.hpp   # CommandContext::providers()

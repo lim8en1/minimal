@@ -1,6 +1,7 @@
 #include "config_view.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
@@ -13,6 +14,7 @@
 #include "minimal/client/sdk/picker_model.hpp"
 #include "minimal/client/sdk/schema_form_model.hpp"
 #include "minimal/common/logger.hpp"
+#include "policy.hpp"
 
 namespace minimal::config_view {
 
@@ -109,6 +111,15 @@ std::string ServerLabel(const json& row) {
         label += "  · restart pending";
     }
     if (row.contains("error")) label += "  · " + row.value("error", std::string());
+    if (const auto checks = row.value("checks", json()); checks.is_object()) {
+        if (checks.value("state", "") == "running") {
+            label += "  · checking...";
+        } else if (const int errors = checks.value("errors", 0); errors > 0) {
+            label += "  · ✗ " + std::to_string(errors) + (errors == 1 ? " check failed" : " checks failed");
+        } else if (const int warnings = checks.value("warnings", 0); warnings > 0) {
+            label += "  · ⚠ " + std::to_string(warnings) + (warnings == 1 ? " warning" : " warnings");
+        }
+    }
     if (const std::string provides = ProvidesSummary(ProvidesFrom(row.value("provides", json()))); !provides.empty()) {
         label += "  · " + provides;
     }
@@ -152,6 +163,7 @@ public:
                 .on_back = [feed = feed_] { feed->Back(); },
                 // `this` owns form_, so the form never outlives it.
                 .on_pick = [this](const client::PickRequest& request) { OpenChooser(request); },
+                .on_check = [feed = feed_] { feed->Check(); },
             },
             *theme_);
     }
@@ -180,6 +192,7 @@ private:
             return;
         }
         if (!feed_->open_plugin().empty()) {
+            PollRunningCheck();
             shown_ = form_;
             return;
         }
@@ -289,6 +302,22 @@ private:
     bool Focusable() const override { return true; }
     // No side effects: called mid-frame.
     ftxui::Component ActiveChild() override { return shown_; }
+
+    // A check in flight on the open plugin: its findings land in a later
+    // describe, so ask again each second (and for the frame to show them).
+    void PollRunningCheck() {
+        const auto form = feed_->form();
+        const bool running = form.describe.is_object() && form.describe.contains("checks") &&
+                             form.describe.at("checks").is_object() &&
+                             form.describe.at("checks").value("state", "") == "running";
+        if (!running || form.busy) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_check_poll_ >= kCheckPoll) {
+            last_check_poll_ = now;
+            feed_->Refresh();
+        }
+        if (ui_ != nullptr) ui_->RequestRedrawAfter(kCheckPoll);
+    }
 
     void RebuildListIfStale() {
         const auto state = feed_->list();
@@ -412,6 +441,7 @@ private:
     plugins::HostActions* actions_;
     // The list's filter and cursor, kept across the rebuild a toggle causes.
     std::shared_ptr<client::MenuMemory> list_memory_ = std::make_shared<client::MenuMemory>();
+    std::chrono::steady_clock::time_point last_check_poll_{};
     // TUI plugin toggles made here (id -> on in the file), until the host's
     // own list shows them; and what the last one did.
     std::shared_ptr<std::map<std::string, bool>> client_toggled_ =
@@ -555,6 +585,39 @@ void ConfigFeed::Toggle(const std::string& name, bool enabled) {
         }
         FetchList();
     });
+}
+
+void ConfigFeed::Check() {
+    std::string name;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        name = open_;
+    }
+    if (name.empty()) return;
+    worker_.Post([this, name] {
+        const json answer = Call("check", {{"name", name}});
+        std::string status;
+        std::string error_path;
+        if (answer.contains("error")) {
+            status = answer.value("error", std::string());
+            error_path = " ";   // an error, about no field
+        }
+        FetchDescribe(name, status, error_path);
+    });
+}
+
+void ConfigFeed::Refresh() {
+    std::string name;
+    std::string status;
+    std::string error_path;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        name = open_;
+        status = form_.status;
+        error_path = form_.status_is_error ? (form_.error_path.empty() ? " " : form_.error_path) : "";
+    }
+    if (name.empty()) return;
+    worker_.Post([this, name, status, error_path] { FetchDescribe(name, status, error_path); });
 }
 
 void ConfigFeed::Set(const std::string& path, const std::string& text) {

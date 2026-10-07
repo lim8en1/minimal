@@ -191,4 +191,17 @@ void minimal_plugin_register_services(
     registry.Provide(minimal::tools_bash::kBashStateServiceName, &BashStore());
 }
 
+// The shell runs.
+void minimal_plugin_check_config(const nlohmann::json& config,
+                                 const minimal::plugins::ConfigCheckContext&, nlohmann::json& out) {
+    minimal::plugins::CheckReport report;
+    const auto settings = minimal::tools_bash::ParseBashSettings(config);
+    if (const auto problem = minimal::plugins::ExecutableProblem(settings.shell)) {
+        report.Fail("shell", *problem);
+    } else {
+        report.Ok("shell", settings.shell + " runs");
+    }
+    out = report.rows();
+}
+
 }  // extern "C"

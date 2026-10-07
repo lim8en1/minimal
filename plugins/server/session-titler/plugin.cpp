@@ -62,4 +62,25 @@ bool minimal_plugin_reconfigure(const nlohmann::json& config, std::string& error
     }
 }
 
+// The model override resolves through providers.json (only the running
+// server can say: a disabled titler is told so).
+void minimal_plugin_check_config(const nlohmann::json& config,
+                                 const minimal::plugins::ConfigCheckContext& context,
+                                 nlohmann::json& out) {
+    minimal::plugins::CheckReport report;
+    const auto settings = minimal::session_titler::ParseTitlerConfig(config);
+    if (settings.model.empty()) {
+        report.Ok("model", "titles use each session's own model");
+    } else if (const auto problem = minimal::plugins::ModelRefProblem(context.services, settings.model)) {
+        if (problem->rfind("not checked", 0) == 0) {
+            report.Warn("model", *problem);
+        } else {
+            report.Fail("model", *problem);
+        }
+    } else {
+        report.Ok("model", settings.model + " resolves");
+    }
+    out = report.rows();
+}
+
 }  // extern "C"
