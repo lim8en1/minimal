@@ -84,9 +84,6 @@ inline constexpr int kMinToolOutputBufferBytes = 4 * static_cast<int>(common::kK
 inline constexpr std::size_t kLiveTextCapBytes = 2 * common::kMiB;
 // Live segments of the streaming turn (newest kept; the status bar says so).
 inline constexpr std::size_t kMaxLiveSegments = 100;
-// Trailing stdout lines per running tool in the tools panel, when ui.json
-// sets none.
-inline constexpr int kDefaultToolsPanelStdoutLines = 100;
 
 // --- display widths and previews ------------------------------------------------------
 
@@ -197,9 +194,8 @@ inline constexpr int kMinModalBodyRows = 2;
 // A modal's pinned rows (ModalFrame's `pinned`: a selected row's details, the
 // last outcome) take at most this many rows.
 inline constexpr int kModalPinnedMaxRows = 8;
-// Status bar / tools panel / tab bar columns.
+// Status bar / tab bar columns.
 inline constexpr std::size_t kStatusSessionColumnCap = 24;
-inline constexpr std::size_t kToolsPanelSessionColumn = 16;
 inline constexpr int kTabOverflowMarkerWidth = 5;
 
 // Context occupancy that tints the token segment: attention as compaction

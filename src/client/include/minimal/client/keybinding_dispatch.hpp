@@ -183,7 +183,6 @@ struct KeyContext {
     const ResolvedKeymap& keymap;
     const std::string& focused;   // the focused TAB id (TabMaintenance::Focused), this frame
 
-    bool& show_panel;
     bool& show_plugin_modal;
 
     std::vector<plugins::PluginViewEntry>& plugin_views;

@@ -1,0 +1,30 @@
+#pragma once
+
+// HostUi::Activity's source: every tab and its tool calls, as plugins see them
+// (registries.hpp TabActivitySnapshot), built from AppState's tab list.
+
+#include <cstdint>
+#include <memory>
+
+#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/state.hpp"
+
+namespace minimal::client {
+
+// The status vocabulary plugins read ("idle", "thinking", ...).
+const char* StateWord(SessionStateKind state);
+
+// Rebuilds the snapshot only when something in it changed -- any tab's tool
+// rows or output (AppState::ToolsVersion), or a tab's name, state, attention,
+// focus or kind -- and otherwise hands back the last one, so a view keyed on
+// its version redraws on change, not per frame. UI thread.
+class TabActivityFeed {
+public:
+    std::shared_ptr<const plugins::TabActivitySnapshot> Get(const AppState& app);
+
+private:
+    std::uint64_t key_ = 0;
+    std::shared_ptr<const plugins::TabActivitySnapshot> last_;
+};
+
+}  // namespace minimal::client

@@ -420,7 +420,7 @@ TEST_CASE("ResolvedKeymap: every core default binds to something", "[keybinding_
     auto keys = Keybindings::Parse("{}");
     for (const auto& action : {"tab.next", "tab.previous", "group.previous", "group.next",
                                "jump.attention", "session.picker", "agent.picker",
-                               "panel.toggle", "tab.close", "chat.load_older",
+                               "tab.close", "chat.load_older",
                                "chat.scroll_up", "chat.scroll_down", "chat.scroll_bottom",
                                "turn.cancel", "app.quit"}) {
         keys.EnsureDefault(action, keys.KeyFor(action, "unbound-in-test"));
@@ -436,7 +436,7 @@ TEST_CASE("ResolvedKeymap: every core default binds to something", "[keybinding_
         "group.previous": "alt+left", "group.next": "alt+right",
         "tab.filter_group": "alt+f", "tab.filter_agents": "alt+o",
         "jump.attention": "alt+a", "session.picker": "ctrl+o",
-        "agent.picker": "alt+g", "panel.toggle": "ctrl+t",
+        "agent.picker": "alt+g",
         "panel.focus.next": "ctrl+alt+n", "panel.focus.prev": "ctrl+alt+p",
         "tab.close": "ctrl+w", "chat.load_older": "pageup",
         "chat.scroll_up": "ctrl+alt+k", "chat.scroll_down": "ctrl+alt+j",

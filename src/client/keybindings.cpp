@@ -46,7 +46,6 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"model.picker", "alt+m"},
         {"permission.cycle", "shift+tab"},
         {"session.pause", "alt+p"},
-        {"panel.toggle", "ctrl+t"},
         // Panel focus cycling among VISIBLE plugin panels: the focused one
         // alone receives key events (keybinding_dispatch.cpp). Not bare
         // ctrl-letters: global actions dispatch BEFORE the prompt editor, and

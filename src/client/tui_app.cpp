@@ -237,7 +237,8 @@ void TuiApp::BuildState() {
     env_.host_focus_provider->AttachReads(
         {.key_bindings = [this] { return KeyBindingsForPlugins(); },
          .command_catalog = [this] { return CatalogForPlugins(); },
-         .theme_names = [this] { return ListThemeNames(); }});
+         .theme_names = [this] { return ListThemeNames(); },
+         .activity = [this] { return activity_feed_.Get(*app_); }});
     // Memory bounds (track R2): ui.json's values, or the built-in defaults
     // (SetUiBounds treats 0 as "keep the default"). Applied before any tab can
     // open, so every SessionState starts bounded.
@@ -456,10 +457,8 @@ void TuiApp::BuildFrame() {
     frame_renderer_.emplace(FrameRenderer::Dependencies{
         *app_, theme, tab_maintenance_->Focused(), tab_maintenance_->FocusedDetails(), tab_ui_,
         registries.start_views, registries.message_renderers, registries.tool_renderers,
-        registries.display_renderers, registries.status_segments, *env_.engine, show_panel_,
+        registries.display_renderers, registries.status_segments, *env_.engine,
         panel_height,
-        env_.ui.tools_panel_stdout_buffer_lines > 0 ? env_.ui.tools_panel_stdout_buffer_lines
-                                                    : kDefaultToolsPanelStdoutLines,
         editor_, env_.status_format, env_.plugin_views,
         // Row-renderer collapse hints follow the user's keymap, not a
         // hardcoded alt+c -- and so do the other key names the frame spells
@@ -527,7 +526,7 @@ void TuiApp::BuildFrame() {
 
 KeyContext TuiApp::MakeKeyContext() {
     return KeyContext{
-        *app_, env_.keymap, tab_maintenance_->Focused(), show_panel_, show_plugin_modal_,
+        *app_, env_.keymap, tab_maintenance_->Focused(), show_plugin_modal_,
         env_.plugin_views, plugin_modal_child_,
         [this] { OpenRoleView("sessions"); },
         [this] { picker_controller_->OpenAgentPicker(); },
