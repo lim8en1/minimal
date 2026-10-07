@@ -77,7 +77,13 @@ target_link_libraries(minimal_client_core
         "$<LINK_LIBRARY:WHOLE_ARCHIVE,ftxui::component,ftxui::dom,ftxui::screen>"
         spdlog::spdlog)
 
+# ftxui's exported targets chain component -> dom -> screen as plain link
+# items, so dom and screen also reach the link line transitively with no
+# feature. CMake refuses an item seen both with and without WHOLE_ARCHIVE;
+# the override makes every occurrence whole.
 set_target_properties(minimal_client_core PROPERTIES
+    LINK_LIBRARY_OVERRIDE_ftxui::dom WHOLE_ARCHIVE
+    LINK_LIBRARY_OVERRIDE_ftxui::screen WHOLE_ARCHIVE
     VERSION "${PROJECT_VERSION}"
     SOVERSION "${PROJECT_VERSION_MAJOR}")
 
