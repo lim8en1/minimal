@@ -15,6 +15,7 @@ minimal/client/render/theme.hpp
 minimal/client/render/syntax_highlighter.hpp
 minimal/client/policy.hpp
 minimal/client/utf8.hpp
+minimal/client/key_event_parser.hpp
 minimal/client/command_catalog_entry.hpp
 minimal/client/view/schema_form_model.hpp
 minimal/client/view/widget_types.hpp

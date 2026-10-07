@@ -1,25 +1,20 @@
-#include "minimal/client/view/prompt_editor.hpp"
+#include "prompt_editor.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
-#include <nlohmann/json.hpp>
 
-#include "minimal/client/config_file_io.hpp"
-#include "minimal/client/key_event_parser.hpp"
+#include "policy.hpp"
+#include "prompt_wrap.hpp"
 #include "minimal/client/utf8.hpp"
-#include "minimal/client/view/prompt_wrap.hpp"
-#include "minimal/common/logger.hpp"
-#include "minimal/client/policy.hpp"
 
-#include <string>
-#include <vector>
-
-namespace minimal::client {
+namespace minimal::client::prompt_editor {
 
 namespace {
 
@@ -149,22 +144,6 @@ std::string CommandPrefixOf(const std::string& text) {
     return text.substr(1);
 }
 
-// The editor's keymap actions at their default keys, for an editor built
-// without a keymap (see the header's `key_matches` comment).
-bool DefaultPromptKeyMatches(std::string_view action, const Event& event) {
-    static const std::vector<Event> kUndo = ParseKeySpec("alt+z");
-    static const std::vector<Event> kRedo = ParseKeySpec("ctrl+alt+z");
-    static const std::vector<Event> kClear = ParseKeySpec("ctrl+alt+u");
-    const auto any_of = [&event](const std::vector<Event>& keys) {
-        return std::find(keys.begin(), keys.end(), event) != keys.end();
-    };
-    if (action == "prompt.newline") return IsNewlineEvent(event);
-    if (action == "prompt.undo") return any_of(kUndo);
-    if (action == "prompt.redo") return any_of(kRedo);
-    if (action == "prompt.clear") return any_of(kClear);
-    return false;
-}
-
 // Undo/redo around the whole editor (PromptUndo). A ComponentBase subclass,
 // not a CatchEvent: recording needs the text AFTER the editor's handlers and
 // the Input have applied the event, and a CatchEvent runs before its child.
@@ -283,145 +262,18 @@ void PromptUndo::Clear() {
     ++generation_;
 }
 
-namespace {
-// kMaxPromptHistoryEntries is far past what arrow-up recall is used for.
-
-// What of a submitted line the history may keep. A /-command whose
-// arguments may carry a credential (CommandCatalogEntry::sensitive_args) is
-// kept as its bare name, and so is any /-command with arguments while the
-// catalog is not known yet: the history is persisted in plaintext.
-std::string HistoryLine(const std::string& line, const CommandCatalogSource& catalog) {
-    if (line.front() != '/') return line;
-    const auto end = line.find_first_of(" \t\n");
-    if (end == std::string::npos) return line;
-    const std::string name = line.substr(1, end - 1);
-    const auto entries = catalog != nullptr ? catalog() : nullptr;
-    if (entries == nullptr || entries->empty()) return "/" + name;
-    for (const auto& entry : *entries) {
-        if (entry.name == name) return entry.sensitive_args ? "/" + name : line;
-    }
-    return line;
-}
-}  // namespace
-
-void PromptHistory::Record(const std::string& line) {
-    // Skip a consecutive duplicate of the last entry -- repeatedly
-    // submitting the same line, or repeating what recall just brought back,
-    // should not grow the list every time.
-    if (!entries.empty() && entries.back() == line) {
-        return;
-    }
-    entries.push_back(line);
-    // Bounded: a long-lived TUI session otherwise kept every submitted line
-    // for the process's whole life. 500 recent entries is far past what
-    // arrow-up recall is used for.
-    if (entries.size() > kMaxPromptHistoryEntries) {
-        const std::size_t trimmed = entries.size() - kMaxPromptHistoryEntries;
-        entries.erase(entries.begin(), entries.begin() + static_cast<long>(trimmed));
-        // Every registered browse position is a raw index into `entries`
-        // (see the ArrowUp/ArrowDown handling below); a front-trim triggered
-        // by ANY tab's Record() call must shift every one of them by the
-        // same amount, or a DIFFERENT tab mid-browse silently ends up
-        // pointed at an unrelated (or out-of-range) line.
-        for (std::optional<std::size_t>* cursor : cursors_) {
-            if (!cursor->has_value()) continue;
-            if (**cursor >= trimmed) {
-                **cursor -= trimmed;
-            } else {
-                cursor->reset();
-            }
-        }
-    }
-    Save();
-}
-
-void PromptHistory::PersistTo(std::filesystem::path path) {
-    persist_path_ = std::move(path);
-    std::string text;
-    if (!TryReadConfigFile(persist_path_, &text)) return;
-    const auto doc = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
-    if (!doc.is_array()) return;
-    std::vector<std::string> loaded;
-    for (const auto& line : doc) {
-        if (line.is_string()) loaded.push_back(line.get<std::string>());
-    }
-    // Loaded lines come BEFORE anything recorded this run, under the same
-    // entry bound Record keeps.
-    entries.insert(entries.begin(), loaded.begin(), loaded.end());
-    if (entries.size() > kMaxPromptHistoryEntries) {
-        entries.erase(entries.begin(),
-                      entries.begin() + static_cast<long>(entries.size() - kMaxPromptHistoryEntries));
-    }
-}
-
-void PromptHistory::Save() const {
-    if (persist_path_.empty()) return;
-    // The newest entries that fit the byte budget, oldest first on disk.
-    std::size_t bytes = 0;
-    std::size_t first = entries.size();
-    while (first > 0 && bytes + entries[first - 1].size() <= kMaxPromptHistoryFileBytes) {
-        bytes += entries[first - 1].size();
-        --first;
-    }
-    nlohmann::json doc = nlohmann::json::array();
-    for (std::size_t i = first; i < entries.size(); ++i) doc.push_back(entries[i]);
-    if (!WriteConfigFileAtomic(persist_path_,
-                               doc.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace))) {
-        common::DefaultLogger().warn("prompt history: could not write {}",
-                                     persist_path_.string());
-    }
-}
-
-void PromptHistory::RegisterCursor(std::optional<std::size_t>* cursor) {
-    cursors_.push_back(cursor);
-}
-
-void PromptHistory::UnregisterCursor(std::optional<std::size_t>* cursor) {
-    cursors_.erase(std::remove(cursors_.begin(), cursors_.end(), cursor), cursors_.end());
-}
-
-ftxui::Component MakePromptEditor(
-    const Theme& theme, PromptEditorState& state,
-    std::function<void(const std::string&)> on_text,
-    std::function<void(const std::string&)> on_command,
-    const MentionSuggestor& suggest,
-    CommandCatalogSource command_catalog,
-    std::function<bool()> session_available,
-    std::function<bool()> subagent_read_only,
-    std::shared_ptr<bool> pasting, PromptHistory* history,
-    std::function<bool(std::string_view action, const ftxui::Event&)> key_matches) {
+ftxui::Component MakePromptEditor(const Theme& theme, PromptEditorState& state,
+                                  plugins::PromptEditorHost& host,
+                                  std::shared_ptr<bool> pasting) {
     using namespace ftxui;
-    // Null (every test call site): the default keys. RunTui passes the
-    // keymap instead (see the header's `key_matches` comment).
-    if (!key_matches) key_matches = DefaultPromptKeyMatches;
+    plugins::PromptEditorHost* const host_ptr = &host;
+    const auto key_matches = [host_ptr](std::string_view action, const Event& event) {
+        return host_ptr->Matches(action, event);
+    };
     const std::function<bool(const Event&)> newline_check =
         [key_matches](const Event& event) { return key_matches("prompt.newline", event); };
     const std::function<bool(const Event&)> clear_check =
         [key_matches](const Event& event) { return key_matches("prompt.clear", event); };
-    // Null (every pre-existing call site): a private timeline, same behavior
-    // as before, no cross-editor sharing. OWNED BY THE CLOSURES (a shared_ptr
-    // captured below), never a factory stack local -- the component outlives
-    // this call, and a reference to a dangled local is exactly the trap the
-    // capture-list comment below documents for on_text/on_command.
-    std::shared_ptr<PromptHistory> owned_history =
-        history != nullptr ? nullptr : std::make_shared<PromptHistory>();
-    PromptHistory& hist = history != nullptr ? *history : *owned_history;
-
-    // Only a SHARED history (history != nullptr, i.e. per-tab editors over
-    // one app-scoped timeline) needs this: a private/owned history has
-    // exactly one editor, so nothing else can trim it out from under this
-    // editor's own browse position. `state.history_cursor`'s address is
-    // stable for the component's lifetime (PerTabPromptEditors::states_ is a
-    // std::map, and ForgetTab drops state and editor together), so
-    // registering it here and unregistering via this guard's destruction --
-    // tied to the returned component's lifetime below -- brackets it exactly.
-    std::shared_ptr<void> history_cursor_guard;
-    if (history != nullptr) {
-        history->RegisterCursor(&state.history_cursor);
-        history_cursor_guard = std::shared_ptr<void>(nullptr, [history, cursor = &state.history_cursor](void*) {
-            history->UnregisterCursor(cursor);
-        });
-    }
 
     // Multiline ON: Return-as-newline is the Input's default, so the submit
     // decision is ours -- CatchEvent sees every event first. cursor_position
@@ -494,24 +346,15 @@ ftxui::Component MakePromptEditor(
     // of), not in PromptEditorState: it is input MODE, not per-tab content,
     // and the state is copied into snapshots. Caller-supplied so
     // HandleGlobalKey (keybinding_dispatch.cpp) can share it -- see the
-    // `pasting` parameter's doc comment in the header. Null (every existing
-    // test call site) falls back to a private flag, exactly as before.
+    // `pasting` parameter's doc comment in the header. Null: a private flag.
     if (!pasting) pasting = std::make_shared<bool>(false);
 
-    // accept_suggestion, on_text, on_command and command_catalog captured BY
-    // VALUE (copies), not by reference: `[&]` here would bind references to
-    // this factory's OWN PARAMETERS -- on_text/on_command/command_catalog are
-    // by-value std::functions living in this stack frame, not the caller's --
-    // and every one of those references dangles the moment MakePromptEditor
-    // returns, exactly the "closures outlive the factory" trap
-    // session_picker.cpp documents (accept_suggestion is the same trap one
-    // level up: a local closure object, not a reference to caller state).
-    // `state` stays by reference deliberately: it is a reference parameter
-    // binding to an object the caller (RunTui) owns for the app's lifetime,
-    // which outlives this component.
+    // accept_suggestion captured BY VALUE (a local closure object: `[&]`
+    // would dangle the moment MakePromptEditor returns). `state` and the
+    // host are by reference/pointer deliberately: both outlive the component
+    // (the PromptEditor instance owns the state; core owns the host).
     auto with_events = CatchEvent(
-        input, [&state, &hist, owned_history, accept_suggestion, on_text, on_command,
-                command_catalog, pasting, mouse_map, newline_check,
+        input, [&state, host_ptr, accept_suggestion, pasting, mouse_map, newline_check,
                 clear_check](const Event& event) {
         // Bracketed paste (DECSET 2004): the terminal wraps a paste in
         // \x1b[200~ ... \x1b[201~ and every line break inside it arrives as
@@ -682,14 +525,10 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
             // Record's. The browse position is per-tab (state.history_cursor,
             // not PromptHistory), so submitting always exits browsing for
             // THIS tab only.
-            hist.Record(HistoryLine(line, command_catalog));
+            host_ptr->History().Record(line);
             state.history_cursor.reset();
             state.undo.Clear();
-            if (line.front() == '/') {
-                on_command(line);
-            } else {
-                on_text(line);
-            }
+            plugins::SubmitLine(*host_ptr, line);
             state.content.clear();
             // The caret and any stashed history draft belong to the line
             // just sent: left set, the next line's editing started from a
@@ -748,7 +587,18 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
         // recalling history over it silently discarded the draft. Falling
         // through hands the event to the wrapped Input, which already moves
         // the cursor up a visual line for multi-line content.
-        if (event == Event::ArrowUp && !hist.entries.empty() &&
+        plugins::PromptTimeline& hist = host_ptr->History();
+        const auto& entries = hist.Entries();
+        // A position the timeline trimmed away (another tab recorded past
+        // the bound) has nothing left to show: browsing restarts.
+        if (state.history_cursor.has_value() && *state.history_cursor < hist.FirstSeq()) {
+            state.history_cursor.reset();
+        }
+        const auto recalled = [&] {
+            return entries[static_cast<std::size_t>(*state.history_cursor - hist.FirstSeq())];
+        };
+        const std::uint64_t newest_seq = hist.FirstSeq() + entries.size() - 1;
+        if (event == Event::ArrowUp && !entries.empty() &&
             state.content.find('\n') == std::string::npos) {
             // Entering browse mode dismisses whatever suggestion list is
             // showing (see the guard comment above). Walking OLDER while
@@ -759,11 +609,11 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
                 state.completions.clear();
                 state.suggestion_selected = 0;
                 state.history_draft = state.content;
-                state.history_cursor = hist.entries.size() - 1;
-            } else if (*state.history_cursor > 0) {
+                state.history_cursor = newest_seq;
+            } else if (*state.history_cursor > hist.FirstSeq()) {
                 --*state.history_cursor;
             }
-            state.content = hist.entries[*state.history_cursor];
+            state.content = recalled();
             // FTXUI's Input only CLAMPS cursor_position into content's new
             // bounds after an external splice -- it never MOVES it -- so
             // without this the caret stayed wherever it was in the PREVIOUS
@@ -774,9 +624,9 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
             return true;
         }
         if (event == Event::ArrowDown && state.history_cursor.has_value()) {
-            if (*state.history_cursor + 1 < hist.entries.size()) {
+            if (*state.history_cursor < newest_seq) {
                 ++*state.history_cursor;
-                state.content = hist.entries[*state.history_cursor];
+                state.content = recalled();
             } else {
                 state.history_cursor.reset();
                 state.content = state.history_draft;
@@ -854,8 +704,6 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
 
     return Renderer(undoable,
                     [=, &state, &theme, cached_command_prefix = std::string(),
-                     cached_command_session_ok = false,
-                     cached_command_subagent = false,
                      cached_command_suggestions = std::vector<std::string>(),
                      cached_command_catalog =
                          std::shared_ptr<const std::vector<CommandCatalogEntry>>(),
@@ -870,20 +718,15 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
         // EMPTY prefix (CommandPrefixOf("/") == ""), and that must still
         // mean "list every command" (rfind("", 0) == 0 matches any name),
         // not "not a command line".
-        if (IsCommandNameInProgress(state.content) && command_catalog != nullptr) {
+        // The catalog core offers is already the focused tab's usable set
+        // (its session and subagent gates applied).
+        const auto catalog = IsCommandNameInProgress(state.content) ? host_ptr->Commands() : nullptr;
+        if (catalog != nullptr) {
             const std::string command_prefix = CommandPrefixOf(state.content);
-            // The focused tab's session presence, probed once per frame this
-            // runs: entries marked requires_session are offered only when a
-            // session exists (a sessionless tab never offers a command that
-            // would only refuse). The subagent probe likewise: on a child
-            // tab only UsableOnSubagent entries are offered, because the
-            // server refuses everything else there.
-            const bool session_ok = !session_available || session_available();
-            const bool subagent_only = subagent_read_only && subagent_read_only();
 
             // Skip the catalog scan (and its per-entry string concatenation)
-            // when nothing that could change the result has: same prefix,
-            // same session availability, AND state.suggestions still holds
+            // when nothing that could change the result has: same catalog
+            // snapshot, same prefix, AND state.suggestions still holds
             // exactly what THIS closure last wrote there. That third check
             // is what makes this safe rather than merely fast -- it
             // self-heals against an external clear (accept_suggestion's
@@ -899,26 +742,13 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
             // added to the project) replaces it, and the pointer's identity
             // is exactly "did it change". Held here, so it cannot be freed
             // and its address reused while this closure still compares it.
-            const auto catalog = command_catalog();
             const bool cache_hit = has_cached_command && catalog == cached_command_catalog &&
                                    command_prefix == cached_command_prefix &&
-                                   session_ok == cached_command_session_ok &&
-                                   subagent_only == cached_command_subagent &&
                                    state.suggestions == cached_command_suggestions;
             if (!cache_hit) {
                 std::vector<std::string> suggestions;
                 std::vector<std::string> completions;
                 for (const auto& entry : *catalog) {
-                    // The sessionless gate (see UsableWithoutSession): a
-                    // session-bound command is offered only while a session
-                    // exists; /agent and /model always are (their forms
-                    // never refuse for want of one).
-                    if (!UsableWithoutSession(entry) && !session_ok) continue;
-                    // The subagent gate (see UsableOnSubagent): a child's
-                    // command surface is read-only server-side, so a
-                    // mutating entry is never offered where it would only
-                    // be refused.
-                    if (subagent_only && !UsableOnSubagent(entry)) continue;
                     if (entry.name.rfind(command_prefix, 0) != 0) continue;
                     std::string display = "/" + entry.name + "  ·  " + entry.summary;
                     if (entry.submits_prompt) display += "  (submits a prompt as your turn)";
@@ -938,8 +768,6 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
                 has_cached_command = true;
                 cached_command_catalog = catalog;
                 cached_command_prefix = command_prefix;
-                cached_command_session_ok = session_ok;
-                cached_command_subagent = subagent_only;
                 cached_command_suggestions = state.suggestions;
             }
             state.list_open = !state.suggestions.empty();
@@ -1013,7 +841,7 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
         // AppState::RequestSuggestPaths / the `suggest` lambda in app.cpp).
         // A resolved-but-empty answer closes the list, same as before.
         if (state.query_pending && std::chrono::steady_clock::now() >= state.query_at) {
-            if (auto result = suggest(state.pending_prefix)) {
+            if (auto result = host_ptr->Mentions(state.pending_prefix)) {
                 state.suggestions = std::move(*result);
                 state.completions = state.suggestions;
                 state.query_pending = false;
@@ -1157,219 +985,4 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
     });
 }
 
-// The per-tab editor host. A ComponentBase subclass, NOT a
-// Renderer+CatchEvent composition -- for the reason modal_host.cpp
-// documents at length: a plain composition never registers the swapped-in
-// child as a real ftxui child, so Focusable()/ActiveChild() fall back to
-// ComponentBase's defaults (no children), Focused() is false along the whole
-// container chain above, and every keystroke is dropped before it can reach
-// the editor. Overriding the pair to defer to the LIVE slot is what keeps
-// the host (and therefore the editor, and therefore the Input) visible to
-// ftxui's own focus machinery.
-class PerTabEditorHost : public ftxui::ComponentBase {
-public:
-    PerTabEditorHost(PerTabPromptEditors& tabs, std::function<std::string()> focused_tab,
-                     std::function<ftxui::Component(PromptEditorState&)> build_editor)
-        : tabs_(tabs), focused_tab_(std::move(focused_tab)), build_editor_(std::move(build_editor)) {}
-
-private:
-    ftxui::Component resolve() { return tabs_.Resolve(focused_tab_(), build_editor_); }
-
-    ftxui::Element OnRender() override {
-        ftxui::Component editor = resolve();
-        // emptyElement (not a default-constructed Element): the frame always
-        // reserves the editor's row (kCriticalHeight), so the no-editor
-        // frame must render an empty node, not hand ftxui a null pointer.
-        return editor ? editor->Render() : ftxui::emptyElement();
-    }
-
-    bool OnEvent(ftxui::Event event) override {
-        // Resolved LIVE: a key arriving in the same frame as a tab switch
-        // lands in the tab focused at event time -- the same rule the submit
-        // paths follow via focused_or_new_tab. Unhandled events return false
-        // and keep propagating up (to with_keys' HandleGlobalKey and the
-        // outer containers), the same posture as any leaf component.
-        ftxui::Component editor = resolve();
-        return editor != nullptr && editor->OnEvent(std::move(event));
-    }
-
-    // The ModalHost contract: being the focused tab's editor IS being the
-    // active thing. Both defer to the live slot, so Focused()'s walk from
-    // the root (through the modal stack, with_keys, session_view) terminates
-    // in the Input that should hold the keyboard.
-    bool Focusable() const override {
-        std::lock_guard lock(tabs_.mtx_);
-        const auto it = tabs_.editors_.find(focused_tab_());
-        return it != tabs_.editors_.end() && it->second != nullptr;
-    }
-
-    ftxui::Component ActiveChild() override { return resolve(); }
-
-    PerTabPromptEditors& tabs_;
-    std::function<std::string()> focused_tab_;
-    std::function<ftxui::Component(PromptEditorState&)> build_editor_;
-};
-
-ftxui::Component MakePerTabPromptEditor(
-    PerTabPromptEditors& tabs, std::function<std::string()> focused_tab,
-    std::function<ftxui::Component(PromptEditorState&)> build_editor) {
-    return Make<PerTabEditorHost>(tabs, std::move(focused_tab), std::move(build_editor));
-}
-
-// --- PerTabPromptEditors -----------------------------------------------------
-
-ftxui::Component PerTabPromptEditors::Resolve(
-    const std::string& tab,
-    const std::function<ftxui::Component(PromptEditorState&)>& build) {
-    std::lock_guard lock(mtx_);
-    auto& slot = editors_[tab];
-    if (slot == nullptr) {
-        // build() runs under the mutex: build_editor_ captures RunTui locals
-        // by reference and only ever runs on the FTXUI loop thread (this and
-        // OnEvent), so the lock is uncontended in practice -- it exists for
-        // the pump's QueryPendingHint, not for reentrancy.
-        slot = build(states_[tab]);
-    }
-    return slot;
-}
-
-PromptEditorState& PerTabPromptEditors::CurrentState(const std::string& tab) {
-    std::lock_guard lock(mtx_);
-    return states_[tab];
-}
-
-bool PerTabPromptEditors::QueryPendingHint(const std::string& tab) const {
-    std::lock_guard lock(mtx_);
-    const auto it = states_.find(tab);
-    // find, not operator[]: a tab the pump peeked at must not have a state
-    // minted for it from another thread; absent means "nothing armed".
-    return it != states_.end() && it->second.query_pending_hint.load(std::memory_order_acquire);
-}
-
-void PerTabPromptEditors::ForgetTab(const std::string& tab) {
-    std::lock_guard lock(mtx_);
-    // The editor dies WITH its state: its closures captured the state's
-    // address, so erasing one without the other is the exact dangling bug
-    // class filterable_menu's lifetime guards document. The "" (pre-tab)
-    // entry is deliberately never forgotten -- it IS the app's no-tab editor.
-    if (!tab.empty()) {
-        states_.erase(tab);
-        editors_.erase(tab);
-    }
-}
-
-// --- MentionQuerySlots -------------------------------------------------------
-
-std::optional<std::vector<std::string>> MentionQuerySlots::Poll(const std::string& tab,
-                                                                const std::string& prefix) {
-    std::lock_guard lock(mtx_);
-    Slot& slot = slots_[tab];
-    if (slot.prefix == prefix) {
-        if (slot.ready) {
-            // Consume: this answer belongs to exactly the query the caller
-            // just asked about, and the MentionSuggestor contract is
-            // deliver-once (the render gate stops polling after a present
-            // result).
-            slot.ready = false;
-            slot.in_flight = false;
-            return std::move(slot.result);
-        }
-        if (slot.in_flight) return std::nullopt;   // still waiting; poll again next frame
-    }
-    // A new (tab, prefix) pair: arm it. Whatever was in flight for this tab
-    // under a different prefix is superseded -- its completion, if it arrives
-    // late, fails Complete's prefix guard below and is dropped rather than
-    // clobbering the newer query. An answer that landed but was never
-    // consumed (the caller re-armed before the next frame) is discarded the
-    // same way: ready/result are overwritten here.
-    slot.prefix = prefix;
-    slot.in_flight = true;
-    slot.ready = false;
-    slot.result.clear();
-    return std::nullopt;
-}
-
-void MentionQuerySlots::Complete(const std::string& tab, const std::string& prefix,
-                                 std::vector<std::string> paths) {
-    std::lock_guard lock(mtx_);
-    const auto it = slots_.find(tab);
-    // No slot: the query died with the tab (ForgetTab) -- nothing to deliver.
-    // A different prefix: the worker's answer is for a query the user has
-    // already moved past -- the staleness drop the shared-slot design could
-    // not make per-tab, which is what let one tab's answer poison another's.
-    if (it == slots_.end() || it->second.prefix != prefix) return;
-    it->second.result = std::move(paths);
-    it->second.ready = true;
-    it->second.in_flight = false;
-}
-
-void MentionQuerySlots::Forget(const std::string& tab) {
-    std::lock_guard lock(mtx_);
-    slots_.erase(tab);
-}
-
-// --- MakeMentionSuggestor ----------------------------------------------------
-
-MentionSuggestor MakeMentionSuggestor(
-    AppState* app, MentionQuerySlots& slots,
-    std::function<std::string(const std::string& session_id)> session_root_fallback) {
-    // `session_root_fallback` maps a session id to the project root a
-    // SESSIONLESS-flavored query would use. Production passes the empty
-    // function (sessioned tabs query BY SESSION -- the server resolves the
-    // root); tests pass a table so no RPC worker is needed. Kept a parameter
-    // rather than a AppState method probe because the fallback's correct
-    // answer differs per caller and the seam documents that in one place.
-    return [app, &slots, session_root_fallback = std::move(session_root_fallback)](
-               const std::string& prefix) -> std::optional<std::vector<std::string>> {
-        if (app == nullptr) return std::vector<std::string>{};
-        const std::string tab = app->FocusedTabId();
-        const std::string sid = app->FocusedSessionId();
-
-        // Per-tab slot, keyed by the tab id the scope used to embed. The
-        // slot handoff (nullopt = armed-and-waiting) comes FIRST: the
-        // subscription is what makes a later Complete() deliverable, so it
-        // must be registered before the RPC can answer, whatever the
-        // submission path below does.
-        auto armed = slots.Poll(tab, prefix);
-        if (armed.has_value()) return armed;   // consume the resolved answer
-
-        // Submission. Empty prefix INCLUDED: a bare `@` is a live query whose
-        // empty prefix asks the server for the project-root listing (the
-        // resolver answers "" with the root's entries, directories
-        // '/'-suffixed -- bash-completion shape). The old client-side
-        // `if (prefix.empty()) return {}` short-circuit made a bare `@` a
-        // permanent no-op -- the list could never open. The server scopes
-        // every request (session id or project root, validated & clamped
-        // server-side), so nothing here is unscoped even for "".
-        if (!sid.empty()) {
-            app->RequestSuggestPaths(sid, prefix, kMentionSuggestionCount, [&slots, tab, prefix](
-                                                          std::vector<std::string> paths) {
-                slots.Complete(tab, prefix, std::move(paths));
-            });
-        } else {
-            // Sessionless tab: scope to the project root the tab's first
-            // message would create the session with. Production passes
-            // CurrentProjectRootOrEmpty(); a test's fallback answers from
-            // its table.
-            const std::string root =
-                session_root_fallback ? session_root_fallback(sid) : std::string();
-            if (root.empty()) {
-                // No project context at all (a stray cwd failure): the
-                // historical empty answer. Complete() is deliberately NOT
-                // called: Poll armed the slot, so feeding it an empty answer
-                // would open-then-close the list on the next frame; leaving
-                // it in-flight keeps the armed state honest (nothing is
-                // coming, but nothing was asked either) and the next prefix
-                // change re-arms cleanly.
-                return std::nullopt;
-            }
-            app->RequestSuggestPathsForRoot(root, prefix, kMentionSuggestionCount, [&slots, tab, prefix](
-                                                                  std::vector<std::string> paths) {
-                slots.Complete(tab, prefix, std::move(paths));
-            });
-        }
-        return std::nullopt;
-    };
-}
-
-}  // namespace minimal::client
+}  // namespace minimal::client::prompt_editor

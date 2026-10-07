@@ -4,6 +4,8 @@
 // where it is listed. What HostUi::KeyBindings hands a plugin listing the
 // keymap (help-view); the listing itself is the plugin's.
 
+#include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -22,6 +24,9 @@ struct KeyActionInfo {
     std::string group;
     int order = 0;
 };
-KeyActionInfo DescribeKeyAction(std::string_view action);
+// `rank`: the action's place within its group when its owner declared an
+// order (the prompt editor's actions, in the order it lists them).
+KeyActionInfo DescribeKeyAction(std::string_view action,
+                                std::optional<std::size_t> rank = std::nullopt);
 
 }  // namespace minimal::client

@@ -169,30 +169,22 @@ inline constexpr std::chrono::milliseconds kSpinnerFrameInterval{120};
 
 // --- prompt editor -------------------------------------------------------------------
 
-// @-mention suggestions: asked for after this pause in typing, and this many.
-inline constexpr std::chrono::milliseconds kSuggestDebounce{120};
+// @-mention suggestions: this many per query.
 inline constexpr int kMentionSuggestionCount = 20;
-// Undo: steps kept, and keystrokes closer than the gap coalesce into one step.
-inline constexpr std::size_t kMaxUndoSteps = 100;
-inline constexpr std::chrono::milliseconds kUndoCoalesceGap = std::chrono::seconds(1);
 // Prompt history: entries kept (far past what arrow-up recall is used for),
 // and the persisted file's cap (a pasted log must not make every submit
 // rewrite megabytes).
 inline constexpr std::size_t kMaxPromptHistoryEntries = 500;
 inline constexpr std::size_t kMaxPromptHistoryFileBytes = common::kMiB;
-// The prompt grows to half the terminal, but never below this many rows.
-inline constexpr std::size_t kMinPromptRows = 4;
 
 // --- layout -----------------------------------------------------------------------------
 
 // Below this terminal height only the critical rows (editor, status bar) are
 // kept, so a fixed-size row is never squeezed to nothing and overdrawn.
 inline constexpr int kCriticalTerminalHeight = 8;
-// Height caps for scrolling regions: a picker's menu, a notice, the
-// suggestion list under the prompt.
+// Height caps for scrolling regions: a picker's menu, a notice.
 inline constexpr int kMenuMaxHeight = 20;
 inline constexpr int kNoticeMaxHeight = 6;
-inline constexpr int kSuggestionListMaxHeight = 8;
 // Modals: the default width (the body's hints get 78 columns inside a
 // 2-column margin) and the confirm modal's narrower one; rows reserved around
 // a modal body (borders and the pinned hint line, plus slack for the tab bar

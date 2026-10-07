@@ -254,21 +254,10 @@ struct KeyContext {
     std::function<void(const std::string& tab_id)> toggle_thinking_fold;
     std::function<void(const std::string& tab_id)> toggle_tool_fold;
 
-    // True while a bracketed paste (DECSET 2004) is in progress -- kept live
-    // by the prompt editor's own CatchEvent (prompt_editor.cpp), shared here
-    // (RunTui passes the same shared_ptr<bool>'s target to both) so
-    // HandleGlobalKey can defer to the editor instead of firing a bound
-    // action when a macOS Option-glyph byte (key_event_parser.cpp's
-    // IsOptionGlyphEvent) arrives mid-paste, byte-identical to a real
-    // alt+key press.
-    bool& pasting;
-
-    // True while the focused tab's prompt editor has its @/-suggestion list
-    // open (its PromptEditorState's list_open) -- so a busy-tab
-    // Escape can defer to the editor's own dismiss-the-list handling
-    // instead of reading as turn.cancel first. Null-checked at the call
-    // site (every real caller sets it; test fixtures may not need to).
-    std::function<bool()> suggestions_open;
+    // Whether the focused tab's prompt editor claims `event` ahead of every
+    // binding (PromptEditor::Claims: an open suggestion list's keys, a pasted
+    // byte that looks like a bound alt+key). Null = it claims nothing.
+    std::function<bool(const ftxui::Event&)> editor_claims;
 
     // Whether screen row `y` lies inside tab `tab_id`'s chat viewport, as
     // last laid out. The wheel scrolls the chat only when the pointer is

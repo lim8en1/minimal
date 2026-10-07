@@ -32,11 +32,13 @@
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/view/chat_view.hpp"
-#include "minimal/client/view/prompt_editor.hpp"
+#include "prompt_editor_fixture.hpp"
+#include "minimal/client/view/prompt_host.hpp"
 #include "minimal/client/view/tools_panel.hpp"
 
 using namespace minimal::client;
 using namespace minimal_test;
+using minimal::client::prompt_editor::PromptEditorState;
 namespace ftx = ftxui;
 namespace v1 = minimal::v1;
 
@@ -157,7 +159,7 @@ TEST_CASE("prompt editor: Enter submits text, / lines go to the command path") {
     PromptEditorState state;
     std::vector<std::string> texts;
     std::vector<std::string> commands;
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; });
@@ -193,7 +195,7 @@ TEST_CASE("prompt editor: callbacks fire correctly well after MakePromptEditor r
     std::vector<std::string> texts;
     // MakePromptEditor itself is entered and exited here; `editor` is the
     // only thing that survives into the test body.
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); }, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; });
 
@@ -211,7 +213,7 @@ TEST_CASE("prompt editor: callbacks fire correctly well after MakePromptEditor r
 TEST_CASE("prompt editor: Alt+Enter inserts a newline AT THE CURSOR, not appended to the end") {
     const auto theme = TestTheme();
     PromptEditorState state;
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; });
 
@@ -234,7 +236,7 @@ TEST_CASE("prompt editor: a bracketed paste becomes one multi-line buffer, not o
     const auto theme = TestTheme();
     PromptEditorState state;
     std::vector<std::string> texts;
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; });
@@ -256,7 +258,7 @@ TEST_CASE("prompt editor: a bracketed paste becomes one multi-line buffer, not o
 TEST_CASE("prompt editor: history recall places the cursor at the end of the recalled line") {
     const auto theme = TestTheme();
     PromptEditorState state;
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; });
 
@@ -1410,7 +1412,7 @@ TEST_CASE("prompt editor: Tab splices the mention token, preserving the prose") 
     PromptEditorState state;
     std::vector<std::string> texts;
     std::vector<std::string> commands;
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{"src/main.cpp"}; });
@@ -1449,7 +1451,7 @@ TEST_CASE("prompt editor: Tab completes the mention AT THE CURSOR, not the "
     PromptEditorState state;
     std::vector<std::string> texts;
     std::vector<std::string> commands;
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; });
@@ -1493,7 +1495,7 @@ TEST_CASE("prompt editor: suggestions repopulate after accepting then returning 
     std::vector<std::string> commands;
     const std::vector<CommandCatalogEntry> catalog = {
         {"compact", "compact the history", false, false}};
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; },
@@ -1529,7 +1531,7 @@ TEST_CASE("prompt editor: a refreshed catalog snapshot updates the list without 
     PromptEditorState state;
     auto current = std::make_shared<const std::vector<CommandCatalogEntry>>(
         std::vector<CommandCatalogEntry>{{"deploy", "old", false, true}});
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; },
         [&current]() { return current; });
@@ -1560,7 +1562,7 @@ TEST_CASE("prompt editor: Enter accepts the highlighted suggestion instead of su
     std::vector<std::string> commands;
     const std::vector<CommandCatalogEntry> catalog = {
         {"compact", "compact the history", false, false}};
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; },
@@ -1603,7 +1605,7 @@ TEST_CASE("prompt editor: Enter submits in ONE press when the user typed the "
     std::vector<std::string> commands;
     const std::vector<CommandCatalogEntry> catalog = {
         {"help", "list commands", true, false}, {"help2", "unrelated", true, false}};
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; },
         SnapshotOf(catalog));
@@ -1633,7 +1635,7 @@ TEST_CASE("prompt editor: a bare '/' lists every command", "[prompt_editor][regr
     PromptEditorState state;
     const std::vector<CommandCatalogEntry> catalog = {{"help", "list commands", true, false},
                                                        {"compact", "compact history", false, false}};
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; },
         SnapshotOf(catalog));
@@ -1647,7 +1649,7 @@ TEST_CASE("prompt editor: a bare '/' lists every command", "[prompt_editor][regr
 TEST_CASE("prompt editor: ctrl+a/e/u/k are readline-style line editing", "[prompt_editor]") {
     const auto theme = TestTheme();
     PromptEditorState state;
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; }, nullptr);
 
@@ -1679,7 +1681,7 @@ TEST_CASE("prompt editor: ctrl+a/e/u/k are readline-style line editing", "[promp
 TEST_CASE("prompt editor: the stale suggestion list is not completable mid-debounce") {
     const auto theme = TestTheme();
     PromptEditorState state;
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string& prefix) {
             return std::vector<std::string>{prefix + "-result"};
@@ -1727,7 +1729,7 @@ TEST_CASE("prompt editor: up-arrow recalls the last submitted line, down-arrow "
     PromptEditorState state;
     PromptHistory hist;   // explicit: the assertions below read the timeline
     std::vector<std::string> texts;
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [](const std::string&) {}, [](const std::string&) { return std::vector<std::string>{}; },
         nullptr, nullptr, nullptr, nullptr, &hist);
@@ -1755,7 +1757,7 @@ TEST_CASE("prompt editor: up-arrow walks further back through older entries, "
     const auto theme = TestTheme();
     PromptEditorState state;
     PromptHistory hist;   // explicit: the assertions below read the timeline
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; },
         nullptr, nullptr, nullptr, nullptr, &hist);
@@ -1806,7 +1808,7 @@ TEST_CASE("prompt editor: history recall walks THROUGH a recalled command line "
     std::vector<std::string> texts;
     const std::vector<CommandCatalogEntry> catalog = {
         {"pause", "pause the session", true, false}};
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; },
@@ -1817,7 +1819,7 @@ TEST_CASE("prompt editor: history recall walks THROUGH a recalled command line "
     REQUIRE(SendEvent(editor, ftx::Event::Return));
     Type(editor, "/pause");
     REQUIRE(SendEvent(editor, ftx::Event::Return));
-    CHECK(hist.entries.size() == 2);
+    CHECK(hist.Entries().size() == 2);
 
     // Recall lands on "/pause", the next frame opens the command list.
     REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
@@ -1831,7 +1833,7 @@ TEST_CASE("prompt editor: history recall walks THROUGH a recalled command line "
     REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
     CHECK(state.content == "plain message");
     CHECK(state.suggestion_selected == 0);   // the list was not navigated
-    CHECK(hist.entries[*state.history_cursor] == "plain message");
+    CHECK(hist.Entries()[*state.history_cursor - hist.FirstSeq()] == "plain message");
 
     // Down returns to "/pause" (still browsing), then further down past the
     // newest restores the draft -- the full walk stays intact.
@@ -1855,7 +1857,7 @@ TEST_CASE("prompt editor: an open suggestion list still owns the arrows while "
     const std::vector<CommandCatalogEntry> catalog = {
         {"pause", "pause the session", true, false},
         {"perm", "show permissions", true, false}};
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {},
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; },
@@ -1892,7 +1894,7 @@ TEST_CASE("prompt editor: up-arrow inside a multi-line draft does not recall "
     const auto theme = TestTheme();
     PromptEditorState state;
     PromptHistory hist;   // explicit: the assertions below read the timeline
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; },
         nullptr, nullptr, nullptr, nullptr, &hist);
@@ -1915,7 +1917,7 @@ TEST_CASE("prompt editor: a consecutive duplicate submission does not grow histo
     const auto theme = TestTheme();
     PromptEditorState state;
     PromptHistory hist;   // explicit: the assertions below read the timeline
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; },
         nullptr, nullptr, nullptr, nullptr, &hist);
@@ -1924,7 +1926,7 @@ TEST_CASE("prompt editor: a consecutive duplicate submission does not grow histo
     REQUIRE(SendEvent(editor, ftx::Event::Return));
     Type(editor, "same line");
     REQUIRE(SendEvent(editor, ftx::Event::Return));
-    CHECK(hist.entries.size() == 1);
+    CHECK(hist.Entries().size() == 1);
 }
 
 TEST_CASE("prompt editor: typing while browsing history exits browse mode",
@@ -1932,7 +1934,7 @@ TEST_CASE("prompt editor: typing while browsing history exits browse mode",
     const auto theme = TestTheme();
     PromptEditorState state;
     PromptHistory hist;   // explicit: the assertions below read the timeline
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; },
         nullptr, nullptr, nullptr, nullptr, &hist);
@@ -1964,7 +1966,7 @@ TEST_CASE("prompt editor: deleting the whole command line closes the stale sugge
         {"send", "send a thing", false, false},
         {"session", "session stuff", false, false},
         {"set", "set stuff", false, false}};
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; },
@@ -2014,7 +2016,7 @@ TEST_CASE("prompt editor: arrowing past the suggestion viewport scrolls the "
         }
         return entries;
     }();
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         theme, state, [](const std::string&) {}, [](const std::string&) {},
         [](const std::string&) { return std::vector<std::string>{}; },
         SnapshotOf(catalog));

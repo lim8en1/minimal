@@ -44,14 +44,14 @@
 #include "minimal/client/view/frame_renderer.hpp"
 #include "minimal/client/view/modal_stack.hpp"
 #include "minimal/client/view/picker_controller.hpp"
-#include "minimal/client/view/prompt_editor.hpp"
+#include "minimal/client/view/prompt_host.hpp"
 #include "minimal/client/view/tab_ui.hpp"
 
 namespace minimal::client::app {
 
 // Also the TUI's own HostActions: what plugins queue (HostActionQueue) is
 // applied to it on the UI thread.
-class TuiApp final : private plugins::HostActions {
+class TuiApp final : private plugins::HostActions, private plugins::PromptEditorHost {
 public:
     explicit TuiApp(const ParsedArgs& args) : args_(args) {}
     ~TuiApp() { Shutdown(); }
@@ -129,8 +129,14 @@ private:
     // plus --agent/--model when given, else this project's remembered last
     // pick (a soft preference the server may fall back from).
     SessionClient::CreateOptions NewTabOptions() const;
-    void SubmitChat(const std::string& text);
-    void SubmitCommand(const std::string& line);
+    // PromptEditorHost (the focused tab's editor calls these).
+    void SubmitChat(const std::string& text) override;
+    void SubmitCommand(const std::string& line) override;
+    std::shared_ptr<const std::vector<CommandCatalogEntry>> Commands() override;
+    std::optional<std::vector<std::string>> Mentions(const std::string& prefix) override;
+    plugins::PromptTimeline& History() override { return prompt_history_; }
+    bool Matches(std::string_view action, const ftxui::Event& event) const override;
+    void RequestRedraw() override;
     void ApplyTheme(const std::string& name);
     std::vector<std::string> ListThemeNames() const;
     void ClearFocusedNotice();
@@ -140,7 +146,6 @@ private:
     // The close/quit confirmation, through the "confirmation" prompt kind.
     ftxui::Component MakeQuitConfirm();
     void ToggleFold(const std::string& tab_id, bool thinking);
-    ftxui::Component BuildPromptEditor(PromptEditorState& state);
     KeyContext MakeKeyContext();
     void RunPump();
 
@@ -187,12 +192,15 @@ private:
 
     MentionSuggestor suggest_;
     CommandRouter command_router_;
-    // Bracketed-paste flag, shared with HandleGlobalKey (keybinding_dispatch.cpp)
-    // via KeyContext::pasting: a macOS Option-glyph byte pasted verbatim
-    // (key_event_parser.cpp's IsOptionGlyphEvent) is byte-identical to the
-    // key it would otherwise bind, so HandleGlobalKey needs to know a paste
-    // is in progress to defer to the editor instead of firing the action.
-    std::shared_ptr<bool> pasting_ = std::make_shared<bool>(false);
+    // Commands()'s answer and what it was built from.
+    struct EditorCatalog {
+        CommandCatalogCache::Snapshot source;
+        bool sessioned = false;
+        bool subagent = false;
+        std::shared_ptr<const std::vector<CommandCatalogEntry>> usable;
+    } editor_catalog_;
+    // The editor's declared actions, for the keymap listing.
+    std::vector<plugins::PromptEditorAction> editor_actions_;
     ftxui::Component editor_;
 
     // --- modal slots: stable hosts whose inner component is swapped ---

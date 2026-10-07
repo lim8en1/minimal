@@ -99,22 +99,6 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"chat.toggle_tool_fold", "ctrl+alt+o"},
         {"chat.toggle_timestamps", "alt+t"},
         {"turn.cancel", "escape"},
-        // The prompt editor's newline-insert key (prompt_editor.cpp):
-        // plain Enter submits, this inserts a line instead. Consulted
-        // directly by the editor (app.cpp's build_prompt_editor), not by
-        // HandleGlobalKey. See key_event_parser.cpp's enter/return branch
-        // for why "alt+enter" resolves to six candidate encodings, and
-        // docs/CONFIGURATION.md for the macOS Option+Enter caveat this
-        // binding exists to be rebindable away from.
-        {"prompt.newline", "alt+enter"},
-        // Prompt undo / redo, also consulted by the editor itself. Not
-        // ctrl+z: the terminal's suspend key.
-        {"prompt.undo", "alt+z"},
-        {"prompt.redo", "ctrl+alt+z"},
-        // Clear the whole prompt (undoable). Not escape: that is
-        // turn.cancel. ctrl+alt+u: readline's ctrl+u (kill to line start)
-        // widened to the whole buffer, in the ctrl+alt+letter family.
-        {"prompt.clear", "ctrl+alt+u"},
         {"app.quit", "ctrl+q"},
     };
     return kDefaults;

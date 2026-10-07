@@ -11,10 +11,10 @@
 
 #include <string>
 
-#include "minimal/client/view/prompt_wrap.hpp"
+#include "prompt_wrap.hpp"
 
-using minimal::client::PromptWrapResult;
-using minimal::client::WrapPromptContent;
+using minimal::client::prompt_editor::PromptWrapResult;
+using minimal::client::prompt_editor::WrapPromptContent;
 
 namespace {
 // The rows' byte ranges must cover the content with no byte in two rows and
