@@ -323,7 +323,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                 continue;
             }
             PluginViewEntry entry{view.get(), std::move(component), false, false, surface, {}};
-            entry.plugin = out.registries.views.attributions()[i].plugin_name;
+            entry.plugin = out.registries.views.owners()[i];
             out.plugin_views.push_back(std::move(entry));
         } catch (const std::exception& error) {
             common::DefaultLogger().warn("plugin view '{}' threw on component(): {}", surface,

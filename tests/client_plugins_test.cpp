@@ -232,6 +232,28 @@ TEST_CASE("additive registries: fallbacks yield too, and roll back per plugin",
     CHECK(registry.Find("stub.start") != nullptr);   // the fallback again
 }
 
+TEST_CASE("additive registries: owners() stays aligned with All() past fallbacks",
+          "[client_plugins][fallback]") {
+    // attributions() interleaves fallbacks with claims, so indexing it by an
+    // All() index (the view bootstrap did) named the wrong plugin for every
+    // claim after a fallback.
+    StartViewRegistry registry;
+    registry.SetAttribution("first");
+    registry.Register(std::make_unique<StubStartView>("a"));
+    registry.SetAttribution("bundled");
+    registry.RegisterFallback(std::make_unique<StubStartView>("b"));
+    registry.SetAttribution("second");
+    registry.Register(std::make_unique<StubStartView>("c"));
+    registry.SetAttribution("third");
+    registry.Register(std::make_unique<StubStartView>("d"));
+    REQUIRE(registry.All().size() == 3);
+    CHECK(registry.owners() == std::vector<std::string>{"first", "second", "third"});
+    registry.RemoveByAttribution("second");
+    REQUIRE(registry.All().size() == 2);
+    CHECK(registry.owners() == std::vector<std::string>{"first", "third"});
+    CHECK(registry.surfaces() == std::vector<std::string>{"a", "d"});
+}
+
 TEST_CASE("start view registry: additive, attributed, id-addressable", "[client_plugins]") {
     StartViewRegistry registry;
     registry.SetAttribution("plugin-a");
