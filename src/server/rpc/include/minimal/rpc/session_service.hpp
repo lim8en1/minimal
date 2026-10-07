@@ -133,6 +133,8 @@ public:
                                v1::DeleteSessionResponse*) override;
     grpc::Status Ping(grpc::ServerContext*, const v1::PingRequest*,
                       v1::PingResponse*) override;
+    grpc::Status GetServerInfo(grpc::ServerContext*, const v1::GetServerInfoRequest*,
+                               v1::ServerInfo*) override;
     grpc::Status PluginCall(grpc::ServerContext*, const v1::PluginCallRequest*,
                             v1::PluginCallResponse*) override;
     grpc::Status PluginSubscribe(grpc::ServerContext*, const v1::PluginCallRequest*,

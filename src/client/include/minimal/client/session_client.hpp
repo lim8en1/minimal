@@ -389,6 +389,14 @@ public:
     };
     GetSessionResult GetSession(const std::string& session_id);
 
+    // The answering server's build identity (see ServerInfo in the proto).
+    // UNIMPLEMENTED means a server older than the RPC -- see ServerBuildMismatch.
+    struct ServerInfoResult {
+        v1::ServerInfo info;
+        grpc::Status status;
+    };
+    ServerInfoResult GetServerInfo();
+
     // @-mention suggestions, resolved by the server's MentionResolver so the
     // strategy is pluggable server-side and every frontend inherits it. Paths
     // are relative to the session's project_root; directories carry a trailing

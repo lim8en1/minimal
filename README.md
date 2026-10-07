@@ -84,7 +84,8 @@ that needs it; it exits on its own once nothing has used it for a while
 
 Everything lives in one config directory (`$MINIMAL_CONFIG_DIR` →
 `$XDG_CONFIG_HOME/minimal` → `$HOME/.config/minimal`), seeded at install time
-and never overwritten afterward.
+and never overwritten afterward (`--target update-config` refreshes the files
+you never edited; see BUILD.md).
 
 | File | Status | Purpose |
 |---|---|---|

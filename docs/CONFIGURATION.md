@@ -12,8 +12,10 @@ separate data dir: `$XDG_DATA_HOME/minimal`, else `$HOME/.local/share/minimal`. 
 stored keys (`secrets.json`, mode 0600 — see [Secrets](#secrets)). The TUI keeps its up-arrow prompt history there too (`prompt_history.json`: the newest 500 submitted lines, at most 1 MiB); delete the file to clear it. And the last agent/model you picked, per project (`last_selection.json`): every new tab starts on it, `--agent`/`--model` outrank it, and a remembered pick that no longer resolves (a preset deleted, a provider removed) is dropped with a one-line notice instead of failing the tab. Picking **default** in the `/model` picker (or `/model default`) returns to `settings.json` `default_model` and is remembered as such. The headless client (`-p`) never reads it.
 
 The config dir is seeded from `bundled/` at `cmake --install` time (see
-BUILD.md); existing files are never overwritten. Nothing is seeded at server
-runtime. Copyable example agents, prompts, skills, and commands live in
+BUILD.md); existing files are never overwritten by the install. To pick up a
+newer release's defaults, run `cmake --build build --target update-config`.
+It replaces only the files you never edited and writes `<file>.bundled-new`
+beside the ones you did. Nothing is seeded at server runtime. Copyable example agents, prompts, skills, and commands live in
 [examples/](../examples/).
 
 ## File inventory

@@ -16,6 +16,7 @@
 
 #include <grpcpp/create_channel.h>
 
+#include "minimal/common/abi_tag.hpp"
 #include "minimal/common/bundled_assets.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/env.hpp"
@@ -189,6 +190,25 @@ bool Reachable(const std::string& target, std::chrono::milliseconds timeout) {
 
 bool IsSpawnableTarget(const std::string& target) {
     return SocketPathOf(target).has_value();
+}
+
+std::optional<std::string> ServerBuildMismatch(const grpc::Status& status,
+                                               const v1::ServerInfo& info) {
+    const std::string mine = std::string(common::Version()) + " (" + common::AbiTag() + ")";
+    if (status.error_code() == grpc::StatusCode::UNIMPLEMENTED) {
+        return "the running server is an older build than this client\n"
+               "  client: " + mine + "\n"
+               "  server: predates the version check\n"
+               "stop it (it holds the socket until it exits) and run again";
+    }
+    if (!status.ok()) {
+        return "could not verify the running server's build: " + status.error_message();
+    }
+    if (info.abi_tag() == common::AbiTag()) return std::nullopt;
+    return "the running server is a different build from this client\n"
+           "  client: " + mine + "\n"
+           "  server: " + info.version() + " (" + info.abi_tag() + ")\n"
+           "stop it with `kill " + std::to_string(info.pid()) + "` and run again";
 }
 
 std::string SpawnedServerLogPath() { return (common::DataDir() / "server-spawn.log").string(); }

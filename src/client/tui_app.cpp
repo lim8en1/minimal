@@ -124,7 +124,8 @@ int TuiApp::Connect() {
         args_.headless.server.empty() ? DefaultServerTarget() : args_.headless.server;
 
     // The same connect (auto-spawn first, 5 s wait) as the headless paths.
-    client_ = ConnectOrReport(target, args_.headless.autospawn);
+    client_ = ConnectOrReport(target, args_.headless.autospawn,
+                              args_.headless.allow_version_mismatch);
     if (!client_) return kUnavailable;
 
     // The startup --resume probe: resolve the target session BEFORE the UI is

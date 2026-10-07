@@ -1495,6 +1495,8 @@ minimal -p PROMPT [--server TARGET] [--agent PRESET] [--model PROVIDER/MODEL]
 
 **Auto-spawn** (`client/server_spawn.{hpp,cpp}`): when nothing is listening on a **unix-socket** target, the client starts a server itself — `--no-autospawn` restores the "cannot reach" error, and a non-unix target never spawns (a remote server is outside the local-only trust model and is the user's to start). Binary resolution: `$MINIMAL_SERVER_BIN`, then the client's own directory (installed layout), then the build-tree layout. The spawn is a double-fork + `setsid` — the server is a peer of one started by hand, not a managed child, so its diagnostics go to `<data dir>/server-spawn.log` and its lifetime belongs to the same reaper policy as any other server's: a session the client leaves behind (a headless run's, a TUI quit's) stays resumable for `sessions.detached_idle_ttl_seconds` (default 30 min), and the idle exit fires once nothing is left (§ Session lifetime). Startup races resolve through machinery that already existed: a server binding a taken socket fails its bind and exits, and the spawner's probe finds the winner; a socket left by a *crashed* server is cleaned by `rpc::Server`'s connect-probe (`SocketIsDead`) before binding. The probe timeout (~25 s) covers config load, plugin load, and the sanity check, which is why spawn failure is diagnosed as a timeout naming the log rather than by reading the child's exit — the double fork makes that exit unobservable by design. The E2E test runs the real lifecycle against the real binary: spawn, serve, reaper self-exit.
 
+**Build handshake.** A server reaped only on idle outlives the rebuilds in between. A client that finds one already listening would otherwise speak a protocol neither side was compiled against. So every connect (`ConnectOrReport`, behind the TUI, `-p` and `--list-sessions`) calls `GetServerInfo` first and compares `abi_tag`, the same toolchain + git-revision tag the plugin loaders use to refuse a stale `.so`. It doesn't compare the release version: the stale server that actually happens is the one left over from a rebuild at the same release. A mismatch refuses, naming both builds and the server's pid. `--allow-version-mismatch` connects anyway, after printing the same diagnostic. A server older than the RPC answers `UNIMPLEMENTED`, which proves it is stale. The plugin CLI's running-server path (`minimal plugin set …`) treats a mismatch like no server and edits the file directly, so the next server start reads the change.
+
 `--resume SESSION_ID` continues a stored session instead of creating one — the headless expression of `CreateSessionRequest.session_id` (§ *Session storage*, "Resume"). The resumed session keeps its stored preset and `project_root`, so the flag is mutually exclusive with `--agent`, and the run-mode default (`AllowOnly`) applies to the resumed turn exactly as to a fresh one. It requires `-p`: resuming runs one headless turn, and the interactive surface that would own a non-headless resume is the TUI's session picker, not a flag.
 
 **Argument parsing rules, because the failure mode was silence** (`client/cli_args.{hpp,cpp}`): a value-taking flag never accepts a flag-shaped value — write `--flag=value` when the value legitimately starts with `-` — and an unrecognised argument is an error rather than being dropped. Both matter together: `minimal -p --server unix:///x "do the thing"` used to send the model the prompt `"--server"`, discard the target and the real prompt, and then report that it could not reach the *default* socket.
@@ -1669,6 +1671,20 @@ failure than shipping without a default — so a bundled file that gains a bette
 default in a later release does *not* propagate to anyone who already has one.
 That is the deliberate trade. Seeding is per file, so a config dir missing only
 `agents/` still gets the presets.
+
+**Updates are opt-in and provably safe.** Seeding records the sha256 of every
+file it writes in `<config dir>/.bundled.sha256`. A bundled file's version is its
+content hash, so there's no per-file number to remember to bump. With that record,
+"untouched" is something the script can prove instead of guess. The
+`update-config` target (the same script, `MINIMAL_SEED_MODE=update`) replaces a
+file only when its hash still equals the recorded one. An edited file that the
+release also changed gets the new default beside it as `<file>.bundled-new`. It's
+offered once, and the record then takes the new hash. An edit the release didn't
+touch is never mentioned. The install step itself runs in `seed` mode, which
+only *reports* what an update would do. So "the install never changes an existing
+file" still holds as stated. `check-config` reports and writes nothing. The
+script and its test (`tests/seed_config_test.cmake`) are CMake for the same
+reason as before: one copy of the logic.
 
 Seeding is best-effort and skips entirely under `DESTDIR` (a packaging root has no
 user whose config dir it is). A missing bundle warns rather than failing the

@@ -94,6 +94,9 @@ std::string UsageText() {
            "      --dangerously-bypass  auto-approve permission prompts; configured\n"
            "                              denies still apply\n"
            "      --no-autospawn      never start a server; fail if none is reachable\n"
+           "      --allow-version-mismatch\n"
+           "                              connect to a server of a different build\n"
+           "                              instead of refusing\n"
            "      --version\n"
            "\n"
            "A typical scripting loop captures the session id a headless run prints:\n"
@@ -277,7 +280,8 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
                 if (comma == std::string_view::npos) break;
                 rest = rest.substr(comma + 1);
             }
-        } else if (name == "--dangerously-bypass" || name == "--no-autospawn") {
+        } else if (name == "--dangerously-bypass" || name == "--no-autospawn" ||
+                   name == "--allow-version-mismatch") {
             // Boolean flags honor the inline form too: `--dangerously-bypass=false`
             // used to DISCARD the inline value and enable the bypass anyway --
             // the one direction where silence is dangerous.
@@ -296,6 +300,8 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
             }
             if (name == "--dangerously-bypass") {
                 parsed.headless.bypass = flag_value;
+            } else if (name == "--allow-version-mismatch") {
+                parsed.headless.allow_version_mismatch = flag_value;
             } else {
                 parsed.headless.autospawn = !flag_value;
             }

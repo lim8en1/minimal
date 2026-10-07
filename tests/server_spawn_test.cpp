@@ -28,6 +28,7 @@
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/client/server_spawn.hpp"
 #include "minimal/client/session_client.hpp"
+#include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
@@ -173,6 +174,47 @@ TEST_CASE("EnsureServerRunning recognises an already-running server without spaw
 
     client::SessionClient probe{target};
     CHECK(probe.WaitForConnected(5s));
+
+    // The handshake every client runs next: this server IS this build.
+    const auto info = probe.GetServerInfo();
+    REQUIRE(info.status.ok());
+    CHECK(info.info.abi_tag() == common::AbiTag());
+    CHECK(info.info.version() == common::Version());
+    CHECK(info.info.pid() == static_cast<std::int64_t>(::getpid()));
+    CHECK_FALSE(client::ServerBuildMismatch(info.status, info.info).has_value());
+}
+
+TEST_CASE("a server of another build is refused, naming both and the pid to stop",
+          "[server_spawn]") {
+    v1::ServerInfo info;
+    info.set_version("0.9.0b");
+    info.set_abi_tag("Clang-old-deadbeef");
+    info.set_pid(4242);
+    const auto mismatch = client::ServerBuildMismatch(grpc::Status::OK, info);
+    REQUIRE(mismatch.has_value());
+    CHECK(mismatch->find("Clang-old-deadbeef") != std::string::npos);
+    CHECK(mismatch->find(common::AbiTag()) != std::string::npos);
+    CHECK(mismatch->find("kill 4242") != std::string::npos);
+
+    // Same release, different build: still refused -- the rebuild-while-a-
+    // server-idles case is the one the check exists for.
+    info.set_version(common::Version());
+    CHECK(client::ServerBuildMismatch(grpc::Status::OK, info).has_value());
+}
+
+TEST_CASE("a server older than GetServerInfo is stale; other failures are unverified",
+          "[server_spawn]") {
+    const v1::ServerInfo empty;
+    const auto old = client::ServerBuildMismatch(
+        grpc::Status(grpc::StatusCode::UNIMPLEMENTED, ""), empty);
+    REQUIRE(old.has_value());
+    CHECK(old->find("older build") != std::string::npos);
+
+    const auto failed = client::ServerBuildMismatch(
+        grpc::Status(grpc::StatusCode::UNAUTHENTICATED, "refused"), empty);
+    REQUIRE(failed.has_value());
+    CHECK(failed->find("could not verify") != std::string::npos);
+    CHECK(failed->find("refused") != std::string::npos);
 }
 
 TEST_CASE("a client with no server spawns one, uses it, and the server exits on its own",

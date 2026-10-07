@@ -1,5 +1,7 @@
 #include "minimal/rpc/session_service.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -11,6 +13,7 @@
 
 #include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/signal_router.hpp"
+#include "minimal/common/abi_tag.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/config/permission_codec.hpp"
 #include "minimal/plugins/plugin_abi.h"
@@ -120,6 +123,18 @@ grpc::Status SessionServiceImpl::Ping(grpc::ServerContext* context, const v1::Pi
             std::chrono::steady_clock::now().time_since_epoch())
             .count(),
         std::memory_order_release);
+    return grpc::Status::OK;
+}
+
+// Build identity (see ServerInfo in the proto). Authenticated like every other
+// RPC: the pid is not something an unauthenticated caller needs.
+grpc::Status SessionServiceImpl::GetServerInfo(grpc::ServerContext* context,
+                                               const v1::GetServerInfoRequest*,
+                                               v1::ServerInfo* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+    response->set_version(common::Version());
+    response->set_abi_tag(common::AbiTag());
+    response->set_pid(static_cast<std::int64_t>(::getpid()));
     return grpc::Status::OK;
 }
 

@@ -35,9 +35,11 @@ SessionClient::CreateOptions DefaultCreateOptions();
 // Every entry point's connect: auto-spawn (if allowed) BEFORE any client
 // channel exists -- the probe channel EnsureServerRunning creates holds the
 // process's only sockets at that moment, so a forked server inherits nothing
-// to hold open -- then dial and wait up to 5 s. Null after printing the one
-// shared "cannot reach" diagnostic.
-std::shared_ptr<SessionClient> ConnectOrReport(const std::string& target, bool autospawn);
+// to hold open -- then dial and wait up to 5 s, then refuse a server of a
+// different build (ServerBuildMismatch) unless allow_version_mismatch. Null
+// after printing the one shared diagnostic.
+std::shared_ptr<SessionClient> ConnectOrReport(const std::string& target, bool autospawn,
+                                               bool allow_version_mismatch);
 
 int RunHeadless(const HeadlessOptions& options);
 int RunListSessions(const HeadlessOptions& options);

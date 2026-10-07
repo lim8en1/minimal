@@ -902,6 +902,21 @@ message PingRequest {}
 
 message PingResponse {}
 
+// Which build is answering. A client attaching to a server left running from
+// an earlier build would be speaking a protocol neither side was compiled
+// against -- a server reaped only on idle outlives every rebuild in between.
+// The client compares abi_tag (toolchain + git revision, the same tag the
+// plugin loaders refuse a stale .so by) with its own and refuses to proceed on
+// a mismatch. A server that predates this RPC answers UNIMPLEMENTED, which
+// is itself proof it is stale.
+message GetServerInfoRequest {}
+
+message ServerInfo {
+  string version = 1;   // the user-visible release, e.g. "1.0.1b"
+  string abi_tag = 2;   // the build identity actually compared
+  int64 pid = 3;        // so a refusal can say which process to stop
+}
+
 service SessionService {
   // Primary channel for one open session: user turns in, streamed model output
   // and permission/confirmation/command round-trips out, multiplexed over a
@@ -936,6 +951,8 @@ service SessionService {
 
   // Client presence heartbeat; see PingRequest above.
   rpc Ping(PingRequest) returns (PingResponse);
+  // Build identity; see ServerInfo above. The first call every client makes.
+  rpc GetServerInfo(GetServerInfoRequest) returns (ServerInfo);
 
   rpc PluginCall(PluginCallRequest) returns (PluginCallResponse);
   rpc PluginSubscribe(PluginCallRequest) returns (stream PluginCallResponse);

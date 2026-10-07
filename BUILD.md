@@ -251,9 +251,26 @@ server uses at runtime:
 2. `$XDG_CONFIG_HOME/minimal`
 3. `$HOME/.config/minimal`
 
-**Existing files are never overwritten** — once seeded, a file is the user's.
-A later release's improved defaults do not propagate to anyone who already has
-the file. Runtime state (SQLite session store, logs, plugin data) lives in the
+**Existing files are never overwritten by the install** — once seeded, a file is
+the user's. Seeding records each file's sha256 in `<config dir>/.bundled.sha256`;
+a bundled file's version *is* its content hash. On a later install, seeding
+lists the files this release changed and leaves them alone. To pick them up:
+
+```bash
+cmake --build build --target check-config    # report only
+cmake --build build --target update-config   # apply
+```
+
+`update-config` replaces a file only when its hash still matches the recorded
+one (you never touched it). A file you edited is left as is, and the new default
+is written beside it as `<file>.bundled-new` for you to merge by hand. It's
+offered once and then stays quiet until a later release changes the file again.
+A config dir seeded before the record existed has no baseline, so every file
+that differs from the bundle is offered once. Files the bundle no longer ships
+are reported and never deleted. `providers.json` is never offered because its
+bundled copy is only a placeholder.
+
+Runtime state (SQLite session store, logs, plugin data) lives in the
 data dir: `$XDG_DATA_HOME/minimal` or `$HOME/.local/share/minimal`.
 
 Seeding tells you when `providers.json` is still empty — that is the one thing
@@ -261,6 +278,12 @@ it cannot do for you; see `providers.example.json` and
 `docs/CONFIGURATION.md` for the format.
 
 ## Rebuilding plugins
+
+The same tag guards the client/server boundary. Every client asks the server
+for its build (`GetServerInfo`) right after connecting and refuses a different
+one. Typically that's a server still idling from before a rebuild. The refusal
+names both builds and the server's pid. Stop that server, or pass
+`--allow-version-mismatch` to connect anyway.
 
 Plugins are **source-compatible, not binary-compatible**: they are rebuilt
 together with the harness, and both host and plugin bake the same ABI tag
