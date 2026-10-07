@@ -1,4 +1,4 @@
-#include "minimal/client/view/tab_bar.hpp"
+#include "tab_bar.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,9 +8,9 @@
 
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/tool_status.hpp"
-#include "minimal/client/policy.hpp"
+#include "policy.hpp"
 
-namespace minimal::client {
+namespace minimal::client::tab_bar {
 
 TabBarWindow ComputeTabBarWindow(const std::vector<int>& cell_widths, int available_width,
                                  std::size_t focused_index, int marker_width) {
@@ -73,11 +73,10 @@ TabBarWindow ComputeTabBarWindow(const std::vector<int>& cell_widths, int availa
 
 namespace {
 
-ftxui::Color StateColor(SessionStateKind state, bool active, const Theme& theme) {
-    switch (state) {
-        case SessionStateKind::Waiting:  return theme.ColorFor("attention");
-        case SessionStateKind::Error:    return theme.ColorFor("error");
-        case SessionStateKind::Done:     return theme.ColorFor("system_message");
+ftxui::Color StateColor(const std::string& state, bool active, const Theme& theme) {
+    if (state == "waiting") return theme.ColorFor("attention");
+    if (state == "error") return theme.ColorFor("error");
+    if (state == "done") return theme.ColorFor("system_message");
         // border_unfocused is a BORDER role (1.70:1 dark / 1.16:1 light
         // against status_bar_bg -- fine for a hairline, useless as body
         // text), but this was the only place in the app using it as a tab
@@ -85,18 +84,16 @@ ftxui::Color StateColor(SessionStateKind state, bool active, const Theme& theme)
         // tabs unreadable. system_message/assistant_message are the roles
         // every other body text in the app already uses for exactly this
         // idle/active distinction.
-        case SessionStateKind::Idle:
-            return active ? theme.ColorFor("assistant_message") : theme.ColorFor("system_message");
+    if (state == "thinking") return theme.ColorFor("thinking");
+    if (state == "working") return theme.ColorFor("working");
         // Thinking and Working used to share this color, making them
         // visually identical (the reported complaint: no way to tell "the
         // model is composing a reply" from "a tool is running" without
         // opening the tools panel). Distinct roles now; StateGlyph below
         // gives them a distinct SHAPE too, so the difference survives even
         // on a theme that hasn't customized either role from its default.
-        case SessionStateKind::Thinking: return theme.ColorFor("thinking");
-        case SessionStateKind::Working:  return theme.ColorFor("working");
-    }
-    return ftxui::Color::Default;
+    // "idle" and anything unknown.
+    return active ? theme.ColorFor("assistant_message") : theme.ColorFor("system_message");
 }
 
 // Animated for Thinking/Working, static otherwise -- the same spinner and
@@ -104,18 +101,11 @@ ftxui::Color StateColor(SessionStateKind state, bool active, const Theme& theme)
 // read identically on the tab and in the transcript. Waiting keeps its own
 // '!' glyph (RenderTabCell's attention_glyph, unchanged) -- this function
 // never emits a second signal for it.
-std::string StateGlyph(SessionStateKind state) {
-    switch (state) {
-        case SessionStateKind::Thinking:
-        case SessionStateKind::Working:
-            return SpinnerFrame();
-        case SessionStateKind::Done:  return "✓";
-        case SessionStateKind::Error: return "✗";
-        case SessionStateKind::Waiting:
-        case SessionStateKind::Idle:
-            return "";
-    }
-    return "";
+std::string StateGlyph(const std::string& state) {
+    if (state == "thinking" || state == "working") return SpinnerFrame();
+    if (state == "done") return "✓";
+    if (state == "error") return "✗";
+    return "";   // waiting (its '!' is the attention mark) and idle
 }
 
 }  // namespace
@@ -134,18 +124,18 @@ int DigitWidth(std::size_t n) { return static_cast<int>(std::to_string(n).size()
 // to a fraction of the visible characters an ASCII name of the same budget
 // would get) -- with room reserved for the attention glyph, and its
 // rendered width in display columns.
-std::pair<std::string, int> LabelAndWidth(const AppState::TabSnapshot& tab, std::size_t index,
+std::pair<std::string, int> LabelAndWidth(const plugins::TabActivity& tab, std::size_t index,
                                           std::size_t name_cap) {
     const std::string prefix = std::to_string(index) + " ";
     std::string label = prefix + TruncateUtf8Columns(tab.display_name, name_cap);
     int width = DigitWidth(index) + 1 +
                 std::min<int>(static_cast<int>(name_cap),
                               static_cast<int>(Utf8ColumnWidth(tab.display_name)));
-    if (tab.attention_glyph != '\0') {
+    if (tab.attention) {
         label += ' ';
         width += 2;  // the separating space plus the glyph itself
     }
-    if (tab.is_subagent) width += 2;                  // the "↳ " marker
+    if (tab.subagent) width += 2;                  // the "↳ " marker
     // The state glyph, when this state has one: one display column plus a
     // separating space, approximated as a flat +2 rather than the glyph's
     // own (multi-byte, UTF-8) string length -- StateGlyph's glyphs are all
@@ -162,10 +152,10 @@ std::pair<std::string, int> LabelAndWidth(const AppState::TabSnapshot& tab, std:
     return {std::move(label), width};
 }
 
-ftxui::Element RenderTabCell(const AppState::TabSnapshot& tab, const std::string& label,
+ftxui::Element RenderTabCell(const plugins::TabActivity& tab, const std::string& label,
                              const Theme& theme) {
     using namespace ftxui;
-    const bool active = tab.is_focused;
+    const bool active = tab.focused;
 
     Element content = text(label);
     content |= color(StateColor(tab.state, active, theme));
@@ -178,7 +168,7 @@ ftxui::Element RenderTabCell(const AppState::TabSnapshot& tab, const std::string
         content = hbox({text(glyph + " ") | color(StateColor(tab.state, active, theme)),
                         std::move(content)});
     }
-    if (tab.attention_glyph != '\0') {
+    if (tab.attention) {
         // THE color-independent signal. Not a spinner, not a state word:
         // Waiting is the one state a human must act on.
         content = hbox({std::move(content), text("!") | color(theme.ColorFor("attention")) |
@@ -186,7 +176,7 @@ ftxui::Element RenderTabCell(const AppState::TabSnapshot& tab, const std::string
     }
     // Children directly follow their parent; "↳" says so -- one space of
     // indent, the old marker, was invisible in practice.
-    if (tab.is_subagent) content = hbox({text("↳ ") | Muted(theme), std::move(content)});
+    if (tab.subagent) content = hbox({text("↳ ") | Muted(theme), std::move(content)});
 
     if (active) content |= bgcolor(theme.ColorFor("status_bar_bg"));
     return content;
@@ -194,32 +184,16 @@ ftxui::Element RenderTabCell(const AppState::TabSnapshot& tab, const std::string
 
 }  // namespace
 
-TabBarBadge ComputeTabBarBadge(const std::vector<AppState::TabSnapshot>& all,
-                               const std::vector<AppState::TabSnapshot>& visible,
-                               TabFilter filter) {
-    if (filter == TabFilter::All) return {};
-    TabBarBadge badge;
-    badge.active = true;
-    badge.label = filter == TabFilter::Group ? "group" : "agents";
-    badge.hidden = all.size() >= visible.size() ? all.size() - visible.size() : 0;
-    // Hidden ATTENTION: the '!' tabs of `all` that `visible` does not carry.
-    // Glyph, not state: Waiting and a plugin raise are the same signal here,
-    // exactly as they render as the same '!' on a visible tab.
-    for (const auto& tab : all) {
-        if (tab.attention_glyph == '\0') continue;
-        const bool shown =
-            std::any_of(visible.begin(), visible.end(),
-                        [&](const auto& v) { return v.tab_id == tab.tab_id; });
-        if (!shown) ++badge.attention;
-    }
-    return badge;
-}
-
-ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, const Theme& theme,
-                            const TabBarBadge& badge, TabHitBoxes* hits) {
+ftxui::Element Bar::Render(const plugins::TabBarModel& model, const Theme& theme,
+                           plugins::TabBarHits& hits) const {
     using namespace ftxui;
-    if (hits != nullptr) hits->cells.clear();
-    if (tabs.empty()) return emptyElement();
+    const auto& tabs = model.tabs;
+    const auto& badge = model.badge;
+    // One tab: the bar would only repeat what the status bar and the chat
+    // already say, for a whole row. It appears with the second tab -- unless
+    // a filter is on, when the badge alone justifies the row (it names the
+    // filter and counts the hidden '!' tabs).
+    if (tabs.size() <= 1 && !badge.active) return nullptr;
 
     std::vector<std::string> labels;
     std::vector<int> widths;
@@ -236,7 +210,7 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
         auto [label, width] = LabelAndWidth(tabs[i], i + 1, name_cap);
         labels.push_back(std::move(label));
         widths.push_back(width);
-        if (tabs[i].is_focused) focused_index = i;
+        if (tabs[i].focused) focused_index = i;
     }
 
     // "«123 " / " 123»": digits plus the glyph plus a hair of breathing
@@ -261,7 +235,7 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
                       kSeparatorWidth;   // plus the separator that joins it
     }
     const auto window = ComputeTabBarWindow(widths, Terminal::Size().dimx - badge_width,
-                                            focused_index, kTabOverflowMarkerWidth);
+                                            focused_index, kOverflowMarkerWidth);
 
     Elements cells;
     if (window.hidden_before > 0) {
@@ -270,11 +244,9 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
     for (std::size_t i = window.visible_start; i < window.visible_end; ++i) {
         if (!cells.empty()) cells.push_back(text(" │ ") | Muted(theme));  // never let labels fuse
         Element cell = RenderTabCell(tabs[i], labels[i], theme);
-        if (hits != nullptr) {
-            auto box = std::make_shared<Box>();
-            cell = std::move(cell) | reflect(*box);
-            hits->cells.emplace_back(tabs[i].tab_id, std::move(box));
-        }
+        auto box = std::make_shared<Box>();
+        cell = std::move(cell) | reflect(*box);
+        hits.cells.emplace_back(tabs[i].tab_id, std::move(box));
         cells.push_back(std::move(cell));
     }
     if (window.hidden_after > 0) {
@@ -292,4 +264,4 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
     return hbox(std::move(cells));
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::tab_bar

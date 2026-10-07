@@ -7,7 +7,6 @@
 #include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/view/chat_view.hpp"
 #include "minimal/client/view/status_bar.hpp"
-#include "minimal/client/view/tab_bar.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/client/policy.hpp"
@@ -114,7 +113,7 @@ ftxui::Element FrameRenderer::Render() {
     // user's tab.filter_group/tab.filter_agents choice), while `tabs` above
     // stays the FULL list: the status-bar lookups below, the tools panel's
     // cache key, and the panel itself are cross-session by design. The
-    // badge (tab_bar.hpp) surfaces what the filter hides -- most importantly
+    // badge (TabBarBadge) surfaces what the filter hides -- most importantly
     // how many hidden tabs carry '!'.
     const TabFilter tab_filter = deps_.app.ActiveTabFilter();
     const auto visible_tabs = FilterTabs(tabs, tab_filter, deps_.focused);
@@ -135,12 +134,20 @@ ftxui::Element FrameRenderer::Render() {
     const bool space_critical = term_height > 0 && term_height < kCriticalTerminalHeight;
 
     Elements rows;
-    // One tab: the bar would only repeat what the status bar and the chat
-    // already say, for a whole row. It appears with the second tab -- unless
-    // a tab filter is active, when the badge alone justifies the row (it
-    // names the filter and counts the hidden '!' tabs).
-    if (!space_critical && (visible_tabs.size() > 1 || badge.active)) {
-        rows.push_back(RenderTabBar(visible_tabs, deps_.theme, badge, &tab_hits_));
+    // The bar decides when it has something to say (the bundled one hides
+    // for a lone tab unless a filter is on); core only takes the row away
+    // when the terminal is too short. A throwing bar draws no row.
+    tab_hits_.cells.clear();
+    if (const plugins::TabBar* bar = deps_.tab_bar_registry.get(); bar != nullptr && !space_critical) {
+        plugins::TabBarModel model;
+        model.badge = badge;
+        for (const auto& tab : visible_tabs) model.tabs.push_back(ActivityOf(tab));
+        Element row;
+        if (GuardPluginCall("tab_bar", "the tab bar",
+                            [&] { row = bar->Render(model, deps_.theme, tab_hits_); }) &&
+            row != nullptr) {
+            rows.push_back(std::move(row));
+        }
     }
 
     const std::string& focused = deps_.focused;

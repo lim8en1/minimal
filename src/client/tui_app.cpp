@@ -457,7 +457,7 @@ void TuiApp::BuildFrame() {
     frame_renderer_.emplace(FrameRenderer::Dependencies{
         *app_, theme, tab_maintenance_->Focused(), tab_maintenance_->FocusedDetails(), tab_ui_,
         registries.start_views, registries.message_renderers, registries.tool_renderers,
-        registries.display_renderers, registries.status_segments, *env_.engine,
+        registries.display_renderers, registries.status_segments, registries.tab_bar, *env_.engine,
         panel_height,
         editor_, env_.status_format, env_.plugin_views,
         // Row-renderer collapse hints follow the user's keymap, not a

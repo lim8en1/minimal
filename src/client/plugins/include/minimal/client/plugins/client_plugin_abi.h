@@ -95,6 +95,12 @@ const char* minimal_client_plugin_abi_tag();
 const char* minimal_client_plugin_name();
 const char* minimal_client_plugin_version();
 
+// OPTIONAL, EXCLUSIVE: the tab bar (registries.hpp TabBar) -- the bundled
+// tab-bar plugin's, or a replacement. None: no bar.
+void minimal_client_plugin_register_tab_bar(
+    minimal::client::plugins::TabBarRegistry&,
+    const minimal::client::plugins::ClientPluginRegistrationContext&);
+
 }  // extern "C"
 
 // Defines the three REQUIRED symbols above. Every client plugin should use
@@ -201,6 +207,12 @@ void minimal_client_plugin_register_widget_kit(
 // -- the bundled prompt-editor plugin's, or a replacement.
 void minimal_client_plugin_register_prompt_editor(
     minimal::client::plugins::PromptEditorRegistry&,
+    const minimal::client::plugins::ClientPluginRegistrationContext&);
+
+// OPTIONAL, EXCLUSIVE: the tab bar (registries.hpp TabBar) -- the bundled
+// tab-bar plugin's, or a replacement. None: no bar.
+void minimal_client_plugin_register_tab_bar(
+    minimal::client::plugins::TabBarRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
 }  // extern "C"

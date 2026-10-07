@@ -14,6 +14,16 @@ namespace minimal::client {
 // The status vocabulary plugins read ("idle", "thinking", ...).
 const char* StateWord(SessionStateKind state);
 
+// One tab as plugins see it; its tool rows only if `tab` carries them.
+plugins::TabActivity ActivityOf(const AppState::TabSnapshot& tab);
+
+// What `filter` keeps out of the bar: the tabs of `all` that `visible` lacks,
+// and how many of those carry attention (the glyph, not the state: Waiting
+// and a plugin raise are the same signal). Inactive for TabFilter::All.
+plugins::TabBarBadge ComputeTabBarBadge(const std::vector<AppState::TabSnapshot>& all,
+                                        const std::vector<AppState::TabSnapshot>& visible,
+                                        TabFilter filter);
+
 // Rebuilds the snapshot only when something in it changed -- any tab's tool
 // rows or output (AppState::ToolsVersion), or a tab's name, state, attention,
 // focus or kind -- and otherwise hands back the last one, so a view keyed on
