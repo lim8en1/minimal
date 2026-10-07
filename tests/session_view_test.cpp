@@ -193,7 +193,7 @@ TEST_CASE("the sessions view: arrow-down past the last row loads the next page b
           "s" + std::to_string(client::kSessionListPageSize - 1));  // the last row the server sent
 }
 
-TEST_CASE("the sessions view: ctrl+d asks first; Escape cancels, delete deletes and refetches",
+TEST_CASE("the sessions view: ctrl+d asks first; Escape or n cancels, y deletes and refetches",
           "[session_view]") {
     FakeHost host;
     session_view::SessionsView view(host.seams());
@@ -214,8 +214,17 @@ TEST_CASE("the sessions view: ctrl+d asks first; Escape cancels, delete deletes 
     CHECK_FALSE(aware->WantsEscape());
 
     minimal_test::SendEvent(component, ftxui::Event::CtrlD);
+    CHECK(frame().find("type to filter") == std::string::npos);  // a question, not a picker
+    minimal_test::SendEvent(component, ftxui::Event::Character('n'));
+    CHECK(frame().find("resume a session") != std::string::npos);
+
+    minimal_test::SendEvent(component, ftxui::Event::CtrlD);
     (void)frame();
-    minimal_test::SendEvent(component, ftxui::Event::Return);  // "delete"
+    // Enter answers nothing: one keystroke must not delete permanently.
+    minimal_test::SendEvent(component, ftxui::Event::Return);
+    CHECK(frame().find("delete session?") != std::string::npos);
+    CHECK((host.log().empty() || host.log().back() != "delete s0"));
+    minimal_test::SendEvent(component, ftxui::Event::Character('y'));
     REQUIRE(Eventually([&] {
         const auto log = host.log();
         return !log.empty() && log.back() == "delete s0";

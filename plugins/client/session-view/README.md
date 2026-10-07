@@ -7,8 +7,8 @@ The session and subagent pickers.
 - **View** `sessions` (modal): this project's stored sessions, newest first,
   with a `+ new session` row. Arrow-down past the last row loads the next
   page; `tab` sorts by recency or name; `ctrl+a` lists every project's;
-  `ctrl+d` deletes the highlighted one after a confirmation (Escape cancels
-  it). Enter opens a session -- attached when it is still live, resumed
+  `ctrl+d` deletes the highlighted one after a confirmation (`y` deletes;
+  `n` or Escape cancels; Enter answers nothing). Enter opens a session -- attached when it is still live, resumed
   from its transcript otherwise (`HostActions::OpenSession` / `NewTab`).
 - **View** `subagents` (modal): the focused session's subagents, live first;
   `ctrl+a` shows the ended ones too. Enter focuses an open tab, attaches a

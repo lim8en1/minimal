@@ -17,6 +17,12 @@ TEST_CASE("core describes its key actions for plugins: words, group, and the lis
     CHECK(DescribeKeyAction("tab.goto.9").order < DescribeKeyAction("tab.close").order);
     CHECK(DescribeKeyAction("tab.close").order < DescribeKeyAction("chat.scroll_up").order);
     CHECK(DescribeKeyAction("chat.scroll_up").group == "chat");
+    // Core's own chat action leads the slot's declared ones (ranked from 1),
+    // instead of sinking below all of them.
+    CHECK(DescribeKeyAction("chat.load_older").order <
+          DescribeKeyAction("chat.scroll_up", /*rank=*/1).order);
+    CHECK(DescribeKeyAction("chat.scroll_up", 1).order <
+          DescribeKeyAction("chat.scroll_down", 2).order);
     // Unknown to core (a plugin view's toggle): grouped last, named by its id.
     const auto view = DescribeKeyAction("config");
     CHECK(view.group == "views");

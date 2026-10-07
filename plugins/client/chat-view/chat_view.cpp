@@ -696,7 +696,9 @@ ftxui::Element ChatView::Render(const plugins::ChatFrame& snapshot,
     // its full history unless the user already knew about chat.load_older
     // (PageUp) -- has_earlier_messages was never rendered anywhere.
     if (snapshot.has_earlier_messages) {
-        column.push_back(text("··· earlier messages · " + load_older_hint_ + " to load ···") |
+        column.push_back(text(load_older_hint_.empty()
+                                  ? "··· earlier messages ···"
+                                  : "··· earlier messages · " + load_older_hint_ + " to load ···") |
                          color(theme_.ColorFor("system_message")));
     }
     // The sliding-window boundary (track R2): older-page loads beyond the cap
