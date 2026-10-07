@@ -57,6 +57,9 @@ private:
 #ifndef MINIMAL_UI_KIT_PLUGIN
 #error "MINIMAL_UI_KIT_PLUGIN must name the built ui-kit plugin"
 #endif
+#ifndef MINIMAL_PROMPT_EDITOR_PLUGIN
+#error "MINIMAL_PROMPT_EDITOR_PLUGIN must name the built prompt-editor plugin"
+#endif
 #ifndef MINIMAL_CONSENT_PROMPTS_PLUGIN
 #error "MINIMAL_CONSENT_PROMPTS_PLUGIN must name the built consent-prompts plugin"
 #endif
@@ -79,15 +82,16 @@ void SeedPlugins(const std::filesystem::path& config_dir,
 }
 
 void SeedRequiredPlugins(const std::filesystem::path& config_dir) {
-    SeedPlugins(config_dir, {MINIMAL_UI_KIT_PLUGIN, MINIMAL_CONSENT_PROMPTS_PLUGIN});
+    SeedPlugins(config_dir,
+                {MINIMAL_UI_KIT_PLUGIN, MINIMAL_CONSENT_PROMPTS_PLUGIN, MINIMAL_PROMPT_EDITOR_PLUGIN});
 }
 
 }  // namespace
 
 // The client side of the server's plugin_matrix: with no client plugin at
 // all the TUI refuses to start -- nothing fills the required widget-kit slot
-// -- with either required plugin alone it refuses, with both it starts.
-TEST_CASE("the TUI starts only with the widget kit and the consent prompts",
+// -- with any one required plugin alone it refuses, with all of them it starts.
+TEST_CASE("the TUI starts only with the widget kit, the consent prompts and an editor",
           "[tui_bootstrap][widget_kit][prompts]") {
     SessionClient client("unix:///nonexistent/minimal-tui-bootstrap-test.sock");
     {
@@ -96,7 +100,8 @@ TEST_CASE("the TUI starts only with the widget kit and the consent prompts",
         TuiEnvironment env;
         CHECK_FALSE(BuildTuiEnvironment(client, env));
     }
-    for (const char* only : {MINIMAL_UI_KIT_PLUGIN, MINIMAL_CONSENT_PROMPTS_PLUGIN}) {
+    for (const char* only :
+         {MINIMAL_UI_KIT_PLUGIN, MINIMAL_CONSENT_PROMPTS_PLUGIN, MINIMAL_PROMPT_EDITOR_PLUGIN}) {
         INFO(only);
         minimal::testing::TempDir config_dir;
         SeedPlugins(config_dir.path(), {only});
@@ -112,6 +117,9 @@ TEST_CASE("the TUI starts only with the widget kit and the consent prompts",
         REQUIRE(BuildTuiEnvironment(client, env));
         CHECK(env.registries.widget_kit.holder() == "ui-kit");
         CHECK(env.registries.prompt_renderers.Find("permission") != nullptr);
+        CHECK(env.registries.prompt_editor.holder() == "prompt-editor");
+        // Its actions are bindable: the defaults it declared are in the keymap.
+        CHECK(env.keybindings.KeyFor("prompt.newline") == "alt+enter");
     }
 }
 

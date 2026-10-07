@@ -644,8 +644,9 @@ number the tab bar shows), `group.previous`, `group.next`, `jump.attention`,
 `chat.scroll_up`, `chat.scroll_down`, `chat.scroll_bottom`, `chat.row_up`,
 `chat.row_down`, `chat.toggle_collapse`, `chat.toggle_collapse_all`,
 `chat.toggle_thinking_fold`, `chat.toggle_tool_fold`,
-`chat.toggle_timestamps`, `turn.cancel`, `session.pause`, `prompt.newline`,
-`prompt.undo`, `prompt.redo`, `prompt.clear`, `app.quit`.
+`chat.toggle_timestamps`, `turn.cancel`, `session.pause`, `app.quit`. The
+prompt editor declares its own actions (the bundled one: `prompt.newline`,
+`prompt.undo`, `prompt.redo`, `prompt.clear`), bound the same way.
 
 Modifiers: `ctrl` (or `control`), `alt` (or `option`/`opt`/`meta` — the
 macOS key's spelling), `shift`, joined by `+` in any order. macOS: Apple

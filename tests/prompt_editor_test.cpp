@@ -27,12 +27,15 @@
 
 #include "minimal/client/key_event_parser.hpp"
 #include "minimal/client/render/theme.hpp"
-#include "minimal/client/view/prompt_editor.hpp"
+#include "../plugins/client/prompt-editor/policy.hpp"
+#include "prompt_editor_factory.hpp"
+#include "prompt_editor_fixture.hpp"
+#include "minimal/client/view/prompt_host.hpp"
 
 using minimal::client::ColorDepth;
-using minimal::client::MakePromptEditor;
-using minimal::client::PromptEditorState;
-using minimal::client::PromptUndo;
+using minimal_test::MakeTestPromptEditor;
+using minimal::client::prompt_editor::PromptEditorState;
+using minimal::client::prompt_editor::PromptUndo;
 using minimal::client::Theme;
 
 namespace {
@@ -58,7 +61,7 @@ TEST_CASE("PromptEditor: Alt+Enter (ESC CR) inserts a newline", "[prompt_editor]
     PromptEditorState state;
     state.content = "ab";
     state.cursor_position = 1;
-    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+    auto editor = MakeTestPromptEditor(TestTheme(), state, {}, {}, {});
 
     CHECK(editor->OnEvent(ftxui::Event::Character("\x1b\r")));
     CHECK(state.content == "a\nb");
@@ -70,7 +73,7 @@ TEST_CASE("PromptEditor: Alt+Enter (ESC LF) inserts a newline", "[prompt_editor]
     PromptEditorState state;
     state.content = "ab";
     state.cursor_position = 2;
-    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+    auto editor = MakeTestPromptEditor(TestTheme(), state, {}, {}, {});
 
     CHECK(editor->OnEvent(ftxui::Event::Character("\x1b\n")));
     CHECK(state.content == "ab\n");
@@ -88,7 +91,7 @@ TEST_CASE("PromptEditor: CSI-u alt/shift enter encodings insert a newline",
             PromptEditorState state;
             state.content = "ab";
             state.cursor_position = 1;
-            auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+            auto editor = MakeTestPromptEditor(TestTheme(), state, {}, {}, {});
 
             CHECK(editor->OnEvent(ftxui::Event::Special(bytes)));
             CHECK(state.content == "a\nb");
@@ -114,7 +117,7 @@ TEST_CASE("PromptEditor: key_matches overrides the default Alt+Enter list",
     PromptEditorState alt_enter_state;
     alt_enter_state.content = "ab";
     alt_enter_state.cursor_position = 1;
-    auto alt_enter_editor = MakePromptEditor(TestTheme(), alt_enter_state, {}, {}, {}, nullptr,
+    auto alt_enter_editor = MakeTestPromptEditor(TestTheme(), alt_enter_state, {}, {}, {}, nullptr,
                                              nullptr, nullptr, nullptr, nullptr, only_ctrl_n);
     CHECK(alt_enter_editor->OnEvent(ftxui::Event::Character("\x1b\r")));  // consumed as plain text
     CHECK(alt_enter_state.content != "a\nb");   // NOT the newline-insert splice anymore
@@ -122,7 +125,7 @@ TEST_CASE("PromptEditor: key_matches overrides the default Alt+Enter list",
     PromptEditorState ctrl_n_state;
     ctrl_n_state.content = "ab";
     ctrl_n_state.cursor_position = 1;
-    auto ctrl_n_editor = MakePromptEditor(TestTheme(), ctrl_n_state, {}, {}, {}, nullptr, nullptr,
+    auto ctrl_n_editor = MakeTestPromptEditor(TestTheme(), ctrl_n_state, {}, {}, {}, nullptr, nullptr,
                                           nullptr, nullptr, nullptr, only_ctrl_n);
     CHECK(ctrl_n_editor->OnEvent(ftxui::Event::Special(std::string(1, '\x0E'))));
     CHECK(ctrl_n_state.content == "a\nb");
@@ -133,7 +136,7 @@ TEST_CASE("PromptEditor: plain Enter submits and clears", "[prompt_editor]") {
     state.content = "hello";
     state.cursor_position = 5;
     std::string submitted;
-    auto editor = MakePromptEditor(TestTheme(), state,
+    auto editor = MakeTestPromptEditor(TestTheme(), state,
                                    [&](const std::string& text) { submitted = text; }, {}, {});
 
     CHECK(editor->OnEvent(ftxui::Event::Return));
@@ -145,7 +148,7 @@ TEST_CASE("PromptEditor: plain Enter on an empty buffer submits nothing",
           "[prompt_editor]") {
     PromptEditorState state;
     bool called = false;
-    auto editor = MakePromptEditor(TestTheme(), state,
+    auto editor = MakeTestPromptEditor(TestTheme(), state,
                                    [&](const std::string&) { called = true; },
                                    [&](const std::string&) { called = true; }, {});
 
@@ -162,7 +165,7 @@ TEST_CASE("PromptEditor: the soft-wrapped body renders one row per visual line",
     PromptEditorState state;
     state.content = std::string(1000, 'x');
     state.cursor_position = 0;
-    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+    auto editor = MakeTestPromptEditor(TestTheme(), state, {}, {}, {});
 
     const std::string rendered = ToText(editor, 80, 20);
     int x_rows = 0;
@@ -184,7 +187,7 @@ TEST_CASE("PromptEditor: the soft-wrapped body renders one row per visual line",
 
 TEST_CASE("PromptEditor: an empty prompt renders the placeholder", "[prompt_editor]") {
     PromptEditorState state;
-    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+    auto editor = MakeTestPromptEditor(TestTheme(), state, {}, {}, {});
 
     // Not from "type": the painted caret's style codes sit after the "t".
     const std::string rendered = ToText(editor, 80, 6);
@@ -195,7 +198,7 @@ TEST_CASE("PromptEditor: a multi-line draft renders each logical line", "[prompt
     PromptEditorState state;
     state.content = "first line\nsecond line";
     state.cursor_position = static_cast<int>(state.content.size());
-    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+    auto editor = MakeTestPromptEditor(TestTheme(), state, {}, {}, {});
 
     const std::string rendered = ToText(editor, 80, 6);
     CHECK(rendered.find("first line") != std::string::npos);
@@ -221,7 +224,7 @@ void TypeInto(ftxui::Component& editor, const std::string& text) {
 TEST_CASE("PromptEditor: undo reverts a word at a time, redo re-applies",
           "[prompt_editor][undo]") {
     PromptEditorState state;
-    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+    auto editor = MakeTestPromptEditor(TestTheme(), state, {}, {}, {});
     TypeInto(editor, "hello world");
 
     // The typed space starts a new step: one undo takes back " world".
@@ -241,7 +244,7 @@ TEST_CASE("PromptEditor: undo reverts a word at a time, redo re-applies",
 
 TEST_CASE("PromptEditor: an edit after undo drops the redo stack", "[prompt_editor][undo]") {
     PromptEditorState state;
-    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+    auto editor = MakeTestPromptEditor(TestTheme(), state, {}, {}, {});
     TypeInto(editor, "ab");
     REQUIRE(editor->OnEvent(Key("alt+z")));
     REQUIRE(state.content.empty());
@@ -256,7 +259,7 @@ TEST_CASE("PromptEditor: an edit after undo drops the redo stack", "[prompt_edit
 TEST_CASE("PromptEditor: submit clears the undo history", "[prompt_editor][undo]") {
     PromptEditorState state;
     std::string submitted;
-    auto editor = MakePromptEditor(TestTheme(), state,
+    auto editor = MakeTestPromptEditor(TestTheme(), state,
                                    [&](const std::string& text) { submitted = text; }, {}, {});
     TypeInto(editor, "sent");
     REQUIRE(editor->OnEvent(ftxui::Event::Return));
@@ -269,7 +272,7 @@ TEST_CASE("PromptEditor: submit clears the undo history", "[prompt_editor][undo]
 
 TEST_CASE("PromptEditor: kill line and paste are one undo step each", "[prompt_editor][undo]") {
     PromptEditorState state;
-    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+    auto editor = MakeTestPromptEditor(TestTheme(), state, {}, {}, {});
     TypeInto(editor, "abc");
     REQUIRE(editor->OnEvent(ftxui::Event::Character(std::string(1, '\x15'))));   // ctrl+u
     REQUIRE(state.content.empty());
@@ -288,7 +291,7 @@ TEST_CASE("PromptEditor: kill line and paste are one undo step each", "[prompt_e
 TEST_CASE("PromptEditor: prompt.clear empties the prompt as one undo step",
           "[prompt_editor][undo]") {
     PromptEditorState state;
-    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+    auto editor = MakeTestPromptEditor(TestTheme(), state, {}, {}, {});
     TypeInto(editor, "one two");
     state.cursor_position = 3;   // mid-buffer: both sides go
     state.history_cursor = 0;
@@ -317,7 +320,7 @@ TEST_CASE("PromptEditor: prompt.clear empties the prompt as one undo step",
 TEST_CASE("PromptEditor: prompt.clear is content mid-paste and follows key_matches",
           "[prompt_editor]") {
     PromptEditorState state;
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         TestTheme(), state, {}, {}, {}, nullptr, nullptr, nullptr, nullptr, nullptr,
         [](std::string_view action, const ftxui::Event& event) {
             return action == "prompt.clear" && event == Key("ctrl+alt+x");
@@ -354,7 +357,7 @@ bool CaretPaintedAt(ftxui::Component& editor, int x) {
 TEST_CASE("PromptEditor: the caret cell is painted, not only the terminal cursor",
           "[prompt_editor]") {
     PromptEditorState state;
-    auto editor = MakePromptEditor(TestTheme(), state, {}, {}, {});
+    auto editor = MakeTestPromptEditor(TestTheme(), state, {}, {}, {});
 
     SECTION("empty prompt: the placeholder's first cell only") {
         CHECK(CaretPaintedAt(editor, 2));
@@ -393,10 +396,10 @@ TEST_CASE("PromptUndo: a pause or a caret jump starts a new step", "[prompt_edit
 TEST_CASE("PromptUndo: the history is capped", "[prompt_editor][undo]") {
     PromptUndo undo;
     const auto now = std::chrono::steady_clock::now();
-    for (std::size_t i = 0; i < minimal::client::kMaxUndoSteps + 20; ++i) {
+    for (std::size_t i = 0; i < minimal::client::prompt_editor::kMaxUndoSteps + 20; ++i) {
         undo.Record({std::to_string(i), 0}, PromptUndo::Kind::Other, 0, false, now);
     }
-    CHECK(undo.undo_depth() == minimal::client::kMaxUndoSteps);
+    CHECK(undo.undo_depth() == minimal::client::prompt_editor::kMaxUndoSteps);
     // The oldest steps went first.
     std::optional<PromptUndo::Snapshot> last;
     while (auto step = undo.Undo({"current", 0})) last = step;
@@ -413,7 +416,7 @@ TEST_CASE("PromptEditor: a sensitive command's arguments stay out of the history
             {"model", "pick a model", false, false, true, false}});
     minimal::client::PromptHistory hist;
     PromptEditorState state;
-    auto editor = MakePromptEditor(
+    auto editor = MakeTestPromptEditor(
         TestTheme(), state, {}, [](const std::string&) {}, {}, [&] { return catalog; },
         nullptr, nullptr, nullptr, &hist);
     const auto submit = [&](const std::string& line) {
@@ -424,10 +427,32 @@ TEST_CASE("PromptEditor: a sensitive command's arguments stay out of the history
 
     submit("/secret set openai sk-live-123");
     submit("/model local/llama");
-    CHECK(hist.entries == std::vector<std::string>{"/secret", "/model local/llama"});
+    CHECK(hist.Entries() == std::vector<std::string>{"/secret", "/model local/llama"});
 
     // Before the catalog arrives, no /-command's arguments are kept.
     catalog = std::make_shared<const std::vector<CommandCatalogEntry>>();
     submit("/secret set other sk-live-456");
-    CHECK(hist.entries.back() == "/secret");
+    CHECK(hist.Entries().back() == "/secret");
+}
+
+TEST_CASE("PromptEditor instance: an open suggestion list claims its keys ahead of bindings",
+          "[prompt_editor][claims]") {
+    using minimal::client::CommandCatalogEntry;
+    auto& host = minimal_test::NewFakeEditorHost();
+    const auto catalog = std::make_shared<const std::vector<CommandCatalogEntry>>(
+        std::vector<CommandCatalogEntry>{{"pause", "pause the session", true, false}});
+    host.catalog = [catalog] { return catalog; };
+    auto editor = minimal::client::prompt_editor::Factory().Make(host, TestTheme());
+    auto component = editor->component();
+
+    // Closed list: nothing claimed, every key is the bindings' first.
+    CHECK_FALSE(editor->Claims(ftxui::Event::Escape));
+
+    editor->SetText("/pa");
+    CHECK(editor->Text() == "/pa");
+    component->Render();   // the list opens from the render pass
+    CHECK(editor->Claims(ftxui::Event::Escape));
+    CHECK(editor->Claims(ftxui::Event::Tab));
+    CHECK(editor->Claims(ftxui::Event::Return));
+    CHECK_FALSE(editor->Claims(ftxui::Event::Character("x")));
 }

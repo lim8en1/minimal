@@ -6,14 +6,19 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <memory>
+#include <stdexcept>
 #include <string>
 
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
 
-#include "minimal/client/view/prompt_editor.hpp"
+#include "prompt_editor_factory.hpp"
+#include "prompt_editor_fixture.hpp"
 #include "temp_dir.hpp"
+
+#include "minimal/client/policy.hpp"
+#include "minimal/client/view/prompt_host.hpp"
 
 namespace minimal::client {
 namespace {
@@ -35,27 +40,26 @@ std::string ToText(ftxui::Component& component, int width, int height) {
     return screen.ToString();
 }
 
-// The catch2 test binary links client_core; a test-local focused-tab source
-// stands in for AppState::FocusedTabId (the host's resolution rule is what
-// is under test, not AppState's focus tracking).
+// A test-local focused-tab source stands in for AppState::FocusedTabId (the
+// host's resolution rule is what is under test, not AppState's focus
+// tracking); the editors are the bundled plugin's, over one fake host.
 struct Harness {
     PerTabPromptEditors tabs;
     std::string focused;
     std::vector<std::string> submitted;
+    minimal_test::FakeEditorHost& fake = minimal_test::NewFakeEditorHost();
     ftxui::Component host;
 
     explicit Harness(Theme theme_) : theme(std::move(theme_)) {
-        host = MakePerTabPromptEditor(
-            tabs, [this] { return focused; },
-            [this, t = &theme](PromptEditorState& state) {
-                built.push_back("built:" + focused);
-                return MakePromptEditor(
-                    *t, state,
-                    [this](const std::string& text) { submitted.push_back(text); },
-                    [](const std::string&) {},
-                    [](const std::string&) { return std::vector<std::string>{}; });
-            });
+        fake.on_text = [this](const std::string& text) { submitted.push_back(text); };
+        tabs.SetBuilder([this] {
+            built.push_back("built:" + focused);
+            return prompt_editor::Factory().Make(fake, theme);
+        });
+        host = MakePerTabPromptEditor(tabs, [this] { return focused; });
     }
+
+    std::string Text(const std::string& tab) { return tabs.Editor(tab)->Text(); }
 
     void Type(const std::string& text) {
         for (const char c : text) {
@@ -76,15 +80,15 @@ TEST_CASE("PerTabPromptEditors: drafts are per-tab", "[prompt_editor][per_tab]")
     h.Type("tab a draft");
     // No frame has rendered yet: lazy build happens on the first event/render
     // resolution, and the event MUST have landed in A's fresh state.
-    REQUIRE(h.tabs.CurrentState("A").content == "tab a draft");
+    REQUIRE(h.Text("A") == "tab a draft");
 
     h.focused = "B";   // switch tabs: A's draft must survive untouched
     h.Type("tab b");
-    CHECK(h.tabs.CurrentState("A").content == "tab a draft");
-    CHECK(h.tabs.CurrentState("B").content == "tab b");
+    CHECK(h.Text("A") == "tab a draft");
+    CHECK(h.Text("B") == "tab b");
 
     h.focused = "A";   // and back: the draft is exactly where typing left it
-    CHECK(h.tabs.CurrentState("A").content == "tab a draft");
+    CHECK(h.Text("A") == "tab a draft");
 }
 
 TEST_CASE("PerTabPromptEditors: one factory invocation per tab, lazily",
@@ -123,8 +127,8 @@ TEST_CASE("PerTabPromptEditors: submit routes through the focused tab's state",
     // The submit callback received ONLY B's content -- A's draft stayed a
     // draft (per-tab content bound by pointer, the whole point of the host).
     REQUIRE(h.submitted == std::vector<std::string>{"from b"});
-    CHECK(h.tabs.CurrentState("B").content.empty());
-    CHECK(h.tabs.CurrentState("A").content == "from a");
+    CHECK(h.Text("B").empty());
+    CHECK(h.Text("A") == "from a");
 }
 
 TEST_CASE("PerTabPromptEditors: undo is per tab", "[prompt_editor][per_tab][undo]") {
@@ -135,24 +139,16 @@ TEST_CASE("PerTabPromptEditors: undo is per tab", "[prompt_editor][per_tab][undo
     h.Type("beta");
     // Undo in B reverts only B's draft.
     REQUIRE(h.host->OnEvent(ftx::Event::Character("\x1bz")));   // alt+z
-    CHECK(h.tabs.CurrentState("B").content.empty());
-    CHECK(h.tabs.CurrentState("A").content == "alpha");
+    CHECK(h.Text("B").empty());
+    CHECK(h.Text("A") == "alpha");
 }
 
 TEST_CASE("PerTabPromptEditors: the shared history is app-scoped, the cursor per editor",
           "[prompt_editor][per_tab]") {
     Harness h(TestTheme());
     PromptHistory hist;
-    auto own = MakePerTabPromptEditor(
-        h.tabs, [&h] { return h.focused; },
-        [&](PromptEditorState& state) {
-            return MakePromptEditor(h.theme, state, [](const std::string&) {},
-                                    [](const std::string&) {},
-                                    [](const std::string&) {
-                                        return std::vector<std::string>{};
-                                    },
-                                    nullptr, nullptr, nullptr, nullptr, &hist);
-        });
+    h.fake.history = &hist;
+    auto& own = h.host;
 
     h.focused = "A";
     own->OnEvent(ftx::Event::Character("o"));
@@ -161,7 +157,7 @@ TEST_CASE("PerTabPromptEditors: the shared history is app-scoped, the cursor per
     // B's editor has never typed anything, but up-arrow recalls the
     // app-scoped timeline: one history, not one per tab.
     REQUIRE(own->OnEvent(ftx::Event::ArrowUp));
-    CHECK(h.tabs.CurrentState("B").content == "o");
+    CHECK(h.Text("B") == "o");
 }
 
 TEST_CASE("PerTabPromptEditors: browsing in one tab does not clobber another "
@@ -175,37 +171,29 @@ TEST_CASE("PerTabPromptEditors: browsing in one tab does not clobber another "
     // state instead of B's own.
     Harness h(TestTheme());
     PromptHistory hist;
-    auto own = MakePerTabPromptEditor(
-        h.tabs, [&h] { return h.focused; },
-        [&](PromptEditorState& state) {
-            return MakePromptEditor(h.theme, state, [](const std::string&) {},
-                                    [](const std::string&) {},
-                                    [](const std::string&) {
-                                        return std::vector<std::string>{};
-                                    },
-                                    nullptr, nullptr, nullptr, nullptr, &hist);
-        });
+    h.fake.history = &hist;
+    auto& own = h.host;
 
     h.focused = "A";
     own->OnEvent(ftx::Event::Character("o"));
     REQUIRE(own->OnEvent(ftx::Event::Return));   // seed the shared timeline
     REQUIRE(own->OnEvent(ftx::Event::ArrowUp));  // A starts browsing
-    CHECK(h.tabs.CurrentState("A").content == "o");
+    CHECK(h.Text("A") == "o");
 
     h.focused = "B";   // switch tabs mid-browse, without arrowing back down
     own->OnEvent(ftx::Event::Character("b"));
-    REQUIRE(h.tabs.CurrentState("B").content == "b");
+    REQUIRE(h.Text("B") == "b");
 
     // B never browsed: Up/Down here must walk B's own (fresh) browse state,
     // not resume A's -- and must never discard "b".
     REQUIRE(own->OnEvent(ftx::Event::ArrowUp));
-    CHECK(h.tabs.CurrentState("B").content == "o");   // recalls the shared entry
+    CHECK(h.Text("B") == "o");   // recalls the shared entry
     REQUIRE(own->OnEvent(ftx::Event::ArrowDown));
-    CHECK(h.tabs.CurrentState("B").content == "b");   // restores B's own draft
+    CHECK(h.Text("B") == "b");   // restores B's own draft
 
     // A's browse state is untouched by B's activity.
     h.focused = "A";
-    CHECK(h.tabs.CurrentState("A").content == "o");
+    CHECK(h.Text("A") == "o");
 }
 
 TEST_CASE("PerTabPromptEditors: ForgetTab drops the state and the editor together",
@@ -219,8 +207,8 @@ TEST_CASE("PerTabPromptEditors: ForgetTab drops the state and the editor togethe
     // (no resurrected draft from a stale editor whose closures had captured
     // the erased node's address).
     h.focused = "A";
-    CHECK(h.tabs.CurrentState("A").content.empty());
-    CHECK(h.built.size() == 1);   // rebuilt exactly once more
+    CHECK(h.Text("A").empty());
+    CHECK(h.built.size() == 2);   // rebuilt exactly once more
 }
 
 TEST_CASE("PerTabPromptEditors: the pre-tab editor serves the empty app",
@@ -229,22 +217,53 @@ TEST_CASE("PerTabPromptEditors: the pre-tab editor serves the empty app",
     h.focused = "";   // no tab at all -- the startup frame's posture
 
     h.Type("pre-tab typing");
-    REQUIRE(h.tabs.CurrentState("").content == "pre-tab typing");
+    REQUIRE(h.Text("") == "pre-tab typing");
     REQUIRE(h.host->OnEvent(ftx::Event::Return));
     CHECK(h.submitted == std::vector<std::string>{"pre-tab typing"});
 }
 
-TEST_CASE("PerTabPromptEditors: QueryPendingHint reads only the asked tab",
+TEST_CASE("PerTabPromptEditors: WantsFrames peeks without building",
+          "[prompt_editor][per_tab]") {
+    Harness h(TestTheme());
+    // Nothing built: absent means "not armed", and no editor is built by a
+    // cross-thread peek.
+    CHECK_FALSE(h.tabs.WantsFrames("nowhere"));
+    CHECK_FALSE(h.tabs.Built("nowhere"));
+    CHECK(h.built.empty());
+}
+
+TEST_CASE("PerTabPromptEditors: a factory that throws leaves the tab without an editor",
           "[prompt_editor][per_tab]") {
     PerTabPromptEditors tabs;
-    // Nothing built: absent means "not armed", and no state is minted by a
-    // cross-thread peek.
-    CHECK_FALSE(tabs.QueryPendingHint("nowhere"));
+    int attempts = 0;
+    tabs.SetBuilder([&]() -> std::unique_ptr<plugins::PromptEditor> {
+        ++attempts;
+        throw std::runtime_error("boom");
+    });
+    CHECK(tabs.Resolve("A") == nullptr);
+    CHECK(tabs.Editor("A") == nullptr);
+    CHECK_FALSE(tabs.Built("A"));
+    CHECK(attempts == 2);   // retried on the next resolution
+}
 
-    PromptEditorState& s = tabs.CurrentState("t");
-    s.query_pending_hint.store(true, std::memory_order_release);
-    CHECK(tabs.QueryPendingHint("t"));
-    CHECK_FALSE(tabs.QueryPendingHint("other"));
+TEST_CASE("PerTabPromptEditors: a browse position trimmed away restarts browsing",
+          "[prompt_editor][per_tab][history]") {
+    // Seq-numbered positions: another tab recording past the bound cannot
+    // leave this tab pointing at an unrelated line.
+    Harness h(TestTheme());
+    PromptHistory hist;
+    h.fake.history = &hist;
+    hist.Record("oldest");
+    h.focused = "A";
+    REQUIRE(h.host->OnEvent(ftx::Event::ArrowUp));
+    REQUIRE(h.Text("A") == "oldest");
+    for (std::size_t i = 0; i < minimal::client::kMaxPromptHistoryEntries; ++i) {
+        hist.Record("newer " + std::to_string(i));
+    }
+    // "oldest" is gone: Up starts over from the newest entry.
+    REQUIRE(h.host->OnEvent(ftx::Event::ArrowUp));
+    CHECK(h.Text("A") ==
+          "newer " + std::to_string(minimal::client::kMaxPromptHistoryEntries - 1));
 }
 
 }  // namespace minimal::client
@@ -255,15 +274,27 @@ TEST_CASE("prompt history persists across instances, newest last", "[prompt_edit
     {
         minimal::client::PromptHistory first;
         first.PersistTo(path);   // no file yet: starts empty
-        CHECK(first.entries.empty());
+        CHECK(first.Entries().empty());
         first.Record("one");
         first.Record("two\nlines");
     }
     minimal::client::PromptHistory second;
     second.Record("typed before load");   // this run's entries follow the loaded ones
     second.PersistTo(path);
-    REQUIRE(second.entries.size() == 3);
-    CHECK(second.entries[0] == "one");
-    CHECK(second.entries[1] == "two\nlines");
-    CHECK(second.entries[2] == "typed before load");
+    REQUIRE(second.Entries().size() == 3);
+    CHECK(second.Entries()[0] == "one");
+    CHECK(second.Entries()[1] == "two\nlines");
+    CHECK(second.Entries()[2] == "typed before load");
 }
+
+TEST_CASE("prompt history: a front trim moves FirstSeq, never renumbers",
+          "[prompt_editor][history]") {
+    minimal::client::PromptHistory hist;
+    for (std::size_t i = 0; i < minimal::client::kMaxPromptHistoryEntries + 3; ++i) {
+        hist.Record("line " + std::to_string(i));
+    }
+    CHECK(hist.Entries().size() == minimal::client::kMaxPromptHistoryEntries);
+    CHECK(hist.FirstSeq() == 3);
+    CHECK(hist.Entries().front() == "line 3");
+}
+

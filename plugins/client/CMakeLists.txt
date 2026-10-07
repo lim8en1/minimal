@@ -88,3 +88,4 @@ add_subdirectory(markdown-md4c)
 # "confirmation" (both required: the TUI refuses to start without them).
 
 add_subdirectory(consent-prompts)
+add_subdirectory(prompt-editor)

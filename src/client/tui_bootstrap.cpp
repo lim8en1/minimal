@@ -262,6 +262,13 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         }
     }();
 
+    // The prompt editor's own actions (the required slot is filled by now):
+    // their defaults, where the user's file binds nothing. Core actions never
+    // share their ids (by convention "prompt.<name>").
+    for (const auto& action : out.registries.prompt_editor.get()->Actions()) {
+        keys.EnsureDefault(action.id, action.default_key);
+    }
+
     // Plugin views: register each id's suggested default keybinding only where
     // nothing binds it yet (the user's file wins), and remember the runtime
     // dispatch entries.

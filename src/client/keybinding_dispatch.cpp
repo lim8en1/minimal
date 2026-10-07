@@ -365,34 +365,12 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     using ftxui::Event;
     using ftxui::Mouse;
 
-    // Mid-paste, a macOS Option-glyph byte (key_event_parser.cpp) is
-    // byte-identical to the same key actually being pressed -- pasting "ç"
-    // and pressing Option+C produce the SAME Event. Defer to the editor
-    // (treat it as literal text) rather than firing the bound action. The
-    // real ESC-prefixed alt encoding is a structurally different (Special,
-    // not Character) Event that never arrives mid-paste, so a genuine
-    // alt+key press still matches normally even while ctx.pasting is true.
-    if (ctx.pasting && IsOptionGlyphEvent(event)) {
-        return false;
-    }
-
-    // The prompt editor's own OPEN @/-suggestion list claims its
-    // navigation/accept/dismiss keys ahead of EVERYTHING below -- both the
-    // busy-turn-cancel branch (Escape) and a focused plugin panel
-    // (Tab/arrows/Return, keybinding_dispatch.cpp's panel-focus block
-    // further down), which would otherwise eat them first (opening a panel
-    // auto-focuses it, so e.g. Tab-completion went dead behind one). None of
-    // these five are bound to a core action by default (DefaultBindings():
-    // tab.next/previous are alt+down/up, permission.cycle is shift+tab,
-    // which parses to the distinct Event::TabReverse) -- same reasoning
-    // keybindings.cpp's own "Not 'end'" comment documents for why a plain
-    // key the editor needs is left unclaimed here. A closed list makes this
-    // whole check a no-op: every key below behaves exactly as before.
-    if (ctx.suggestions_open && ctx.suggestions_open() &&
-        (event == Event::Tab || event == Event::ArrowUp || event == Event::ArrowDown ||
-         event == Event::Escape || event == Event::Return)) {
-        return false;
-    }
+    // The focused prompt editor's own keys come first (PromptEditor::Claims):
+    // an open @/-suggestion list's navigation, accept and dismiss keys --
+    // ahead of the busy-turn Escape and a focused panel's Tab/arrows/Return,
+    // which would otherwise eat them -- and a pasted macOS Option-glyph byte,
+    // byte-identical to the alt+key it would otherwise fire.
+    if (ctx.editor_claims && ctx.editor_claims(event)) return false;
 
     const std::string& sid = ctx.focused;
 

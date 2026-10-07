@@ -197,4 +197,10 @@ void minimal_client_plugin_register_widget_kit(
     minimal::client::plugins::WidgetKitRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
+// REQUIRED, EXCLUSIVE: the prompt editor (registries.hpp PromptEditorFactory)
+// -- the bundled prompt-editor plugin's, or a replacement.
+void minimal_client_plugin_register_prompt_editor(
+    minimal::client::plugins::PromptEditorRegistry&,
+    const minimal::client::plugins::ClientPluginRegistrationContext&);
+
 }  // extern "C"

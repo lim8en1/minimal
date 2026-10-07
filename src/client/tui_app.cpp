@@ -312,49 +312,48 @@ void TuiApp::BuildEditor() {
         seed_catalog_.reset();
     }
 
-    // Per-tab prompt editors (prompt_editor.hpp): one PromptEditorState per
-    // tab -- a draft, its @-mention list and debounce are THAT tab's, and a
-    // tab switch keeps the other tab's draft intact -- plus the ONE shared
-    // recall timeline (up-arrow history is app-scoped by design). The host
-    // component swaps the focused tab's editor in live, at render AND event
-    // time (a key in the same frame as a tab switch lands in the tab focused
-    // at event time -- the same rule the submit paths follow via
-    // FocusedOrNewTab); the pre-tab "" entry serves the empty-app frame.
-    editor_ = MakePerTabPromptEditor(
-        prompt_editors_, [this] { return app_->FocusedTabId(); },
-        [this](PromptEditorState& state) { return BuildPromptEditor(state); });
+    // Per-tab prompt editors (prompt_host.hpp): the slot's factory makes one
+    // per tab -- a draft, its suggestion list and debounce are THAT tab's --
+    // all over this one host (every call acts on the focused tab) and the
+    // ONE shared recall timeline. The host component swaps the focused tab's
+    // editor in live, at render AND event time (a key in the same frame as a
+    // tab switch lands in the tab focused at event time -- the rule the
+    // submit paths follow via FocusedOrNewTab); "" serves the empty app.
+    prompt_history_.SetCatalog([this] { return CurrentCatalog(); });
+    editor_actions_ = env_.registries.prompt_editor.get()->Actions();
+    prompt_editors_.SetBuilder([this] {
+        return env_.registries.prompt_editor.get()->Make(*this, *env_.theme);
+    });
+    editor_ = MakePerTabPromptEditor(prompt_editors_, [this] { return app_->FocusedTabId(); });
 }
 
-ftxui::Component TuiApp::BuildPromptEditor(PromptEditorState& state) {
-    // Invoked at most once per tab (prompt_editor.cpp's Resolve), on the
-    // FTXUI loop thread.
-    return MakePromptEditor(
-        *env_.theme, state, [this](const std::string& text) { SubmitChat(text); },
-        [this](const std::string& line) { SubmitCommand(line); }, suggest_,
-        // The pull-model snapshot source (CommandCatalogCache): per frame
-        // while a command name is typed, which is also what triggers the
-        // background refresh.
-        [this] { return CurrentCatalog(); },
-        // The requires_session filter's probe (cheap: one locked read in
-        // AppState). An empty FocusedSessionId means no tab, or a tab whose
-        // session does not exist yet -- both hide the session-bound entries.
-        // The subagent probe feeds the read-only gate (UsableOnSubagent):
-        // a child's command surface is read-only server-side, so a subagent
-        // tab is offered only what would not be refused there.
-        [this] { return !app_->FocusedSessionId().empty(); },
-        [this] { return app_->FocusedTabIsSubagent(); }, pasting_,
-        // Recall is app-scoped: every tab's editor records into and recalls
-        // from the ONE timeline (see prompt_editor.hpp's PromptHistory).
-        &prompt_history_,
-        // The editor's own actions (prompt.newline / undo / redo / clear), so a
-        // user's rebind takes effect -- e.g. moving the newline key away
-        // from Alt+Enter (see prompt_editor.hpp's NEWLINE comment for why a
-        // macOS user might need to -- Option+Enter is byte-ambiguous with
-        // plain Enter on several terminals until configured).
-        [this](std::string_view action, const ftxui::Event& event) {
-            return env_.keymap.Matches(action, event);
-        });
+// --- PromptEditorHost ---------------------------------------------------------
+
+std::shared_ptr<const std::vector<CommandCatalogEntry>> TuiApp::Commands() {
+    const auto catalog = CurrentCatalog();
+    if (catalog == nullptr) return nullptr;
+    const bool sessioned = !app_->FocusedSessionId().empty();
+    const bool subagent = app_->FocusedTabIsSubagent();
+    // Rebuilt only when an input changed: the editor polls this per frame
+    // and reads a new pointer as a new list.
+    if (catalog != editor_catalog_.source || sessioned != editor_catalog_.sessioned ||
+        subagent != editor_catalog_.subagent || editor_catalog_.usable == nullptr) {
+        editor_catalog_ = {catalog, sessioned, subagent,
+                           std::make_shared<const std::vector<CommandCatalogEntry>>(
+                               CatalogForPlugins())};
+    }
+    return editor_catalog_.usable;
 }
+
+std::optional<std::vector<std::string>> TuiApp::Mentions(const std::string& prefix) {
+    return suggest_(prefix);
+}
+
+bool TuiApp::Matches(std::string_view action, const ftxui::Event& event) const {
+    return env_.keymap.Matches(action, event);
+}
+
+void TuiApp::RequestRedraw() { env_.host_focus_provider->RequestRedraw(); }
 
 void TuiApp::BuildModals() {
     using namespace ftxui;
@@ -512,7 +511,9 @@ void TuiApp::BuildFrame() {
         // instead of submitting). tab_maintenance_->Run() above already
         // applied this tick's snapshot, so a permission/confirmation/ask
         // modal that just became due is reflected in its show flag by now.
-        if (*pasting_ && modals_.AnyOpen()) *pasting_ = false;
+        if (modals_.AnyOpen() && prompt_editors_.Built(app_->FocusedTabId())) {
+            if (auto* editor = prompt_editors_.Editor(app_->FocusedTabId())) editor->OnFocusLost();
+        }
         return false;
     });
     // The theme's optional canvas color, outermost so it reaches every modal
@@ -580,8 +581,13 @@ KeyContext TuiApp::MakeKeyContext() {
         },
         [this](const std::string& tab_id) { ToggleFold(tab_id, /*thinking=*/true); },
         [this](const std::string& tab_id) { ToggleFold(tab_id, /*thinking=*/false); },
-        *pasting_,
-        [this] { return prompt_editors_.CurrentState(app_->FocusedTabId()).list_open; },
+        // The focused editor's own keys outrank every binding (Claims).
+        [this](const ftxui::Event& event) {
+            const std::string tab = app_->FocusedTabId();
+            if (!prompt_editors_.Built(tab)) return false;
+            auto* editor = prompt_editors_.Editor(tab);
+            return editor != nullptr && editor->Claims(event);
+        },
         [this](const std::string& tab_id, int y) {
             return WithChat(tab_ui_, tab_id, [y](auto& chat) { return chat.ViewportContainsY(y); });
         },
@@ -664,7 +670,7 @@ void TuiApp::RunPump() {
             }
         }
         const bool debounce_pending =
-            prompt_editors_.QueryPendingHint(app_->FocusedTabId()) ||
+            prompt_editors_.WantsFrames(app_->FocusedTabId()) ||
             env_.host_focus_provider->TakeRedrawDue() ||
             running_tool_redraw_due || tab_maintenance_->RefreshRetryDue();
         if (version != last_version || debounce_pending) {
@@ -791,18 +797,24 @@ void TuiApp::OpenSubagent(const std::string& session_id, const std::string& pare
 void TuiApp::InsertPrompt(const std::string& text) {
     // The focused tab's editor (CurrentState("") on an empty app = the
     // pre-tab editor, the same resolution the host itself uses).
-    PromptEditorState& state = prompt_editors_.CurrentState(app_->FocusedTabId());
-    state.content = text;
-    state.cursor_position = static_cast<int>(state.content.size());
+    if (auto* editor = prompt_editors_.Editor(app_->FocusedTabId())) editor->SetText(text);
 }
 
 std::vector<plugins::KeyBindingInfo> TuiApp::KeyBindingsForPlugins() const {
     std::vector<plugins::KeyBindingInfo> out;
     for (const auto& [id, key] : env_.keybindings.all()) {
-        KeyActionInfo info = DescribeKeyAction(id);
+        std::optional<std::size_t> rank;
+        for (std::size_t i = 0; i < editor_actions_.size(); ++i) {
+            if (editor_actions_[i].id == id) rank = i;
+        }
+        KeyActionInfo info = DescribeKeyAction(id, rank);
         // A plugin view's toggle: its own title says what it opens.
         for (const auto& entry : env_.plugin_views) {
             if (entry.surface_id == id) info.description = "open " + entry.view->spec().title;
+        }
+        // The prompt editor's actions: its own words.
+        for (const auto& action : editor_actions_) {
+            if (action.id == id) info.description = action.description;
         }
         out.push_back({id, key, std::move(info.description), std::move(info.group), info.order});
     }
@@ -874,11 +886,8 @@ void TuiApp::SubmitChat(const std::string& text) {
             app_->SubmitChatTurn(tab, text);
         },
         [this, tab, text] {
-            auto& editor = prompt_editors_.CurrentState(tab);
-            if (editor.content.empty()) {
-                editor.content = text;
-                editor.cursor_position = static_cast<int>(text.size());
-            }
+            auto* editor = prompt_editors_.Editor(tab);
+            if (editor != nullptr && editor->Text().empty()) editor->SetText(text);
         });
 }
 

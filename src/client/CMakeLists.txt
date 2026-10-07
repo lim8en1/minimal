@@ -37,8 +37,7 @@ add_library(minimal_client_core SHARED
     view/tab_bar.cpp
     view/chat_scroll_region.cpp
     view/chat_view.cpp
-    view/prompt_editor.cpp
-    view/prompt_wrap.cpp
+    view/prompt_host.cpp
     view/status_bar.cpp
     view/tools_panel.cpp
     view/picker_controller.cpp

@@ -1166,6 +1166,7 @@ Core never names a plugin, a plugin's tool, or a plugin's directory layout: a pl
 | Themes, skills, agent presets, prompts | **Not plugins — config** | Pure data; a plugin would add ABI/build complexity for something that is already just a file. |
 | Syntax-highlighting grammars | **Client slot**, bundled `syntax-grammars` plugin | Additive and language-keyed (EXTENSIBILITY.md §4.2): each grammar carries its node-type table, function-name positions and fence aliases; core keeps the highlighter. |
 | Permission and confirmation modals | **Client prompt kinds**, bundled `consent-prompts` plugin | Required kinds (EXTENSIBILITY.md §4.2): the TUI can run without this look but not without these questions, so core builds the payload, keeps the layer topmost and fails closed, and a plugin draws the modal. |
+| Prompt editor | **Client slot**, bundled `prompt-editor` plugin | Exclusive and required (EXTENSIBILITY.md §4.2): the TUI cannot take input without one, but a different editor (a vim mode) is the obvious replacement. Core keeps key decoding, the catalog, mentions, history and the submit paths. |
 
 `ask_user` (`tool-ask`) is also a bundled plugin, not listed as its own row — see *Asking the user* above for its rationale.
 
@@ -1201,7 +1202,7 @@ Core defines neither payload nor semantics; plugin authors define their own JSON
 |---|---|---|
 | New self-contained view (panel or modal) | register a `View` — placement + default keybinding, remappable | **v1** |
 | Fill a named slot | slot registry | **v1**: tool-result and display-kind renderers, message-kind presentation, status-bar segments, prompt renderers, markdown engine, syntax grammars, chat surface |
-| Replace a default presentation (chat view, prompt editor, widgets, tab bar, pickers, the permission prompt) | an exclusive slot or a bundled view; disable the bundled default | live for the chat surface and markdown engine; the rest **planned** (EXTENSIBILITY.md §4.2) |
+| Replace a default presentation (chat view, prompt editor, widgets, tab bar, pickers, the permission prompt) | an exclusive slot or a bundled view; disable the bundled default | live for the chat surface, markdown engine, widget kit, prompt editor, pickers and the permission prompt; the tab bar **planned** (EXTENSIBILITY.md §4.2) |
 | Restructure the frame, the state, the transport | — | **No** — write a different client |
 
 Slots:
@@ -1465,7 +1466,7 @@ Three tiers:
 
 1. **Config** — no code: `themes/*.json` (now with namespaced plugin sections — `git_plugin.branch` — merged after core roles so a plugin can never shadow one); **`keybindings.json`** (not optional: terminals disagree on what they can even *encode* — `Shift+Enter` is indistinguishable from `Enter` without the kitty keyboard protocol / CSI-u — so remapping must be user config; default newline-in-prompt is the more portable `Alt+Enter`); status bar as a format string (`"{version} | {model} | {tokens} | {agent} | {permission_mode} | {session}"`) that orders and selects registered segments — every one a plugin's (the usual ones are the bundled `session-status`), core owning only the layout; layout ratios and collapse/timestamp toggles.
 2. **Server plugins extend UI *content* without touching UI code** — a plugin command appears in `/`-autocomplete via `ListCommands`, and its results surface as a view or status line, never as a chat message (§ `/-command system`); a plugin tool appears in chat and the tools panel automatically.
-3. **Client plugins** for all presentation — additive views, renderers and status segments, and exclusive slots for the chat surface, markdown engine and (planned) the prompt editor, widget kit and tab bar (EXTENSIBILITY.md §4); for anything beyond (frame, state, tab model, transport), **write a different frontend** against `SessionService` — language-agnostic, process-isolated. This is also why @-mention resolution lives server-side: every frontend inherits it.
+3. **Client plugins** for all presentation — additive views, renderers and status segments, and exclusive slots for the chat surface, markdown engine, prompt editor and widget kit (and, planned, the tab bar) (EXTENSIBILITY.md §4); for anything beyond (frame, state, tab model, transport), **write a different frontend** against `SessionService` — language-agnostic, process-isolated. This is also why @-mention resolution lives server-side: every frontend inherits it.
 
 ## @-mention file references
 

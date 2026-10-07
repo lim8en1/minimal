@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-namespace minimal::client {
+namespace minimal::client::prompt_editor {
 
 // One rendered row of the wrapped prompt.
 struct PromptVisualLine {
@@ -46,4 +46,4 @@ struct PromptWrapResult {
 PromptWrapResult WrapPromptContent(const std::string& content, std::size_t cursor_position,
                                    std::size_t width);
 
-}  // namespace minimal::client
+}  // namespace minimal::client::prompt_editor

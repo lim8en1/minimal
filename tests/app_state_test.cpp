@@ -32,7 +32,7 @@
 #include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/state.hpp"
-#include "minimal/client/view/prompt_editor.hpp"
+#include "minimal/client/view/prompt_host.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/rpc/server.hpp"
@@ -1721,7 +1721,6 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Escape before "
     bool show_plugin_modal = false;
     std::vector<minimal::client::plugins::PluginViewEntry> plugin_views;
     std::shared_ptr<ftxui::Component> plugin_modal_child;
-    bool pasting = false;
     bool suggestions_open_value = true;
     bool quit_requested = false;
 
@@ -1744,8 +1743,8 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Escape before "
         [](const std::string&) {},
         [](const std::string&) {},   // chat.toggle_thinking_fold
         [](const std::string&) {},   // chat.toggle_tool_fold
-        pasting,
-        [&] { return suggestions_open_value; }};
+        // The editor claims keys while its list is open (PromptEditor::Claims).
+        [&](const ftxui::Event&) { return suggestions_open_value; }};
 
     // Suggestions open: Escape must NOT be consumed here -- it falls through
     // to the editor's own CatchEvent.
@@ -1784,7 +1783,6 @@ TEST_CASE("HandleGlobalKey: an idle Escape clears a lingering notice, but only "
     bool show_plugin_modal = false;
     std::vector<minimal::client::plugins::PluginViewEntry> plugin_views;
     std::shared_ptr<ftxui::Component> plugin_modal_child;
-    bool pasting = false;
     bool quit_requested = false;
 
     minimal::client::KeyContext ctx{
@@ -1806,8 +1804,7 @@ TEST_CASE("HandleGlobalKey: an idle Escape clears a lingering notice, but only "
         [](const std::string&) {},
         [](const std::string&) {},   // chat.toggle_thinking_fold
         [](const std::string&) {},   // chat.toggle_tool_fold
-        pasting,
-        [] { return false; }};   // no suggestion list open
+        [](const ftxui::Event&) { return false; }};   // the editor claims nothing
 
     // A notice is showing: idle Escape claims the key and clears it.
     CHECK(minimal::client::HandleGlobalKey(ctx, ftxui::Event::Escape));
@@ -1844,7 +1841,6 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Tab before a "
     std::vector<minimal::client::plugins::PluginViewEntry> plugin_views;
     plugin_views.push_back(ConsumingPanel("test.panel", /*visible=*/true, /*focused=*/true));
     std::shared_ptr<ftxui::Component> plugin_modal_child;
-    bool pasting = false;
     bool suggestions_open_value = true;
 
     minimal::client::KeyContext ctx{
@@ -1865,8 +1861,8 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Tab before a "
         [](const std::string&) {},
         [](const std::string&) {},   // chat.toggle_thinking_fold
         [](const std::string&) {},   // chat.toggle_tool_fold
-        pasting,
-        [&] { return suggestions_open_value; }};
+        // The editor claims keys while its list is open (PromptEditor::Claims).
+        [&](const ftxui::Event&) { return suggestions_open_value; }};
 
     // The focused panel's component consumes every event -- proven below,
     // once the carve-out is disabled, so the fixture itself is trustworthy.

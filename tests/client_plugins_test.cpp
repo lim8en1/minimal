@@ -25,6 +25,7 @@
 #include "markdown_renderer.hpp"
 #include "md4c_engine.hpp"
 #include "syntax_grammars.hpp"
+#include "prompt_editor_factory.hpp"
 #include "ui_kit.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/plugins/plugin_discovery.hpp"
@@ -105,6 +106,12 @@ struct LoadedFixtures {
             f->registries.widget_kit.SetAttribution("ui-kit");
             f->registries.widget_kit.Register(std::make_unique<minimal::client::ui_kit::UiKit>());
             f->registries.widget_kit.ClearAttribution();
+        }
+        if (f->registries.prompt_editor.empty()) {
+            f->registries.prompt_editor.SetAttribution("prompt-editor");
+            f->registries.prompt_editor.Register(
+                std::make_unique<minimal::client::prompt_editor::Factory>());
+            f->registries.prompt_editor.ClearAttribution();
         }
         return f;
     }
@@ -372,15 +379,14 @@ TEST_CASE("the widget kit: whichever plugin holds the slot draws for every view;
     CHECK(ToText(widgets->ModalRule(theme)) == "stub rule");
     CHECK(ToText(widgets->ModalFrame(theme, "t", {}, {}, "")) == "stub frame");
 
-    // Core has no kit of its own any more: the slot is one the TUI cannot
-    // start without.
+    // Core has no kit (or editor) of its own any more: the slots are ones the
+    // TUI cannot start without, and the only required ones.
     ClientRegistries registries;
-    bool kit_required = false;
+    std::vector<std::string> required;
     for (const auto& hook : RegistryHooks(registries)) {
-        if (hook.label == "widget_kit") kit_required = hook.required;
-        if (hook.label != "widget_kit") CHECK_FALSE(hook.required);
+        if (hook.required) required.emplace_back(hook.label);
     }
-    CHECK(kit_required);
+    CHECK(required == std::vector<std::string>{"widget_kit", "prompt_editor"});
     CHECK(registries.widget_kit.empty());
 }
 
@@ -398,6 +404,20 @@ TEST_CASE("the bundled ui-kit plugin fills the widget-kit slot", "[client_plugin
     const Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
     CHECK(ToText(fixtures->widgets->ModalFrame(theme, "kit frame", {ftxui::text("row")}, {}, ""))
               .find("kit frame") != std::string::npos);
+}
+
+#ifndef MINIMAL_PROMPT_EDITOR_PLUGIN
+#error "MINIMAL_PROMPT_EDITOR_PLUGIN must name the built prompt-editor plugin"
+#endif
+
+TEST_CASE("the bundled prompt-editor plugin fills the prompt-editor slot",
+          "[client_plugins][prompt_editor]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_PROMPT_EDITOR_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    INFO(fixtures->records.front().error);
+    REQUIRE(fixtures->records.front().ok());
+    CHECK(fixtures->registries.prompt_editor.holder() == "prompt-editor");
 }
 
 #ifndef MINIMAL_CONSENT_PROMPTS_PLUGIN

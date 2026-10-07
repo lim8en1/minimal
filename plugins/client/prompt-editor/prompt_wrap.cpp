@@ -1,11 +1,11 @@
-#include "minimal/client/view/prompt_wrap.hpp"
+#include "prompt_wrap.hpp"
 
 #include <algorithm>
 #include <string_view>
 
 #include "minimal/client/utf8.hpp"
 
-namespace minimal::client {
+namespace minimal::client::prompt_editor {
 
 namespace {
 
@@ -105,4 +105,4 @@ PromptWrapResult WrapPromptContent(const std::string& content, std::size_t curso
     return result;
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::prompt_editor

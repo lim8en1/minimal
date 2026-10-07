@@ -1,5 +1,6 @@
 #include "minimal/client/keymap_help_model.hpp"
 
+#include <algorithm>
 #include <array>
 
 
@@ -61,10 +62,6 @@ constexpr KnownAction kKnown[] = {
     {"chat.toggle_thinking_fold", "auto-fold / unfold thinking rows"},
     {"chat.toggle_tool_fold", "auto-fold / unfold tool rows"},
     {"chat.toggle_timestamps", "show / hide timestamps"},
-    {"prompt.newline", "insert a newline"},
-    {"prompt.undo", "undo the last prompt edit"},
-    {"prompt.redo", "redo the undone prompt edit"},
-    {"prompt.clear", "clear the prompt"},
     {"turn.cancel", "interrupt the turn"},
     {"permission.cycle", "cycle the permission mode"},
     {"session.pause", "pause / resume the agent (stops at the next tool boundary)"},
@@ -107,12 +104,13 @@ std::string ActionDescription(std::string_view action) {
     return std::string(action);
 }
 
-KeyActionInfo DescribeKeyAction(std::string_view action) {
+KeyActionInfo DescribeKeyAction(std::string_view action, std::optional<std::size_t> rank) {
     const std::string id(action);
     const std::size_t group = GroupOf(id);
+    const std::size_t within = rank.has_value() ? std::min(*rank, kUnknownOrder) : OrderOf(action);
     return {ActionDescription(action),
             group < kGroups.size() ? kGroups[group].name : "views",
-            static_cast<int>(group * (kUnknownOrder + 1) + OrderOf(action))};
+            static_cast<int>(group * (kUnknownOrder + 1) + within)};
 }
 
 }  // namespace minimal::client
