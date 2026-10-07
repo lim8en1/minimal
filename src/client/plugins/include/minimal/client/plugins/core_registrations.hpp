@@ -4,7 +4,6 @@
 #include <vector>
 
 #include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/markdown_renderer.hpp"
 #include "minimal/client/render/syntax_highlighter.hpp"
 
 namespace minimal::client::plugins {
@@ -25,18 +24,9 @@ void RegisterCoreAgentMarkdownRenderer(MessageRendererRegistry& registry,
 void RegisterCoreDisplayRenderers(DisplayRendererRegistry& registry, const MarkdownEngine& engine,
                                   const SyntaxHighlighter& highlighter);
 
-// The vendored grammars as the additive registry's defaults. Always runs --
-// the grammar slot has no "core default" concept beyond the vendored set; a
-// plugin may only ADD a language (claiming an existing one is a fatal
-// collision).
-void RegisterCoreSyntaxGrammars(SyntaxGrammarRegistry& registry);
 
-// Registers the md4c engine when no plugin claimed the exclusive slot.
-void RegisterDefaultMarkdownEngine(MarkdownEngineRegistry& registry,
-                                   const MarkdownRenderer& renderer);
-
-// Registers core's widget kit (filterable_menu, schema_form, prompt_modal's
-// chrome) when no plugin claimed the exclusive slot.
-void RegisterDefaultWidgetKit(WidgetKitRegistry& registry);
+// Registers the plain-text engine when no plugin claimed the markdown slot
+// (it is optional: without a markdown plugin, markdown reads as plain text).
+void RegisterPlainMarkdownEngine(MarkdownEngineRegistry& registry);
 
 }  // namespace minimal::client::plugins

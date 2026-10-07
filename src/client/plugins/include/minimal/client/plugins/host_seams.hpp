@@ -1,6 +1,9 @@
 #pragma once
 
 #include <functional>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -91,6 +94,10 @@ public:
     std::vector<TabInfo> Tabs() const override;
     // Held under the same lock as the reads: a no-op once Detach() returned.
     void RequestRedraw() override;
+    void RequestRedrawAfter(std::chrono::milliseconds delay) override;
+    // The pump's half: whether a RequestRedrawAfter deadline has come (and,
+    // if so, forgets it).
+    bool TakeRedrawDue();
     void ShowView(const std::string& view_id) override;
     void CloseView(const std::string& view_id) override;
     void SetPanelVisible(const std::string& view_id, bool visible) override;
@@ -131,9 +138,24 @@ private:
     // before RequestRedraw takes mtx_).
     std::mutex requests_mtx_;
     std::vector<ViewRequest> requests_;
+    // The earliest RequestRedrawAfter deadline (steady clock, ms); 0 = none.
+    std::atomic<std::int64_t> redraw_due_ms_{0};
 };
 
 std::unique_ptr<HostFocusProvider> MakeHostFocusProvider();
+
+// The CodeHighlighter handed to plugins: forwards to the host's highlighter
+// once it is built (after the plugins load); until then code renders plain.
+class HostCodeHighlighter final : public CodeHighlighter {
+public:
+    void Attach(const CodeHighlighter* target) { target_.store(target); }
+    ftxui::Elements Highlight(std::string_view code, std::string_view language,
+                              std::size_t block_id = 0) const override;
+    std::string CanonicalLanguageFor(std::string_view language) const override;
+
+private:
+    std::atomic<const CodeHighlighter*> target_{nullptr};
+};
 
 // The HostActions handed to plugins: queues each verb (any thread) for the
 // TUI to apply on the UI thread (Take, in the pump), and asks for the frame

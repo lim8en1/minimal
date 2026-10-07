@@ -17,11 +17,11 @@
 
 #include "ask_display.hpp"
 #include "ask_modal.hpp"
+#include "md4c_engine.hpp"
 #include "ftxui_harness.hpp"
 #include "widget_kit_fixture.hpp"
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
-#include "minimal/client/render/markdown_renderer.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/view/chat_view.hpp"
@@ -396,9 +396,8 @@ TEST_CASE("chat view: an ask row starts expanded by its display kind, whatever t
     // Regression: the expanded default was keyed by the literal tool name
     // "ask_user", so an operator alias silently collapsed the row.
     const auto theme = TestTheme();
-    MarkdownRenderer markdown(&theme, nullptr);
     plugins::MarkdownEngineRegistry engine_registry;
-    plugins::RegisterDefaultMarkdownEngine(engine_registry, markdown);
+    minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
     plugins::DisplayRendererRegistry display_renderers;

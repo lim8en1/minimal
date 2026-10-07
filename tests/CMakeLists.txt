@@ -375,6 +375,20 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     # session-status: the status bar's usual segments.
     "${CMAKE_SOURCE_DIR}/plugins/client/session-status/session_status.cpp"
     session_status_test.cpp
+    # ui-kit: the bundled widget kit, which every view test draws with.
+    "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/ui_kit.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/modal_chrome.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/filterable_menu.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/schema_form.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/model_picker.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/model_picker_model.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/model_selector.cpp"
+    # syntax-grammars: the bundled grammar set the highlighter tests use.
+    "${CMAKE_SOURCE_DIR}/plugins/client/syntax-grammars/syntax_grammars.cpp"
+    # markdown-md4c: the markdown engine the chat-view tests render with.
+    "${CMAKE_SOURCE_DIR}/plugins/client/markdown-md4c/md4c_engine.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/markdown-md4c/markdown_renderer.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/markdown-md4c/streaming_markdown_view.cpp"
     task_worker_test.cpp
     model_selector_test.cpp
     mcp_view_test.cpp)
@@ -389,6 +403,9 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/client/selection-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/session-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/session-status"
+    "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit"
+    "${CMAKE_SOURCE_DIR}/plugins/client/syntax-grammars"
+    "${CMAKE_SOURCE_DIR}/plugins/client/markdown-md4c"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")
 
 target_include_directories(minimal_tests PRIVATE
@@ -450,6 +467,7 @@ target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_SELECTION_VIEW_PLUGIN="$<TARGET_FILE:minimal_selection_view>"
     MINIMAL_SESSION_VIEW_PLUGIN="$<TARGET_FILE:minimal_session_view>"
     MINIMAL_SESSION_STATUS_PLUGIN="$<TARGET_FILE:minimal_session_status>"
+    MINIMAL_UI_KIT_PLUGIN="$<TARGET_FILE:minimal_ui_kit>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto"
     # The captured live Jev responses (fixtures/decision-advisor/): the
     # response-shape contract the advisor parses, kept as data not literals.
@@ -516,6 +534,11 @@ target_compile_definitions(minimal_tests PRIVATE
 # fixture (support/fake_http_mcp_server.hpp).
 find_package(httplib CONFIG REQUIRED)
 target_link_libraries(minimal_tests PRIVATE httplib::httplib)
+# The bundled grammar set's parsers (syntax_grammars.cpp is compiled in).
+target_link_libraries(minimal_tests PRIVATE
+    tsgrammar_cpp tsgrammar_python tsgrammar_javascript tsgrammar_typescript tsgrammar_bash
+    tsgrammar_json tsgrammar_yaml tsgrammar_rust tsgrammar_go
+    md4c::md4c)
 
 # TSAN_OPTIONS suppresses the uninstrumented system-libsqlite3 races the
 # multi-process E2E tests trigger (see tests/tsan.supp); ignored by non-TSan

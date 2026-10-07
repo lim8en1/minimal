@@ -40,12 +40,12 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     //
     // ORDER MATTERS, and each step is load-bearing for a later one:
     //   1. ui.json (status format -- it selects plugin segments by id)
-    //   2. vendored grammars registered as the additive registry's defaults
+    //   2. (the grammars are plugins' too: the bundled syntax-grammars)
     //   3. PLUGIN LOAD (contexts carry the attention sink and the data path;
     //      registries record what each plugin claimed)
     //   4. Name resolution: collisions fatal, dangling/slot aliases warned
-    //      -- then the widget kit's core default, if unclaimed (step 6 builds
-    //      plugin view components, which may use it)
+    //      -- then required slots must be filled (step 6 builds plugin view
+    //      components, which may use the widget kit)
     //   5. THEME (sections may reference loaded plugin names)
     //   6. keybindings (+ plugin view defaults, only where nothing binds)
     //   7. core defaults fill every unclaimed slot, then the frame is assembled
@@ -64,9 +64,9 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         plugins::MakeHostAttentionSink(&out.attention_state, out.host_focus_provider.get());
     out.host_client_api = plugins::MakeHostClientApi(&client);
     out.host_widget_kit = plugins::MakeHostWidgetKit(out.registries.widget_kit);
+    out.host_highlighter = std::make_unique<plugins::HostCodeHighlighter>();
     out.host_actions = std::make_unique<plugins::HostActionQueue>(out.host_focus_provider.get());
 
-    plugins::RegisterCoreSyntaxGrammars(out.registries.grammars);
 
     // Discovery + load. The config file is the client's own (client-plugins.json);
     // the server owns plugins.json, so neither writer can stomp the other's
@@ -139,6 +139,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                              .ui = out.host_focus_provider.get(),
                              .widgets = out.host_widget_kit.get(),
                              .actions = out.host_actions.get(),
+                             .highlighter = out.host_highlighter.get(),
                              .ui_for_plugin = [provider = out.host_focus_provider.get()](
                                                   const std::string& plugin_name) {
                                  return provider->UiFor(plugin_name);
@@ -200,11 +201,22 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         }
     }
 
-    // The widget kit before anything can ask for it: the plugin views'
-    // component()s, built with the keybindings below, may already build
-    // their widgets. Core's own kit when no plugin claimed the slot; the
-    // theme travels with every call, so it need not be loaded yet.
-    plugins::RegisterDefaultWidgetKit(out.registries.widget_kit);
+    // A required slot no plugin filled: the TUI cannot run without it (the
+    // server's "no provider" rule). Checked here, before anything -- the
+    // plugin views' component()s, built with the keybindings below -- can
+    // ask for what it would have provided.
+    {
+        bool missing = false;
+        for (const auto& hook : plugins::RegistryHooks(out.registries)) {
+            if (!hook.required || !hook.registry->empty()) continue;
+            std::fprintf(stderr,
+                         "minimal: FATAL: no client plugin fills the required '%s' slot -- is "
+                         "the bundled plugin that provides it disabled in client-plugins.json?\n",
+                         std::string(hook.label).c_str());
+            missing = true;
+        }
+        if (missing) return false;
+    }
 
     // ui.json's "theme" selects the file (themes/<name>.json); empty means
     // the built-in default. Previously hardcoded to "dark" regardless of
@@ -321,16 +333,17 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         }
     }
 
-    // The highlighter consults the assembled grammar table (vendored defaults
-    // plus plugin additions), so a plugin's language highlights like a vendored
-    // one. The renderer owns it; the engine routes fenced code through it.
+    // The highlighter consults the assembled grammar table (every
+    // registered grammar -- the bundled syntax-grammars plugin's and
+    // any other plugin's alike). The renderer owns it; the engine routes fenced code through it.
     // Built INTO out.languages, not a local: SyntaxHighlighter stores a raw
     // pointer to this vector (see the address-stability contract in the
     // header), so its storage must outlive the highlighter, not just this
     // function call.
     for (const auto& grammar : out.registries.grammars.All()) {
         out.languages.push_back(minimal::client::LanguageDefinition{
-            grammar->Language(), grammar->LanguageFn(), grammar->Rules()});
+            grammar->Language(), grammar->LanguageFn(), grammar->Rules(),
+            grammar->FunctionFields(), grammar->Aliases()});
     }
     // emplace, not assignment: SyntaxHighlighter stores `const Theme&`, so it
     // has no default constructor and no operator= -- it can only ever be
@@ -339,20 +352,15 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // ITS final address (out.theme.emplace() ran above, on `out` itself), and
     // `out.languages` is too (populated in place, just above).
     out.highlighter.emplace(*out.theme, out.languages);
+    // Plugins hold the proxy from registration; it reaches the real one now.
+    out.host_highlighter->Attach(&*out.highlighter);
 
     // Core defaults fill every slot no plugin claimed. The engine first (the
     // agent-markdown default renders through it), then the kind defaults.
-    // ONE construction of the renderer (emplace, same reasoning as
-    // highlighter above: MarkdownRenderer stores raw Theme*/SyntaxHighlighter*
-    // pointers, so it is built once with both dependencies already at their
-    // final addresses inside `out`) -- the original inline code's own
-    // comment recorded the exact bug a second construction would reintroduce:
-    // "a refactor that introduced a second variable would dangle the engine
-    // silently".
-    out.renderer.emplace(&*out.theme, &*out.highlighter);
-    plugins::RegisterDefaultMarkdownEngine(out.registries.markdown_engine, *out.renderer);
-    // Non-null by construction: RegisterDefaultMarkdownEngine registers the
-    // md4c adapter when no plugin claimed the slot.
+    // The markdown engine is a plugin's (the bundled markdown-md4c); with
+    // none, markdown reads as plain text. Non-null by construction either
+    // way.
+    plugins::RegisterPlainMarkdownEngine(out.registries.markdown_engine);
     out.engine = out.registries.markdown_engine.get();
     plugins::RegisterCoreMessageRenderers(out.registries.message_renderers);
     plugins::RegisterCoreAgentMarkdownRenderer(out.registries.message_renderers, *out.engine);

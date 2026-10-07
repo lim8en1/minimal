@@ -12,6 +12,7 @@ minimal/v1/session_service.pb.h
 # Rendering, and the widget contracts (the widgets themselves come from the
 # WidgetKit slot, through the registration context).
 minimal/client/render/theme.hpp
+minimal/client/render/syntax_highlighter.hpp
 minimal/client/policy.hpp
 minimal/client/utf8.hpp
 minimal/client/command_catalog_entry.hpp
@@ -26,6 +27,7 @@ minimal/common/abi_tag.hpp
 minimal/common/config_reader.hpp
 minimal/common/clock.hpp
 minimal/common/count_format.hpp
+minimal/common/model_ref.hpp
 minimal/common/logger.hpp
 minimal/common/plugin_config_label.hpp
 minimal/common/plugin_config_schema.hpp

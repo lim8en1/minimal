@@ -14,7 +14,7 @@
 #include "ftxui_harness.hpp"
 #include "widget_kit_fixture.hpp"
 #include "minimal/client/view/modal_host.hpp"
-#include "minimal/client/view/schema_form.hpp"
+#include "schema_form.hpp"
 #include "minimal/client/view/schema_form_model.hpp"
 
 using namespace minimal;
@@ -105,7 +105,7 @@ TEST_CASE("form rows carry why a field is unused, and the form says it", "[schem
 
     client::SchemaFormState state = FormState("t", describe);
     const auto theme = TestTheme();
-    auto form = client::MakeSchemaForm([&] { return state; }, {}, theme);
+    auto form = client::ui_kit::MakeSchemaForm([&] { return state; }, {}, theme);
     std::string frame = minimal_test::RenderFrame(form, 100, 24);
     CHECK(frame.find("not used") != std::string::npos);
     for (int i = 0; i < 3; ++i) minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
@@ -119,7 +119,7 @@ TEST_CASE("the form: toggle, cycle, edit, reset; the editor claims Escape", "[sc
     bool back = false;
     client::SchemaFormState state = FormState("plugins.d/sample.json", kDescribe);
     const auto theme = TestTheme();
-    auto form = client::MakeSchemaForm(
+    auto form = client::ui_kit::MakeSchemaForm(
         [&] { return state; },
         {.on_set = [&](const std::string& p, const std::string& t) { sets.emplace_back(p, t); },
          .on_unset = [&](const std::string& p) { unsets.push_back(p); },
@@ -171,7 +171,7 @@ TEST_CASE("Enter on an untouched secret does not erase it", "[schema_form][regre
     std::vector<std::pair<std::string, std::string>> sets;
     client::SchemaFormState state = FormState("plugins.d/sample.json", kDescribe);
     const auto theme = TestTheme();
-    auto form = client::MakeSchemaForm(
+    auto form = client::ui_kit::MakeSchemaForm(
         [&] { return state; },
         {.on_set = [&](const std::string& p, const std::string& t) { sets.emplace_back(p, t); }},
         theme);
@@ -197,7 +197,7 @@ TEST_CASE("the selected field's details and the status stay on screen below a lo
     }
     client::SchemaFormState state = FormState("t", describe, "enabled saved -- the outcome");
     const auto theme = TestTheme();
-    auto form = client::MakeSchemaForm([&] { return state; }, {}, theme);
+    auto form = client::ui_kit::MakeSchemaForm([&] { return state; }, {}, theme);
     const std::string frame = minimal_test::RenderFrame(form, 100, 24);
     CHECK(frame.find("enabled saved -- the outcome") != std::string::npos);
     CHECK(frame.find("Turns it on.") != std::string::npos);
@@ -213,7 +213,7 @@ TEST_CASE("while an edit is in flight the form takes no edit keys", "[schema_for
     client::SchemaFormState state = FormState("t", kDescribe);
     state.busy = true;
     const auto theme = TestTheme();
-    auto form = client::MakeSchemaForm(
+    auto form = client::ui_kit::MakeSchemaForm(
         [&] { return state; },
         {.on_set = [&](const std::string& p, const std::string& t) { sets.emplace_back(p, t); },
          .on_unset = [&](const std::string& p) { unsets.push_back(p); }},
@@ -235,7 +235,7 @@ TEST_CASE("while an edit is in flight the form takes no edit keys", "[schema_for
 TEST_CASE("a secret is typed masked", "[schema_form][regression]") {
     client::SchemaFormState state = FormState("t", kDescribe);
     const auto theme = TestTheme();
-    auto form = client::MakeSchemaForm([&] { return state; }, {}, theme);
+    auto form = client::ui_kit::MakeSchemaForm([&] { return state; }, {}, theme);
     for (int i = 0; i < 3; ++i) minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
     minimal_test::SendEvent(form, ftxui::Event::Return);  // net.api_key: the editor
     for (const char c : std::string("sk-typed")) {
@@ -258,7 +258,7 @@ TEST_CASE("resetting a set secret takes a second d", "[schema_form][regression]"
     std::vector<std::string> unsets;
     client::SchemaFormState state = FormState("t", kDescribe);
     const auto theme = TestTheme();
-    auto form = client::MakeSchemaForm(
+    auto form = client::ui_kit::MakeSchemaForm(
         [&] { return state; }, {.on_unset = [&](const std::string& p) { unsets.push_back(p); }},
         theme);
     for (int i = 0; i < 3; ++i) minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
@@ -283,7 +283,7 @@ TEST_CASE("a refused edit reopens the editor with what was typed", "[schema_form
     std::vector<std::pair<std::string, std::string>> sets;
     client::SchemaFormState state = FormState("t", kDescribe);
     const auto theme = TestTheme();
-    auto form = client::MakeSchemaForm(
+    auto form = client::ui_kit::MakeSchemaForm(
         [&] { return state; },
         {.on_set = [&](const std::string& p, const std::string& t) { sets.emplace_back(p, t); }},
         theme);
@@ -322,7 +322,7 @@ TEST_CASE("the plugin modal host gives Escape to an editor that wants it, else c
     client::SchemaFormState state = FormState("t", kDescribe);
     const auto theme = TestTheme();
     std::vector<std::pair<std::string, std::string>> sets;
-    auto form = client::MakeSchemaForm(
+    auto form = client::ui_kit::MakeSchemaForm(
         [&] { return state; },
         {.on_set = [&](const std::string& p, const std::string& t) { sets.emplace_back(p, t); },
          .on_unset = {}},

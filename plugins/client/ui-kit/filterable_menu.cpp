@@ -1,4 +1,4 @@
-#include "minimal/client/view/filterable_menu.hpp"
+#include "filterable_menu.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -10,7 +10,7 @@
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/policy.hpp"
 
-namespace minimal::client {
+namespace minimal::client::ui_kit {
 namespace {
 
 // A row's "#rrggbb"/"#rgb" tint -> Color, tolerant: anything malformed yields
@@ -343,4 +343,4 @@ ftxui::Component MakeFilterableMenuModal(
     });
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::ui_kit

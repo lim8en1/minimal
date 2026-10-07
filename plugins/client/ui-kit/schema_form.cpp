@@ -1,4 +1,4 @@
-#include "minimal/client/view/schema_form.hpp"
+#include "schema_form.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -8,13 +8,12 @@
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
 
-#include "minimal/client/view/modal_host.hpp"
-#include "minimal/client/view/prompt_modal.hpp"
+#include "modal_chrome.hpp"
 #include "minimal/client/view/schema_form_model.hpp"
 #include "minimal/common/utf8.hpp"
 #include "minimal/client/policy.hpp"
 
-namespace minimal::client {
+namespace minimal::client::ui_kit {
 namespace {
 
 using namespace ftxui;
@@ -250,4 +249,4 @@ ftxui::Component MakeSchemaForm(std::function<SchemaFormState()> source,
     return Make<SchemaFormComponent>(std::move(source), std::move(callbacks), theme);
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::ui_kit

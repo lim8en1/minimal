@@ -12,10 +12,10 @@
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/view/widget_types.hpp"
 
-namespace minimal::client {
+namespace minimal::client::ui_kit {
 
 // `theme` must outlive the component (the view's own theme member).
 ftxui::Component MakeModelSelector(ModelSelectorSpec spec, ModelSelectorCallbacks callbacks,
                                    const Theme& theme);
 
-}  // namespace minimal::client
+}  // namespace minimal::client::ui_kit

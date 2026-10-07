@@ -1,4 +1,5 @@
 #include "minimal/client/render/syntax_highlighter.hpp"
+#include "syntax_grammars.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -13,6 +14,12 @@
 namespace minimal::client {
 
 namespace {
+
+// The bundled grammar set, as the host assembles it from the registry.
+const std::vector<LanguageDefinition>& Bundled() {
+    static const auto kLanguages = syntax_grammars::Definitions();
+    return kLanguages;
+}
 
 Theme TestTheme() {
     return Theme::Parse(R"({"name": "test", "colors": {}})", ColorDepth::Truecolor);
@@ -64,7 +71,7 @@ bool HasPiece(const std::vector<std::pair<HighlightCategory, std::string>>& piec
 }  // namespace
 
 TEST_CASE("C++ keywords, strings, comments and types are categorized") {
-    const SyntaxHighlighter highlighter(TestTheme());
+    const SyntaxHighlighter highlighter(TestTheme(), Bundled());
     const std::string code = "int main() {\n  // returns nothing\n  return 0;\n}\n";
     const auto pieces = Resolve(code, highlighter.HighlightCode(code, "cpp"));
     CHECK(HasPiece(pieces, HighlightCategory::Type, "int"));
@@ -74,7 +81,7 @@ TEST_CASE("C++ keywords, strings, comments and types are categorized") {
 }
 
 TEST_CASE("Aliases resolve to the vendored grammars") {
-    const SyntaxHighlighter highlighter(TestTheme());
+    const SyntaxHighlighter highlighter(TestTheme(), Bundled());
     const std::string code = "def f():\n    return 1\n";
     const auto pieces = Resolve(code, highlighter.HighlightCode(code, "py"));
     CHECK(HasPiece(pieces, HighlightCategory::Keyword, "def"));
@@ -88,7 +95,7 @@ TEST_CASE("Aliases resolve to the vendored grammars") {
 // registration like "HCL" was unreachable by any fence spelling at all,
 // including its own exact case.
 TEST_CASE("A plugin-registered grammar key resolves case-insensitively") {
-    const auto vendored = VendoredLanguages();
+    const auto& vendored = Bundled();
     REQUIRE_FALSE(vendored.empty());
     const std::vector<LanguageDefinition> languages = {
         LanguageDefinition{"HCL", vendored[0].language_fn, vendored[0].rules},
@@ -100,7 +107,7 @@ TEST_CASE("A plugin-registered grammar key resolves case-insensitively") {
 }
 
 TEST_CASE("An unsupported language is one Plain span over the whole input") {
-    const SyntaxHighlighter highlighter(TestTheme());
+    const SyntaxHighlighter highlighter(TestTheme(), Bundled());
     const std::string code = "some [unusual] source\n";
     const auto spans = highlighter.HighlightCode(code, "cobol");
     REQUIRE(spans.size() == 1);
@@ -113,7 +120,7 @@ TEST_CASE("Every vendored language categorizes its comment") {
     // Guards the table drift failure mode: a grammar update renames node types
     // silently (unlisted -> Plain), and the curated set is only worth shipping
     // if the basics still land.
-    const SyntaxHighlighter highlighter(TestTheme());
+    const SyntaxHighlighter highlighter(TestTheme(), Bundled());
     const struct {
         const char* language;
         const char* code;
@@ -151,7 +158,7 @@ TEST_CASE("Incremental parse never reuses a stale tree from an unrelated block")
     // back-to-back, UNRELATED code blocks for the same language (two chat
     // messages, or two fenced blocks in one reply) shared one parser_cache_
     // slot, so the second reused the first's parse.
-    const SyntaxHighlighter highlighter(TestTheme());
+    const SyntaxHighlighter highlighter(TestTheme(), Bundled());
     const std::string block_a = "import os\n";
     highlighter.HighlightCode(block_a, "python");   // seeds parser_cache_'s tree for "python"
 
@@ -169,7 +176,7 @@ TEST_CASE("Incremental parse correctly categorizes content appended after the ca
     // the debounce-tick shape a still-growing block actually produces) DOES
     // take the incremental-reuse path (ts_tree_edit + the previous tree), and
     // the appended suffix must still parse correctly.
-    const SyntaxHighlighter highlighter(TestTheme());
+    const SyntaxHighlighter highlighter(TestTheme(), Bundled());
     highlighter.HighlightCode("def f():\n", "python");
     const std::string grown = "def f():\n    return 1\n";
     const auto pieces = Resolve(grown, highlighter.HighlightCode(grown, "python"));
@@ -186,7 +193,7 @@ TEST_CASE("Highlight caches by (language, code) without cross-contaminating entr
     // reference stayed latent; Highlight() does (color_of/ColorFor), and
     // this is the first test in the file to call it.
     const Theme theme = TestTheme();
-    const SyntaxHighlighter highlighter(theme);
+    const SyntaxHighlighter highlighter(theme, Bundled());
     const std::string code_a = "int a() { return 1; }\n";
     const std::string code_b = "int b() { return 2; }\n";
 
@@ -216,7 +223,7 @@ TEST_CASE("Highlight caches by (language, code) without cross-contaminating entr
 TEST_CASE("Highlight collapses a growing streaming block into one cache entry, "
          "not one per tick") {
     const Theme theme = TestTheme();
-    const SyntaxHighlighter highlighter(theme);
+    const SyntaxHighlighter highlighter(theme, Bundled());
 
     std::string code = "def f():\n";
     highlighter.Highlight(code, "python");
@@ -248,7 +255,7 @@ TEST_CASE("OnThemeChanged drops color-baked cache entries after a theme swap") {
 
     Theme swapped = Theme::Parse(R"({"name": "a", "colors": {"syntax_keyword": "#ff0000"}})",
                                  ColorDepth::Truecolor);
-    SyntaxHighlighter highlighter(swapped);
+    SyntaxHighlighter highlighter(swapped, Bundled());
     // "return" is a Keyword node in the vendored C++ grammar ("int" would be
     // a Type, a different role); the theme below supplies only
     // syntax_keyword, so an uncategorized cell would read as Default here --
@@ -272,6 +279,30 @@ TEST_CASE("OnThemeChanged drops color-baked cache entries after a theme swap") {
     const auto fresh = fg_at(highlighter.Highlight(code, "cpp"));
     REQUIRE(fresh.has_value());
     CHECK(*fresh == ftxui::Color(0, 255, 0));
+}
+
+}  // namespace minimal::client
+
+namespace minimal::client {
+
+// The bug: the TUI builds its highlighter from the grammar registry, and that
+// path never applied a language's function-name positions -- only the old
+// built-in table did -- so `foo` in `foo()` was never colored as a function
+// in the real app, only in tests.
+TEST_CASE("function names highlight through the registry's table, as the TUI builds it",
+          "[syntax_highlighter][regression]") {
+    const SyntaxHighlighter highlighter(TestTheme(), Bundled());
+    const std::string code = "def greet():\n    pass\n";
+    const auto spans = highlighter.HighlightCode(code, "python");
+    const bool named = std::any_of(spans.begin(), spans.end(), [&](const HighlightSpan& span) {
+        return span.category == HighlightCategory::Function &&
+               code.substr(span.start_byte, span.end_byte - span.start_byte) == "greet";
+    });
+    CHECK(named);
+    // And the aliases come from the grammars too.
+    CHECK(highlighter.CanonicalLanguageFor("py") == "python");
+    CHECK(highlighter.CanonicalLanguageFor("YML") == "yaml");
+    CHECK(highlighter.CanonicalLanguageFor("cobol").empty());
 }
 
 }  // namespace minimal::client

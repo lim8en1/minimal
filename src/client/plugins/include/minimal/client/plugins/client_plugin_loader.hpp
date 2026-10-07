@@ -65,6 +65,7 @@ struct PluginHostSeams {
     HostUi* ui = nullptr;
     WidgetKit* widgets = nullptr;
     HostActions* actions = nullptr;
+    const CodeHighlighter* highlighter = nullptr;
     // When set, each plugin gets the HostUi this returns for its name instead
     // of `ui` (HostFocusProvider::UiFor), so its view requests carry it.
     std::function<HostUi*(const std::string& plugin_name)> ui_for_plugin;
@@ -87,6 +88,9 @@ struct RegistryHook {
     // contract with outside data (a payload kind, a tool name, a language);
     // never aliased, and a collision is resolved by disabling a plugin.
     minimal::plugins::NameTable::Policy policy = minimal::plugins::NameTable::Policy::kSlot;
+    // A slot the TUI cannot run without: left empty after every plugin has
+    // registered, startup refuses (the server's "no provider" rule).
+    bool required = false;
     // Calls the looked-up hook with the registry at its real type.
     void (*invoke)(void* hook, RegistryBase& registry,
                    const ClientPluginRegistrationContext& context) = nullptr;

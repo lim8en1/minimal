@@ -22,10 +22,13 @@
 #include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
+#include "markdown_renderer.hpp"
+#include "md4c_engine.hpp"
+#include "syntax_grammars.hpp"
+#include "ui_kit.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/plugins/plugin_discovery.hpp"
 #include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/markdown_renderer.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/client/chat_model.hpp"
@@ -96,8 +99,13 @@ struct LoadedFixtures {
                                                   .widgets = f->widgets.get(),
                                                   .actions = f->actions.get()});
         f->records = loader.LoadAll(candidates);
-        // As the bootstrap does once names resolve: core's kit, if unclaimed.
-        RegisterDefaultWidgetKit(f->registries.widget_kit);
+        // The kit slot is required (the bundled ui-kit fills it in a real
+        // TUI): a test loading other plugins fills it the same way.
+        if (f->registries.widget_kit.empty()) {
+            f->registries.widget_kit.SetAttribution("ui-kit");
+            f->registries.widget_kit.Register(std::make_unique<minimal::client::ui_kit::UiKit>());
+            f->registries.widget_kit.ClearAttribution();
+        }
         return f;
     }
 };
@@ -348,7 +356,7 @@ public:
 
 }  // namespace
 
-TEST_CASE("the widget kit: a plugin's kit draws for every view; core's fills an empty slot",
+TEST_CASE("the widget kit: whichever plugin holds the slot draws for every view; it is required",
           "[client_plugins][widget_kit]") {
     const Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
     WidgetKitRegistry slot;
@@ -360,18 +368,36 @@ TEST_CASE("the widget kit: a plugin's kit draws for every view; core's fills an 
     slot.SetAttribution("my-kit");
     slot.Register(std::make_unique<StubKit>());
     slot.ClearAttribution();
-    RegisterDefaultWidgetKit(slot);  // claimed: core's default stays out
     CHECK(slot.holder() == "my-kit");
     CHECK(ToText(widgets->ModalRule(theme)) == "stub rule");
     CHECK(ToText(widgets->ModalFrame(theme, "t", {}, {}, "")) == "stub frame");
 
-    WidgetKitRegistry unclaimed;
-    RegisterDefaultWidgetKit(unclaimed);
-    REQUIRE(unclaimed.held());
-    CHECK(unclaimed.holder().empty());  // core's
-    const auto core_widgets = MakeHostWidgetKit(unclaimed);
-    CHECK(ToText(core_widgets->ModalFrame(theme, "core frame", {ftxui::text("row")}, {}, ""))
-              .find("core frame") != std::string::npos);
+    // Core has no kit of its own any more: the slot is one the TUI cannot
+    // start without.
+    ClientRegistries registries;
+    bool kit_required = false;
+    for (const auto& hook : RegistryHooks(registries)) {
+        if (hook.label == "widget_kit") kit_required = hook.required;
+        if (hook.label != "widget_kit") CHECK_FALSE(hook.required);
+    }
+    CHECK(kit_required);
+    CHECK(registries.widget_kit.empty());
+}
+
+#ifndef MINIMAL_UI_KIT_PLUGIN
+#error "MINIMAL_UI_KIT_PLUGIN must name the built ui-kit plugin"
+#endif
+
+TEST_CASE("the bundled ui-kit plugin fills the widget-kit slot", "[client_plugins][widget_kit]") {
+    const auto fixtures = LoadedFixtures::Load(
+        {PluginCandidate{MINIMAL_UI_KIT_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    INFO(fixtures->records.front().error);
+    REQUIRE(fixtures->records.front().ok());
+    CHECK(fixtures->registries.widget_kit.holder() == "ui-kit");
+    const Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
+    CHECK(ToText(fixtures->widgets->ModalFrame(theme, "kit frame", {ftxui::text("row")}, {}, ""))
+              .find("kit frame") != std::string::npos);
 }
 
 namespace {
@@ -599,15 +625,12 @@ TEST_CASE("a partial registration is rolled back, and a later plugin reusing "
           "fixture panel");
 }
 
-TEST_CASE("the md4c default engine carries the streaming contract", "[client_plugins]") {
+TEST_CASE("the md4c engine carries the streaming contract", "[client_plugins]") {
     Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
-    MarkdownRenderer renderer(&theme, nullptr);
     MarkdownEngineRegistry engines;
-    RegisterDefaultMarkdownEngine(engines, renderer);
+    minimal::client::markdown_md4c::RegisterEngine(engines, nullptr, nullptr);
     REQUIRE(engines.get() != nullptr);
     CHECK(engines.held());
-    // Core, not a plugin: the claimant name is cleared.
-    CHECK(engines.holder().empty());
 
     // Complete-text render.
     const auto rendered = ToText(engines.get()->Render("hello **world**", theme));
@@ -626,13 +649,13 @@ TEST_CASE("the md4c default engine carries the streaming contract", "[client_plu
     CHECK(finalized.find("part two") != std::string::npos);
 }
 
-TEST_CASE("the md4c default engine renders GFM table HEADER cells", "[client_plugins]") {
+TEST_CASE("the md4c engine renders GFM table HEADER cells", "[client_plugins]") {
     // md4c emits the distinct MD_BLOCK_TH enum for a header cell, which the
     // renderer's cell handling used to key on MD_BLOCK_TD alone -- header
     // cells fell to the empty-text default and every GFM table lost its
     // header row.
     Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
-    MarkdownRenderer renderer(&theme, nullptr);
+    minimal::client::markdown_md4c::MarkdownRenderer renderer(&theme, nullptr);
     const auto rendered =
         ToText(renderer.Render("| Head | Tail |\n| --- | --- |\n| 1 | 2 |\n"));
     CHECK(rendered.find("Head") != std::string::npos);
@@ -1070,6 +1093,41 @@ TEST_CASE("the bundled session-status plugin registers every segment the default
         INFO(id);
         CHECK(fixtures->registries.status_segments.Find(id) != nullptr);
     }
+}
+
+TEST_CASE("the highlighter plugins get: plain until the host's is built, then the host's",
+          "[client_plugins]") {
+    Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
+    HostCodeHighlighter proxy;
+    CHECK(proxy.CanonicalLanguageFor("py").empty());
+    CHECK(proxy.Highlight("a\nb", "python").size() == 2);  // plain, a line per line
+
+    static const auto languages = minimal::client::syntax_grammars::Definitions();
+    const SyntaxHighlighter host(theme, languages);
+    proxy.Attach(&host);
+    CHECK(proxy.CanonicalLanguageFor("py") == "python");
+    CHECK(ToText(ftxui::vbox(proxy.Highlight("x = 1", "python"))).find("x = 1") != std::string::npos);
+}
+
+TEST_CASE("with no markdown plugin, markdown reads as plain text", "[client_plugins]") {
+    Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
+    MarkdownEngineRegistry engines;
+    RegisterPlainMarkdownEngine(engines);
+    REQUIRE(engines.get() != nullptr);
+    CHECK(engines.holder().empty());  // core's fallback
+    CHECK(ToText(engines.get()->Render("hello **world**", theme)) == "hello **world**");
+    auto stream = engines.get()->MakeStream();
+    stream->AppendDelta("a ");
+    stream->AppendDelta("*b*");
+    CHECK(ToText(stream->Render(theme)) == "a *b*");
+
+    // A markdown plugin, registered first, keeps the slot.
+    MarkdownEngineRegistry claimed;
+    claimed.SetAttribution("markdown-md4c");
+    minimal::client::markdown_md4c::RegisterEngine(claimed, nullptr, nullptr);
+    claimed.ClearAttribution();
+    RegisterPlainMarkdownEngine(claimed);
+    CHECK(claimed.holder() == "markdown-md4c");
 }
 
 // regenerate_per_session=false must share one banner across every session

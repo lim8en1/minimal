@@ -28,11 +28,11 @@
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/view/widget_types.hpp"
 
-namespace minimal::client {
+namespace minimal::client::ui_kit {
 
 // `source` is read on every render and event -- it must be cheap (a copy of
 // the owner's latest state under its lock).
 ftxui::Component MakeSchemaForm(std::function<SchemaFormState()> source,
                                  SchemaFormCallbacks callbacks, const Theme& theme);
 
-}  // namespace minimal::client
+}  // namespace minimal::client::ui_kit

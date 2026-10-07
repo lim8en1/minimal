@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <chrono>
 #include <functional>
 #include <string>
@@ -9,7 +8,7 @@
 #include <ftxui/dom/elements.hpp>
 #include "minimal/client/policy.hpp"
 
-namespace minimal::client {
+namespace minimal::client::markdown_md4c {
 
 // Renders the assistant message currently streaming in. md4c has no incremental
 // parse API and CANNOT soundly parse partial input -- `**bold` cannot be
@@ -38,11 +37,18 @@ public:
     // `render` re-parses full markdown text into an Element -- in production,
     // MarkdownRenderer::Render. Taken as a function so the debounce state
     // machine is testable without FTXUI assertions or md4c.
-    // `clock` is the test seam for time.
+    // `clock` is the test seam for time. `redraw_after` (optional) is asked
+    // for a frame once the debounce closes, whenever Render() declines to
+    // reparse: a burst of deltas that PAUSES wakes the pump once, for the
+    // pause's last delta -- if the debounce had not closed by that render,
+    // nothing else would bring the next frame, and the tail sat rendered
+    // stale until some unrelated event arrived. In the TUI it is the host's
+    // HostUi::RequestRedrawAfter.
     explicit StreamingMarkdownView(
         std::function<ftxui::Element(std::string_view)> render,
         std::function<std::chrono::steady_clock::time_point()> clock =
-            std::chrono::steady_clock::now);
+            std::chrono::steady_clock::now,
+        std::function<void(std::chrono::milliseconds)> redraw_after = {});
 
     // O(1) amortized, per TextDeltaEvent. Legal after Finalize(): a turn has
     // as many content blocks as the model emits, and the block boundary is
@@ -61,25 +67,10 @@ public:
     // Visible for tests. True only between a Finalize() and the next delta.
     bool finalized() const { return finalized_; }
 
-    // Set by Render() whenever it declines to reparse because the debounce
-    // window has not closed yet (text landed, still dirty) -- mirrors
-    // PromptEditorState::query_pending_hint (app.cpp), the pump's existing
-    // "wake me even though UiVersion() did not move" seam. The 20 Hz pump
-    // wakes on a UiVersion() change; DispatchToTab bumps that once per wire
-    // event (state.cpp), so a burst of deltas that PAUSES wakes the pump
-    // once for the pause's last delta -- if the debounce had not closed by
-    // that render, nothing bumps the version again when it DOES close, and
-    // the tail sat rendered-stale until some unrelated event happened to
-    // arrive. A single process-wide flag, not per-instance: only the
-    // FOCUSED tab's stream is rendered in a given frame (FrameRenderer), so
-    // cross-instance collisions are rare, and a wrong clear/an unnecessary
-    // extra poll is bounded and self-correcting -- the same trade-off
-    // query_pending_hint already makes.
-    static std::atomic<bool>& PendingReparseHint();
-
 private:
     std::function<ftxui::Element(std::string_view)> render_;
     std::function<std::chrono::steady_clock::time_point()> clock_;
+    std::function<void(std::chrono::milliseconds)> redraw_after_;
     std::string accumulated_text_;
     mutable ftxui::Element cached_render_;
     mutable std::size_t rendered_length_ = 0;  // dirty check: skip reparsing unchanged text
@@ -88,4 +79,4 @@ private:
     bool finalized_ = false;
 };
 
-}  // namespace minimal::client
+}  // namespace minimal::client::markdown_md4c

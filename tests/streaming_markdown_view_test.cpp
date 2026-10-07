@@ -1,11 +1,13 @@
-#include "minimal/client/render/streaming_markdown_view.hpp"
+#include "streaming_markdown_view.hpp"
+
+#include "minimal/client/policy.hpp"
 
 #include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
-namespace minimal::client {
+namespace minimal::client::markdown_md4c {
 
 namespace {
 
@@ -24,10 +26,13 @@ struct FakeRenderer {
 struct Fixture {
     std::chrono::steady_clock::time_point now{};
     std::shared_ptr<FakeRenderer> renderer = std::make_shared<FakeRenderer>();
+    // What the view asked the host for: a frame after each delay.
+    std::vector<std::chrono::milliseconds> redraws;
     StreamingMarkdownView view{[renderer = renderer](std::string_view text) {
                                    return (*renderer)(text);
                                },
-                               [this] { return now; }};
+                               [this] { return now; },
+                               [this](std::chrono::milliseconds delay) { redraws.push_back(delay); }};
 
     void Advance(std::chrono::milliseconds delta) { now += delta; }
 };
@@ -161,40 +166,30 @@ TEST_CASE("Render honors the scaled debounce for a large buffer") {
     CHECK(f.renderer->calls == 2);
 }
 
-// B4: PendingReparseHint is a single process-wide flag (see the header), so
-// this test owns its own before/after state rather than assuming a fresh
-// process -- Catch2 runs every TEST_CASE in one binary.
-TEST_CASE("PendingReparseHint is set while a debounced reparse is pending, "
-          "cleared once it happens") {
-    StreamingMarkdownView::PendingReparseHint().store(false);
+// A burst of deltas that PAUSES wakes the pump once, for its last delta; if
+// the debounce had not closed by that render, nothing else brings the frame
+// that reparses -- so the view asks the host for it, timed to the window.
+TEST_CASE("a declined reparse asks for the frame that will do it") {
     Fixture f;
-
-    // The first-ever render is immediate (no debounce to wait on): no hint.
+    // The first-ever render is immediate (no debounce to wait on): no ask.
     f.view.AppendDelta("hello");
     f.view.Render();
-    CHECK_FALSE(StreamingMarkdownView::PendingReparseHint().load());
+    CHECK(f.redraws.empty());
 
-    // A delta lands, but the debounce window has not closed: this is exactly
-    // "the pump's own DispatchToTab-driven wake already happened for this
-    // delta, and nothing else will ask again once the window closes" --
-    // Render() must flag it.
+    // Text landed inside the window: a frame when it closes.
+    f.Advance(std::chrono::milliseconds(30));
     f.view.AppendDelta(" world");
     f.view.Render();
-    CHECK(StreamingMarkdownView::PendingReparseHint().load());
+    REQUIRE(f.redraws.size() == 1);
+    CHECK(f.redraws[0] == minimal::client::kMarkdownReparseDebounce - std::chrono::milliseconds(30));
 
-    // Once the debounce closes and Render() actually reparses, the hint
-    // clears -- the pump does not need to keep polling forever.
+    // Once it reparses, nothing more is asked.
     f.Advance(minimal::client::kMarkdownReparseDebounce);
     f.view.Render();
-    CHECK_FALSE(StreamingMarkdownView::PendingReparseHint().load());
-
-    // Finalize() also clears it (it is its own authoritative reparse, same
-    // as a debounce-driven one).
-    f.view.AppendDelta("!");
+    CHECK(f.redraws.size() == 1);
+    // Unchanged text asks for nothing either.
     f.view.Render();
-    CHECK(StreamingMarkdownView::PendingReparseHint().load());
-    f.view.Finalize();
-    CHECK_FALSE(StreamingMarkdownView::PendingReparseHint().load());
+    CHECK(f.redraws.size() == 1);
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::markdown_md4c

@@ -51,7 +51,6 @@
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/markdown_renderer.hpp"
 #include "minimal/client/render/syntax_highlighter.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/session_client.hpp"
@@ -94,6 +93,8 @@ struct TuiEnvironment {
     std::unique_ptr<plugins::ClientApi> host_client_api;
     // Concrete type: the TUI drains it (Take) in its pump.
     std::unique_ptr<plugins::HostActionQueue> host_actions;
+    // The CodeHighlighter plugins get; attached to `highlighter` once built.
+    std::unique_ptr<plugins::HostCodeHighlighter> host_highlighter;
 
     plugins::ClientRegistries registries;
     // The WidgetKit plugins get (forwarding to registries.widget_kit, which it
@@ -120,7 +121,6 @@ struct TuiEnvironment {
     // never reassigned wholesale.
     std::optional<Theme> theme;
     std::optional<SyntaxHighlighter> highlighter;
-    std::optional<MarkdownRenderer> renderer;
 
     // Non-owning: `engine` points at registries.markdown_engine's own heap-owned
     // default/plugin engine; `chat_surface` at registries.chat_surface's exclusive

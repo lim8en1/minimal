@@ -12,7 +12,6 @@ add_library(minimal_client_core SHARED
     plugin_command.cpp
     session_client.cpp
     rpc_queue.cpp
-    model_picker_model.cpp
     keymap_help_model.cpp
     state.cpp
     session_components.cpp
@@ -42,35 +41,29 @@ add_library(minimal_client_core SHARED
     view/prompt_wrap.cpp
     view/status_bar.cpp
     view/tools_panel.cpp
-    view/filterable_menu.cpp
-    view/model_picker.cpp
-    view/model_selector.cpp
     view/picker_controller.cpp
     view/tab_ui.cpp
     view/frame_renderer.cpp
     view/prompt_modal.cpp
     view/modal_host.cpp
-    view/schema_form.cpp
     view/schema_form_model.cpp
     view/modal_stack.cpp
     render/color_downsample.cpp
     render/theme.cpp
-    render/syntax_highlighter.cpp
-    render/markdown_renderer.cpp
-    render/streaming_markdown_view.cpp)
+    render/syntax_highlighter.cpp)
 add_library(minimal::client_core ALIAS minimal_client_core)
 
 target_include_directories(minimal_client_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/include")
 
-# The vendored grammar set for the syntax highlighter. Populates and compiles
-# one static library per grammar; see the module header for why this is not
-# the grammar repos' own CMake.
+# The vendored grammar set (the bundled syntax-grammars plugin links it).
+# Populates and compiles one static library per grammar; see the module
+# header for why this is not the grammar repos' own CMake.
 include("${CMAKE_SOURCE_DIR}/cmake/TreeSitterGrammars.cmake")
 
-# tree-sitter core is normalized at the top level as minimal_tree_sitter; the
-# grammar set below supplies the per-language parsers.
+# tree-sitter core is normalized at the top level as minimal_tree_sitter;
+# the per-language parsers are the grammar plugins'.
 target_link_libraries(minimal_client_core
     PUBLIC
         minimal::common
@@ -80,18 +73,8 @@ target_link_libraries(minimal_client_core
         # so naming them here too would put those archives on the link line
         # twice (ld notes the duplicate).
         ftxui::component
-        md4c::md4c
         minimal_tree_sitter
     PRIVATE
-        tsgrammar_cpp
-        tsgrammar_python
-        tsgrammar_javascript
-        tsgrammar_typescript
-        tsgrammar_bash
-        tsgrammar_json
-        tsgrammar_yaml
-        tsgrammar_rust
-        tsgrammar_go
         spdlog::spdlog)
 
 set_target_properties(minimal_client_core PROPERTIES

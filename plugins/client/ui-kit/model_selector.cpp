@@ -1,4 +1,4 @@
-#include "minimal/client/view/model_selector.hpp"
+#include "model_selector.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -10,9 +10,9 @@
 #include <ftxui/component/component_base.hpp>
 
 #include "minimal/client/plugins/task_worker.hpp"
-#include "minimal/client/view/model_picker.hpp"
+#include "model_picker.hpp"
 
-namespace minimal::client {
+namespace minimal::client::ui_kit {
 namespace {
 
 // What the worker publishes and the component reads; shared, so a task
@@ -134,4 +134,4 @@ ftxui::Component MakeModelSelector(ModelSelectorSpec spec, ModelSelectorCallback
     return ftxui::Make<ModelSelectorComponent>(std::move(spec), std::move(callbacks), theme);
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::ui_kit

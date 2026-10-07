@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "ftxui_harness.hpp"
-#include "minimal/client/view/model_selector.hpp"
+#include "model_selector.hpp"
 
 using namespace minimal;
 using namespace std::chrono_literals;
@@ -89,7 +89,7 @@ TEST_CASE("the model selector loads the list itself, then picks a model or the l
     Source source;
     std::vector<std::string> picked;
     const auto theme = TestTheme();
-    auto selector = client::MakeModelSelector(
+    auto selector = client::ui_kit::MakeModelSelector(
         SpecOver(source), {.on_select = [&](const std::string& ref) { picked.push_back(ref); }},
         theme);
 
@@ -116,7 +116,7 @@ TEST_CASE("the model selector shows why the list failed, and ctrl+r refreshes di
           "[model_selector]") {
     Source source;
     const auto theme = TestTheme();
-    auto selector = client::MakeModelSelector(SpecOver(source), {}, theme);
+    auto selector = client::ui_kit::MakeModelSelector(SpecOver(source), {}, theme);
     source.Release(/*fail=*/true);
     REQUIRE(Eventually([&] {
         return minimal_test::RenderFrame(selector, 80, 24).find("the server is away") !=
@@ -134,7 +134,7 @@ TEST_CASE("the model selector offers a typed ref the list does not have", "[mode
     const auto theme = TestTheme();
     auto spec = SpecOver(source);
     spec.allow_custom = true;
-    auto selector = client::MakeModelSelector(
+    auto selector = client::ui_kit::MakeModelSelector(
         spec, {.on_select = [&](const std::string& ref) { picked.push_back(ref); }}, theme);
     REQUIRE(Eventually([&] {
         return minimal_test::RenderFrame(selector, 80, 24).find("gamma") != std::string::npos;
@@ -164,7 +164,7 @@ TEST_CASE("a model selector closed while its fetch is out goes away cleanly",
     auto spec = SpecOver(source);
     spec.redraw = [&] { ++redraws; };
     {
-        auto selector = client::MakeModelSelector(spec, {}, theme);
+        auto selector = client::ui_kit::MakeModelSelector(spec, {}, theme);
         REQUIRE(Eventually([&] { return source.refreshes().size() == 1; }));
         std::thread release([&] {
             std::this_thread::sleep_for(20ms);
@@ -190,7 +190,7 @@ TEST_CASE("a default row is offered only when the server names a default, and na
         spec.leading_row_id = "<default>";
         spec.leading_row_is_default = true;
         std::vector<std::string> picked;
-        auto selector = client::MakeModelSelector(
+        auto selector = client::ui_kit::MakeModelSelector(
             spec, {.on_select = [&](const std::string& ref) { picked.push_back(ref); }}, theme);
         REQUIRE(Eventually([&] {
             return minimal_test::RenderFrame(selector, 80, 24).find("beta") != std::string::npos;

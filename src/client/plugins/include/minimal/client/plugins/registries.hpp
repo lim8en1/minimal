@@ -28,6 +28,7 @@
 // loaded), so nothing renderable can capture a theme at registration.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -90,6 +91,13 @@ class HostUi {
 public:
     virtual ~HostUi() = default;
     virtual void RequestRedraw() = 0;
+    // A frame no later than `delay` from now -- for state that changes with
+    // time and no event (a debounced reparse coming due). The earliest of
+    // several requests wins. Any thread. (The default draws one now.)
+    virtual void RequestRedrawAfter(std::chrono::milliseconds delay) {
+        (void)delay;
+        RequestRedraw();
+    }
     // View control, by registered view id. Callable from any thread: each is
     // queued and applied on the UI thread before the next frame (in call
     // order). An id no view answers to is a no-op.
@@ -409,15 +417,20 @@ public:
 class SyntaxGrammar {
 public:
     virtual ~SyntaxGrammar() = default;
-    // Canonical language key ("python") -- the fenced-code info string is
-    // matched through the core alias table, which consults registered
-    // languages too.
+    // Canonical language key ("python"), matched against a fence label
+    // before any language's Aliases().
     virtual std::string_view Language() const = 0;
     // The tree-sitter parse function itself (tree_sitter_python and friends) --
     // the raw symbol, not a called result, so the highlighter's parser setup
     // treats registered and vendored grammars identically.
     virtual minimal::client::LanguageFnPtr LanguageFn() const = 0;
     virtual std::span<const SyntaxRule> Rules() const = 0;
+    // Positions that name a function (a call target, a declaration's name),
+    // which the node-type table alone cannot tell from other identifiers.
+    virtual std::span<const FunctionFieldRule> FunctionFields() const { return {}; }
+    // Other fence labels that mean this language ("py" for "python"). A
+    // language's own name always wins over another's alias.
+    virtual std::span<const std::string_view> Aliases() const { return {}; }
 };
 
 // --- Markdown engine (EXCLUSIVE) --------------------------------------------
@@ -870,6 +883,8 @@ public:
     // NAME namespaces, after the collision check passed; a slot registry is
     // never renamed. Default: nothing to rename.
     virtual void ApplyAliases(const std::map<std::string, std::string>& aliases) { (void)aliases; }
+    // Nothing registered (a required slot left empty refuses startup).
+    virtual bool empty() const = 0;
 
 protected:
     // False, with a warning, once sealed.
@@ -901,6 +916,7 @@ public:
 
     // In registration order.
     const std::vector<std::unique_ptr<T>>& All() const { return entries_; }
+    bool empty() const override { return entries_.empty(); }
     // Index-aligned with All(): the name each entry answers to.
     const std::vector<std::string>& surfaces() const { return surfaces_; }
 
@@ -968,6 +984,7 @@ public:
 
     T* get() const { return entry_.get(); }
     bool held() const { return held_; }
+    bool empty() const override { return !held_; }
     // Who holds the slot: a plugin's name, or "" for core.
     const std::string& holder() const { return holder_; }
 
@@ -1052,6 +1069,7 @@ using WidgetKitRegistry = ExclusiveSlot<WidgetKit, WidgetKitKey>;
 // fatal, like every additive key.
 class MessageRendererRegistry : public RegistryBase {
 public:
+    bool empty() const override { return renderers_.empty(); }
     void Register(ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer);
     // The renderer for a kind, or null -- the caller falls back to the core
     // default (which is itself registered here once core fills it).

@@ -3,7 +3,6 @@
 #include <chrono>
 #include <string_view>
 
-#include "minimal/client/render/markdown_renderer.hpp"
 #include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/view/chat_view.hpp"
 #include "minimal/client/view/status_bar.hpp"

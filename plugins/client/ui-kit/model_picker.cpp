@@ -1,9 +1,9 @@
-#include "minimal/client/view/model_picker.hpp"
+#include "model_picker.hpp"
 
-#include "minimal/client/model_picker_model.hpp"
-#include "minimal/client/view/filterable_menu.hpp"
+#include "model_picker_model.hpp"
+#include "filterable_menu.hpp"
 
-namespace minimal::client {
+namespace minimal::client::ui_kit {
 
 ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
                                  const Theme& theme, ModelPickerCallbacks callbacks, MenuStatus status) {
@@ -72,4 +72,4 @@ ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
     return MakeFilterableMenuModal(build_rows, with_status, callbacks_out, theme);
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::ui_kit

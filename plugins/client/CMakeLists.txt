@@ -68,3 +68,18 @@ add_subdirectory(session-view)
 # the focused tab's state the host hands every segment.
 
 add_subdirectory(session-status)
+
+# ui-kit is the widget kit every view builds on (menus, the schema form, the
+# model selector, modal chrome): the required widget-kit slot's default.
+
+add_subdirectory(ui-kit)
+
+# syntax-grammars is the bundled tree-sitter grammar set code blocks are
+# highlighted with.
+
+add_subdirectory(syntax-grammars)
+
+# markdown-md4c is the markdown engine (md4c, debounced streaming, fenced code
+# through the host's highlighter); without it markdown reads as plain text.
+
+add_subdirectory(markdown-md4c)

@@ -26,12 +26,12 @@
 #include <ftxui/dom/node.hpp>
 #include <ftxui/screen/screen.hpp>
 
+#include "md4c_engine.hpp"
 #include "ftxui_harness.hpp"
 
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/markdown_renderer.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/view/chat_scroll_region.hpp"
@@ -123,15 +123,13 @@ void PassWheelGate() {
 }
 
 struct ChatViewFixture {
-    ChatViewFixture()
-        : renderer(&theme, nullptr) {
-        plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    ChatViewFixture() {
+        minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
         plugins::RegisterCoreMessageRenderers(messages);
         plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.get());
     }
 
     Theme theme{TestTheme()};
-    MarkdownRenderer renderer;
     plugins::MarkdownEngineRegistry engine_registry;
     plugins::MessageRendererRegistry messages;
     plugins::ToolResultRendererRegistry tool_renderers;
