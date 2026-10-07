@@ -477,7 +477,8 @@ void TuiApp::BuildFrame() {
     // FrameRenderer owns the tab body / status-bar / plugin-panel assembly.
     const int panel_height = env_.ui.panel_height > 0 ? env_.ui.panel_height : 12;   // ui.json
     frame_renderer_.emplace(FrameRenderer::Dependencies{
-        *app_, theme, tab_maintenance_->Focused(), tab_maintenance_->FocusedDetails(), tab_ui_,
+        *app_, theme, tab_maintenance_->Focused(), tab_maintenance_->FocusedDetails(),
+        tab_maintenance_->FocusedChatFrame(), tab_ui_,
         registries.start_views, registries.status_segments, registries.tab_bar, panel_height,
         editor_, env_.status_format, env_.plugin_views,
         // The key the empty state names: the user's keymap decides it.

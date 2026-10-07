@@ -52,6 +52,7 @@ public:
         // valid as long as that object is (RunTui's whole lifetime).
         const std::string& focused;
         const SessionState::Snapshot& focused_details;
+        const plugins::ChatFrame& focused_frame;   // ChatFrameFrom(focused_details)
 
         // NOT owned -- see view/tab_ui.hpp's file comment on why the map
         // itself stays a plain RunTui local.

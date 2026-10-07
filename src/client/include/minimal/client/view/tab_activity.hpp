@@ -18,7 +18,9 @@ const char* StateWord(SessionStateKind state);
 plugins::ToolActivity ToolActivityOf(const ToolExecutionState& tool);
 
 // One tab as plugins see it; its tool rows only if `tab` carries them.
-plugins::TabActivity ActivityOf(const AppState::TabSnapshot& tab);
+// `with_tools` false leaves `tools` empty: a view that never reads them (the
+// tab bar, every render) skips a JSON summary per running tool per tab.
+plugins::TabActivity ActivityOf(const AppState::TabSnapshot& tab, bool with_tools = true);
 
 // What `filter` keeps out of the bar: the tabs of `all` that `visible` lacks,
 // and how many of those carry attention (the glyph, not the state: Waiting
@@ -37,6 +39,12 @@ public:
 
 private:
     std::uint64_t key_ = 0;
+    // Nothing moved at all since the last call (a mouse move's render): the
+    // key's own light snapshot and hashing are skipped too. Not the key
+    // itself -- UiVersion moves on every text delta, which changes nothing
+    // here.
+    std::uint64_t seen_ui_version_ = 0;
+    std::uint64_t seen_tools_version_ = 0;
     std::shared_ptr<const plugins::TabActivitySnapshot> last_;
 };
 

@@ -141,7 +141,10 @@ ftxui::Element FrameRenderer::Render() {
     if (const plugins::TabBar* bar = deps_.tab_bar_registry.get(); bar != nullptr && !space_critical) {
         plugins::TabBarModel model;
         model.badge = badge;
-        for (const auto& tab : visible_tabs) model.tabs.push_back(ActivityOf(tab));
+        // Without tool rows (TabBarModel's contract): this runs every render.
+        for (const auto& tab : visible_tabs) {
+            model.tabs.push_back(ActivityOf(tab, /*with_tools=*/false));
+        }
         Element row;
         if (GuardPluginCall("tab_bar", "the tab bar",
                             [&] { row = bar->Render(model, deps_.theme, tab_hits_); }) &&
@@ -203,7 +206,7 @@ ftxui::Element FrameRenderer::Render() {
                 Element body;
                 if (ui.chat != nullptr &&
                     GuardPluginCall("chat:" + focused, "the chat view",
-                                    [&] { body = ui.chat->Render(ChatFrameFrom(snap)); }) &&
+                                    [&] { body = ui.chat->Render(deps_.focused_frame); }) &&
                     body != nullptr) {
                     rows.push_back(std::move(body) | flex);
                 } else {
