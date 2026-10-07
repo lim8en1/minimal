@@ -400,6 +400,21 @@ TEST_CASE("the bundled ui-kit plugin fills the widget-kit slot", "[client_plugin
               .find("kit frame") != std::string::npos);
 }
 
+#ifndef MINIMAL_CONSENT_PROMPTS_PLUGIN
+#error "MINIMAL_CONSENT_PROMPTS_PLUGIN must name the built consent-prompts plugin"
+#endif
+
+TEST_CASE("the bundled consent-prompts plugin renders core's two prompt kinds",
+          "[client_plugins][prompts]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_CONSENT_PROMPTS_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    INFO(fixtures->records.front().error);
+    REQUIRE(fixtures->records.front().ok());
+    CHECK(fixtures->registries.prompt_renderers.Find("permission") != nullptr);
+    CHECK(fixtures->registries.prompt_renderers.Find("confirmation") != nullptr);
+}
+
 namespace {
 
 // The TUI's half of HostActions, recording what was applied to it.

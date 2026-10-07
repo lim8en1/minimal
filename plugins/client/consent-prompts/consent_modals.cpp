@@ -1,4 +1,4 @@
-#include "minimal/client/view/prompt_modal.hpp"
+#include "consent_modals.hpp"
 #include "minimal/client/policy.hpp"
 
 #include <algorithm>
@@ -11,7 +11,7 @@
 #include <ftxui/screen/box.hpp>
 #include <ftxui/screen/terminal.hpp>
 
-namespace minimal::client {
+namespace minimal::client::consent_prompts {
 
 std::vector<std::string> GrantToggles::GrantedKeys(const PendingPermission& request) const {
     std::vector<std::string> keys;
@@ -29,76 +29,6 @@ using ftxui::Elements;
 
 }  // namespace
 
-// A modal's internal divider, in the hairline role rather than the window's
-// `attention` tint -- dividers are structure, not a call to act.
-Element ModalRule(const Theme& theme) {
-    return ftxui::separator() | ftxui::color(theme.ColorFor("border_unfocused"));
-}
-
-// The modal body's height budget: what the content may take before the pinned
-// hint line and the window borders stop fitting on screen. Without a cap the
-// modal simply ran past the terminal's bottom edge -- and the KEYBOARD HINTS,
-// being the last row, were exactly what got clipped ("permission prompt lacks
-// button hints"). The hints are pinned OUTSIDE the scrollable region and the
-// content scrolls inside it, so they render no matter how long the summary or
-// the grants list is.
-int ModalBodyHeightBudget() {
-    const int dimy = ftxui::Terminal::Size().dimy;
-    // The frame's rows (borders, hint line) plus slack for the tab bar/editor
-    // the modal overlays; a tiny or unknown terminal degrades to the smallest
-    // budget that still leaves room for the pinned hint line, rather than a
-    // fixed value that could exceed dimy itself and clip the hints again --
-    // the exact regression this cap exists to prevent, just at small sizes.
-    constexpr int kReserved = kModalFrameRows + kModalOverlaySlackRows;
-    if (dimy > kReserved + kMinModalBodyRows) return dimy - kReserved;
-    return std::max(dimy - kModalFrameRows, 1);
-}
-
-namespace {
-
-// One column of breathing room on each side: window() draws its border
-// flush against the content otherwise, so transcript-like text (a bash
-// command, a file path) reads as if it were spilling past the frame.
-Element PadHorizontal(Element content) {
-    return ftxui::hbox({ftxui::text(" "), std::move(content) | ftxui::flex, ftxui::text(" ")});
-}
-
-// A modal's body: padded, and in the BODY color. The window's `attention`
-// tint is for the frame and the title -- the call to act -- not for every
-// word inside it: an all-amber window left the summary, the hints and the
-// answers with no hierarchy. Explicitly colored rows (the title line, the
-// grant labels, muted hints) keep their own color; color() nests.
-}  // namespace
-
-Element ModalBody(const Theme& theme, Element content) {
-    return PadHorizontal(std::move(content)) | ftxui::color(theme.ColorFor("assistant_message"));
-}
-
-Element ModalFrame(const Theme& theme, const std::string& title, Elements rows,
-                   const std::string& footer, int max_width) {
-    return ModalFrame(theme, title, std::move(rows), {}, footer, max_width);
-}
-
-Element ModalFrame(const Theme& theme, const std::string& title, Elements rows, Elements pinned,
-                   const std::string& footer, int max_width) {
-    using namespace ftxui;
-    // The pinned rows (and their rule) come out of the scrolling budget, so
-    // the frame as a whole still fits and the hints stay on screen.
-    const int pinned_rows = pinned.empty() ? 0 : kModalPinnedMaxRows + 1;
-    Elements body{vbox(std::move(rows)) | yframe | vscroll_indicator |
-                  size(HEIGHT, LESS_THAN, std::max(ModalBodyHeightBudget() - pinned_rows, 1))};
-    if (!pinned.empty()) {
-        body.push_back(ModalRule(theme));
-        body.push_back(vbox(std::move(pinned)) | yframe |
-                       size(HEIGHT, LESS_THAN, kModalPinnedMaxRows));
-    }
-    if (!footer.empty()) {
-        body.push_back(ModalRule(theme));
-        body.push_back(paragraph(footer) | Muted(theme));
-    }
-    return window(text(" " + title + " "), ModalBody(theme, vbox(std::move(body)))) |
-           size(WIDTH, LESS_THAN, max_width) | color(theme.ColorFor("attention"));
-}
 
 namespace {
 
@@ -154,7 +84,7 @@ std::string TrimmedMessage(const std::string& s) {
 }  // namespace
 
 ftxui::Component MakePermissionModal(const PendingPermission& request, GrantToggles& toggles,
-                                     const Theme& theme,
+                                     const plugins::WidgetKit& widgets, const Theme& theme,
                                      std::function<void(PermissionVerdict verdict)> on_answer) {
     using namespace ftxui;
 
@@ -198,7 +128,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
     // competing anchors inside the same scrolling yframe; with no Checkbox
     // components at all, the one `|= focus` applied below is the only one
     // that exists.
-    auto body = Renderer([request_state, state, input, &toggles, &theme] {
+    auto body = Renderer([request_state, state, input, &toggles, &widgets, &theme] {
         const PendingPermission& request = *request_state;
         const int grant_count = static_cast<int>(request.grants.size());
         Elements rows;
@@ -303,7 +233,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
         // can run past the modal's own width (interior padding narrows it
         // further) -- text() would silently clip the tail (the exact "toggle
         // grants" the user needs), paragraph() wraps onto a second line.
-        return ModalFrame(theme, "permission", std::move(rows), footer_text);
+        return widgets.ModalFrame(theme, "permission", std::move(rows), {}, footer_text);
     });
     // RunTui's on_answer reads toggles.GrantedKeys(request) -- the filtered
     // keys ride along from state it owns, so the modal never mints a key.
@@ -452,7 +382,8 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
     });
 }
 
-ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const Theme& theme,
+ftxui::Component MakeConfirmationModal(const PendingConfirmation& request,
+                                       const plugins::WidgetKit& widgets, const Theme& theme,
                                        std::function<void(std::string chosen)> on_answer) {
     using namespace ftxui;
 
@@ -488,7 +419,7 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
         }
     }
     const auto interacted = std::make_shared<bool>(false);
-    auto body = Renderer(buttons, [buttons_val, request_state, has_cancel, &theme, interacted] {
+    auto body = Renderer(buttons, [buttons_val, request_state, has_cancel, &widgets, &theme, interacted] {
         const PendingConfirmation& request = *request_state;
         Elements rows;
         rows.push_back(text(request.title) | bold | color(theme.ColorFor("attention")));
@@ -499,8 +430,9 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
         // Content scrolls; the esc hint stays pinned below it. (No esc hint
         // at all when the wire request offers no cancel option -- see the
         // CatchEvent below.)
-        return ModalFrame(theme, "confirm", std::move(rows),
-                          has_cancel ? "esc: cancel" : "", kConfirmModalMaxWidth);
+        return widgets.ModalFrame(theme, "confirm", std::move(rows), {},
+                                  has_cancel ? "esc: cancel" : "") |
+               size(WIDTH, LESS_THAN, kConfirmModalMaxWidth);
     });
     // Escape picks the "cancel" option when the modal offers one: both
     // destructive confirms do, and the picker/permission modals already honor
@@ -528,4 +460,4 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
     });
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::consent_prompts

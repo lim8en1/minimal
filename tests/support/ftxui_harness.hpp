@@ -21,6 +21,7 @@
 // run.
 
 #include <string>
+#include <string_view>
 
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
@@ -47,6 +48,20 @@ inline std::string RenderElement(const ftxui::Element& element, int width = 80, 
     ftxui::Screen screen(width, height);
     ftxui::Render(screen, element);
     return screen.ToString();
+}
+
+// The 0-based screen row carrying `needle`, or -1.
+inline int ScreenLineOf(std::string_view frame, std::string_view needle) {
+    int y = 0;
+    for (std::size_t pos = 0; pos < frame.size();) {
+        const std::size_t end = frame.find('\n', pos);
+        const std::size_t len = end == std::string_view::npos ? frame.size() - pos
+                                                              : end - pos;
+        if (frame.substr(pos, len).find(needle) != std::string_view::npos) return y;
+        pos = end == std::string_view::npos ? frame.size() : end + 1;
+        ++y;
+    }
+    return -1;
 }
 
 }  // namespace minimal_test

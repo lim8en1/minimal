@@ -331,7 +331,7 @@ ftxui::Component MakeFilterableMenuModal(
         // hint line wraps rather than losing its tail.
         rows.push_back(separator() | color(theme.ColorFor("border_unfocused")));
         rows.push_back(paragraph(spec.hint_line) | Muted(theme));
-        // Padded with a space each side, matching prompt_modal.cpp's " permission "/
+        // Padded with a space each side, matching consent-prompts' consent_modals.cpp's " permission "/
         // " confirm " -- window() draws the border flush against the title text
         // otherwise. The accent colors the FRAME and title; the rows inside
         // keep the body color (a whole window of accent-colored text had no

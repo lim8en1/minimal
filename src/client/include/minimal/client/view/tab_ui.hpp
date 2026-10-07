@@ -25,8 +25,12 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include <ftxui/component/component.hpp>
+
+#include <nlohmann/json.hpp>
 
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/theme.hpp"
@@ -34,9 +38,30 @@
 #include "minimal/client/state.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/view/chat_view.hpp"
-#include "minimal/client/view/prompt_modal.hpp"
 
 namespace minimal::client {
+
+// Core's side of the consent prompts ("permission", "confirmation"): plugin
+// renderers draw them (consent-prompts, bundled; both kinds required at
+// startup), core builds the payload and reads the answer, failing closed.
+//
+// The renderer registered for `kind`, built over `payload`; nullptr (logged)
+// when none is registered or it throws -- the caller answers "no" at once.
+ftxui::Component MakeConsentModal(const plugins::PromptRendererRegistry& registry,
+                                  std::string_view kind, const nlohmann::json& payload,
+                                  const std::string& asker, const Theme& theme,
+                                  std::function<void(plugins::PromptReply)> reply);
+nlohmann::json PermissionPayload(const PendingPermission& request);
+nlohmann::json ConfirmationPayload(const std::string& kind, const std::string& title,
+                                   const std::string& detail,
+                                   const std::vector<std::string>& options);
+// Answers `request` from a "permission" reply: allow only on an ANSWERED
+// {"decision":"allow"}, granting only offered keys; deny otherwise.
+void AnswerPermissionFromReply(AppState& app, const std::string& session_id,
+                               const PendingPermission& request, const plugins::PromptReply& reply);
+// A "confirmation" reply's choice: one of `options`, or "" (do not proceed).
+std::string ConfirmationChoice(const std::vector<std::string>& options,
+                               const plugins::PromptReply& reply);
 
 struct TabUi {
     // Track C4: one slot per live TEXT segment, keyed by the segment's
@@ -51,11 +76,8 @@ struct TabUi {
     // another segment's view -- the reported "random unrelated text" in
     // long streaming turns. Maintain GCs slots whose id is no longer live.
     std::vector<LiveTextStreamSlot> live_text_streams;
-    // The permission modal's toggles are owned by the modal/closure pair
-    // (a shared_ptr captured by both, see TabMaintenance::MaintainModals) --
-    // there is deliberately no TabUi member holding them: a raw unique_ptr
-    // here once made the closure's validity depend on an implicit
-    // "never reset while its modal lives" invariant.
+    // The permission modal's rebuild key: rebuilt only when a NEW
+    // request_id arrives (its grant toggles live in the renderer's modal).
     std::string grants_for_request;
     // The wire confirmation modal's rebuild key, like grants_for_request:
     // the inner modal is rebuilt only when a NEW request_id arrives.

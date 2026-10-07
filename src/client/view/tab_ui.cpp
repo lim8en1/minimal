@@ -2,6 +2,11 @@
 #include "minimal/client/view/tab_ui.hpp"
 
 #include <algorithm>
+#include <exception>
+#include <functional>
+#include <string_view>
+
+#include <nlohmann/json.hpp>
 
 #include "minimal/common/logger.hpp"
 #include "minimal/v1/session_service.pb.h"
@@ -254,6 +259,87 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
     // the unknown segment id's.
 }
 
+nlohmann::json PermissionPayload(const PendingPermission& request) {
+    nlohmann::json grants = nlohmann::json::array();
+    for (const auto& grant : request.grants) {
+        grants.push_back({{"key", grant.key()}, {"label", grant.label()}});
+    }
+    return {{"tool_name", request.tool_name},
+            {"category", v1::ToolCategory_Name(request.category)},
+            {"summary", request.summary},
+            {"complete", request.complete},
+            {"reason", request.reason},
+            {"grants", std::move(grants)}};
+}
+
+nlohmann::json ConfirmationPayload(const std::string& kind, const std::string& title,
+                                   const std::string& detail,
+                                   const std::vector<std::string>& options) {
+    return {{"kind", kind}, {"title", title}, {"detail", detail}, {"options", options}};
+}
+
+void AnswerPermissionFromReply(AppState& app, const std::string& session_id,
+                               const PendingPermission& request, const plugins::PromptReply& reply) {
+    bool allow = false;
+    bool stop = false;
+    std::vector<std::string> granted;
+    std::string message;
+    if (reply.outcome == v1::PROMPT_OUTCOME_ANSWERED && reply.answer.is_object()) {
+        const std::string decision = reply.answer.value("decision", "");
+        if (decision == "allow") {
+            allow = true;
+            // Only what this request OFFERED: an answer can never mint a
+            // grant for a key no prompt displayed (the server filters too).
+            for (const auto& key : reply.answer.value("granted_keys", nlohmann::json::array())) {
+                if (!key.is_string()) continue;
+                for (const auto& offer : request.grants) {
+                    if (offer.key() == key.get<std::string>()) granted.push_back(offer.key());
+                }
+            }
+        } else if (decision == "deny_with_message") {
+            message = reply.answer.value("message", "");  // empty: a plain deny
+        } else if (decision == "deny_and_stop") {
+            stop = true;
+        }
+        // "deny", and anything else: deny.
+    }
+    app.AnswerPermission(session_id, request.request_id,
+                         allow ? v1::PERMISSION_DECISION_ALLOW : v1::PERMISSION_DECISION_DENY,
+                         std::move(granted), std::move(message), stop);
+}
+
+std::string ConfirmationChoice(const std::vector<std::string>& options,
+                               const plugins::PromptReply& reply) {
+    // One of the offered options, or "" -- the server's own "do not proceed".
+    if (reply.outcome != v1::PROMPT_OUTCOME_ANSWERED || !reply.answer.is_object()) return {};
+    const std::string chosen = reply.answer.value("chosen", "");
+    for (const auto& option : options) {
+        if (option == chosen) return chosen;
+    }
+    return {};
+}
+
+ftxui::Component MakeConsentModal(const plugins::PromptRendererRegistry& registry,
+                                  std::string_view kind, const nlohmann::json& payload,
+                                  const std::string& asker, const Theme& theme,
+                                  std::function<void(plugins::PromptReply)> reply) {
+    const auto* renderer = registry.Find(kind);
+    if (renderer == nullptr) {
+        common::DefaultLogger().error("no prompt renderer for core's '{}' kind: answering no", kind);
+        return nullptr;
+    }
+    try {
+        return renderer->Make(plugins::PromptView{.kind = kind, .payload = payload, .asker = asker},
+                              theme, std::move(reply));
+    } catch (const std::exception& error) {
+        common::DefaultLogger().error("prompt renderer for '{}' threw: {} -- answering no", kind,
+                                      error.what());
+    } catch (...) {
+        common::DefaultLogger().error("prompt renderer for '{}' threw -- answering no", kind);
+    }
+    return nullptr;
+}
+
 // The permission modal for the focused tab: rebuilt when the outstanding
 // request changes, shown while it is unanswered. Moved here from
 // FrameRenderer::Render() (Part 3.2): deciding "is this a NEW request" and
@@ -264,69 +350,56 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
 void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
     TabUi& ui = deps_.tab_ui[focused_];
 
+    // Core's two questions, drawn by whichever plugin renders the
+    // "permission" / "confirmation" prompt kinds (both required at startup).
+    // Core builds the payload, keeps the layer topmost, checks the answer and
+    // fails closed: no modal, a throw, or anything but a well-formed choice
+    // answers deny / "do not proceed" at once -- the server worker is parked
+    // on the request and nothing else would answer it.
     if (snap.pending_permission.has_value()) {
         const auto& request = *snap.pending_permission;
         if (ui.permission_modal == nullptr || ui.grants_for_request != request.request_id) {
             ui.grants_for_request = request.request_id;
-            // ONE shared_ptr shared by the modal component and the answer
-            // closure. The old code captured a raw `&toggles` (pointee of
-            // ui.grants) in the closure, which stayed valid only through the
-            // implicit invariant that ui.grants is never reset while its
-            // modal lives -- and the modal's checkboxes bind raw bool* into
-            // the toggles deque, so the component and the closure must agree
-            // on the SAME object anyway. Ownership inside the modal/closure
-            // pair makes the lifetime explicit: the toggles live exactly as
-            // long as the component that displays and answers them, even if
-            // the next request replaces this modal wholesale.
-            const auto toggles = std::make_shared<GrantToggles>();
             // AnswerPermission is SESSION-keyed; a modal can only exist on a
             // sessioned tab, so the snapshot's session id is the right key.
             const auto session_id = snap.session_id;
             AppState& app = deps_.app;
-            ui.permission_modal = MakePermissionModal(
-                request, *toggles, deps_.theme,
-                [&app, session_id, request, toggles](PermissionVerdict verdict) {
-                    // granted_keys FILTERED to what this request offered
-                    // (GrantToggles reads the request's own offers). Grants
-                    // ride only an allow; the message and the stop only a deny.
-                    const bool allow = verdict.choice == PermissionChoice::Allow;
-                    app.AnswerPermission(session_id, request.request_id,
-                                         allow ? v1::PERMISSION_DECISION_ALLOW
-                                               : v1::PERMISSION_DECISION_DENY,
-                                         allow ? toggles->GrantedKeys(request)
-                                               : std::vector<std::string>{},
-                                         verdict.choice == PermissionChoice::DenyWithMessage
-                                             ? std::move(verdict.message)
-                                             : std::string{},
-                                         verdict.choice == PermissionChoice::DenyAndStop);
-                });
+            const auto answer = [&app, session_id, request](const plugins::PromptReply& reply) {
+                AnswerPermissionFromReply(app, session_id, request, reply);
+            };
+            ui.permission_modal = MakeConsentModal(deps_.prompt_registry, "permission",
+                                                   PermissionPayload(request), snap.agent_preset,
+                                                   deps_.theme, answer);
+            if (ui.permission_modal == nullptr) answer({v1::PROMPT_OUTCOME_UNAVAILABLE, nullptr});
         }
         *deps_.permission_child = ui.permission_modal;
-        deps_.show_permission = true;
+        deps_.show_permission = ui.permission_modal != nullptr;
     } else {
         ui.permission_modal = nullptr;
         deps_.show_permission = false;
     }
 
-    // The wire confirmation modal: same rebuild-on-new-request-id rule as
-    // the permission modal above. All three pending modals are never set at
-    // once (each Set clears the others in SessionState).
+    // The wire confirmation: the same rule.
     if (snap.pending_confirmation.has_value()) {
         const auto& request = *snap.pending_confirmation;
         if (ui.confirmation_modal == nullptr ||
             ui.confirmation_for_request != request.request_id) {
             ui.confirmation_for_request = request.request_id;
             const auto session_id = snap.session_id;   // SESSION-keyed (see above)
-            const auto request_copy = request;
             AppState& app = deps_.app;
-            ui.confirmation_modal = MakeConfirmationModal(
-                request_copy, deps_.theme,
-                [&app, session_id, request_copy](const std::string& chosen) {
-                    app.AnswerConfirmation(session_id, request_copy.request_id, chosen);
-                });
+            const auto answer = [&app, session_id, request](const plugins::PromptReply& reply) {
+                app.AnswerConfirmation(session_id, request.request_id,
+                                       ConfirmationChoice(request.options, reply));
+            };
+            ui.confirmation_modal =
+                MakeConsentModal(deps_.prompt_registry, "confirmation",
+                                 ConfirmationPayload(request.kind, request.title, request.detail,
+                                                     request.options),
+                                 snap.agent_preset, deps_.theme, answer);
+            if (ui.confirmation_modal == nullptr) answer({v1::PROMPT_OUTCOME_UNAVAILABLE, nullptr});
         }
         *deps_.confirmation_child = ui.confirmation_modal;
-        deps_.show_confirmation = true;
+        deps_.show_confirmation = ui.confirmation_modal != nullptr;
     } else {
         ui.confirmation_modal = nullptr;
         deps_.show_confirmation = false;

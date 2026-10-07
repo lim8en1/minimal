@@ -1165,6 +1165,7 @@ Core never names a plugin, a plugin's tool, or a plugin's directory layout: a pl
 | `PrefixMentionResolver` | **Core default**, plugin-overridable | The minimum default needed to function. |
 | Themes, skills, agent presets, prompts | **Not plugins — config** | Pure data; a plugin would add ABI/build complexity for something that is already just a file. |
 | Syntax-highlighting grammars | **Client slot**, bundled `syntax-grammars` plugin | Additive and language-keyed (EXTENSIBILITY.md §4.2): each grammar carries its node-type table, function-name positions and fence aliases; core keeps the highlighter. |
+| Permission and confirmation modals | **Client prompt kinds**, bundled `consent-prompts` plugin | Required kinds (EXTENSIBILITY.md §4.2): the TUI can run without this look but not without these questions, so core builds the payload, keeps the layer topmost and fails closed, and a plugin draws the modal. |
 
 `ask_user` (`tool-ask`) is also a bundled plugin, not listed as its own row — see *Asking the user* above for its rationale.
 

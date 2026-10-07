@@ -375,6 +375,10 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     # session-status: the status bar's usual segments.
     "${CMAKE_SOURCE_DIR}/plugins/client/session-status/session_status.cpp"
     session_status_test.cpp
+    # consent-prompts: the permission and confirmation prompt kinds.
+    "${CMAKE_SOURCE_DIR}/plugins/client/consent-prompts/consent_modals.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/consent-prompts/consent_prompts.cpp"
+    consent_prompts_test.cpp
     # ui-kit: the bundled widget kit, which every view test draws with.
     "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/ui_kit.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit/modal_chrome.cpp"
@@ -404,6 +408,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/client/session-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/session-status"
     "${CMAKE_SOURCE_DIR}/plugins/client/ui-kit"
+    "${CMAKE_SOURCE_DIR}/plugins/client/consent-prompts"
     "${CMAKE_SOURCE_DIR}/plugins/client/syntax-grammars"
     "${CMAKE_SOURCE_DIR}/plugins/client/markdown-md4c"
     "${CMAKE_SOURCE_DIR}/plugins/client/ask-view")
@@ -468,6 +473,7 @@ target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_SESSION_VIEW_PLUGIN="$<TARGET_FILE:minimal_session_view>"
     MINIMAL_SESSION_STATUS_PLUGIN="$<TARGET_FILE:minimal_session_status>"
     MINIMAL_UI_KIT_PLUGIN="$<TARGET_FILE:minimal_ui_kit>"
+    MINIMAL_CONSENT_PROMPTS_PLUGIN="$<TARGET_FILE:minimal_consent_prompts>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto"
     # The captured live Jev responses (fixtures/decision-advisor/): the
     # response-shape contract the advisor parses, kept as data not literals.

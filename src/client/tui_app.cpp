@@ -21,7 +21,6 @@
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/keymap_help_model.hpp"
 #include "minimal/client/view/modal_host.hpp"
-#include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/client/policy.hpp"
@@ -379,36 +378,8 @@ void TuiApp::BuildModals() {
     modals_.Set(ModalId::kPluginPrompt, MakeModalHost(prompt_child_, show_prompt_));
 
     // --- quit / close confirmation --------------------------------------------
-    // THREE answers, not two (the close-vs-detach split): "close anyway"
-    // destroys the sessions and everything in flight (EndSession{TERMINATE});
-    // "detach" ends only the streams -- the sessions keep running
-    // server-side, work finishes unattended, the server shuts itself down
-    // once nothing is busy; "cancel" (esc) backs out.
-    confirm_request_.kind = "app_quit";
-    confirm_request_.title = "work is still running";
-    confirm_request_.detail =
-        "a session still has work in flight. close: destroy it now. "
-        "detach: keep it running in the background (/sessions reattaches).";
-    confirm_request_.options = {"close anyway", "cancel", "detach"};
-    confirm_modal_ = MakeConfirmationModal(confirm_request_, theme, [this](const std::string& chosen) {
-        if (chosen != "close anyway" && chosen != "detach") {
-            show_quit_confirm_ = false;
-            pending_close_ = PendingClose{};
-            return;
-        }
-        // State the intent on the wire FIRST, while the streams are still
-        // open: DETACH or TERMINATE per the answer. Then close the tabs root
-        // first, children after (the staging order -- see PendingClose); each
-        // Close() lands on an already-ended stream and degrades to a no-op.
-        app_->EndTabSessions(pending_close_.tab_ids, chosen == "detach"
-                                                         ? EndSessionMode::kDetach
-                                                         : EndSessionMode::kTerminate);
-        for (const auto& id : pending_close_.tab_ids) CloseTab(id);
-        if (pending_close_.quit) quit_();
-        show_quit_confirm_ = false;
-        pending_close_ = PendingClose{};
-    });
-    modals_.Set(ModalId::kQuitConfirm, confirm_modal_);
+    // A stable host; StageClose builds a fresh modal into it each time.
+    modals_.Set(ModalId::kQuitConfirm, MakeModalHost(quit_confirm_child_, show_quit_confirm_));
 
     // The pickers are plugin views (sessions, subagents, agents, models,
     // subagent-models); core keeps what their choices do.
@@ -1042,8 +1013,63 @@ void TuiApp::RequestQuit() {
     }
 }
 
+ftxui::Component TuiApp::MakeQuitConfirm() {
+    using namespace ftxui;
+    // THREE answers, not two (the close-vs-detach split): "close anyway"
+    // destroys the sessions and everything in flight (EndSession{TERMINATE});
+    // "detach" ends only the streams -- the sessions keep running
+    // server-side, work finishes unattended, the server shuts itself down
+    // once nothing is busy; "cancel" (esc) backs out.
+    // Drawn by the "confirmation" prompt renderer like the server's own
+    // confirmations, built fresh per ask (a renderer answers once); anything
+    // but one of the three options is "cancel".
+    static const std::vector<std::string> kQuitOptions = {"close anyway", "cancel", "detach"};
+    const auto on_quit_choice = [this](const std::string& chosen) {
+        if (chosen != "close anyway" && chosen != "detach") {
+            show_quit_confirm_ = false;
+            pending_close_ = PendingClose{};
+            return;
+        }
+        // State the intent on the wire FIRST, while the streams are still
+        // open: DETACH or TERMINATE per the answer. Then close the tabs root
+        // first, children after (the staging order -- see PendingClose); each
+        // Close() lands on an already-ended stream and degrades to a no-op.
+        app_->EndTabSessions(pending_close_.tab_ids, chosen == "detach"
+                                                         ? EndSessionMode::kDetach
+                                                         : EndSessionMode::kTerminate);
+        for (const auto& id : pending_close_.tab_ids) CloseTab(id);
+        if (pending_close_.quit) quit_();
+        show_quit_confirm_ = false;
+        pending_close_ = PendingClose{};
+    };
+    auto modal = MakeConsentModal(
+        env_.registries.prompt_renderers, "confirmation",
+        ConfirmationPayload("app_quit", "work is still running",
+                            "a session still has work in flight. close: destroy it now. "
+                            "detach: keep it running in the background (/sessions reattaches).",
+                            kQuitOptions),
+        "", *env_.theme, [on_quit_choice](const plugins::PromptReply& reply) {
+            on_quit_choice(ConfirmationChoice(kQuitOptions, reply));
+        });
+    // Startup refuses without a "confirmation" renderer; if it threw here,
+    // a bare layer that Escape still cancels -- never one that traps input.
+    if (modal == nullptr) {
+        modal = CatchEvent(Renderer([] {
+                                        return text("quit confirmation unavailable -- esc: cancel") |
+                                               border;
+                                    }),
+                                    [on_quit_choice](const Event& event) {
+                                        if (event != Event::Escape) return true;
+                                        on_quit_choice("cancel");
+                                        return true;
+                                    });
+    }
+    return modal;
+}
+
 void TuiApp::StageClose(std::vector<std::string> ids, bool quit) {
     pending_close_ = PendingClose{quit, std::move(ids)};
+    *quit_confirm_child_ = MakeQuitConfirm();
     show_quit_confirm_ = true;
 }
 
