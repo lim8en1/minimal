@@ -85,7 +85,7 @@ optional; an absent or partial config object is normal rather than an error.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `rates` | *(none)* | Per-model rate overrides, consumed verbatim as the RateTable's config tier. Keys are model ids. |
+| `rates` | *(none)* | Per-model rate overrides, the RateTable's config tier. Keys are model ids -- the name the provider sends, not `<provider>/<model>`; each entry takes `input`, `output`, `cache_read`, `cache_write` in $ per million tokens, all optional. A negative or non-number price is refused, naming the entry. Applied live. In `/config` each model is its own row; its id is picked from the server's models. |
 | `rate_sources` | OpenRouter `/api/v1/models`, then LiteLLM's catalog on GitHub | What the fetch (startup auto-refresh, the flag, the `.rpc` method) reads, highest priority first. Setting it replaces the whole list; `[]` fetches nothing. Each entry: `format` (required, above), `url` (required), `name` (defaults to `format`; must be unique — it keys the cached snapshot, so two sources of one format need names), `api_key` (optional key reference — `"secret:NAME"`, `"env:NAME"`, `"secret:<plugin>:NAME"` or a literal, docs/CONFIGURATION.md § Secrets — sent as `Authorization: Bearer`; a stored secret is read per fetch). Restart to apply. |
 | `rates_fetch_timeout_ms` | `30000` | Every fetch — the startup auto-refresh included — is bounded even when the transfer stalls. |
 | `rates_refresh_days` | `7` | How stale a cached snapshot may be before a server start fetches again. `0` fetches on every start; the `--plugin-call cost-tracker refresh_rates` flag always fetches regardless. |

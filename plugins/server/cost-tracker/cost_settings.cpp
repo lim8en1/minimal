@@ -115,8 +115,7 @@ CostSettings ParseCostSettings(const nlohmann::json& config,
     // settings (held by the refresher and the RPC service; the source list
     // also fixes the rate table's tiers) and rates_refresh_days, which only a
     // startup consults.
-    reader.Describe("rates", {"Per-model rate overrides, keyed by model id: {\"input\", "
-                              "\"output\", \"cache_read\"} per million tokens. Costs are priced "
+    reader.Describe("rates", {"Per-model prices that outrank every snapshot. Costs are priced "
                               "when reported, so a change reprices past usage too.",
                               config::ApplyPolicy::kLive});
     reader.Default("rates", nlohmann::json::object());
@@ -136,7 +135,22 @@ CostSettings ParseCostSettings(const nlohmann::json& config,
     // 0 is meaningful ("always refresh").
     settings.rates_refresh_days = static_cast<int>(
         reader.Int("rates_refresh_days", settings.rates_refresh_days, 0, std::numeric_limits<int>::max()));
-    if (auto rates = reader.MaybeObject("rates")) settings.rates = rates->node();
+    // Each entry checked here -- a negative or non-number price used to be
+    // dropped silently by the rate table -- and handed over as written.
+    reader.ObjectMap(
+        "rates", {{"input", 0}, {"output", 0}},
+        {.doc = "The model id your provider sends (the name the price is looked up by).",
+         .format = config::FieldFormat::kModelId},
+        [](const std::string&, config::Reader& entry) {
+            for (const char* field : {"input", "output", "cache_read", "cache_write"}) {
+                entry.Describe(field, {"$ per million tokens."});
+                (void)entry.MaybeDouble(field, 0.0);
+            }
+            entry.Finish();
+        });
+    if (const auto* rates = reader.Has("rates") ? &config.at("rates") : nullptr) {
+        settings.rates = *rates;
+    }
     reader.Finish();
     return settings;
 }

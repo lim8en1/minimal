@@ -123,6 +123,7 @@ void Reader::Describe(std::string_view key, FieldMeta meta) {
     field["apply"] = meta.apply == ApplyPolicy::kLive ? "live" : "restart";
     if (meta.secret) field["secret"] = true;
     if (meta.format == FieldFormat::kModelRef) field["format"] = "model_ref";
+    if (meta.format == FieldFormat::kModelId) field["format"] = "model_id";
     if (!meta.empty_label.empty()) field["empty_label"] = std::move(meta.empty_label);
 }
 
@@ -384,6 +385,36 @@ void Reader::ObjectList(std::string_view key, const nlohmann::json& sample,
     nlohmann::json& field = recorder_->Field(Join(key));
     field["items"] = std::move(items);
     field["item_template"] = sample;
+}
+
+void Reader::ObjectMap(std::string_view key, const nlohmann::json& sample, FieldMeta key_meta,
+                       const std::function<void(const std::string& name, Reader& item)>& each) {
+    Note(key, "object_map");
+    if (const auto* map = Find(key)) {
+        if (!map->is_object()) Fail(key, "must be an object of entries, got " + Quoted(*map));
+        for (const auto& [name, node] : map->items()) {
+            if (IsCommentKey(name)) continue;
+            const std::string segment = std::string(key) + "." + name;
+            if (!node.is_object()) Fail(segment, "must be an object, got " + Quoted(node));
+            Reader item = Child(node, segment);
+            each(name, item);
+        }
+    }
+    if (!recorder_) return;
+    {
+        Reader item = Child(sample, std::string(key) + ".{}");
+        each("{}", item);
+    }
+    nlohmann::json items = recorder_->Extract(Join(key) + ".{}.");
+    nlohmann::json described_key = nlohmann::json::object();
+    if (!key_meta.doc.empty()) described_key["doc"] = std::move(key_meta.doc);
+    if (key_meta.format == FieldFormat::kModelRef) described_key["format"] = "model_ref";
+    if (key_meta.format == FieldFormat::kModelId) described_key["format"] = "model_id";
+    if (!key_meta.empty_label.empty()) described_key["empty_label"] = std::move(key_meta.empty_label);
+    nlohmann::json& field = recorder_->Field(Join(key));
+    field["items"] = std::move(items);
+    field["item_template"] = sample;
+    field["key"] = std::move(described_key);
 }
 
 void Reader::Finish(UnknownKeys policy) {
