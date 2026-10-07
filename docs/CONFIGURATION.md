@@ -468,6 +468,16 @@ Mode vocabulary:
 | `advisor_inherit` | bool | `false` | also let the advisor answer inside subagent sessions. An advisor decides one invocation at a time and never mints session grants |
 | `advisor_timeout_ms` | int | `30000` | ≥ 0; `0` disables the advisor budget |
 
+**Editing it in the TUI.** `/config` lists `permissions.json` under **core**,
+above the plugins (`/config permissions.json` opens it directly). Every field
+above except `plugins` is on its form — each plugin's slice belongs on that
+plugin's own form. `advisor` is a choice of the running plugins that
+registered an advisor; the per-tool and pattern maps are edited as JSON.
+A save is validated by the same parser the server starts with, and
+everything applies at the next server start (the form says **restart
+pending** until then). Saving rewrites the file: keys come back sorted, `//`
+comment keys first. Clearing every field leaves `{}`, never a missing file.
+
 **Seeing what applies.** Every denial and every permission prompt names the
 rule that decided it (`preset: file_write=deny`, ``pattern `git push *`=ask``,
 `outside the project: out_of_workdir=ask`, `parent session: …`, `run mode

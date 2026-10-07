@@ -51,6 +51,14 @@ struct PermissionsConfig {
 // sentinel used by agent::BuildPermissionPolicy.
 PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc);
 
+// The file's schema (config::DescribeConfig over the parser above) -- for
+// /config's permissions.json form. Defined beside the parser on purpose:
+// describe mode is a thread-local in config_reader, and a caller in another
+// binary (the server executable, a test) holds its own copy of it.
+nlohmann::json DescribePermissionsConfig();
+// "" when ParsePermissionsConfig accepts `doc`, else its message.
+std::string ValidatePermissionsConfig(const nlohmann::json& doc);
+
 // Thin: reads the file and parses it. Throws if the file is missing or isn't
 // valid JSON.
 PermissionsConfig LoadPermissionsConfig(const std::filesystem::path& path);

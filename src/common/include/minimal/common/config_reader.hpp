@@ -151,6 +151,9 @@ public:
     // A string that must be one of `choices`; the error lists them.
     std::optional<std::string> MaybeEnum(std::string_view key,
                                          std::initializer_list<std::string_view> choices);
+    // The same, over choices known only at run time (a spelling table).
+    std::optional<std::string> MaybeEnum(std::string_view key,
+                                         const std::vector<std::string_view>& choices);
     std::string Enum(std::string_view key, std::string fallback,
                      std::initializer_list<std::string_view> choices);
 
