@@ -53,6 +53,9 @@ struct HeadlessOptions {
     // (see server_spawn.hpp). --no-autospawn restores the old "cannot reach"
     // error; a non-unix target never spawns regardless.
     bool autospawn = true;
+    // Connect to a server of a different build instead of refusing (see
+    // ServerBuildMismatch). The diagnostic still prints.
+    bool allow_version_mismatch = false;
 };
 
 struct ParsedArgs {

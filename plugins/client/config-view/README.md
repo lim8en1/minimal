@@ -15,6 +15,12 @@ Plugin configuration in the TUI: `/config`.
   uses; a field the current mode does not use (memory's http fields under
   `strategy: sidecar`) is dimmed and tagged **not used**, still editable. The
   selected field's type, default, range, doc and, when unused, why show below.
+- **Core** rows above the plugins: core config files with a form of their
+  own — `permissions.json` (docs/CONFIGURATION.md). Same form and keys as a
+  plugin's, no on/off (space says so), every change on **restart**. A
+  running plugin that a core field could name but does not (an advisor
+  plugin `permissions.json` does not choose) says `not the advisor in
+  permissions.json` on its row.
 - **Command** `/config [plugin]` — opens the list, or straight onto a
   plugin's form.
 
@@ -49,6 +55,9 @@ found, each finding marks its field (✓ fine, ⚠ worth a look, ✗ a problem)
 and the selected field's finding is shown below it; a list or map entry
 carries the worst of its fields'. The plugin list shows a plugin's failed
 checks too.
+
+A core file's edits take the same path, checked by the parser the server
+starts with and written to the file itself (never removed: `{}` at the least).
 
 Edits go to core's `plugins` endpoint: the plugin's own parser checks the
 value (a refusal shows in red, nothing is written), the file

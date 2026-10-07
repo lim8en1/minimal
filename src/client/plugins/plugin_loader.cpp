@@ -109,7 +109,7 @@ std::string_view ToString(LoadStatus status) {
 std::vector<RegistryHook> RegistryHooks(ClientRegistries& r) {
     using Policy = minimal::plugins::NameTable::Policy;
     return {
-        // kName: user-addressed names (keybindings.json, ui.json status_format).
+        // kName: user-addressed names (keybindings.json, ui.json status_segments).
         // kSlot: the key is a contract with something outside the plugin (a
         // payload kind, a tool name, a language; client commands dispatch by
         // their original name). Start views share the view-id namespace.

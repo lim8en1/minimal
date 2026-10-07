@@ -45,16 +45,6 @@ void DropSegment(std::vector<StatusBarPart>& parts, std::size_t index) {
 
 }  // namespace
 
-std::vector<std::string> FormatSegmentIds(const std::string& format) {
-    std::vector<std::string> ids;
-    for (const auto& part : ParseStatusFormat(format)) {
-        if (part.is_segment && !part.optional && part.text != kStatusSplitId) {
-            ids.push_back(part.text);
-        }
-    }
-    return ids;
-}
-
 std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& format,
                                             const std::map<std::string, std::string>& values,
                                             int max_width, const StatusLayout& layout) {

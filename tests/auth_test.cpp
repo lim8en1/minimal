@@ -117,12 +117,12 @@ TEST_CASE("every RPC in the service descriptor is on the guarded list", "[auth][
     // 14th RPC without adding it to this list fails this case, and the same
     // commit must then show the guard in the new handler. The two wire cases
     // below spot-check that the listed methods really do carry it.
-    static const std::array<std::string_view, 15> kGuardedMethods = {
+    static const std::array<std::string_view, 16> kGuardedMethods = {
         "OpenSession",       "GetMessages",      "GetSession",
         "ListSessions",      "ListAgentPresets", "ListModels",
         "CreateSession",     "ForkSession",      "SuggestPaths",
         "ListCommands",      "RunSessionlessCommand", "DeleteSession", "Ping",
-        "PluginCall",        "PluginSubscribe",
+        "GetServerInfo",     "PluginCall",       "PluginSubscribe",
     };
 
     std::ifstream proto_file(std::string(MINIMAL_PROTO_DIR) +

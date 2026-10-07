@@ -251,9 +251,10 @@ json ReadPluginConfigFile(const std::filesystem::path& path, const std::string& 
     return loaded.is_object() ? loaded : json::object();
 }
 
-std::string WritePluginConfigFile(const std::filesystem::path& path, const json& config) {
+std::string WritePluginConfigFile(const std::filesystem::path& path, const json& config,
+                                  EmptyConfig empty) {
     std::error_code ec;
-    if (config.empty()) {
+    if (config.empty() && empty == EmptyConfig::kRemoveFile) {
         std::filesystem::remove(path, ec);
         return ec ? "could not remove " + path.string() + ": " + ec.message() : "";
     }

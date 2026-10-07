@@ -192,7 +192,8 @@ int RunHeadless(const HeadlessOptions& options) {
     const std::string target =
         options.server.empty() ? minimal::client::DefaultServerTarget() : options.server;
 
-    const auto connected = ConnectOrReport(target, options.autospawn);
+    const auto connected = ConnectOrReport(target, options.autospawn,
+                                           options.allow_version_mismatch);
     if (!connected) return kUnavailable;
     SessionClient& client = *connected;
 
@@ -528,7 +529,8 @@ int RunListSessions(const minimal::client::HeadlessOptions& options) {
     const std::string target =
         options.server.empty() ? minimal::client::DefaultServerTarget() : options.server;
 
-    const auto connected = ConnectOrReport(target, options.autospawn);
+    const auto connected = ConnectOrReport(target, options.autospawn,
+                                           options.allow_version_mismatch);
     if (!connected) return kUnavailable;
     SessionClient& client = *connected;
 

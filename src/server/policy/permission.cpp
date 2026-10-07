@@ -53,7 +53,18 @@ std::optional<Enum> ValueOf(const Spelling<Enum> (&table)[N], std::string_view n
     return std::nullopt;
 }
 
+template <typename Enum, std::size_t N>
+std::vector<std::string_view> NamesOf(const Spelling<Enum> (&table)[N]) {
+    std::vector<std::string_view> out;
+    for (const auto& row : table) out.push_back(row.name);
+    return out;
+}
+
 }  // namespace
+
+std::vector<std::string_view> mode_names() { return NamesOf(kModeNames); }
+std::vector<std::string_view> run_mode_names() { return NamesOf(kRunModeNames); }
+std::vector<std::string_view> precedence_names() { return NamesOf(kPrecedenceNames); }
 
 std::string_view mode_name(PermissionMode mode) { return NameOf(kModeNames, mode); }
 std::string_view category_name(ToolCategory category) { return NameOf(kCategoryNames, category); }

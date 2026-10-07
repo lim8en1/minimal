@@ -270,6 +270,11 @@ double Reader::Double(std::string_view key, double fallback, double min, double 
 
 std::optional<std::string> Reader::MaybeEnum(std::string_view key,
                                              std::initializer_list<std::string_view> choices) {
+    return MaybeEnum(key, std::vector<std::string_view>(choices));
+}
+
+std::optional<std::string> Reader::MaybeEnum(std::string_view key,
+                                             const std::vector<std::string_view>& choices) {
     auto value = MaybeString(key);
     if (recorder_) {
         nlohmann::json list = nlohmann::json::array();

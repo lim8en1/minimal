@@ -327,7 +327,7 @@ The "write a different frontend" tier shrinks to exactly this list. Not on it, u
 | Prompt editor | **exclusive, required** | bundled `prompt-editor` | **live** |
 | Tab bar | **exclusive**, optional | bundled `tab-bar` | **live** |
 | Tools panel (cross-session tool activity) | a bundled panel view | bundled `tools-panel` | **live** |
-| Status-bar segments (keyed by segment id) | additive; **format string orders/selects** | bundled `session-status` | live: every segment is a plugin's; a segment renders from the focused tab's `TabStatus`, tints by theme role, and declares its priority and an optional column cap |
+| Status-bar segments (keyed by segment id) | additive; **each segment places itself**, `ui.json` overrides by id | bundled `session-status` | live: every segment is a plugin's; a segment renders from the focused tab's `TabStatus`, tints by theme role, and declares its priority and an optional column cap |
 | Views (Panel/Modal) | additive | — | live; every picker is a bundled plugin view, opened by role id -- the server's view_hint names -- by core's commands and keys: `help-view` (`help.overlay`, `help.commands`), `theme-view` (`theme`), `selection-view` (`agents`, `models`, `subagent-models`), `session-view` (`sessions`, `subagents`) |
 | MentionResolver (server-side) | exclusive | `PrefixMentionResolver` — live: `SessionServiceImpl` resolves through `MentionResolverRegistry::Active()` | live |
 | Attention source | additive | core event derivation | live |
@@ -364,14 +364,14 @@ Rows from an assistant message carry `ChatRow::agent` / `ChatRow::model` — the
 ```cpp
 class StatusSegment {
 public:
-    virtual std::string_view id() const = 0;  // what {id} addresses in the format string
+    virtual std::string_view id() const = 0;  // what ui.json's status_segments addresses
     // Text for the focused tab's session ("" = sessionless); cheap, never
     // blocks -- it runs every frame. Color via theme roles, never hardcoded.
     virtual std::string Render(const std::string& focused_session_id) const = 0;
 };
 ```
 
-The format string (`"{version} | {tokens} | {git_branch}"`) is the ordering/selection config; a plugin adds content, the user keeps layout control. An unknown id renders nothing with a startup warning — the `keybindings.json` pattern for names unknown at compile time. A segment that throws is hidden for the frame, logged once, and disabled after three consecutive throws.
+A segment places itself (`placement()`: a side and an order) and the host composes the bar from what is registered, so enabling a plugin is enough to show its segment; `ui.json`'s `status_segments` hides or moves any segment by id, and `minimal status-bar` prints the result. A segment that throws is hidden for the frame, logged once, and disabled after three consecutive throws.
 
 **Markdown engine.** The md4c adapter becomes the default registrant of an exclusive slot. The contract carries the streaming semantics explicitly — complete-text render *and* the `AppendDelta`/`Finalize` lifecycle, whose debounce-and-finalize property ("partial input cannot soundly parse"; `Finalize()` always reparses authoritatively) is the **implementer's** obligation, not the host's.
 

@@ -280,6 +280,16 @@ include(cmake/StripDebugInfo.cmake)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SeedConfig.cmake"
                "${CMAKE_CURRENT_BINARY_DIR}/SeedConfig.cmake" @ONLY)
 install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/SeedConfig.cmake")
+# The same script's other modes, on demand: `check-config` reports which seeded
+# files this release changed, `update-config` replaces the ones the user never
+# touched and writes <file>.bundled-new beside the ones they did.
+foreach(_seed_mode IN ITEMS check update)
+    add_custom_target(${_seed_mode}-config
+        COMMAND "${CMAKE_COMMAND}" -DMINIMAL_SEED_MODE=${_seed_mode}
+                -P "${CMAKE_CURRENT_BINARY_DIR}/SeedConfig.cmake"
+        COMMENT "minimal: ${_seed_mode} the config dir against bundled/"
+        USES_TERMINAL VERBATIM)
+endforeach()
 
 # --- Plugin ABI tag ----------------------------------------------------------
 # Plugins are source-compatible, not binary-compatible: they are rebuilt with the

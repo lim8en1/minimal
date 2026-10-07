@@ -43,15 +43,36 @@ PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
                                            const std::vector<PluginRecord>& records,
                                            const std::vector<PluginCandidate>& candidates,
                                            BackendsInUse backends_in_use,
-                                           const ServiceRegistry* services)
+                                           const ServiceRegistry* services,
+                                           std::vector<CoreConfigFile> core_files)
     : config_dir_(std::move(config_dir)),
       backends_in_use_(std::move(backends_in_use)),
       services_(services),
       check_thread_([this] { CheckLoop(); }) {
+    for (auto& core : core_files) {
+        Entry entry;
+        entry.name = core.name;
+        entry.core = true;
+        entry.path = std::move(core.path);
+        entry.label = core.name;
+        entry.enabled = true;
+        entry.loaded = true;
+        entry.schema = std::move(core.schema);
+        entry.validate = std::move(core.validate);
+        entry.plugin_choices = std::move(core.plugin_choices);
+        try {
+            entry.applied = ReadFile(entry);
+        } catch (const std::exception&) {
+            entry.applied = json::object();   // the server started; an edit since is what broke it
+        }
+        entries_[entry.name] = std::move(entry);
+    }
     for (const auto& record : records) {
         Entry entry;
         entry.name = record.file.stem().string();
         entry.file = record.file.filename().string();
+        entry.path = config_dir_ / common::kPluginConfigDirName / (entry.name + ".json");
+        entry.label = common::PluginConfigLabel(common::kPluginConfigDirName, entry.name);
         entry.provenance = record.provenance;
         entry.provider_kinds = record.Registered("provider");
         entry.provides = ProvidesOf(record);
@@ -73,11 +94,18 @@ PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
                 entry.schema = nullptr;  // a broken describe: not configurable here
             }
         }
+        if (const auto validate = entry.symbols.validate; validate != nullptr) {
+            entry.validate = [validate](const json& next) {
+                std::string error;
+                validate(next, error);
+                return error;
+            };
+        }
         entry.applied = json::object();
         for (const auto& candidate : candidates) {
             if (candidate.file == record.file) entry.applied = candidate.config;
         }
-        entries_[entry.name] = std::move(entry);
+        entries_.emplace(entry.name, std::move(entry));   // a core file's name stays the core file
     }
 }
 
@@ -179,6 +207,7 @@ std::map<std::string, bool> PluginConfigEndpoint::EnabledInFile() const {
         return out;
     }
     for (const auto& [name, entry] : entries_) {
+        if (entry.core) continue;
         for (const auto& row : file.plugins) {
             if (row.file != entry.file) continue;
             if (row.provenance && *row.provenance != entry.provenance) continue;
@@ -189,6 +218,7 @@ std::map<std::string, bool> PluginConfigEndpoint::EnabledInFile() const {
 }
 
 json PluginConfigEndpoint::SetEnabled(Entry& entry, bool enabled) {
+    if (entry.core) return {{"error", entry.name + " is core configuration, not a plugin"}};
     const auto path = config_dir_ / "plugins.json";
     const std::string before = common::ReadFileOrEmpty(path);
     PluginConfig file = ParsePluginConfig(before);
@@ -202,7 +232,7 @@ json PluginConfigEndpoint::SetEnabled(Entry& entry, bool enabled) {
         const auto in_file = EnabledInFile();
         std::set<std::string> remaining;
         for (const auto& [name, other] : entries_) {
-            if (&other == &entry || !other.loaded) continue;
+            if (&other == &entry || !other.loaded || other.core) continue;
             const auto it = in_file.find(name);
             if (it != in_file.end() && !it->second) continue;
             remaining.insert(other.provider_kinds.begin(), other.provider_kinds.end());
@@ -240,13 +270,61 @@ json PluginConfigEndpoint::SetEnabled(Entry& entry, bool enabled) {
                            : "applied when the server restarts"}};
 }
 
-std::filesystem::path PluginConfigEndpoint::PathOf(const Entry& entry) const {
-    return config_dir_ / common::kPluginConfigDirName / (entry.name + ".json");
+json PluginConfigEndpoint::ReadFile(const Entry& entry) const {
+    return common::ReadPluginConfigFile(entry.path, entry.label);
 }
 
-json PluginConfigEndpoint::ReadFile(const Entry& entry) const {
-    return common::ReadPluginConfigFile(
-        PathOf(entry), common::PluginConfigLabel(common::kPluginConfigDirName, entry.name));
+std::vector<std::string> PluginConfigEndpoint::PluginsRegisteredUnder(const std::string& label) const {
+    std::vector<std::string> out;
+    for (const auto& [name, entry] : entries_) {
+        if (!entry.core && entry.provides.is_object() && entry.provides.contains(label)) {
+            out.push_back(name);
+        }
+    }
+    return out;
+}
+
+json PluginConfigEndpoint::SchemaOf(const Entry& entry, const json& file) const {
+    json schema = entry.schema;
+    if (entry.plugin_choices.empty() || !schema.contains("fields")) return schema;
+    for (auto& field : schema["fields"]) {
+        const auto it = entry.plugin_choices.find(field.value("path", ""));
+        if (it == entry.plugin_choices.end()) continue;
+        json choices = json::array();
+        for (const auto& name : PluginsRegisteredUnder(it->second)) choices.push_back(name);
+        // The file's own value stays choosable: a disabled or misspelled
+        // plugin still shows as what the file says.
+        if (const json* current = common::ConfigGet(file, it->first);
+            current != nullptr && current->is_string() &&
+            std::find(choices.begin(), choices.end(), *current) == choices.end()) {
+            choices.push_back(*current);
+        }
+        field["type"] = "enum";
+        field["choices"] = std::move(choices);
+    }
+    return schema;
+}
+
+json PluginConfigEndpoint::UnselectedOf(const Entry& entry) const {
+    json out = json::array();
+    if (entry.core || !entry.provides.is_object()) return out;
+    for (const auto& [name, core] : entries_) {
+        if (!core.core) continue;
+        for (const auto& [field, label] : core.plugin_choices) {
+            if (!entry.provides.contains(label)) continue;
+            json file;
+            try {
+                file = ReadFile(core);
+            } catch (const std::exception&) {
+                continue;   // the core row reports the broken file
+            }
+            const json* value = common::ConfigGet(file, field);
+            if (value == nullptr || !value->is_string() || value->get<std::string>() != entry.name) {
+                out.push_back({{"file", core.name}, {"field", field}});
+            }
+        }
+    }
+    return out;
 }
 
 json PluginConfigEndpoint::Describe(const Entry& entry) const {
@@ -258,10 +336,11 @@ json PluginConfigEndpoint::Describe(const Entry& entry) const {
         if (row.unused) unused[row.path] = *row.unused;
     }
     return {{"name", entry.name},
-            {"file", common::PluginConfigLabel(common::kPluginConfigDirName, entry.name)},
+            {"kind", entry.core ? "core" : "plugin"},
+            {"file", entry.label},
             {"enabled", entry.enabled},
             {"loaded", entry.loaded},
-            {"schema", entry.schema},
+            {"schema", SchemaOf(entry, file)},
             {"config", file},
             {"effective", std::move(effective)},
             {"unused", std::move(unused)},
@@ -317,10 +396,13 @@ json PluginConfigEndpoint::Apply(Entry& entry, const json& file) {
 }
 
 json PluginConfigEndpoint::Save(Entry& entry, const json& next) {
-    std::string error;
-    if (entry.symbols.validate != nullptr) entry.symbols.validate(next, error);
-    if (!error.empty()) return {{"error", error}};
-    if (const std::string failed = common::WritePluginConfigFile(PathOf(entry), next);
+    if (entry.validate) {
+        if (const std::string error = entry.validate(next); !error.empty()) return {{"error", error}};
+    }
+    // A core file is never removed: the server does not start without it.
+    if (const std::string failed = common::WritePluginConfigFile(
+            entry.path, next,
+            entry.core ? common::EmptyConfig::kKeepFile : common::EmptyConfig::kRemoveFile);
         !failed.empty()) {
         return {{"error", failed}};
     }
@@ -339,6 +421,7 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
             for (const auto& [name, entry] : entries_) {
                 const auto file_enabled = in_file.find(name);
                 json row = {{"name", name},
+                            {"kind", entry.core ? "core" : "plugin"},
                             {"enabled", entry.enabled},
                             {"enabled_in_file", file_enabled != in_file.end()
                                                     ? file_enabled->second
@@ -348,6 +431,9 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
                             {"provides", entry.provides},
                             {"set", 0},
                             {"pending", json::array()}};
+                if (json unselected = UnselectedOf(entry); !unselected.empty()) {
+                    row["unselected"] = std::move(unselected);
+                }
                 if (!entry.schema.is_null()) {
                     try {
                         const json file = ReadFile(entry);

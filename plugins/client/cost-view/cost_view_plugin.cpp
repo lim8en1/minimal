@@ -29,13 +29,16 @@ using minimal::client::cost_view::TotalsField;
 
 class TotalsSegment final : public plugins::StatusSegment {
 public:
-    TotalsSegment(std::string_view id, TotalsField field, std::shared_ptr<TotalsFeed> feed)
-        : id_(id), field_(field), feed_(std::move(feed)) {}
+    TotalsSegment(std::string_view id, TotalsField field, int order, std::shared_ptr<TotalsFeed> feed)
+        : id_(id), field_(field), order_(order), feed_(std::move(feed)) {}
 
     std::string_view id() const override { return id_; }
 
     plugins::StatusValue Render(const plugins::TabStatus& focused) const override {
         return {feed_->Render(focused.session_id, field_), ""};
+    }
+    std::optional<plugins::StatusPlacement> placement() const override {
+        return plugins::StatusPlacement{plugins::StatusPlacement::Side::kLeft, order_};
     }
     // Reference detail, but above the session name and version.
     int priority() const override { return minimal::client::cost_view::kStatusSegmentPriority; }
@@ -43,6 +46,7 @@ public:
 private:
     std::string_view id_;
     TotalsField field_;
+    int order_;
     std::shared_ptr<TotalsFeed> feed_;
 };
 
@@ -85,9 +89,11 @@ void minimal_client_plugin_register_status_segments(
     auto feed = std::make_shared<TotalsFeed>(context.client_api);
     feed->SetHostUi(context.ui);
     shared_feed = feed;
-    registry.Register(std::make_unique<TotalsSegment>("cost", TotalsField::kCost, feed));
-    registry.Register(
-        std::make_unique<TotalsSegment>("token_detail", TotalsField::kTokenDetail, feed));
+    using minimal::client::cost_view::kCostOrder;
+    using minimal::client::cost_view::kTokenDetailOrder;
+    registry.Register(std::make_unique<TotalsSegment>("cost", TotalsField::kCost, kCostOrder, feed));
+    registry.Register(std::make_unique<TotalsSegment>("token_detail", TotalsField::kTokenDetail,
+                                                      kTokenDetailOrder, feed));
 }
 
 // Runs after register_status_segments (the host's hook order): no feed

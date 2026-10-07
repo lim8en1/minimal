@@ -16,6 +16,7 @@
 #include "client_entry.hpp"
 #include "minimal/client/cli_args.hpp"
 #include "minimal/client/plugin_command.hpp"
+#include "minimal/client/status_bar_command.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
@@ -35,6 +36,10 @@ int main(int argc, char** argv) {
     // from a shell (plugin_command.hpp). Nothing else here applies to it.
     if (argc >= 2 && std::strcmp(argv[1], "plugin") == 0) {
         return minimal::client::RunPluginCommand({argv + 2, argv + argc});
+    }
+    // `minimal status-bar`: the composed status bar, printed (status_bar_command.hpp).
+    if (argc >= 2 && std::strcmp(argv[1], "status-bar") == 0) {
+        return minimal::client::RunStatusBarCommand({argv + 2, argv + argc});
     }
 
     const auto parsed = minimal::client::ParseArgs(argc, argv);

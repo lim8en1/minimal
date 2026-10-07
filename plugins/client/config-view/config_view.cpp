@@ -94,9 +94,22 @@ std::string Padded(const std::string& name) {
     return name.size() >= kNameColumn ? name + " " : name + std::string(kNameColumn - name.size(), ' ');
 }
 
-// The list's row ids: which side a plugin is on.
+// The list's row ids: which side a plugin is on, or a core file.
 constexpr const char* kServerPrefix = "s:";
 constexpr const char* kClientPrefix = "c:";
+constexpr const char* kCorePrefix = "k:";
+
+bool IsCore(const json& row) { return row.value("kind", "") == "core"; }
+
+// A core file's row: no on/off, only what needs attention.
+std::string CoreLabel(const json& row) {
+    std::string label = Padded(row.value("name", ""));
+    if (const auto pending = row.value("pending", json::array()); !pending.empty()) {
+        label += "  · restart pending";
+    }
+    if (row.contains("error")) label += "  · " + row.value("error", std::string());
+    return label;
+}
 
 // The list screen's label for one server plugin. Only what needs attention:
 // how many keys a file sets is the steady state, not news (the form's *
@@ -109,6 +122,12 @@ std::string ServerLabel(const json& row) {
     if (enabled && !row.value("loaded", false)) label += "  · failed to load";
     if (const auto pending = row.value("pending", json::array()); !pending.empty()) {
         label += "  · restart pending";
+    }
+    // Running, but a core field that would put it to use names another
+    // (permissions.json's advisor): enabling it alone does nothing.
+    for (const auto& unselected : row.value("unselected", json::array())) {
+        label += "  · not the " + unselected.value("field", std::string()) + " in " +
+                 unselected.value("file", std::string());
     }
     if (row.contains("error")) label += "  · " + row.value("error", std::string());
     if (const auto checks = row.value("checks", json()); checks.is_object()) {
@@ -338,7 +357,14 @@ private:
             bool header = false;
             for (const auto& row : rows) {
                 const std::string name = row.value("name", "");
-                if (!client::MatchesFilter(lowered, {name})) continue;
+                if (!IsCore(row) || !client::MatchesFilter(lowered, {name})) continue;
+                if (!std::exchange(header, true)) out.push_back({"core", "", /*header=*/true});
+                out.push_back({CoreLabel(row), kCorePrefix + name, /*header=*/false});
+            }
+            header = false;
+            for (const auto& row : rows) {
+                const std::string name = row.value("name", "");
+                if (IsCore(row) || !client::MatchesFilter(lowered, {name})) continue;
                 if (!std::exchange(header, true)) out.push_back({"server plugins", "", /*header=*/true});
                 out.push_back({ServerLabel(row), kServerPrefix + name, /*header=*/false});
             }
@@ -371,7 +397,10 @@ private:
         client::FilterableMenuCallbacks callbacks{
             .on_select =
                 [feed = feed_, rows](const client::MenuRow& row) {
-                    if (row.id.rfind(kServerPrefix, 0) != 0) return;   // TUI plugins: no config here
+                    // TUI plugins: no config here.
+                    if (row.id.rfind(kServerPrefix, 0) != 0 && row.id.rfind(kCorePrefix, 0) != 0) {
+                        return;
+                    }
                     const std::string name = row.id.substr(2);
                     for (const auto& server : rows) {
                         if (server.value("name", "") == name && server.value("configurable", false)) {
@@ -409,6 +438,12 @@ private:
                 client_outcome_newer_ = false;
                 feed_->Toggle(name, !enabled);
             }
+            return;
+        }
+        if (id.rfind(kCorePrefix, 0) == 0) {
+            client_outcome_ = id.substr(2) + " is core configuration: it has no on/off";
+            client_outcome_newer_ = true;
+            ++client_outcome_generation_;
             return;
         }
         if (id.rfind(kClientPrefix, 0) != 0 || ui_ == nullptr) return;

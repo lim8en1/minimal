@@ -12,8 +12,10 @@ separate data dir: `$XDG_DATA_HOME/minimal`, else `$HOME/.local/share/minimal`. 
 stored keys (`secrets.json`, mode 0600 — see [Secrets](#secrets)). The TUI keeps its up-arrow prompt history there too (`prompt_history.json`: the newest 500 submitted lines, at most 1 MiB); delete the file to clear it. And the last agent/model you picked, per project (`last_selection.json`): every new tab starts on it, `--agent`/`--model` outrank it, and a remembered pick that no longer resolves (a preset deleted, a provider removed) is dropped with a one-line notice instead of failing the tab. Picking **default** in the `/model` picker (or `/model default`) returns to `settings.json` `default_model` and is remembered as such. The headless client (`-p`) never reads it.
 
 The config dir is seeded from `bundled/` at `cmake --install` time (see
-BUILD.md); existing files are never overwritten. Nothing is seeded at server
-runtime. Copyable example agents, prompts, skills, and commands live in
+BUILD.md); existing files are never overwritten by the install. To pick up a
+newer release's defaults, run `cmake --build build --target update-config`.
+It replaces only the files you never edited and writes `<file>.bundled-new`
+beside the ones you did. Nothing is seeded at server runtime. Copyable example agents, prompts, skills, and commands live in
 [examples/](../examples/).
 
 ## File inventory
@@ -466,6 +468,16 @@ Mode vocabulary:
 | `advisor_inherit` | bool | `false` | also let the advisor answer inside subagent sessions. An advisor decides one invocation at a time and never mints session grants |
 | `advisor_timeout_ms` | int | `30000` | ≥ 0; `0` disables the advisor budget |
 
+**Editing it in the TUI.** `/config` lists `permissions.json` under **core**,
+above the plugins (`/config permissions.json` opens it directly). Every field
+above except `plugins` is on its form — each plugin's slice belongs on that
+plugin's own form. `advisor` is a choice of the running plugins that
+registered an advisor; the per-tool and pattern maps are edited as JSON.
+A save is validated by the same parser the server starts with, and
+everything applies at the next server start (the form says **restart
+pending** until then). Saving rewrites the file: keys come back sorted, `//`
+comment keys first. Clearing every field leaves `{}`, never a missing file.
+
 **Seeing what applies.** Every denial and every permission prompt names the
 rule that decided it (`preset: file_write=deny`, ``pattern `git push *`=ask``,
 `outside the project: out_of_workdir=ask`, `parent session: …`, `run mode
@@ -708,11 +720,41 @@ One undo step — `prompt.undo` brings the text back. Prompt editor only.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `status_format` | string | built-in default | segment ids in braces with literal text between; the default is `{activity} · {tokens} · {cost?} · {token_detail?}{>}{model} · {agent} · {permission_mode}`. Core ids: `activity`, `tokens`, `model`, `agent`, `permission_mode`, `session`, `paused`, `version`; plugin ids (e.g. cost-view's `cost`, `token_detail`) too. An unknown id is warned about at startup unless it is written `{id?}` -- optional, for a plugin segment that may not be installed. A plugin segment cannot take a core id: it is ignored with a warning. `{>}` right-aligns everything after it. An empty segment takes its separator with it; when the bar overflows, whole segments drop lowest-priority first (`version`, `token_detail`, `session` … `permission_mode` last) — a value is never clipped |
+| `status_segments` | object | `{}` | the status bar's exceptions, by segment id: `false` hides one, `{"side": "left"\|"right", "order": N}` moves it (a key left out keeps the segment's own). Every segment places itself (below); an id no loaded plugin registers is warned about and ignored. Not seeded — `minimal status-bar` prints a complete block to start from |
 | `scrollback_window_max_messages` | int | `0` (= built-in) | must be positive if set |
 | `tool_output_buffer_bytes` | int | `0` | |
 | `panel_height` | int | unset (12) | rows for a panel's content (the tools panel and every plugin panel); minimum 3 |
 | `theme` | string | `""` (= `"dark"`) | names `themes/<name>.json`; unknown name → terminal defaults + warning |
+
+**The status bar.** Each segment says where it goes; the bar is what the
+enabled plugins place, left side then right (`{>}` in the layout below),
+ascending by order, ties by id:
+
+| side | order | segment | plugin |
+|---|---|---|---|
+| left | 10 | `activity` | session-status |
+| left | 20 | `tokens` | session-status |
+| left | 30 | `cost` | cost-view |
+| left | 40 | `token_detail` | cost-view |
+| left | 50 | `todo` | checklist-view |
+| right | 10 | `model` | session-status |
+| right | 20 | `agent` | session-status |
+| right | 30 | `permission_mode` | session-status |
+| right | 40 | `paused` | session-status |
+| — | — | `session`, `version` | session-status (place them yourself) |
+
+An empty segment takes its separator with it; when the bar overflows, whole
+segments drop lowest-priority first (`version`, `session` … `permission_mode`
+last) — a value is never clipped. To see the bar without starting a session:
+
+```sh
+minimal status-bar --width 120 --width 80
+```
+
+prints the layout, the bar rendered from a sample tab at each width (with
+what dropped), and a complete `"status_segments"` block — paste it into
+`ui.json`, change what you want, and run it again. (`status_format`, the old
+format string, is gone; a leftover key is warned about as unknown.)
 
 Unknown keys ignored; the file is never rewritten (it is yours) — the only
 exception is the managed write of `theme` (`/theme`), which round-trips every

@@ -17,6 +17,7 @@
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_config_endpoint.hpp"
+#include "minimal/config/permissions_config.hpp"
 #include "minimal/common/read_file.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
@@ -1419,4 +1420,115 @@ TEST_CASE("the plugins endpoint checks a saved config off the request, newest sa
     // On demand.
     CHECK(CallJson(endpoint, "check", {{"name", "fixture-config"}}).at("started") == true);
     REQUIRE(wait_done());
+}
+
+// --- core files in the endpoint (permissions.json) ---------------------------
+
+namespace {
+
+plugins::CoreConfigFile PermissionsCoreFile(const std::filesystem::path& dir) {
+    return {.name = "permissions.json",
+            .path = dir / "permissions.json",
+            .schema = config::DescribePermissionsConfig(),
+            .validate = config::ValidatePermissionsConfig,
+            .plugin_choices = {{"advisor", "advisor"}}};
+}
+
+// A running plugin that registered an advisor -- a record, not a module: the
+// endpoint reads only what the loader recorded.
+plugins::PluginRecord AdvisorRecord(const std::string& name) {
+    plugins::PluginRecord record;
+    record.file = "/plugins/" + name + ".so";
+    record.name = name;
+    record.status = LoadStatus::Loaded;
+    record.registered["advisor"] = {"permission prompts"};
+    return record;
+}
+
+}  // namespace
+
+TEST_CASE("the plugins endpoint edits permissions.json as a core entry",
+          "[plugin_loader][config_endpoint][core_config]") {
+    TempDir config_dir;
+    std::ofstream(config_dir.path() / "permissions.json") << R"({"default_run_mode": "normal"})";
+    const std::vector<plugins::PluginRecord> records = {AdvisorRecord("decision-advisor")};
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, {}, {}, nullptr,
+                                           {PermissionsCoreFile(config_dir.path())});
+
+    // Listed as core, configurable; the advisor plugin is flagged unselected.
+    auto list = CallJson(endpoint, "list", {});
+    REQUIRE(list.size() == 2);
+    const auto row = [&](const std::string& name) {
+        for (const auto& r : list) {
+            if (r.at("name") == name) return r;
+        }
+        FAIL("no row " << name);
+        return nlohmann::json();
+    };
+    CHECK(row("permissions.json").at("kind") == "core");
+    CHECK(row("permissions.json").at("configurable") == true);
+    CHECK(row("decision-advisor").at("kind") == "plugin");
+    CHECK(row("decision-advisor").at("unselected") ==
+          nlohmann::json::array({{{"file", "permissions.json"}, {"field", "advisor"}}}));
+
+    // The schema: every field described, enums from the spelling tables, and
+    // the advisor a choice of the plugins that registered one.
+    auto described = CallJson(endpoint, "describe", {{"name", "permissions.json"}});
+    std::map<std::string, nlohmann::json> fields;
+    for (const auto& field : described.at("schema").at("fields")) fields[field.at("path")] = field;
+    CHECK(fields.at("default_run_mode").at("choices") ==
+          nlohmann::json::array({"normal", "bypass", "allow-only"}));
+    CHECK(fields.at("fallback.execute").at("choices") ==
+          nlohmann::json::array({"allow", "ask", "deny"}));
+    CHECK(fields.at("pattern_overrides").at("type") == "json");
+    CHECK(fields.at("advisor").at("type") == "enum");
+    CHECK(fields.at("advisor").at("choices") == nlohmann::json::array({"decision-advisor"}));
+    CHECK(fields.count("plugins") == 0);   // each plugin's slice is on its own form
+    for (const auto& [path, field] : fields) {
+        INFO(path);
+        CHECK(field.at("apply") == "restart");
+        CHECK(!field.value("doc", "").empty());
+    }
+
+    // Selecting it: written, pending until a restart, and the flag clears.
+    auto answer = CallJson(endpoint, "set", {{"name", "permissions.json"}, {"key", "advisor"},
+                                             {"text", "decision-advisor"}});
+    CHECK(answer.at("applied") == "restart");
+    described = CallJson(endpoint, "describe", {{"name", "permissions.json"}});
+    CHECK(described.at("pending") == nlohmann::json::array({"advisor"}));
+    list = CallJson(endpoint, "list", {});
+    CHECK(!row("decision-advisor").contains("unselected"));
+
+    // Refused by the parser: an error, and nothing written.
+    answer = CallJson(endpoint, "set", {{"name", "permissions.json"}, {"key", "fallback.execute"},
+                                        {"value", "sometimes"}});
+    CHECK(answer.contains("error"));
+    CHECK(!CallJson(endpoint, "describe", {{"name", "permissions.json"}})
+               .at("config")
+               .contains("fallback"));
+
+    // Unsetting everything leaves {} on disk: the server needs the file.
+    CallJson(endpoint, "unset", {{"name", "permissions.json"}, {"key", "advisor"}});
+    CallJson(endpoint, "unset", {{"name", "permissions.json"}, {"key", "default_run_mode"}});
+    REQUIRE(std::filesystem::exists(config_dir.path() / "permissions.json"));
+    CHECK(nlohmann::json::parse(common::ReadFileOrEmpty(config_dir.path() / "permissions.json")) ==
+          nlohmann::json::object());
+
+    // Not a plugin: no on/off.
+    CHECK(CallJson(endpoint, "enable", {{"name", "permissions.json"}, {"enabled", false}})
+              .contains("error"));
+}
+
+TEST_CASE("the plugins endpoint keeps a permissions.json advisor no plugin provides choosable",
+          "[plugin_loader][config_endpoint][core_config]") {
+    TempDir config_dir;
+    std::ofstream(config_dir.path() / "permissions.json") << R"({"advisor": "gone"})";
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), {}, {}, {}, nullptr,
+                                           {PermissionsCoreFile(config_dir.path())});
+    const auto described = CallJson(endpoint, "describe", {{"name", "permissions.json"}});
+    nlohmann::json advisor;
+    for (const auto& field : described.at("schema").at("fields")) {
+        if (field.at("path") == "advisor") advisor = field;
+    }
+    CHECK(advisor.value("choices", nlohmann::json()) == nlohmann::json::array({"gone"}));
 }

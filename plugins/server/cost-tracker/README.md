@@ -12,7 +12,12 @@ every completed turn (the only writer).
 - **Startup auto-refresh**: when any cached pricing snapshot is older than
   `rates_refresh_days` (default 7), the plugin fetches fresh prices from every
   `rate_sources` entry on a bounded background thread as the server boots. No
-  network during a turn; a failed refresh keeps the previous prices.
+  network during a turn; a failed refresh keeps the previous prices. A start
+  that skips the fetch says so: `pricing snapshots are fresh (oldest fetched
+  …, refreshed every N day(s)); not refreshing at startup`.
+  A source added to `rate_sources` has no snapshot yet, so the next start
+  fetches; one removed or renamed has its cached snapshot deleted at that
+  start (`dropped the cached prices of …`) -- its prices no longer count.
 - **Server flag**: `minimal-server --plugin-call cost-tracker refresh_rates` — fetch every pricing
   snapshot now and exit (bypasses the staleness gate). The manual escape
   hatch the old `/cost-update-rates` command was; there is no TUI command for

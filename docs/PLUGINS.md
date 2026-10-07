@@ -446,7 +446,7 @@ Aliases live in the `"aliases"` map of `plugins.json` (client: the same map in
   model addresses: tools and commands (server), view ids and status segments
   (client). The renamed entry answers to its alias everywhere it is
   addressed: the model calls the tool by it, the user types the command,
-  `keybindings.json` binds the view, `ui.json`'s `status_format` places the
+  `keybindings.json` binds the view, `ui.json`'s `status_segments` moves the
   segment, a command's view hint opens it. A plugin's own code keeps using
   its original id.
 - **Slots are never aliased** — keys that are a contract with something

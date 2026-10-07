@@ -14,4 +14,10 @@ inline constexpr double kSubCentUsd = 0.01;
 // plugin default -- spend is decision-relevant -- below live core state.
 inline constexpr int kStatusSegmentPriority = 40;
 
+// Where the segments sit: on the left, right after session-status's
+// {tokens} (left 20) -- spend reads with the context it bought -- the cost
+// first, the token breakdown after it.
+inline constexpr int kCostOrder = 30;
+inline constexpr int kTokenDetailOrder = 40;
+
 }  // namespace minimal::client::cost_view

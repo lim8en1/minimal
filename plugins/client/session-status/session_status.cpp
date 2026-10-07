@@ -14,26 +14,41 @@ namespace minimal::session_status {
 
 namespace {
 
-// One segment: an id, its priority and column cap, and how it reads the tab.
+// One segment: an id, where it sits, its priority and column cap, and how
+// it reads the tab.
 class Segment final : public plugins::StatusSegment {
 public:
     using Fn = std::function<plugins::StatusValue(const plugins::TabStatus&)>;
-    Segment(std::string_view id, int priority, std::size_t max_columns, Fn render)
-        : id_(id), priority_(priority), max_columns_(max_columns), render_(std::move(render)) {}
+    Segment(std::string_view id, std::optional<plugins::StatusPlacement> placement, int priority,
+            std::size_t max_columns, Fn render)
+        : id_(id),
+          placement_(placement),
+          priority_(priority),
+          max_columns_(max_columns),
+          render_(std::move(render)) {}
 
     std::string_view id() const override { return id_; }
     plugins::StatusValue Render(const plugins::TabStatus& focused) const override {
         return render_(focused);
     }
+    std::optional<plugins::StatusPlacement> placement() const override { return placement_; }
     int priority() const override { return priority_; }
     std::size_t max_columns() const override { return max_columns_; }
 
 private:
     std::string_view id_;
+    std::optional<plugins::StatusPlacement> placement_;
     int priority_;
     std::size_t max_columns_;
     Fn render_;
 };
+
+constexpr plugins::StatusPlacement Left(int order) {
+    return {plugins::StatusPlacement::Side::kLeft, order};
+}
+constexpr plugins::StatusPlacement Right(int order) {
+    return {plugins::StatusPlacement::Side::kRight, order};
+}
 
 // The desired-state rule for {model} / {agent}: the user's last choice
 // shows, with the "→ " pending marker until the session confirms it -- on a
@@ -79,15 +94,16 @@ std::vector<std::unique_ptr<plugins::StatusSegment>> MakeSegments() {
     using plugins::StatusValue;
     using plugins::TabStatus;
     std::vector<std::unique_ptr<plugins::StatusSegment>> out;
-    const auto add = [&out](std::string_view id, int priority, std::size_t cap, Segment::Fn fn) {
-        out.push_back(std::make_unique<Segment>(id, priority, cap, std::move(fn)));
+    const auto add = [&out](std::string_view id, std::optional<plugins::StatusPlacement> placement,
+                            int priority, std::size_t cap, Segment::Fn fn) {
+        out.push_back(std::make_unique<Segment>(id, placement, priority, cap, std::move(fn)));
     };
 
-    add("version", kVersionPriority, 0,
+    add("version", std::nullopt, kVersionPriority, 0,
         [](const TabStatus&) { return StatusValue{std::string(common::Version()), ""}; });
 
     // A name, not a figure: the one segment the bar may cut short.
-    add("session", kSessionPriority, client::kStatusSessionColumnCap, [](const TabStatus& tab) {
+    add("session", std::nullopt, kSessionPriority, client::kStatusSessionColumnCap, [](const TabStatus& tab) {
         if (!tab.focused) return StatusValue{};
         std::string name = tab.display_name.empty() ? "new session" : tab.display_name;
         // A read-only transcript says so where the user looks before typing.
@@ -96,7 +112,7 @@ std::vector<std::unique_ptr<plugins::StatusSegment>> MakeSegments() {
     });
 
     // Tinted as the window fills.
-    add("tokens", kTokensPriority, 0, [](const TabStatus& tab) {
+    add("tokens", Left(kTokensOrder), kTokensPriority, 0, [](const TabStatus& tab) {
         if (!tab.focused || tab.tokens_used <= 0) return StatusValue{};
         std::string role;
         if (tab.context_window > 0) {
@@ -110,10 +126,10 @@ std::vector<std::unique_ptr<plugins::StatusSegment>> MakeSegments() {
         return StatusValue{FormatTokenUsage(tab.tokens_used, tab.context_window), role};
     });
 
-    add("model", kModelPriority, 0, [](const TabStatus& tab) {
+    add("model", Right(kModelOrder), kModelPriority, 0, [](const TabStatus& tab) {
         return StatusValue{tab.focused ? Staged(tab, tab.model, tab.desired_model) : "", ""};
     });
-    add("agent", kAgentPriority, 0, [](const TabStatus& tab) {
+    add("agent", Right(kAgentOrder), kAgentPriority, 0, [](const TabStatus& tab) {
         return StatusValue{
             tab.focused ? Staged(tab, tab.agent_preset, tab.desired_agent_preset) : "", ""};
     });
@@ -121,7 +137,7 @@ std::vector<std::unique_ptr<plugins::StatusSegment>> MakeSegments() {
     // bypass runs every tool unasked: the one mode that must never look like
     // the others. Colored by the DISPLAYED mode, so a pending bypass is red
     // already -- it is about to be true.
-    add("permission_mode", kPermissionModePriority, 0, [](const TabStatus& tab) {
+    add("permission_mode", Right(kPermissionModeOrder), kPermissionModePriority, 0, [](const TabStatus& tab) {
         if (!tab.focused) return StatusValue{};
         const std::string value = PermissionModeSegmentValue(
             tab.permission_mode, tab.desired_permission_mode, !tab.session_id.empty());
@@ -132,11 +148,11 @@ std::vector<std::unique_ptr<plugins::StatusSegment>> MakeSegments() {
 
     // "The agent is suspended" is exactly what the user must notice before
     // wondering why nothing is happening.
-    add("paused", kPausedPriority, 0, [](const TabStatus& tab) {
+    add("paused", Right(kPausedOrder), kPausedPriority, 0, [](const TabStatus& tab) {
         return tab.focused && tab.paused ? StatusValue{"paused", "attention"} : StatusValue{};
     });
 
-    add("activity", kActivityPriority, 0, [](const TabStatus& tab) {
+    add("activity", Left(kActivityOrder), kActivityPriority, 0, [](const TabStatus& tab) {
         if (!tab.focused) return StatusValue{};
         StatusValue value;
         if (tab.state == "thinking") {

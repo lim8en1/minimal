@@ -15,7 +15,8 @@ SessionClient::CreateOptions DefaultCreateOptions() {
     return opts;
 }
 
-std::shared_ptr<SessionClient> ConnectOrReport(const std::string& target, bool autospawn) {
+std::shared_ptr<SessionClient> ConnectOrReport(const std::string& target, bool autospawn,
+                                               bool allow_version_mismatch) {
     SpawnOptions spawn_options;
     spawn_options.enabled = autospawn;
     bool spawned = false;
@@ -24,7 +25,18 @@ std::shared_ptr<SessionClient> ConnectOrReport(const std::string& target, bool a
         [](const std::string& line) { std::fprintf(stderr, "minimal: %s\n", line.c_str()); },
         &spawned);
     auto client = std::make_shared<SessionClient>(target);
-    if (reachable && client->WaitForConnected(kChannelConnectTimeout)) return client;
+    if (reachable && client->WaitForConnected(kChannelConnectTimeout)) {
+        const auto info = client->GetServerInfo();
+        const auto mismatch = ServerBuildMismatch(info.status, info.info);
+        if (!mismatch) return client;
+        std::fprintf(stderr, "minimal: %s\n", mismatch->c_str());
+        if (allow_version_mismatch) {
+            std::fprintf(stderr, "minimal: continuing anyway (--allow-version-mismatch)\n");
+            return client;
+        }
+        std::fprintf(stderr, "(or pass --allow-version-mismatch to connect regardless)\n");
+        return nullptr;
+    }
     // A spawned server that failed has already said why (its fatal lines, or
     // the log to read); "start one yourself" would only bury that.
     if (spawned && !reachable) return nullptr;

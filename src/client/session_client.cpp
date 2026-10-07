@@ -168,6 +168,14 @@ SessionClient::GetSessionResult SessionClient::GetSession(const std::string& ses
     return result;
 }
 
+SessionClient::ServerInfoResult SessionClient::GetServerInfo() {
+    grpc::ClientContext context;
+    context.set_deadline(In(kUnaryDeadline));
+    ServerInfoResult result;
+    result.status = stub_->GetServerInfo(&context, v1::GetServerInfoRequest{}, &result.info);
+    return result;
+}
+
 // Presence heartbeat (see PingRequest in the proto). Fire-and-forget: the
 // caller (the TUI's heartbeat thread) treats every failure -- including "the
 // server is gone" -- as a non-event; the next beat simply tries again until

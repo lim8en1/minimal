@@ -45,6 +45,8 @@ enum class PermissionMode { AlwaysDeny = 0, Ask = 1, AlwaysAllow = 2 };
 std::string_view mode_name(PermissionMode mode);
 std::string_view category_name(ToolCategory category);
 std::optional<PermissionMode> mode_from_name(std::string_view name);
+// Every spelling, in table order -- a config form's choices.
+std::vector<std::string_view> mode_names();
 
 // allow+ask = ask, ask+deny = deny, deny+allow = deny.
 constexpr PermissionMode most_restrictive(PermissionMode a, PermissionMode b) {
@@ -121,6 +123,8 @@ std::string_view run_mode_name(PermissionRunMode mode);
 std::optional<PermissionRunMode> run_mode_from_name(std::string_view name);
 std::string_view precedence_name(PatternPrecedence precedence);
 std::optional<PatternPrecedence> precedence_from_name(std::string_view name);
+std::vector<std::string_view> run_mode_names();
+std::vector<std::string_view> precedence_names();
 
 struct PermissionOverrideLayer {
     std::optional<PermissionMode> read_only, file_write, execute, out_of_workdir, network;

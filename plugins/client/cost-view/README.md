@@ -11,7 +11,8 @@ server plugin's data.
 - **`{token_detail}`** — `i 45.6k · o 7.8k · cr 1.2M · cw 3.4k`. Zero
   fields are left out.
 
-Both segments are unfilled until the session has spent something.
+Both sit on the left, right after session-status's `{tokens}` (left 30
+and 40), and are unfilled until the session has spent something.
 
 ## Data path
 

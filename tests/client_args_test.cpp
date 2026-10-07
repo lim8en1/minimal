@@ -325,6 +325,17 @@ TEST_CASE("auto-spawn defaults on and --no-autospawn turns it off", "[client_arg
     CHECK(UsageText().find("--no-autospawn") != std::string::npos);
 }
 
+TEST_CASE("a build mismatch refuses by default; --allow-version-mismatch overrides",
+          "[client_args]") {
+    CHECK_FALSE(Parse({}).headless.allow_version_mismatch);
+    CHECK(Parse({"--allow-version-mismatch"}).headless.allow_version_mismatch);
+    CHECK(Parse({"-p", "hi", "--allow-version-mismatch"}).headless.allow_version_mismatch);
+    CHECK_FALSE(
+        Parse({"--allow-version-mismatch=false"}).headless.allow_version_mismatch);
+    // The refusal names the flag; the usage text has to know it too.
+    CHECK(UsageText().find("--allow-version-mismatch") != std::string::npos);
+}
+
 // --- List sessions -------------------------------------------------------------
 
 TEST_CASE("list-sessions is its own action", "[client_args][list]") {

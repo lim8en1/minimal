@@ -70,6 +70,9 @@ public:
     std::optional<FetchedRates> GetFetchedRates(const std::string& source_name) const;
     // Throws std::runtime_error on I/O failure.
     void SetFetchedRates(const std::string& source_name, const FetchedRates& rates);
+    // Deletes every snapshot whose source is not in `configured` -- a source
+    // removed or renamed in rate_sources -- and returns their names, sorted.
+    std::vector<std::string> PruneFetchedRates(const std::vector<std::string>& configured);
 
 private:
     plugins::PluginStorage* storage_;  // borrowed; may be null

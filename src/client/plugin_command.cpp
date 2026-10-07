@@ -53,6 +53,14 @@ std::optional<nlohmann::json> CallRunningServer(const std::string& method,
     if (!EnsureServerRunning(target, no_spawn)) return std::nullopt;
     SessionClient client(target);
     if (!client.WaitForConnected(std::chrono::seconds(2))) return std::nullopt;
+    // A server of another build may not even have the method, or may apply
+    // it differently: edit the file, which the next server start reads.
+    const auto info = client.GetServerInfo();
+    if (const auto mismatch = ServerBuildMismatch(info.status, info.info)) {
+        std::fprintf(stderr, "minimal: %s\nminimal: editing the file directly\n",
+                     mismatch->c_str());
+        return std::nullopt;
+    }
     const auto result = client.PluginCall("plugins", method, request.dump());
     if (!result.status.ok()) {
         std::fprintf(stderr, "minimal: running server: %s -- editing the file directly\n",

@@ -7,8 +7,9 @@
 // ("plugins"), between LoadAll and Seal.
 //
 // Methods (payloads and answers are JSON):
-//   list                      [{name, enabled, enabled_in_file, loaded, configurable,
-//                              provides: {label: [names]}, set, pending}] -- every plugin;
+//   list                      [{name, kind, enabled, enabled_in_file, loaded, configurable,
+//                              provides: {label: [names]}, set, pending,
+//                              unselected?}] -- every core file and plugin;
 //                              enabled_in_file differs from enabled after a
 //                              toggle, until the restart that applies it
 //   check {name}              runs the plugin's config check again (also run
@@ -39,6 +40,15 @@
 // "pending" lists the fields whose file value differs from what the plugin
 // is running with: the changes a restart would bring.
 //
+// Core files (CoreConfigFile: permissions.json) are entries too, named by
+// their file name -- which no plugin stem can be. Their rows carry
+// kind: "core" (plugins: "plugin"); describe/set/unset/apply work as for a
+// plugin, every change waits for a restart, and enable refuses them. A core
+// field whose values are plugin names (permissions.json's advisor) is
+// described as an enum over the plugins that registered under its label,
+// and a plugin row registering under that label carries
+// "unselected": [{file, field}] while the field names another.
+//
 // "checks" (describe; a summary in list) is the plugin's last config check
 // (minimal_plugin_check_config) -- {state: "running" | "done", at,
 // results: [{path, level, message}]} -- or null for a plugin without one.
@@ -66,6 +76,18 @@ namespace minimal::plugins {
 
 inline constexpr const char* kPluginConfigEndpointName = "plugins";
 
+// A core config file the endpoint edits beside the plugins' own.
+struct CoreConfigFile {
+    std::string name;             // its file name, the entry's name ("permissions.json")
+    std::filesystem::path path;   // absolute
+    nlohmann::json schema;        // config::DescribeConfig over the file's own parser
+    // "" when the parser accepts the value, else its message.
+    std::function<std::string(const nlohmann::json&)> validate;
+    // Fields naming a plugin: {field path: registry label} ("advisor":
+    // "advisor"), offered as a choice of the plugins registered under it.
+    std::map<std::string, std::string> plugin_choices;
+};
+
 class PluginConfigEndpoint final : public PluginEndpoint {
 public:
     // The backends providers.json's models use, read when asked (the file
@@ -74,10 +96,12 @@ public:
 
     // `records` and `candidates` from the same LoadAll, matched by file.
     // `services`: the host's, handed to a running plugin's config check.
+    // `core_files`: read once here, as the server started with them.
     PluginConfigEndpoint(std::filesystem::path config_dir, const std::vector<PluginRecord>& records,
                          const std::vector<PluginCandidate>& candidates,
                          BackendsInUse backends_in_use = {},
-                         const ServiceRegistry* services = nullptr);
+                         const ServiceRegistry* services = nullptr,
+                         std::vector<CoreConfigFile> core_files = {});
     // Cancels the check in flight and waits for it.
     ~PluginConfigEndpoint() override;
     PluginConfigEndpoint(const PluginConfigEndpoint&) = delete;
@@ -91,14 +115,20 @@ public:
 
 private:
     struct Entry {
-        std::string name;  // the module's stem: plugins.d/<name>.json
-        std::string file;  // the module's basename, its plugins.json key
+        std::string name;  // the module's stem (plugins.d/<name>.json), or a core file's name
+        std::string file;  // the module's basename, its plugins.json key; "" for a core file
+        bool core = false;
+        std::filesystem::path path;  // the config file
+        std::string label;           // as messages name it ("plugins.d/memory.json")
         Provenance provenance = Provenance::User;
         bool enabled = false;
         bool loaded = false;
         std::vector<std::string> provider_kinds;  // the backends it registered
         nlohmann::json provides;                  // {registry label: [names]}
         PluginConfigSymbols symbols;
+        // "" when the value is accepted, else why not. Unset: anything goes.
+        std::function<std::string(const nlohmann::json&)> validate;
+        std::map<std::string, std::string> plugin_choices;  // CoreConfigFile's
         nlohmann::json schema;   // null: the plugin takes no configuration
         nlohmann::json applied;  // the config the plugin is running with
     };
@@ -122,8 +152,14 @@ private:
     void StartCheck(const Entry& entry, const nlohmann::json& file);
     nlohmann::json ChecksOf(const Entry& entry) const;
     void CheckLoop();
-    std::filesystem::path PathOf(const Entry& entry) const;
     nlohmann::json ReadFile(const Entry& entry) const;
+    // The plugins that registered something under `label` (running ones).
+    std::vector<std::string> PluginsRegisteredUnder(const std::string& label) const;
+    // `entry`'s schema with each plugin_choices field made an enum of the
+    // plugins registered under its label (plus the file's own value).
+    nlohmann::json SchemaOf(const Entry& entry, const nlohmann::json& file) const;
+    // The core fields naming another plugin where `entry` could be named.
+    nlohmann::json UnselectedOf(const Entry& entry) const;
     nlohmann::json Describe(const Entry& entry) const;
     // Fields whose file value differs from what the running plugin uses;
     // none for a plugin that is not running.

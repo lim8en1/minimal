@@ -24,7 +24,11 @@ not confident about falls through to you in the usual permission modal.
 
 `decision-advisor` is built `DISABLED_BY_DEFAULT`, like `session-titler`: it
 sends tool input to an external endpoint and auto-answers
-permission prompts. Enabling it is two deliberate edits:
+permission prompts. Enabling it is three deliberate edits. In `/config`: turn
+`decision-advisor` on (space) and set its `api_key`, restart the server, then
+open **core → permissions.json** and choose it as `advisor`, and restart
+again — the advisor is chosen among *running* plugins, and until it is chosen
+the plugin's row says `not the advisor in permissions.json`. By hand:
 
 ```json
 // plugins.json: the plugin's entry

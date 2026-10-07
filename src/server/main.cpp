@@ -545,8 +545,18 @@ static int RunServer(int argc, char** argv) {
         }
         return used;
     };
-    minimal::plugins::PluginConfigEndpoint plugin_config_endpoint(config_dir, records, candidates,
-                                                                  backends_in_use, &services);
+    // Core files edited beside the plugins': permissions.json, so the advisor
+    // a plugin provides can be selected where the plugin is enabled.
+    std::vector<minimal::plugins::CoreConfigFile> core_config_files;
+    core_config_files.push_back({
+        .name = "permissions.json",
+        .path = config_dir / "permissions.json",
+        .schema = minimal::config::DescribePermissionsConfig(),
+        .validate = minimal::config::ValidatePermissionsConfig,
+        .plugin_choices = {{"advisor", "advisor"}},
+    });
+    minimal::plugins::PluginConfigEndpoint plugin_config_endpoint(
+        config_dir, records, candidates, backends_in_use, &services, std::move(core_config_files));
     services.Provide(minimal::plugins::PluginEndpointServiceName(
                          minimal::plugins::kPluginConfigEndpointName),
                      &plugin_config_endpoint);

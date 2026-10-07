@@ -21,6 +21,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <nlohmann/json.hpp>
+#include <spdlog/sinks/base_sink.h>
+#include <spdlog/spdlog.h>
 
 #include "commands_core_fixture.hpp"
 #include "cost_command.hpp"
@@ -958,6 +960,9 @@ TEST_CASE("the .rpc service answers totals, list and malformed calls",
     CHECK(!service.Handle("no-such-method", "").ok);               // unknown method
     CHECK(service.Handle("no-such-method", "").error.find("no-such-method") !=
           std::string::npos);
+    // The reply names what does exist: refresh-rates is one underscore away.
+    CHECK(service.Handle("refresh-rates", "").error ==
+          "unknown method 'refresh-rates' (known: totals, list, refresh_rates)");
 }
 
 TEST_CASE("the in-flight accumulator merges rounds per model and clears on demand",
@@ -1306,6 +1311,88 @@ TEST_CASE("the startup refresh runs in the background and teardown joins it", "[
     {
         RatesRefresherOwner owner(refresher);
     }
+}
+
+namespace {
+
+class LineSink final : public spdlog::sinks::base_sink<std::mutex> {
+public:
+    std::vector<std::string> lines;
+
+protected:
+    void sink_it_(const spdlog::details::log_msg& msg) override {
+        lines.emplace_back(msg.payload.data(), msg.payload.size());
+    }
+    void flush_() override {}
+};
+
+}  // namespace
+
+TEST_CASE("rates refresh: a source no longer configured has its cached prices dropped",
+          "[cost_tracker][rates_refresh]") {
+    Harness harness;
+    RateTable rates(RateSources{}, &harness.storage);
+    CostSettings settings;
+    settings.rate_sources = UnroutableSources();   // openrouter, litellm
+    settings.rates_refresh_days = 7;
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    for (const char* name : {"openrouter", "litellm", "LiteLLM", "OpenRouter"}) {
+        harness.store.SetFetchedRates(name, FetchedRates{"2026-10-07T10:00:00Z", now - 60, {}});
+    }
+
+    auto sink = std::make_shared<LineSink>();
+    const auto previous = spdlog::default_logger();
+    spdlog::set_default_logger(std::make_shared<spdlog::logger>("capture", sink));
+    {
+        RatesRefresher refresher(settings, harness.store, rates, &harness.storage);
+        refresher.MaybeStart();   // fresh: prunes, fetches nothing
+        refresher.Shutdown();
+    }
+    spdlog::set_default_logger(previous);
+
+    // The renamed spellings are gone; the configured ones stay, and stay fresh.
+    CHECK_FALSE(harness.store.GetFetchedRates("LiteLLM").has_value());
+    CHECK_FALSE(harness.store.GetFetchedRates("OpenRouter").has_value());
+    CHECK(harness.store.GetFetchedRates("openrouter").has_value());
+    CHECK(harness.store.GetFetchedRates("litellm").has_value());
+    REQUIRE(sink->lines.size() == 2);
+    CHECK(sink->lines[0] ==
+          "cost-tracker: dropped the cached prices of LiteLLM, OpenRouter -- no longer in "
+          "rate_sources");
+
+    // Nothing left to prune: no line about it.
+    CHECK(harness.store.PruneFetchedRates({"openrouter", "litellm"}).empty());
+}
+
+TEST_CASE("rates refresh: fresh snapshots say so at startup and fetch nothing",
+          "[cost_tracker][rates_refresh]") {
+    Harness harness;
+    RateTable rates(RateSources{}, &harness.storage);
+    CostSettings settings;
+    settings.rate_sources = UnroutableSources();
+    settings.rates_refresh_days = 7;
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    harness.store.SetFetchedRates("openrouter", FetchedRates{"2026-10-07T10:00:00Z", now - 60, {}});
+    harness.store.SetFetchedRates("litellm", FetchedRates{"2026-10-06T10:00:00Z", now - 3600, {}});
+
+    auto sink = std::make_shared<LineSink>();
+    const auto previous = spdlog::default_logger();
+    spdlog::set_default_logger(std::make_shared<spdlog::logger>("capture", sink));
+    {
+        RatesRefresher refresher(settings, harness.store, rates, &harness.storage);
+        refresher.MaybeStart();
+        refresher.Shutdown();   // nothing started: returns at once
+    }
+    spdlog::set_default_logger(previous);
+
+    REQUIRE(sink->lines.size() == 1);
+    CHECK(sink->lines[0] ==
+          "cost-tracker: pricing snapshots are fresh (oldest fetched 2026-10-06T10:00:00Z, "
+          "refreshed every 7 day(s)); not refreshing at startup");
 }
 
 namespace {

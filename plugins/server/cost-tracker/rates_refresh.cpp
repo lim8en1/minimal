@@ -29,11 +29,39 @@ void RatesRefresher::MaybeStart() {
     // Storage is the fetch's cache; without the seam there is nothing to
     // refresh (bundled/config tiers still price every report).
     if (storage_ == nullptr) return;
+    // A source removed or renamed since the last start: its snapshot prices
+    // nothing any more (RateTable reads only configured names), so it goes.
+    std::vector<std::string> configured;
+    for (const auto& source : settings_.rate_sources) configured.push_back(source.name);
+    try {
+        if (const auto removed = store_.PruneFetchedRates(configured); !removed.empty()) {
+            std::string names;
+            for (const auto& name : removed) names += (names.empty() ? "" : ", ") + name;
+            common::DefaultLogger().info(
+                "cost-tracker: dropped the cached prices of {} -- no longer in rate_sources", names);
+        }
+    } catch (const std::exception& error) {
+        common::DefaultLogger().warn("cost-tracker: pruning cached prices failed: {}", error.what());
+    }
     std::vector<std::optional<FetchedRates>> snapshots;
     for (const auto& source : settings_.rate_sources) {
         snapshots.push_back(store_.GetFetchedRates(source.name));
     }
-    if (!RefreshRatesDue(snapshots, settings_)) return;
+    if (!RefreshRatesDue(snapshots, settings_)) {
+        // Said, not silent: a skipped refresh must not read like one that
+        // never ran. The oldest snapshot is what the next fetch waits on.
+        const auto oldest = std::min_element(
+            snapshots.begin(), snapshots.end(), [](const auto& a, const auto& b) {
+                return a && b && a->fetched_at_unix < b->fetched_at_unix;
+            });
+        if (oldest != snapshots.end() && *oldest) {
+            common::DefaultLogger().info(
+                "cost-tracker: pricing snapshots are fresh (oldest fetched {}, refreshed every "
+                "{} day(s)); not refreshing at startup",
+                (*oldest)->fetched_at, settings_.rates_refresh_days);
+        }
+        return;
+    }
     bool expected = false;
     if (!started_.compare_exchange_strong(expected, true)) return;
     worker_ = std::thread([this] { Run(); });
