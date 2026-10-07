@@ -390,7 +390,7 @@ public:
     GetSessionResult GetSession(const std::string& session_id);
 
     // The answering server's build identity (see ServerInfo in the proto).
-    // UNIMPLEMENTED means a server older than the RPC -- see ServerBuildMismatch.
+    // UNIMPLEMENTED means a server older than the RPC -- see CheckServerBuild.
     struct ServerInfoResult {
         v1::ServerInfo info;
         grpc::Status status;

@@ -54,7 +54,7 @@ struct HeadlessOptions {
     // error; a non-unix target never spawns regardless.
     bool autospawn = true;
     // Connect to a server of a different build instead of refusing (see
-    // ServerBuildMismatch). The diagnostic still prints.
+    // CheckServerBuild). The diagnostic still prints.
     bool allow_version_mismatch = false;
 };
 

@@ -56,9 +56,12 @@ std::optional<nlohmann::json> CallRunningServer(const std::string& method,
     // A server of another build may not even have the method, or may apply
     // it differently: edit the file, which the next server start reads.
     const auto info = client.GetServerInfo();
-    if (const auto mismatch = ServerBuildMismatch(info.status, info.info)) {
-        std::fprintf(stderr, "minimal: %s\nminimal: editing the file directly\n",
-                     mismatch->c_str());
+    const auto check = CheckServerBuild(info.status, info.info, target, /*spawned=*/false);
+    if (check.verdict == ServerBuildCheck::Verdict::kOther) {
+        std::fprintf(stderr,
+                     "minimal: %s\nminimal: editing the file directly -- that server is not "
+                     "told; restart it to apply\n",
+                     check.message.c_str());
         return std::nullopt;
     }
     const auto result = client.PluginCall("plugins", method, request.dump());

@@ -738,6 +738,68 @@ TEST_CASE("decision-advisor Advise resolves allow/deny/abstain from the live-sha
     }
 }
 
+TEST_CASE("decision-advisor debug_decision_logging is off by default and parses",
+          "[decision_advisor][settings][decision_log]") {
+    CHECK_FALSE(Parse(nlohmann::json::object()).debug_decision_logging);
+    CHECK(Parse(nlohmann::json{{"debug_decision_logging", true}}).debug_decision_logging);
+    CHECK_THROWS(Parse(nlohmann::json{{"debug_decision_logging", "yes"}}));
+}
+
+TEST_CASE("decision-advisor decision log: one line per judged call, with the distribution",
+          "[decision_advisor][advise][decision_log]") {
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("decision-log-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const auto log = dir / "decisions.jsonl";
+
+    LoopbackServer server({HttpResponseOf(200, "OK", LoadFixture("allow-response.json").dump()),
+                           HttpResponseOf(200, "OK", LoadFixture("review-response.json").dump())});
+    auto settings = FastSettings();
+    settings.endpoint = server.url();
+    minimal::decision_advisor::DecisionAdvisor advisor(
+        settings, minimal::common::SecretHandle::Literal("k"), net::HttpClient{}, log);
+    REQUIRE(advisor.Advise(MakeRequest(), tools::AdvisorContext{}) != std::nullopt);
+    REQUIRE(advisor.Advise(MakeRequest(), tools::AdvisorContext{}) == std::nullopt);
+
+    // A failed call is logged too, without a distribution.
+    auto unreachable = FastSettings();
+    unreachable.endpoint = "http://127.0.0.1:1/";
+    unreachable.max_retries = 0;
+    minimal::decision_advisor::DecisionAdvisor failing(
+        unreachable, minimal::common::SecretHandle::Literal("k"), net::HttpClient{}, log);
+    REQUIRE(failing.Advise(MakeRequest(), tools::AdvisorContext{}) == std::nullopt);
+
+    std::ifstream in(log);
+    std::vector<nlohmann::json> lines;
+    for (std::string line; std::getline(in, line);) lines.push_back(nlohmann::json::parse(line));
+    REQUIRE(lines.size() == 3);
+
+    const auto& allowed = lines[0];
+    CHECK(allowed.at("outcome") == "allowed");
+    CHECK(allowed.at("tool_name") == "bash");
+    CHECK(allowed.at("tool_input") == nlohmann::json{{"command", "make test"}});
+    CHECK(allowed.at("model") == settings.model);
+    CHECK(allowed.at("choice") == "allow");
+    const auto& p = allowed.at("probabilities");
+    CHECK(p.at("allow").get<double>() > p.at("deny").get<double>());
+    CHECK(p.contains("review"));
+    CHECK(allowed.at("answers").contains("action"));
+    CHECK(allowed.at("thresholds").at("min_margin") == settings.min_margin);
+    CHECK(allowed.at("attempts") == 1);
+    CHECK(allowed.contains("ts_ms"));
+
+    CHECK(lines[1].at("outcome") == "abstained");
+    CHECK(lines[1].at("choice") == "review");
+    CHECK(lines[1].contains("reason"));
+
+    CHECK(lines[2].at("outcome") == "abstained");
+    CHECK_FALSE(lines[2].contains("probabilities"));
+    CHECK_FALSE(lines[2].at("reason").get<std::string>().empty());
+
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("decision-advisor Advise abstains on transport failure without answering",
           "[decision_advisor][advise]") {
     auto settings = FastSettings();

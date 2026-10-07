@@ -192,23 +192,47 @@ bool IsSpawnableTarget(const std::string& target) {
     return SocketPathOf(target).has_value();
 }
 
-std::optional<std::string> ServerBuildMismatch(const grpc::Status& status,
-                                               const v1::ServerInfo& info) {
+ServerBuildCheck CheckServerBuild(const grpc::Status& status, const v1::ServerInfo& info,
+                                  const std::string& target, bool spawned) {
+    using Verdict = ServerBuildCheck::Verdict;
+    const bool older = status.error_code() == grpc::StatusCode::UNIMPLEMENTED;
+    if (!older && !status.ok()) {
+        std::string why = status.error_message();
+        if (status.error_code() == grpc::StatusCode::UNAUTHENTICATED) {
+            why = "the server refused this client's credentials (" + why + ")";
+        } else if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+            why = "it did not answer in time";
+        }
+        return {Verdict::kUnverified,
+                "could not verify the running server's build: " + why + "; continuing"};
+    }
+    if (!older && info.abi_tag() == common::AbiTag()) return {};
+
     const std::string mine = std::string(common::Version()) + " (" + common::AbiTag() + ")";
-    if (status.error_code() == grpc::StatusCode::UNIMPLEMENTED) {
-        return "the running server is an older build than this client\n"
-               "  client: " + mine + "\n"
-               "  server: predates the version check\n"
-               "stop it (it holds the socket until it exits) and run again";
+    std::string message =
+        std::string(older ? "the running server is an older build than this client\n"
+                          : "the running server is a different build from this client\n") +
+        "  client: " + mine + "\n" + "  server: " +
+        (older ? std::string("predates the version check")
+               : info.version() + " (" + info.abi_tag() + ")") +
+        "\n";
+    const auto socket = SocketPathOf(target);
+    if (spawned) {
+        // Rerunning would only start the same binary again.
+        const bool overridden = common::LookupEnv("MINIMAL_SERVER_BIN").has_value();
+        message += "this client just started it from " + LocateServerBinary() +
+                   ", which is that other build: rebuild or reinstall minimal-server" +
+                   (overridden ? ", or point MINIMAL_SERVER_BIN at this build's" : "");
+    } else if (!socket) {
+        message += "the server at " + target + " must run this build (or this client its)";
+    } else if (older) {
+        message += "stop it -- `kill $(lsof -t " + socket->string() +
+                   ")` -- or wait for its idle exit, and run again";
+    } else {
+        message += "stop it with `kill " + std::to_string(info.pid()) +
+                   "` (or wait for its idle exit) and run again";
     }
-    if (!status.ok()) {
-        return "could not verify the running server's build: " + status.error_message();
-    }
-    if (info.abi_tag() == common::AbiTag()) return std::nullopt;
-    return "the running server is a different build from this client\n"
-           "  client: " + mine + "\n"
-           "  server: " + info.version() + " (" + info.abi_tag() + ")\n"
-           "stop it with `kill " + std::to_string(info.pid()) + "` and run again";
+    return {Verdict::kOther, std::move(message)};
 }
 
 std::string SpawnedServerLogPath() { return (common::DataDir() / "server-spawn.log").string(); }

@@ -245,10 +245,11 @@ int Save(const Target& target, const json& next, const std::string& what) {
                     target.label.c_str(), what.c_str());
     } else if (change.all_live) {
         // Saved only: this process never talks to a server. `minimal plugin`
-        // sends an edit through a running server instead (plugin_command.hpp),
-        // so reaching here means none was running.
-        std::printf("%s: %s (live: through `minimal plugin`, a running server applies it "
-                    "without a restart)\n",
+        // sends an edit through a running server of its build when there is
+        // one (plugin_command.hpp); reaching here means no such server took
+        // it -- none ran, or one of another build did and was not told.
+        std::printf("%s: %s (live-applicable: a server applies it without a restart when the "
+                    "edit goes through it; any other reads it when it starts)\n",
                     target.label.c_str(), what.c_str());
     } else {
         std::printf("%s: %s (restart: takes effect when the server restarts)\n",

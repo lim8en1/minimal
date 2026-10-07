@@ -36,7 +36,7 @@ SessionClient::CreateOptions DefaultCreateOptions();
 // channel exists -- the probe channel EnsureServerRunning creates holds the
 // process's only sockets at that moment, so a forked server inherits nothing
 // to hold open -- then dial and wait up to 5 s, then refuse a server of a
-// different build (ServerBuildMismatch) unless allow_version_mismatch. Null
+// different build (CheckServerBuild) unless allow_version_mismatch. Null
 // after printing the one shared diagnostic.
 std::shared_ptr<SessionClient> ConnectOrReport(const std::string& target, bool autospawn,
                                                bool allow_version_mismatch);
