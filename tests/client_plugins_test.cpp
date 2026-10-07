@@ -1009,15 +1009,16 @@ TEST_CASE("theme sections merge after core roles and never shadow them",
 TEST_CASE("ui.json: missing and malformed files degrade to defaults", "[client_plugins]") {
     TempDir dir;
     auto ui = LoadUiConfig(dir.path());
-    CHECK(ui.status_format.empty());
+    CHECK(ui.status_segments.empty());
 
     std::ofstream(dir.path() / "ui.json") << "{ not json";
     ui = LoadUiConfig(dir.path());
-    CHECK(ui.status_format.empty());
+    CHECK(ui.status_segments.empty());
 
-    std::ofstream(dir.path() / "ui.json") << R"({"status_format": "{a} | {b}", "future": 1})";
+    std::ofstream(dir.path() / "ui.json") << R"({"status_segments": {"a": false}, "future": 1})";
     ui = LoadUiConfig(dir.path());
-    CHECK(ui.status_format == "{a} | {b}");
+    REQUIRE(ui.status_segments.count("a") == 1);
+    CHECK(ui.status_segments.at("a").hidden);
 }
 
 TEST_CASE("keybindings EnsureDefault never overwrites an existing binding",
@@ -1218,22 +1219,27 @@ TEST_CASE("the bundled session-view plugin registers the sessions and subagents 
 #error "MINIMAL_SESSION_STATUS_PLUGIN must name the built session-status plugin"
 #endif
 
-// The default status format's ids are all this plugin's: with it loaded,
-// none of them is unknown.
-TEST_CASE("the bundled session-status plugin registers every segment the default format names",
+// session-status places its segments itself: composed with nothing
+// overriding, the bar is activity and tokens on the left, the session's
+// model, agent, mode and pause state on the right; version and session
+// place nowhere but are registered, for ui.json to place.
+TEST_CASE("the bundled session-status plugin places its own segments",
           "[client_plugins][session_status]") {
     const auto fixtures = LoadedFixtures::Load({PluginCandidate{
         MINIMAL_SESSION_STATUS_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
     REQUIRE(fixtures->records.size() == 1);
     INFO(fixtures->records.front().error);
     REQUIRE(fixtures->records.front().ok());
-    // tui_bootstrap.cpp's kDefaultStatusFormat, and the two ids it leaves out.
-    for (const auto& id : minimal::client::FormatSegmentIds(
-             "{activity} · {tokens}{>}{model} · {agent} · {permission_mode} · {paused} "
-             "{session} {version}")) {
+    const auto bar = minimal::client::ComposeStatusBar(fixtures->registries.status_segments, {});
+    std::string shape;
+    for (const auto& piece : bar.format) shape += piece.is_segment ? "{" + piece.text + "}" : piece.text;
+    CHECK(shape == "{activity} · {tokens}{>}{model} · {agent} · {permission_mode} · {paused}");
+    for (const char* id : {"session", "version"}) {
         INFO(id);
         CHECK(fixtures->registries.status_segments.Find(id) != nullptr);
     }
+    CHECK(bar.segments.back().id == "version");
+    CHECK_FALSE(bar.segments.back().placement.has_value());
 }
 
 TEST_CASE("the highlighter plugins get: plain until the host's is built, then the host's",

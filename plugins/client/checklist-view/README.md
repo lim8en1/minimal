@@ -7,7 +7,8 @@ data: two presentation surfaces over one fetch path.
 
 - **`{todo}` status segment** — `todo 2/5 (1 active)` for the focused
   session; unfilled while the list is empty or not yet known; ` (stale)`
-  appended while the server connection is down.
+  appended while the server connection is down. Placed at the left side's
+  end (left 50), after cost-view's segments.
 - **`checklist.panel` view** — a toggleable panel (default binding
   `alt+l`, rebindable under that id in `keybindings.json`) with two
   surfaces, flipped with `Tab` while the panel has focus:

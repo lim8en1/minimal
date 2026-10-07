@@ -322,8 +322,8 @@ ftxui::Element FrameRenderer::Render() {
     const auto& segments = deps_.status_registry.All();
     for (std::size_t i = 0; i < segments.size(); ++i) {
         const auto& segment = segments[i];
-        // The value lands under the SURFACE id -- what ui.json's
-        // status_format names.
+        // The value lands under the SURFACE id -- what the composed bar and
+        // ui.json's status_segments name.
         const std::string& id = deps_.status_registry.surfaces()[i];
         if (!deps_.status_ids_in_format.count(id)) continue;   // not shown: not asked
         GuardPluginCall(segment.get(), "status segment", id, [&] {

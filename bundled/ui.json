@@ -1,3 +1,0 @@
-{
-  "status_format": "{version} | {session} | {activity} | {tokens} | {cost?} | {model} | {agent} | {permission_mode} | {todo?}"
-}

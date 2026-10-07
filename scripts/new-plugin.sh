@@ -106,7 +106,7 @@ done
 
 say "created user-plugins/$kind/$name (from templates/$kind-plugin)"
 if [ "$kind" = client ]; then
-    say "note: add {$name} to ui.json's status_format to place the segment"
+    say "note: the segment places itself (placement()); \`minimal status-bar\` shows the bar"
 fi
 say "note: these sources are NOT versioned (user-plugins/ is gitignored); move the"
 say "      plugin into a real repo and re-register with --link when it earns its keep."

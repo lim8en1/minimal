@@ -7,11 +7,12 @@
 // user-owned, seeded once), so "kept" means simply ignored.
 //
 // Keys:
-//   status_format -- the status-bar format string ("{version} | {tokens}").
-//     Load-bearing plugin infrastructure (ARCHITECTURE.md "Client plugins"):
-//     it is how plugin-registered segments are addressed, so ids that exist
-//     only at plugin load time are legal here. Unknown ids render nothing with
-//     a startup warning.
+//   status_segments -- {segment id: false | {"side": "left"|"right",
+//     "order": int}}: hides a status-bar segment, or moves it (a field left
+//     out keeps the segment's own placement). Segments place themselves; this
+//     is only the user's exceptions, never seeded. Ids exist only at plugin
+//     load time, so an unknown one is warned about after the load, not here.
+//     `minimal status-bar` prints a complete block to start from.
 //   scrollback_window_max_messages -- the per-tab scrollback window's message
 //     cap (track R2: the window is a bounded sliding window, not an
 //     unbounded append; loading older pages beyond the cap evicts the
@@ -31,14 +32,17 @@
 // same rule client-plugins.json's writer follows.
 
 #include <filesystem>
+#include <map>
 #include <string>
+
+#include "minimal/client/status_layout.hpp"
 
 namespace minimal::client {
 
 struct UiConfig {
-    // Empty = use the built-in default. A non-string or missing key means the
-    // same thing; a malformed FILE (not valid JSON) is warned and defaulted.
-    std::string status_format;
+    // By segment id; empty = every segment where its plugin places it. A
+    // malformed entry is warned about and skipped.
+    std::map<std::string, StatusSegmentOverride> status_segments;
 
     // 0/missing = built-in default. Non-positive-int values are warned and
     // defaulted.

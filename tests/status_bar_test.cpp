@@ -14,11 +14,14 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <map>
+#include <memory>
+#include <optional>
+#include <stdexcept>
 
 #include "minimal/client/sdk/utf8.hpp"
 #include "minimal/client/view/status_bar.hpp"
 
-using minimal::client::ParseStatusFormat;
 using minimal::client::ResolveStatusBar;
 using minimal::client::StatusBarPart;
 using minimal::client::StatusLayout;
@@ -31,6 +34,26 @@ const StatusLayout kLayout = {
     .priorities = {{"permission_mode", 100}, {"activity", 90}, {"model", 80}, {"tokens", 70},
                    {"agent", 60}, {"paused", 50}, {"session", 20}, {"version", 10}},
     .caps = {{"session", 24}}};
+
+// The pieces ComposeStatusBar would hand the renderer, written the short
+// way: "{id}" a segment, "{>}" the split, anything else a literal.
+std::vector<minimal::client::StatusSegment> ParseStatusFormat(std::string_view format) {
+    std::vector<minimal::client::StatusSegment> out;
+    std::size_t i = 0;
+    while (i < format.size()) {
+        const std::size_t open = format.find('{', i);
+        if (open != i) {
+            const std::size_t end = open == std::string_view::npos ? format.size() : open;
+            out.push_back({false, std::string(format.substr(i, end - i))});
+            i = end;
+            continue;
+        }
+        const std::size_t close = format.find('}', open);
+        out.push_back({true, std::string(format.substr(open + 1, close - open - 1))});
+        i = close + 1;
+    }
+    return out;
+}
 
 std::vector<std::string> Texts(const std::vector<StatusBarPart>& parts) {
     std::vector<std::string> out;
@@ -161,8 +184,6 @@ TEST_CASE("{>} splits the bar; the right group's first value takes no separator"
                                                          {"agent", "build"}};
     CHECK(Texts(ResolveStatusBar(format, no_model, 0)) ==
           std::vector<std::string>{"thinking…", "", "build"});
-    CHECK(minimal::client::FormatSegmentIds("{activity}{>}{model?}{x}") ==
-          std::vector<std::string>{"activity", "x"});  // no split, no optional
 }
 
 TEST_CASE("a plugin segment gives way by its own declared priority", "[status_bar]") {
@@ -175,4 +196,89 @@ TEST_CASE("a plugin segment gives way by its own declared priority", "[status_ba
     // Room for model + one plugin value: the lower-priority one goes.
     const auto parts = ResolveStatusBar(format, values, /*max_width=*/22, {.priorities = priorities});
     CHECK(Texts(parts) == std::vector<std::string>{"local/x", " | ", "bbbbbbbb"});
+}
+
+// --- composition: segments place themselves, ui.json overrides ---------------
+
+namespace {
+
+using minimal::client::ComposeStatusBar;
+using minimal::client::StatusSegmentOverride;
+using Side = minimal::client::plugins::StatusPlacement::Side;
+
+class Placed final : public minimal::client::plugins::StatusSegment {
+public:
+    Placed(std::string id, std::optional<minimal::client::plugins::StatusPlacement> placement,
+           bool throws = false)
+        : id_(std::move(id)), placement_(placement), throws_(throws) {}
+    std::string_view id() const override { return id_; }
+    minimal::client::plugins::StatusValue Render(
+        const minimal::client::plugins::TabStatus&) const override {
+        return {id_, ""};
+    }
+    std::optional<minimal::client::plugins::StatusPlacement> placement() const override {
+        if (throws_) throw std::runtime_error("placement broke");
+        return placement_;
+    }
+
+private:
+    std::string id_;
+    std::optional<minimal::client::plugins::StatusPlacement> placement_;
+    bool throws_;
+};
+
+std::string Shape(const minimal::client::ComposedStatusBar& bar) {
+    std::string out;
+    for (const auto& piece : bar.format) out += piece.is_segment ? "{" + piece.text + "}" : piece.text;
+    return out;
+}
+
+void Fill(minimal::client::plugins::StatusSegmentRegistry& registry) {
+    registry.Register(std::make_unique<Placed>("model", minimal::client::plugins::StatusPlacement{Side::kRight, 10}));
+    registry.Register(std::make_unique<Placed>("tokens", minimal::client::plugins::StatusPlacement{Side::kLeft, 20}));
+    registry.Register(std::make_unique<Placed>("activity", minimal::client::plugins::StatusPlacement{Side::kLeft, 10}));
+    registry.Register(std::make_unique<Placed>("cost", minimal::client::plugins::StatusPlacement{Side::kLeft, 20}));
+    registry.Register(std::make_unique<Placed>("version", std::nullopt));
+    registry.Register(std::make_unique<Placed>("broken", minimal::client::plugins::StatusPlacement{Side::kLeft, 1}, /*throws=*/true));
+}
+
+}  // namespace
+
+TEST_CASE("the bar composes from placements: side, order, ties by id, unplaced left out",
+          "[status_bar][status_layout]") {
+    minimal::client::plugins::StatusSegmentRegistry registry;
+    Fill(registry);
+    const auto bar = ComposeStatusBar(registry, {});
+    // cost and tokens tie at left 20: by id. A throwing placement places nowhere.
+    CHECK(Shape(bar) == "{activity} · {cost} · {tokens}{>}{model}");
+    std::vector<std::string> order;
+    for (const auto& placed : bar.segments) order.push_back(placed.id);
+    CHECK(order == std::vector<std::string>{"activity", "cost", "tokens", "model", "broken", "version"});
+    CHECK(bar.unknown.empty());
+}
+
+TEST_CASE("ui.json overrides hide, move one field, place an unplaced segment, and name unknowns",
+          "[status_bar][status_layout]") {
+    minimal::client::plugins::StatusSegmentRegistry registry;
+    Fill(registry);
+    const std::map<std::string, StatusSegmentOverride> overrides = {
+        {"cost", {.side = Side::kRight, .order = 5}},
+        {"tokens", {.order = 5}},              // side kept: left
+        {"model", {.hidden = true}},
+        {"version", {.side = Side::kRight}},   // placed nowhere before: order 0
+        {"nope", {.hidden = true}}};
+    const auto bar = ComposeStatusBar(registry, overrides);
+    CHECK(Shape(bar) == "{tokens} · {activity}{>}{version} · {cost}");
+    CHECK(bar.unknown == std::vector<std::string>{"nope"});
+    for (const auto& placed : bar.segments) {
+        INFO(placed.id);
+        CHECK(placed.overridden == (placed.id != "activity" && placed.id != "broken"));
+    }
+}
+
+TEST_CASE("a bar with one side only takes no split", "[status_bar][status_layout]") {
+    minimal::client::plugins::StatusSegmentRegistry registry;
+    registry.Register(std::make_unique<Placed>("model", minimal::client::plugins::StatusPlacement{Side::kRight, 10}));
+    CHECK(Shape(ComposeStatusBar(registry, {})) == "{>}{model}");
+    CHECK(Shape(ComposeStatusBar(registry, {{"model", {.hidden = true}}})).empty());
 }

@@ -38,7 +38,7 @@
 #include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/state.hpp"
-#include "minimal/client/status_format.hpp"
+#include "minimal/client/status_layout.hpp"
 #include "minimal/client/view/tab_ui.hpp"
 #include "minimal/client/policy.hpp"
 

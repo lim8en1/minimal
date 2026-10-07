@@ -216,6 +216,15 @@ struct TabStatus {
     bool live_view_truncated = false;  // older live rows of this turn were dropped
 };
 
+// Where a segment sits: left of the bar's split or right of it, ascending
+// by order within a side (ties by id). Orders are plugins' own judgment
+// calls, spaced (10, 20, ...) so another plugin can land between.
+struct StatusPlacement {
+    enum class Side { kLeft, kRight };
+    Side side = Side::kLeft;
+    int order = 0;
+};
+
 // One segment's value for this frame: its text ("" = renders nothing) and
 // the theme role that tints it ("" = the bar's own color).
 struct StatusValue {
@@ -225,10 +234,11 @@ struct StatusValue {
 
 // --- Status-bar segments (keyed by segment id) ------------------------------
 
-// One provider per segment id; the format string (ui.json `status_format`)
-// orders and selects by id, so a plugin adds content while the user keeps
-// layout control. An unknown id renders nothing with a startup warning --
-// the keybindings.json rule for names unknown at compile time.
+// One provider per segment id. A segment places itself (placement(): a side
+// of the bar and an order within it) and the host assembles the bar from
+// what is registered, so enabling a plugin is enough to show its segment;
+// ui.json's `status_segments` hides or moves any of them by id, and
+// `minimal status-bar` prints the result.
 //
 // Render() is called on the render thread every frame (up to ~20 Hz while
 // anything changes): it must be cheap and must never block -- a segment that
@@ -246,6 +256,10 @@ public:
     virtual std::string_view id() const = 0;
     // Runs every frame, on the UI thread: cheap, never blocking.
     virtual StatusValue Render(const TabStatus& focused) const = 0;
+    // Where it sits when ui.json does not say otherwise; nullopt: shown only
+    // where ui.json's status_segments places it. Separate from priority():
+    // where a segment sits is not what gives way first.
+    virtual std::optional<StatusPlacement> placement() const { return std::nullopt; }
     // Which segment gives way first when the bar overflows: lowest first.
     virtual int priority() const { return kPluginStatusSegmentPriority; }
     // A value wider than this many columns is truncated -- and, short of

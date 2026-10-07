@@ -19,7 +19,7 @@ add_library(minimal_client_core SHARED
     keybindings.cpp
     keybinding_dispatch.cpp
     key_event_parser.cpp
-    status_format.cpp
+    status_layout.cpp
     ui_config.cpp
     config_file_io.cpp
     last_selection.cpp
@@ -102,7 +102,8 @@ endif()
 
 # The TUI client and the headless -p mode are one binary: `minimal` dispatches on
 # argv. -p is the smallest real client and doubles as the end-to-end test harness.
-add_executable(minimal app.cpp client_entry.cpp headless.cpp tui_app.cpp tui_commands.cpp)
+add_executable(minimal app.cpp client_entry.cpp headless.cpp status_bar_command.cpp tui_app.cpp
+               tui_commands.cpp)
 target_link_libraries(minimal PRIVATE minimal::client_core)
 
 # Find libminimal_client_core next to the binary, in the build tree and once

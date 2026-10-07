@@ -43,7 +43,7 @@ TEST_CASE("SaveThemePreference preserves every other key in the file") {
     {
         std::ofstream out(dir / "ui.json");
         out << R"({
-  "status_format": "{version} | {tokens}",
+  "status_segments": {"agent": false},
   "scrollback_window_max_messages": 77,
   "tool_output_buffer_bytes": 8192,
   "theme": "dark"
@@ -53,7 +53,8 @@ TEST_CASE("SaveThemePreference preserves every other key in the file") {
 
     const auto config = LoadUiConfig(dir);
     CHECK(config.theme == "lucent-grn");
-    CHECK(config.status_format == "{version} | {tokens}");
+    REQUIRE(config.status_segments.count("agent") == 1);
+    CHECK(config.status_segments.at("agent").hidden);
     CHECK(config.scrollback_window_max_messages == 77);
     CHECK(config.tool_output_buffer_bytes == 8192);
     // The atomic-rename write must not leave a tmp sibling behind.
@@ -85,7 +86,7 @@ TEST_CASE("SaveThemePreference refuses to rewrite a ui.json it cannot read") {
     }
     const auto dir = TestDir("unreadable");
     const auto path = dir / "ui.json";
-    const std::string original = R"({"theme": "dark", "status_format": "{version}"})";
+    const std::string original = R"({"theme": "dark", "status_segments": {"version": false}})";
     {
         std::ofstream out(path);
         out << original;
@@ -97,6 +98,49 @@ TEST_CASE("SaveThemePreference refuses to rewrite a ui.json it cannot read") {
     // Same discipline as the malformed-JSON case: bytes we could not even
     // read are never replaced with a fresh, near-empty document.
     CHECK(ReadAll(path) == original);
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("status_segments: false hides, an object moves field by field, a bad entry is skipped") {
+    const auto dir = TestDir("status-segments");
+    {
+        std::ofstream out(dir / "ui.json");
+        out << R"({"status_segments": {
+  "agent": false,
+  "cost": {"side": "right", "order": 5},
+  "tokens": {"order": 15},
+  "model": {},
+  "activity": true,
+  "todo": "left",
+  "paused": {"side": "middle"}
+}})";
+    }
+    const auto config = LoadUiConfig(dir);
+    const auto& segments = config.status_segments;
+    REQUIRE(segments.count("agent") == 1);
+    CHECK(segments.at("agent").hidden);
+    REQUIRE(segments.count("cost") == 1);
+    CHECK(segments.at("cost").side == plugins::StatusPlacement::Side::kRight);
+    CHECK(segments.at("cost").order == 5);
+    REQUIRE(segments.count("tokens") == 1);
+    CHECK_FALSE(segments.at("tokens").side.has_value());   // kept: the segment's own
+    CHECK(segments.at("tokens").order == 15);
+    CHECK(segments.count("model") == 1);    // nothing set: does nothing, not an error
+    CHECK(segments.count("activity") == 0); // true means nothing
+    CHECK(segments.count("todo") == 0);     // neither false nor an object
+    CHECK(segments.count("paused") == 0);   // not a side
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("status_format is retired: an unknown key, the rest of the file still read") {
+    const auto dir = TestDir("status-format-retired");
+    {
+        std::ofstream out(dir / "ui.json");
+        out << R"({"status_format": "{version}", "theme": "light"})";
+    }
+    const auto config = LoadUiConfig(dir);
+    CHECK(config.theme == "light");
+    CHECK(config.status_segments.empty());
     std::filesystem::remove_all(dir);
 }
 

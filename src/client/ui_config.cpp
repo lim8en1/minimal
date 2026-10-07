@@ -40,8 +40,10 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
     // The UI file degrades instead of refusing: each bad field is warned and
     // keeps its default, through the same strict reader every config uses --
     // so an unknown or misspelled key is named rather than silently ignored.
+    // The reader's unknown-key warning already says it is ignored.
     const auto warn = [](const std::string& message) {
-        common::DefaultLogger().warn("{} -- ignored", message);
+        const bool said = message.size() >= 7 && message.compare(message.size() - 7, 7, "ignored") == 0;
+        common::DefaultLogger().warn("{}{}", message, said ? "" : " -- ignored");
     };
     config::Reader reader(parsed, "ui.json", "", warn);
     const auto lenient = [&warn](const std::function<void()>& read) {
@@ -51,7 +53,35 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
             warn(error.what());
         }
     };
-    lenient([&] { config.status_format = reader.String("status_format", config.status_format); });
+    for (const auto& [id, value] : reader.Entries("status_segments")) {
+        lenient([&] {
+            if (value->is_boolean()) {
+                if (value->get<bool>()) {
+                    reader.Fail("status_segments." + id,
+                                "true means nothing here: a segment shows where its plugin "
+                                "places it; false hides it, {\"side\", \"order\"} moves it");
+                }
+                config.status_segments[id] = StatusSegmentOverride{.hidden = true};
+                return;
+            }
+            if (!value->is_object()) {
+                reader.Fail("status_segments." + id,
+                            "must be false or {\"side\": \"left\"|\"right\", \"order\": int}");
+            }
+            config::Reader entry = reader.Child(*value, "status_segments." + id);
+            StatusSegmentOverride override;
+            if (const auto side = entry.MaybeEnum("side", {"left", "right"})) {
+                override.side = *side == "left" ? plugins::StatusPlacement::Side::kLeft
+                                                : plugins::StatusPlacement::Side::kRight;
+            }
+            if (const auto order = entry.MaybeInt("order", std::numeric_limits<int>::min(),
+                                                  std::numeric_limits<int>::max())) {
+                override.order = static_cast<int>(*order);
+            }
+            entry.Finish(config::UnknownKeys::kWarn);
+            config.status_segments[id] = override;
+        });
+    }
     lenient([&] { config.theme = reader.String("theme", config.theme); });
     const auto bounded_int = [&](const char* key, int& out, int floor) {
         lenient([&] {
@@ -77,7 +107,7 @@ namespace {
 // parseable), hands the parsed document to `mutate`, and writes it back
 // atomically. Every key the mutator does not touch survives verbatim -- the
 // file is the user's, and rewriting it from a default struct would silently
-// drop status_format and the bounded-int knobs.
+// drop status_segments and the bounded-int knobs.
 //
 // Refuses to run on a file we cannot READ (permission, transient I/O) or
 // cannot PARSE: bytes we cannot understand are the user's, and silently

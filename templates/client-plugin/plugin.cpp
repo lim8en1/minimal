@@ -17,19 +17,20 @@
 // plugin's entry in client-plugins.json.
 
 #include <ctime>
+#include <optional>
 #include <string>
 #include <string_view>
 
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 
 namespace {
 
 namespace plugins = minimal::client::plugins;
 
-// One status-bar segment. The id is referenced from ui.json's status_format
-// ("{@PLUGIN_NAME@}"); an id that never appears in the format string renders
-// nothing. Duplicate ids across plugins are fatal at startup, like every
-// other name collision.
+// One status-bar segment. It places itself (placement(): right side, after
+// the bundled segments); ui.json's status_segments can hide or move it by id
+// ("@PLUGIN_NAME@"), and `minimal status-bar` shows where it lands. Duplicate
+// ids across plugins are fatal at startup, like every other name collision.
 //
 // CONTRACT: Render runs on the render thread each frame (~20 Hz). It must be
 // cheap and must never block -- fetch data (plugin RPCs, sessions) on your
@@ -38,14 +39,18 @@ class ClockSegment final : public plugins::StatusSegment {
 public:
     std::string_view id() const override { return "@PLUGIN_NAME@"; }
 
-    std::string Render(const std::string& focused_session_id) const override {
-        (void)focused_session_id;  // the focused tab's session, empty if none
+    std::optional<plugins::StatusPlacement> placement() const override {
+        return plugins::StatusPlacement{plugins::StatusPlacement::Side::kRight, 100};
+    }
+
+    plugins::StatusValue Render(const plugins::TabStatus& focused) const override {
+        (void)focused;  // the focused tab's state
         std::time_t now = std::time(nullptr);
         std::tm utc{};
         gmtime_r(&now, &utc);
         char buf[9];
         std::strftime(buf, sizeof(buf), "%H:%M:%S", &utc);
-        return buf;
+        return {buf, ""};
     }
 };
 

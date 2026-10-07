@@ -19,6 +19,7 @@
 
 #include "checklist_panel_view.hpp"
 #include "checklist_feed.hpp"
+#include "policy.hpp"
 #include "minimal/client/sdk/client_plugin_abi.h"
 
 namespace {
@@ -33,6 +34,10 @@ public:
         : feed_(std::move(feed)) {}
 
     std::string_view id() const override { return "todo"; }
+
+    std::optional<plugins::StatusPlacement> placement() const override {
+        return plugins::StatusPlacement{plugins::StatusPlacement::Side::kLeft, kTodoOrder};
+    }
 
     // Keyed by the frame's own session id, so the label can never show the
     // previous tab's checklist; the call doubles as the feed's focus hint.

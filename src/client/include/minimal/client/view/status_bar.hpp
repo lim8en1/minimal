@@ -1,11 +1,10 @@
 #pragma once
 
-// The status bar: a format string of segments ("{version} | {model} | ...")
-// resolved from the values the registered segments supply this frame. Core
-// owns the layout and knows no segment by name -- every id, the bundled ones
-// included (session-status), is a plugin's. An id nobody provides renders
-// NOTHING -- and RunTui warns at startup, once, naming the id (the
-// keybindings.json rule for names unknown at compile time).
+// The status bar: the composed pieces (status_layout.hpp -- each segment
+// placed by its plugin, ui.json overriding) resolved from the values the
+// registered segments supply this frame. Core owns the layout and knows no
+// segment by name -- every id, the bundled ones included (session-status),
+// is a plugin's.
 
 #include <cstddef>
 #include <map>
@@ -15,13 +14,9 @@
 #include <ftxui/dom/elements.hpp>
 
 #include "minimal/client/sdk/theme.hpp"
-#include "minimal/client/status_format.hpp"
+#include "minimal/client/status_layout.hpp"
 
 namespace minimal::client {
-
-// The format's segment ids (the split aside), for the startup check that
-// warns about ids no registered segment answers to.
-std::vector<std::string> FormatSegmentIds(const std::string& format);
 
 // The pseudo-segment "{>}": everything after it right-aligns. Not a value --
 // it never renders text and never takes a separator.

@@ -57,7 +57,7 @@
 #include "minimal/client/render/syntax_highlighter.hpp"
 #include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/session_client.hpp"
-#include "minimal/client/status_format.hpp"
+#include "minimal/client/status_layout.hpp"
 #include "minimal/common/plugin_config.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/plugins/name_table.hpp"
@@ -118,8 +118,11 @@ struct TuiEnvironment {
     // key is bound to this action" as human-readable text.
     Keybindings keybindings;
     ResolvedKeymap keymap;
+    // The status bar as composed (status_layout.hpp): where every registered
+    // segment landed, for `minimal status-bar`; status_format is its pieces,
+    // status_segment_ids the ids shown -- the only segments rendered.
+    ComposedStatusBar status_bar;
     std::vector<StatusSegment> status_format;
-    // Every segment id status_format names: the segments worth rendering.
     std::set<std::string> status_segment_ids;
 
     // The assembled grammar table (vendored defaults plus plugin additions):
@@ -146,13 +149,23 @@ struct TuiEnvironment {
 // Runs the whole startup sequence into `out`, which the caller must have
 // declared as a plain local (see the address-stability contract above) --
 // never a temporary, never later moved or returned by value. Diagnostics
-// (plugin load warnings, unknown status segments, unmapped keybindings, a
+// (plugin load warnings, unknown status_segments ids, unmapped keybindings, a
 // malformed config file) print to stderr exactly as RunTui did inline.
 // Returns false on a FATAL condition (a bundled plugin failed to load, or a
 // name collision among client plugins) -- the caller's contract is to treat
 // that as minimal's kUnavailable exit code, same as the inline code's
 // `return kUnavailable` did at each of these points.
 bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out);
+
+// BuildTuiEnvironment's first half, on its own: ui.json, the plugin seams,
+// discovery, load, name resolution and the required slots, then the status
+// bar's composition -- everything up to the theme. `minimal status-bar` runs
+// only this, with `client` null: every ClientApi call then answers nothing,
+// and plugins still register what they would (cost-view's segments
+// included). `announce_loads` false keeps the per-plugin "loaded" lines off
+// stderr; failures still print. Same false-is-fatal contract.
+bool LoadClientPluginEnvironment(SessionClient* client, TuiEnvironment& out,
+                                 bool announce_loads);
 
 // Re-delivers the current theme to the view plugins (View::OnTheme; the
 // chat surface gets the theme with each pane it makes). Called once by

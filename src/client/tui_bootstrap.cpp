@@ -15,7 +15,6 @@
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/plugins/plugin_discovery.hpp"
-#include "minimal/client/status_format.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/common/bundled_assets.hpp"
 #include "minimal/common/config_paths.hpp"
@@ -24,25 +23,14 @@
 
 namespace minimal::client {
 
-namespace {
-
-// Left: what is happening. Right ({>}): what it is running on. {version} and
-// {session} are out of the default -- the banner/help carry the one, the tab
-// bar the other -- but remain available ids. session-status's segments only:
-// other plugins' ({cost}, {todo}, ...) are placed by ui.json's status_format
-// (the seeded one includes them).
-constexpr const char* kDefaultStatusFormat =
-    "{activity} · {tokens}{>}{model} · {agent} · {permission_mode} · {paused}";
-
-}  // namespace
-
-bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
+bool LoadClientPluginEnvironment(SessionClient* client, TuiEnvironment& out,
+                                 bool announce_loads) {
     namespace plugins = minimal::client::plugins;
 
     // --- config + client plugins --------------------------------------------
     //
     // ORDER MATTERS, and each step is load-bearing for a later one:
-    //   1. ui.json (status format -- it selects plugin segments by id)
+    //   1. ui.json (status_segments -- it moves plugin segments by id)
     //   2. (the grammars are plugins' too: the bundled syntax-grammars)
     //   3. PLUGIN LOAD (contexts carry the attention sink and the data path;
     //      registries record what each plugin claimed)
@@ -65,7 +53,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     out.host_focus_provider = plugins::MakeHostFocusProvider();   // also the HostUi seam
     out.attention_sink =
         plugins::MakeHostAttentionSink(&out.attention_state, out.host_focus_provider.get());
-    out.host_client_api = plugins::MakeHostClientApi(&client);
+    out.host_client_api = plugins::MakeHostClientApi(client);   // null: answers nothing
     out.host_widget_kit = plugins::MakeHostWidgetKit(out.registries.widget_kit);
     out.host_highlighter = std::make_unique<plugins::HostCodeHighlighter>();
     out.host_markdown = plugins::MakeHostMarkdownEngine(out.registries.markdown_engine);
@@ -183,7 +171,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         bool fatal = false;
         for (const auto& record : records) {
             if (record.ok() || record.status == plugins::LoadStatus::Disabled) {
-                if (record.status == plugins::LoadStatus::Disabled) continue;
+                if (record.status == plugins::LoadStatus::Disabled || !announce_loads) continue;
                 std::fprintf(stderr, "minimal: client plugin '%s' loaded (%s)\n",
                              record.name.c_str(), record.version.c_str());
                 continue;
@@ -275,6 +263,26 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             }
         }
     }
+
+    // The status bar: every segment where its plugin placed it, ui.json's
+    // exceptions applied. An override naming no segment is the user's typo
+    // or a disabled plugin -- said once, then ignored.
+    out.status_bar = ComposeStatusBar(out.registries.status_segments, out.ui.status_segments);
+    for (const auto& id : out.status_bar.unknown) {
+        common::DefaultLogger().warn("ui.json: status_segments.{}: no status segment by that name "
+                                     "-- ignored", id);
+    }
+    out.status_format = out.status_bar.format;
+    out.status_segment_ids.clear();
+    for (const auto& piece : out.status_format) {
+        if (piece.is_segment && piece.text != kStatusSplitId) out.status_segment_ids.insert(piece.text);
+    }
+    return true;
+}
+
+bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
+    namespace plugins = minimal::client::plugins;
+    if (!LoadClientPluginEnvironment(&client, out, /*announce_loads=*/true)) return false;
 
     // ui.json's "theme" selects the file (themes/<name>.json); empty means
     // the built-in default. Previously hardcoded to "dark" regardless of
@@ -434,19 +442,6 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     for (const auto& [action, key] : out.keymap.Unmapped()) {
         std::fprintf(stderr, "minimal: no key mapping for '%s' -> '%s'\n", action.c_str(),
                      key.c_str());
-    }
-
-    // The status format: ui.json's value, or the built-in default. An id no
-    // registered segment answers to warns (the bundled ones are
-    // session-status's: with it disabled, every default id warns).
-    const std::string status_format_string =
-        !out.ui.status_format.empty() ? out.ui.status_format : std::string(kDefaultStatusFormat);
-    out.status_format = minimal::client::ParseStatusFormat(status_format_string);
-    for (const auto& id : minimal::client::FormatSegmentIds(status_format_string)) {
-        out.status_segment_ids.insert(id);
-        if (out.registries.status_segments.Find(id) == nullptr) {
-            std::fprintf(stderr, "minimal: unknown status segment '{%s}'\n", id.c_str());
-        }
     }
 
     // The highlighter consults the assembled grammar table (every

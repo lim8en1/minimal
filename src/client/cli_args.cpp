@@ -71,6 +71,8 @@ std::string DefaultServerTarget() {
 std::string UsageText() {
     return "usage: minimal [options] [-p PROMPT]\n"
            "       minimal plugin [...]      plugin configuration (minimal plugin --help)\n"
+           "       minimal status-bar [...]  the status bar's layout, a sample, and a\n"
+           "                                 ui.json block to edit (minimal status-bar --help)\n"
            "\n"
            "  -p, --print PROMPT        run one turn headlessly and exit\n"
            "      --resume SESSION_ID   open a stored session: attach to it in the TUI\n"

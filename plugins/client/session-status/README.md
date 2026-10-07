@@ -17,7 +17,10 @@ every segment (`plugins::TabStatus`):
 | `{session}` | the session's name; the one value the bar may cut short | |
 | `{version}` | the build | first |
 
-The format string (`ui.json`'s `status_format`) places them; the layout is
+Each segment places itself (left: `activity` 10, `tokens` 20; right:
+`model` 10, `agent` 20, `permission_mode` 30, `paused` 40; `session` and
+`version` nowhere until `ui.json`'s `status_segments` places them --
+docs/CONFIGURATION.md "The status bar"); the layout is
 core's.
 
 ## Configuration

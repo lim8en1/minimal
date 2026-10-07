@@ -720,11 +720,41 @@ One undo step — `prompt.undo` brings the text back. Prompt editor only.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `status_format` | string | built-in default | segment ids in braces with literal text between; the default is `{activity} · {tokens} · {cost?} · {token_detail?}{>}{model} · {agent} · {permission_mode}`. Core ids: `activity`, `tokens`, `model`, `agent`, `permission_mode`, `session`, `paused`, `version`; plugin ids (e.g. cost-view's `cost`, `token_detail`) too. An unknown id is warned about at startup unless it is written `{id?}` -- optional, for a plugin segment that may not be installed. A plugin segment cannot take a core id: it is ignored with a warning. `{>}` right-aligns everything after it. An empty segment takes its separator with it; when the bar overflows, whole segments drop lowest-priority first (`version`, `token_detail`, `session` … `permission_mode` last) — a value is never clipped |
+| `status_segments` | object | `{}` | the status bar's exceptions, by segment id: `false` hides one, `{"side": "left"\|"right", "order": N}` moves it (a key left out keeps the segment's own). Every segment places itself (below); an id no loaded plugin registers is warned about and ignored. Not seeded — `minimal status-bar` prints a complete block to start from |
 | `scrollback_window_max_messages` | int | `0` (= built-in) | must be positive if set |
 | `tool_output_buffer_bytes` | int | `0` | |
 | `panel_height` | int | unset (12) | rows for a panel's content (the tools panel and every plugin panel); minimum 3 |
 | `theme` | string | `""` (= `"dark"`) | names `themes/<name>.json`; unknown name → terminal defaults + warning |
+
+**The status bar.** Each segment says where it goes; the bar is what the
+enabled plugins place, left side then right (`{>}` in the layout below),
+ascending by order, ties by id:
+
+| side | order | segment | plugin |
+|---|---|---|---|
+| left | 10 | `activity` | session-status |
+| left | 20 | `tokens` | session-status |
+| left | 30 | `cost` | cost-view |
+| left | 40 | `token_detail` | cost-view |
+| left | 50 | `todo` | checklist-view |
+| right | 10 | `model` | session-status |
+| right | 20 | `agent` | session-status |
+| right | 30 | `permission_mode` | session-status |
+| right | 40 | `paused` | session-status |
+| — | — | `session`, `version` | session-status (place them yourself) |
+
+An empty segment takes its separator with it; when the bar overflows, whole
+segments drop lowest-priority first (`version`, `session` … `permission_mode`
+last) — a value is never clipped. To see the bar without starting a session:
+
+```sh
+minimal status-bar --width 120 --width 80
+```
+
+prints the layout, the bar rendered from a sample tab at each width (with
+what dropped), and a complete `"status_segments"` block — paste it into
+`ui.json`, change what you want, and run it again. (`status_format`, the old
+format string, is gone; a leftover key is warned about as unknown.)
 
 Unknown keys ignored; the file is never rewritten (it is yours) — the only
 exception is the managed write of `theme` (`/theme`), which round-trips every
