@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "minimal",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local-first, memory/CPU-efficient coding-agent harness (gRPC server + FTXUI TUI client).",
   "license": "Apache-2.0",
   "dependencies": [
