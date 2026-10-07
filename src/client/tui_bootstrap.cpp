@@ -298,21 +298,21 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         const auto& view = views[i];
         // Users address the SURFACE id (the alias, if one renamed the view).
         const std::string& surface = view_surfaces[i];
-        keys.EnsureDefault(surface, view->spec().default_keybinding);
-        const std::string bound = keys.KeyFor(surface);
-        if (const auto clash = core_keys.find(NormalizeKeySpec(bound));
-            !bound.empty() && clash != core_keys.end()) {
-            std::fprintf(stderr,
-                         "minimal: warning: plugin view '%s' is bound to '%s', which '%s' "
-                         "already uses -- the view's key does nothing; rebind one in "
-                         "keybindings.json\n",
-                         surface.c_str(), bound.c_str(), clash->second.c_str());
-        }
-        // Plugin component code: a throw out of component() would propagate
-        // into the frame assembly (and, later, the ftxui loop, where it would
+        // Plugin code (spec(), component()): a throw would propagate into the
+        // frame assembly (and, later, the ftxui loop, where it would
         // std::terminate). Contained like every other plugin call site:
         // logged, that view skipped, never fatal.
         try {
+            keys.EnsureDefault(surface, view->spec().default_keybinding);
+            const std::string bound = keys.KeyFor(surface);
+            if (const auto clash = core_keys.find(NormalizeKeySpec(bound));
+                !bound.empty() && clash != core_keys.end()) {
+                std::fprintf(stderr,
+                             "minimal: warning: plugin view '%s' is bound to '%s', which '%s' "
+                             "already uses -- the view's key does nothing; rebind one in "
+                             "keybindings.json\n",
+                             surface.c_str(), bound.c_str(), clash->second.c_str());
+            }
             auto component = view->component();
             // A null component is skipped like a throwing one: every event
             // path downstream (keybinding dispatch, modal routing) calls
@@ -370,10 +370,21 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // pointer to this vector (see the address-stability contract in the
     // header), so its storage must outlive the highlighter, not just this
     // function call.
-    for (const auto& grammar : out.registries.grammars.All()) {
-        out.languages.push_back(minimal::client::LanguageDefinition{
-            grammar->Language(), grammar->LanguageFn(), grammar->Rules(),
-            grammar->FunctionFields(), grammar->Aliases()});
+    // Plugin code, so contained like every other additive entry: a grammar
+    // whose accessors throw is skipped (its fences render plain), never the
+    // end of startup.
+    const auto& grammar_owners = out.registries.grammars.owners();
+    for (std::size_t i = 0; i < out.registries.grammars.All().size(); ++i) {
+        const auto& grammar = out.registries.grammars.All()[i];
+        try {
+            out.languages.push_back(minimal::client::LanguageDefinition{
+                grammar->Language(), grammar->LanguageFn(), grammar->Rules(),
+                grammar->FunctionFields(), grammar->Aliases()});
+        } catch (...) {
+            std::fprintf(stderr,
+                         "minimal: warning: a syntax grammar of plugin '%s' threw; skipped\n",
+                         grammar_owners[i].c_str());
+        }
     }
     // emplace, not assignment: SyntaxHighlighter stores `const Theme&`, so it
     // has no default constructor and no operator= -- it can only ever be
