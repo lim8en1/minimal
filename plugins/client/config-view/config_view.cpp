@@ -8,6 +8,7 @@
 
 #include <ftxui/component/component_base.hpp>
 
+#include "minimal/client/picker_model.hpp"
 #include "minimal/client/view/schema_form_model.hpp"
 #include "minimal/common/logger.hpp"
 
@@ -169,9 +170,10 @@ private:
             if (choice.is_string()) choices.push_back(choice.get<std::string>());
         }
         auto build_rows = [choices, current, fallback](const std::string& filter) {
+            const std::string lowered = client::ToLower(filter);
             std::vector<client::MenuRow> rows;
             for (const auto& choice : choices) {
-                if (!filter.empty() && choice.find(filter) == std::string::npos) continue;
+                if (!client::MatchesFilter(lowered, {choice})) continue;
                 std::string label = choice;
                 if (choice == current) label += "  (current)";
                 if (choice == fallback) label += "  (default)";
@@ -215,10 +217,11 @@ private:
         built_generation_ = state.generation;
         auto rows = state.rows;
         auto build_rows = [rows](const std::string& filter) {
+            const std::string lowered = client::ToLower(filter);
             std::vector<client::MenuRow> out;
             for (const auto& row : rows) {
                 const std::string name = row.value("name", "");
-                if (!filter.empty() && name.find(filter) == std::string::npos) continue;
+                if (!client::MatchesFilter(lowered, {name})) continue;
                 out.push_back({ListLabel(row), name, /*header=*/false});
             }
             return out;
@@ -304,14 +307,21 @@ void ConfigFeed::FetchList() {
 void ConfigFeed::Open(const std::string& name) {
     {
         std::lock_guard<std::mutex> lock(mu_);
+        // Reopening the plugin already open (the view shown again): its last
+        // description stands while the fresh one is fetched -- no "loading"
+        // flash, and the form keeps the selected field.
+        const bool reopen = open_ == name && !form_.describe.is_null();
         open_ = name;
-        // The generation keeps counting across plugins: reset to 1, the
-        // next plugin's description could land at the generation the form
-        // last built at, and the form kept the previous plugin's rows.
-        const std::uint64_t generation = form_.generation + 1;
-        form_ = client::SchemaFormState{};
-        form_.title = name;
-        form_.generation = generation;
+        if (!reopen) {
+            // The generation keeps counting across plugins: reset to 1, the
+            // next plugin's description could land at the generation the
+            // form last built at, and the form kept the previous plugin's
+            // rows.
+            const std::uint64_t generation = form_.generation + 1;
+            form_ = client::SchemaFormState{};
+            form_.title = name;
+            form_.generation = generation;
+        }
     }
     worker_.Post([this, name] { FetchDescribe(name, "", ""); });
 }

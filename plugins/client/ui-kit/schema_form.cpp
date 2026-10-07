@@ -10,8 +10,8 @@
 
 #include "modal_chrome.hpp"
 #include "minimal/client/view/schema_form_model.hpp"
-#include "minimal/common/utf8.hpp"
 #include "minimal/client/policy.hpp"
+#include "minimal/client/utf8.hpp"
 
 namespace minimal::client::ui_kit {
 namespace {
@@ -19,9 +19,30 @@ namespace {
 using namespace ftxui;
 
 
+// Clipped to `width` display columns (a wide glyph counts two), with an
+// ellipsis when cut.
 std::string Clip(const std::string& text, std::size_t width) {
-    if (text.size() <= width) return text;
-    return common::TruncateCodePoints(text, width - 1) + "~";
+    return TruncateUtf8Columns(text, width);
+}
+
+// A nested field's label sits under its group header, indented.
+constexpr std::size_t kNestedIndent = 2;  // NOLINT(readability-magic-numbers): the columns of "  "
+
+// What the keys do on the selected row -- the row's own action first.
+std::string HintsFor(const FormRow* row, bool can_pick, bool can_back) {
+    std::string hints;
+    if (row != nullptr) {
+        switch (ActionFor(*row, can_pick)) {
+            case FormAction::kToggle: hints = "enter/space: toggle"; break;
+            case FormAction::kCycle: hints = "enter/space: next value"; break;
+            case FormAction::kEdit: hints = "enter: edit"; break;
+            case FormAction::kPick: hints = "enter: choose"; break;
+        }
+        if (row->overridden) hints += "  ·  d/del: reset to default";
+        hints += "  ·  ";
+    }
+    hints += can_back ? "←/esc: back" : "esc: close";
+    return hints + "  ·  * = set";
 }
 
 class SchemaFormComponent final : public ComponentBase, public EscapeAware {
@@ -37,7 +58,9 @@ public:
         Add(input_);
     }
 
-    bool WantsEscape() const override { return editing_; }
+    // The editor's Escape cancels it; otherwise Escape steps back a level
+    // when there is one to step back to.
+    bool WantsEscape() const override { return editing_ || static_cast<bool>(callbacks_.on_back); }
 
 private:
     void Sync(const SchemaFormState& state) {
@@ -65,6 +88,10 @@ private:
         }
     }
 
+    static std::size_t Indent(const FormRow& row) {
+        return !row.header && row.path.find('.') != std::string::npos ? kNestedIndent : 0;
+    }
+
     const FormRow* Selected() const {
         if (selected_ < 0 || selected_ >= static_cast<int>(rows_.size())) return nullptr;
         return rows_[selected_].header ? nullptr : &rows_[selected_];
@@ -82,10 +109,13 @@ private:
         const SchemaFormState state = source_();
         Sync(state);
 
+        // The label column fits the longest label, indent included, up to
+        // the cap -- in display columns.
         std::size_t label_width = 0;
         for (const auto& row : rows_) {
-            const std::size_t indent = row.header ? 0 : (row.path.find('.') == std::string::npos ? 0 : 2);
-            label_width = std::max(label_width, std::min(row.label.size() + indent, kSchemaFormLabelWidth));
+            const std::size_t indent = Indent(row);
+            label_width = std::max(label_width,
+                                   std::min(Utf8ColumnWidth(row.label) + indent, kSchemaFormLabelWidth));
         }
 
         Elements lines;
@@ -96,8 +126,9 @@ private:
                 lines.push_back(text(row.label) | bold);
                 continue;
             }
-            const bool nested = row.path.find('.') != std::string::npos;
-            const std::string label = (nested ? "  " : "") + Clip(row.label, kSchemaFormLabelWidth);
+            const std::size_t indent = Indent(row);
+            const std::string label =
+                std::string(indent, ' ') + Clip(row.label, kSchemaFormLabelWidth - indent);
             Element value = editing_ && i == selected_
                                 ? input_->Render() | size(WIDTH, EQUAL, kSchemaFormValueWidth)
                                 : text(Clip(row.shown, kSchemaFormValueWidth)) |
@@ -113,8 +144,8 @@ private:
                 text("  "),
                 std::move(value),
                 text("  "),
-                text(!row.unused.empty() ? "not used" : row.live ? "live" : "restart") |
-                    Muted(theme_),
+                // Restart is the usual case: only the exceptions are tagged.
+                text(!row.unused.empty() ? "not used" : row.live ? "live" : "") | Muted(theme_),
             };
             if (row.pending) cells.push_back(text("  restart pending") | color(theme_.ColorFor("attention")));
             Element line = hbox(std::move(cells));
@@ -133,6 +164,10 @@ private:
             if (row->field.contains("choices")) about += ", one of " + row->field["choices"].dump();
             about += ")";
             pinned.push_back(text(about) | Muted(theme_));
+            // The whole value, when the column had to cut it.
+            if (Utf8ColumnWidth(row->shown) > kSchemaFormValueWidth) {
+                pinned.push_back(paragraph("= " + row->shown) | Muted(theme_));
+            }
             if (!row->unused.empty()) {
                 pinned.push_back(paragraph("Not used while " + row->unused + ".") |
                                  color(theme_.ColorFor("attention")));
@@ -150,7 +185,8 @@ private:
             pinned.push_back(state.status_is_error ? status | color(theme_.ColorFor("error")) : status);
         }
 
-        std::string hints = "enter: edit/toggle/choose  ·  d: default  ·  ←: back  ·  esc: close  ·  * = set";
+        std::string hints = HintsFor(Selected(), static_cast<bool>(callbacks_.on_pick),
+                                     static_cast<bool>(callbacks_.on_back));
         if (editing_) {
             hints = secret_edit_ ? "enter: save (empty keeps the current key)  ·  esc: cancel"
                                  : "enter: save  ·  esc: cancel";
@@ -190,7 +226,9 @@ private:
             selected_ = NextFieldRow(rows_, selected_, +1);
             return true;
         }
-        if (event == Event::ArrowLeft || event == Event::Backspace) {
+        // Not Backspace: a habitual delete, often pressed right after the
+        // editor closed, used to leave the form.
+        if (event == Event::ArrowLeft || (event == Event::Escape && callbacks_.on_back)) {
             if (callbacks_.on_back) callbacks_.on_back();
             return true;
         }
