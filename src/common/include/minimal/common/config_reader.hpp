@@ -79,7 +79,9 @@ public:
     // {"file": <label>, "fields": [{"path", "type", "default"?, "minimum"?,
     // "maximum"?, "choices"?, "doc"?, "apply", "secret"?}, ...]}, in read
     // order. Types: "boolean", "integer", "number", "string", "enum",
-    // "string_list", "string_map", "json" (an opaque value: edited as JSON).
+    // "string_list", "string_map", "object_list" (with "items": the item's
+    // own fields, and "item_template"), "json" (an opaque value: edited as
+    // JSON).
     nlohmann::json Schema() const;
 
 private:
@@ -173,6 +175,15 @@ public:
     // A child cursor over an arbitrary node reached through Entries() or an
     // array, extending this cursor's path.
     Reader Child(const nlohmann::json& node, const std::string& segment) const;
+    // A list of objects, each read by `each` through its own cursor (path
+    // "<key>[i]"; the item's Finish() is the callback's). Absent: `each`
+    // never runs. Present but not a list of objects: an error naming the
+    // entry. In describe mode the field records as "object_list", and `each`
+    // also runs once over `sample` -- an item that parses -- so the item's
+    // own fields (their types, docs, secrets, choices) record under "items",
+    // and `sample` as "item_template": what a form starts a new item from.
+    void ObjectList(std::string_view key, const nlohmann::json& sample,
+                    const std::function<void(Reader& item)>& each);
 
     // Reports every key not consumed (comments excluded): kError throws,
     // kWarn sends one warning per key.

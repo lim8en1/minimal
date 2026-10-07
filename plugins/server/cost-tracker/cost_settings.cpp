@@ -33,44 +33,46 @@ nlohmann::json SourcesAsJson(const std::vector<RateSourceSettings>& sources) {
     return list;
 }
 
-std::vector<RateSourceSettings> ParseRateSources(config::Reader& root,
-                                                 const nlohmann::json& list,
-                                                 const config::SecretResolver& secrets) {
-    if (!list.is_array()) root.Fail("rate_sources", "must be a list of rate sources");
-    std::vector<RateSourceSettings> sources;
-    std::set<std::string> names;
-    for (std::size_t index = 0; index < list.size(); ++index) {
-        const std::string segment = "rate_sources[" + std::to_string(index) + "]";
-        const auto& node = list[index];
-        if (!node.is_object()) root.Fail(segment, "must be an object");
-        config::Reader entry = root.Child(node, segment);
-        RateSourceSettings source;
-        const auto format =
-            entry.MaybeEnum("format", {"litellm", "openrouter", "litellm-proxy"});
-        if (!format) entry.Fail("format", "is required");
-        for (const RateFormat candidate : kFormats) {
-            if (*format == RateFormatName(candidate)) source.format = candidate;
-        }
-        source.name = entry.String("name", *format, /*allow_empty=*/false);
-        if (!ValidSourceName(source.name)) {
-            entry.Fail("name", "may contain only letters, digits, '-', '_' and '.'");
-        }
-        if (!names.insert(source.name).second) {
-            entry.Fail("name", "\"" + source.name + "\" names an earlier source too; " +
-                                   "give one of them a distinct name");
-        }
-        source.url = entry.RequireString("url");
-        if (source.url.empty()) entry.Fail("url", "must not be empty");
-        source.api_key_ref = entry.String("api_key", {});
-        entry.Finish();
-        try {
-            source.api_key = secrets.Bind(source.api_key_ref, source.url);
-        } catch (const std::exception& error) {
-            entry.Fail("api_key", error.what());
-        }
-        sources.push_back(std::move(source));
+// What a form starts a new source from: a format whose name is unlikely to
+// collide with the defaults', and the one field the user must fill in.
+nlohmann::json NewSourceTemplate() {
+    return {{"format", "litellm-proxy"}, {"url", "https://"}};
+}
+
+// One rate source, read and checked; `names` holds the earlier sources'.
+RateSourceSettings ParseRateSource(config::Reader& entry, std::set<std::string>& names,
+                                   const config::SecretResolver& secrets) {
+    entry.Describe("format", {"The snapshot's shape: litellm (the public JSON), openrouter "
+                              "(its /models list), litellm-proxy (a gateway's /model/info)."});
+    entry.Describe("name", {"Unique label (storage key, logs); defaults to the format."});
+    entry.Describe("url", {"Where the snapshot is fetched from."});
+    entry.Describe("api_key", {.doc = "Sent as Authorization: Bearer; a key reference such as "
+                                      "secret:NAME.",
+                               .secret = true});
+    RateSourceSettings source;
+    const auto format = entry.MaybeEnum("format", {"litellm", "openrouter", "litellm-proxy"});
+    if (!format) entry.Fail("format", "is required");
+    for (const RateFormat candidate : kFormats) {
+        if (*format == RateFormatName(candidate)) source.format = candidate;
     }
-    return sources;
+    source.name = entry.String("name", *format, /*allow_empty=*/false);
+    if (!ValidSourceName(source.name)) {
+        entry.Fail("name", "may contain only letters, digits, '-', '_' and '.'");
+    }
+    if (!names.insert(source.name).second) {
+        entry.Fail("name", "\"" + source.name + "\" names an earlier source too; " +
+                               "give one of them a distinct name");
+    }
+    source.url = entry.RequireString("url");
+    if (source.url.empty()) entry.Fail("url", "must not be empty");
+    source.api_key_ref = entry.String("api_key", {});
+    entry.Finish();
+    try {
+        source.api_key = secrets.Bind(source.api_key_ref, source.url);
+    } catch (const std::exception& error) {
+        entry.Fail("api_key", error.what());
+    }
+    return source;
 }
 
 }  // namespace
@@ -100,10 +102,8 @@ CostSettings ParseCostSettings(const nlohmann::json& config,
     CostSettings settings;
     config::Reader reader(config, common::PluginConfigLabel(common::kPluginConfigDirName, "cost-tracker"));
     reader.Describe("rate_sources",
-                    {"Pricing snapshots to fetch, highest priority first: [{\"format\": "
-                     "\"litellm\" | \"openrouter\" | \"litellm-proxy\", \"url\", \"name\" "
-                     "(defaults to format; unique), \"api_key\" (a key reference such as "
-                     "\"secret:NAME\", sent as Authorization: Bearer)}]. [] fetches nothing."});
+                    {"Pricing snapshots to fetch, highest priority first. An empty list "
+                     "fetches nothing."});
     reader.Default("rate_sources", SourcesAsJson(settings.rate_sources));
     reader.Describe("rates_fetch_timeout_ms", {"Bound on one pricing fetch."});
     reader.Describe("rates_refresh_days",
@@ -118,10 +118,15 @@ CostSettings ParseCostSettings(const nlohmann::json& config,
                               config::ApplyPolicy::kLive});
     reader.Default("rates", nlohmann::json::object());
     static const config::SecretResolver kDefaultSecrets;
-    if (const auto* list = reader.Raw("rate_sources")) {
-        settings.rate_sources =
-            ParseRateSources(reader, *list, secrets != nullptr ? *secrets : kDefaultSecrets);
-    }
+    const config::SecretResolver& resolver = secrets != nullptr ? *secrets : kDefaultSecrets;
+    // Present (even []) replaces the defaults; absent keeps them.
+    std::vector<RateSourceSettings> sources;
+    std::set<std::string> names;
+    const bool listed = reader.Has("rate_sources");
+    reader.ObjectList("rate_sources", NewSourceTemplate(), [&](config::Reader& entry) {
+        sources.push_back(ParseRateSource(entry, names, resolver));
+    });
+    if (listed) settings.rate_sources = std::move(sources);
     settings.rates_fetch_timeout_ms = static_cast<int>(reader.Int(
         "rates_fetch_timeout_ms", settings.rates_fetch_timeout_ms, 1,
         std::min<std::int64_t>(std::numeric_limits<int>::max(), common::kMaxDeadline.count())));

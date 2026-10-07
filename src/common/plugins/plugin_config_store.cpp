@@ -141,6 +141,7 @@ json ParseFieldValue(const json& field, std::string_view text) {
     if (parsed.is_discarded()) return fail("must be JSON, got " + Quote(text));
     if (type == "string_list" && !parsed.is_array()) return fail("must be a JSON list of strings");
     if (type == "string_map" && !parsed.is_object()) return fail("must be a JSON object");
+    if (type == "object_list" && !parsed.is_array()) return fail("must be a JSON list of objects");
     return parsed;
 }
 

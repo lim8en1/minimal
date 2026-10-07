@@ -55,6 +55,28 @@ public:
         return {{"file", file_}, {"fields", std::move(fields)}};
     }
 
+    // Takes the fields under `prefix` ("rate_sources[]."), their paths
+    // relative to it: an object list's item fields, recorded by running the
+    // item reader over a sample.
+    nlohmann::json Extract(const std::string& prefix) {
+        nlohmann::json taken = nlohmann::json::array();
+        std::vector<nlohmann::json> kept;
+        for (auto& field : fields_) {
+            const std::string path = field.value("path", "");
+            if (path.rfind(prefix, 0) != 0) {
+                kept.push_back(std::move(field));
+                continue;
+            }
+            field["path"] = path.substr(prefix.size());
+            if (!field.contains("type")) field["type"] = "json";
+            taken.push_back(std::move(field));
+        }
+        fields_ = std::move(kept);
+        index_.clear();
+        for (std::size_t i = 0; i < fields_.size(); ++i) index_.emplace(fields_[i]["path"], i);
+        return taken;
+    }
+
 private:
     std::string file_;
     std::vector<nlohmann::json> fields_;
@@ -338,6 +360,30 @@ std::vector<std::pair<std::string, const nlohmann::json*>> Reader::Entries(std::
 
 Reader Reader::Child(const nlohmann::json& node, const std::string& segment) const {
     return Reader(node, file_, Join(segment), warn_);
+}
+
+void Reader::ObjectList(std::string_view key, const nlohmann::json& sample,
+                        const std::function<void(Reader& item)>& each) {
+    Note(key, "object_list");
+    if (const auto* list = Find(key)) {
+        if (!list->is_array()) Fail(key, "must be a list of objects, got " + Quoted(*list));
+        for (std::size_t i = 0; i < list->size(); ++i) {
+            const std::string segment = std::string(key) + "[" + std::to_string(i) + "]";
+            const auto& node = (*list)[i];
+            if (!node.is_object()) Fail(segment, "must be an object, got " + Quoted(node));
+            Reader item = Child(node, segment);
+            each(item);
+        }
+    }
+    if (!recorder_) return;
+    {
+        Reader item = Child(sample, std::string(key) + "[]");
+        each(item);
+    }
+    nlohmann::json items = recorder_->Extract(Join(key) + "[].");
+    nlohmann::json& field = recorder_->Field(Join(key));
+    field["items"] = std::move(items);
+    field["item_template"] = sample;
 }
 
 void Reader::Finish(UnknownKeys policy) {
