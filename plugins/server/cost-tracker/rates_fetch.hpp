@@ -15,6 +15,7 @@
 // gRPC handler thread (--plugin-call cost-tracker refresh_rates / refresh_rates) -- blocking is
 // acceptable there.
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -40,7 +41,10 @@ struct RatesFetchOutcome {
     std::string error;                       // REQUIRED when !ok
 };
 
+// `stop` (optional), polled during the downloads: true abandons them -- a
+// shutdown never waits out a slow rates server. The sources it cut short
+// fail like any other, and the previous snapshots stay in force.
 RatesFetchOutcome FetchAndUpdateRates(const CostSettings& settings, CostStore& store,
-                                      RateTable& rates);
+                                      RateTable& rates, std::function<bool()> stop = {});
 
 }  // namespace minimal::cost_tracker

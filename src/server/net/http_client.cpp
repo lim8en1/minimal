@@ -384,8 +384,8 @@ HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode 
     curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, &WriteCallback);
     curl_easy_setopt(handle, CURLOPT_WRITEDATA, &state);
 
-    if (mode == Mode::Streaming && request.should_abort) state.should_abort = &request.should_abort;
-    if (mode == Mode::Streaming && (request.idle_timeout.count() > 0 || request.should_abort)) {
+    if (request.should_abort) state.should_abort = &request.should_abort;
+    if (request.should_abort || (mode == Mode::Streaming && request.idle_timeout.count() > 0)) {
         curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, &XferInfoCallback);
         curl_easy_setopt(handle, CURLOPT_XFERINFODATA, &state);

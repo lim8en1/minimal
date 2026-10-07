@@ -44,7 +44,8 @@ struct HttpRequest {
     // TOCTOU). Empty by default -- libcurl resolves normally.
     std::vector<std::string> pinned_resolves;
     // Polled by libcurl's progress callback (at least ~1/s, bytes or not);
-    // true aborts the transfer with HttpError{Cancelled}. Streaming mode only.
+    // true aborts the transfer with HttpError{Cancelled}. Every mode: a
+    // buffered download a shutdown is waiting on stops too.
     std::function<bool()> should_abort;
 };
 

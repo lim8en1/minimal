@@ -70,7 +70,8 @@ public:
     // Never blocks: the fetch itself runs on the worker.
     void MaybeStart();
 
-    // Joins the worker (a no-op when never started). Called at teardown from
+    // Abandons the download in flight and joins the worker (a no-op when
+    // never started). Called at teardown from
     // RatesRefresherOwner's destructor -- never from a static's destructor,
     // which would run after plugin_storage is gone.
     void Shutdown();
@@ -83,6 +84,7 @@ private:
     RateTable& rates_;
     plugins::PluginStorage* storage_;
     std::atomic<bool> started_{false};
+    std::atomic<bool> stopping_{false};
     std::thread worker_;
 };
 

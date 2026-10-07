@@ -72,7 +72,9 @@ void RatesRefresher::Run() {
     // previous snapshot staying in force on failure. A failed refresh is a
     // log line, never an error surfaced anywhere -- the auto path has no
     // caller to answer.
-    const auto outcome = FetchAndUpdateRates(settings_, store_, rates_);
+    const auto outcome =
+        FetchAndUpdateRates(settings_, store_, rates_, [this] { return stopping_.load(); });
+    if (stopping_) return;   // shutting down: nothing to report
     if (outcome.ok) {
         std::string per_source;
         for (const auto& source : outcome.sources) {
@@ -91,6 +93,9 @@ void RatesRefresher::Run() {
 }
 
 void RatesRefresher::Shutdown() {
+    // The download is abandoned, not waited out: a server that failed its
+    // startup (or was stopped) exited only once a slow rates server answered.
+    stopping_ = true;
     if (worker_.joinable()) worker_.join();
 }
 

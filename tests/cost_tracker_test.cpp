@@ -1120,6 +1120,36 @@ TEST_CASE("the tracking service reads the same store, degrading to nullopt",
     CHECK(degraded.SessionIds().empty());
 }
 
+TEST_CASE("cost-tracker: a stop abandons the rates download instead of waiting it out",
+          "[cost_tracker][rates]") {
+    // Regression: shutdown joined the startup refresh, so a server that
+    // failed at startup exited only once a slow rates server answered (~18 s
+    // seen). A listener that accepts and never answers stands in for it.
+    const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+    REQUIRE(listener >= 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    REQUIRE(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    REQUIRE(::listen(listener, 4) == 0);
+    socklen_t len = sizeof(addr);
+    REQUIRE(::getsockname(listener, reinterpret_cast<sockaddr*>(&addr), &len) == 0);
+    const std::string url = "http://127.0.0.1:" + std::to_string(ntohs(addr.sin_port)) + "/r.json";
+
+    Harness harness;
+    RateTable rates(RateSources{}, &harness.storage);
+    CostSettings settings;
+    settings.rate_sources = {Source("silent", RateFormat::kOpenRouter, url)};
+    settings.rates_fetch_timeout_ms = 30000;
+    const auto started = std::chrono::steady_clock::now();
+    const auto outcome = FetchAndUpdateRates(settings, harness.store, rates, [started] {
+        return std::chrono::steady_clock::now() - started > std::chrono::milliseconds(200);
+    });
+    CHECK_FALSE(outcome.ok);
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(5));
+    ::close(listener);
+}
+
 TEST_CASE("a failed rates fetch keeps the old table", "[cost_tracker]") {
     Harness harness;
     RateSources sources;

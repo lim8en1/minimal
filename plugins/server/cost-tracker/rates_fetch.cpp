@@ -32,11 +32,12 @@ std::string Iso8601UtcNow() {
 // ANY failure returns an empty map and fills `error` -- never throws, never
 // touches storage.
 std::map<std::string, Rate> FetchSource(const RateSourceSettings& source, int timeout_ms,
-                                        std::string& error) {
+                                        std::string& error, const std::function<bool()>& stop) {
     const std::string& label = source.name;
     net::HttpRequest request;
     request.url = source.url;
     request.request_timeout = std::chrono::milliseconds(timeout_ms);
+    request.should_abort = stop;
     if (source.api_key.configured()) {
         try {
             request.headers.push_back({"Authorization", "Bearer " + source.api_key.Get().value});
@@ -83,7 +84,7 @@ std::int64_t UnixSecondsNow() {
 }  // namespace
 
 RatesFetchOutcome FetchAndUpdateRates(const CostSettings& settings, CostStore& store,
-                                      RateTable& rates) {
+                                      RateTable& rates, std::function<bool()> stop) {
     RatesFetchOutcome outcome;
     const auto& sources = settings.rate_sources;
     if (sources.empty()) {
@@ -105,7 +106,7 @@ RatesFetchOutcome FetchAndUpdateRates(const CostSettings& settings, CostStore& s
         workers.reserve(sources.size());
         const auto fetch = [&](std::size_t i) {
             fetched[i] = FetchSource(sources[i], settings.rates_fetch_timeout_ms,
-                                     outcome.sources[i].error);
+                                     outcome.sources[i].error, stop);
         };
         for (std::size_t i = 0; i < sources.size(); ++i) {
             outcome.sources[i].name = sources[i].name;
