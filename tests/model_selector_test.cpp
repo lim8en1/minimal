@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "ftxui_harness.hpp"
+#include "minimal/client/plugins/task_worker.hpp"
 #include "model_selector.hpp"
 
 using namespace minimal;
@@ -72,8 +73,14 @@ bool Eventually(Pred pred) {
     return pred();
 }
 
-client::ModelSelectorSpec SpecOver(Source& source) {
+// The caller's worker every selector fetches on: test-lived, like a view's.
+void PostOn(client::ModelSelectorSpec& spec, client::plugins::TaskWorker& worker) {
+    spec.post = [&worker](std::function<void()> task) { worker.Post(std::move(task)); };
+}
+
+client::ModelSelectorSpec SpecOver(Source& source, client::plugins::TaskWorker& worker) {
     client::ModelSelectorSpec spec;
+    PostOn(spec, worker);
     spec.fetch = [&source](bool refresh, std::string& error) {
         return source.Fetch(refresh, error);
     };
@@ -87,10 +94,11 @@ client::ModelSelectorSpec SpecOver(Source& source) {
 TEST_CASE("the model selector loads the list itself, then picks a model or the leading row",
           "[model_selector]") {
     Source source;
+    client::plugins::TaskWorker worker("test");  // after `source`: joined first
     std::vector<std::string> picked;
     const auto theme = TestTheme();
     auto selector = client::ui_kit::MakeModelSelector(
-        SpecOver(source), {.on_select = [&](const std::string& ref) { picked.push_back(ref); }},
+        SpecOver(source, worker), {.on_select = [&](const std::string& ref) { picked.push_back(ref); }},
         theme);
 
     CHECK(minimal_test::RenderFrame(selector, 80, 24).find("loading") != std::string::npos);
@@ -115,8 +123,9 @@ TEST_CASE("the model selector loads the list itself, then picks a model or the l
 TEST_CASE("the model selector shows why the list failed, and ctrl+r refreshes discovery",
           "[model_selector]") {
     Source source;
+    client::plugins::TaskWorker worker("test");  // after `source`: joined first
     const auto theme = TestTheme();
-    auto selector = client::ui_kit::MakeModelSelector(SpecOver(source), {}, theme);
+    auto selector = client::ui_kit::MakeModelSelector(SpecOver(source, worker), {}, theme);
     source.Release(/*fail=*/true);
     REQUIRE(Eventually([&] {
         return minimal_test::RenderFrame(selector, 80, 24).find("the server is away") !=
@@ -129,10 +138,11 @@ TEST_CASE("the model selector shows why the list failed, and ctrl+r refreshes di
 
 TEST_CASE("the model selector offers a typed ref the list does not have", "[model_selector]") {
     Source source;
+    client::plugins::TaskWorker worker("test");  // after `source`: joined first
     source.Release();
     std::vector<std::string> picked;
     const auto theme = TestTheme();
-    auto spec = SpecOver(source);
+    auto spec = SpecOver(source, worker);
     spec.allow_custom = true;
     auto selector = client::ui_kit::MakeModelSelector(
         spec, {.on_select = [&](const std::string& ref) { picked.push_back(ref); }}, theme);
@@ -156,29 +166,40 @@ TEST_CASE("the model selector offers a typed ref the list does not have", "[mode
     CHECK(minimal_test::RenderFrame(selector, 80, 24).find("use '") == std::string::npos);
 }
 
-TEST_CASE("a model selector closed while its fetch is out goes away cleanly",
+TEST_CASE("a model selector dropped while its fetch is out never waits on it",
           "[model_selector]") {
+    // The UI-freeze shape: a discovery refresh (seconds) in flight when the
+    // modal is dropped on the UI thread. The drop returns at once; the
+    // fetch finishes on the caller's worker into state nobody shows.
     Source source;
-    const auto theme = TestTheme();
     std::atomic<int> redraws{0};
-    auto spec = SpecOver(source);
-    spec.redraw = [&] { ++redraws; };
     {
+        client::plugins::TaskWorker worker("test");
+        const auto theme = TestTheme();
+        auto spec = SpecOver(source, worker);
+        spec.redraw = [&] { ++redraws; };
         auto selector = client::ui_kit::MakeModelSelector(spec, {}, theme);
         REQUIRE(Eventually([&] { return source.refreshes().size() == 1; }));
-        std::thread release([&] {
-            std::this_thread::sleep_for(20ms);
-            source.Release();
-        });
-        selector.reset();  // waits for the fetch in flight, then joins
-        release.join();
+        const auto before = std::chrono::steady_clock::now();
+        selector.reset();  // the fetch is still blocked in Source::Fetch
+        CHECK(std::chrono::steady_clock::now() - before < 200ms);
+        source.Release();  // the worker's join (end of scope) then finishes
     }
-    CHECK(redraws.load() <= 1);
+    CHECK(redraws.load() == 1);
+}
+
+TEST_CASE("a model selector without a worker says so", "[model_selector]") {
+    const auto theme = TestTheme();
+    client::ModelSelectorSpec spec;
+    spec.fetch = [](bool, std::string&) { return std::optional<v1::ListModelsResponse>(); };
+    auto selector = client::ui_kit::MakeModelSelector(spec, {}, theme);
+    CHECK(minimal_test::RenderFrame(selector, 80, 24).find("no worker") != std::string::npos);
 }
 
 TEST_CASE("a default row is offered only when the server names a default, and names it",
           "[model_selector]") {
     const auto theme = TestTheme();
+    client::plugins::TaskWorker worker("test");
     for (const bool has_default : {true, false}) {
         INFO("has_default " << has_default);
         client::ModelSelectorSpec spec;
@@ -187,6 +208,7 @@ TEST_CASE("a default row is offered only when the server names a default, and na
             if (has_default) response.set_default_model("main/beta");
             return std::optional<v1::ListModelsResponse>(response);
         };
+        PostOn(spec, worker);
         spec.leading_row_id = "<default>";
         spec.leading_row_is_default = true;
         std::vector<std::string> picked;

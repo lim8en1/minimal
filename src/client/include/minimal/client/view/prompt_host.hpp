@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -60,7 +61,9 @@ private:
 // resolution and dropped with the tab. "" is the PRE-TAB editor (the frame
 // before any tab exists): typing there goes through the same submit paths,
 // which open a tab on submit. A factory that throws or answers null leaves
-// that tab without an editor (logged; retried on the next resolution).
+// that tab without an editor: logged once, and not retried until the tab is
+// forgotten -- every render and key resolves the editor, so a retry ran the
+// failing plugin code (and logged) at frame rate.
 // Loop thread, except WantsFrames (the redraw pump; the mutex exists for it).
 class PerTabPromptEditors {
 public:
@@ -75,7 +78,10 @@ public:
     bool Built(const std::string& tab) const;
     // The pump thread's read of the focused tab's editor. Never builds.
     bool WantsFrames(const std::string& tab) const;
-    // Tab close. The "" pre-tab entry is never forgotten.
+    // Whether building the tab's editor failed (a peek: never builds).
+    bool Failed(const std::string& tab) const;
+    // Tab close: drops the editor, or the failure. The "" pre-tab entry is
+    // never forgotten.
     void ForgetTab(const std::string& tab);
 
 private:
@@ -87,6 +93,7 @@ private:
 
     mutable std::mutex mtx_;
     std::map<std::string, Entry> entries_;
+    std::set<std::string> failed_;
     Build build_;
 };
 

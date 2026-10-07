@@ -243,7 +243,21 @@ TEST_CASE("PerTabPromptEditors: a factory that throws leaves the tab without an 
     CHECK(tabs.Resolve("A") == nullptr);
     CHECK(tabs.Editor("A") == nullptr);
     CHECK_FALSE(tabs.Built("A"));
-    CHECK(attempts == 2);   // retried on the next resolution
+    CHECK(tabs.Failed("A"));
+    // Once per tab: every render and key resolves the editor, and a retry
+    // ran the failing factory (and logged) at frame rate.
+    CHECK(attempts == 1);
+
+    // The host's row says so instead of rendering blank.
+    auto host = MakePerTabPromptEditor(tabs, [] { return std::string("A"); });
+    CHECK(ToText(host, 60, 1).find("failed to start") != std::string::npos);
+    CHECK(attempts == 1);
+
+    // Forgetting the tab forgets the failure; another tab tries afresh.
+    tabs.ForgetTab("A");
+    CHECK_FALSE(tabs.Failed("A"));
+    CHECK(tabs.Resolve("B") == nullptr);
+    CHECK(attempts == 2);
 }
 
 TEST_CASE("PerTabPromptEditors: a browse position trimmed away restarts browsing",

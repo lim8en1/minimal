@@ -710,6 +710,10 @@ void TuiApp::Shutdown() {
     // Tabs()/FocusedSessionId() during env_'s own teardown would otherwise
     // dereference a freed AppState. See HostFocusProvider::Detach().
     if (env_.host_focus_provider) env_.host_focus_provider->Detach();
+    // The highlighter proxy forwards into env_.highlighter, which unwinds
+    // before the registries (and the plugin threads they join) do: plain
+    // text from here on.
+    if (env_.host_highlighter) env_.host_highlighter->Attach(nullptr);
 
     // Cancel subscribe streams BEFORE the members unwind: `env_` is declared
     // after `client_`, so it is destroyed FIRST, and a subscribing plugin

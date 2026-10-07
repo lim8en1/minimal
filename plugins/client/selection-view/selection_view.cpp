@@ -108,6 +108,13 @@ ftxui::Component AgentsView::component() {
     });
 }
 
+ModelsView::ModelsView(Seams seams, bool for_subagents)
+    : seams_(seams),
+      for_subagents_(for_subagents),
+      worker_(std::make_unique<plugins::TaskWorker>("selection-view models")) {}
+
+ModelsView::~ModelsView() = default;
+
 const plugins::ViewSpec& ModelsView::spec() const {
     static const plugins::ViewSpec kModels{kModelsViewId, "switch model",
                                            plugins::ViewPlacement::Modal};
@@ -117,9 +124,10 @@ const plugins::ViewSpec& ModelsView::spec() const {
 }
 
 ftxui::Component ModelsView::component() {
+    plugins::TaskWorker* worker = worker_.get();
     return ftxui::Make<client::RebuildingComponent>(stale_, [seams = seams_,
                                                              subagents = for_subagents_,
-                                                             theme = &theme_] {
+                                                             theme = &theme_, worker] {
         const char* view_id = subagents ? kSubagentModelsViewId : kModelsViewId;
         // What the server names its default, from the fetch, for the
         // default row's choice.
@@ -136,6 +144,7 @@ ftxui::Component ModelsView::component() {
             }
             return answer;
         };
+        spec.post = [worker](std::function<void()> task) { worker->Post(std::move(task)); };
         spec.redraw = [ui = seams.ui] { ui->RequestRedraw(); };
         spec.leading_row_label = "same as parent";  // the subagent form's
         spec.leading_row_id = subagents ? kInheritRowId : kDefaultRowId;

@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -88,16 +89,18 @@ public:
     // the plugin registries (this provider's owner), so locals unwind in
     // the reverse order -- AppState dies FIRST. A plugin poller thread still
     // calling Tabs()/FocusedSessionId() during the registries' own teardown
-    // would otherwise dereference a freed AppState. Mutex-guarded (not just
-    // a null-out) so it acts as a real barrier: FocusedSessionId()/Tabs()
-    // hold the same lock for their WHOLE call into app_, so once Detach()
-    // returns, no in-flight call is still touching app_ and no new one can
-    // start.
+    // would otherwise dereference a freed AppState. Lock-guarded (not just
+    // a null-out) so it acts as a real barrier: every call into app_ or the
+    // UI reads holds the lock (shared) for its WHOLE call, so once Detach()
+    // (exclusive) returns, no in-flight call is still touching either and
+    // no new one can start. Drops the UI reads too: they reach into the
+    // TUI's own members, which unwind before the plugins do.
     void Detach();
 
     std::string FocusedSessionId() const override;
     std::vector<TabInfo> Tabs() const override;
-    // Held under the same lock as the reads: a no-op once Detach() returned.
+    // A shared hold like the reads, so it never waits on one (a Tabs() copy
+    // on a poller thread); a no-op once Detach() returned.
     void RequestRedraw() override;
     void RequestRedrawAfter(std::chrono::milliseconds delay) override;
     // The pump's half: whether a RequestRedrawAfter deadline has come (and,
@@ -113,7 +116,8 @@ public:
     std::shared_ptr<const TabActivitySnapshot> Activity() const override;
 
     // The TUI's half of the reads, once it is built (after Attach); until
-    // then both answer empty. UI thread, like the reads themselves.
+    // then, and after Detach, they answer empty. UI thread, like the reads
+    // themselves.
     struct UiReads {
         std::function<std::vector<KeyBindingInfo>()> key_bindings;
         std::function<std::vector<CommandCatalogEntry>()> command_catalog;
@@ -143,8 +147,10 @@ private:
     std::map<std::string, std::unique_ptr<BoundUi>> bound_;  // by plugin name
     std::filesystem::path state_dir_;
 
-    UiReads reads_;  // set once before the UI loop; read on the UI thread only
-    mutable std::mutex mtx_;
+    // Shared by every read and RequestRedraw; exclusive for Attach,
+    // AttachReads and Detach.
+    mutable std::shared_mutex mtx_;
+    UiReads reads_;            // guarded by mtx_; empty after Detach
     AppState* app_ = nullptr;  // guarded by mtx_; host-owned, null until Attach/after Detach
     // Its own lock, never held together with mtx_ (Enqueue releases it
     // before RequestRedraw takes mtx_).

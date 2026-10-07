@@ -602,7 +602,7 @@ public:
     virtual ftxui::Element ModalRule(const Theme& theme) const = 0;
 
     // A model chooser that fetches the list itself through `spec.fetch`,
-    // on its own worker; ctrl+r refreshes discovery.
+    // on the caller's worker (`spec.post`); ctrl+r refreshes discovery.
     virtual ftxui::Component ModelSelector(ModelSelectorSpec spec,
                                            ModelSelectorCallbacks callbacks,
                                            const Theme& theme) const = 0;
@@ -1070,6 +1070,7 @@ public:
         std::string key(KeyOf{}(*entry));
         if (key.empty()) return;
         surfaces_.push_back(key);
+        owners_.push_back(attribution_);
         attributions_.push_back({attribution_, std::move(key)});
         entries_.push_back(std::move(entry));
     }
@@ -1090,6 +1091,9 @@ public:
     bool empty() const override { return entries_.empty() && fallbacks_.empty(); }
     // Index-aligned with All(): the name each entry answers to.
     const std::vector<std::string>& surfaces() const { return surfaces_; }
+    // Index-aligned with All(): the plugin that registered each entry ("" =
+    // core). Not attributions(), which interleaves the fallbacks.
+    const std::vector<std::string>& owners() const { return owners_; }
 
     // The claim for `surface`, else its fallback, else null.
     T* Find(std::string_view surface) const {
@@ -1128,6 +1132,7 @@ public:
                 if (write != entry) {
                     entries_[write] = std::move(entries_[entry]);
                     surfaces_[write] = std::move(surfaces_[entry]);
+                    owners_[write] = std::move(owners_[entry]);
                 }
                 ++write;
             }
@@ -1135,6 +1140,7 @@ public:
         }
         entries_.resize(write);
         surfaces_.resize(write);
+        owners_.resize(write);
         write = 0;
         for (std::size_t read = 0; read < fallbacks_.size(); ++read) {
             if (fallback_owners_[read] == plugin_name) continue;
@@ -1161,6 +1167,7 @@ private:
 
     std::vector<std::unique_ptr<T>> entries_;
     std::vector<std::string> surfaces_;
+    std::vector<std::string> owners_;
     std::vector<std::unique_ptr<T>> fallbacks_;
     std::vector<std::string> fallback_keys_;
     std::vector<std::string> fallback_owners_;

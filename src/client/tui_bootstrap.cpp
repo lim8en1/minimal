@@ -1,10 +1,13 @@
 #include "minimal/client/tui_bootstrap.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <system_error>
+#include <vector>
 
 #include "minimal/client/config_file_io.hpp"
 #include "minimal/client/key_event_parser.hpp"
@@ -272,12 +275,15 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // The prompt editor's own actions (the required slot is filled by now):
     // their defaults, where the user's file binds nothing. Core actions never
     // share their ids (by convention "prompt.<name>").
+    std::set<std::string> slot_actions;   // for the unknown-id check below
     for (const auto& action : out.registries.prompt_editor.get()->Actions()) {
         keys.EnsureDefault(action.id, action.default_key);
+        slot_actions.insert(action.id);
     }
     // The chat surface's too ("chat.<name>").
     for (const auto& action : out.registries.chat_surface.get()->Actions()) {
         keys.EnsureDefault(action.id, action.default_key);
+        slot_actions.insert(action.id);
     }
 
     // Plugin views: register each id's suggested default keybinding only where
@@ -298,21 +304,21 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         const auto& view = views[i];
         // Users address the SURFACE id (the alias, if one renamed the view).
         const std::string& surface = view_surfaces[i];
-        keys.EnsureDefault(surface, view->spec().default_keybinding);
-        const std::string bound = keys.KeyFor(surface);
-        if (const auto clash = core_keys.find(NormalizeKeySpec(bound));
-            !bound.empty() && clash != core_keys.end()) {
-            std::fprintf(stderr,
-                         "minimal: warning: plugin view '%s' is bound to '%s', which '%s' "
-                         "already uses -- the view's key does nothing; rebind one in "
-                         "keybindings.json\n",
-                         surface.c_str(), bound.c_str(), clash->second.c_str());
-        }
-        // Plugin component code: a throw out of component() would propagate
-        // into the frame assembly (and, later, the ftxui loop, where it would
+        // Plugin code (spec(), component()): a throw would propagate into the
+        // frame assembly (and, later, the ftxui loop, where it would
         // std::terminate). Contained like every other plugin call site:
         // logged, that view skipped, never fatal.
         try {
+            keys.EnsureDefault(surface, view->spec().default_keybinding);
+            const std::string bound = keys.KeyFor(surface);
+            if (const auto clash = core_keys.find(NormalizeKeySpec(bound));
+                !bound.empty() && clash != core_keys.end()) {
+                std::fprintf(stderr,
+                             "minimal: warning: plugin view '%s' is bound to '%s', which '%s' "
+                             "already uses -- the view's key does nothing; rebind one in "
+                             "keybindings.json\n",
+                             surface.c_str(), bound.c_str(), clash->second.c_str());
+            }
             auto component = view->component();
             // A null component is skipped like a throwing one: every event
             // path downstream (keybinding dispatch, modal routing) calls
@@ -323,7 +329,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                 continue;
             }
             PluginViewEntry entry{view.get(), std::move(component), false, false, surface, {}};
-            entry.plugin = out.registries.views.attributions()[i].plugin_name;
+            entry.plugin = out.registries.views.owners()[i];
             out.plugin_views.push_back(std::move(entry));
         } catch (const std::exception& error) {
             common::DefaultLogger().warn("plugin view '{}' threw on component(): {}", surface,
@@ -333,6 +339,27 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                 "plugin view '{}' threw on component() (non-standard exception)", surface);
         }
     }
+    // A binding nothing in this build answers to -- a renamed action, a view
+    // whose plugin is disabled, a typo -- is kept (the file may predate or
+    // postdate the build) but said out loud: it used to sit dead silently.
+    {
+        std::vector<std::string> unknown;
+        for (const auto& [action, key] : keys.all()) {
+            if (Keybindings::IsCoreAction(action) || slot_actions.count(action) != 0 ||
+                out.registries.views.Find(action) != nullptr) {
+                continue;
+            }
+            unknown.push_back(action);
+        }
+        std::sort(unknown.begin(), unknown.end());
+        for (const auto& action : unknown) {
+            std::fprintf(stderr,
+                         "minimal: warning: keybindings.json binds '%s', which nothing in this "
+                         "build answers to -- renamed, a disabled plugin's view, or a typo?\n",
+                         action.c_str());
+        }
+    }
+
     // Parsed ONCE, after keys.all() has settled (core defaults + the user's
     // file + every plugin view's EnsureDefault default, just folded in
     // above): the caller's with_keys used to re-derive this per EVENT --
@@ -370,10 +397,21 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // pointer to this vector (see the address-stability contract in the
     // header), so its storage must outlive the highlighter, not just this
     // function call.
-    for (const auto& grammar : out.registries.grammars.All()) {
-        out.languages.push_back(minimal::client::LanguageDefinition{
-            grammar->Language(), grammar->LanguageFn(), grammar->Rules(),
-            grammar->FunctionFields(), grammar->Aliases()});
+    // Plugin code, so contained like every other additive entry: a grammar
+    // whose accessors throw is skipped (its fences render plain), never the
+    // end of startup.
+    const auto& grammar_owners = out.registries.grammars.owners();
+    for (std::size_t i = 0; i < out.registries.grammars.All().size(); ++i) {
+        const auto& grammar = out.registries.grammars.All()[i];
+        try {
+            out.languages.push_back(minimal::client::LanguageDefinition{
+                grammar->Language(), grammar->LanguageFn(), grammar->Rules(),
+                grammar->FunctionFields(), grammar->Aliases()});
+        } catch (...) {
+            std::fprintf(stderr,
+                         "minimal: warning: a syntax grammar of plugin '%s' threw; skipped\n",
+                         grammar_owners[i].c_str());
+        }
     }
     // emplace, not assignment: SyntaxHighlighter stores `const Theme&`, so it
     // has no default constructor and no operator= -- it can only ever be

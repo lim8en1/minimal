@@ -19,7 +19,7 @@
   "agent.picker": "alt+g",
   "model.picker": "alt+m",
   "permission.cycle": "shift+tab",
-  "panel.toggle": "ctrl+t",
+  "tools.panel": "ctrl+t",
   "panel.focus.next": "ctrl+alt+n",
   "panel.focus.prev": "ctrl+alt+p",
   "tab.close": "ctrl+w",

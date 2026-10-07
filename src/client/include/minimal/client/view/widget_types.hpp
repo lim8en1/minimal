@@ -151,11 +151,16 @@ struct SchemaFormCallbacks {
 struct ModelSelectorSpec {
     std::string window_title = "choose a model";
     std::string select_hint = "choose";  // what Enter does, for the hint line
-    // Answers the model list, on the selector's own worker thread -- never
-    // the UI thread. `refresh` (ctrl+r) re-runs every provider's discovery
-    // first and can take seconds. nullopt: it failed, and `error` says why
-    // (shown in place of the list).
+    // Answers the model list, on `post`'s worker -- never the UI thread.
+    // `refresh` (ctrl+r) re-runs every provider's discovery first and can
+    // take seconds. nullopt: it failed, and `error` says why (shown in place
+    // of the list).
     std::function<std::optional<v1::ListModelsResponse>(bool refresh, std::string& error)> fetch;
+    // Where `fetch` runs: the caller's own long-lived worker
+    // (TaskWorker::Post). The selector owns no thread, so dropping it -- a
+    // modal closed mid-refresh -- never waits on a fetch; an answer landing
+    // after that goes nowhere. Unset: the selector says it has no worker.
+    std::function<void(std::function<void()>)> post;
     // Called from the worker after each answer lands (HostUi::RequestRedraw).
     std::function<void()> redraw;
     // A row above the models that is not one ("off (untagged)", "the

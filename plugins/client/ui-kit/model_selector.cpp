@@ -9,7 +9,6 @@
 
 #include <ftxui/component/component_base.hpp>
 
-#include "minimal/client/plugins/task_worker.hpp"
 #include "model_picker.hpp"
 
 namespace minimal::client::ui_kit {
@@ -32,8 +31,7 @@ public:
                            const Theme& theme)
         : spec_(std::move(spec)),
           callbacks_(std::move(callbacks)),
-          theme_(theme),
-          worker_("model selector", spec_.redraw) {
+          theme_(theme) {
         Fetch(/*refresh=*/false);
     }
 
@@ -45,7 +43,15 @@ private:
             state_->error.clear();
             ++state_->generation;
         }
-        worker_.Post([state = state_, fetch = spec_.fetch, refresh] {
+        if (!spec_.post) {
+            std::lock_guard<std::mutex> lock(state_->mtx);
+            state_->loading = false;
+            state_->error = "no worker to fetch the model list on";
+            ++state_->generation;
+            return;
+        }
+        // Shared state and copies only: the task may outlive this component.
+        spec_.post([state = state_, fetch = spec_.fetch, redraw = spec_.redraw, refresh] {
             std::string error;
             std::optional<v1::ListModelsResponse> answer;
             if (fetch) {
@@ -53,16 +59,19 @@ private:
             } else {
                 error = "no model source";
             }
-            std::lock_guard<std::mutex> lock(state->mtx);
-            if (answer) {
-                state->models.assign(answer->models().begin(), answer->models().end());
-                state->default_model = answer->default_model();
-                state->error.clear();
-            } else {
-                state->error = error.empty() ? "the model list is unavailable" : error;
+            {
+                std::lock_guard<std::mutex> lock(state->mtx);
+                if (answer) {
+                    state->models.assign(answer->models().begin(), answer->models().end());
+                    state->default_model = answer->default_model();
+                    state->error.clear();
+                } else {
+                    state->error = error.empty() ? "the model list is unavailable" : error;
+                }
+                state->loading = false;
+                ++state->generation;
             }
-            state->loading = false;
-            ++state->generation;
+            if (redraw) redraw();
         });
     }
 
@@ -123,8 +132,6 @@ private:
     std::shared_ptr<MenuMemory> memory_ = std::make_shared<MenuMemory>();
     ftxui::Component shown_;
     std::uint64_t built_generation_ = 0;
-    // Last: destroyed first, joined before anything above goes.
-    plugins::TaskWorker worker_;
 };
 
 }  // namespace

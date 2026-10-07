@@ -53,6 +53,9 @@ public:
     // E5 plugin registry consults before registering its runtime defaults.
     const std::unordered_map<std::string, std::string>& all() const { return bindings_; }
 
+    // Whether `action` is one of core's own (every one has a default).
+    static bool IsCoreAction(std::string_view action);
+
 private:
     std::unordered_map<std::string, std::string> bindings_;
 };

@@ -97,21 +97,27 @@ void PerTabPromptEditors::SetBuilder(Build build) { build_ = std::move(build); }
 PerTabPromptEditors::Entry* PerTabPromptEditors::EntryFor(const std::string& tab) {
     auto it = entries_.find(tab);
     if (it != entries_.end()) return &it->second;
-    if (!build_) return nullptr;
+    if (!build_ || failed_.count(tab) != 0) return nullptr;
     // Plugin code: a throw (or a null editor) leaves the tab without one --
-    // logged, retried on the next resolution, never fatal.
+    // logged once, never fatal, not retried until the tab is forgotten.
     Entry entry;
     try {
         entry.editor = build_();
         if (entry.editor != nullptr) entry.component = entry.editor->component();
     } catch (const std::exception& error) {
         common::DefaultLogger().error("prompt editor: building one threw: {}", error.what());
+        failed_.insert(tab);
         return nullptr;
     } catch (...) {
         common::DefaultLogger().error("prompt editor: building one threw");
+        failed_.insert(tab);
         return nullptr;
     }
-    if (entry.editor == nullptr || entry.component == nullptr) return nullptr;
+    if (entry.editor == nullptr || entry.component == nullptr) {
+        common::DefaultLogger().error("prompt editor: the factory made no editor");
+        failed_.insert(tab);
+        return nullptr;
+    }
     return &entries_.emplace(tab, std::move(entry)).first->second;
 }
 
@@ -140,11 +146,18 @@ bool PerTabPromptEditors::WantsFrames(const std::string& tab) const {
     return it != entries_.end() && it->second.editor->WantsFrames();
 }
 
+bool PerTabPromptEditors::Failed(const std::string& tab) const {
+    std::lock_guard lock(mtx_);
+    return failed_.count(tab) != 0;
+}
+
 void PerTabPromptEditors::ForgetTab(const std::string& tab) {
     std::lock_guard lock(mtx_);
     // The "" (pre-tab) entry is never forgotten -- it IS the app's no-tab
     // editor.
-    if (!tab.empty()) entries_.erase(tab);
+    if (tab.empty()) return;
+    entries_.erase(tab);
+    failed_.erase(tab);
 }
 
 // The per-tab editor host. A ComponentBase subclass, NOT a
@@ -165,11 +178,16 @@ private:
     ftxui::Component resolve() { return tabs_.Resolve(focused_tab_()); }
 
     ftxui::Element OnRender() override {
-        ftxui::Component editor = resolve();
-        // emptyElement (not a default-constructed Element): the frame always
-        // reserves the editor's row (kCriticalHeight), so the no-editor
-        // frame must render an empty node, not hand ftxui a null pointer.
-        return editor ? editor->Render() : ftxui::emptyElement();
+        const std::string tab = focused_tab_();
+        ftxui::Component editor = tabs_.Resolve(tab);
+        if (editor) return editor->Render();
+        // Never a null Element: the frame always reserves the editor's row
+        // (kCriticalHeight). A failed build says so instead of a blank row
+        // that silently takes no input.
+        if (tabs_.Failed(tab)) {
+            return ftxui::text(" the prompt editor failed to start (see the log)") | ftxui::dim;
+        }
+        return ftxui::emptyElement();
     }
 
     bool OnEvent(ftxui::Event event) override {

@@ -179,21 +179,27 @@ private:
 // --- HostFocusProvider ----------------------------------------------------------
 
 void HostFocusProvider::Attach(AppState* app) {
-    std::lock_guard lk(mtx_);
+    std::unique_lock lk(mtx_);
     app_ = app;
 }
 
-void HostFocusProvider::AttachReads(UiReads reads) { reads_ = std::move(reads); }
+void HostFocusProvider::AttachReads(UiReads reads) {
+    std::unique_lock lk(mtx_);
+    reads_ = std::move(reads);
+}
 
 std::vector<KeyBindingInfo> HostFocusProvider::KeyBindings() const {
+    std::shared_lock lk(mtx_);
     return reads_.key_bindings ? reads_.key_bindings() : std::vector<KeyBindingInfo>{};
 }
 
 std::vector<CommandCatalogEntry> HostFocusProvider::CommandCatalog() const {
+    std::shared_lock lk(mtx_);
     return reads_.command_catalog ? reads_.command_catalog() : std::vector<CommandCatalogEntry>{};
 }
 
 std::shared_ptr<const TabActivitySnapshot> HostFocusProvider::Activity() const {
+    std::shared_lock lk(mtx_);
     if (reads_.activity) {
         if (auto snapshot = reads_.activity()) return snapshot;
     }
@@ -201,12 +207,14 @@ std::shared_ptr<const TabActivitySnapshot> HostFocusProvider::Activity() const {
 }
 
 std::vector<std::string> HostFocusProvider::ThemeNames() const {
+    std::shared_lock lk(mtx_);
     return reads_.theme_names ? reads_.theme_names() : std::vector<std::string>{};
 }
 
 void HostFocusProvider::Detach() {
-    std::lock_guard lk(mtx_);
+    std::unique_lock lk(mtx_);
     app_ = nullptr;
+    reads_ = {};
 }
 
 std::string HostFocusProvider::FocusedSessionId() const {
@@ -214,13 +222,13 @@ std::string HostFocusProvider::FocusedSessionId() const {
     // the interface's own "no focus knowledge" answer, not a distinct
     // condition. Held for the whole call: see Detach()'s comment for why
     // this is what makes it a real barrier, not just a racy null-out.
-    std::lock_guard lk(mtx_);
+    std::shared_lock lk(mtx_);
     if (app_ == nullptr) return {};
     return app_->FocusedSessionId();
 }
 
 std::vector<TabInfo> HostFocusProvider::Tabs() const {
-    std::lock_guard lk(mtx_);
+    std::shared_lock lk(mtx_);
     if (app_ == nullptr) return {};
     // LIGHT snapshots only (include_tool_output=false): a focus poller needs
     // identity and names, never tool buffers -- the same reason the tools
@@ -241,7 +249,7 @@ std::vector<TabInfo> HostFocusProvider::Tabs() const {
 }
 
 void HostFocusProvider::RequestRedraw() {
-    std::lock_guard lk(mtx_);
+    std::shared_lock lk(mtx_);
     if (app_ != nullptr) app_->NotifyExternalUpdate();   // an atomic bump; never blocks
 }
 
