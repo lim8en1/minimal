@@ -126,7 +126,7 @@ struct ChatViewFixture {
     ChatViewFixture() {
         minimal::client::markdown_md4c::RegisterEngine(engine_registry, nullptr, nullptr);
         plugins::RegisterCoreMessageRenderers(messages);
-        plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.get());
+        plugins::RegisterCoreMarkdownRenderers(messages, *engine_registry.get());
     }
 
     Theme theme{TestTheme()};
