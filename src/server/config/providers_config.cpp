@@ -441,6 +441,9 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc,
                 provider.MaybeEnum("max_tokens_field", {"max_tokens", "max_completion_tokens"})) {
             entry.connection.max_tokens_field = *field;
         }
+        // Off by default: it costs a second GET per discovery fetch, and only
+        // LiteLLM-shaped gateways serve the endpoint.
+        entry.connection.fetch_model_info = provider.Bool("model_info", false);
         // Transport timeouts, all optional, all in milliseconds.
         if (auto timeouts = provider.MaybeObject("timeouts")) {
             const auto read_ms = [&](const char* key, std::chrono::milliseconds& target) {

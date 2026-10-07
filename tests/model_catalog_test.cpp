@@ -9,12 +9,18 @@
 
 #include <memory>
 
+#include "loopback_http_server.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "openai_model_catalog.hpp"
 
 using minimal::llm::DiscoveredModel;
 using minimal::llm::ModelCatalogRegistry;
+using minimal::provider_openai::MergeModelInfo;
+using minimal::provider_openai::OpenAiModelCatalog;
+using minimal::provider_openai::ParseModelInfo;
 using minimal::provider_openai::ParseModelList;
+using minimal::test::HttpResponseOf;
+using minimal::test::LoopbackHttpServer;
 
 // --- The registry ------------------------------------------------------------
 
@@ -308,4 +314,119 @@ TEST_CASE("AdvertisedEfforts degrades every malformed shape to empty",
     CHECK(minimal::llm::AdvertisedEfforts(
               nlohmann::json::parse(R"({"reasoning_options": "low"})"))
               .empty());
+}
+
+TEST_CASE("AdvertisedEfforts reads a LiteLLM /model/info row", "[model_catalog][variants]") {
+    using minimal::llm::AdvertisedEfforts;
+    const auto efforts = [](const char* info) {
+        return AdvertisedEfforts(nlohmann::json{{"model_info", nlohmann::json::parse(info)}});
+    };
+    // supports_reasoning grants the standard ladder...
+    CHECK(efforts(R"({"supports_reasoning": true})") ==
+          std::vector<std::string>{"low", "medium", "high"});
+    // ...the per-level flags add the model-specific rungs or withdraw one...
+    CHECK(efforts(R"({"supports_reasoning": true, "supports_xhigh_reasoning_effort": true,
+                      "supports_none_reasoning_effort": true,
+                      "supports_medium_reasoning_effort": false})") ==
+          std::vector<std::string>{"none", "low", "high", "xhigh"});
+    // ...and nothing reasons without supports_reasoning: true -- null, the
+    // proxy's "not a reasoning model", included.
+    CHECK(efforts(R"({"supports_reasoning": null, "supports_low_reasoning_effort": null})").empty());
+    CHECK(efforts(R"({"supports_xhigh_reasoning_effort": true})").empty());
+    CHECK(efforts(R"({"supports_reasoning": "yes"})").empty());
+    CHECK(AdvertisedEfforts(nlohmann::json::parse(R"({"model_info": [1]})")).empty());
+}
+
+// --- /model/info: the LiteLLM-proxy enrichment --------------------------------
+
+TEST_CASE("ParseModelInfo keys each row's model_info by model_name", "[model_catalog]") {
+    const auto info = ParseModelInfo(R"({"data":[
+        {"model_name": "reasoner", "model_info": {"supports_reasoning": true,
+                                                  "input_cost_per_token": 3e-06}},
+        {"model_info": {"supports_reasoning": true}},
+        {"model_name": "", "model_info": {}},
+        {"model_name": 42, "model_info": {}},
+        {"model_name": "no-info"},
+        "junk"
+    ]})");
+    REQUIRE(info.size() == 1);
+    CHECK(info.at("reasoner").at("input_cost_per_token") == 3e-06);
+
+    CHECK_THROWS_AS(ParseModelInfo("not json"), std::runtime_error);
+    CHECK_THROWS_AS(ParseModelInfo(R"({"object": "list"})"), std::runtime_error);
+    CHECK_THROWS_AS(ParseModelInfo(R"({"data": 42})"), std::runtime_error);
+}
+
+TEST_CASE("MergeModelInfo enriches listed ids only, the listing's numbers standing",
+          "[model_catalog]") {
+    auto models = ParseModelList(R"({"data":[
+        {"id": "listed", "max_input_tokens": 1050000},
+        {"id": "bare", "max_model_len": 4096}
+    ]})");
+    auto info = ParseModelInfo(R"({"data":[
+        {"model_name": "listed", "model_info": {"supports_reasoning": true,
+                                                "max_input_tokens": 1}},
+        {"model_name": "not-listed", "model_info": {"supports_reasoning": true}}
+    ]})");
+
+    CHECK(MergeModelInfo(models, std::move(info)) == 1);
+    REQUIRE(models.size() == 2);
+    CHECK(*models[0].context_window_tokens == 1050000);
+    CHECK(models[0].metadata.at("model_info").at("supports_reasoning") == true);
+    CHECK(minimal::llm::AdvertisedEfforts(models[0].metadata).size() == 3);
+    CHECK_FALSE(models[1].metadata.contains("model_info"));
+}
+
+namespace {
+
+constexpr const char* kGatewayModels =
+    R"({"data":[{"id": "reasoner", "max_input_tokens": 200000, "max_output_tokens": 64000}]})";
+constexpr const char* kGatewayInfo =
+    R"({"data":[{"model_name": "reasoner", "model_info": {"supports_reasoning": true}}]})";
+
+minimal::llm::ProviderConfig GatewayConfig(const LoopbackHttpServer& server, bool model_info) {
+    minimal::llm::ProviderConfig config;
+    config.base_url = server.url("/v1/");
+    config.fetch_model_info = model_info;
+    config.headers.push_back({"x-gateway-tenant", "t1"});
+    return config;
+}
+
+}  // namespace
+
+TEST_CASE("OpenAiModelCatalog: model_info adds a second GET whose rows ride the metadata",
+          "[model_catalog]") {
+    LoopbackHttpServer server({HttpResponseOf(200, "OK", "application/json", kGatewayModels),
+                               HttpResponseOf(200, "OK", "application/json", kGatewayInfo)});
+    const auto models =
+        OpenAiModelCatalog(minimal::net::HttpClient{}).List(GatewayConfig(server, true));
+
+    REQUIRE(models.size() == 1);
+    CHECK(models[0].metadata.at("model_info").at("supports_reasoning") == true);
+    const auto requests = server.requests();
+    REQUIRE(requests.size() == 2);
+    CHECK(requests[0].find("GET /v1/models ") != std::string::npos);
+    CHECK(requests[1].find("GET /v1/model/info ") != std::string::npos);
+    // The connection's own headers reach the info GET too.
+    CHECK(requests[1].find("x-gateway-tenant: t1") != std::string::npos);
+}
+
+TEST_CASE("OpenAiModelCatalog: a failed /model/info leaves the listing standing",
+          "[model_catalog]") {
+    LoopbackHttpServer server({HttpResponseOf(200, "OK", "application/json", kGatewayModels),
+                               HttpResponseOf(404, "Not Found", "application/json",
+                                              R"({"detail": "Not Found"})")});
+    const auto models =
+        OpenAiModelCatalog(minimal::net::HttpClient{}).List(GatewayConfig(server, true));
+    REQUIRE(models.size() == 1);
+    CHECK(*models[0].context_window_tokens == 200000);
+    CHECK_FALSE(models[0].metadata.contains("model_info"));
+}
+
+TEST_CASE("OpenAiModelCatalog: without model_info there is one GET", "[model_catalog]") {
+    LoopbackHttpServer server({HttpResponseOf(200, "OK", "application/json", kGatewayModels)});
+    const auto models =
+        OpenAiModelCatalog(minimal::net::HttpClient{}).List(GatewayConfig(server, false));
+    REQUIRE(models.size() == 1);
+    CHECK(server.requests().size() == 1);
 }

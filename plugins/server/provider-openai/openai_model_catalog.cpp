@@ -1,6 +1,7 @@
 #include "openai_model_catalog.hpp"
 
 #include <limits>
+#include <string_view>
 #include <stdexcept>
 
 #include "openai_error_mapping.hpp"
@@ -19,12 +20,40 @@ using nlohmann::json;
 // timeout; a short bound caps the worst case while local servers answer in
 // milliseconds (llm::kListModelsTimeout).
 
-// <base_url>/models, tolerating a trailing slash on the configured url.
-std::string ModelsUrl(const std::string& base_url) {
+// <base_url>/<endpoint>, tolerating a trailing slash on the configured url.
+std::string EndpointUrl(const std::string& base_url, std::string_view endpoint) {
     std::string url = base_url;
     while (!url.empty() && url.back() == '/') url.pop_back();
-    url += "/models";
+    url += '/';
+    url += endpoint;
     return url;
+}
+
+// One discovery GET against `endpoint`, 2xx-checked. Classified the same way
+// a chat call against the same backend would be, so a 401 from a stale key
+// reads as an auth error, not "catalog failed" -- and Retry-After on a 429
+// survives into the message.
+std::string Get(const net::HttpClient& http, const llm::ProviderConfig& config,
+                std::string_view endpoint) {
+    net::HttpRequest request;
+    request.url = EndpointUrl(config.base_url, endpoint);
+    request.connect_timeout = config.connect_timeout;
+    request.request_timeout = llm::kListModelsTimeout;
+    if (const auto key = llm::RequestApiKey(config)) {
+        request.headers.push_back({"Authorization", "Bearer " + *key});
+    }
+    // Same headers the chat path sends (see OpenAiProvider::BuildHttpRequest):
+    // a header-auth gateway (tenant id, routing tags) 401s every discovery
+    // call that carries only the bearer token.
+    for (const auto& [name, value] : config.headers) {
+        request.headers.push_back({name, value});
+    }
+
+    net::HttpResponse response = http.Get(request);
+    if (!common::IsSuccessStatus(response.status)) {
+        throw ClassifyHttpFailure(response.status, response.body, response.headers);
+    }
+    return std::move(response.body);
 }
 
 // The first numeric field present, in per-server precedence order. The names
@@ -124,29 +153,58 @@ std::vector<llm::DiscoveredModel> ParseModelList(const std::string& body) {
     return out;
 }
 
-std::vector<llm::DiscoveredModel> OpenAiModelCatalog::List(const llm::ProviderConfig& config) const {
-    net::HttpRequest request;
-    request.url = ModelsUrl(config.base_url);
-    request.connect_timeout = config.connect_timeout;
-    request.request_timeout = llm::kListModelsTimeout;
-    if (const auto key = llm::RequestApiKey(config)) {
-        request.headers.push_back({"Authorization", "Bearer " + *key});
+std::map<std::string, json> ParseModelInfo(const std::string& body) {
+    json doc;
+    try {
+        doc = json::parse(body);
+    } catch (const json::exception&) {
+        throw std::runtime_error("model info: response is not valid JSON");
     }
-    // Same headers the chat path sends (see OpenAiProvider::BuildHttpRequest):
-    // a header-auth gateway (tenant id, routing tags) 401s every discovery
-    // call that carries only the bearer token.
-    for (const auto& [name, value] : config.headers) {
-        request.headers.push_back({name, value});
+    if (!doc.is_object() || !doc.contains("data") || !doc.at("data").is_array()) {
+        throw std::runtime_error("model info: expected an object with a \"data\" array");
     }
 
-    const net::HttpResponse response = http_.Get(request);
-    if (!common::IsSuccessStatus(response.status)) {
-        // Classified the same way a chat call against the same backend would
-        // be, so a 401 from a stale key reads as an auth error, not "catalog
-        // failed" -- and Retry-After on a 429 survives into the message.
-        throw ClassifyHttpFailure(response.status, response.body, response.headers);
+    std::map<std::string, json> out;
+    for (auto& entry : doc.at("data")) {
+        if (!entry.is_object()) continue;
+        // Same rule as ParseModelList's id-less row: a row that cannot be
+        // matched to a listed id is skipped, not fatal.
+        if (!entry.contains("model_name") || !entry.at("model_name").is_string() ||
+            entry.at("model_name").get<std::string>().empty()) {
+            continue;
+        }
+        if (!entry.contains("model_info") || !entry.at("model_info").is_object()) continue;
+        // MOVED, not copied: a gateway's info body runs to megabytes.
+        out.emplace(entry.at("model_name").get<std::string>(), std::move(entry.at("model_info")));
     }
-    return ParseModelList(response.body);
+    return out;
+}
+
+std::size_t MergeModelInfo(std::vector<llm::DiscoveredModel>& models,
+                           std::map<std::string, json> info) {
+    std::size_t enriched = 0;
+    for (auto& model : models) {
+        const auto it = info.find(model.id);
+        if (it == info.end()) continue;  // the listing's row stands alone
+        model.metadata["model_info"] = std::move(it->second);
+        ++enriched;
+    }
+    return enriched;
+}
+
+std::vector<llm::DiscoveredModel> OpenAiModelCatalog::List(const llm::ProviderConfig& config) const {
+    std::vector<llm::DiscoveredModel> models = ParseModelList(Get(http_, config, "models"));
+    if (!config.fetch_model_info) return models;
+
+    // The opt-in enrichment DEGRADES: a 404 (plain vLLM/llama.cpp), an auth
+    // failure scoped to this endpoint, a malformed body -- all leave the
+    // listing standing. The endpoint is a bonus; its absence must not read
+    // as "the backend serves nothing".
+    try {
+        MergeModelInfo(models, ParseModelInfo(Get(http_, config, "model/info")));
+    } catch (const std::exception&) {
+    }
+    return models;
 }
 
 }  // namespace minimal::provider_openai
