@@ -140,6 +140,19 @@ struct SchemaFormState {
     std::string error_path;
 };
 
+// What the form asks its owner to choose a value for (on_pick): the field,
+// its current value, and where the choice goes. `deliver` takes the chosen
+// value as the field's text, or nullopt to unset it; the form decides what
+// that does -- saved at once on the plugin's own form, kept in the draft of
+// a list item or map entry being edited. Calling it after the form moved on
+// is harmless.
+struct PickRequest {
+    std::string path;          // the field's path, as its form knows it
+    nlohmann::json field;      // its schema field ("choices", "format", ...)
+    nlohmann::json current;    // its value now (null: unset)
+    std::function<void(std::optional<std::string> text)> deliver;
+};
+
 struct SchemaFormCallbacks {
     std::function<void(const std::string& path, const std::string& text)> on_set;
     std::function<void(const std::string& path)> on_unset;
@@ -148,7 +161,7 @@ struct SchemaFormCallbacks {
     // ref): the owner shows a chooser and sends what is chosen through its
     // own set/unset. Unset: an enum steps to its next choice and a formatted
     // field opens the text editor, as before.
-    std::function<void(const std::string& path, const nlohmann::json& field)> on_pick;
+    std::function<void(const PickRequest& request)> on_pick;
 };
 
 // --- The model selector --------------------------------------------------------

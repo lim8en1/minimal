@@ -35,7 +35,13 @@ struct FormRow {
     // item's index (-1 on every other row), `add_item` marks the add row.
     int item = -1;
     bool add_item = false;
+    // An object_map's entry row: the entry's name ("" on every other row).
+    std::string item_key;
 };
+
+// The synthetic field a map entry's form shows its name under (an entry's
+// draft carries its name there; MapWithEntry takes it back out).
+inline constexpr const char* kMapKeyField = "@key";
 
 // Ungrouped (top-level) fields first, then one header per group with its
 // fields, each in schema order.
@@ -74,6 +80,21 @@ int NextFieldRow(const std::vector<FormRow>& rows, int from, int step);
 
 // The list an item row (or the list row, or its add row) belongs to.
 nlohmann::json ListOf(const FormRow& row);
+// A schema-less value (an object or array) as a describe: one "member"
+// field per key or index, typed by its value; a nested object or array is a
+// "json_node" row that opens as a form of its own.
+nlohmann::json InferredDescribe(const nlohmann::json& value);
+// A map entry's draft back into `map` under its (possibly new) name. False,
+// with `error`, for an empty name or one another entry already has.
+bool MapWithEntry(nlohmann::json& map, const std::string& old_key, nlohmann::json draft,
+                  std::string& error);
+nlohmann::json MapWithout(const nlohmann::json& map, const std::string& key);
+// `value` set into `parent` at `row`: a member by its key or index, a
+// described field by its path.
+void SetNode(nlohmann::json& parent, const FormRow& row, nlohmann::json value);
+// A typed value for a schema-less member: JSON when it parses ("3", "true",
+// "[1]"), the text itself otherwise.
+nlohmann::json ParseLooseValue(const std::string& text);
 // The draft an item row opens with; the add row's is the schema's template.
 nlohmann::json ItemDraft(const FormRow& row);
 // The describe an item's form is built from (BuildFormRows): the item

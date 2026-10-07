@@ -10,10 +10,38 @@ namespace {
 
 using nlohmann::json;
 
+// A "member" field names one key (or array index) of its config as it is,
+// dots included -- a model id "gpt-4.1" is not a group -- rather than a
+// dotted path into it.
+bool IsMember(const json& field) { return field.value("member", false); }
+
+const json* MemberOf(const json& config, const std::string& key) {
+    if (config.is_object()) {
+        const auto it = config.find(key);
+        return it != config.end() ? &*it : nullptr;
+    }
+    if (config.is_array()) {
+        try {
+            const std::size_t index = std::stoul(key);
+            return index < config.size() ? &config[index] : nullptr;
+        } catch (const std::exception&) {
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+
+// "{…} 3 keys" / "[…] 2 items": a nested value's row.
+std::string NodeSummary(const json& value) {
+    if (value.is_object()) return "{…} " + std::to_string(value.size()) + (value.size() == 1 ? " key" : " keys");
+    if (value.is_array()) return "[…] " + std::to_string(value.size()) + (value.size() == 1 ? " item" : " items");
+    return value.dump();
+}
+
 FormRow FieldRow(const json& field, const json& describe, const std::string& label) {
     FormRow row;
     row.path = field.value("path", "");
-    row.label = label;
+    row.label = field.value("label", label);
     row.type = field.value("type", "json");
     row.doc = field.value("doc", "");
     row.live = field.value("apply", "restart") == "live";
@@ -22,10 +50,14 @@ FormRow FieldRow(const json& field, const json& describe, const std::string& lab
     // pointer ConfigGet answers with would dangle.
     static const json kNone = json::object();
     const json& config = describe.contains("config") ? describe.at("config") : kNone;
-    const json* configured = common::ConfigGet(config, row.path);
+    const json* configured =
+        IsMember(field) ? MemberOf(config, row.path) : common::ConfigGet(config, row.path);
     row.overridden = configured != nullptr;
     row.value = configured != nullptr ? *configured : field.value("default", json());
-    row.shown = common::DisplayValue(field, row.value);
+    // Structure reads as its shape ("{…} 3 keys"): its members are a form away.
+    const bool structured = row.type == "json_node" ||
+                            (row.type == "json" && (row.value.is_object() || row.value.is_array()));
+    row.shown = structured ? NodeSummary(row.value) : common::DisplayValue(field, row.value);
     if (row.value.is_string() && row.shown == row.value.dump()) {
         row.shown = row.value.get<std::string>();  // plain text, not a JSON literal
         if (row.shown.empty()) row.shown = "\"\"";
@@ -53,8 +85,35 @@ std::string ItemSummary(const json& items, const json& item) {
     return out.empty() ? "(empty)" : out;
 }
 
+// `row`, and for an object map its entry rows (by name) and add row.
+void AppendMap(std::vector<FormRow>& rows, FormRow row) {
+    const json map = row.value.is_object() ? row.value : json::object();
+    const json items = row.field.value("items", json::array());
+    row.shown = map.empty() ? "(none)" : std::to_string(map.size()) + (map.size() == 1 ? " entry" : " entries");
+    const FormRow base = row;
+    rows.push_back(std::move(row));
+    for (const auto& [name, entry] : map.items()) {
+        if (name.rfind("//", 0) == 0) continue;   // a comment key
+        FormRow item = base;
+        item.item_key = name;
+        item.label = name;
+        item.shown = ItemSummary(items, entry);
+        rows.push_back(std::move(item));
+    }
+    FormRow add = base;
+    add.add_item = true;
+    add.label = "+";
+    add.shown = "add an entry";
+    add.overridden = false;
+    rows.push_back(std::move(add));
+}
+
 // `row`, and for an object list its item rows and add row.
 void AppendField(std::vector<FormRow>& rows, FormRow row) {
+    if (row.type == "object_map") {
+        AppendMap(rows, std::move(row));
+        return;
+    }
     if (row.type != "object_list") {
         rows.push_back(std::move(row));
         return;
@@ -88,7 +147,7 @@ std::vector<FormRow> BuildFormRows(const json& describe) {
     if (!describe.is_object() || !describe.contains("schema")) return top;
     for (const auto& field : describe.at("schema").value("fields", json::array())) {
         const std::string path = field.value("path", "");
-        const auto dot = path.find('.');
+        const auto dot = IsMember(field) ? std::string::npos : path.find('.');
         if (dot == std::string::npos) {
             AppendField(top, FieldRow(field, describe, path));
             continue;
@@ -109,7 +168,10 @@ std::vector<FormRow> BuildFormRows(const json& describe) {
 }
 
 FormAction ActionFor(const FormRow& row, bool can_pick) {
-    if (row.item >= 0 || row.add_item) return FormAction::kOpen;
+    if (row.item >= 0 || !row.item_key.empty() || row.add_item) return FormAction::kOpen;
+    if (row.type == "json_node") return FormAction::kOpen;
+    // A schema-less JSON value with structure opens as an inferred form.
+    if (row.type == "json" && (row.value.is_object() || row.value.is_array())) return FormAction::kOpen;
     if (row.type == "boolean") return FormAction::kToggle;
     if (can_pick && (row.type == "enum" || row.field.contains("format"))) return FormAction::kPick;
     if (row.type == "enum") return FormAction::kCycle;
@@ -147,6 +209,15 @@ int NextFieldRow(const std::vector<FormRow>& rows, int from, int step) {
 json ListOf(const FormRow& row) { return row.value.is_array() ? row.value : json::array(); }
 
 json ItemDraft(const FormRow& row) {
+    if (row.type == "object_map") {
+        const json map = row.value.is_object() ? row.value : json::object();
+        json draft = !row.item_key.empty() && map.contains(row.item_key)
+                         ? map.at(row.item_key)
+                         : row.field.value("item_template", json::object());
+        if (!draft.is_object()) draft = json::object();
+        draft[std::string(kMapKeyField)] = row.item_key;
+        return draft;
+    }
     const json list = ListOf(row);
     if (row.item >= 0 && row.item < static_cast<int>(list.size())) return list[row.item];
     const json sample = row.field.value("item_template", json::object());
@@ -154,13 +225,74 @@ json ItemDraft(const FormRow& row) {
 }
 
 json ItemDescribe(const FormRow& list_row, const json& item) {
-    return {{"schema", {{"fields", list_row.field.value("items", json::array())}}},
+    json fields = list_row.field.value("items", json::array());
+    if (list_row.type == "object_map") {
+        // The entry's name, first: what the key describes (its doc, format --
+        // a model id gets the model chooser), required.
+        json key = list_row.field.value("key", json::object());
+        key["path"] = kMapKeyField;
+        key["label"] = "name";
+        key["type"] = "string";
+        key["required"] = true;
+        key["member"] = true;
+        fields.insert(fields.begin(), std::move(key));
+    }
+    return {{"schema", {{"fields", std::move(fields)}}},
             {"config", item.is_object() ? item : json::object()}};
+}
+
+json InferredDescribe(const json& value) {
+    json fields = json::array();
+    const auto field_for = [](const std::string& path, const json& member, std::string label) {
+        std::string type = "string";
+        if (member.is_boolean()) type = "boolean";
+        else if (member.is_number_integer()) type = "integer";
+        else if (member.is_number()) type = "number";
+        else if (member.is_object() || member.is_array()) type = "json_node";
+        else if (member.is_null()) type = "json";
+        return json{{"path", path}, {"label", std::move(label)}, {"type", type}, {"member", true}};
+    };
+    if (value.is_object()) {
+        for (const auto& [key, member] : value.items()) fields.push_back(field_for(key, member, key));
+    } else if (value.is_array()) {
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            fields.push_back(field_for(std::to_string(i), value[i], "[" + std::to_string(i) + "]"));
+        }
+    }
+    return {{"schema", {{"fields", std::move(fields)}}}, {"config", value}};
+}
+
+json* MemberSlot(json& draft, const FormRow& row) {
+    if (draft.is_array()) {
+        try {
+            const std::size_t index = std::stoul(row.path);
+            return index < draft.size() ? &draft[index] : nullptr;
+        } catch (const std::exception&) {
+            return nullptr;
+        }
+    }
+    if (!draft.is_object()) draft = json::object();
+    return &draft[row.path];
+}
+
+void SetNode(json& parent, const FormRow& row, json value) {
+    if (!IsMember(row.field)) {
+        common::ConfigSet(parent, row.path, std::move(value));
+        return;
+    }
+    if (json* slot = MemberSlot(parent, row)) *slot = std::move(value);
 }
 
 bool SetItemField(json& item, const FormRow& row, const std::string& text, std::string& error) {
     try {
-        common::ConfigSet(item, row.path, common::ParseFieldValue(row.field, text));
+        json value = common::ParseFieldValue(row.field, text);
+        if (IsMember(row.field)) {
+            json* slot = MemberSlot(item, row);
+            if (slot == nullptr) throw std::invalid_argument(row.path + ": no such item");
+            *slot = std::move(value);
+        } else {
+            common::ConfigSet(item, row.path, std::move(value));
+        }
         return true;
     } catch (const std::exception& failure) {
         error = failure.what();
@@ -168,7 +300,49 @@ bool SetItemField(json& item, const FormRow& row, const std::string& text, std::
     }
 }
 
-void UnsetItemField(json& item, const FormRow& row) { common::ConfigUnset(item, row.path); }
+void UnsetItemField(json& item, const FormRow& row) {
+    if (!IsMember(row.field)) {
+        common::ConfigUnset(item, row.path);
+        return;
+    }
+    if (item.is_object()) {
+        item.erase(row.path);
+    } else if (item.is_array()) {
+        try {
+            const std::size_t index = std::stoul(row.path);
+            if (index < item.size()) item.erase(item.begin() + static_cast<long>(index));
+        } catch (const std::exception&) {
+        }
+    }
+}
+
+bool MapWithEntry(json& map, const std::string& old_key, json draft, std::string& error) {
+    if (!map.is_object()) map = json::object();
+    const std::string key = draft.value(std::string(kMapKeyField), std::string());
+    draft.erase(std::string(kMapKeyField));
+    if (key.empty()) {
+        error = "give the entry a name";
+        return false;
+    }
+    if (key != old_key && map.contains(key)) {
+        error = "\"" + key + "\" already has an entry";
+        return false;
+    }
+    if (!old_key.empty() && key != old_key) map.erase(old_key);
+    map[key] = std::move(draft);
+    return true;
+}
+
+json MapWithout(const json& map, const std::string& key) {
+    json out = map.is_object() ? map : json::object();
+    out.erase(key);
+    return out;
+}
+
+json ParseLooseValue(const std::string& text) {
+    json parsed = json::parse(text, nullptr, /*allow_exceptions=*/false);
+    return parsed.is_discarded() ? json(text) : parsed;
+}
 
 json ListWithItem(const json& list, int index, const json& item) {
     json out = list.is_array() ? list : json::array();

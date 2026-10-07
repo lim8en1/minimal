@@ -804,7 +804,7 @@ TEST_CASE("schema form: an item opens as its own form and saves the whole list o
     minimal_test::SendEvent(form, ftxui::Event::ArrowDown);   // item #1
     minimal_test::SendEvent(form, ftxui::Event::Return);      // open it
     std::string frame = minimal_test::RenderFrame(form, 100, 30);
-    CHECK(frame.find("›  sources #1") != std::string::npos);
+    CHECK(frame.find("sources › #1") != std::string::npos);
     minimal_test::SendEvent(form, ftxui::Event::ArrowDown);   // url
     minimal_test::SendEvent(form, ftxui::Event::Return);      // edit
     for (int i = 0; i < 9; ++i) minimal_test::SendEvent(form, ftxui::Event::Backspace);
@@ -826,7 +826,7 @@ TEST_CASE("schema form: an item opens as its own form and saves the whole list o
     state.status = "sources[0].url: unreachable";
     state.status_is_error = true;
     frame = minimal_test::RenderFrame(form, 100, 30);
-    CHECK(frame.find("›  sources #1") != std::string::npos);
+    CHECK(frame.find("sources › #1") != std::string::npos);
     CHECK(frame.find("unreachable") != std::string::npos);
 
     // Accepted: back on the list, the item selected.
@@ -837,7 +837,7 @@ TEST_CASE("schema form: an item opens as its own form and saves the whole list o
     state.status = "saved";
     state.status_is_error = false;
     frame = minimal_test::RenderFrame(form, 100, 30);
-    CHECK(frame.find("›  sources #1") == std::string::npos);   // the item form's title
+    CHECK(frame.find("sources › #1") == std::string::npos);   // the item form's title
     CHECK(frame.find("2 entries") != std::string::npos);
 }
 
@@ -874,4 +874,145 @@ TEST_CASE("schema form: items are added, deleted on a second d, and moved",
     REQUIRE(sent.size() == 3);
     CHECK(sent[2].size() == 3);
     CHECK(sent[2][2] == json({{"format", "litellm-proxy"}, {"url", "https://"}}));
+}
+
+namespace {
+
+// A plugin with a map of priced models (cost-tracker's rates) and a rubric
+// with no schema (decision-advisor's questions).
+const json kStructuredDescribe = json::parse(R"({
+  "name": "structured", "file": "plugins.d/structured.json",
+  "schema": {"file": "plugins.d/structured.json", "fields": [
+    {"path": "rates", "type": "object_map", "apply": "live", "default": {},
+     "key": {"doc": "the model id", "format": "model_id"},
+     "item_template": {"input": 0, "output": 0},
+     "items": [{"path": "input", "type": "number"}, {"path": "output", "type": "number"},
+               {"path": "tier", "type": "enum", "choices": ["low", "high"]}]},
+    {"path": "questions", "type": "json"}
+  ]},
+  "config": {
+    "rates": {"gpt-4.1": {"input": 2, "output": 8}},
+    "questions": {"action": {"type": "choice", "criteria": {"allow": "safe", "deny": "harm"}},
+                  "tags": ["a", "b"]}
+  }
+})");
+
+struct Picks {
+    std::vector<client::PickRequest> requests;
+};
+
+}  // namespace
+
+TEST_CASE("form rows: a map shows an entry per name; its form names it, renamed or not twice",
+          "[schema_form][object_map]") {
+    const auto rows = client::BuildFormRows(kStructuredDescribe);
+    REQUIRE(rows.size() >= 4);
+    CHECK(rows[0].shown == "1 entry");
+    CHECK(rows[1].item_key == "gpt-4.1");   // a dotted name is a name, not a group
+    CHECK(rows[1].label == "gpt-4.1");
+    CHECK(rows[1].shown == "2  8");
+    CHECK(rows[2].add_item);
+    CHECK(client::ActionFor(rows[1]) == client::FormAction::kOpen);
+    CHECK(client::ActionFor(rows[3], true) == client::FormAction::kOpen);   // questions: inferred
+
+    json draft = client::ItemDraft(rows[1]);
+    CHECK(draft[client::kMapKeyField] == "gpt-4.1");
+    const auto entry_rows = client::BuildFormRows(client::ItemDescribe(rows[0], draft));
+    REQUIRE(entry_rows.size() == 4);
+    CHECK(entry_rows[0].label == "name");
+    CHECK(client::ActionFor(entry_rows[0], /*can_pick=*/true) == client::FormAction::kPick);
+
+    json map = rows[0].value;
+    std::string error;
+    draft[client::kMapKeyField] = "gpt-5";
+    CHECK(client::MapWithEntry(map, "gpt-4.1", draft, error));
+    CHECK(map.contains("gpt-5"));
+    CHECK_FALSE(map.contains("gpt-4.1"));
+    CHECK(map["gpt-5"] == json({{"input", 2}, {"output", 8}}));
+    json taken = client::ItemDraft(rows[2]);   // a new entry
+    taken[client::kMapKeyField] = "gpt-5";
+    CHECK_FALSE(client::MapWithEntry(map, "", taken, error));
+    CHECK(error.find("already") != std::string::npos);
+    taken[client::kMapKeyField] = "";
+    CHECK_FALSE(client::MapWithEntry(map, "", taken, error));
+}
+
+TEST_CASE("schema form: a map entry's name is chosen into the draft; the map goes out once",
+          "[schema_form][object_map]") {
+    const auto theme = TestTheme();
+    auto state = FormState("plugins.d/structured.json", kStructuredDescribe);
+    std::vector<std::pair<std::string, json>> sets;
+    Picks picks;
+    auto form = client::ui_kit::MakeSchemaForm(
+        [&] { return state; },
+        {.on_set = [&](const std::string& path, const std::string& text) {
+             sets.emplace_back(path, json::parse(text));
+             state.busy = true;
+         },
+         .on_pick = [&](const client::PickRequest& request) { picks.requests.push_back(request); }},
+        theme);
+    (void)minimal_test::RenderFrame(form, 110, 30);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);   // gpt-4.1
+    minimal_test::SendEvent(form, ftxui::Event::Return);      // its form
+    CHECK(minimal_test::RenderFrame(form, 110, 30).find("rates › gpt-4.1") != std::string::npos);
+    minimal_test::SendEvent(form, ftxui::Event::Return);      // name: the chooser
+    REQUIRE(picks.requests.size() == 1);
+    CHECK(picks.requests[0].field.value("format", "") == "model_id");
+    CHECK(picks.requests[0].current == "gpt-4.1");
+    picks.requests[0].deliver("gpt-4.1-mini");                // chosen: into the draft
+    CHECK(sets.empty());
+    for (int i = 0; i < 3; ++i) minimal_test::SendEvent(form, ftxui::Event::ArrowDown);   // tier
+    minimal_test::SendEvent(form, ftxui::Event::Character(' '));   // space: next value
+    minimal_test::SendEvent(form, ftxui::Event::Escape);      // keep it: the map goes out
+    REQUIRE(sets.size() == 1);
+    CHECK(sets[0].first == "rates");
+    CHECK(sets[0].second == json({{"gpt-4.1-mini", {{"input", 2}, {"output", 8}, {"tier", "low"}}}}));
+}
+
+TEST_CASE("schema form: a schema-less value opens as forms, level by level, and goes out once",
+          "[schema_form][inferred]") {
+    const auto theme = TestTheme();
+    auto state = FormState("plugins.d/structured.json", kStructuredDescribe);
+    std::vector<std::pair<std::string, json>> sets;
+    auto form = client::ui_kit::MakeSchemaForm(
+        [&] { return state; },
+        {.on_set = [&](const std::string& path, const std::string& text) {
+             sets.emplace_back(path, json::parse(text));
+             state.busy = true;
+         }},
+        theme);
+    (void)minimal_test::RenderFrame(form, 110, 30);
+    for (int i = 0; i < 3; ++i) minimal_test::SendEvent(form, ftxui::Event::ArrowDown);   // questions
+    minimal_test::SendEvent(form, ftxui::Event::Return);      // { action, tags }
+    std::string frame = minimal_test::RenderFrame(form, 110, 30);
+    CHECK(frame.find("{…} 2 keys") != std::string::npos);   // action: a nested object
+    CHECK(frame.find("[…] 2 items") != std::string::npos);  // tags
+    minimal_test::SendEvent(form, ftxui::Event::Return);      // action: { criteria, type }
+    minimal_test::SendEvent(form, ftxui::Event::Return);      // criteria: { allow, deny }
+    minimal_test::SendEvent(form, ftxui::Event::Return);      // allow: edit
+    for (int i = 0; i < 4; ++i) minimal_test::SendEvent(form, ftxui::Event::Backspace);
+    Type(form, "harmless");
+    minimal_test::SendEvent(form, ftxui::Event::Return);
+    minimal_test::SendEvent(form, ftxui::Event::Character('a'));   // a new member
+    Type(form, "review");
+    minimal_test::SendEvent(form, ftxui::Event::Return);
+    Type(form, "unsure");
+    minimal_test::SendEvent(form, ftxui::Event::Return);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowUp);      // from review (added last) to deny
+    minimal_test::SendEvent(form, ftxui::Event::Character('d'));
+    minimal_test::SendEvent(form, ftxui::Event::Character('d'));   // deleted
+    for (int i = 0; i < 3; ++i) minimal_test::SendEvent(form, ftxui::Event::Escape);   // up, up, out
+    REQUIRE(sets.size() == 1);
+    CHECK(sets[0].first == "questions");
+    const json expect = {
+        {"action", {{"type", "choice"}, {"criteria", {{"allow", "harmless"}, {"review", "unsure"}}}}},
+        {"tags", {"a", "b"}}};
+    CHECK(sets[0].second == expect);
+
+    // `e`: the raw line, the escape hatch.
+    state.busy = false;
+    state.generation = 2;
+    (void)minimal_test::RenderFrame(form, 110, 30);
+    minimal_test::SendEvent(form, ftxui::Event::Character('e'));
+    CHECK(minimal_test::RenderFrame(form, 110, 30).find("enter: save") != std::string::npos);
 }

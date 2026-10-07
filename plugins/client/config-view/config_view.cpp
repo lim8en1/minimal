@@ -151,8 +151,7 @@ public:
                 .on_unset = [feed = feed_](const std::string& path) { feed->Unset(path); },
                 .on_back = [feed = feed_] { feed->Back(); },
                 // `this` owns form_, so the form never outlives it.
-                .on_pick = [this](const std::string& path,
-                                  const nlohmann::json& field) { OpenChooser(path, field); },
+                .on_pick = [this](const client::PickRequest& request) { OpenChooser(request); },
             },
             *theme_);
     }
@@ -188,13 +187,18 @@ private:
         shown_ = list_;
     }
 
-    // A chooser over `path`: the server's models for a model ref, the
-    // choices for an enum. Built here, on the UI thread, inside the form's
-    // event; shown from the next Sync. Choosing sends through the feed like
-    // any edit, and returns to the form.
-    void OpenChooser(const std::string& path, const nlohmann::json& field) {
+    // A chooser for a field: the server's models for a model ref or a
+    // model's own name, the choices for an enum. Built here, on the UI
+    // thread, inside the form's event; shown from the next Sync. The choice
+    // goes back through the request (saved, or into an item's draft), and
+    // the form shows again.
+    void OpenChooser(const client::PickRequest& request) {
         const auto close = [this] { choosing_ = false; };
-        if (field.value("format", "") == "model_ref") {
+        const nlohmann::json& field = request.field;
+        // What the user calls it: a map entry's "name", else the field's path.
+        const std::string path = field.value("label", request.path);
+        const std::string format = field.value("format", "");
+        if (format == "model_ref" || format == "model_id") {
             client::ModelSelectorSpec spec;
             spec.window_title = path;
             spec.select_hint = "set";
@@ -207,36 +211,36 @@ private:
             spec.redraw = [ui = ui_] {
                 if (ui != nullptr) ui->RequestRedraw();
             };
-            const std::string empty = field.value("empty_label", "");
-            spec.leading_row_label = empty.empty() ? "(empty)" : "empty -- " + empty;
-            spec.leading_row_id = kUnsetRowId;
+            // A required value has no "empty" to choose.
+            if (!field.value("required", false)) {
+                const std::string empty = field.value("empty_label", "");
+                spec.leading_row_label = empty.empty() ? "(empty)" : "empty -- " + empty;
+                spec.leading_row_id = kUnsetRowId;
+            }
             spec.allow_custom = true;
+            spec.choose_model_name = format == "model_id";
             chooser_ = widgets_->ModelSelector(
                 std::move(spec),
                 {.on_select =
-                     [this, path, close](const std::string& ref) {
-                         if (ref == kUnsetRowId) {
-                             feed_->Unset(path);
-                         } else {
-                             feed_->Set(path, ref);
-                         }
+                     [deliver = request.deliver, close](const std::string& ref) {
+                         deliver(ref == kUnsetRowId ? std::nullopt : std::optional<std::string>(ref));
                          close();
                      },
                  .on_close = close},
                 *theme_);
         } else {
-            chooser_ = EnumChooser(path, field, close);
+            chooser_ = EnumChooser(request, close);
         }
         choosing_ = true;
     }
 
-    ftxui::Component EnumChooser(const std::string& path, const nlohmann::json& field,
+    ftxui::Component EnumChooser(const client::PickRequest& request,
                                  const std::function<void()>& close) {
+        const std::string path = request.field.value("label", request.path);
+        const nlohmann::json& field = request.field;
         // The current value, as the form shows it, starts under the cursor.
-        std::string current;
-        for (const auto& row : client::BuildFormRows(feed_->form().describe)) {
-            if (row.path == path && row.value.is_string()) current = row.value.get<std::string>();
-        }
+        const std::string current =
+            request.current.is_string() ? request.current.get<std::string>() : std::string();
         const std::string fallback = field.value("default", json()).is_string()
                                          ? field.at("default").get<std::string>()
                                          : std::string();
@@ -265,8 +269,8 @@ private:
         return widgets_->FilterableMenuModal(
             build_rows, spec,
             {.on_select =
-                 [this, path, close](const client::MenuRow& row) {
-                     feed_->Set(path, row.id);
+                 [deliver = request.deliver, close](const client::MenuRow& row) {
+                     deliver(row.id);
                      close();
                  },
              .on_close = close},
