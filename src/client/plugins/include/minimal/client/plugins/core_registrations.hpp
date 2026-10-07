@@ -13,10 +13,11 @@ namespace minimal::client::plugins {
 // them while the rest stand. The data plane (chat_model) stays untouched.
 void RegisterCoreMessageRenderers(MessageRendererRegistry& registry);
 
-// The agent-markdown default, registered once the engine is settled (it
-// renders through the engine, so a replacement engine flows through it).
-void RegisterCoreAgentMarkdownRenderer(MessageRendererRegistry& registry,
-                                       const MarkdownEngine& engine);
+// The defaults that render through the markdown engine -- the assistant's
+// and the user's messages, and compaction summaries -- registered once the
+// engine is settled (a replacement engine flows through them).
+void RegisterCoreMarkdownRenderers(MessageRendererRegistry& registry,
+                                   const MarkdownEngine& engine);
 
 // Renderers for the core display-payload kinds (diff, file, process,
 // markdown), filling only the kinds no plugin claimed. The engine and the

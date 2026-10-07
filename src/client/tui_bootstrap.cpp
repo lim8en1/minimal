@@ -382,7 +382,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     plugins::RegisterPlainMarkdownEngine(out.registries.markdown_engine);
     out.engine = out.registries.markdown_engine.get();
     plugins::RegisterCoreMessageRenderers(out.registries.message_renderers);
-    plugins::RegisterCoreAgentMarkdownRenderer(out.registries.message_renderers, *out.engine);
+    plugins::RegisterCoreMarkdownRenderers(out.registries.message_renderers, *out.engine);
     plugins::RegisterCoreDisplayRenderers(out.registries.display_renderers, *out.engine, *out.highlighter);
 
     // The exclusive chat surface, when a plugin claimed it.

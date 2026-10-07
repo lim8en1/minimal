@@ -1,6 +1,7 @@
 #include "minimal/client/plugins/core_registrations.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -209,22 +210,6 @@ std::vector<std::string> SplitTextBlocks(std::string_view body) {
 // The row's own speaker bar ("▎") is drawn by ChatView as a full-height gutter
 // now -- a layout concern, like the timestamp -- so these labels are words
 // only.
-Element RenderUserText(const ChatRow& row, const Theme& theme) {
-    using namespace ftxui;
-    // Verbatim: the user's text is echoed, never re-rendered as markdown
-    // (their underscores are not emphasis).
-    //
-    // Labeled, like the assistant rows below: an unlabeled bold block forced
-    // the reader to infer the speaker from styling alone -- exactly the
-    // "difficult to map user/assistant" complaint. Same one-word label shape
-    // the assistant rows use, so the roles scan as a pair.
-    // The label is the bold part; a whole bold paragraph shouted every turn.
-    return vbox({
-        text("you") | color(theme.ColorFor("user_message")) | bold,
-        paragraph(row.text) | color(theme.ColorFor("user_message")),
-    });
-}
-
 // A large `@`-mention (a 5k-symbol file, say) is unusable inline -- collapsed
 // shows only the header (path + size), expanded shows the full framed block,
 // capped at kAttachmentExpandedRenderCapChars so an accidentally-expanded
@@ -416,32 +401,6 @@ MINIMAL_CORE_RENDERER(Switch, { return RenderSwitch(row, theme); });
 // The remaining core kinds split long content into scroll-anchor chunks
 // (RenderBlocks), so they are spelled out rather than macro'd: each pairs a
 // single-Element Render with a block decomposition of the same content.
-class CoreUserTextRenderer final : public MessageRenderer {
-public:
-    Element Render(const ChatRow& row, const Theme& theme,
-                   const RowRenderContext&) const override {
-        return RenderUserText(row, theme);
-    }
-    Elements RenderBlocks(const ChatRow& row, const Theme& theme,
-                          [[maybe_unused]] const RowRenderContext& ctx) const override {
-        using namespace ftxui;
-        const auto chunks = SplitTextBlocks(row.text);
-        if (chunks.size() <= 1) return {RenderUserText(row, theme)};
-        Elements blocks;
-        for (std::size_t i = 0; i < chunks.size(); ++i) {
-            Element body = paragraph(chunks[i]) | color(theme.ColorFor("user_message"));
-            if (i == 0) {
-                // The label rides the first chunk, exactly as the unsplit
-                // render draws it.
-                body = vbox({text("you") | color(theme.ColorFor("user_message")) | bold,
-                             std::move(body)});
-            }
-            blocks.push_back(std::move(body));
-        }
-        return blocks;
-    }
-};
-
 class CoreThinkingRenderer final : public MessageRenderer {
 public:
     Element Render(const ChatRow& row, const Theme& theme,
@@ -518,34 +477,34 @@ private:
     const MarkdownEngine& engine_;
 };
 
-// The one renderer that needs the engine is registered separately below, so
-// the macro above stays uniform.
-class CoreAgentMarkdownRenderer final : public MessageRenderer {
+// A message through the markdown engine: the assistant's, and the user's own
+// (rendered once it is sent -- the finished row is cached by the chat view,
+// and its raw text is what rewind, editing and history read). The engine
+// keeps typed line breaks as line breaks; CommonMark leaves intra-word `_`
+// alone, so snake_case stays snake_case.
+class CoreMarkdownMessageRenderer final : public MessageRenderer {
 public:
-    explicit CoreAgentMarkdownRenderer(const MarkdownEngine& engine) : engine_(engine) {}
+    // `label` names the speaker above the first chunk; `role` is the theme
+    // role of the label and the prose's base color.
+    using Label = std::function<std::string(const ChatRow&)>;
+    CoreMarkdownMessageRenderer(const MarkdownEngine& engine, std::string role, Label label)
+        : engine_(engine), role_(std::move(role)), label_(std::move(label)) {}
+
     Element Render(const ChatRow& row, const Theme& theme,
                    const RowRenderContext& ctx) const override {
         using namespace ftxui;
+        const Color base = theme.ColorFor(role_);
         // The base color: markdown only styles spans, so without it the prose
         // fell through to the terminal's own foreground.
-        Element body = RenderAgentMarkdown(row, theme, engine_) |
-                       color(theme.ColorFor("assistant_message"));
+        Element body = engine_.Render(row.text, theme) | color(base);
         // Later text of the same turn: the label already sits above it.
         if (ctx.continuation) return body;
-        // A persisted row loses the streaming block's transient "assistant"
-        // label the moment the turn finalizes (chat_view.cpp only shows that
-        // label while streaming_text is non-empty) -- without this, a
-        // finished assistant message is the only row kind with no role
-        // marker at all. Same theme key as the streaming label, for visual
-        // continuity between "in flight" and "settled".
-        return vbox({
-            text(AssistantLabel(row.agent, row.model)) |
-                color(theme.ColorFor("assistant_message")) | bold,
-            std::move(body),
-        });
+        // Every message carries its speaker -- a row with no role marker
+        // forced the reader to infer it from styling alone.
+        return vbox({text(label_(row)) | color(base) | bold, std::move(body)});
     }
 
-    // Long responses decompose into scroll-anchor chunks: the source splits
+    // Long messages decompose into scroll-anchor chunks: the source splits
     // at paragraph boundaries (a long code fence splits too, each piece
     // re-fenced so highlighting survives -- see SplitMarkdownBlocks), and
     // each piece re-renders through the engine. Every chunk parses on its
@@ -554,10 +513,8 @@ public:
     Elements RenderBlocks(const ChatRow& row, const Theme& theme,
                           const RowRenderContext& ctx) const override {
         using namespace ftxui;
-        const Color base = theme.ColorFor("assistant_message");
-        // Later text of the same turn: the label already sits above it.
-        const std::string label =
-            ctx.continuation ? std::string() : AssistantLabel(row.agent, row.model);
+        const Color base = theme.ColorFor(role_);
+        const std::string label = ctx.continuation ? std::string() : label_(row);
         Elements blocks;
         for (auto& block : SplitMarkdownBlocks(row.text)) {
             std::string source;
@@ -578,6 +535,8 @@ public:
 
 private:
     const MarkdownEngine& engine_;
+    std::string role_;
+    Label label_;
 };
 
 }  // namespace
@@ -590,18 +549,17 @@ void RegisterCoreMessageRenderers(MessageRendererRegistry& registry) {
     const auto fill = [&registry](ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer) {
         if (registry.Find(kind) == nullptr) registry.Register(kind, std::move(renderer));
     };
-    fill(ChatRowKind::UserText, std::make_unique<CoreUserTextRenderer>());
     fill(ChatRowKind::UserAttachment, std::make_unique<CoreUserAttachmentRenderer>());
     fill(ChatRowKind::Thinking, std::make_unique<CoreThinkingRenderer>());
     fill(ChatRowKind::ToolActivity, std::make_unique<CoreToolActivityRenderer>());
     fill(ChatRowKind::System, std::make_unique<CoreSystemRenderer>());
     fill(ChatRowKind::Switch, std::make_unique<CoreSwitchRenderer>());
-    // AgentMarkdown needs the engine and is registered by the caller once the
-    // default engine is settled.
+    // UserText and AgentMarkdown need the engine and are registered by the
+    // caller once the default engine is settled.
 }
 
-void RegisterCoreAgentMarkdownRenderer(MessageRendererRegistry& registry,
-                                       const MarkdownEngine& engine) {
+void RegisterCoreMarkdownRenderers(MessageRendererRegistry& registry,
+                                   const MarkdownEngine& engine) {
     // Compaction renders its summary through the same engine, so it is
     // registered at the same point -- independently: a plugin claiming one
     // kind must not suppress core's renderer for the other.
@@ -609,9 +567,17 @@ void RegisterCoreAgentMarkdownRenderer(MessageRendererRegistry& registry,
         registry.Register(ChatRowKind::Compaction,
                           std::make_unique<CoreCompactionRenderer>(engine));
     }
-    if (registry.Find(ChatRowKind::AgentMarkdown) != nullptr) return;
-    registry.Register(ChatRowKind::AgentMarkdown,
-                      std::make_unique<CoreAgentMarkdownRenderer>(engine));
+    if (registry.Find(ChatRowKind::AgentMarkdown) == nullptr) {
+        registry.Register(ChatRowKind::AgentMarkdown,
+                          std::make_unique<CoreMarkdownMessageRenderer>(
+                              engine, "assistant_message",
+                              [](const ChatRow& row) { return AssistantLabel(row.agent, row.model); }));
+    }
+    if (registry.Find(ChatRowKind::UserText) == nullptr) {
+        registry.Register(ChatRowKind::UserText,
+                          std::make_unique<CoreMarkdownMessageRenderer>(
+                              engine, "user_message", [](const ChatRow&) { return "you"; }));
+    }
 }
 
 void RegisterPlainMarkdownEngine(MarkdownEngineRegistry& registry) {

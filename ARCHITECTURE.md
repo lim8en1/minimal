@@ -1453,7 +1453,7 @@ A client-side presentational categorization, broader than the wire `Role` enum (
 
 | Kind | Source | Treatment |
 |---|---|---|
-| User | `Message{role: User}` text | Plain styled text — echoes typed input verbatim, not Markdown-rendered |
+| User | `Message{role: User}` text | Markdown through the engine, like the assistant's, with typed line breaks kept; the raw text is what rewind, editing and history read |
 | Agent | `Message{role: Assistant}` text | `MarkdownRenderer` / `StreamingMarkdownView`, labeled `agent (model)` from the message's persisted attribution (`StoredMessage.agent_preset`/`model`) |
 | Switch | synthetic, between assistant messages | A muted rule (`── agent build → plan · model a/x → b/y ──`) before the first assistant message whose agent or model differs from the previous one's — `/agent`, `/model` and per-turn overrides all surface where they took effect. Unknown attribution never draws one |
 | Thinking | `ThinkingBlock` | `Collapsible`, dimmed, collapsed by default |
