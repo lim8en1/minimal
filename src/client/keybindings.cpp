@@ -157,6 +157,10 @@ Keybindings Keybindings::Load(const std::filesystem::path& config_dir) {
     return parsed;
 }
 
+bool Keybindings::IsCoreAction(std::string_view action) {
+    return DefaultBindings().count(std::string(action)) != 0;
+}
+
 void Keybindings::ApplyDefaults() {
     // emplace, not assignment: the user's own binding always wins over the
     // default for the same action.

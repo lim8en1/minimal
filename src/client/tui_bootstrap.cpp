@@ -1,10 +1,13 @@
 #include "minimal/client/tui_bootstrap.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <system_error>
+#include <vector>
 
 #include "minimal/client/config_file_io.hpp"
 #include "minimal/client/key_event_parser.hpp"
@@ -272,12 +275,15 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // The prompt editor's own actions (the required slot is filled by now):
     // their defaults, where the user's file binds nothing. Core actions never
     // share their ids (by convention "prompt.<name>").
+    std::set<std::string> slot_actions;   // for the unknown-id check below
     for (const auto& action : out.registries.prompt_editor.get()->Actions()) {
         keys.EnsureDefault(action.id, action.default_key);
+        slot_actions.insert(action.id);
     }
     // The chat surface's too ("chat.<name>").
     for (const auto& action : out.registries.chat_surface.get()->Actions()) {
         keys.EnsureDefault(action.id, action.default_key);
+        slot_actions.insert(action.id);
     }
 
     // Plugin views: register each id's suggested default keybinding only where
@@ -333,6 +339,27 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                 "plugin view '{}' threw on component() (non-standard exception)", surface);
         }
     }
+    // A binding nothing in this build answers to -- a renamed action, a view
+    // whose plugin is disabled, a typo -- is kept (the file may predate or
+    // postdate the build) but said out loud: it used to sit dead silently.
+    {
+        std::vector<std::string> unknown;
+        for (const auto& [action, key] : keys.all()) {
+            if (Keybindings::IsCoreAction(action) || slot_actions.count(action) != 0 ||
+                out.registries.views.Find(action) != nullptr) {
+                continue;
+            }
+            unknown.push_back(action);
+        }
+        std::sort(unknown.begin(), unknown.end());
+        for (const auto& action : unknown) {
+            std::fprintf(stderr,
+                         "minimal: warning: keybindings.json binds '%s', which nothing in this "
+                         "build answers to -- renamed, a disabled plugin's view, or a typo?\n",
+                         action.c_str());
+        }
+    }
+
     // Parsed ONCE, after keys.all() has settled (core defaults + the user's
     // file + every plugin view's EnsureDefault default, just folded in
     // above): the caller's with_keys used to re-derive this per EVENT --
