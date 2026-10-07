@@ -125,6 +125,9 @@ public:
     // ParseProvidersConfig -- see VariantParametersFor's own threading).
     // Once per process; called under the config mutex, must not re-enter.
     void SetVariantParamsHook(VariantParamsHook hook);
+    // The backend's own reading of a model's advertised ladder (EffortsFor),
+    // for discovered and metadata-enriched models. Same once-per-process rule.
+    void SetEffortsHook(EffortsHook hook);
 
     // Whether discovery failed for a provider, and why. Untouched
     // (attempted == false) for a non-discover provider or a discover-entry the

@@ -44,6 +44,14 @@ in providers.json (see `bundled/providers.example.json`):
 | `url` | The endpoint, WITH its `/v1` suffix (this backend's convention — provider-anthropic's differs). |
 | `api_key` | A key reference: `"secret:NAME"` (stored with `/secret set`, read per request — no restart), `"env:NAME"` (read at startup; unset is an error), or a literal. See docs/CONFIGURATION.md § Secrets. |
 | `discover` | `true` = list the backend's own models; no `models` object needed. Static entries beside it still work, and a model's own window wins over the provider default. |
+
+**`@effort` variants from a LiteLLM proxy.** With `model_info` on, each
+model's `/model/info` row gives its ladder: `supports_reasoning` grants
+`@low`/`@medium`/`@high`, and `supports_<word>_reasoning_effort` flags add
+(`none`, `minimal`, `xhigh`, `max`) or withdraw single rungs. A rung the row
+advertises is sent verbatim (`reasoning_effort: "xhigh"`); anything else gets
+the generic mapping, which folds `xhigh`/`max` to `high` and `none` to
+`minimal`.
 | `models.<key>` | The KEY is sent on the wire verbatim as the request's `model` field. |
 
 Provider-level values (`max_tokens`, `parameters`, `context_window_tokens`)

@@ -62,10 +62,9 @@ public:
 // the loader tests can observe this seam through a real dlopen too.
 class FixtureVariantParams : public minimal::llm::VariantParamsProvider {
 public:
-    std::pair<nlohmann::json, bool> DeriveParameters(const std::string& effort_word,
-                                                     std::optional<int>,
-                                                     const nlohmann::json&) const override {
-        return {nlohmann::json{{"fixture_effort", effort_word}}, false};
+    std::optional<std::pair<nlohmann::json, bool>> DeriveParameters(
+        const std::string& effort_word, std::optional<int>, const nlohmann::json&) const override {
+        return std::pair{nlohmann::json{{"fixture_effort", effort_word}}, false};
     }
 };
 

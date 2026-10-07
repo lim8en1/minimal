@@ -1,7 +1,11 @@
 #include "anthropic_variant_params.hpp"
 
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#include "minimal/common/logger.hpp"
 
 #include "policy.hpp"
 #include "api_limits.hpp"
@@ -42,7 +46,18 @@ struct ThinkingModes {
 };
 
 ThinkingModes ModesOf(const json* capabilities) {
-    if (capabilities == nullptr) return {};  // unreported: a current model
+    if (capabilities == nullptr) {
+        // Unreported: a current model -- but an older, budget-only one would
+        // answer adaptive thinking with a 400, so say once how to declare it.
+        static std::once_flag hinted;
+        std::call_once(hinted, [] {
+            common::DefaultLogger().info(
+                "anthropic: a model with no capability report (discover: false) gets adaptive "
+                "thinking for its @effort variants; for a budget-only model (Haiku 4.5, Sonnet "
+                "4 and older) set \"thinking\": \"budget\" on its providers.json entry");
+        });
+        return {};
+    }
     ThinkingModes modes{false, false};
     if (!capabilities->contains("thinking")) return modes;
     const json& thinking = capabilities->at("thinking");
@@ -75,13 +90,12 @@ std::optional<std::string> EffortFor(const json* capabilities, const std::string
 
 }  // namespace
 
-std::pair<json, bool> AnthropicVariantParams::DeriveParameters(const std::string& effort_word,
-                                                               std::optional<int> max_tokens,
-                                                               const json& metadata) const {
+std::optional<std::pair<json, bool>> AnthropicVariantParams::DeriveParameters(
+    const std::string& effort_word, std::optional<int> max_tokens, const json& metadata) const {
     if (effort_word == "none") {
         // Thinking omitted entirely: off where the model can turn it off, its
         // own default where it cannot -- never a 400 either way.
-        return {json::object(), false};
+        return std::pair{json::object(), false};
     }
     const auto budget = AnthropicBudgetFor(effort_word);
     if (!budget) {
@@ -103,9 +117,9 @@ std::pair<json, bool> AnthropicVariantParams::DeriveParameters(const std::string
         // "summarized": newer models default to "omitted" (empty thinking
         // text), which would turn the transcript's reasoning rows blank.
         out["thinking"] = {{"type", "adaptive"}, {"display", "summarized"}};
-        return {out, false};
+        return std::pair{out, false};
     }
-    if (!modes.budget) return {out, false};  // no thinking: effort alone, if any
+    if (!modes.budget) return std::pair{out, false};  // no thinking: effort alone, if any
 
     bool clamped = false;
     int value = *budget;
@@ -120,7 +134,7 @@ std::pair<json, bool> AnthropicVariantParams::DeriveParameters(const std::string
         // for this request rather than send a budget guaranteed invalid
         // either way, the same degrade "none"/"minimal" already use above.
         if (*max_tokens < kMinThinkingBudgetTokens + kReservedVisibleOutputTokens) {
-            return {out, false};
+            return std::pair{out, false};
         }
         const int ceiling = *max_tokens - kReservedVisibleOutputTokens;
         if (value > ceiling) {
@@ -129,7 +143,62 @@ std::pair<json, bool> AnthropicVariantParams::DeriveParameters(const std::string
         }
     }
     out["thinking"] = {{"type", "enabled"}, {"budget_tokens", value}};
-    return {out, clamped};
+    return std::pair{out, clamped};
+}
+
+std::optional<std::vector<std::string>> AnthropicVariantParams::AdvertisedEfforts(
+    const json& metadata) const {
+    const json* capabilities = Capabilities(metadata);
+    if (capabilities == nullptr) return std::nullopt;  // not ours: core's catalog shapes
+    std::vector<std::string> out;
+    // The effort rungs the model takes, in the ladder's order (object keys
+    // carry none).
+    if (capabilities->contains("effort") && Supported(capabilities->at("effort"))) {
+        const json& effort = capabilities->at("effort");
+        for (const auto& [rung, budget] : kThinkingBudgets) {
+            const std::string name(rung);
+            if (effort.contains(name) && Supported(effort.at(name))) out.push_back(name);
+        }
+        return out;
+    }
+    // No effort word, but budgeted thinking: the budget rungs, each a
+    // thinking budget (DeriveParameters). Without them a budget-only model
+    // had no @effort variants at all.
+    if (ModesOf(capabilities).budget) {
+        for (const auto& [rung, budget] : kThinkingBudgets) out.emplace_back(rung);
+    }
+    return out;
+}
+
+void AnthropicThinkingTranslator::Translate(json& entry, const std::string& where) const {
+    if (!entry.is_object() || entry.value("backend", "") != "anthropic") return;
+    if (!entry.contains("models") || !entry.at("models").is_object()) return;
+    for (auto& [name, model] : entry.at("models").items()) {
+        if (!model.is_object() || !model.contains("thinking")) continue;
+        const json mode = model.at("thinking");
+        model.erase("thinking");
+        const std::string value = mode.is_string() ? mode.get<std::string>() : "";
+        json capabilities;
+        if (value == "adaptive") {
+            capabilities = {{"thinking", {{"supported", true},
+                                          {"types", {{"adaptive", {{"supported", true}}}}}}},
+                            {"effort", {{"supported", true}}}};
+            for (const auto& [rung, budget] : kThinkingBudgets) {
+                capabilities["effort"][std::string(rung)] = {{"supported", true}};
+            }
+        } else if (value == "budget") {
+            capabilities = {{"thinking", {{"supported", true},
+                                          {"types", {{"enabled", {{"supported", true}}}}}}}};
+        } else if (value == "none") {
+            capabilities = {{"thinking", {{"supported", false}}}};
+        } else {
+            throw std::runtime_error(where + ": models." + name +
+                                     ".thinking: must be \"adaptive\", \"budget\" or \"none\"");
+        }
+        json& metadata = model["metadata"];
+        if (!metadata.is_object()) metadata = json::object();
+        metadata["capabilities"] = std::move(capabilities);
+    }
 }
 
 }  // namespace minimal::provider_anthropic

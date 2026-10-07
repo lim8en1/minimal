@@ -17,6 +17,8 @@
 
 #include "minimal/config/providers_config.hpp"
 #include "minimal/config/settings_config.hpp"
+#include "anthropic_variant_params.hpp"
+#include "minimal/config/provider_config_extensions.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal::config;
@@ -1685,6 +1687,40 @@ TEST_CASE("discovery applies the entry recipe to models that advertise an effort
     CHECK(config.VariantsOf(ModelRef{"local", "no-reasoning"}).empty());
 }
 
+TEST_CASE("a static Anthropic model declares its thinking; its variants get that wire shape",
+          "[providers][variants]") {
+    // Regression: a discover:false model has no capability report, so every
+    // @effort variant got adaptive thinking + output_config.effort -- a 400
+    // from a budget-only model. provider-anthropic's translator turns the
+    // entry's "thinking" into the report discovery would have stored.
+    const auto doc = nlohmann::json::parse(R"({"providers": {"anthro": {
+        "backend": "anthropic", "url": "https://api.anthropic.com", "max_tokens": 64000,
+        "models": {
+          "claude-haiku-4-5": {"thinking": "budget", "variants": ["high"]},
+          "claude-opus-5-5": {"variants": ["high"]}
+        }}}})");
+    ProviderConfigExtensions extensions;
+    extensions.AddTranslator(
+        std::make_shared<minimal::provider_anthropic::AnthropicThinkingTranslator>());
+    const VariantParamsHook hook = [](const std::string&, const std::string& effort,
+                                      std::optional<int> max_tokens, const nlohmann::json& metadata) {
+        return minimal::provider_anthropic::AnthropicVariantParams().DeriveParameters(
+            effort, max_tokens, metadata);
+    };
+    const auto config = ParseProvidersConfig(doc, hook, &extensions);
+
+    const auto& haiku = Require(config, "anthro/claude-haiku-4-5@high");
+    CHECK(haiku.parameters.at("thinking").at("type") == "enabled");
+    CHECK_FALSE(haiku.parameters.contains("output_config"));
+    // Undeclared: today's default, adaptive.
+    const auto& opus = Require(config, "anthro/claude-opus-5-5@high");
+    CHECK(opus.parameters.at("thinking").at("type") == "adaptive");
+
+    auto bad = doc;
+    bad["providers"]["anthro"]["models"]["claude-haiku-4-5"]["thinking"] = "sometimes";
+    CHECK_THROWS(ParseProvidersConfig(bad, hook, &extensions));
+}
+
 TEST_CASE("an Anthropic capabilities tree is the ladder, and the variant hook sees the metadata",
           "[providers][variants][discover]") {
     // Anthropic's /v1/models shape: capabilities.effort holds one
@@ -1709,6 +1745,10 @@ TEST_CASE("an Anthropic capabilities tree is the ladder, and the variant hook se
             seen = model_metadata;
             return std::pair{nlohmann::json{{"effort_seen", effort}}, false};
         });
+    // The backend's own reading of its metadata shape (provider-anthropic's).
+    config.SetEffortsHook([](const std::string&, const nlohmann::json& model_metadata) {
+        return minimal::provider_anthropic::AnthropicVariantParams().AdvertisedEfforts(model_metadata);
+    });
 
     REQUIRE(config.Resolve(ModelRef{"local", "claude-x"}) != nullptr);
     const auto names = config.VariantsOf(ModelRef{"local", "claude-x"});

@@ -12,6 +12,7 @@
 #include "loopback_http_server.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "openai_model_catalog.hpp"
+#include "openai_variant_params.hpp"
 
 using minimal::llm::DiscoveredModel;
 using minimal::llm::ModelCatalogRegistry;
@@ -316,10 +317,14 @@ TEST_CASE("AdvertisedEfforts degrades every malformed shape to empty",
               .empty());
 }
 
-TEST_CASE("AdvertisedEfforts reads a LiteLLM /model/info row", "[model_catalog][variants]") {
-    using minimal::llm::AdvertisedEfforts;
-    const auto efforts = [](const char* info) {
-        return AdvertisedEfforts(nlohmann::json{{"model_info", nlohmann::json::parse(info)}});
+TEST_CASE("provider-openai reads a LiteLLM /model/info row as the ladder", "[model_catalog][variants]") {
+    // The backend's own shape: read by its plugin, not core (core reads only
+    // the cross-provider catalogs, and must not see this one at all).
+    const minimal::provider_openai::OpenAiVariantParams params;
+    const auto efforts = [&params](const char* info) {
+        return params
+            .AdvertisedEfforts(nlohmann::json{{"model_info", nlohmann::json::parse(info)}})
+            .value_or(std::vector<std::string>{"<not ours>"});
     };
     // supports_reasoning grants the standard ladder...
     CHECK(efforts(R"({"supports_reasoning": true})") ==
@@ -334,7 +339,26 @@ TEST_CASE("AdvertisedEfforts reads a LiteLLM /model/info row", "[model_catalog][
     CHECK(efforts(R"({"supports_reasoning": null, "supports_low_reasoning_effort": null})").empty());
     CHECK(efforts(R"({"supports_xhigh_reasoning_effort": true})").empty());
     CHECK(efforts(R"({"supports_reasoning": "yes"})").empty());
-    CHECK(AdvertisedEfforts(nlohmann::json::parse(R"({"model_info": [1]})")).empty());
+    CHECK_FALSE(params.AdvertisedEfforts(nlohmann::json::parse(R"({"model_info": [1]})")));
+    CHECK(minimal::llm::AdvertisedEfforts(
+              nlohmann::json{{"model_info", {{"supports_reasoning", true}}}})
+              .empty());
+}
+
+TEST_CASE("provider-openai sends an advertised rung verbatim, the rest the generic way",
+          "[model_catalog][variants]") {
+    // Regression: @none sent "minimal" (which the model may not take) and
+    // @xhigh/@max sent "high" -- duplicates of @high under other names.
+    const minimal::provider_openai::OpenAiVariantParams params;
+    const nlohmann::json metadata = {{"model_info", {{"supports_reasoning", true},
+                                                     {"supports_none_reasoning_effort", true},
+                                                     {"supports_xhigh_reasoning_effort", true}}}};
+    CHECK(params.DeriveParameters("none", std::nullopt, metadata)->first ==
+          nlohmann::json{{"reasoning_effort", "none"}});
+    CHECK(params.DeriveParameters("xhigh", std::nullopt, metadata)->first ==
+          nlohmann::json{{"reasoning_effort", "xhigh"}});
+    CHECK_FALSE(params.DeriveParameters("max", std::nullopt, metadata));   // not advertised
+    CHECK_FALSE(params.DeriveParameters("high", std::nullopt, nlohmann::json::object()));
 }
 
 // --- /model/info: the LiteLLM-proxy enrichment --------------------------------
@@ -373,7 +397,8 @@ TEST_CASE("MergeModelInfo enriches listed ids only, the listing's numbers standi
     REQUIRE(models.size() == 2);
     CHECK(*models[0].context_window_tokens == 1050000);
     CHECK(models[0].metadata.at("model_info").at("supports_reasoning") == true);
-    CHECK(minimal::llm::AdvertisedEfforts(models[0].metadata).size() == 3);
+    CHECK(minimal::provider_openai::OpenAiVariantParams().AdvertisedEfforts(models[0].metadata)->size() ==
+          3);
     CHECK_FALSE(models[1].metadata.contains("model_info"));
 }
 

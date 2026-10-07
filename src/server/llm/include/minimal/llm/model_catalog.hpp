@@ -60,18 +60,14 @@ struct DiscoveredModel {
 // degrading to empty -- the MaxCompletionTokens posture: a hostile or foreign
 // metadata body yields "no variants", never a guess.
 //
-// Anthropic's /v1/models `capabilities.effort` tree ({"low": {"supported":
-// true}, ...}) is read too, so a discovered Claude model gets exactly the
-// rungs the API says it accepts.
-//
 // models.dev's normalized `reasoning_options` spelling
 // ([{"type":"effort","values":[...]}]) is ALSO read, so a Models.dev-style
 // catalog plugin (docs/EXTENSIBILITY.md deferred table) feeds this unchanged.
 //
-// A LiteLLM proxy's /model/info row (stored under "model_info" by an
-// opted-in OpenAI-shape discovery) is read too: `supports_reasoning` grants
-// low/medium/high, and `supports_<word>_reasoning_effort` flags add or
-// withdraw single rungs.
+// Only the CROSS-PROVIDER catalog shapes live here. A backend's own shape --
+// Anthropic's capability report, a LiteLLM proxy's /model/info row -- is read
+// by that backend's plugin (VariantParamsProvider::AdvertisedEfforts, asked
+// first through config::EffortsFor).
 std::vector<std::string> AdvertisedEfforts(const nlohmann::json& metadata);
 
 class ModelCatalog {

@@ -57,4 +57,12 @@ void minimal_plugin_register_variant_params(
     registry.Register("anthropic", std::make_shared<minimal::provider_anthropic::AnthropicVariantParams>());
 }
 
+// A static model's "thinking": "adaptive" | "budget" | "none" -- the
+// capability report discovery would have stored, declared in providers.json.
+void minimal_plugin_register_provider_config_extensions(
+    minimal::config::ProviderConfigExtensions& extensions,
+    const minimal::plugins::PluginRegistrationContext&) {
+    extensions.AddTranslator(std::make_shared<minimal::provider_anthropic::AnthropicThinkingTranslator>());
+}
+
 }  // extern "C"

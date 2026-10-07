@@ -28,7 +28,7 @@ const json kBudgetModel = json::parse(R"({"capabilities": {
 TEST_CASE("DeriveParameters: an adaptive model gets adaptive thinking and the effort word",
           "[anthropic_variant]") {
     AnthropicVariantParams params;
-    const auto [out, clamped] = params.DeriveParameters("high", 128000, kAdaptiveModel);
+    const auto [out, clamped] = *params.DeriveParameters("high", 128000, kAdaptiveModel);
     CHECK_FALSE(clamped);
     CHECK(out["thinking"]["type"] == "adaptive");
     CHECK(out["thinking"]["display"] == "summarized");
@@ -41,7 +41,7 @@ TEST_CASE("DeriveParameters: a model with no capability report is treated as cur
     // A static model discovery never saw: adaptive, the word verbatim -- never
     // budget_tokens, which every current model rejects.
     AnthropicVariantParams params;
-    const auto [out, clamped] = params.DeriveParameters("xhigh", 32000, json::object());
+    const auto [out, clamped] = *params.DeriveParameters("xhigh", 32000, json::object());
     CHECK_FALSE(clamped);
     CHECK(out["thinking"]["type"] == "adaptive");
     CHECK(out["output_config"]["effort"] == "xhigh");
@@ -53,14 +53,14 @@ TEST_CASE("DeriveParameters: an unsupported effort word steps down to the neares
     json model = kAdaptiveModel;
     model["capabilities"]["effort"]["xhigh"]["supported"] = false;
     AnthropicVariantParams params;
-    CHECK(params.DeriveParameters("xhigh", 128000, model).first["output_config"]["effort"] ==
+    CHECK(params.DeriveParameters("xhigh", 128000, model)->first["output_config"]["effort"] ==
           "high");
-    CHECK(params.DeriveParameters("max", 128000, model).first["output_config"]["effort"] ==
+    CHECK(params.DeriveParameters("max", 128000, model)->first["output_config"]["effort"] ==
           "max");
 
     // Nothing at or below the word: no effort field at all.
     model["capabilities"]["effort"]["low"]["supported"] = false;
-    const auto [low, clamped] = params.DeriveParameters("low", 128000, model);
+    const auto [low, clamped] = *params.DeriveParameters("low", 128000, model);
     CHECK_FALSE(low.contains("output_config"));
     CHECK(low["thinking"]["type"] == "adaptive");
 }
@@ -68,7 +68,7 @@ TEST_CASE("DeriveParameters: an unsupported effort word steps down to the neares
 TEST_CASE("DeriveParameters: a budget-only model gets budget_tokens and no effort",
           "[anthropic_variant]") {
     AnthropicVariantParams params;
-    const auto [out, clamped] = params.DeriveParameters("low", 64000, kBudgetModel);
+    const auto [out, clamped] = *params.DeriveParameters("low", 64000, kBudgetModel);
     CHECK_FALSE(clamped);
     CHECK(out["thinking"]["type"] == "enabled");
     CHECK(out["thinking"]["budget_tokens"] == 4096);
@@ -81,7 +81,7 @@ TEST_CASE("DeriveParameters: budget_tokens clamps against max_tokens, never nega
     // <= 1024 sent a negative budget_tokens -- a 400 instead of the graceful
     // degradation the clamp exists to provide.
     AnthropicVariantParams params;
-    const auto [out, clamped] = params.DeriveParameters("low", 3000, kBudgetModel);
+    const auto [out, clamped] = *params.DeriveParameters("low", 3000, kBudgetModel);
     REQUIRE(clamped);
     CHECK(out["thinking"]["budget_tokens"] == 1976);  // 3000 - 1024
 }
@@ -91,10 +91,10 @@ TEST_CASE("DeriveParameters: max_tokens too small for a budget skips thinking",
     // 2047 can't hold both the 1024-token minimum budget AND 1024 reserved
     // for visible output; 2048 exactly can.
     AnthropicVariantParams params;
-    const auto [below, below_clamped] = params.DeriveParameters("low", 2047, kBudgetModel);
+    const auto [below, below_clamped] = *params.DeriveParameters("low", 2047, kBudgetModel);
     CHECK_FALSE(below_clamped);
     CHECK_FALSE(below.contains("thinking"));
-    const auto [at, at_clamped] = params.DeriveParameters("low", 2048, kBudgetModel);
+    const auto [at, at_clamped] = *params.DeriveParameters("low", 2048, kBudgetModel);
     REQUIRE(at_clamped);
     CHECK(at["thinking"]["budget_tokens"] == 1024);
 }
@@ -102,11 +102,11 @@ TEST_CASE("DeriveParameters: max_tokens too small for a budget skips thinking",
 TEST_CASE("DeriveParameters: every rung of a budget ladder has its own budget",
           "[anthropic_variant]") {
     AnthropicVariantParams params;
-    CHECK(params.DeriveParameters("high", 200000, kBudgetModel).first["thinking"]["budget_tokens"] ==
+    CHECK(params.DeriveParameters("high", 200000, kBudgetModel)->first["thinking"]["budget_tokens"] ==
           16384);
-    CHECK(params.DeriveParameters("xhigh", 200000, kBudgetModel).first["thinking"]["budget_tokens"] ==
+    CHECK(params.DeriveParameters("xhigh", 200000, kBudgetModel)->first["thinking"]["budget_tokens"] ==
           32768);
-    CHECK(params.DeriveParameters("max", 200000, kBudgetModel).first["thinking"]["budget_tokens"] ==
+    CHECK(params.DeriveParameters("max", 200000, kBudgetModel)->first["thinking"]["budget_tokens"] ==
           65536);
 }
 
@@ -117,15 +117,15 @@ TEST_CASE("DeriveParameters: a model without thinking gets effort alone",
         "effort": {"supported": true, "low": {"supported": true}, "medium": {"supported": true},
                    "high": {"supported": true}}}})");
     AnthropicVariantParams params;
-    const auto [out, clamped] = params.DeriveParameters("high", 64000, model);
+    const auto [out, clamped] = *params.DeriveParameters("high", 64000, model);
     CHECK_FALSE(out.contains("thinking"));
     CHECK(out["output_config"]["effort"] == "high");
 }
 
 TEST_CASE("DeriveParameters: 'none' omits thinking on every model", "[anthropic_variant]") {
     AnthropicVariantParams params;
-    CHECK(params.DeriveParameters("none", 500, kBudgetModel).first.empty());
-    CHECK(params.DeriveParameters("none", 128000, kAdaptiveModel).first.empty());
+    CHECK(params.DeriveParameters("none", 500, kBudgetModel)->first.empty());
+    CHECK(params.DeriveParameters("none", 128000, kAdaptiveModel)->first.empty());
 }
 
 TEST_CASE("DeriveParameters: an unmapped effort word throws rather than sending garbage",

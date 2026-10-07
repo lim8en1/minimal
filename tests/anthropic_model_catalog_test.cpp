@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "anthropic_model_catalog.hpp"
+#include "anthropic_variant_params.hpp"
 #include "loopback_http_server.hpp"
 #include "minimal/llm/model_catalog.hpp"
 
@@ -62,12 +63,23 @@ TEST_CASE("ParseModelListPage: limits and capabilities map onto DiscoveredModel"
     CHECK(opus.metadata["capabilities"]["thinking"]["types"]["adaptive"]["supported"] == true);
     CHECK_FALSE(opus.metadata.contains("id"));  // the id is the model, not metadata
 
-    // The effort ladder core autodetects from the same metadata.
-    const auto efforts = llm::AdvertisedEfforts(opus.metadata);
-    REQUIRE(efforts.size() == 5);
-    CHECK(efforts.front() == "low");
-    CHECK(efforts.back() == "max");
-    CHECK(llm::AdvertisedEfforts(page.models[1].metadata).empty());  // no effort parameter
+    // The effort ladder the plugin reads from the same metadata (core reads
+    // only the cross-provider catalog shapes, not this one).
+    const provider_anthropic::AnthropicVariantParams params;
+    const auto efforts = params.AdvertisedEfforts(opus.metadata);
+    REQUIRE(efforts.has_value());
+    REQUIRE(efforts->size() == 5);
+    CHECK(efforts->front() == "low");
+    CHECK(efforts->back() == "max");
+    CHECK(llm::AdvertisedEfforts(opus.metadata).empty());
+    // Budget-only (Haiku 4.5: no effort parameter, thinking.types.enabled):
+    // the budget rungs, each a thinking budget. Regression: it had no
+    // @effort variants at all.
+    const auto haiku = params.AdvertisedEfforts(page.models[1].metadata);
+    REQUIRE(haiku.has_value());
+    CHECK(*haiku == std::vector<std::string>{"low", "medium", "high", "xhigh", "max"});
+    CHECK(params.DeriveParameters("high", 64000, page.models[1].metadata)->first["thinking"]["type"] ==
+          "enabled");
 
     REQUIRE(page.next_after_id.has_value());
     CHECK(*page.next_after_id == "claude-haiku-4-5");
