@@ -191,7 +191,8 @@ private:
             hints = secret_edit_ ? "enter: save (empty keeps the current key)  ·  esc: cancel"
                                  : "enter: save  ·  esc: cancel";
         }
-        return ModalFrame(theme_, state.title, std::move(lines), std::move(pinned), hints);
+        return ModalFrame(theme_, state.title, std::move(lines), std::move(pinned), hints,
+                          ModalAccent::Focus);
     }
 
     bool OnEvent(Event event) override {

@@ -22,8 +22,8 @@ ftxui::Component UiKit::SchemaForm(std::function<SchemaFormState()> source,
 
 ftxui::Element UiKit::ModalFrame(const Theme& theme, const std::string& title,
                                  ftxui::Elements rows, ftxui::Elements pinned,
-                                 const std::string& footer) const {
-    return ui_kit::ModalFrame(theme, title, std::move(rows), std::move(pinned), footer);
+                                 const std::string& footer, ModalAccent accent) const {
+    return ui_kit::ModalFrame(theme, title, std::move(rows), std::move(pinned), footer, accent);
 }
 
 ftxui::Element UiKit::ModalRule(const Theme& theme) const { return ui_kit::ModalRule(theme); }

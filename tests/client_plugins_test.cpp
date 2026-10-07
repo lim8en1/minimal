@@ -420,7 +420,7 @@ public:
         return ftxui::Renderer([] { return ftxui::text("stub form"); });
     }
     ftxui::Element ModalFrame(const Theme&, const std::string&, ftxui::Elements, ftxui::Elements,
-                              const std::string&) const override {
+                              const std::string&, ModalAccent) const override {
         return ftxui::text("stub frame");
     }
     ftxui::Element ModalRule(const Theme&) const override { return ftxui::text("stub rule"); }
@@ -446,7 +446,7 @@ TEST_CASE("the widget kit: whichever plugin holds the slot draws for every view;
     slot.ClearAttribution();
     CHECK(slot.holder() == "my-kit");
     CHECK(ToText(widgets->ModalRule(theme)) == "stub rule");
-    CHECK(ToText(widgets->ModalFrame(theme, "t", {}, {}, "")) == "stub frame");
+    CHECK(ToText(widgets->ModalFrame(theme, "t", {}, {}, "", ModalAccent::Focus)) == "stub frame");
 
     // Core has no kit (or editor) of its own any more: the slots are ones the
     // TUI cannot start without, and the only required ones.
@@ -471,7 +471,7 @@ TEST_CASE("the bundled ui-kit plugin fills the widget-kit slot", "[client_plugin
     REQUIRE(fixtures->records.front().ok());
     CHECK(fixtures->registries.widget_kit.holder() == "ui-kit");
     const Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
-    CHECK(ToText(fixtures->widgets->ModalFrame(theme, "kit frame", {ftxui::text("row")}, {}, ""))
+    CHECK(ToText(fixtures->widgets->ModalFrame(theme, "kit frame", {ftxui::text("row")}, {}, "", ModalAccent::Focus))
               .find("kit frame") != std::string::npos);
 }
 

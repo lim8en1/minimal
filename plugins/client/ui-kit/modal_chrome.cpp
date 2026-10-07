@@ -37,7 +37,8 @@ ftxui::Element ModalRule(const Theme& theme) {
 }
 
 ftxui::Element ModalFrame(const Theme& theme, const std::string& title, ftxui::Elements rows,
-                          ftxui::Elements pinned, const std::string& footer, int max_width) {
+                          ftxui::Elements pinned, const std::string& footer, ModalAccent accent,
+                          int max_width) {
     using namespace ftxui;
     // The pinned rows (and their rule) come out of the scrolling budget, so
     // the frame as a whole still fits and the hints stay on screen.
@@ -54,7 +55,8 @@ ftxui::Element ModalFrame(const Theme& theme, const std::string& title, ftxui::E
         body.push_back(paragraph(footer) | Muted(theme));
     }
     return window(text(" " + title + " "), Body(theme, vbox(std::move(body)))) |
-           size(WIDTH, LESS_THAN, max_width) | color(theme.ColorFor("attention"));
+           size(WIDTH, LESS_THAN, max_width) |
+           color(theme.ColorFor(accent == ModalAccent::Attention ? "attention" : "border_focused"));
 }
 
 }  // namespace minimal::client::ui_kit

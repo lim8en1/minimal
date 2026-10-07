@@ -21,6 +21,14 @@
 
 namespace minimal::client {
 
+// --- Modal chrome ---------------------------------------------------------------
+
+// What a modal's frame says about it. Attention is for a question the user
+// must answer before work goes on (a permission, an ask, a destructive
+// confirm); everything else -- a form, a listing -- wears the focus border,
+// like the pickers, so the accent keeps its meaning.
+enum class ModalAccent { Focus, Attention };
+
 // --- The filterable menu ------------------------------------------------------
 
 // One row of the filtered list. `id` is caller-defined: session_id for the

@@ -594,9 +594,10 @@ public:
     // A titled modal window: `rows` scroll within the screen's height,
     // `pinned` stays visible below them (details, the last outcome), and
     // `footer` -- the key hints -- is pinned last. Empty parts are omitted.
+    // `accent`: whether the user is being asked something (ModalAccent).
     virtual ftxui::Element ModalFrame(const Theme& theme, const std::string& title,
                                       ftxui::Elements rows, ftxui::Elements pinned,
-                                      const std::string& footer) const = 0;
+                                      const std::string& footer, ModalAccent accent) const = 0;
 
     // A divider between sections of a modal's body.
     virtual ftxui::Element ModalRule(const Theme& theme) const = 0;
