@@ -79,7 +79,7 @@ private:
             *theme_, "delete session?",
             {text(" " + label_) | bold,
              text(" its transcript and its subagent sessions go, permanently")},
-            {}, "y: delete  ·  n / esc: cancel");
+            {}, "y: delete  ·  n / esc: cancel", client::ModalAccent::Attention);
     }
     bool OnEvent(ftxui::Event event) override {
         using ftxui::Event;

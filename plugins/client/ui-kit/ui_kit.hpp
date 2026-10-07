@@ -19,7 +19,8 @@ public:
     ftxui::Component SchemaForm(std::function<SchemaFormState()> source,
                                 SchemaFormCallbacks callbacks, const Theme& theme) const override;
     ftxui::Element ModalFrame(const Theme& theme, const std::string& title, ftxui::Elements rows,
-                              ftxui::Elements pinned, const std::string& footer) const override;
+                              ftxui::Elements pinned, const std::string& footer,
+                              ModalAccent accent) const override;
     ftxui::Element ModalRule(const Theme& theme) const override;
     ftxui::Component ModelSelector(ModelSelectorSpec spec, ModelSelectorCallbacks callbacks,
                                    const Theme& theme) const override;

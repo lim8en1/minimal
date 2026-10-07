@@ -419,8 +419,8 @@ public:
     }
     ftxui::Element ModalFrame(const Theme& theme, const std::string& title,
                               ftxui::Elements rows, ftxui::Elements pinned,
-                              const std::string& footer) const override {
-        return Kit().ModalFrame(theme, title, std::move(rows), std::move(pinned), footer);
+                              const std::string& footer, ModalAccent accent) const override {
+        return Kit().ModalFrame(theme, title, std::move(rows), std::move(pinned), footer, accent);
     }
     ftxui::Element ModalRule(const Theme& theme) const override { return Kit().ModalRule(theme); }
     ftxui::Component ModelSelector(ModelSelectorSpec spec, ModelSelectorCallbacks callbacks,

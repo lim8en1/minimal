@@ -233,7 +233,8 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
         // can run past the modal's own width (interior padding narrows it
         // further) -- text() would silently clip the tail (the exact "toggle
         // grants" the user needs), paragraph() wraps onto a second line.
-        return widgets.ModalFrame(theme, "permission", std::move(rows), {}, footer_text);
+        return widgets.ModalFrame(theme, "permission", std::move(rows), {}, footer_text,
+                                  client::ModalAccent::Attention);
     });
     // RunTui's on_answer reads toggles.GrantedKeys(request) -- the filtered
     // keys ride along from state it owns, so the modal never mints a key.
@@ -431,7 +432,7 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request,
         // at all when the wire request offers no cancel option -- see the
         // CatchEvent below.)
         return widgets.ModalFrame(theme, "confirm", std::move(rows), {},
-                                  has_cancel ? "esc: cancel" : "") |
+                                  has_cancel ? "esc: cancel" : "", client::ModalAccent::Attention) |
                size(WIDTH, LESS_THAN, kConfirmModalMaxWidth);
     });
     // Escape picks the "cancel" option when the modal offers one: both

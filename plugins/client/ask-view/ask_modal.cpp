@@ -439,7 +439,8 @@ ftxui::Component MakeAskModal(std::vector<AskQuestion> questions, std::string as
             }
             if (!state->interacted && first_line >= 0) rows[first_line] |= focus;
             return widgets.ModalFrame(theme, "review answers", std::move(rows), {},
-                                      "enter: submit  ·  esc: edit answers");
+                                      "enter: submit  ·  esc: edit answers",
+                                      client::ModalAccent::Attention);
         }
         for (int i = 0; i < count; ++i) {
             const auto& question = state->questions[i];
@@ -457,7 +458,8 @@ ftxui::Component MakeAskModal(std::vector<AskQuestion> questions, std::string as
                   "tab: skip  ·  esc: dismiss";
         const std::string window_title =
             count > 1 ? std::to_string(count) + " questions" : std::string("question");
-        return widgets.ModalFrame(theme, window_title, std::move(rows), {}, hints);
+        return widgets.ModalFrame(theme, window_title, std::move(rows), {}, hints,
+                                  client::ModalAccent::Attention);
     });
 
     const auto dismiss = [reply] { reply({v1::PROMPT_OUTCOME_DISMISSED, nullptr}); };

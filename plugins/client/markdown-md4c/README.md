@@ -1,7 +1,8 @@
 # markdown-md4c
 
-The markdown engine: how assistant text, compaction summaries and markdown
-tool results render.
+The markdown engine: how assistant and user messages, compaction summaries
+and markdown tool results render. (Text meant literally -- `__init__`, a
+glob -- goes in backticks, as anywhere markdown is read.)
 
 ## What it adds
 
