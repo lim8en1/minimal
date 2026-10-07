@@ -38,6 +38,36 @@ std::string NodeSummary(const json& value) {
     return value.dump();
 }
 
+// The describe's check findings, or null.
+json ResultsOf(const json& describe) {
+    if (!describe.is_object() || !describe.contains("checks") || !describe.at("checks").is_object()) {
+        return nullptr;
+    }
+    return describe.at("checks").value("results", json());
+}
+
+int Severity(const std::string& level) {
+    return level == "error" ? 3 : level == "warning" ? 2 : level == "ok" ? 1 : 0;  // NOLINT(readability-magic-numbers): an order, not quantities
+}
+
+// `result` on `row`, when it is worse than what the row already has.
+void Worst(FormRow& row, const json& result) {
+    const std::string level = result.value("level", "");
+    if (Severity(level) <= Severity(row.check_level)) return;
+    row.check_level = level;
+    row.check_message = result.value("message", "");
+}
+
+// An entry row's check: the worst finding under its prefix.
+void EntryCheck(FormRow& row, const json& describe, const std::string& prefix) {
+    const json results = ResultsOf(describe);
+    if (!results.is_array()) return;
+    for (const auto& result : results) {
+        const std::string path = result.value("path", "");
+        if (path.rfind(prefix, 0) == 0 || path == prefix.substr(0, prefix.size() - 1)) Worst(row, result);
+    }
+}
+
 FormRow FieldRow(const json& field, const json& describe, const std::string& label) {
     FormRow row;
     row.path = field.value("path", "");
@@ -67,6 +97,12 @@ FormRow FieldRow(const json& field, const json& describe, const std::string& lab
     if (describe.contains("unused") && describe.at("unused").contains(row.path)) {
         row.unused = describe.at("unused").at(row.path).get<std::string>();
     }
+    if (const json results = ResultsOf(describe); results.is_array()) {
+        for (const auto& result : results) {
+            if (result.value("path", "") != row.path) continue;
+            Worst(row, result);
+        }
+    }
     return row;
 }
 
@@ -86,7 +122,7 @@ std::string ItemSummary(const json& items, const json& item) {
 }
 
 // `row`, and for an object map its entry rows (by name) and add row.
-void AppendMap(std::vector<FormRow>& rows, FormRow row) {
+void AppendMap(std::vector<FormRow>& rows, FormRow row, const json& describe) {
     const json map = row.value.is_object() ? row.value : json::object();
     const json items = row.field.value("items", json::array());
     row.shown = map.empty() ? "(none)" : std::to_string(map.size()) + (map.size() == 1 ? " entry" : " entries");
@@ -98,6 +134,9 @@ void AppendMap(std::vector<FormRow>& rows, FormRow row) {
         item.item_key = name;
         item.label = name;
         item.shown = ItemSummary(items, entry);
+        item.check_level.clear();
+        item.check_message.clear();
+        EntryCheck(item, describe, base.path + "." + name + ".");
         rows.push_back(std::move(item));
     }
     FormRow add = base;
@@ -109,9 +148,9 @@ void AppendMap(std::vector<FormRow>& rows, FormRow row) {
 }
 
 // `row`, and for an object list its item rows and add row.
-void AppendField(std::vector<FormRow>& rows, FormRow row) {
+void AppendField(std::vector<FormRow>& rows, FormRow row, const json& describe) {
     if (row.type == "object_map") {
-        AppendMap(rows, std::move(row));
+        AppendMap(rows, std::move(row), describe);
         return;
     }
     if (row.type != "object_list") {
@@ -128,6 +167,9 @@ void AppendField(std::vector<FormRow>& rows, FormRow row) {
         item.item = static_cast<int>(i);
         item.label = std::to_string(i + 1);
         item.shown = ItemSummary(items, list[i]);
+        item.check_level.clear();
+        item.check_message.clear();
+        EntryCheck(item, describe, base.path + "[" + std::to_string(i) + "].");
         rows.push_back(std::move(item));
     }
     FormRow add = base;
@@ -149,12 +191,12 @@ std::vector<FormRow> BuildFormRows(const json& describe) {
         const std::string path = field.value("path", "");
         const auto dot = IsMember(field) ? std::string::npos : path.find('.');
         if (dot == std::string::npos) {
-            AppendField(top, FieldRow(field, describe, path));
+            AppendField(top, FieldRow(field, describe, path), describe);
             continue;
         }
         const std::string group = path.substr(0, dot);
         if (!groups.count(group)) group_order.push_back(group);
-        AppendField(groups[group], FieldRow(field, describe, path.substr(dot + 1)));
+        AppendField(groups[group], FieldRow(field, describe, path.substr(dot + 1)), describe);
     }
     std::vector<FormRow> rows = std::move(top);
     for (const auto& group : group_order) {
@@ -207,6 +249,44 @@ int NextFieldRow(const std::vector<FormRow>& rows, int from, int step) {
 }
 
 json ListOf(const FormRow& row) { return row.value.is_array() ? row.value : json::array(); }
+
+json ChecksUnder(const json& checks, const std::string& prefix) {
+    if (!checks.is_object()) return nullptr;
+    json out = checks;
+    out["results"] = json::array();
+    for (const auto& result : checks.value("results", json::array())) {
+        const std::string path = result.value("path", "");
+        if (path.rfind(prefix, 0) != 0) continue;
+        json relative = result;
+        relative["path"] = path.substr(prefix.size());
+        out["results"].push_back(std::move(relative));
+    }
+    return out;
+}
+
+std::string CheckSummary(const json& describe) {
+    if (!describe.is_object() || !describe.contains("checks") || !describe.at("checks").is_object()) {
+        return {};
+    }
+    const json& checks = describe.at("checks");
+    if (checks.value("state", "") == "running") return "checking...";
+    if (checks.value("state", "") != "done") return {};
+    int errors = 0;
+    int warnings = 0;
+    for (const auto& result : checks.value("results", json::array())) {
+        const std::string level = result.value("level", "");
+        errors += level == "error" ? 1 : 0;
+        warnings += level == "warning" ? 1 : 0;
+    }
+    if (errors == 0 && warnings == 0) return "checks: all good";
+    std::string out = "checks:";
+    if (errors > 0) out += " " + std::to_string(errors) + (errors == 1 ? " error" : " errors");
+    if (warnings > 0) {
+        out += std::string(errors > 0 ? "," : "") + " " + std::to_string(warnings) +
+               (warnings == 1 ? " warning" : " warnings");
+    }
+    return out;
+}
 
 json ItemDraft(const FormRow& row) {
     if (row.type == "object_map") {

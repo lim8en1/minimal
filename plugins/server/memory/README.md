@@ -179,3 +179,7 @@ The remaining knobs:
 
 `allow_inline: false` is the file-only mode: entries enter only through
 `memory_store(path=...)`.
+
+## Config check
+
+`/config` checks this plugin's settings after each save and on `c` (docs/PLUGINS.md, "Config checks"). The embedding backend `strategy` picks: an http backend's model list names a `model` it does not serve, and one real embedding of a word confirms `api_base` and `api_key`; a sidecar's interpreter must run (fastembed itself is checked when the sidecar starts); `tagger_model` must resolve through providers.json (checked only while the server runs the plugin).

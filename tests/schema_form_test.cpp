@@ -1016,3 +1016,54 @@ TEST_CASE("schema form: a schema-less value opens as forms, level by level, and 
     minimal_test::SendEvent(form, ftxui::Event::Character('e'));
     CHECK(minimal_test::RenderFrame(form, 110, 30).find("enter: save") != std::string::npos);
 }
+
+TEST_CASE("form rows carry the plugin's check findings; an entry the worst of its fields'",
+          "[schema_form][config_check]") {
+    json describe = kListDescribe;
+    describe["checks"] = {{"state", "done"},
+                          {"results",
+                           {{{"path", "timeout_ms"}, {"level", "ok"}, {"message", "fine"}},
+                            {{"path", "sources[0].url"}, {"level", "ok"}, {"message", "12 models"}},
+                            {{"path", "sources[1].url"}, {"level", "error"}, {"message", "HTTP 404"}},
+                            {{"path", "sources[1].api_key"}, {"level", "warning"}, {"message", "w"}}}}};
+    const auto rows = client::BuildFormRows(describe);
+    CHECK(rows[1].check_level == "ok");
+    CHECK(rows[2].check_level == "error");
+    CHECK(rows[2].check_message == "HTTP 404");
+    CHECK(rows[4].check_level == "ok");   // timeout_ms
+    CHECK(client::CheckSummary(describe) == "checks: 1 error, 1 warning");
+    describe["checks"]["state"] = "running";
+    CHECK(client::CheckSummary(describe) == "checking...");
+    const json under = client::ChecksUnder(kListDescribe.contains("checks") ? json() : describe["checks"],
+                                           "sources[1].");
+    REQUIRE(under.at("results").size() == 2);
+    CHECK(under.at("results")[0].at("path") == "url");
+}
+
+TEST_CASE("schema form: findings show on their fields, `c` checks again, an entry shows its own",
+          "[schema_form][config_check]") {
+    const auto theme = TestTheme();
+    auto state = FormState("plugins.d/lists.json", kListDescribe);
+    state.describe["checks"] = {
+        {"state", "done"},
+        {"results", {{{"path", "sources[1].url"}, {"level", "error"}, {"message", "HTTP 404"}}}}};
+    int checks = 0;
+    auto form = client::ui_kit::MakeSchemaForm([&] { return state; },
+                                               {.on_set = [](const std::string&, const std::string&) {},
+                                                .on_check = [&] { ++checks; }},
+                                               theme);
+    std::string frame = minimal_test::RenderFrame(form, 110, 30);
+    CHECK(frame.find("checks: 1 error") != std::string::npos);
+    CHECK(frame.find("c: check again") != std::string::npos);
+    CHECK(frame.find("✗") != std::string::npos);
+    minimal_test::SendEvent(form, ftxui::Event::Character('c'));
+    CHECK(checks == 1);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);   // entry 2
+    CHECK(minimal_test::RenderFrame(form, 110, 30).find("HTTP 404") != std::string::npos);
+    minimal_test::SendEvent(form, ftxui::Event::Return);      // its form
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);   // url
+    frame = minimal_test::RenderFrame(form, 110, 30);
+    CHECK(frame.find("sources › #2") != std::string::npos);
+    CHECK(frame.find("HTTP 404") != std::string::npos);   // the url's own finding, pinned
+}

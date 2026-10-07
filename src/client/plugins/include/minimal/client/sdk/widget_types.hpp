@@ -162,6 +162,9 @@ struct SchemaFormCallbacks {
     // own set/unset. Unset: an enum steps to its next choice and a formatted
     // field opens the text editor, as before.
     std::function<void(const PickRequest& request)> on_pick;
+    // Optional: `c` asks for the plugin's config check again (the owner
+    // answers through describe "checks"). Unset: no such key.
+    std::function<void()> on_check;
 };
 
 // --- The model selector --------------------------------------------------------

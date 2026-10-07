@@ -96,3 +96,7 @@ Agent presets (agents/*.md) may declare a package contract in their
 
 - `packages`: package specs, verbatim.
 - `requirements`: requirements files, project_root-relative paths.
+
+## Config check
+
+`/config` checks this plugin's settings after each save and on `c` (docs/PLUGINS.md, "Config checks"). `python` must be runnable: a path that exists and is executable, or a name on PATH.

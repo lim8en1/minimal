@@ -14,6 +14,7 @@
 // granted key against the disclosure, so a hostile or hallucinating judge
 // mints nothing.
 
+#include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <utility>
@@ -127,7 +128,7 @@ void minimal_plugin_check_config(const nlohmann::json& config,
     if (reason.rfind("HTTP 401", 0) == 0 || reason.rfind("HTTP 403", 0) == 0) {
         report.Fail("api_key", "the backend refused the key (" + reason + ")");
     } else if (reason == "budget exhausted") {
-        report.Fail("endpoint", "no answer within " + std::to_string(context.budget.count() / 1000) + " s");
+        report.Fail("endpoint", "no answer within " + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(context.budget).count()) + " s");
     } else if (reason == "unparseable response body" ||
                reason == "response carries no 'action' choice answer") {
         report.Fail("endpoint", "answered, but not as a systemone API (" + reason + ") -- the wrong URL?");

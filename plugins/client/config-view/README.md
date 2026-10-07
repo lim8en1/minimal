@@ -43,6 +43,13 @@ draft and saved once, when the first level is left (`x` discards a level):
   one, `K`/`J` move an item; on the plugin's form, `e` edits the whole value
   as one line of JSON instead.
 
+A plugin with a config check (docs/PLUGINS.md) is checked after every save
+and on `c`: a line above the fields says "checking..." and then what was
+found, each finding marks its field (✓ fine, ⚠ worth a look, ✗ a problem)
+and the selected field's finding is shown below it; a list or map entry
+carries the worst of its fields'. The plugin list shows a plugin's failed
+checks too.
+
 Edits go to core's `plugins` endpoint: the plugin's own parser checks the
 value (a refusal shows in red, nothing is written), the file
 `plugins.d/<name>.json` is written, and the change applies live when every

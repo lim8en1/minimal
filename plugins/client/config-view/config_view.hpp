@@ -44,6 +44,11 @@ public:
     void Unset(const std::string& path);
     // Turns server plugin `name` on or off in plugins.json (next start).
     void Toggle(const std::string& name, bool enabled);
+    // Runs the open plugin's config check again.
+    void Check();
+    // Re-reads the open plugin's description, keeping the status line (a
+    // check in flight landing its findings).
+    void Refresh();
 
     struct ListState {
         nlohmann::json rows;  // the endpoint's `list`: every server plugin

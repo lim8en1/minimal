@@ -124,3 +124,7 @@ a path the footer names, page-able with the `read` tool. Spill files are a
 cache: one per distinct URL, overwritten on refetch, safe to delete. If the
 spill write itself fails, the truncation still happens and the footer says the
 pointer is missing instead of returning one that leads nowhere.
+
+## Config check
+
+`/config` checks this plugin's settings after each save and on `c` (docs/PLUGINS.md, "Config checks"). `search.api_url` answers a query (`?q=...&count=1`) as JSON, with `search.api_key` when set; a refused key is reported on the key.

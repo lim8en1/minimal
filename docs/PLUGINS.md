@@ -305,6 +305,23 @@ object code.
   leaves the model a stale number after a live change and invalidates the
   cache on every edit. State the limit in the result where it applied
   instead (bash's timed-out result, web_fetch's truncation footer)
+- `minimal_plugin_check_config` — check a config against the world: the URL
+  answers, the model is served, the key is accepted, the interpreter runs.
+  The host runs it on its own thread (never inside a request) after every
+  save of the plugin's config and when the user presses `c` in `/config`,
+  within `ConfigCheckContext::budget`, and shows each finding on the field it
+  names (`path`: a dotted field path, `list[i].field`, `map.<name>.field`,
+  or `""` for the plugin) as ✓/⚠/✗ with its message. A newer save cancels a
+  check in flight (`context.cancelled()`). It also runs for a plugin that is
+  not running, with `context.services` null: probe what needs no host, say
+  what was skipped. Findings are information -- never a refusal (validation
+  refuses) -- and a check has no side effects beyond its probes.
+  `minimal/plugins/config_check.hpp` carries `CheckReport` and the probes
+  most checks need: `ProbeHttp` (failures in words: cannot connect, the key
+  was refused, a typo in the path, not an API), `ListOpenAiModels` +
+  `ModelNotServed`, `ModelRefProblem`, `ResolveKey`, `ExecutableProblem`.
+  The bundled checks: decision-advisor, cost-tracker, memory,
+  session-titler, tools-web, tools-python, tools-bash
 
 A plugin that owns a config file validates it itself and reports problems
 through `PluginRegistrationContext::report_warning`; the startup sanity check
