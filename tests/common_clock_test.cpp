@@ -1,5 +1,5 @@
 // minimal/common/clock.hpp's unit conversions, and the client's one duration
-// format built on std::chrono (minimal/client/view/tool_status.hpp).
+// format built on std::chrono (minimal/client/sdk/tool_status.hpp).
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -7,7 +7,7 @@
 #include <ctime>
 #include <limits>
 
-#include "minimal/client/view/tool_status.hpp"
+#include "minimal/client/sdk/tool_status.hpp"
 #include "minimal/common/clock.hpp"
 
 using minimal::common::MillisToSeconds;

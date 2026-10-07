@@ -120,8 +120,9 @@ private:
     // Shows the plugin view registered as `role` ("agents", ...); false, with
     // a notice, when none is.
     bool OpenRoleView(const std::string& role);
-    // The surface id of the plugin modal showing, "" for none.
-    std::string ShownPluginModal() const;
+    // The role of the plugin modal showing ("" for none, or a modal with no
+    // role): what a first message waiting on a choice watches.
+    std::string ShownPluginModalRole() const;
     // HostUi's reads (HostFocusProvider::AttachReads).
     std::vector<plugins::KeyBindingInfo> KeyBindingsForPlugins() const;
     std::vector<CommandCatalogEntry> CatalogForPlugins();
@@ -228,8 +229,7 @@ private:
     std::shared_ptr<ftxui::Component> plugin_modal_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> quit_confirm_child_ = std::make_shared<ftxui::Component>();
     std::optional<PickerController> picker_controller_;
-    // Reset slots for the two help overlays: they are built once, so without
-    // these the typed filter survived across opens.
+    // The modal host the plugin modals render in (ModalHost over the slot).
     ftxui::Component plugin_modal_host_;
 
     // --- frame ---

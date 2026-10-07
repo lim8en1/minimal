@@ -21,8 +21,8 @@
 
 #include <ftxui/dom/elements.hpp>
 
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/render.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 namespace minimal::client::tab_bar {
 

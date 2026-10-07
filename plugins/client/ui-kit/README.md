@@ -4,7 +4,7 @@ The widget kit: what every plugin view draws with.
 
 ## What it adds
 
-The exclusive, required widget-kit slot (`registries.hpp` `WidgetKit`): the
+The exclusive, required widget-kit slot (`sdk/widgets.hpp` `WidgetKit`): the
 filterable menu, the schema form, the model selector and the modal chrome.
 Views reach it through `ClientPluginRegistrationContext::widgets`, never by
 naming this plugin.

@@ -6,7 +6,7 @@
 #include <cstring>
 #include <utility>
 
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/logger.hpp"
 
@@ -188,12 +188,14 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         return record;
     }
 
-    // ABI tag is verified BEFORE any other plugin code runs (the server loader
-    // fixed exactly this ordering): name_fn()/version_fn() are
+    // ABI tag is verified BEFORE any plugin FUNCTION is called (the server
+    // loader fixed exactly this ordering): name_fn()/version_fn() are
     // plugin-executed functions, and running them from a .so built against a
     // different toolchain/ABI is what the ABI gate exists to prevent. A
     // mismatch report therefore names the FILE's tag only -- the plugin's own
-    // name is not read yet.
+    // name is not read yet. (dlopen has already run the module's static
+    // initializers by now: a plugin keeps those trivial -- no work against
+    // host types at load time -- since no gate can precede them.)
     if (const char* tag = abi_tag_fn(); tag != nullptr) record.abi_tag = tag;
     // Checked before any registration callback runs: a plugin built against a
     // different toolchain must never get to execute against our types.

@@ -59,6 +59,20 @@ private:
     int& calls_;
 };
 
+// Throws on focus changes until told to stop, every other event fine.
+class Flaky final : public plugins::Observer {
+public:
+    Flaky(bool& failing, int& calls) : failing_(failing), calls_(calls) {}
+    void OnFocusChanged(const plugins::TabInfo&) override {
+        ++calls_;
+        if (failing_) throw std::runtime_error("transient");
+    }
+
+private:
+    bool& failing_;
+    int& calls_;
+};
+
 }  // namespace
 
 TEST_CASE("observer events: open, focus, close, in order", "[observer_events]") {
@@ -141,6 +155,32 @@ TEST_CASE("observer delivery: in order, a thrower is contained and disabled",
     // called once disabled.
     CHECK(throws == minimal::client::kMaxPluginThrows);
     CHECK(log.size() == 3 + 2 * minimal::client::kMaxPluginThrows);
+}
+
+TEST_CASE("observer delivery: only CONSECUTIVE throws disable", "[observer_events]") {
+    // Separated by successful calls, any number of throws is forgiven: the
+    // count used to accumulate for the whole session, so a rare transient
+    // failure eventually disabled a healthy observer.
+    plugins::ObserverRegistry registry;
+    bool failing = false;
+    int calls = 0;
+    registry.Register(std::make_unique<Flaky>(failing, calls));
+    plugins::ObserverDispatcher dispatcher(registry);
+    const int rounds = 3 * minimal::client::kMaxPluginThrows;
+    for (int i = 0; i < rounds; ++i) {
+        failing = true;
+        dispatcher.Deliver({{Kind::FocusChanged, {"t1", "", ""}}});
+        failing = false;
+        dispatcher.Deliver({{Kind::FocusChanged, {"t1", "", ""}}});
+    }
+    CHECK(calls == 2 * rounds);   // never disabled
+
+    // Back to back, they still disable it.
+    failing = true;
+    for (int i = 0; i < 2 * minimal::client::kMaxPluginThrows; ++i) {
+        dispatcher.Deliver({{Kind::FocusChanged, {"t1", "", ""}}});
+    }
+    CHECK(calls == 2 * rounds + minimal::client::kMaxPluginThrows);
 }
 
 TEST_CASE("session turn counters count each edge once", "[observer_events]") {

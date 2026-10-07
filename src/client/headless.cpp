@@ -32,11 +32,11 @@
 #include <optional>
 
 
-#include "minimal/client/chat_model.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
 #include "minimal/client/cli_args.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/server_spawn.hpp"
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"

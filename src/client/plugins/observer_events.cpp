@@ -96,6 +96,7 @@ void ObserverDispatcher::Deliver(const std::vector<ObserverEvent>& events) {
                         observer->OnSessionMetadata(event.tab, event.metadata);
                         break;
                 }
+                throws = 0;   // CONSECUTIVE throws disable (kMaxPluginThrows), like every guard
             } catch (const std::exception& error) {
                 ++throws;
                 common::DefaultLogger().warn("plugin observer threw: {}{}", error.what(),

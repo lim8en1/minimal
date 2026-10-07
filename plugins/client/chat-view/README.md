@@ -4,7 +4,7 @@ The chat: the TUI's body, one per tab.
 
 ## What it adds
 
-The exclusive, required chat-surface slot (`registries.hpp` `ChatSurface`):
+The exclusive, required chat-surface slot (`sdk/chat.hpp` `ChatSurface`):
 the transcript and the turn in flight -- rows through the message and display
 renderers (bundled: `chat-renderers`), live markdown streamed as it arrives,
 live tool rows with their clocks, queued messages (click one to cancel it),

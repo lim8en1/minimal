@@ -4,10 +4,11 @@
 #include <chrono>
 #include <ctime>
 
-#include "minimal/client/picker_model.hpp"
-#include "minimal/client/policy.hpp"
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/picker_model.hpp"
+#include "minimal/client/sdk/policy.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 #include "minimal/common/clock.hpp"
+#include "policy.hpp"
 
 namespace minimal::session_view {
 

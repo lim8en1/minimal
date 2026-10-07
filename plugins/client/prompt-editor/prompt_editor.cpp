@@ -12,7 +12,7 @@
 
 #include "policy.hpp"
 #include "prompt_wrap.hpp"
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 
 namespace minimal::client::prompt_editor {
 
@@ -27,28 +27,6 @@ constexpr int kPromptGutter = 2;  // NOLINT(readability-magic-numbers): the colu
 
 constexpr const char* kPromptPlaceholder =
     "type here; @ for files, / for commands, alt+enter for newline";
-
-// The events that INSERT a newline rather than submit. Alt+Enter is the
-// portable multi-line key, encoded ESC CR (most terminals) or ESC LF; the
-// CSI-u rows cover terminals that report Enter with a modifier attached --
-// the kitty keyboard protocol's \x1b[13;{mod}u and xterm modifyOtherKeys'
-// \x1b[27;{mod};13~ (FTXUI 7 delivers unknown CSI as Event::Special with the
-// raw bytes preserved -- the same mechanism the bracketed-paste markers use,
-// and the one ctrl+tab's \x1b[27;5;9~ already arrives through). On macOS
-// several terminals send Option+Enter as a PLAIN \r unless their
-// option-as-alt / kitty-protocol setting is on -- no byte distinguishes it
-// from submit then, and no in-app match can fix that (see prompt_editor.hpp).
-bool IsNewlineEvent(const Event& event) {
-    static const Event kAltEnterCr = Event::Character("\x1b\r");
-    static const Event kAltEnterLf = Event::Character("\x1b\n");
-    static const Event kKittyAltEnter = Event::Special("\x1b[13;3u");
-    static const Event kKittyShiftEnter = Event::Special("\x1b[13;2u");
-    static const Event kModifyOtherKeysAltEnter = Event::Special("\x1b[27;3;13~");
-    static const Event kModifyOtherKeysShiftEnter = Event::Special("\x1b[27;2;13~");
-    return event == kAltEnterCr || event == kAltEnterLf || event == kKittyAltEnter ||
-           event == kKittyShiftEnter || event == kModifyOtherKeysAltEnter ||
-           event == kModifyOtherKeysShiftEnter;
-}
 
 // Newline AT THE CURSOR, not appended to the end: appending always broke a
 // newline inserted while editing mid-line (the common case -- Alt+Enter is
@@ -446,10 +424,9 @@ static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
             return true;
         }
 
-        // The "prompt.newline" action (or, absent a resolved keymap,
-        // IsNewlineEvent's hardcoded default) inserts a newline -- see
-        // newline_check's construction above and the header's NEWLINE
-        // comment.
+        // The "prompt.newline" action inserts a newline -- its encodings
+        // (alt+enter's ESC CR / ESC LF, the kitty and modifyOtherKeys forms)
+        // are the key parser's; see the header's NEWLINE comment.
         if (newline_check(event)) {
             InsertNewlineAtCursor(state);
             return true;   // consumed

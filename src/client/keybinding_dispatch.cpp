@@ -5,7 +5,7 @@
 #include <optional>
 #include <string>
 
-#include "minimal/client/key_event_parser.hpp"
+#include "minimal/client/sdk/key_event_parser.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::client {
@@ -190,11 +190,15 @@ bool ApplyViewRequest(std::vector<plugins::PluginViewEntry>& views,
     using Op = plugins::ViewRequest::Op;
     for (auto& entry : views) {
         // A plugin's own request names its view's canonical id; anything else
-        // (a server view hint) names the surface the user sees.
-        const bool addressed = request.plugin.empty()
-                                   ? entry.surface_id == request.view_id
-                                   : entry.plugin == request.plugin &&
-                                         entry.view->spec().id == request.view_id;
+        // (a server view hint) names the surface the user sees, or the role a
+        // view fills -- "sessions" reaches the session picker even after an
+        // alias renamed it.
+        const auto& spec = entry.view->spec();
+        const bool addressed =
+            request.plugin.empty()
+                ? entry.surface_id == request.view_id ||
+                      (!spec.role.empty() && spec.role == request.view_id)
+                : entry.plugin == request.plugin && spec.id == request.view_id;
         if (!addressed) continue;
         const bool is_panel = entry.view->spec().placement == plugins::ViewPlacement::Panel;
         const bool show = request.op == Op::kShow ||

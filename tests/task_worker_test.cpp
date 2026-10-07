@@ -1,4 +1,4 @@
-// TaskWorker (minimal/client/plugins/task_worker.hpp): the serial queue a
+// TaskWorker (minimal/client/sdk/task_worker.hpp): the serial queue a
 // client plugin runs its blocking calls on.
 #include <catch2/catch_test_macros.hpp>
 
@@ -11,7 +11,7 @@
 #include <thread>
 #include <vector>
 
-#include "minimal/client/plugins/task_worker.hpp"
+#include "minimal/client/sdk/task_worker.hpp"
 
 using minimal::client::plugins::TaskWorker;
 using namespace std::chrono_literals;

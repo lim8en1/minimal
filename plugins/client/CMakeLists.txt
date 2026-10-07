@@ -1,27 +1,25 @@
 # Bundled CLIENT plugin implementations.
 #
-# The host machinery lives in src/client/plugins (track E5); this subtree is for
+# The host machinery lives in src/client/plugins, the SDK plugins build
+# against in src/client/plugins/include/minimal/client/sdk; this subtree is
 # implementations, categorically identical to a third-party client plugin and
-# differing only in who publishes it. The external todo plugin is the intended
-# first consumer; until it lands, E5's proof is the test fixtures
-# (tests/fixtures/client-*), which use minimal_add_client_fixture_plugin.
+# differing only in who publishes it. Several fill slots the TUI cannot run
+# without (chat-view, prompt-editor, ui-kit, consent-prompts); the rest add
+# views, segments and renderers.
 #
-# logo is the first bundled client plugin: the ASCII-banner start view. It is
-# deliberately the thinnest possible real plugin -- one StartView registration
-# over a pure generator -- so its value is as a reference shape as much as a
-# feature.
+# logo: the ASCII-banner start view -- deliberately the thinnest real plugin,
+# a reference shape as much as a feature.
 
 add_subdirectory(logo)
 
-# cost-view is the second: a `{cost}` status-bar segment consuming the
-# bundled server-side cost-tracker plugin's PluginCall RPC, the intended
-# first real (non-reference-shape) consumer of that surface.
+# cost-view: a `{cost}` status-bar segment over the server-side cost-tracker
+# plugin's PluginCall endpoint.
 
 add_subdirectory(cost-view)
 
-# checklist-view is the third: a `{todo}` status-bar segment consuming the
-# bundled server-side checklist plugin's PluginCall RPC, on the cost-view
-# shape (background poll, tab-switch refresh, unfilled-segment degradation).
+# checklist-view: a `{todo}` status-bar segment over the server-side
+# checklist plugin, on the cost-view shape (background poll, tab-switch
+# refresh, unfilled-segment degradation).
 
 add_subdirectory(checklist-view)
 
@@ -88,8 +86,19 @@ add_subdirectory(markdown-md4c)
 # "confirmation" (both required: the TUI refuses to start without them).
 
 add_subdirectory(consent-prompts)
+
+# prompt-editor: the required prompt editor slot (one editor per tab).
 add_subdirectory(prompt-editor)
+
+# tools-panel: the running and recent tool calls across tabs (ctrl+t).
 add_subdirectory(tools-panel)
+
+# tab-bar: the row of tabs above the chat (optional: none, no bar).
 add_subdirectory(tab-bar)
+
+# chat-renderers: the default row renderers for every message kind and
+# display payload; any plugin's claim of a kind replaces its fallback.
 add_subdirectory(chat-renderers)
+
+# chat-view: the required chat surface -- one scrolling pane per tab.
 add_subdirectory(chat-view)

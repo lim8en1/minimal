@@ -1,6 +1,6 @@
 // syntax-grammars -- the bundled grammar set (syntax_grammars.hpp).
 
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 #include "syntax_grammars.hpp"
 
 namespace plugins = minimal::client::plugins;

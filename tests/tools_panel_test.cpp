@@ -9,7 +9,7 @@
 #include "ftxui_harness.hpp"
 #include "tools_panel.hpp"
 
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 namespace plugins = minimal::client::plugins;
 using minimal::client::ColorDepth;

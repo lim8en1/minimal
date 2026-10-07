@@ -4,6 +4,7 @@
 #include <utility>
 
 #include <ftxui/screen/terminal.hpp>
+#include "policy.hpp"
 
 namespace minimal::client::ui_kit {
 

@@ -3,7 +3,7 @@
 // /config -- plugin configuration in the TUI, as a Modal plugin view with id
 // "config". Two screens: the configurable plugins (a filterable list from the
 // server's `plugins` endpoint: `list`), and one plugin's form
-// (client::MakeSchemaForm over `describe`), whose edits go back as `set` /
+// (the widget kit's SchemaForm over `describe`), whose edits go back as `set` /
 // `unset` -- validated by the plugin itself, applied live where every changed
 // field is live, otherwise reported as waiting for a restart.
 //
@@ -19,9 +19,11 @@
 #include <ftxui/component/component.hpp>
 #include <nlohmann/json.hpp>
 
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/plugins/task_worker.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/host.hpp"
+#include "minimal/client/sdk/views.hpp"
+#include "minimal/client/sdk/widgets.hpp"
+#include "minimal/client/sdk/task_worker.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 namespace minimal::config_view {
 

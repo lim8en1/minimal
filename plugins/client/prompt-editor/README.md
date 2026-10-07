@@ -4,7 +4,7 @@ The prompt: where you type messages and /-commands.
 
 ## What it adds
 
-The exclusive, required prompt-editor slot (`registries.hpp`
+The exclusive, required prompt-editor slot (`sdk/prompt_editor.hpp`
 `PromptEditorFactory`): a multi-line editor with soft wrap, undo/redo,
 up-arrow recall of submitted lines, bracketed paste, and inline suggestion
 lists for `@`-mentions and `/`-commands. Its keys are listed in the keymap

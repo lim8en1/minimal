@@ -1,4 +1,4 @@
-#include "minimal/client/view/schema_form_model.hpp"
+#include "minimal/client/sdk/schema_form_model.hpp"
 
 #include <algorithm>
 #include <map>

@@ -25,9 +25,9 @@
 
 #include <ftxui/component/component.hpp>
 
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/policy.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/widgets.hpp"
+#include "minimal/client/sdk/policy.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 namespace minimal::client::consent_prompts {
 

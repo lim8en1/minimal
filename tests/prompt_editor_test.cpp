@@ -25,8 +25,8 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
 
-#include "minimal/client/key_event_parser.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/key_event_parser.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "../plugins/client/prompt-editor/policy.hpp"
 #include "prompt_editor_factory.hpp"
 #include "prompt_editor_fixture.hpp"

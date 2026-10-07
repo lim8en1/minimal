@@ -6,7 +6,7 @@
 #include <memory>
 
 #include "mcp_picker.hpp"
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 
 namespace plugins = minimal::client::plugins;
 

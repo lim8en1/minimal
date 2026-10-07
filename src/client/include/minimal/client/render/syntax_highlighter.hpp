@@ -12,12 +12,11 @@
 #include <ftxui/dom/elements.hpp>
 #include <tree_sitter/api.h>
 
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/highlighter.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/policy.hpp"
 
 namespace minimal::client {
-
-enum class HighlightCategory { Keyword, String, Comment, Number, Function, Type, Operator, Plain };
 
 // Byte range of `code` carrying one category. The testable half of the
 // highlighter: span mapping is asserted here, FTXUI render output is not
@@ -28,14 +27,6 @@ struct HighlightSpan {
     uint32_t end_byte;
 };
 
-// One rule: a tree-sitter node type and the category it maps to. Matches
-// ANONYMOUS node types too -- tree-sitter keywords are anonymous nodes, which
-// the rule tables exploit deliberately.
-struct SyntaxRule {
-    std::string_view node_type;
-    HighlightCategory category;
-};
-
 // Flattens preorder spans (HighlightCode's output: parents before children,
 // so a parent's range covers its descendants) into ordered, non-overlapping
 // runs where a DEEPER node wins over its ancestors: a keyword inside a JS
@@ -44,53 +35,6 @@ struct SyntaxRule {
 // tests, which is where the override rule is assertable.
 std::vector<HighlightSpan> ApplySpanOverrides(std::string_view code,
                                               const std::vector<HighlightSpan>& spans);
-
-// A function name/call-target position, identified by (parent node type,
-// field name) rather than by node type alone: tree-sitter grammars use the
-// SAME node type ("identifier") for a function name as for any other
-// identifier, so the flat SyntaxRule table (type -> category) can't tell
-// `foo` in `foo()` from `foo` in `x = foo`. The traversal already tracks the
-// current node's field name and its parent's type, so matching is exact.
-struct FunctionFieldRule {
-    std::string_view parent_type;
-    std::string_view field_name;
-};
-
-// One language: canonical key, its parser, its node-type table, its
-// function-name positions and the fence labels that also mean it. The
-// grammar registry hands these to the highlighter (the bundled
-// syntax-grammars plugin registers the usual set).
-using LanguageFnPtr = const TSLanguage* (*)(void);
-
-struct LanguageDefinition {
-    std::string_view name;
-    LanguageFnPtr language_fn;
-    std::span<const SyntaxRule> rules;
-    std::span<const FunctionFieldRule> function_fields = {};
-    std::span<const std::string_view> aliases = {};
-};
-
-// tree-sitter core plus a curated, vendored grammar set. A regex tokenizer was
-// considered and rejected: nested/context-free constructs (Rust nested block
-// comments, C++ raw strings, JS template literals) are exactly where correctness
-// matters and exactly where regex fails.
-//
-// The highlighter never hardcodes a color; the theme supplies one per category.
-// Code highlighting as a markdown engine (or any renderer) uses it: the
-// host's highlighter, over every registered grammar, handed to plugins
-// through ClientPluginRegistrationContext::highlighter.
-class CodeHighlighter {
-public:
-    virtual ~CodeHighlighter() = default;
-    // `code` as highlighted lines, colored by the current theme. `block_id`
-    // (non-zero) names a growing streaming block, so its parse is
-    // incremental. An unknown language renders plain.
-    virtual ftxui::Elements Highlight(std::string_view code, std::string_view language,
-                                      std::size_t block_id = 0) const = 0;
-    // A fence label's canonical language ("py" -> "python"); "" when no
-    // registered grammar knows it.
-    virtual std::string CanonicalLanguageFor(std::string_view language) const = 0;
-};
 
 class SyntaxHighlighter final : public CodeHighlighter {
 public:

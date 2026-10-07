@@ -26,7 +26,7 @@
 // 2.3 generalization re-swept every symbol once; this header starts where that
 // landed).
 
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/client_registries.hpp"
 #include "minimal/common/abi_tag.hpp"
 
 namespace minimal::client::plugins {
@@ -39,7 +39,7 @@ struct ClientPluginRegistrationContext {
     // not exist.
     nlohmann::json config = nlohmann::json::object();
 
-    // The attention sink (registries.hpp): raise/clear tab or global attention.
+    // The attention sink (host.hpp): raise/clear a tab's attention.
     // Null when the host does not offer the seam (a test exercising other
     // registries), which a plugin treats as "no attention", not an error.
     AttentionSink* attention = nullptr;
@@ -99,12 +99,6 @@ extern "C" {
 const char* minimal_client_plugin_abi_tag();
 const char* minimal_client_plugin_name();
 const char* minimal_client_plugin_version();
-
-// OPTIONAL, EXCLUSIVE: the tab bar (registries.hpp TabBar) -- the bundled
-// tab-bar plugin's, or a replacement. None: no bar.
-void minimal_client_plugin_register_tab_bar(
-    minimal::client::plugins::TabBarRegistry&,
-    const minimal::client::plugins::ClientPluginRegistrationContext&);
 
 }  // extern "C"
 
@@ -187,34 +181,35 @@ void minimal_client_plugin_register_observers(
     minimal::client::plugins::ObserverRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
-// REQUIRED, EXCLUSIVE: the chat view (registries.hpp ChatSurface) -- the
+// REQUIRED, EXCLUSIVE: the chat view (chat.hpp ChatSurface) -- the
 // bundled chat-view plugin's, or a replacement. Two claimants are fatal.
 void minimal_client_plugin_register_chat_surface(
     minimal::client::plugins::ChatSurfaceRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
-// OPTIONAL, EXCLUSIVE: replace the markdown engine (the md4c adapter is the
-// core default). The replacement carries the streaming contract itself --
+// OPTIONAL, EXCLUSIVE: the markdown engine -- the bundled markdown-md4c
+// plugin's, or a replacement; with none, core's plain-text engine stands.
+// The implementation carries the streaming contract itself --
 // partial input cannot soundly parse; Finalize() always reparses
 // authoritatively (EXTENSIBILITY 4.2).
 void minimal_client_plugin_register_markdown_engine(
     minimal::client::plugins::MarkdownEngineRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
-// OPTIONAL, EXCLUSIVE: replace the widget kit -- the menus, form and modal
-// chrome every view builds on (registries.hpp WidgetKit; core's own is the
-// default).
+// REQUIRED, EXCLUSIVE: the widget kit -- the menus, form and modal chrome
+// every view builds on (widgets.hpp WidgetKit) -- the bundled ui-kit
+// plugin's, or a replacement. Two claimants are fatal.
 void minimal_client_plugin_register_widget_kit(
     minimal::client::plugins::WidgetKitRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
-// REQUIRED, EXCLUSIVE: the prompt editor (registries.hpp PromptEditorFactory)
+// REQUIRED, EXCLUSIVE: the prompt editor (prompt_editor.hpp PromptEditorFactory)
 // -- the bundled prompt-editor plugin's, or a replacement.
 void minimal_client_plugin_register_prompt_editor(
     minimal::client::plugins::PromptEditorRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
-// OPTIONAL, EXCLUSIVE: the tab bar (registries.hpp TabBar) -- the bundled
+// OPTIONAL, EXCLUSIVE: the tab bar (render.hpp TabBar) -- the bundled
 // tab-bar plugin's, or a replacement. None: no bar.
 void minimal_client_plugin_register_tab_bar(
     minimal::client::plugins::TabBarRegistry&,

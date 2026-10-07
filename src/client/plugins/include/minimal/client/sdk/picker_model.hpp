@@ -15,7 +15,7 @@
 #include <string_view>
 #include <vector>
 
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 #include "minimal/v1/session_service.pb.h"
 #include "minimal/client/policy.hpp"
 

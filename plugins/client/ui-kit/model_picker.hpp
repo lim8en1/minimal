@@ -10,7 +10,7 @@
 
 #include <ftxui/component/component.hpp>
 
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "filterable_menu.hpp"
 #include "minimal/v1/session_service.pb.h"
 

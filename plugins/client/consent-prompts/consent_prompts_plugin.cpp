@@ -2,7 +2,7 @@
 // (consent_prompts.hpp).
 
 #include "consent_prompts.hpp"
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 
 namespace plugins = minimal::client::plugins;
 

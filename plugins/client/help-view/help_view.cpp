@@ -4,9 +4,10 @@
 #include <tuple>
 #include <utility>
 
-#include "minimal/client/policy.hpp"
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/view/rebuilding.hpp"
+#include "minimal/client/sdk/policy.hpp"
+#include "minimal/client/sdk/utf8.hpp"
+#include "minimal/client/sdk/rebuilding.hpp"
+#include "policy.hpp"
 
 namespace minimal::help_view {
 
@@ -25,7 +26,7 @@ std::vector<client::MenuRow> BuildKeymapRows(std::vector<plugins::KeyBindingInfo
     for (const auto& binding : bindings) {
         key_width = std::max(key_width, client::Utf8ColumnWidth(binding.key));
     }
-    key_width = std::min(key_width, client::kKeyColumnCap);
+    key_width = std::min(key_width, kKeyColumnCap);
 
     std::vector<client::MenuRow> rows;
     const std::string* group = nullptr;

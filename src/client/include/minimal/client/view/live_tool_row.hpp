@@ -9,9 +9,9 @@
 #include <cstdint>
 #include <string>
 
-#include "minimal/client/chat_model.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
 #include "minimal/client/state.hpp"
-#include "minimal/client/view/tool_status.hpp"
+#include "minimal/client/sdk/tool_status.hpp"
 
 namespace minimal::client {
 

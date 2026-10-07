@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 #include "minimal/common/config_reader.hpp"
 #include "minimal/common/plugin_config_label.hpp"
 #include "policy.hpp"

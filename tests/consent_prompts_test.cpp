@@ -17,8 +17,10 @@
 #include "ftxui_harness.hpp"
 #include "widget_kit_fixture.hpp"
 
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/plugins/attention_state.hpp"
+#include "minimal/client/plugins/plugin_view_entry.hpp"
+#include "minimal/client/sdk/client_registries.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/view/tab_ui.hpp"
 
 using namespace minimal::client::consent_prompts;

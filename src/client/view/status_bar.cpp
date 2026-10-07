@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 #include "minimal/common/count_format.hpp"
 #include "minimal/client/policy.hpp"
 #include "minimal/common/units.hpp"

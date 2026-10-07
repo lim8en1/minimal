@@ -14,7 +14,7 @@
 
 #include <ftxui/dom/elements.hpp>
 
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/status_format.hpp"
 
 namespace minimal::client {

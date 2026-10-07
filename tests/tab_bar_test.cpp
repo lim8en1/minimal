@@ -10,7 +10,7 @@
 #include <ftxui/dom/node.hpp>
 #include <ftxui/screen/screen.hpp>
 
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/state.hpp"
 #include "tab_bar.hpp"
 #include "minimal/client/view/tab_activity.hpp"

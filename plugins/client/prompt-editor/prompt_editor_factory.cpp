@@ -2,7 +2,7 @@
 
 #include <atomic>
 
-#include "minimal/client/key_event_parser.hpp"
+#include "minimal/client/sdk/key_event_parser.hpp"
 #include "prompt_editor.hpp"
 
 namespace minimal::client::prompt_editor {

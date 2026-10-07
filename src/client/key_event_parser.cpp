@@ -1,11 +1,11 @@
-#include "minimal/client/key_event_parser.hpp"
+#include "minimal/client/sdk/key_event_parser.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <unordered_map>
 
-#include "minimal/client/utf8.hpp"   // ToLower
+#include "minimal/client/sdk/utf8.hpp"   // ToLower
 
 namespace minimal::client {
 namespace {

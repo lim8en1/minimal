@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "minimal/client/config_file_io.hpp"
-#include "minimal/client/key_event_parser.hpp"
+#include "minimal/client/sdk/key_event_parser.hpp"
 #include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
@@ -339,6 +339,24 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                 "plugin view '{}' threw on component() (non-standard exception)", surface);
         }
     }
+    // A role core opens is filled by one view: a second claimant is never
+    // reached, so say which one stands.
+    {
+        std::map<std::string, std::string> roles;   // role -> the surface filling it
+        for (const auto& entry : out.plugin_views) {
+            const std::string& role = entry.view->spec().role;
+            if (role.empty()) continue;
+            const auto [it, fresh] = roles.emplace(role, entry.surface_id);
+            if (!fresh) {
+                std::fprintf(stderr,
+                             "minimal: warning: views '%s' and '%s' both fill the '%s' role -- "
+                             "'%s' is the one core opens\n",
+                             it->second.c_str(), entry.surface_id.c_str(), role.c_str(),
+                             it->second.c_str());
+            }
+        }
+    }
+
     // A binding nothing in this build answers to -- a renamed action, a view
     // whose plugin is disabled, a typo -- is kept (the file may predate or
     // postdate the build) but said out loud: it used to sit dead silently.

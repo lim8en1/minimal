@@ -6,7 +6,8 @@
 #include <string_view>
 
 #include <ftxui/dom/elements.hpp>
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
+#include "policy.hpp"
 
 namespace minimal::client::markdown_md4c {
 

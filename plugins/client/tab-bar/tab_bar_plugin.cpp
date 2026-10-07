@@ -3,7 +3,7 @@
 
 #include <memory>
 
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 #include "tab_bar.hpp"
 
 namespace plugins = minimal::client::plugins;

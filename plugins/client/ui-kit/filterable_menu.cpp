@@ -7,8 +7,9 @@
 #include <ftxui/component/component_options.hpp>
 #include <ftxui/dom/elements.hpp>
 
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/utf8.hpp"
+#include "minimal/client/sdk/policy.hpp"
+#include "policy.hpp"
 
 namespace minimal::client::ui_kit {
 namespace {

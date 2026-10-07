@@ -6,7 +6,9 @@
 // cannot soundly parse, so a growing message is reparsed at most once per
 // window and Finalize() always reparses authoritatively.
 
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/host.hpp"
+#include "minimal/client/sdk/render.hpp"
+#include "minimal/client/sdk/registries.hpp"
 
 namespace minimal::client::markdown_md4c {
 

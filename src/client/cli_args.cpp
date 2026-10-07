@@ -6,7 +6,7 @@
 #include <optional>
 #include <system_error>
 
-#include "minimal/client/utf8.hpp"
+#include "minimal/client/sdk/utf8.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"

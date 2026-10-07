@@ -1,35 +1,20 @@
 # Client SDK v0 -- UNSTABLE. The client headers a client plugin may include
 # (checked by scripts/check_module_deps.py --plugins over plugins/client/).
 #
-# The ABI and the registries its hooks fill.
-minimal/client/plugins/client_plugin_abi.h
-minimal/client/plugins/registries.hpp
-minimal/client/plugins/background_poller.hpp
-minimal/client/plugins/task_worker.hpp
+# The client SDK is one directory: the ABI (client_plugin_abi.h), the seams
+# and registries its hooks fill, the render and widget contracts, and the
+# helpers plugins share. Everything else under minimal/client/ is core's own.
+minimal/client/sdk/
+
 # The wire types the ABI already hands over (ClientApi answers, events).
 minimal/v1/session_service.pb.h
-
-# Rendering, and the widget contracts (the widgets themselves come from the
-# WidgetKit slot, through the registration context).
-minimal/client/render/theme.hpp
-minimal/client/render/syntax_highlighter.hpp
-minimal/client/policy.hpp
-minimal/client/utf8.hpp
-minimal/client/key_event_parser.hpp
-minimal/common/env.hpp
-minimal/client/command_catalog_entry.hpp
-minimal/client/chat_model.hpp
-minimal/client/view/schema_form_model.hpp
-minimal/client/view/widget_types.hpp
-minimal/client/picker_model.hpp
-minimal/client/view/rebuilding.hpp
-minimal/client/view/tool_status.hpp
 
 # Shared utilities.
 minimal/common/abi_tag.hpp
 minimal/common/config_reader.hpp
 minimal/common/clock.hpp
 minimal/common/count_format.hpp
+minimal/common/env.hpp
 minimal/common/model_ref.hpp
 minimal/common/logger.hpp
 minimal/common/plugin_config_label.hpp

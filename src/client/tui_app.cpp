@@ -15,9 +15,9 @@
 #include <ftxui/dom/elements.hpp>
 
 #include "client_entry.hpp"
-#include "minimal/client/chat_model.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/keymap_help_model.hpp"
 #include "minimal/client/view/modal_host.hpp"
@@ -467,7 +467,7 @@ void TuiApp::BuildFrame() {
                 ApplyViewRequest(env_.plugin_views, request, *plugin_modal_child_,
                                  show_plugin_modal_);
             }
-            picker_controller_->WatchPendingView(ShownPluginModal());
+            picker_controller_->WatchPendingView(ShownPluginModalRole());
             observer_pump_->Run();
         },
         tab_ui_, theme, registries.prompt_renderers, permission_child_, show_permission_,
@@ -743,8 +743,10 @@ AppState::CommandScope TuiApp::CommandScope() const {
 }
 
 bool TuiApp::OpenRoleView(const std::string& role) {
+    // By role, never by name: an alias renaming the view must not break
+    // /agent, /model or a first message waiting on a choice.
     for (auto& entry : env_.plugin_views) {
-        if (entry.surface_id != role) continue;
+        if (entry.view->spec().role != role) continue;
         ShowPluginView(env_.plugin_views, entry, *plugin_modal_child_, show_plugin_modal_);
         return true;
     }
@@ -753,11 +755,11 @@ bool TuiApp::OpenRoleView(const std::string& role) {
     return false;
 }
 
-std::string TuiApp::ShownPluginModal() const {
+std::string TuiApp::ShownPluginModalRole() const {
     if (!show_plugin_modal_) return {};
     for (const auto& entry : env_.plugin_views) {
         if (entry.visible && entry.view->spec().placement == plugins::ViewPlacement::Modal) {
-            return entry.surface_id;
+            return entry.view->spec().role;
         }
     }
     return {};

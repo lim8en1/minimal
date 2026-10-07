@@ -29,7 +29,7 @@
 #include "checklist_feed.hpp"
 #include "checklist_model.hpp"
 #include "checklist_panel_view.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 using namespace std::chrono_literals;
 using minimal::checklist_view::ChecklistFeed;

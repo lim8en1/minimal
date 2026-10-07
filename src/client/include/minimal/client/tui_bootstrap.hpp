@@ -51,9 +51,11 @@
 #include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/plugins/attention_state.hpp"
+#include "minimal/client/plugins/plugin_view_entry.hpp"
+#include "minimal/client/sdk/client_registries.hpp"
 #include "minimal/client/render/syntax_highlighter.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/status_format.hpp"
 #include "minimal/client/ui_config.hpp"
@@ -147,15 +149,14 @@ struct TuiEnvironment {
 // `return kUnavailable` did at each of these points.
 bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out);
 
-// Re-delivers the current theme to every theme-aware plugin: the exclusive
-// chat surface first, then the view plugins. Called once by
+// Re-delivers the current theme to the view plugins (View::OnTheme; the
+// chat surface gets the theme with each pane it makes). Called once by
 // BuildTuiEnvironment at startup, and again by RunTui's /theme swap AFTER
 // `env.theme`'s contents have been replaced in place (the object keeps its
 // address -- every reference holder sees the new colors -- but plugins that
 // CACHED colors at OnTheme time need the push to re-read them). Same throw
-// containment as the inline code this replaces: a throwing chat surface is
-// disabled (the core chat view takes over), a throwing view is logged and
-// kept.
+// containment as every plugin call: a throw is logged and the plugin kept
+// (with the theme it had).
 void PushThemeToPlugins(TuiEnvironment& out);
 
 // One registry's claims, as fed to ResolveClientNames. `attributions` points

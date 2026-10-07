@@ -10,6 +10,7 @@
 #include <string_view>
 #include <utility>
 
+#include "minimal/client/sdk/policy.hpp"
 #include "minimal/common/units.hpp"
 
 namespace minimal::client {
@@ -55,8 +56,6 @@ inline constexpr std::size_t kStreamCloserQueueCapacity = 1024;
 
 // --- paging -----------------------------------------------------------------------
 
-// Sessions per ListSessions page (pickers, `-l`, subagent scans).
-inline constexpr std::int32_t kSessionListPageSize = 200;
 // Messages per scrollback page, and the pages one refresh job may walk before
 // yielding: a bounded job cannot wedge the worker behind a huge delta.
 inline constexpr std::int32_t kScrollbackPageSize = 100;
@@ -87,21 +86,12 @@ inline constexpr std::size_t kMaxLiveSegments = 100;
 
 // --- display widths and previews ------------------------------------------------------
 
-// A tool call's input preview on its row, and a live tool summary.
-inline constexpr std::size_t kToolInputSummaryBytes = 120;
+// A live tool's one-line summary (the tab activity, the tools panel).
 inline constexpr std::size_t kLiveToolSummaryBytes = 200;
 // An attachment longer than this starts collapsed.
 inline constexpr std::size_t kAttachmentCollapseThresholdChars = 2000;
-// Picker columns: a session/preset name, a key spec in the keymap help, and
-// the message-count column ("12345 msgs").
-inline constexpr std::size_t kNameColumnCap = 40;
-inline constexpr std::size_t kKeyColumnCap = 18;
-inline constexpr std::size_t kMessageCountColumnWidth = 9;
 // `minimal -l`'s name column.
 inline constexpr std::size_t kSessionListNameColumnChars = 48;
-// An unnamed subagent is labelled by its session id's prefix: the ULID's
-// timestamp part plus a little randomness, enough to tell siblings apart.
-inline constexpr std::size_t kUnnamedSessionIdPrefixChars = 12;
 
 // Transient notices: cleared after this many ticks of UI activity, and never
 // before they have been visible this long (a streaming background tab is
@@ -125,37 +115,6 @@ inline constexpr std::chrono::milliseconds kHeadlessCancelPoll{5};
 
 // --- chat view ---------------------------------------------------------------------
 
-// Live thinking text kept on screen while it streams: settled lines, and the
-// trailing partial line's bytes ever re-wrapped. Presentation only; the
-// transcript is authoritative.
-inline constexpr std::size_t kMaxLiveThinkingLines = 300;
-inline constexpr std::size_t kMaxLiveThinkingTailBytes = 64 * common::kKiB;
-// Mouse wheel: events closer than the gate are dropped (about one step per
-// two frames at a ~60 Hz repaint), and each accepted tick moves a few lines --
-// small enough to read, large enough that a trackpad flick travels.
-inline constexpr std::chrono::milliseconds kWheelGate{30};
-inline constexpr int kWheelLinesPerTick = 3;
-// Keyboard scroll step before the first layout pass has measured the viewport.
-inline constexpr int kFallbackViewportLines = 20;
-// Long row content renders in chunks of at most this many source lines, so a
-// streamed delta re-renders one small chunk, not the whole row.
-inline constexpr std::size_t kMaxAnchorLines = 20;
-// An expanded attachment renders at most this much: an accidentally expanded
-// huge file must not wedge the renderer.
-inline constexpr std::size_t kAttachmentExpandedRenderCapChars = 200'000;
-// A tool result's body shown on its row (the tail window): orientation, not
-// an archive -- the persisted result is the record.
-inline constexpr std::size_t kToolResultBodyPreviewBytes = 4000;
-
-// Markdown of a streaming message is reparsed whole (md4c has no incremental
-// API), at most this often; past the threshold the interval grows with the
-// buffer up to the ceiling, so a long reply's tail still updates without the
-// reparse eating every frame.
-inline constexpr std::chrono::milliseconds kMarkdownReparseDebounce{120};
-inline constexpr std::chrono::milliseconds kMaxMarkdownReparseDebounce{500};
-inline constexpr std::size_t kMarkdownReparseScaleThresholdBytes = 8 * common::kKiB;
-// Past the threshold the interval grows by a millisecond per this many bytes.
-inline constexpr std::size_t kMarkdownReparseBytesPerExtraMs = 64;
 // Highlighted code blocks cached (MRU): a screenful of blocks and some
 // scrollback.
 inline constexpr std::size_t kHighlightCacheCap = 64;
@@ -179,48 +138,10 @@ inline constexpr std::size_t kMaxPromptHistoryFileBytes = common::kMiB;
 // Below this terminal height only the critical rows (editor, status bar) are
 // kept, so a fixed-size row is never squeezed to nothing and overdrawn.
 inline constexpr int kCriticalTerminalHeight = 8;
-// Height caps for scrolling regions: a picker's menu, a notice.
-inline constexpr int kMenuMaxHeight = 20;
+// The notice line's scrolling height.
 inline constexpr int kNoticeMaxHeight = 6;
-// Modals: the default width (the body's hints get 78 columns inside a
-// 2-column margin) and the confirm modal's narrower one; rows reserved around
-// a modal body (borders and the pinned hint line, plus slack for the tab bar
-// and editor it overlays); a body always gets at least the minimum.
-inline constexpr int kModalMaxWidth = 82;
-inline constexpr int kConfirmModalMaxWidth = 72;
-inline constexpr int kModalFrameRows = 3;
-inline constexpr int kModalOverlaySlackRows = 3;
-inline constexpr int kMinModalBodyRows = 2;
-// A modal's pinned rows (ModalFrame's `pinned`: a selected row's details, the
-// last outcome) take at most this many rows.
-inline constexpr int kModalPinnedMaxRows = 8;
-// Status bar columns.
-inline constexpr std::size_t kStatusSessionColumnCap = 24;
-
-// Context occupancy that tints the token segment: attention as compaction
-// nears, error when the window is all but full.
-inline constexpr std::int64_t kContextAttentionPercent = 80;
-inline constexpr std::int64_t kContextErrorPercent = 95;
-
-// Where a status segment ranks when the bar overflows (lowest gives way
-// first) unless it declares its own priority.
-inline constexpr int kPluginStatusSegmentPriority = 30;
-
-// The schema form (/config): a field's label and value columns -- room for a
-// dotted key and a typical value; longer ones are clipped, the full value is
-// one keypress away in the editor.
-inline constexpr std::size_t kSchemaFormLabelWidth = 28;
-inline constexpr std::size_t kSchemaFormValueWidth = 30;
 
 // --- plugins -------------------------------------------------------------------------
-
-// A plugin view's data feed (checklist, cost): after its push subscription
-// fails it marks the cache stale and polls every poll interval for the
-// fallback period before subscribing again; consecutive failures double the
-// period up to the ceiling, so a server without the plugin is not hammered.
-inline constexpr std::chrono::milliseconds kPluginFeedPollInterval = std::chrono::seconds(3);
-inline constexpr std::chrono::milliseconds kPluginFeedFallbackPeriod = std::chrono::seconds(30);
-inline constexpr std::chrono::milliseconds kPluginFeedMaxFallbackPeriod = std::chrono::minutes(5);
 
 // Consecutive throws from one plugin surface (a status segment, an observer)
 // before it is skipped for the rest of the session: a broken plugin must not

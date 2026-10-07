@@ -3,8 +3,8 @@
 #include <mutex>
 #include <utility>
 
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/view/rebuilding.hpp"
+#include "minimal/client/sdk/utf8.hpp"
+#include "minimal/client/sdk/rebuilding.hpp"
 
 namespace minimal::selection_view {
 
@@ -51,7 +51,7 @@ AgentsView::~AgentsView() = default;
 
 const plugins::ViewSpec& AgentsView::spec() const {
     static const plugins::ViewSpec kSpec{kAgentsViewId, "switch agent preset",
-                                         plugins::ViewPlacement::Modal};
+                                         plugins::ViewPlacement::Modal, {}, kAgentsViewId};
     return kSpec;
 }
 
@@ -117,9 +117,10 @@ ModelsView::~ModelsView() = default;
 
 const plugins::ViewSpec& ModelsView::spec() const {
     static const plugins::ViewSpec kModels{kModelsViewId, "switch model",
-                                           plugins::ViewPlacement::Modal};
+                                           plugins::ViewPlacement::Modal, {}, kModelsViewId};
     static const plugins::ViewSpec kSubagents{kSubagentModelsViewId, "subagent model",
-                                              plugins::ViewPlacement::Modal};
+                                              plugins::ViewPlacement::Modal, {},
+                                              kSubagentModelsViewId};
     return for_subagents_ ? kSubagents : kModels;
 }
 

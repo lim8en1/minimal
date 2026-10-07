@@ -12,8 +12,9 @@
 #include <ftxui/dom/elements.hpp>
 #include <nlohmann/json.hpp>
 
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/views.hpp"
+#include "minimal/client/sdk/widgets.hpp"
+#include "minimal/client/sdk/theme.hpp"
 
 namespace minimal::ask_view {
 

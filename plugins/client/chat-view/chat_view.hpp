@@ -30,9 +30,12 @@
 #include <vector>
 
 #include "chat_scroll_region.hpp"
-#include "minimal/client/chat_model.hpp"
-#include "minimal/client/plugins/registries.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/chat_model.hpp"
+#include "minimal/client/sdk/host.hpp"
+#include "minimal/client/sdk/render.hpp"
+#include "minimal/client/sdk/chat.hpp"
+#include "minimal/client/sdk/theme.hpp"
+#include "policy.hpp"
 
 namespace minimal::client::chat_view {
 
@@ -40,9 +43,11 @@ namespace minimal::client::chat_view {
 // CollapsedByDefault), start expanded, start collapsed.
 enum : int { kFoldDefaultAuto, kFoldExpanded, kFoldCollapsed };
 
-// One live TEXT segment's streaming view, owned and fed by TabMaintenance
-// (the event path -- track C4), read by ChatView::Render (which must stay a
-// pure read, like every other render-path consumer here). Keyed by the
+// One live TEXT segment's streaming view, owned by the tab's pane and fed by
+// its MaintainStreams at the start of each Render (the chat surface has no
+// other per-frame hook), then read by ChatView::Render. Only a drawn tab's
+// streams advance; the deltas accumulate meanwhile and land on its next
+// frame. Keyed by the
 // segment's stable id (ChatLiveSegment::segment_id), NOT its vector index:
 // segments are removed mid-turn (the page apply's retirement, the count-cap
 // trim, the turn-aware clear) and the survivors shift down -- an index-keyed

@@ -34,7 +34,7 @@
 #include <string>
 #include <vector>
 
-#include "minimal/client/command_catalog_entry.hpp"
+#include "minimal/client/sdk/command_catalog_entry.hpp"
 
 
 namespace minimal::client {

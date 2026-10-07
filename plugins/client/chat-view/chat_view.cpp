@@ -6,12 +6,13 @@
 #include <cstring>
 #include <set>
 
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/view/tool_status.hpp"
+#include "minimal/client/sdk/utf8.hpp"
+#include "minimal/client/sdk/tool_status.hpp"
 #include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/units.hpp"
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
+#include "policy.hpp"
 
 namespace minimal::client::chat_view {
 

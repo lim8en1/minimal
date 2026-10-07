@@ -13,7 +13,7 @@
 #include <ftxui/component/event.hpp>
 
 #include "ftxui_harness.hpp"
-#include "minimal/client/render/theme.hpp"
+#include "minimal/client/sdk/theme.hpp"
 #include "filterable_menu.hpp"
 
 namespace minimal::client::ui_kit {

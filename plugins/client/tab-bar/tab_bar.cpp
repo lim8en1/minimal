@@ -6,8 +6,8 @@
 
 #include <ftxui/screen/terminal.hpp>
 
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/view/tool_status.hpp"
+#include "minimal/client/sdk/utf8.hpp"
+#include "minimal/client/sdk/tool_status.hpp"
 #include "policy.hpp"
 
 namespace minimal::client::tab_bar {
@@ -77,22 +77,15 @@ ftxui::Color StateColor(const std::string& state, bool active, const Theme& them
     if (state == "waiting") return theme.ColorFor("attention");
     if (state == "error") return theme.ColorFor("error");
     if (state == "done") return theme.ColorFor("system_message");
-        // border_unfocused is a BORDER role (1.70:1 dark / 1.16:1 light
-        // against status_bar_bg -- fine for a hairline, useless as body
-        // text), but this was the only place in the app using it as a tab
-        // LABEL color; combined with the `dim` modifier below it made idle
-        // tabs unreadable. system_message/assistant_message are the roles
-        // every other body text in the app already uses for exactly this
-        // idle/active distinction.
+    // Distinct roles for thinking and working -- one shared color left no way
+    // to tell "composing a reply" from "a tool is running" without opening
+    // the tools panel; StateGlyph gives them distinct SHAPES too, so the
+    // difference survives a theme that customizes neither role.
     if (state == "thinking") return theme.ColorFor("thinking");
     if (state == "working") return theme.ColorFor("working");
-        // Thinking and Working used to share this color, making them
-        // visually identical (the reported complaint: no way to tell "the
-        // model is composing a reply" from "a tool is running" without
-        // opening the tools panel). Distinct roles now; StateGlyph below
-        // gives them a distinct SHAPE too, so the difference survives even
-        // on a theme that hasn't customized either role from its default.
-    // "idle" and anything unknown.
+    // "idle" and anything unknown: the body-text roles every other label
+    // uses for active/inactive (border_unfocused, once used here, is a
+    // hairline role: unreadable as text).
     return active ? theme.ColorFor("assistant_message") : theme.ColorFor("system_message");
 }
 

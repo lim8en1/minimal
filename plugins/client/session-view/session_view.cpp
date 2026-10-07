@@ -10,9 +10,9 @@
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/event.hpp>
 
-#include "minimal/client/policy.hpp"
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/view/rebuilding.hpp"
+#include "minimal/client/sdk/policy.hpp"
+#include "minimal/client/sdk/utf8.hpp"
+#include "minimal/client/sdk/rebuilding.hpp"
 #include "session_rows.hpp"
 
 namespace minimal::session_view {
@@ -188,7 +188,7 @@ SessionsView::~SessionsView() = default;
 
 const plugins::ViewSpec& SessionsView::spec() const {
     static const plugins::ViewSpec kSpec{kSessionsViewId, "resume a session",
-                                         plugins::ViewPlacement::Modal};
+                                         plugins::ViewPlacement::Modal, {}, kSessionsViewId};
     return kSpec;
 }
 
@@ -368,7 +368,7 @@ SubagentsView::~SubagentsView() = default;
 
 const plugins::ViewSpec& SubagentsView::spec() const {
     static const plugins::ViewSpec kSpec{kSubagentsViewId, "subagents",
-                                         plugins::ViewPlacement::Modal};
+                                         plugins::ViewPlacement::Modal, {}, kSubagentsViewId};
     return kSpec;
 }
 

@@ -1,5 +1,5 @@
 #include "consent_modals.hpp"
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -10,6 +10,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/box.hpp>
 #include <ftxui/screen/terminal.hpp>
+#include "policy.hpp"
 
 namespace minimal::client::consent_prompts {
 

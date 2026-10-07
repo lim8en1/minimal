@@ -15,8 +15,8 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
 
-#include "minimal/client/render/theme.hpp"
-#include "minimal/client/view/widget_types.hpp"
+#include "minimal/client/sdk/theme.hpp"
+#include "minimal/client/sdk/widget_types.hpp"
 
 namespace minimal::client::ui_kit {
 

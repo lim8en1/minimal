@@ -1,12 +1,12 @@
 // config-view -- plugin configuration in the TUI: the "config" modal view and
 // its /config command. It talks to the server only through the generic
 // PluginCall channel, to core's `plugins` endpoint; the form itself is
-// client core's reusable client::MakeSchemaForm.
+// the widget kit's schema form (WidgetKit::SchemaForm).
 
 #include <memory>
 
 #include "config_view.hpp"
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 
 namespace plugins = minimal::client::plugins;
 

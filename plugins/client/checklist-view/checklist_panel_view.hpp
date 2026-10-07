@@ -13,7 +13,8 @@
 #include <ftxui/dom/elements.hpp>
 
 #include "checklist_feed.hpp"
-#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/sdk/host.hpp"
+#include "minimal/client/sdk/views.hpp"
 
 namespace minimal::checklist_view {
 

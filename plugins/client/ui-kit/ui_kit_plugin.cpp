@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/sdk/client_plugin_abi.h"
 #include "ui_kit.hpp"
 
 namespace plugins = minimal::client::plugins;
