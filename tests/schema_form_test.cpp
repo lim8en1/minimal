@@ -15,6 +15,7 @@
 #include "widget_kit_fixture.hpp"
 #include "minimal/client/view/modal_host.hpp"
 #include "schema_form.hpp"
+#include "minimal/client/utf8.hpp"
 #include "minimal/client/view/schema_form_model.hpp"
 
 using namespace minimal;
@@ -149,12 +150,11 @@ TEST_CASE("the form: toggle, cycle, edit, reset; the editor claims Escape", "[sc
     minimal_test::SendEvent(form, ftxui::Event::Return);
     REQUIRE(sets.size() == 2);
     CHECK(sets[1] == std::pair<std::string, std::string>{"net.timeout_ms", "1005"});
-    CHECK_FALSE(aware->WantsEscape());
 
     minimal_test::SendEvent(form, ftxui::Event::Return);  // editor again
     minimal_test::SendEvent(form, ftxui::Event::Escape);  // cancelled: nothing sent
     CHECK(sets.size() == 2);
-    CHECK_FALSE(aware->WantsEscape());
+    CHECK_FALSE(back);   // the editor's Escape only closed the editor
 
     minimal_test::SendEvent(form, ftxui::Event::ArrowLeft);
     CHECK(back);
@@ -530,7 +530,7 @@ TEST_CASE("config-view: an enum and a model ref are chosen from a list, not type
     CHECK(calls[1] == R"(plugins set {"key":"mode","name":"sample","text":"off"})");
     REQUIRE(Eventually([&] { return !view.feed().form().busy; }));
     CHECK(frame().find("timeout_ms") != std::string::npos);  // back on the form
-    CHECK_FALSE(aware->WantsEscape());
+    CHECK(aware->WantsEscape());   // on the form, Escape steps back to the list
 
     // model (a model ref; top-level, so right after mode): the server's
     // models, and "empty" to unset.
@@ -558,8 +558,10 @@ TEST_CASE("config-view: an enum and a model ref are chosen from a list, not type
     minimal_test::SendEvent(component, ftxui::Event::Return);
     CHECK(aware->WantsEscape());
     minimal_test::SendEvent(component, ftxui::Event::Escape);
-    CHECK(frame().find("timeout_ms") != std::string::npos);
-    CHECK_FALSE(aware->WantsEscape());
+    CHECK(frame().find("timeout_ms") != std::string::npos);   // the chooser closed
+    minimal_test::SendEvent(component, ftxui::Event::Escape);   // the form steps back
+    CHECK(view.feed().open_plugin().empty());
+    CHECK_FALSE(aware->WantsEscape());   // the list: Escape closes the view
 }
 
 // A user reported a segfault while moving around /config. This drives the
@@ -601,4 +603,111 @@ TEST_CASE("config-view survives random navigation, keys and mouse", "[schema_for
         if (pick(50) == 0) std::this_thread::sleep_for(2ms);  // let answers land
     }
     SUCCEED("no crash");
+}
+
+// --- config-view polish (CONFIG_VIEW_PLAN.md F1-F7, §1.3) ----------------------
+
+TEST_CASE("the form: Backspace stays, Escape and left step back", "[schema_form][polish]") {
+    // F1/F2: Backspace is a habitual delete, often pressed right after the
+    // editor closed; it used to leave the form. Escape steps back one level.
+    client::SchemaFormState state = FormState("t", kDescribe);
+    const auto theme = TestTheme();
+    int backs = 0;
+    auto form = client::ui_kit::MakeSchemaForm([&] { return state; },
+                                               {.on_back = [&] { ++backs; }}, theme);
+    const auto* aware = dynamic_cast<const client::EscapeAware*>(form.get());
+    REQUIRE(aware != nullptr);
+    (void)minimal_test::RenderFrame(form, 100, 24);
+    minimal_test::SendEvent(form, ftxui::Event::Backspace);
+    CHECK(backs == 0);
+    CHECK(aware->WantsEscape());   // there is a level to step back to
+    minimal_test::SendEvent(form, ftxui::Event::Escape);
+    CHECK(backs == 1);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowLeft);
+    CHECK(backs == 2);
+    // Without a level to go back to, Escape is the host's (closes the view).
+    auto bare = client::ui_kit::MakeSchemaForm([&] { return state; }, {}, theme);
+    CHECK_FALSE(dynamic_cast<const client::EscapeAware*>(bare.get())->WantsEscape());
+}
+
+TEST_CASE("the form: only live fields are tagged; the hints follow the row",
+          "[schema_form][polish]") {
+    // F3, F7.
+    client::SchemaFormState state = FormState("t", kDescribe);
+    const auto theme = TestTheme();
+    auto form = client::ui_kit::MakeSchemaForm(
+        [&] { return state; }, {.on_set = [](const std::string&, const std::string&) {},
+                                .on_back = [] {}},
+        theme);
+    std::string frame = minimal_test::RenderFrame(form, 110, 24);
+    CHECK(frame.find("live") != std::string::npos);
+    CHECK(frame.find("  restart\n") == std::string::npos);
+    CHECK(frame.find("restart ") == frame.find("restart pending"));   // only the pending mark
+    CHECK(frame.find("enter/space: toggle") != std::string::npos);   // enabled: a boolean
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);          // mode: set, an enum
+    frame = minimal_test::RenderFrame(form, 110, 24);
+    CHECK(frame.find("enter/space: next value") != std::string::npos);
+    CHECK(frame.find("d/del: reset to default") != std::string::npos);
+    minimal_test::SendEvent(form, ftxui::Event::ArrowDown);          // net.timeout_ms
+    frame = minimal_test::RenderFrame(form, 110, 24);
+    CHECK(frame.find("enter: edit") != std::string::npos);
+    CHECK(frame.find("d/del") == std::string::npos);                 // at its default
+}
+
+TEST_CASE("the form: a cut value is shown whole below; widths count columns",
+          "[schema_form][polish]") {
+    // F4 and §1.3.
+    json describe = kDescribe;
+    describe["schema"]["fields"].push_back({{"path", "net.endpoint_url_that_is_long"},
+                                            {"type", "string"},
+                                            {"default", ""},
+                                            {"apply", "live"}});
+    const std::string url = "https://example.invalid/a/very/long/path/that/does/not/fit";
+    describe["config"]["net"]["endpoint_url_that_is_long"] = url;
+    describe["schema"]["fields"].push_back(
+        {{"path", "net.名前名前名前名前名前名前名前名前"}, {"type", "string"}, {"default", "x"},
+         {"apply", "live"}});
+    client::SchemaFormState state = FormState("t", describe);
+    const auto theme = TestTheme();
+    auto form = client::ui_kit::MakeSchemaForm([&] { return state; }, {}, theme);
+    for (int i = 0; i < 4; ++i) minimal_test::SendEvent(form, ftxui::Event::ArrowDown);
+    const std::string frame = minimal_test::RenderFrame(form, 120, 30);
+    CHECK(frame.find("= " + url) != std::string::npos);
+    // The wide label is cut to the column (minus its indent), not past it:
+    // its value starts at the same screen column as every other row's.
+    const auto column_after = [&](const std::string& row_needle, const std::string& value) {
+        const auto at = frame.find(row_needle);
+        const auto line_start = frame.rfind('\n', at) + 1;
+        const auto value_at = frame.find(value, at + row_needle.size());
+        return client::Utf8ColumnWidth(frame.substr(line_start, value_at - line_start));
+    };
+    INFO(frame);
+    CHECK(column_after("timeout_ms", "1000") == column_after("名前", "x"));
+}
+
+TEST_CASE("config-view: filters ignore case; reopening keeps the form and the selection",
+          "[schema_form][config_view][polish]") {
+    // F5, F6.
+    EndpointApi api;
+    config_view::ConfigView view(&api, &minimal_test::CoreWidgetKit(), nullptr);
+    view.OnTheme(TestTheme());
+    auto component = view.component();
+    view.feed().RefreshList();
+    REQUIRE(Eventually([&] { return !view.feed().list().rows.empty(); }));
+    (void)minimal_test::RenderFrame(component, 100, 30);
+    for (const char c : std::string("SAMP")) {
+        minimal_test::SendEvent(component, ftxui::Event::Character(std::string(1, c)));
+    }
+    CHECK(minimal_test::RenderFrame(component, 100, 30).find("sample") != std::string::npos);
+
+    view.feed().Open("sample");
+    REQUIRE(Eventually([&] { return !view.feed().form().describe.is_null(); }));
+    (void)minimal_test::RenderFrame(component, 100, 30);
+    minimal_test::SendEvent(component, ftxui::Event::ArrowDown);   // mode
+    view.OnShow();                                                 // the view shown again
+    CHECK_FALSE(view.feed().form().describe.is_null());            // no "loading" flash
+    const auto generation = view.feed().form().generation;
+    REQUIRE(Eventually([&] { return view.feed().form().generation > generation; }));
+    const std::string frame = minimal_test::RenderFrame(component, 100, 30);
+    CHECK(frame.find("enter: choose") != std::string::npos);   // still on mode (an enum)
 }
