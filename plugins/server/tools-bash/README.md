@@ -55,7 +55,7 @@ field is optional; non-positive values fall back to defaults.
   "max_timeout_s": 600,
   "background_max_timeout_s": 600,
   "max_background_tasks": 4,
-  "max_output_bytes": 1048576,
+  "max_output_bytes": 65536,
   "max_file_size_bytes": 1073741824,
   "shell": "/bin/sh",
   "inherit_env": "allowlist"
@@ -68,7 +68,7 @@ field is optional; non-positive values fall back to defaults.
 | `max_timeout_s` | `600` | Ceiling on the model-supplied `timeout`. A model may ask for longer than the default (a build is not `ls`) but not without bound. |
 | `background_max_timeout_s` | `600` | Detached tasks' own ceiling — generous, because a long-running build is the point of the mode. A task with no `timeout` gets this ceiling itself. |
 | `max_background_tasks` | `4` | Per-session cap on live background tasks; over the limit is an error result, not a queue. |
-| `max_output_bytes` | `1048576` (1 MiB) | Bounds the PERSISTED result. Live streaming is uncapped (lossy by design); this is the record. |
+| `max_output_bytes` | `65536` (64 KiB) | Bounds the PERSISTED result — the model's view, sized for a context window (~16–32k tokens of dense output). Past it the start and the end are kept and the whole output streams to `.minimal/tool-output/<session>/<tool_use_id>.txt`, which the result names. Live streaming is uncapped (lossy by design). |
 | `max_file_size_bytes` | `1073741824` (1 GiB) | RLIMIT_FSIZE backstop for written files. |
 | `shell` | `/bin/sh` | A different POSIX shell, or a wrapper that enters a container, needs no code change. |
 | `inherit_env` | `allowlist` | How the session's shell environment is seeded. `allowlist` filters to `$HOME`, `$PATH`, `$TMPDIR`, ... (the server process env carries provider API keys; seeding all of it let `env` persist credentials into the transcript). `all` restores the full seed as an explicit operator choice. Any other value is a named startup error. |

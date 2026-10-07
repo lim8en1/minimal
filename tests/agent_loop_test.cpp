@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -146,6 +147,9 @@ private:
 // destruction-safe order: the loop refers to the others, so it is destroyed
 // first.
 struct Harness {
+    // The session's project root: a cut tool result spills under it
+    // (.minimal/tool-output), which must never land in the source tree.
+    testing::TempDir project;
     // Skill support for tier-2 coverage of the lazy-load path. Declared first so
     // they are destroyed LAST: the registry below owns a SkillTool that holds a
     // reference into `skills`.
@@ -226,7 +230,7 @@ struct Harness {
                                                          PermissionRunMode::Normal);
         agent::SessionContext session{common::DefaultLogger()};
         session.session_id = "s1";
-        session.project_root = ".";
+        session.project_root = project.path();
         if (throwing_lifecycle_sink) {
             session.tool_lifecycle_sink = [](const agent::ToolLifecycleEvent&) {
                 throw std::runtime_error("simulated sink failure");
@@ -586,6 +590,69 @@ TEST_CASE("a result at or under max_tool_result_bytes is untouched",
     REQUIRE(result != nullptr);
     REQUIRE(result->content.size() == 1);
     CHECK(std::get<llm::TextBlock>(result->content.front()).text == std::string(50, 'x'));
+}
+
+TEST_CASE("the result ceiling is a share of the context window, in bytes at 2 per token",
+          "[agent_loop][invariant]") {
+    // Regression: the window's TOKEN count was used as a BYTE cap, so a 1M
+    // window let one result take a megabyte -- the whole window or more.
+    // 10% of 1M tokens at 2 bytes/token is 200,000 bytes.
+    Harness h;
+    std::string big;
+    big.reserve(300000);
+    for (int i = 0; big.size() < 300000; ++i) big += "row " + std::to_string(i) + "\n";
+    auto owned = std::make_unique<FakeTool>("big", ToolCategory::ReadOnly, big);
+    h.registry.Register(std::move(owned));
+    h.provider.PushResponse(ToolUseResponse("tu1", "big"));
+    h.provider.PushResponse(TextResponse("done"));
+
+    agent::AgentPreset preset;
+    preset.context_window_tokens = 1000000;
+    h.Build(std::move(preset), agent::LoopConfig{});
+    h.loop->RunTurn(UserText("go"));
+
+    const llm::ToolResultBlock* result = nullptr;
+    for (const auto& message : h.store.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* r = std::get_if<llm::ToolResultBlock>(&block)) result = r;
+        }
+    }
+    REQUIRE(result != nullptr);
+    const auto& text = std::get<llm::TextBlock>(result->content.front()).text;
+    const auto note = text.find("[Output cut to 200000 of ");
+    REQUIRE(note != std::string::npos);
+    CHECK(note < 200000 + 64);
+    CHECK(text.rfind("row 0\n", 0) == 0);                       // the start
+    CHECK(text.find(big.substr(big.size() - 40)) != std::string::npos);  // and the end
+    // The whole result is spilled under the session's project root.
+    std::ifstream spill(h.project.path() / ".minimal/tool-output/s1/tu1.result.txt",
+                        std::ios::binary);
+    const std::string spilled((std::istreambuf_iterator<char>(spill)),
+                              std::istreambuf_iterator<char>());
+    CHECK(spilled == big);
+}
+
+TEST_CASE("a tiny window still leaves the floor for a result", "[agent_loop][invariant]") {
+    Harness h;
+    auto owned = std::make_unique<FakeTool>("big", ToolCategory::ReadOnly, std::string(10000, 'x'));
+    h.registry.Register(std::move(owned));
+    h.provider.PushResponse(ToolUseResponse("tu1", "big"));
+    h.provider.PushResponse(TextResponse("done"));
+
+    agent::AgentPreset preset;
+    preset.context_window_tokens = 1000;  // 10% = 100 tokens = 200 bytes: under the floor
+    h.Build(std::move(preset), agent::LoopConfig{});
+    h.loop->RunTurn(UserText("go"));
+
+    const llm::ToolResultBlock* result = nullptr;
+    for (const auto& message : h.store.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* r = std::get_if<llm::ToolResultBlock>(&block)) result = r;
+        }
+    }
+    REQUIRE(result != nullptr);
+    CHECK(std::get<llm::TextBlock>(result->content.front()).text.find("[Output cut to 4096 of 10000") !=
+          std::string::npos);
 }
 
 namespace {
@@ -1125,6 +1192,111 @@ TEST_CASE("a context-overflow refusal compacts and retries once", "[agent_loop][
     CHECK(compactions == 1);
     CHECK(h.provider.call_count() == 3);
     CHECK(result.final_text == "two");
+}
+
+namespace {
+
+const llm::ToolResultBlock* ResultFor(const InMemoryHistoryStore& store, const std::string& id) {
+    for (const auto& message : store.messages) {
+        for (const auto& block : message.content) {
+            const auto* r = std::get_if<llm::ToolResultBlock>(&block);
+            if (r != nullptr && r->tool_use_id == id) return r;
+        }
+    }
+    return nullptr;
+}
+
+std::size_t ResultBytes(const llm::ToolResultBlock& result) {
+    return std::get<llm::TextBlock>(result.content.front()).text.size();
+}
+
+}  // namespace
+
+TEST_CASE("a tool round's results share the room left in the window, headroom kept",
+          "[agent_loop][invariant]") {
+    // The per-result ceilings are off: this is the room check alone. A 20k
+    // window keeps 8192 tokens of compaction headroom, so a round on a
+    // near-empty context may add ~(20000 - context - 8192) * 2 bytes.
+    Harness h;
+    h.registry.Register(std::make_unique<FakeTool>("big", ToolCategory::ReadOnly, std::string(100000, 'b')));
+    h.registry.Register(std::make_unique<FakeTool>("small", ToolCategory::ReadOnly, std::string(800, 's')));
+    h.provider.PushResponse(MultiToolUseResponse({{"tu-big", "big"}, {"tu-small", "small"}}));
+    h.provider.PushResponse(TextResponse("done"));
+
+    agent::AgentPreset preset;
+    preset.context_window_tokens = 20000;
+    agent::LoopConfig config;
+    config.max_tool_result_bytes = 0;
+    config.max_tool_result_window_percent = 0;
+    h.Build(std::move(preset), config);
+    h.loop->RunTurn(UserText("go"));
+
+    const auto* big = ResultFor(h.store, "tu-big");
+    const auto* small = ResultFor(h.store, "tu-small");
+    REQUIRE(big != nullptr);
+    REQUIRE(small != nullptr);
+    CHECK(std::get<llm::TextBlock>(small->content.front()).text == std::string(800, 's'));
+    CHECK(ResultBytes(*big) < 2 * (20000 - 8192));
+    CHECK(std::get<llm::TextBlock>(big->content.front()).text.find("[Output cut to ") !=
+          std::string::npos);
+    std::ifstream spill(h.project.path() / ".minimal/tool-output/s1/tu-big.result.txt",
+                        std::ios::binary);
+    const std::string spilled((std::istreambuf_iterator<char>(spill)),
+                              std::istreambuf_iterator<char>());
+    CHECK(spilled == std::string(100000, 'b'));
+}
+
+TEST_CASE("after an overflow, compaction elides tool results until its own request fits",
+          "[agent_loop][compaction]") {
+    // Regression: the summarizer re-sends the whole history, so an
+    // overfilled context made the rescue overflow too and the session could
+    // neither continue nor compact. Two rounds that each fit the room
+    // measured at bytes/4 add up past the window at 2 bytes a token; the
+    // provider refuses, and the compaction must elide before summarizing.
+    Harness h;
+    h.registry.Register(std::make_unique<FakeTool>("one", ToolCategory::ReadOnly, std::string(60000, '1')));
+    h.registry.Register(std::make_unique<FakeTool>("two", ToolCategory::ReadOnly, std::string(30000, '2')));
+    h.provider.PushResponse(ToolUseResponse("tu1", "one"));
+    h.provider.PushResponse(ToolUseResponse("tu2", "two"));
+    h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::RequestError,
+                                       "prompt is too long: 45000 tokens > 40000 maximum", 400));
+    h.provider.PushResponse(TextResponse("done"));
+
+    std::size_t one_seen = 0;
+    std::size_t two_seen = 0;
+    int compactions = 0;
+    auto compactor = [&](std::span<const llm::Message> messages, llm::LlmProvider&,
+                         const agent::CompactionRequest&) {
+        ++compactions;
+        for (const auto& message : messages) {
+            for (const auto& block : message.content) {
+                if (const auto* r = std::get_if<llm::ToolResultBlock>(&block)) {
+                    (r->tool_use_id == "tu1" ? one_seen : two_seen) = ResultBytes(*r);
+                }
+            }
+        }
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    agent::AgentPreset preset;
+    preset.context_window_tokens = 40000;
+    agent::LoopConfig config;
+    config.auto_compact = true;
+    config.max_tool_result_bytes = 0;
+    config.max_tool_result_window_percent = 0;
+    h.Build(std::move(preset), config, compactor);
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(compactions == 1);
+    // The largest result was elided before the summarizer saw it; the
+    // smaller one stays, since the request fits once the larger is gone.
+    CHECK(one_seen < 2000);
+    CHECK(two_seen == 30000);
+    CHECK(result.final_text == "done");
+    // The persisted transcript keeps the full text.
+    const auto* one = ResultFor(h.store, "tu1");
+    REQUIRE(one != nullptr);
+    CHECK(ResultBytes(*one) == 60000);
 }
 
 TEST_CASE("an unrelated request error is not mistaken for an overflow", "[agent_loop][compaction]") {

@@ -85,6 +85,10 @@ struct ToolsSettings {
     // compaction. Truncated over the cap, with a visible marker, never an
     // error result -- a large result is not a refusal. 0 disables.
     std::int64_t max_result_bytes = kDefaultMaxToolResultBytes;
+    // One result's share of the model's context window, in percent; the
+    // effective cap is the smaller of this and max_result_bytes. 0 disables
+    // the window term.
+    std::int64_t max_result_window_percent = kDefaultMaxToolResultWindowPercent;
     // Ceiling on one result's client-only display payload (serialized JSON).
     // Over it the payload is DROPPED, never truncated -- a cut diff misleads --
     // and the client falls back to the text. 0 disables.

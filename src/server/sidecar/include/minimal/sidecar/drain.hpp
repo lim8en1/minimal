@@ -48,6 +48,9 @@ struct PipeSink {
     Mode mode = Mode::kDiscard;
     std::int64_t cap = 0;
     std::function<void(std::string_view)> emit;  // kCapped only; may be empty
+    // kCapped only; may be empty. Receives the whole stream once it passes
+    // `cap` (CappedBuffer's spill), e.g. a tools::ToolOutputSpill.
+    std::function<void(std::string_view)> spill;
     std::string payload;                         // kSource only
 
     // Whether this pipe counts toward DrainOptions::idle_after_reap_ms's
@@ -69,6 +72,7 @@ struct PipeSink {
                              // kBounded: raw payload (empty once overflowed)
     bool overflow = false;   // kBounded only
     std::size_t dropped = 0; // kBounded: bytes beyond the cap
+    std::size_t total = 0;   // kCapped: bytes read in total (> cap: cut)
 };
 
 struct DrainOptions {

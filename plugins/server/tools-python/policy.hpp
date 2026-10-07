@@ -23,9 +23,11 @@ inline constexpr std::int64_t kDefaultStartupTimeoutSeconds = 10;
 // venv creation and package installation: a cold pip install of a few
 // packages over a slow network.
 inline constexpr std::int64_t kDefaultInstallTimeoutSeconds = 300;
-// What is persisted per request, and the per-stream capture inside the
-// interpreter (which also sizes the protocol line).
-inline constexpr std::int64_t kDefaultMaxOutputBytes = static_cast<std::int64_t>(common::kMiB);
+// What is persisted per request (sized for a context window: ~16-32k tokens
+// of dense output; past it the whole text spills to a file the model can
+// read), and the per-stream capture inside the interpreter (which also sizes
+// the protocol line, and bounds what a spill can hold).
+inline constexpr std::int64_t kDefaultMaxOutputBytes = 64 * static_cast<std::int64_t>(common::kKiB);
 inline constexpr std::int64_t kDefaultMaxCaptureBytes = static_cast<std::int64_t>(common::kMiB);
 // The live-output ring python_output polls: a head to see how it started, a
 // longer tail to see where it is.

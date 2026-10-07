@@ -439,7 +439,7 @@ TEST_CASE("web_fetch: an oversized response is truncated, and the full text is s
 
     // The footer names a project-relative path, and that file holds the FULL
     // text -- exactly what `read` would page into.
-    const auto start = result.content_text.find(".minimal/web-fetch/");
+    const auto start = result.content_text.find(".minimal/tool-output/");
     REQUIRE(start != std::string::npos);
     const auto end = result.content_text.find(" --", start);
     REQUIRE(end != std::string::npos);
@@ -695,8 +695,8 @@ TEST_CASE("ParseWebSettings: defaults with an empty config", "[tools_web][settin
     const auto settings = ParseWebSettings(nlohmann::json::object());
     CHECK(settings.fetch_timeout_ms == 15000);
     CHECK(settings.fetch_allow_private_hosts == false);
-    CHECK(settings.fetch_default_max_bytes == 262144);
-    CHECK(settings.fetch_max_bytes == 2097152);
+    CHECK(settings.fetch_default_max_bytes == 65536);
+    CHECK(settings.fetch_max_bytes == 262144);
     CHECK(settings.search_api_url.empty());
 }
 

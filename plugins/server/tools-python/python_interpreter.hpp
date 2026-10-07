@@ -22,6 +22,7 @@
 #include "minimal/llm/message.hpp"
 #include "minimal/tools/cancel_token.hpp"
 #include "minimal/tools/tool.hpp"
+#include "minimal/tools/tool_output_spill.hpp"
 
 #include "python_process.hpp"
 #include "python_settings.hpp"
@@ -76,6 +77,9 @@ struct RequestHandles {
     // the operator's panel; the authoritative record is the response capture).
     std::function<void(std::string_view)> emit_output;
     std::weak_ptr<const void> session_lifetime;
+    // Where a cut result's full text is spilled (tools::ToolOutputSpill).
+    std::filesystem::path project_root;
+    std::string session_id;
 };
 
 // One row of `python_output`'s task listing (no output text; call
@@ -374,8 +378,11 @@ private:
 
 // Formats one completed request into the text the model sees (shared by the
 // sync result and the async injection, so both audiences read the same shape).
-// `queued_ahead` is how many requests ran before this one (0 = none).
+// `queued_ahead` is how many requests ran before this one (0 = none). Past
+// `max_bytes` the start and the end are kept; with a `spill` the whole text
+// goes there first and a note says where.
 std::string FormatOutcome(const std::string& id, const RequestOutcome& outcome,
-                          std::size_t queued_ahead, std::int64_t max_bytes);
+                          std::size_t queued_ahead, std::int64_t max_bytes,
+                          tools::ToolOutputSpill* spill = nullptr);
 
 }  // namespace minimal::tools_python

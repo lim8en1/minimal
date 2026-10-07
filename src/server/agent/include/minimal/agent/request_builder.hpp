@@ -89,9 +89,21 @@ public:
                                        const std::vector<llm::ToolDefinition>& tools) const;
 
     // The byte ceiling for one tool result: the configured cap, tightened to
-    // what a quarter of the model's window can hold (about 4 bytes a token), so
-    // one result can never fill the context on its own. 0 = no ceiling.
+    // tools.max_result_window_percent of the model's window (at
+    // kConservativeBytesPerToken), so one result can never fill the context on
+    // its own. 0 = no ceiling.
     std::int64_t ToolResultByteCap() const;
+
+    // The bytes a tool round's results may add, all together, and still leave
+    // the compaction headroom free: the window minus the current context (the
+    // larger of the reported occupancy and the estimate) minus
+    // kCompactionHeadroom*, converted at kConservativeBytesPerToken -- the
+    // new results are unmeasured, and dense output runs ~2 bytes a token.
+    // nullopt: no known window, nothing to fit against.
+    std::optional<std::int64_t> ToolRoundRoomBytes() const;
+
+    // The room a compaction keeps free on a window (kCompactionHeadroom*).
+    static std::int64_t CompactionHeadroomTokens(std::int64_t window);
 
 private:
     SystemAndTools ComputeSystemAndTools() const;

@@ -5,6 +5,18 @@
 namespace minimal::sidecar {
 
 void CappedBuffer::Append(std::string_view chunk) {
+    total_ += chunk.size();
+    if (spill_) {
+        // Nothing is dropped before the stream passes head_cap_ + tail_cap_
+        // (Compact only erases past 2x the tail), so at the first overflow
+        // head_ + tail_ is still the whole stream so far.
+        if (!spilling_ && total_ > head_cap_ + tail_cap_) {
+            spilling_ = true;
+            spill_(head_);
+            spill_(tail_);
+        }
+        if (spilling_) spill_(chunk);
+    }
     if (head_.size() < head_cap_) {
         const auto take = std::min(head_cap_ - head_.size(), chunk.size());
         head_.append(chunk.data(), take);

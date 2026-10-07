@@ -7,10 +7,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <string>
 #include <optional>
 #include <vector>
 
 #include "minimal/llm/message.hpp"
+#include "minimal/tools/tool_output_spill.hpp"
 
 namespace minimal::agent {
 
@@ -25,8 +28,20 @@ std::vector<const llm::ToolUseBlock*> ToolUsesOf(const llm::Message& message);
 // guarantee, and an MCP tool or third-party plugin tool has no cap at all short
 // of this one. Truncation, not an error: a large result is not a refusal the
 // model needs to adapt its call to, just content it should know was cut.
-// `max_bytes <= 0` means no ceiling.
-void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes);
+// `max_bytes <= 0` means no ceiling. The start and the end are kept; with a
+// `spill` the whole text is saved there first and the note names the file.
+void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes,
+                   tools::ToolOutputSpill* spill = nullptr);
+
+// Shrinks a tool round's results so that, together, they add at most
+// `room_bytes` of text (RequestBuilder::ToolRoundRoomBytes). The room is
+// shared fairly: results under the fair share keep everything, the larger
+// ones are cut to it (never below kMinFittedResultBytes) with CapToolResult's
+// shape, the whole text spilled through `spill_for(tool_use_id)`. Returns how
+// many results were cut.
+std::size_t FitRoundResults(
+    std::vector<llm::ContentBlock>& results, std::int64_t room_bytes,
+    const std::function<tools::ToolOutputSpill(const std::string& tool_use_id)>& spill_for);
 
 // The display payload's ceiling (settings.json tools.max_display_bytes).
 // DROPPED whole over the cap, never truncated: a cut diff or file excerpt

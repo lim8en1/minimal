@@ -156,10 +156,32 @@ ToolResult ReadWindowResult(const nlohmann::json& input, const std::filesystem::
         }
     }
 
-    const auto window = tools::read_window(path, static_cast<int>(raw_offset), limit,
-                                           settings.read_max_line_length);
+    auto window = tools::read_window(path, static_cast<int>(raw_offset), limit,
+                                     settings.read_max_line_length);
     if (!window.ok) return Error(window.error);
+    // The byte budget: lines x line length alone allows megabytes (2000 lines
+    // of a minified bundle), far more context than one read should take.
+    // Stopped at a whole line, never mid-line; at least one line is kept, so
+    // paging always makes progress.
+    bool budget_hit = false;
+    std::size_t bytes = 0;
+    for (std::size_t i = 0; i < window.lines.size(); ++i) {
+        // As RenderWindow prints it: number, tab, line, newline.
+        bytes += std::to_string(window.start_line + static_cast<int>(i)).size() +
+                 window.lines[i].size() + 2;
+        if (i > 0 && static_cast<std::int64_t>(bytes) > settings.read_max_bytes) {
+            window.lines.resize(i);
+            window.end_line = window.start_line + static_cast<int>(i) - 1;
+            window.truncated = true;
+            budget_hit = true;
+            break;
+        }
+    }
     std::string text = RenderWindow(window);
+    if (budget_hit) {
+        text += "\n[Stopped at the read byte budget (" + std::to_string(settings.read_max_bytes) +
+                " bytes); pass a smaller limit, or offset to continue.]";
+    }
     if (clamped) {
         text += "\n[The requested window was clipped to the configured read ceiling (" +
                 std::to_string(settings.read_max_lines) + " lines).]";

@@ -142,8 +142,23 @@ an error): tool plugins take their knobs from their own file,
 |---|---|---|---|
 | `max_parallel_tool_calls` | int | `4` | 1..64; `1` = inline execution, no pool threads |
 | `max_input_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
-| `max_result_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
+| `max_result_bytes` | int | `262144` (256 KiB) | ≥ 0; one tool result's text, the backstop for MCP and any tool that caps nothing; `0` disables the limit |
+| `max_result_window_percent` | int | `10` | 0..100; one result's share of the model's context window, converted to bytes at 2 bytes/token (10% of 200k tokens ≈ 40 KB, of 1M ≈ 200 KB); the cap is the smaller of this and `max_result_bytes`; `0` disables the window term |
 | `max_display_bytes` | int | `131072` | ≥ 0; a tool result's client-only display payload over this is dropped (the client shows the text); `0` disables the limit |
+
+**Cut output is spilled, not lost.** A result over its cap (the tool's own, or
+the core ceiling above) keeps its start and its end, and the whole output is
+saved to `<project>/.minimal/tool-output/<session>/<tool_use_id>.txt`; the
+result's note names the file, so the model reads or greps the part it needs
+instead of re-running the command. That directory carries its own
+`.gitignore` (`*`), and each session keeps only its newest 50 spills.
+
+**Tool output never takes the room compaction needs.** With the model's
+context window known, a tool round's results together may only use what is
+left of the window after the current context and a 10% compaction headroom;
+past that they are cut (and spilled) to share it. A compaction whose own
+request would not fit elides the largest tool results first, so a session can
+always compact instead of being stuck past its window.
 
 ### Per-plugin tool settings (`plugins.d/<name>.json`)
 
@@ -155,6 +170,7 @@ an error): tool plugins take their knobs from their own file,
 | `read.default_limit_lines` | int | `2000` |
 | `read.max_line_length` | int | `2000` |
 | `read.max_lines` | int | `2000` — the hard ceiling on any read window; `limit: 0` clamps to this too |
+| `read.max_bytes` | int | `65536` (64 KiB) — bytes one read returns at most, stopping at a whole line (the footer gives the offset to continue) |
 | `edit.max_editable_file_bytes` | int | `5242880` (5 MiB) |
 
 **`tools-bash`** — flat object (every field optional):
@@ -165,7 +181,7 @@ an error): tool plugins take their knobs from their own file,
 | `max_timeout_s` | int | `600` — ceiling on a model-supplied `timeout`; must be ≥ `timeout_s` |
 | `background_max_timeout_s` | int | `600` — ceiling for background commands; must be ≥ `timeout_s` |
 | `max_background_tasks` | int | `4` — per-session cap on live background tasks |
-| `max_output_bytes` | int | `1048576` (1 MiB) — bounds the persisted result |
+| `max_output_bytes` | int | `65536` (64 KiB) — bounds the persisted result (start and end kept; the whole output is spilled) |
 | `max_file_size_bytes` | int | `1073741824` (1 GiB) — RLIMIT_FSIZE backstop |
 | `shell` | string | `"/bin/sh"` |
 | `inherit_env` | string | `"allowlist"` — or `"all"` |
@@ -181,7 +197,7 @@ an error): tool plugins take their knobs from their own file,
 | `grace_s` | int | `2` — how long `python_interrupt` waits for evidence the SIGINT landed |
 | `background_max_runtime_s` | int | `0` (= unlimited) — default kill deadline for background requests |
 | `rlimit_cpu_s` | int | `0` (= disabled) — RLIMIT_CPU backstop for the interpreter process |
-| `max_output_bytes` | int | `1048576` (1 MiB) — persisted result cap per request |
+| `max_output_bytes` | int | `65536` (64 KiB) — persisted result cap per request (start and end kept; the whole text is spilled) |
 | `max_capture_bytes` | int | `1048576` (1 MiB) — driver-side per-stream stdout/stderr capture cap |
 | `stream_head_bytes` / `stream_tail_bytes` | int | `262144` / `786432` — head/tail windows kept of a long stream |
 | `max_file_size_bytes` | int | `1073741824` (1 GiB) — RLIMIT_FSIZE backstop |

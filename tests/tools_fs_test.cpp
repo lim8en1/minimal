@@ -79,6 +79,35 @@ TEST_CASE("read's footer states the total and the next offset", "[tools_fs][read
     CHECK(result.content_text.find("offset=11") != std::string::npos);
 }
 
+TEST_CASE("read stops at its byte budget on a whole line and says how to continue",
+          "[tools_fs][read]") {
+    // 2000 lines of 2000 characters is ~4 MB: the line limits alone let one
+    // read flood the context.
+    Fixture f;
+    f.settings.read_max_bytes = 1000;
+    std::string content;
+    for (int i = 1; i <= 100; ++i) content += std::string(90, 'a') + std::to_string(i) + "\n";
+    f.Write("wide.txt", content);
+    auto tool = tools_fs::MakeReadTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute({{"path", "wide.txt"}}, ctx);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.find("byte budget (1000 bytes)") != std::string::npos);
+    CHECK(result.content_text.find("of 100. Pass offset=") != std::string::npos);
+    CHECK(result.content_text.find("\t" + std::string(90, 'a') + "100") == std::string::npos);
+    CHECK(result.content_text.size() < 1000 + 200);
+
+    // One line wider than the whole budget still comes back: paging must
+    // always make progress.
+    f.settings.read_max_bytes = 10;
+    auto narrow = tools_fs::MakeReadTool(f.settings);
+    const auto one = narrow->execute({{"path", "wide.txt"}}, ctx);
+    CHECK(one.content_text.find("1\t" + std::string(90, 'a') + "1\n") == 0);
+    CHECK(one.content_text.find("offset=2") != std::string::npos);
+}
+
 TEST_CASE("read reports a missing file as an error result", "[tools_fs][read]") {
     Fixture f;
     auto tool = tools_fs::MakeReadTool(f.settings);

@@ -29,8 +29,8 @@ per tool. Every field is optional; an unknown field (top level, `fetch` or
   "fetch": {
     "timeout_ms": 15000,
     "max_redirects": 5,
-    "default_max_bytes": 262144,
-    "max_bytes": 2097152,
+    "default_max_bytes": 65536,
+    "max_bytes": 262144,
     "allow_private_hosts": false
   },
   "search": {
@@ -47,8 +47,8 @@ per tool. Every field is optional; an unknown field (top level, `fetch` or
 | --- | --- | --- |
 | `fetch.timeout_ms` | `15000` | Hard wall-clock bound on a fetch. |
 | `fetch.max_redirects` | `5` | Redirect follow limit. |
-| `fetch.default_max_bytes` | `262144` (256 KiB) | Text returned when the model supplies no `max_bytes`. |
-| `fetch.max_bytes` | `2097152` (2 MiB) | Absolute ceiling on the model-supplied `max_bytes`; a ceiling below the default is raised, not honoured. |
+| `fetch.default_max_bytes` | `65536` (64 KiB) | Text returned when the model supplies no `max_bytes`. |
+| `fetch.max_bytes` | `262144` (256 KiB) | Absolute ceiling on the model-supplied `max_bytes`; a ceiling below the default is raised, not honoured. |
 | `fetch.allow_private_hosts` | `false` | Loopback/private/link-local hosts (including the cloud-metadata address `169.254.169.254`) are refused by default — the URL comes from the MODEL. Set true only for a trusted internal network. |
 | `search.api_url` | *(empty = unconfigured)* | Queried as `GET <url>?q=<query>&count=<n>` (`&q=` when the URL already has a query string); must return `{"results": [{"title", "url", "snippet"}, ...]}`, with `content` accepted in place of `snippet`. SearXNG works directly (below); a vendor whose API differs needs a thin adapter in front of it. |
 | `search.api_key` | *(unset)* | A key reference (docs/CONFIGURATION.md § Secrets: `"secret:NAME"`, `"env:NAME"`, or a literal), sent as `Authorization: Bearer <key>`. A stored secret is read per search; an `"env:"` variable that is UNSET is a fail-loud startup error. Unset = no header (a local SearXNG needs none). |
@@ -119,9 +119,10 @@ persisted result at one central chokepoint — but a response that fits both can
 still be far more text than a turn needs, so `web_fetch` bounds its own return:
 the model gets the first `max_bytes` bytes (default `fetch.default_max_bytes`,
 ceiling `fetch.max_bytes`, `max_bytes: 0` means the ceiling), and everything
-over that is spilled to `<project_root>/.minimal/web-fetch/<url-hash>.txt` —
-a path the footer names, page-able with the `read` tool. Spill files are a
-cache: one per distinct URL, overwritten on refetch, safe to delete. If the
+over that is spilled to `<project_root>/.minimal/tool-output/<session>/<url-hash>.txt`
+(the shared tool-output spill, gitignored and pruned per session) — a path the
+footer names, page-able with the `read` tool. Spill files are a cache: one per
+distinct URL, overwritten on refetch, safe to delete. If the
 spill write itself fails, the truncation still happens and the footer says the
 pointer is missing instead of returning one that leads nowhere.
 

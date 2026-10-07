@@ -95,6 +95,9 @@ struct LoopConfig {
     // short of this one. Checked once, right after Execute() returns, so it
     // applies uniformly to every tool regardless of who wrote it. 0 disables.
     std::int64_t max_tool_result_bytes = config::kDefaultMaxToolResultBytes;
+    // tools.max_result_window_percent: the same ceiling as a share of the
+    // context window (RequestBuilder::ToolResultByteCap takes the smaller).
+    std::int64_t max_tool_result_window_percent = config::kDefaultMaxToolResultWindowPercent;
 
     // Ceiling on a result's display payload (settings.json
     // tools.max_display_bytes). Over it the payload is dropped whole. 0 disables.

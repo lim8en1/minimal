@@ -28,7 +28,10 @@ inline constexpr std::chrono::milliseconds kDefaultBackgroundMaxTimeout = std::c
 // once; past it the model is told, not queued.
 inline constexpr int kDefaultMaxBackgroundTasks = 4;
 // The persisted result's cap (the model's view); live streaming is uncapped.
-inline constexpr std::int64_t kDefaultMaxOutputBytes = static_cast<std::int64_t>(common::kMiB);
+// Sized for a context window, not a disk: dense output (paths, hex, JSON)
+// runs 1-2 bytes per token, so this is ~16-32k tokens. Past it the start and
+// the end are kept and the whole output spills to a file the model can read.
+inline constexpr std::int64_t kDefaultMaxOutputBytes = 64 * static_cast<std::int64_t>(common::kKiB);
 
 // --- the shell wrapper ------------------------------------------------------------
 

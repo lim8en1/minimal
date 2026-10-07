@@ -5,6 +5,7 @@
 #include <mutex>
 
 #include "minimal/common/utf8.hpp"
+#include "minimal/tools/tool_output_spill.hpp"
 #include "tool_result_caps.hpp"
 
 namespace minimal::agent {
@@ -266,7 +267,15 @@ ToolRound::Outcome ToolRound::Run(const std::vector<const llm::ToolUseBlock*>& t
         // THE GLOBAL TOOL-RESULT CEILING (see CapToolResult): applies
         // regardless of which tool produced this, including MCP tools and
         // any third-party plugin tool that caps nothing on its own.
-        CapToolResult(tool_result, request_.ToolResultByteCap());
+        {
+            // Its own file name: a tool that spilled already (bash) keeps the
+            // full stream under <tool_use_id>.txt, which this must not
+            // overwrite with the tool's already-cut text.
+            tools::ToolOutputSpill spill(
+                call.ctx.project_root, call.ctx.session_id,
+                use->id.empty() ? "" : use->id + ".result.txt");
+            CapToolResult(tool_result, request_.ToolResultByteCap(), &spill);
+        }
         if (const std::size_t dropped =
                 CapToolDisplay(tool_result, config_.max_tool_display_bytes)) {
             session_.logger.warn(

@@ -24,4 +24,9 @@ inline constexpr std::size_t kHardLineCapBytes = common::kMiB;
 // the advisor is skipped and the human is asked directly.
 inline constexpr int kMaxAbandonedAdvisors = 8;
 
+// Spilled tool outputs kept per session (tool_output_spill.hpp). A model
+// rarely reaches back past the last few cut outputs; the bound keeps a long
+// session from filling the project's .minimal/ with logs nobody reads.
+inline constexpr std::size_t kSpillKeepPerSession = 50;
+
 }  // namespace minimal::tools

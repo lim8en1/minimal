@@ -43,6 +43,8 @@ RequestHandles BuildHandles(const std::string& tool_use_id, const std::string& c
     handles.emit_task_event = ctx.emit_task_event;
     handles.emit_output = ctx.emit_output;
     handles.session_lifetime = ctx.session_lifetime;
+    handles.project_root = ctx.project_root;
+    handles.session_id = ctx.session_id;
     return handles;
 }
 
@@ -218,8 +220,9 @@ public:
             case Interpreter::WaitOutcome::kCompleted: {
                 ToolResult result;
                 result.is_error = !outcome.ok;
+                auto spill = tools::ToolOutputSpill::For(ctx);
                 result.content_text =
-                    FormatOutcome(*id, outcome, ahead, S().max_output_bytes) + advisory;
+                    FormatOutcome(*id, outcome, ahead, S().max_output_bytes, &spill) + advisory;
                 return result;
             }
             case Interpreter::WaitOutcome::kDemoted:

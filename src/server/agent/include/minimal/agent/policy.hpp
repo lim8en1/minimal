@@ -19,6 +19,15 @@ namespace minimal::agent {
 // heuristic, not a tokenizer: real counts vary by model and content, and
 // anything with a backend-reported count uses that instead.
 inline constexpr std::int64_t kEstimatedBytesPerToken = 4;
+// The ratio for SIZING a cap that must hold in tokens (a tool result's share
+// of the window), deliberately pessimistic: dense output -- paths, hex, JSON,
+// escaped control bytes -- tokenizes at 1-2 bytes per token, so a cap sized
+// at 4 would let through two to four times the tokens it was meant to allow.
+inline constexpr std::int64_t kConservativeBytesPerToken = 2;
+
+// The floor under a window-derived tool-result cap: a tiny or misreported
+// window must still leave room for an error message and a spill note.
+inline constexpr std::int64_t kMinToolResultCapBytes = 4096;
 
 // JsonSizeEstimate's size for a number (or binary): sized without printing
 // it. A fixed guess is within the noise of kEstimatedBytesPerToken.
@@ -77,6 +86,19 @@ inline constexpr std::int64_t kOutputCapFloorTokens = 1024;
 // result already this small is left alone (eliding it frees nothing).
 inline constexpr std::int64_t kElisionTargetBytes = 500;
 inline constexpr std::int64_t kElisionMinBytes = 1000;
+
+// The room every request keeps free for a compaction to run in: the
+// summarizer re-sends the whole history plus its instruction and needs room
+// for the summary it writes. A tool round's results are shrunk to leave this
+// much of the window unused, and a compaction whose own request would not
+// fit with it elides tool results first -- otherwise one oversized result
+// leaves a session that can neither continue nor compact.
+inline constexpr std::int64_t kCompactionHeadroomPercent = 10;
+inline constexpr std::int64_t kCompactionHeadroomMinTokens = 8192;
+
+// What a tool result keeps, at least, when a round has to be shrunk to the
+// room left in the window: enough for an error line and the spill note.
+inline constexpr std::int64_t kMinFittedResultBytes = 1024;
 
 // A compaction whose history is still at least this percent of its old size
 // "freed little" and says so (the summary is about as large as what it
