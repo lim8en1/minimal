@@ -521,8 +521,12 @@ public:
     void NewTab() override {}
     void OpenSession(const std::string&, bool) override {}
     void OpenSubagent(const std::string&, const std::string&, bool) override {}
+    void SetClientPluginEnabled(const std::string& id, bool enabled) override {
+        toggles.emplace_back(id, enabled);
+    }
     std::vector<std::string> inserted;
     std::vector<std::string> themes;
+    std::vector<std::pair<std::string, bool>> toggles;
 };
 
 class CountingUi final : public HostUi {

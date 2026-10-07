@@ -157,6 +157,21 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         const auto records = loader.LoadAll(candidates);
         for (const auto& record : records) {
             if (record.ok()) out.loaded_plugins.push_back(record.name);
+            plugins::ClientPluginInfo info;
+            info.id = record.file.filename().string();
+            info.name = record.name.empty() ? record.file.stem().string() : record.name;
+            info.enabled = record.status != plugins::LoadStatus::Disabled;
+            info.enabled_in_file = info.enabled;
+            info.loaded = record.ok();
+            if (!record.ok() && info.enabled) info.error = record.error;
+            for (const auto& [label, names] : record.registered) {
+                if (names.empty()) continue;
+                std::string items;
+                for (const auto& name : names) items += (items.empty() ? "" : ", ") + name;
+                info.provides += (info.provides.empty() ? "" : " · ") + label + ": " + items;
+            }
+            out.client_plugin_provenance[info.id] = record.provenance;
+            out.client_plugins.push_back(std::move(info));
         }
 
         // Provenance-keyed severity, mirrored from the server's sanity check:
@@ -238,6 +253,24 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             missing = true;
         }
         if (missing) return false;
+
+        // What the TUI cannot start without, by holder: such a plugin is
+        // never toggled off from /config.
+        const auto require = [&out](const std::string& holder, const std::string& why) {
+            for (auto& info : out.client_plugins) {
+                if (info.name == holder && info.required.empty()) info.required = why;
+            }
+        };
+        require(out.registries.chat_surface.holder(), "it draws the chat");
+        require(out.registries.prompt_editor.holder(), "it is the prompt editor");
+        require(out.registries.widget_kit.holder(), "every view's widgets come from it");
+        const auto& kinds = out.registries.prompt_renderers;
+        for (std::size_t i = 0; i < kinds.All().size(); ++i) {
+            const std::string& kind = kinds.surfaces()[i];
+            if (kind == "permission" || kind == "confirmation") {
+                require(kinds.owners()[i], "it asks for permissions and confirmations");
+            }
+        }
     }
 
     // ui.json's "theme" selects the file (themes/<name>.json); empty means

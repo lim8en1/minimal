@@ -206,6 +206,11 @@ std::shared_ptr<const TabActivitySnapshot> HostFocusProvider::Activity() const {
     return HostUi::Activity();
 }
 
+std::vector<ClientPluginInfo> HostFocusProvider::ClientPlugins() const {
+    std::shared_lock lk(mtx_);
+    return reads_.client_plugins ? reads_.client_plugins() : std::vector<ClientPluginInfo>{};
+}
+
 std::vector<std::string> HostFocusProvider::ThemeNames() const {
     std::shared_lock lk(mtx_);
     return reads_.theme_names ? reads_.theme_names() : std::vector<std::string>{};
@@ -510,6 +515,10 @@ void HostActionQueue::OpenSubagent(const std::string& session_id,
     Enqueue([session_id, parent_session_id, is_live](HostActions& host) {
         host.OpenSubagent(session_id, parent_session_id, is_live);
     });
+}
+
+void HostActionQueue::SetClientPluginEnabled(const std::string& id, bool enabled) {
+    Enqueue([id, enabled](HostActions& host) { host.SetClientPluginEnabled(id, enabled); });
 }
 
 void HostActionQueue::Enqueue(std::function<void(HostActions&)> action) {

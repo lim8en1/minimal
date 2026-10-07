@@ -117,6 +117,7 @@ private:
     void OpenSession(const std::string& session_id, bool is_live) override;
     void OpenSubagent(const std::string& session_id, const std::string& parent,
                       bool is_live) override;
+    void SetClientPluginEnabled(const std::string& id, bool enabled) override;
     // Shows the plugin view registered as `role` ("agents", ...); false, with
     // a notice, when none is.
     bool OpenRoleView(const std::string& role);

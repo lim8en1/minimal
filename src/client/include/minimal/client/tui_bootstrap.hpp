@@ -58,6 +58,7 @@
 #include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/status_format.hpp"
+#include "minimal/common/plugin_config.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/plugins/name_table.hpp"
 
@@ -86,6 +87,10 @@ struct TuiEnvironment {
     // Every client plugin that loaded, by name -- the theme's section check
     // input, at startup and on every /theme switch.
     std::vector<std::string> loaded_plugins;
+    // Every client plugin found, loaded or not (HostUi::ClientPlugins), and
+    // each one's provenance by id: what a toggle writes its entry under.
+    std::vector<plugins::ClientPluginInfo> client_plugins;
+    std::map<std::string, common::PluginProvenance> client_plugin_provenance;
     plugins::AttentionState attention_state;
     // Concrete type: tui_app.cpp attaches the (later-constructed) AppState
     // after BuildTuiEnvironment returns -- see host_seams.hpp for why the

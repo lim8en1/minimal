@@ -135,6 +135,25 @@ TEST_CASE("the TUI starts only with every required plugin: kit, prompts, editor,
     }
 }
 
+TEST_CASE("the TUI lists its client plugins, marking the ones it cannot start without",
+          "[tui_bootstrap][toggle]") {
+    SessionClient client("unix:///nonexistent/minimal-tui-bootstrap-test.sock");
+    minimal::testing::TempDir config_dir;
+    SeedRequiredPlugins(config_dir.path());
+    ScopedEnv config_override("MINIMAL_CONFIG_DIR", config_dir.path().c_str());
+    TuiEnvironment env;
+    REQUIRE(BuildTuiEnvironment(client, env));
+    REQUIRE(env.client_plugins.size() == 4);
+    for (const auto& plugin : env.client_plugins) {
+        INFO(plugin.name);
+        CHECK(plugin.loaded);
+        CHECK(plugin.enabled_in_file);
+        CHECK_FALSE(plugin.provides.empty());
+        CHECK_FALSE(plugin.required.empty());   // each holds a slot or core's prompt kinds
+        CHECK(env.client_plugin_provenance.count(plugin.id) == 1);
+    }
+}
+
 TEST_CASE("BuildTuiEnvironment's highlighter outlives the call and highlights code",
           "[tui_bootstrap]") {
     minimal::testing::TempDir config_dir;
