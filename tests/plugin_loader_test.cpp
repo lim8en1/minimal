@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <set>
 #include <fstream>
 
 #include "temp_dir.hpp"
@@ -16,6 +17,7 @@
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_config_endpoint.hpp"
+#include "minimal/common/read_file.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/tools/tool_executor.hpp"
@@ -1320,4 +1322,56 @@ TEST_CASE("the plugins endpoint applies an edit made elsewhere (the CLI)",
     // Nothing new: nothing to do.
     CHECK(CallJson(endpoint, "apply", {{"name", "fixture-config"}}).at("applied") == "none");
     CHECK(CallJson(endpoint, "describe", {{"name", "nosuch"}}).contains("error"));
+}
+
+TEST_CASE("the plugins endpoint toggles plugins.json and refuses to strand providers.json",
+          "[plugin_loader][config_endpoint][toggle]") {
+    TempDir config_dir;
+    Harness h;
+    const std::vector<PluginCandidate> candidates = {Enabled("fixture-good"),
+                                                     Enabled("fixture-config")};
+    const auto records = h.loader.LoadAll(candidates);
+    REQUIRE(records[0].ok());
+    std::set<std::string> in_use = {"fixture"};
+    plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, candidates,
+                                           [&] { return in_use; });
+
+    // Every plugin is listed, with what it provides and the file's value.
+    const auto list = CallJson(endpoint, "list", {});
+    const auto row_of = [&](const nlohmann::json& rows, const std::string& name) {
+        for (const auto& row : rows) {
+            if (row.at("name") == name) return row;
+        }
+        return nlohmann::json();
+    };
+    const auto good = row_of(list, "fixture-good");
+    REQUIRE(good.is_object());
+    CHECK(good.at("enabled_in_file") == true);
+    CHECK(good.at("provides").get<std::string>().find("provider: fixture") != std::string::npos);
+
+    // The only plugin behind providers.json's backend: refused, saying why.
+    auto answer = CallJson(endpoint, "enable", {{"name", "fixture-good"}, {"enabled", false}});
+    REQUIRE(answer.contains("error"));
+    CHECK(answer.at("error").get<std::string>().find("no provider") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(config_dir.path() / "plugins.json"));
+
+    // Nothing depends on it: written, applied at restart, and listed so.
+    answer = CallJson(endpoint, "enable", {{"name", "fixture-config"}, {"enabled", false}});
+    CHECK(answer.at("applied") == "restart");
+    const auto file = plugins::ParsePluginConfig(
+        common::ReadFileOrEmpty(config_dir.path() / "plugins.json"));
+    bool written = false;
+    for (const auto& entry : file.plugins) {
+        if (entry.file.find("fixture-config") != std::string::npos) {
+            written = entry.enabled == false;
+        }
+    }
+    CHECK(written);
+    CHECK(row_of(CallJson(endpoint, "list", {}), "fixture-config").at("enabled_in_file") == false);
+
+    // Once providers.json no longer needs it, the provider may go too.
+    in_use.clear();
+    CHECK(CallJson(endpoint, "enable", {{"name", "fixture-good"}, {"enabled", false}})
+              .at("applied") == "restart");
+    CHECK(CallJson(endpoint, "enable", {{"name", "fixture-good"}}).contains("error"));
 }

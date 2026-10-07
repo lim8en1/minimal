@@ -2,8 +2,11 @@
 
 #include <stdexcept>
 
+#include "minimal/common/atomic_write.hpp"
+#include "minimal/common/read_file.hpp"
 #include "minimal/common/plugin_config_label.hpp"
 #include "minimal/common/plugin_config_store.hpp"
+#include "minimal/plugins/plugin_discovery.hpp"
 
 namespace minimal::plugins {
 namespace {
@@ -17,15 +20,32 @@ std::string Need(const json& request, const char* key) {
     return request.at(key).get<std::string>();
 }
 
+// What a plugin registered, in one line: "provider: openai · tool: bash".
+std::string ProvidesLine(const PluginRecord& record) {
+    std::string out;
+    for (const auto& [label, names] : record.registered) {
+        if (names.empty()) continue;
+        std::string items;
+        for (const auto& name : names) items += (items.empty() ? "" : ", ") + name;
+        out += (out.empty() ? "" : " · ") + label + ": " + items;
+    }
+    return out;
+}
+
 }  // namespace
 
 PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
                                            const std::vector<PluginRecord>& records,
-                                           const std::vector<PluginCandidate>& candidates)
-    : config_dir_(std::move(config_dir)) {
+                                           const std::vector<PluginCandidate>& candidates,
+                                           BackendsInUse backends_in_use)
+    : config_dir_(std::move(config_dir)), backends_in_use_(std::move(backends_in_use)) {
     for (const auto& record : records) {
         Entry entry;
         entry.name = record.file.stem().string();
+        entry.file = record.file.filename().string();
+        entry.provenance = record.provenance;
+        entry.provider_kinds = record.Registered("provider");
+        entry.provides = ProvidesLine(record);
         entry.enabled = record.status != LoadStatus::Disabled;
         entry.loaded = record.ok();
         entry.symbols = record.config;
@@ -52,14 +72,89 @@ PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
     }
 }
 
-PluginConfigEndpoint::Entry& PluginConfigEndpoint::Require(const json& request) {
+PluginConfigEndpoint::Entry& PluginConfigEndpoint::Find(const json& request) {
     const std::string name = Need(request, "name");
     const auto it = entries_.find(name);
     if (it == entries_.end()) throw std::invalid_argument("no plugin '" + name + "'");
-    if (it->second.schema.is_null()) {
-        throw std::invalid_argument("plugin '" + name + "' has no configuration");
-    }
     return it->second;
+}
+
+PluginConfigEndpoint::Entry& PluginConfigEndpoint::Require(const json& request) {
+    Entry& entry = Find(request);
+    if (entry.schema.is_null()) {
+        throw std::invalid_argument("plugin '" + entry.name + "' has no configuration");
+    }
+    return entry;
+}
+
+std::map<std::string, bool> PluginConfigEndpoint::EnabledInFile() const {
+    std::map<std::string, bool> out;
+    PluginConfig file;
+    try {
+        file = ParsePluginConfig(common::ReadFileOrEmpty(config_dir_ / "plugins.json"));
+    } catch (const std::exception&) {
+        return out;
+    }
+    for (const auto& [name, entry] : entries_) {
+        for (const auto& row : file.plugins) {
+            if (row.file != entry.file) continue;
+            if (row.provenance && *row.provenance != entry.provenance) continue;
+            if (row.enabled) out[name] = *row.enabled;
+        }
+    }
+    return out;
+}
+
+json PluginConfigEndpoint::SetEnabled(Entry& entry, bool enabled) {
+    const auto path = config_dir_ / "plugins.json";
+    const std::string before = common::ReadFileOrEmpty(path);
+    PluginConfig file = ParsePluginConfig(before);
+    if (file.malformed || !file.problems.empty()) {
+        return {{"error", "plugins.json cannot be used as written; fix it first" +
+                              (file.problems.empty() ? std::string() : ": " + file.problems.front())}};
+    }
+    if (!enabled && !entry.provider_kinds.empty() && backends_in_use_) {
+        // What every OTHER plugin enabled in the file (and running, so its
+        // registrations are known) still provides.
+        const auto in_file = EnabledInFile();
+        std::set<std::string> remaining;
+        for (const auto& [name, other] : entries_) {
+            if (&other == &entry || !other.loaded) continue;
+            const auto it = in_file.find(name);
+            if (it != in_file.end() && !it->second) continue;
+            remaining.insert(other.provider_kinds.begin(), other.provider_kinds.end());
+        }
+        const std::set<std::string> used = backends_in_use_();
+        bool usable = used.empty();
+        std::string lost;
+        for (const auto& backend : used) {
+            if (remaining.count(backend) != 0) usable = true;
+            lost += (lost.empty() ? "" : ", ") + backend;
+        }
+        if (!usable) {
+            return {{"error", "disabling " + entry.name + " would leave no provider for "
+                              "providers.json's models (they use: " + lost +
+                              ") -- the server would not start"}};
+        }
+    }
+    bool found = false;
+    for (auto& row : file.plugins) {
+        if (row.file != entry.file) continue;
+        if (row.provenance && *row.provenance != entry.provenance) continue;
+        row.provenance = entry.provenance;
+        row.enabled = enabled;
+        found = true;
+    }
+    if (!found) {
+        file.plugins.push_back({entry.file, entry.provenance, enabled});
+    }
+    const auto outcome = common::write_file(path, SerializePluginConfig(file));
+    if (!outcome.ok) return {{"error", "could not write plugins.json: " + outcome.error}};
+    const bool now = enabled == entry.enabled;
+    return {{"applied", now ? "none" : "restart"},
+            {"enabled", enabled},
+            {"reason", now ? "already " + std::string(enabled ? "running" : "off")
+                           : "applied when the server restarts"}};
 }
 
 std::filesystem::path PluginConfigEndpoint::PathOf(const Entry& entry) const {
@@ -154,11 +249,17 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
         const json request = payload.empty() ? json::object() : json::parse(payload);
         if (method == "list") {
             json rows = json::array();
+            const auto in_file = EnabledInFile();
             for (const auto& [name, entry] : entries_) {
+                const auto file_enabled = in_file.find(name);
                 json row = {{"name", name},
                             {"enabled", entry.enabled},
+                            {"enabled_in_file", file_enabled != in_file.end()
+                                                    ? file_enabled->second
+                                                    : entry.enabled},
                             {"loaded", entry.loaded},
                             {"configurable", !entry.schema.is_null()},
+                            {"provides", entry.provides},
                             {"set", 0},
                             {"pending", json::array()}};
                 if (!entry.schema.is_null()) {
@@ -175,6 +276,12 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
             return rows.dump();
         }
         if (method == "describe") return Describe(Require(request)).dump();
+        if (method == "enable") {
+            if (!request.contains("enabled") || !request.at("enabled").is_boolean()) {
+                throw std::invalid_argument("'enabled' (true or false) is required");
+            }
+            return SetEnabled(Find(request), request.at("enabled").get<bool>()).dump();
+        }
         if (method == "set" || method == "unset") {
             Entry& entry = Require(request);
             const std::string key = Need(request, "key");
@@ -197,7 +304,7 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
             return Apply(entry, ReadFile(entry)).dump();
         }
         return json{{"error", "unknown method '" + method +
-                                  "' (known: list, describe, set, unset, apply)"}}
+                                  "' (known: list, describe, set, unset, apply, enable)"}}
             .dump();
     } catch (const std::exception& error) {
         return json{{"error", error.what()}}.dump();

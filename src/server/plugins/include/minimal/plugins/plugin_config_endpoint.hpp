@@ -7,7 +7,14 @@
 // ("plugins"), between LoadAll and Seal.
 //
 // Methods (payloads and answers are JSON):
-//   list                      [{name, enabled, loaded, configurable, set, pending}]
+//   list                      [{name, enabled, enabled_in_file, loaded, configurable,
+//                              provides, set, pending}] -- every plugin;
+//                              enabled_in_file differs from enabled after a
+//                              toggle, until the restart that applies it
+//   enable {name, enabled}    sets the plugin's plugins.json entry; applied at
+//                             the next server start ({applied: "restart"}). A
+//                             disable that would leave no usable provider for
+//                             providers.json is refused, saying which
 //   describe {name}           {name, file, enabled, loaded, schema, config,
 //                              effective: {path: value}, pending: [paths],
 //                              unused: {path: why}} -- fields whose "when" is
@@ -30,7 +37,9 @@
 // is running with: the changes a restart would bring.
 
 #include <filesystem>
+#include <functional>
 #include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -46,9 +55,14 @@ inline constexpr const char* kPluginConfigEndpointName = "plugins";
 
 class PluginConfigEndpoint final : public PluginEndpoint {
 public:
+    // The backends providers.json's models use, read when asked (the file
+    // may have changed since startup): what a disable must leave registered.
+    using BackendsInUse = std::function<std::set<std::string>()>;
+
     // `records` and `candidates` from the same LoadAll, matched by file.
     PluginConfigEndpoint(std::filesystem::path config_dir, const std::vector<PluginRecord>& records,
-                         const std::vector<PluginCandidate>& candidates);
+                         const std::vector<PluginCandidate>& candidates,
+                         BackendsInUse backends_in_use = {});
 
     std::string Call(const std::string& method, const std::string& json_payload) override;
     bool Subscribe(const std::string&, const std::string&,
@@ -59,14 +73,23 @@ public:
 private:
     struct Entry {
         std::string name;  // the module's stem: plugins.d/<name>.json
+        std::string file;  // the module's basename, its plugins.json key
+        Provenance provenance = Provenance::User;
         bool enabled = false;
         bool loaded = false;
+        std::vector<std::string> provider_kinds;  // the backends it registered
+        std::string provides;                     // what it registered, in a line
         PluginConfigSymbols symbols;
         nlohmann::json schema;   // null: the plugin takes no configuration
         nlohmann::json applied;  // the config the plugin is running with
     };
 
     Entry& Require(const nlohmann::json& request);
+    // The plugin by name, configurable or not.
+    Entry& Find(const nlohmann::json& request);
+    // plugins.json's enabled value for each plugin, as the file says now.
+    std::map<std::string, bool> EnabledInFile() const;
+    nlohmann::json SetEnabled(Entry& entry, bool enabled);
     std::filesystem::path PathOf(const Entry& entry) const;
     nlohmann::json ReadFile(const Entry& entry) const;
     nlohmann::json Describe(const Entry& entry) const;
@@ -79,6 +102,7 @@ private:
     nlohmann::json Apply(Entry& entry, const nlohmann::json& file);
 
     std::filesystem::path config_dir_;
+    BackendsInUse backends_in_use_;
     std::mutex mutex_;  // RPC threads call concurrently; one edit at a time
     std::map<std::string, Entry> entries_;
 };
