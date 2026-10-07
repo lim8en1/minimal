@@ -4,7 +4,7 @@ The row of tabs above the chat.
 
 ## What it adds
 
-The exclusive, optional tab-bar slot (`registries.hpp` `TabBar`): one cell per
+The exclusive, optional tab-bar slot (`sdk/render.hpp` `TabBar`): one cell per
 visible tab -- its number, name, a state glyph and color (a spinner while busy,
 ✓ done, ✗ error), `!` when it waits on you, `↳` for a subagent -- the focused
 one highlighted, a window around the focused tab with `«N`/`N»` counts when
