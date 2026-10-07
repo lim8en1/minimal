@@ -196,9 +196,15 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
     // fails closed: no modal, a throw, or anything but a well-formed choice
     // answers deny / "do not proceed" at once -- the server worker is parked
     // on the request and nothing else would answer it.
+    //
+    // Each modal is keyed on its request id ALONE, never on the component:
+    // a renderer that throws builds none, and with the answer's send failing
+    // too (the request stays pending) a null-component key re-built, re-threw
+    // and re-answered on every pass. The key clears when the request does,
+    // so the same id arriving again (a replay after reattach) is drawn.
     if (snap.pending_permission.has_value()) {
         const auto& request = *snap.pending_permission;
-        if (ui.permission_modal == nullptr || ui.grants_for_request != request.request_id) {
+        if (ui.grants_for_request != request.request_id) {
             ui.grants_for_request = request.request_id;
             // AnswerPermission is SESSION-keyed; a modal can only exist on a
             // sessioned tab, so the snapshot's session id is the right key.
@@ -216,14 +222,14 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
         deps_.show_permission = ui.permission_modal != nullptr;
     } else {
         ui.permission_modal = nullptr;
+        ui.grants_for_request.clear();
         deps_.show_permission = false;
     }
 
     // The wire confirmation: the same rule.
     if (snap.pending_confirmation.has_value()) {
         const auto& request = *snap.pending_confirmation;
-        if (ui.confirmation_modal == nullptr ||
-            ui.confirmation_for_request != request.request_id) {
+        if (ui.confirmation_for_request != request.request_id) {
             ui.confirmation_for_request = request.request_id;
             const auto session_id = snap.session_id;   // SESSION-keyed (see above)
             AppState& app = deps_.app;
@@ -242,6 +248,7 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
         deps_.show_confirmation = ui.confirmation_modal != nullptr;
     } else {
         ui.confirmation_modal = nullptr;
+        ui.confirmation_for_request.clear();
         deps_.show_confirmation = false;
     }
 
@@ -296,6 +303,7 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
         deps_.show_prompt = ui.prompt_modal != nullptr;
     } else {
         ui.prompt_modal = nullptr;
+        ui.prompt_for_request.clear();
         deps_.show_prompt = false;
     }
 }
