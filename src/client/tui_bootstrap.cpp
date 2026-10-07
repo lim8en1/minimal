@@ -385,6 +385,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         !out.ui.status_format.empty() ? out.ui.status_format : std::string(kDefaultStatusFormat);
     out.status_format = minimal::client::ParseStatusFormat(status_format_string);
     for (const auto& id : minimal::client::FormatSegmentIds(status_format_string)) {
+        out.status_segment_ids.insert(id);
         if (out.registries.status_segments.Find(id) == nullptr) {
             std::fprintf(stderr, "minimal: unknown status segment '{%s}'\n", id.c_str());
         }

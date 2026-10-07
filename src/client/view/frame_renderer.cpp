@@ -62,20 +62,10 @@ plugins::TabStatus FocusedTabStatus(const std::string& focused,
 
 FrameRenderer::FrameRenderer(Dependencies deps) : deps_(std::move(deps)) {}
 
-bool FrameRenderer::GuardPluginCall(const std::string& key, const std::string& what,
-                                    const std::function<void()>& call) {
-    int& throws = plugin_throws_[key];
-    if (throws < 0) return false;   // disabled after repeated throws
-    std::string error;
-    try {
-        call();
-        throws = 0;
-        return true;
-    } catch (const std::exception& e) {
-        error = e.what();
-    } catch (...) {
-        error = "a non-standard exception";
-    }
+void FrameRenderer::NotePluginThrow(int& throws, std::string_view kind, std::string_view name,
+                                    std::string_view error) {
+    const std::string what =
+        name.empty() ? std::string(kind) : std::string(kind) + " '" + std::string(name) + "'";
     if (++throws >= kMaxPluginThrows) {
         common::DefaultLogger().error("{} threw {} times in a row ({}); disabled for this session",
                                       what, kMaxPluginThrows, error);
@@ -83,15 +73,13 @@ bool FrameRenderer::GuardPluginCall(const std::string& key, const std::string& w
     } else if (throws == 1) {
         common::DefaultLogger().error("{} threw: {}", what, error);
     }
-    return false;
 }
 
 ftxui::Elements FrameRenderer::RenderStartViews(const std::string& session_id) {
     using namespace ftxui;
     Elements out;
     for (const auto& view : deps_.start_view_registry.All()) {
-        const std::string id(view->spec().id);
-        GuardPluginCall("start:" + id, "start view '" + id + "'", [&] {
+        GuardPluginCall(view.get(), "start view", view->spec().id, [&] {
             out.push_back(view->Render(session_id, deps_.theme) | center);
         });
     }
@@ -146,7 +134,7 @@ ftxui::Element FrameRenderer::Render() {
             model.tabs.push_back(ActivityOf(tab, /*with_tools=*/false));
         }
         Element row;
-        if (GuardPluginCall("tab_bar", "the tab bar",
+        if (GuardPluginCall(bar, "the tab bar", {},
                             [&] { row = bar->Render(model, deps_.theme, tab_hits_); }) &&
             row != nullptr) {
             rows.push_back(std::move(row));
@@ -205,7 +193,7 @@ ftxui::Element FrameRenderer::Render() {
                 // this tab, never ends the TUI.
                 Element body;
                 if (ui.chat != nullptr &&
-                    GuardPluginCall("chat:" + focused, "the chat view",
+                    GuardPluginCall(ui.chat.get(), "the chat view", {},
                                     [&] { body = ui.chat->Render(deps_.focused_frame); }) &&
                     body != nullptr) {
                     rows.push_back(std::move(body) | flex);
@@ -295,8 +283,7 @@ ftxui::Element FrameRenderer::Render() {
             // cannot protect against it.
             if (entry.component == nullptr) continue;
             Element body;
-            const std::string& id = entry.surface_id;
-            if (!GuardPluginCall("panel:" + id, "plugin view '" + id + "'",
+            if (!GuardPluginCall(entry.view, "plugin view", entry.surface_id,
                                  [&] { body = entry.component->Render(); })) {
                 continue;
             }
@@ -341,7 +328,8 @@ ftxui::Element FrameRenderer::Render() {
         // The value lands under the SURFACE id -- what ui.json's
         // status_format names.
         const std::string& id = deps_.status_registry.surfaces()[i];
-        GuardPluginCall("segment:" + id, "status segment '" + id + "'", [&] {
+        if (!deps_.status_ids_in_format.count(id)) continue;   // not shown: not asked
+        GuardPluginCall(segment.get(), "status segment", id, [&] {
             plugins::StatusValue value = segment->Render(status);
             if (!value.role.empty()) emphasis[id] = deps_.theme.ColorFor(value.role);
             values[id] = std::move(value.text);

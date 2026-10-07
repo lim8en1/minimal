@@ -480,7 +480,7 @@ void TuiApp::BuildFrame() {
         *app_, theme, tab_maintenance_->Focused(), tab_maintenance_->FocusedDetails(),
         tab_maintenance_->FocusedChatFrame(), tab_ui_,
         registries.start_views, registries.status_segments, registries.tab_bar, panel_height,
-        editor_, env_.status_format, env_.plugin_views,
+        editor_, env_.status_format, env_.status_segment_ids, env_.plugin_views,
         // The key the empty state names: the user's keymap decides it.
         env_.keybindings.KeyFor("session.picker", "ctrl+o"),
         [this](const std::string& tab_id, TabUi& ui) {
@@ -830,6 +830,9 @@ CommandCatalogCache::Snapshot TuiApp::CurrentCatalog() {
 // grants and surface body for the process lifetime.
 void TuiApp::CloseTab(const std::string& id) {
     app_->CloseTab(id);
+    if (const auto it = tab_ui_.find(id); it != tab_ui_.end() && frame_renderer_) {
+        frame_renderer_->ForgetPluginCall(it->second.chat.get());
+    }
     tab_ui_.erase(id);
     // The tab's editor dies WITH the tab (state AND component together -- the
     // component's closures captured the state's address; neither may outlive
