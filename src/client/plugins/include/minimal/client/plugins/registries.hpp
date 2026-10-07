@@ -299,12 +299,14 @@ struct PromptView {
     std::string_view asker;
 };
 
-// Draws one KIND of plugin prompt (docs/EXTENSIBILITY.md, "Plugin prompts")
-// as a modal: the client half of a server plugin that calls
-// ToolContext::prompt_user. The host shows it in the prompt modal slot (below
-// the permission and confirmation modals), rebuilds it per request id, and
-// sends whatever `on_reply` receives. A kind with no renderer is answered
-// UNAVAILABLE by the host, never left hanging; so is a Make() that throws.
+// Draws one KIND of prompt as a modal: a plugin kind (docs/EXTENSIBILITY.md,
+// "Plugin prompts" -- the client half of a server plugin that calls
+// ToolContext::prompt_user), or one of core's own two, "permission" and
+// "confirmation" (§4.2: their payloads and answers, both kinds required at
+// startup). The host shows it in its modal layer, rebuilds it per request id,
+// and sends whatever `on_reply` receives. A kind with no renderer, or a Make()
+// that throws, is answered at once -- UNAVAILABLE for a plugin kind, deny /
+// "do not proceed" for core's -- never left hanging.
 class PromptRenderer {
 public:
     virtual ~PromptRenderer() = default;

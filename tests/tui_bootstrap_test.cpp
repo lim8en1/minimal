@@ -4,6 +4,9 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include <ftxui/component/component.hpp>
 
@@ -54,28 +57,38 @@ private:
 #ifndef MINIMAL_UI_KIT_PLUGIN
 #error "MINIMAL_UI_KIT_PLUGIN must name the built ui-kit plugin"
 #endif
+#ifndef MINIMAL_CONSENT_PROMPTS_PLUGIN
+#error "MINIMAL_CONSENT_PROMPTS_PLUGIN must name the built consent-prompts plugin"
+#endif
 
 namespace {
 
-// The widget-kit slot is required, and from the test binary the bundled
-// plugin dir is not the build's (it probes relative to the executable): the
-// built ui-kit goes in as a user plugin, enabled.
-void SeedWidgetKit(const std::filesystem::path& config_dir) {
-    const std::filesystem::path kit(MINIMAL_UI_KIT_PLUGIN);
+// The widget-kit slot and core's prompt kinds are required, and from the
+// test binary the bundled plugin dir is not the build's (it probes relative
+// to the executable): the built plugins go in as user plugins, enabled.
+void SeedPlugins(const std::filesystem::path& config_dir,
+                 const std::vector<std::filesystem::path>& plugins) {
     std::filesystem::create_directories(config_dir / "client-plugins");
-    std::filesystem::copy_file(kit, config_dir / "client-plugins" / kit.filename());
-    std::ofstream(config_dir / "client-plugins.json")
-        << R"({"plugins": [{"file": ")" << kit.filename().string()
-        << R"(", "provenance": "user", "enabled": true}]})";
+    nlohmann::json entries = nlohmann::json::array();
+    for (const auto& plugin : plugins) {
+        std::filesystem::copy_file(plugin, config_dir / "client-plugins" / plugin.filename());
+        entries.push_back(
+            {{"file", plugin.filename().string()}, {"provenance", "user"}, {"enabled", true}});
+    }
+    std::ofstream(config_dir / "client-plugins.json") << nlohmann::json{{"plugins", entries}}.dump();
+}
+
+void SeedRequiredPlugins(const std::filesystem::path& config_dir) {
+    SeedPlugins(config_dir, {MINIMAL_UI_KIT_PLUGIN, MINIMAL_CONSENT_PROMPTS_PLUGIN});
 }
 
 }  // namespace
 
 // The client side of the server's plugin_matrix: with no client plugin at
 // all the TUI refuses to start -- nothing fills the required widget-kit slot
-// -- and with only the kit it starts.
-TEST_CASE("the TUI refuses to start with no widget kit, and starts with only the kit",
-          "[tui_bootstrap][widget_kit]") {
+// -- with either required plugin alone it refuses, with both it starts.
+TEST_CASE("the TUI starts only with the widget kit and the consent prompts",
+          "[tui_bootstrap][widget_kit][prompts]") {
     SessionClient client("unix:///nonexistent/minimal-tui-bootstrap-test.sock");
     {
         minimal::testing::TempDir config_dir;
@@ -83,20 +96,29 @@ TEST_CASE("the TUI refuses to start with no widget kit, and starts with only the
         TuiEnvironment env;
         CHECK_FALSE(BuildTuiEnvironment(client, env));
     }
+    for (const char* only : {MINIMAL_UI_KIT_PLUGIN, MINIMAL_CONSENT_PROMPTS_PLUGIN}) {
+        INFO(only);
+        minimal::testing::TempDir config_dir;
+        SeedPlugins(config_dir.path(), {only});
+        ScopedEnv config_override("MINIMAL_CONFIG_DIR", config_dir.path().c_str());
+        TuiEnvironment env;
+        CHECK_FALSE(BuildTuiEnvironment(client, env));
+    }
     {
         minimal::testing::TempDir config_dir;
-        SeedWidgetKit(config_dir.path());
+        SeedRequiredPlugins(config_dir.path());
         ScopedEnv config_override("MINIMAL_CONFIG_DIR", config_dir.path().c_str());
         TuiEnvironment env;
         REQUIRE(BuildTuiEnvironment(client, env));
         CHECK(env.registries.widget_kit.holder() == "ui-kit");
+        CHECK(env.registries.prompt_renderers.Find("permission") != nullptr);
     }
 }
 
 TEST_CASE("BuildTuiEnvironment's highlighter outlives the call and highlights code",
           "[tui_bootstrap]") {
     minimal::testing::TempDir config_dir;
-    SeedWidgetKit(config_dir.path());
+    SeedRequiredPlugins(config_dir.path());
     ScopedEnv config_override("MINIMAL_CONFIG_DIR", config_dir.path().c_str());
 
     // The channel is lazy (grpc::CreateChannel does not connect eagerly), and

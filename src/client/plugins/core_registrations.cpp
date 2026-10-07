@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "minimal/client/utf8.hpp"
-#include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/tool_status.hpp"
 #include "minimal/client/policy.hpp"
 

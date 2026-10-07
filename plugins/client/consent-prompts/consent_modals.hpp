@@ -1,8 +1,9 @@
 #pragma once
 
-// THE SECURITY UI. Never pluggable, under any circumstance
-// (docs/EXTENSIBILITY.md §4.1) -- the consent-scoping wording obligations are
-// core-owned, and they are load-bearing, not decoration:
+// The consent prompts: the permission and confirmation modals core asks
+// through the "permission" and "confirmation" prompt kinds. The wording
+// obligations are this renderer's -- part of the kinds' contract
+// (docs/EXTENSIBILITY.md §4.2), load-bearing, not decoration:
 //
 //   * A grant is BLANKET: for a binary, any arguments ("/usr/bin/git *
 //     (any arguments)"); for file edits, every file in the project. The
@@ -24,11 +25,34 @@
 
 #include <ftxui/component/component.hpp>
 
-#include "minimal/client/render/theme.hpp"
-#include "minimal/client/state.hpp"
+#include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/policy.hpp"
+#include "minimal/client/render/theme.hpp"
 
-namespace minimal::client {
+namespace minimal::client::consent_prompts {
+
+// A permission request, as the "permission" prompt kind's payload carries it.
+struct PendingPermission {
+    std::string request_id;
+    std::string tool_name;
+    v1::ToolCategory category = v1::TOOL_CATEGORY_UNSPECIFIED;  // UI tint
+    std::string summary;   // one-line description shown in the prompt
+    bool complete = false; // the server offered full disclosure (false = lower bound)
+    std::string reason;    // the rule that made this call ask (display only)
+    // Session-grant offers ("/usr/bin/make *"): blanket, for the whole binary,
+    // any arguments -- worded exactly that way.
+    std::vector<v1::GrantOffer> grants;
+};
+
+// A confirmation, as the "confirmation" prompt kind's payload carries it.
+struct PendingConfirmation {
+    std::string request_id;
+    std::string kind;    // "tool_permission" | "command_confirmation" | a host's own
+    std::string title;
+    std::string detail;
+    std::vector<std::string> options;
+};
+
 
 // Ephemeral checkbox state, one per offered grant. Lives in RunTui.
 struct GrantToggles {
@@ -63,38 +87,11 @@ struct PermissionVerdict {
 // or toggle anything on an unread prompt. Ctrl+C always falls through to the
 // root dispatch's turn-cancel branch.
 ftxui::Component MakePermissionModal(const PendingPermission& request, GrantToggles& toggles,
-                                     const Theme& theme,
+                                     const plugins::WidgetKit& widgets, const Theme& theme,
                                      std::function<void(PermissionVerdict verdict)> on_answer);
 
-ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const Theme& theme,
+ftxui::Component MakeConfirmationModal(const PendingConfirmation& request,
+                                       const plugins::WidgetKit& widgets, const Theme& theme,
                                        std::function<void(std::string chosen)> on_answer);
 
-// Modal chrome shared by every blocking prompt -- core's permission and
-// confirmation modals and the prompt renderers client plugins register -- so a
-// plugin's modal looks like the core ones.
-
-// A modal's internal divider (hairline role, not the window's attention tint).
-ftxui::Element ModalRule(const Theme& theme);
-// How tall the scrollable body may be before the pinned hint line and the
-// window borders stop fitting on screen.
-int ModalBodyHeightBudget();
-// The body: padded one column each side, in the body color.
-ftxui::Element ModalBody(const Theme& theme, ftxui::Element content);
-
-// The whole chrome of a prompt-style modal: a titled window framed in the
-// attention color; `rows` in the body color, scrolling under the height
-// budget; the key hints (`footer`, omitted when empty) pinned below a rule --
-// visible however much content there is -- and wrapped rather than clipped.
-// `max_width` caps the frame (kModalMaxWidth by default).
-ftxui::Element ModalFrame(const Theme& theme, const std::string& title, ftxui::Elements rows,
-                          const std::string& footer, int max_width = kModalMaxWidth);
-// The same, with `pinned` between the scrolling rows and the hints, below a
-// rule and always visible: what describes the selected row, or the outcome
-// of the last action -- content that must not scroll away with a long list.
-// It takes at most kModalPinnedMaxRows rows (scrolling past that); the
-// scrolling rows give up that much of their budget.
-ftxui::Element ModalFrame(const Theme& theme, const std::string& title, ftxui::Elements rows,
-                          ftxui::Elements pinned, const std::string& footer,
-                          int max_width = kModalMaxWidth);
-
-}  // namespace minimal::client
+}  // namespace minimal::client::consent_prompts

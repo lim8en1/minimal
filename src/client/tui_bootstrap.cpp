@@ -215,6 +215,18 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                          std::string(hook.label).c_str());
             missing = true;
         }
+        // Core's own questions are prompt KINDS, not a slot: a permission
+        // request or a quit confirmation with no renderer could only be
+        // answered "no" -- refuse instead of running a TUI that cannot ask.
+        for (const char* kind : {"permission", "confirmation"}) {
+            if (out.registries.prompt_renderers.Find(kind) != nullptr) continue;
+            std::fprintf(stderr,
+                         "minimal: FATAL: no client plugin renders the required '%s' prompt kind "
+                         "-- is the bundled consent-prompts plugin disabled in "
+                         "client-plugins.json?\n",
+                         kind);
+            missing = true;
+        }
         if (missing) return false;
     }
 

@@ -83,3 +83,8 @@ add_subdirectory(syntax-grammars)
 # through the host's highlighter); without it markdown reads as plain text.
 
 add_subdirectory(markdown-md4c)
+
+# consent-prompts draws core's two prompt kinds, "permission" and
+# "confirmation" (both required: the TUI refuses to start without them).
+
+add_subdirectory(consent-prompts)

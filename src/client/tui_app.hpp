@@ -137,6 +137,8 @@ private:
     void FocusedNotice(const std::string& text);
     void RequestQuit();
     void StageClose(std::vector<std::string> ids, bool quit);
+    // The close/quit confirmation, through the "confirmation" prompt kind.
+    ftxui::Component MakeQuitConfirm();
     void ToggleFold(const std::string& tab_id, bool thinking);
     ftxui::Component BuildPromptEditor(PromptEditorState& state);
     KeyContext MakeKeyContext();
@@ -198,8 +200,7 @@ private:
     std::shared_ptr<ftxui::Component> confirmation_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> prompt_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> plugin_modal_child_ = std::make_shared<ftxui::Component>();
-    PendingConfirmation confirm_request_;
-    ftxui::Component confirm_modal_;
+    std::shared_ptr<ftxui::Component> quit_confirm_child_ = std::make_shared<ftxui::Component>();
     std::optional<PickerController> picker_controller_;
     // Reset slots for the two help overlays: they are built once, so without
     // these the typed filter survived across opens.
