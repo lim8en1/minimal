@@ -141,9 +141,10 @@ ftxui::Element Pane::Render(const plugins::ChatFrame& frame) {
     // Scrolled up (or parked on a row) while the turn is still producing,
     // or after output landed below the viewport: nothing else says so.
     if (!view_.IsScrolledAway() || !(frame.turn_busy || view_.HasUnseenBelow())) return body;
+    // The key only when one is bound: an unbound action read " ·  to follow".
+    const std::string key = host_.KeyFor("chat.scroll_bottom");
     return vbox({std::move(body),
-                 text(" ↓ new output below · " + host_.KeyFor("chat.scroll_bottom") +
-                      " to follow") |
+                 text(" ↓ new output below" + (key.empty() ? "" : " · " + key + " to follow")) |
                      color(theme_.ColorFor("attention"))});
 }
 
