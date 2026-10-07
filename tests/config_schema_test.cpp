@@ -1,6 +1,7 @@
 // Describe mode (config::SchemaRecording): a plugin's schema recorded from
 // its own parser, and dry-run validation through the same function.
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <cstdlib>
 #include <filesystem>
@@ -203,4 +204,45 @@ TEST_CASE("every bundled plugin's schema agrees with its own parser", "[config_s
     // tools-fs, tools-search, tools-bash, tools-python, tools-web, memory,
     // mcp, cost-tracker, session-titler, project-context, decision-advisor.
     CHECK(described == 11);
+}
+
+TEST_CASE("an object list records its item fields and a template; items read and fail by index",
+          "[config_schema]") {
+    const auto parse = [](const json& config, std::vector<std::string>* names) {
+        config::Reader reader(config, "plugins.d/lists.json");
+        reader.ObjectList("sources", {{"url", "https://example"}}, [&](config::Reader& item) {
+            item.Describe("key", {.doc = "the key", .secret = true});
+            const std::string url = item.RequireString("url");
+            item.String("key", {});
+            item.Finish();
+            if (names != nullptr) names->push_back(url);
+        });
+        reader.Finish();
+    };
+    json schema;
+    {
+        config::SchemaRecording recording("plugins.d/lists.json");
+        parse(json::object(), nullptr);
+        schema = recording.Schema();
+    }
+    REQUIRE(schema.at("fields").size() == 1);   // the items are not top-level fields
+    const json& list = schema.at("fields").at(0);
+    CHECK(list.at("path") == "sources");
+    CHECK(list.at("type") == "object_list");
+    CHECK(list.at("item_template") == json{{"url", "https://example"}});
+    REQUIRE(list.at("items").size() == 2);
+    CHECK(list.at("items").at(0).at("path") == "key");
+    CHECK(list.at("items").at(0).at("secret") == true);
+    CHECK(list.at("items").at(1).at("path") == "url");
+    CHECK(list.at("items").at(1).at("required") == true);
+
+    std::vector<std::string> urls;
+    parse({{"sources", {{{"url", "a"}}, {{"url", "b"}}}}}, &urls);
+    CHECK(urls == std::vector<std::string>{"a", "b"});
+    CHECK_THROWS_WITH(parse({{"sources", {{{"url", "a"}}, json::object()}}}, nullptr),
+                      Catch::Matchers::ContainsSubstring("sources[1].url: is required"));
+    CHECK_THROWS_WITH(parse({{"sources", {1}}}, nullptr),
+                      Catch::Matchers::ContainsSubstring("sources[0]: must be an object"));
+    CHECK_THROWS_WITH(parse({{"sources", "x"}}, nullptr),
+                      Catch::Matchers::ContainsSubstring("must be a list of objects"));
 }
