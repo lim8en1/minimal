@@ -52,7 +52,9 @@ namespace minimal::client::app {
 
 // Also the TUI's own HostActions: what plugins queue (HostActionQueue) is
 // applied to it on the UI thread.
-class TuiApp final : private plugins::HostActions, private plugins::PromptEditorHost {
+class TuiApp final : private plugins::HostActions,
+                     private plugins::PromptEditorHost,
+                     private plugins::ChatHost {
 public:
     explicit TuiApp(const ParsedArgs& args) : args_(args) {}
     ~TuiApp() { Shutdown(); }
@@ -138,6 +140,19 @@ private:
     plugins::PromptTimeline& History() override { return prompt_history_; }
     bool Matches(std::string_view action, const ftxui::Event& event) const override;
     void RequestRedraw() override;
+    // ChatHost (every tab's chat pane).
+    const plugins::MessageRendererRegistry& MessageRenderers() const override;
+    const plugins::ToolResultRendererRegistry& ToolRenderers() const override;
+    const plugins::DisplayRendererRegistry& DisplayRenderers() const override;
+    const plugins::MarkdownEngine& Markdown() const override;
+    std::string KeyFor(std::string_view action) const override;
+    void CancelQueued(const std::string& tab_id, std::uint64_t turn_id) override;
+    void Notice(const std::string& tab_id, const std::string& text) override;
+    // A tab's pane (the chat surface's Make, contained); the tab's existing
+    // one; a contained call into one.
+    std::unique_ptr<plugins::ChatPane> MakeChatPane(const std::string& tab_id);
+    plugins::ChatPane* PaneOf(const std::string& tab_id);
+    static void GuardChat(const std::function<void()>& call);
     void ApplyTheme(const std::string& name);
     std::vector<std::string> ListThemeNames() const;
     void ClearFocusedNotice();
@@ -146,7 +161,6 @@ private:
     void StageClose(std::vector<std::string> ids, bool quit);
     // The close/quit confirmation, through the "confirmation" prompt kind.
     ftxui::Component MakeQuitConfirm();
-    void ToggleFold(const std::string& tab_id, bool thinking);
     KeyContext MakeKeyContext();
     void RunPump();
 
@@ -201,8 +215,10 @@ private:
         bool subagent = false;
         std::shared_ptr<const std::vector<CommandCatalogEntry>> usable;
     } editor_catalog_;
-    // The editor's declared actions, for the keymap listing.
-    std::vector<plugins::PromptEditorAction> editor_actions_;
+    // The editor's and the chat surface's declared actions, for the keymap
+    // listing; the chat surface's ids, for the dispatch.
+    std::vector<plugins::DeclaredAction> editor_actions_;
+    std::vector<std::string> chat_action_ids_;
     ftxui::Component editor_;
 
     // --- modal slots: stable hosts whose inner component is swapped ---

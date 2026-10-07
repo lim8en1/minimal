@@ -1,4 +1,4 @@
-#include "minimal/client/view/chat_scroll_region.hpp"
+#include "chat_scroll_region.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -6,7 +6,7 @@
 #include <ftxui/screen/screen.hpp>
 #include <ftxui/util/autoreset.hpp>
 
-namespace minimal::client {
+namespace minimal::client::chat_view {
 
 namespace {
 
@@ -90,4 +90,4 @@ ftxui::Element ScrollRegion(ftxui::Element child,
     return std::make_shared<ScrollRegionNode>(std::move(child), std::move(state));
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::chat_view

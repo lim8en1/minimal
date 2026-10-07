@@ -25,7 +25,7 @@
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
-#include "minimal/client/view/chat_view.hpp"
+#include "chat_view_fixture.hpp"
 
 using namespace minimal::client;
 using namespace minimal_test;
@@ -419,7 +419,7 @@ TEST_CASE("chat view: an ask row starts expanded by its display kind, whatever t
     tool_result->add_content()->mutable_text()->set_text("1. Approach: the user selected: one");
     tool_result->set_display_json(AskDisplay("answered").dump());
 
-    ChatView view(theme, messages, tool_renderers, display_renderers);
+    minimal_test::ChatViewHarness view(theme, messages, tool_renderers, display_renderers);
     SessionState::Snapshot snap;
     snap.session_id = "session-ask";
     snap.transcript_version = 1;

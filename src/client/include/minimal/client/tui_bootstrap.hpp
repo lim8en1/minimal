@@ -126,7 +126,7 @@ struct TuiEnvironment {
 
     // Non-owning: `engine` points at registries.markdown_engine's own heap-owned
     // default/plugin engine; `chat_surface` at registries.chat_surface's exclusive
-    // surface (null if none claimed the slot, or if one threw on OnTheme).
+    // surface (a required slot: set once the build succeeded).
     plugins::MarkdownEngine* engine = nullptr;
     plugins::ChatSurface* chat_surface = nullptr;
 

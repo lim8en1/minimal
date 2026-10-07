@@ -33,13 +33,12 @@ add_library(minimal_client_core SHARED
     plugins/host_seams.cpp
     plugins/observer_events.cpp
     plugins/task_worker.cpp
-    view/chat_scroll_region.cpp
-    view/chat_view.cpp
     view/prompt_host.cpp
     view/status_bar.cpp
     view/picker_controller.cpp
     view/tab_ui.cpp
     view/tab_activity.cpp
+    view/chat_frame.cpp
     view/frame_renderer.cpp
     view/modal_host.cpp
     view/schema_form_model.cpp

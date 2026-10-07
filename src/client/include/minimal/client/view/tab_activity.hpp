@@ -14,6 +14,9 @@ namespace minimal::client {
 // The status vocabulary plugins read ("idle", "thinking", ...).
 const char* StateWord(SessionStateKind state);
 
+// One tool call as plugins see it.
+plugins::ToolActivity ToolActivityOf(const ToolExecutionState& tool);
+
 // One tab as plugins see it; its tool rows only if `tab` carries them.
 plugins::TabActivity ActivityOf(const AppState::TabSnapshot& tab);
 

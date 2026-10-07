@@ -27,183 +27,23 @@ TabMaintenance::TabMaintenance(Dependencies deps) : deps_(std::move(deps)) {}
 // the result within the same call -- it returns the snapshot UNCHANGED, and
 // the worker's completion (BumpUiVersion) wakes the pump for a frame that
 // will see the applied page in a freshly-taken snapshot.
-void TabMaintenance::EnsureChatView(const std::string& tab_id, TabUi& ui) {
-    if (ui.chat) return;
-    // The keymap's hints, not the ChatView defaults: a remapped
-    // chat.toggle_collapse must reach the row hints.
-    ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
-                                         deps_.renderer_registry, deps_.display_registry,
-                                         deps_.toggle_collapse_hint, deps_.load_older_hint);
-    ui.chat->SetFoldDefaults(deps_.fold_thinking_default, deps_.fold_tool_default);
-    // Click-to-cancel for QUEUED message rows: the view is per-tab, so the
-    // handler binds this tab's own id.
-    if (deps_.cancel_pending_turn) {
-        ui.chat->SetCancelPendingHandler([this, tab_id](std::uint64_t turn_id) {
-            deps_.cancel_pending_turn(tab_id, turn_id);
-        });
-    }
-}
-
-void TabMaintenance::SetFoldDefaults(std::optional<int> thinking, std::optional<int> tool) {
-    if (thinking) deps_.fold_thinking_default = *thinking;
-    if (tool) deps_.fold_tool_default = *tool;
+void TabMaintenance::EnsureChatPane(const std::string& tab_id, TabUi& ui) {
+    if (ui.chat || !deps_.make_chat_pane) return;
+    ui.chat = deps_.make_chat_pane(tab_id);
 }
 
 SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
                                                 SessionState::Snapshot snap) {
-    // Gated SOLELY on EffectiveChatSurface(): it is what actually renders the
-    // tab body (FrameRenderer::Render reads the same accessor), and it turns
-    // null the moment a registered surface throws and
-    // AppState::DisableChatSurface runs -- the frame falls back to the core
-    // ChatView right then. A prior revision also checked a by-value copy of
-    // the registered surface pointer (constant since bootstrap), which made
-    // this return early forever once a surface was ever registered, even
-    // after DisableChatSurface flipped the effective accessor back to null:
-    // the core view the frame fell back to never got fed a streaming delta
-    // or a scrollback refresh, so the fallback rendered nothing, permanently.
-    if (deps_.app.EffectiveChatSurface() != nullptr) return snap;
     // A sessionless tab (no session yet) has nothing streamed or persisted:
     // no ChatView, no streaming bookkeeping, no refresh. Its SessionState
     // gains an id the moment EnsureSession resolves, and the next pass runs.
     if (snap.session_id.empty()) return snap;
     TabUi& ui = deps_.tab_ui[tab_id];
 
-    // The chat view itself: constructed once per tab, lazily -- a tab that
-    // never leaves the start-view banner (a fresh session with nothing
-    // streamed or persisted yet) may never need one, but building it here
-    // rather than in Render() means Render() is a pure read of ui.chat for
-    // every tab this method has processed at least once (Render() keeps its
-    // own null-guarded fallback for the one documented race where it hasn't
-    // -- see frame_renderer.cpp).
-    EnsureChatView(tab_id, ui);
-
-    const auto make_stream = [&] { return deps_.engine.MakeStream(); };
-
-    // One stream slot per live TEXT segment (track C4), keyed by the
-    // segment's stable id (LiveTurnSegment::segment_id) -- NOT its vector
-    // index. The old index-aligned vector assumed "segments only ever APPEND
-    // within a turn", but three paths REMOVE without bumping turn_seq:
-    // LiveTurnBuffer::Retire (a mid-turn page apply), the count cap's
-    // trim, and ClearStreamingIfCurrentTurn. The survivors shift down, an
-    // index-keyed slot's `seen` watermark then named a DIFFERENT segment,
-    // and AppendDelta(text.substr(seen)) spliced the tail of one segment
-    // onto another segment's buffered view -- corrupted for the rest of the
-    // turn ("random unrelated text" at the end of long thinking blocks;
-    // self-healing only because the next turn's turn_seq bump cleared the
-    // whole vector). Ids are never reused, and removals are permanent
-    // within a turn, so a slot whose id is absent from this pass's snapshot
-    // is dead -- the GC below retires it, which also replaces the old
-    // wholesale turn-boundary clear.
-    std::vector<uint64_t> live_text_ids;
-    live_text_ids.reserve(snap.live_segments.size());
-    for (const auto& segment : snap.live_segments) {
-        if (segment.kind != LiveTurnSegment::Kind::Text) continue;
-        live_text_ids.push_back(segment.segment_id);
-        LiveTextStreamSlot* slot = nullptr;
-        for (auto& candidate : ui.live_text_streams) {
-            if (candidate.segment_id == segment.segment_id) {
-                slot = &candidate;
-                break;
-            }
-        }
-        if (slot == nullptr) {
-            ui.live_text_streams.push_back(
-                LiveTextStreamSlot{.segment_id = segment.segment_id});
-            slot = &ui.live_text_streams.back();
-        }
-        // The snapshot's copy-on-publish view (state.hpp LiveTurnSegment) --
-        // shared with every other consumer of this segment's current text;
-        // only the actively-appending segment republishes per delta.
-        const std::string& text = segment.Text();
-        // A plugin MarkdownEngine is not trusted to return normally: a
-        // throw here used to kill the whole TUI mid-turn. MakeStream()
-        // throwing leaves slot.view null -- the guard above naturally
-        // retries next pass, since nothing below has consumed `text` yet.
-        if (!slot->view) {
-            try {
-                slot->view = make_stream();
-            } catch (const std::exception& error) {
-                common::DefaultLogger().warn("markdown engine MakeStream threw: {}",
-                                             error.what());
-            } catch (...) {
-                common::DefaultLogger().warn(
-                    "markdown engine MakeStream threw a non-standard exception");
-            }
-        }
-        if (slot->view && text.size() > slot->seen) {
-            try {
-                slot->view->AppendDelta(std::string_view(text).substr(slot->seen));
-                slot->seen = text.size();
-                // New text on an ALREADY-finalized segment means a re-arm at
-                // the engine level (the engine stream's AppendDelta, track
-                // A1) -- mirror that here too, so this segment gets its own
-                // fresh authoritative reparse when it next finalizes, exactly
-                // like the engine's own re-arm.
-                slot->finalized_for_turn = false;
-            } catch (const std::exception& error) {
-                common::DefaultLogger().warn("markdown stream AppendDelta threw: {}",
-                                             error.what());
-                // Discard the (possibly now-corrupted) stream rather than
-                // keep feeding it every frame; slot.seen resets too, so the
-                // fresh stream MakeStream() builds next pass replays the
-                // FULL accumulated text from scratch instead of missing the
-                // span this call was trying to append.
-                slot->view.reset();
-                slot->seen = 0;
-            } catch (...) {
-                common::DefaultLogger().warn(
-                    "markdown stream AppendDelta threw a non-standard exception");
-                slot->view.reset();
-                slot->seen = 0;
-            }
-        }
-    }
-    // GC: slots whose segment is gone. Safe against a transient absence
-    // because segments never reappear: every removal path (retirement,
-    // trim, turn-aware clear) is permanent, and ids are never reused.
-    ui.live_text_streams.erase(
-        std::remove_if(ui.live_text_streams.begin(), ui.live_text_streams.end(),
-                       [&](const LiveTextStreamSlot& slot) {
-                           return std::find(live_text_ids.begin(), live_text_ids.end(),
-                                            slot.segment_id) == live_text_ids.end();
-                       }),
-        ui.live_text_streams.end());
-    // The MOST RECENT text segment's authoritative reparse (the engine
-    // contract: Finalize replaces artifacts from mid-stream unclosed spans).
-    // is_streaming_finalized fires once per BLOCK boundary, and blocks are
-    // strictly sequential (never interleaved with each other -- only with
-    // tool activity, which is what live_segments itself now records), so it
-    // always names the LAST text segment in the timeline; an earlier one
-    // already got its own Finalize when ITS block ended.
-    if (snap.is_streaming_finalized) {
-        for (std::size_t i = snap.live_segments.size(); i-- > 0;) {
-            if (snap.live_segments[i].kind != LiveTurnSegment::Kind::Text) continue;
-            LiveTextStreamSlot* slot = nullptr;
-            for (auto& candidate : ui.live_text_streams) {
-                if (candidate.segment_id == snap.live_segments[i].segment_id) {
-                    slot = &candidate;
-                    break;
-                }
-            }
-            if (slot != nullptr && slot->view && !slot->finalized_for_turn) {
-                try {
-                    slot->view->Finalize();
-                    slot->finalized_for_turn = true;
-                } catch (const std::exception& error) {
-                    common::DefaultLogger().warn("markdown stream Finalize threw: {}",
-                                                 error.what());
-                    slot->view.reset();
-                    slot->seen = 0;
-                } catch (...) {
-                    common::DefaultLogger().warn(
-                        "markdown stream Finalize threw a non-standard exception");
-                    slot->view.reset();
-                    slot->seen = 0;
-                }
-            }
-            break;
-        }
-    }
+    // The chat pane: built once per tab, lazily -- here rather than in
+    // Render(), so Render() only reads ui.chat for every tab this method has
+    // processed (it keeps a fallback for the one race where it hasn't).
+    EnsureChatPane(tab_id, ui);
 
     // Resolve any outstanding refresh and act on the version mismatch --
     // the whole decision (submit / latch / mark-current, success vs

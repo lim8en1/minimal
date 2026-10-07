@@ -131,17 +131,20 @@ public:
     }
 };
 
+class StubPane final : public ChatPane {
+public:
+    ftxui::Element Render(const ChatFrame&) override { return ftxui::text("stub pane"); }
+    void OnAction(std::string_view) override {}
+    bool OnMouse(const ftxui::Event&) override { return false; }
+    void OnSubmitted() override {}
+};
+
 class StubSurface final : public ChatSurface {
 public:
-    const Spec& spec() const override { return spec_; }
-    ftxui::Component component(const std::string&) override {
-        return ftxui::Renderer([] { return ftxui::text("stub surface"); });
+    std::vector<DeclaredAction> Actions() const override { return {}; }
+    std::unique_ptr<ChatPane> Make(ChatHost&, const std::string&, const Theme&) override {
+        return std::make_unique<StubPane>();
     }
-    void OnEvent(const v1::ServerEvent&) override {}
-    void OnTheme(const Theme&) override {}
-
-private:
-    Spec spec_{"stub", "Stub"};
 };
 
 class StubEngine final : public MarkdownEngine {
@@ -430,7 +433,7 @@ TEST_CASE("the widget kit: whichever plugin holds the slot draws for every view;
     for (const auto& hook : RegistryHooks(registries)) {
         if (hook.required) required.emplace_back(hook.label);
     }
-    CHECK(required == std::vector<std::string>{"widget_kit", "prompt_editor"});
+    CHECK(required == std::vector<std::string>{"chat_surface", "widget_kit", "prompt_editor"});
     CHECK(registries.widget_kit.empty());
 }
 
@@ -633,8 +636,7 @@ TEST_CASE("the client loader loads a real plugin through a real dlopen",
     }
     CHECK(claimed_thinking);
 
-    // The exclusive slots were NOT touched by this fixture: the core defaults
-    // still stand.
+    // The exclusive slots were NOT touched by this fixture.
     CHECK_FALSE(fixtures->registries.chat_surface.held());
     CHECK_FALSE(fixtures->registries.markdown_engine.held());
 }
@@ -656,14 +658,6 @@ TEST_CASE("a second plugin with a loaded plugin's name is refused before any hoo
     CHECK(fixtures->registries.markdown_engine.held());
     CHECK(fixtures->registries.markdown_engine.holder() == "fixture-client-exclusive");
     REQUIRE(fixtures->registries.chat_surface.get() != nullptr);
-
-    // The surface receives what the host pushes (the OnEvent contract): a
-    // push must be accepted without blocking or crashing; per-surface state
-    // observability is the app-state tier's business.
-    v1::ServerEvent event;
-    event.set_session_id("s-1");
-    event.mutable_session_metadata()->set_session_id("s-1");
-    fixtures->registries.chat_surface.get()->OnEvent(event);
 }
 
 TEST_CASE("a partial registration is rolled back, and a later plugin reusing "

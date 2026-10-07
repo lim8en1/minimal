@@ -50,7 +50,7 @@ TEST_CASE("Load on a fresh config dir yields the defaults", "[keybindings]") {
     // slate the user has to author before anything works.
     CHECK(kb.KeyFor("tab.next") == "alt+down");
     CHECK(kb.KeyFor("app.quit") == "ctrl+q");
-    CHECK(kb.KeyFor("chat.scroll_bottom") == "pagedown");
+    CHECK(kb.KeyFor("chat.load_older") == "pageup");   // chat.scroll_bottom is the chat-view's
     CHECK(kb.KeyFor("nonexistent.action", "x") == "x");
 }
 

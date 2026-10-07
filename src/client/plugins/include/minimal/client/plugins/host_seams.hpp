@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <functional>
 #include <atomic>
 #include <chrono>
@@ -126,6 +127,10 @@ public:
     // lifetime.
     HostUi* UiFor(const std::string& plugin_name);
 
+    // Where each plugin's LoadState/SaveState file lives (<dir>/<plugin>.json);
+    // set before the plugins load. Unset: nothing is kept.
+    void SetStateDir(std::filesystem::path dir) { state_dir_ = std::move(dir); }
+
     // The UI thread's half: every view request queued since the last call,
     // oldest first.
     std::vector<ViewRequest> TakeViewRequests();
@@ -136,6 +141,7 @@ private:
 
     std::mutex bound_mtx_;
     std::map<std::string, std::unique_ptr<BoundUi>> bound_;  // by plugin name
+    std::filesystem::path state_dir_;
 
     UiReads reads_;  // set once before the UI loop; read on the UI thread only
     mutable std::mutex mtx_;

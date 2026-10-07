@@ -37,7 +37,6 @@
 #include "minimal/client/scrollback_refresh.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/ui_config.hpp"
-#include "minimal/client/view/chat_view.hpp"
 
 namespace minimal::client {
 
@@ -64,18 +63,6 @@ std::string ConfirmationChoice(const std::vector<std::string>& options,
                                const plugins::PromptReply& reply);
 
 struct TabUi {
-    // Track C4: one slot per live TEXT segment, keyed by the segment's
-    // stable id (LiveTurnSegment::segment_id) rather than its vector index.
-    // Replaces the single shared `streaming` view a pre-C4 tab held: text
-    // before and after a tool call are now SEPARATE segments, each needing
-    // its own debounce/finalize lifecycle, not one buffer the tool row
-    // rendered unconditionally after in full. The KEY matters because
-    // segments are removed mid-turn (the page apply's retirement, the count
-    // cap, the turn-aware clear) and survivors shift down: an index-keyed
-    // slot fed by seen-watermark appends spliced one segment's tail onto
-    // another segment's view -- the reported "random unrelated text" in
-    // long streaming turns. Maintain GCs slots whose id is no longer live.
-    std::vector<LiveTextStreamSlot> live_text_streams;
     // The permission modal's rebuild key: rebuilt only when a NEW
     // request_id arrives (its grant toggles live in the renderer's modal).
     std::string grants_for_request;
@@ -92,13 +79,11 @@ struct TabUi {
     ftxui::Component permission_modal;
     ftxui::Component confirmation_modal;
     ftxui::Component prompt_modal;
-    ftxui::Component surface_body;          // the chat surface's tab body (when slotted)
-    plugins::ChatSurface* surface_for = nullptr;   // which surface instance built it
-    // Per-tab ChatView: its row cache is keyed by transcript_version, a
-    // PER-SESSION counter starting at 0 -- one shared instance served tab
-    // A's cached rows as tab B's transcript whenever the two versions
-    // collided. One view per tab makes the invariant true by construction.
-    std::unique_ptr<ChatView> chat;
+    // The tab's chat pane (the chat surface's, one per tab): a view's row
+    // cache keyed by a per-session transcript_version served tab A's rows as
+    // tab B's whenever the versions collided -- one pane per tab makes that
+    // impossible by construction. Null until the tab first needs one.
+    std::unique_ptr<plugins::ChatPane> chat;
     // VIEW-display notice side-effects fire ONCE per notice, keyed on the
     // notice's sequence number (see TabMaintenance::HandleNotice).
     uint64_t handled_notice_seq = 0;
@@ -125,16 +110,6 @@ class TabMaintenance {
 public:
     struct Dependencies {
         AppState& app;
-        plugins::MarkdownEngine& engine;
-        // No by-value ChatSurface* here: Maintain() gates SOLELY on
-        // AppState::EffectiveChatSurface(), which is what actually renders
-        // the tab body (FrameRenderer::Render reads the same accessor). A
-        // constant-since-bootstrap copy used to be checked ALONGSIDE it,
-        // which made Maintain() skip its own bookkeeping forever once a
-        // surface was ever registered -- including after
-        // AppState::DisableChatSurface flipped the effective accessor back
-        // to null and the frame fell back to the core ChatView, which then
-        // never got fed a streaming delta or a scrollback refresh.
         plugins::ViewRegistry& view_registry;
         std::vector<plugins::PluginViewEntry>& plugin_views;
         std::shared_ptr<ftxui::Component>& plugin_modal_child;
@@ -163,9 +138,6 @@ public:
         // request" and rebuilding a modal component are event-path
         // decisions, not render-path ones).
         const Theme& theme;
-        plugins::MessageRendererRegistry& message_registry;
-        plugins::ToolResultRendererRegistry& renderer_registry;
-        plugins::DisplayRendererRegistry& display_registry;
         // Plugin prompts are drawn by the renderer registered for their kind;
         // an unclaimed kind is answered UNAVAILABLE (see MaintainModals).
         const plugins::PromptRendererRegistry& prompt_registry;
@@ -175,22 +147,9 @@ public:
         bool& show_confirmation;
         std::shared_ptr<ftxui::Component>& prompt_child;
         bool& show_prompt;
-        // The resolved chat.toggle_collapse / chat.load_older bindings, for
-        // the ChatViews built here (their row hints and scrollback marker
-        // name these keys).
-        std::string toggle_collapse_hint = "alt+c";
-        std::string load_older_hint = "pageup";
-        // ui.json's fold_thinking/fold_tools (kFoldDefaultAuto when unset),
-        // seeded into every ChatView built here -- the startup fold tier
-        // IsCollapsed consults below the global collapse choice.
-        int fold_thinking_default = kFoldDefaultAuto;
-        int fold_tool_default = kFoldDefaultAuto;
-        // Click-to-cancel for a QUEUED message row: sends CancelQueuedTurn
-        // for (this tab's session, turn_id). Null when unset -- queued rows
-        // then render without the cancel affordance. `tab_id` (not session
-        // id): the ChatView is built under a tab's key and may exist before
-        // the session does.
-        std::function<void(const std::string& tab_id, std::uint64_t turn_id)> cancel_pending_turn;
+        // Makes tab `tab_id`'s chat pane (the chat surface's Make, contained:
+        // null when it threw).
+        std::function<std::unique_ptr<plugins::ChatPane>(const std::string& tab_id)> make_chat_pane;
     };
 
     explicit TabMaintenance(Dependencies deps);
@@ -208,16 +167,10 @@ public:
     // into this object's own members -- valid as long as this TabMaintenance
     // is (RunTui declares one plain local and never relocates it, same
     // requirement as PickerController/KeyContext's dependents).
-    // THE ChatView builder for a tab (no-op when `ui` already has one): the
+    // THE chat pane builder for a tab (no-op when `ui` already has one): the
     // maintenance pass calls it for the focused tab, and FrameRenderer for
     // the race where a frame renders a tab this pass has not processed yet.
-    // One builder, so both paths get the same hints, fold defaults and
-    // click-to-cancel handler.
-    void EnsureChatView(const std::string& tab_id, TabUi& ui);
-
-    // The fold toggles' new kind defaults, for ChatViews built from now on
-    // (the existing ones flip themselves). nullopt leaves a kind unchanged.
-    void SetFoldDefaults(std::optional<int> thinking, std::optional<int> tool);
+    void EnsureChatPane(const std::string& tab_id, TabUi& ui);
 
     const std::string& Focused() const { return focused_; }
     const SessionState::Snapshot& FocusedDetails() const { return focused_details_; }

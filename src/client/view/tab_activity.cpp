@@ -42,6 +42,9 @@ std::uint64_t KeyOf(const AppState& app, const std::vector<AppState::TabSnapshot
     return key;
 }
 
+
+}  // namespace
+
 plugins::ToolActivity ToolActivityOf(const ToolExecutionState& tool) {
     plugins::ToolActivity out;
     out.name = LiveToolName(tool);
@@ -51,10 +54,10 @@ plugins::ToolActivity ToolActivityOf(const ToolExecutionState& tool) {
     out.started_at_unix_ms = tool.started_at_unix_ms.count();
     out.duration_ms = tool.started ? -1 : tool.duration.count();
     out.output = tool.buffered_output;
+    out.tool_use_id = tool.tool_use_id;
+    out.input = tool.input;
     return out;
 }
-
-}  // namespace
 
 plugins::TabActivity ActivityOf(const AppState::TabSnapshot& tab) {
     plugins::TabActivity activity;

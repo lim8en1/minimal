@@ -1,5 +1,7 @@
 #include "minimal/client/plugins/host_seams.hpp"
 
+#include "minimal/client/config_file_io.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
@@ -343,8 +345,25 @@ public:
     void RequestRedrawAfter(std::chrono::milliseconds delay) override {
         host_.RequestRedrawAfter(delay);
     }
+    nlohmann::json LoadState() const override {
+        if (host_.state_dir_.empty()) return nullptr;
+        std::string text;
+        if (!TryReadConfigFile(StatePath(), &text)) return nullptr;
+        return nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+    }
+    void SaveState(const nlohmann::json& state) override {
+        if (host_.state_dir_.empty()) return;
+        std::error_code ec;
+        std::filesystem::create_directories(host_.state_dir_, ec);
+        if (!WriteConfigFileAtomic(StatePath(), state.dump(2))) {
+            common::DefaultLogger().warn("client plugin '{}': could not save its state to {}",
+                                         plugin_, StatePath().string());
+        }
+    }
 
 private:
+    std::filesystem::path StatePath() const { return host_.state_dir_ / (plugin_ + ".json"); }
+
     HostFocusProvider& host_;
     std::string plugin_;
 };

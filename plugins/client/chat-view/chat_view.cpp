@@ -1,4 +1,4 @@
-#include "minimal/client/view/chat_view.hpp"
+#include "chat_view.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -7,14 +7,13 @@
 #include <set>
 
 #include "minimal/client/utf8.hpp"
-#include "minimal/client/view/live_tool_row.hpp"
 #include "minimal/client/view/tool_status.hpp"
 #include "minimal/common/env.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/units.hpp"
 #include "minimal/client/policy.hpp"
 
-namespace minimal::client {
+namespace minimal::client::chat_view {
 
 namespace {
 
@@ -156,7 +155,7 @@ bool ChatView::IsCollapsed(const RowKey& key, const ChatRow& row) const {
     return CollapsedByDefault(row);
 }
 
-void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
+void ChatView::RebuildRows(const plugins::ChatFrame& snapshot) {
     using namespace ftxui;
     // The row cache, the row cursor and any per-row collapse override are all
     // PER-SESSION: a transcript seq from another tab's snapshot is a
@@ -398,18 +397,40 @@ ftxui::Element ChatView::RenderLiveWithPlugin(const ChatRow& row) const {
     return nullptr;
 }
 
-ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const {
+namespace {
+
+ToolStatus StatusOf(const plugins::ToolActivity& tool) {
+    if (tool.running) return ToolStatus::Running;
+    return tool.failed ? ToolStatus::Failed : ToolStatus::Ok;
+}
+
+// Elapsed so far while running (without a clock a stuck step and a running
+// one looked identical), the final duration once done.
+std::string TimingOf(const plugins::ToolActivity& tool) {
+    if (tool.running) {
+        if (tool.started_at_unix_ms < 0) return {};
+        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+        return FormatDuration(std::max<std::int64_t>(0, now_ms - tool.started_at_unix_ms));
+    }
+    return tool.duration_ms >= 0 ? FormatDuration(tool.duration_ms) : std::string();
+}
+
+}  // namespace
+
+ftxui::Element ChatView::RenderLiveToolRow(const plugins::ToolActivity& tool) const {
     using namespace ftxui;
     Elements line;
-    line.push_back(ToolHeadline(LiveToolStatus(tool), LiveToolName(tool), theme_));
-    if (const std::string summary = LiveToolSummary(tool); !summary.empty()) {
+    line.push_back(ToolHeadline(StatusOf(tool), tool.name, theme_));
+    if (const std::string& summary = tool.summary; !summary.empty()) {
         // The one part allowed to shrink: a long summary used to push the
         // timing field after it off the edge of the row.
         line.push_back(text("  " + summary) | Muted(theme_) | flex_shrink);
     }
     // Without a clock a stuck step and a running one looked identical until
     // the whole turn ended.
-    if (const std::string timing = LiveToolTiming(tool); !timing.empty()) {
+    if (const std::string timing = TimingOf(tool); !timing.empty()) {
         line.push_back(text("  " + timing) | Muted(theme_));
     }
     Element row = hbox(std::move(line));
@@ -420,8 +441,8 @@ ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const
     // a live tool call with no "when did this start" until the whole turn
     // finished. started_at_unix_ms is already on hand the instant the call
     // begins, so stamp it here too, same toggle and style as persisted rows.
-    if (show_timestamps_ && tool.started_at_unix_ms.count() >= 0) {
-        const auto stamp = FormatClockTime(tool.started_at_unix_ms.count());
+    if (show_timestamps_ && tool.started_at_unix_ms >= 0) {
+        const auto stamp = FormatClockTime(tool.started_at_unix_ms);
         if (!stamp.empty()) {
             row = hbox({std::move(row) | flex,
                         text(stamp) | color(theme_.ColorFor("system_message"))});
@@ -436,9 +457,9 @@ ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const
 // entry carries the truncated flag: a mismatch (or a size smaller than the
 // rendered watermark, only truncation can shrink) forces a full rebuild,
 // where the settled-lines cache starts over from byte 0.
-ftxui::Element ChatView::RenderLiveThinking(const LiveTurnSegment& segment) {
+ftxui::Element ChatView::RenderLiveThinking(const plugins::ChatLiveSegment& segment) {
     using namespace ftxui;
-    const std::string& body_text = segment.Text();
+    const std::string& body_text = (*segment.text);
     ThinkingRenderCacheEntry& entry = thinking_render_cache_[segment.segment_id];
     if (entry.rendered_bytes > body_text.size() ||
         entry.truncated != segment.text_truncated) {
@@ -517,7 +538,7 @@ bool ChatView::VirtualizationEnabled() {
     return enabled;
 }
 
-ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
+ftxui::Element ChatView::Render(const plugins::ChatFrame& snapshot,
                                 const std::vector<LiveTextStreamSlot>& live_text_streams) {
     using namespace ftxui;
 
@@ -965,7 +986,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         std::vector<uint64_t> live_thinking_ids;
         live_thinking_ids.reserve(snapshot.live_segments.size());
         for (const auto& segment : snapshot.live_segments) {
-            if (segment.kind == LiveTurnSegment::Kind::Thinking) {
+            if (segment.kind == plugins::ChatLiveSegment::Kind::Thinking) {
                 live_thinking_ids.push_back(segment.segment_id);
             }
         }
@@ -991,12 +1012,12 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     for (auto it = live_box_slots_.begin(); it != live_box_slots_.end();) {
         const bool live = std::any_of(
             snapshot.live_segments.begin(), snapshot.live_segments.end(),
-            [&](const LiveTurnSegment& segment) { return segment.segment_id == it->first; });
+            [&](const plugins::ChatLiveSegment& segment) { return segment.segment_id == it->first; });
         it = live ? std::next(it) : live_box_slots_.erase(it);
     }
     for (std::size_t i = 0; i < snapshot.live_segments.size(); ++i) {
         const auto& segment = snapshot.live_segments[i];
-        if (segment.kind == LiveTurnSegment::Kind::Text) {
+        if (segment.kind == plugins::ChatLiveSegment::Kind::Text) {
             // The slot is found by the segment's stable id, not this loop's
             // index: mid-turn removals (the page apply's retirement, the
             // count-cap trim) shift indices -- see TabMaintenance::Maintain.
@@ -1043,7 +1064,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             column.push_back(spy_live(segment.segment_id,
                                       WithGutter(vbox(std::move(block)), assistant_gutter)));
             column.push_back(text(" "));
-        } else if (segment.kind == LiveTurnSegment::Kind::Thinking) {
+        } else if (segment.kind == plugins::ChatLiveSegment::Kind::Thinking) {
             // Reasoning streams as plain quiet text, same look as the persisted
             // expanded thinking row (core_registrations.cpp's
             // RenderThinking). No LiveTextStreamSlot and no markdown engine:
@@ -1053,8 +1074,8 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // changed frame re-split the entire accumulated block into word
             // Elements up to 20x/s, which froze the frame loop on a long
             // reasoning stream.
-            if (segment.Text().empty()) continue;
-            ChatRow live_row{.kind = ChatRowKind::Thinking, .text = segment.Text()};
+            if ((*segment.text).empty()) continue;
+            ChatRow live_row{.kind = ChatRowKind::Thinking, .text = (*segment.text)};
             if (Element plugin_row = RenderLiveWithPlugin(live_row)) {
                 column.push_back(spy_live(segment.segment_id,
                                           WithGutter(std::move(plugin_row), assistant_gutter)));
@@ -1068,25 +1089,15 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                     vbox({text("thinking") | color(theme_.ColorFor("thinking")), thinking_body}),
                     assistant_gutter)));
             column.push_back(text(" "));
-        } else if (segment.kind == LiveTurnSegment::Kind::Tool) {
-            const ToolExecutionState* tool = nullptr;
-            for (const auto& candidate : snapshot.tools) {
-                if (candidate.tool_use_id == segment.tool_use_id) {
-                    tool = &candidate;
-                    break;
-                }
-            }
-            // Not found: OnTurnCompleted swept the row, and the marker is
-            // waiting for the post-turn refresh to retire it. It carries the
-            // row's final state for exactly this window -- rendering nothing
-            // here is how a late refresh made the turn's tool calls vanish.
-            if (tool == nullptr) tool = segment.final_tool.get();
+        } else if (segment.kind == plugins::ChatLiveSegment::Kind::Tool) {
+            // Core resolved the call: live, or its final state (ChatFrame).
+            const plugins::ToolActivity* tool = segment.tool ? &*segment.tool : nullptr;
             if (tool != nullptr) {
                 ChatRow live_row{.kind = ChatRowKind::ToolActivity,
-                                 .tool_name = tool->tool_name,
+                                 .tool_name = tool->name,
                                  .tool_input = *tool->input,
-                                 .tool_is_error = tool->is_error,
-                                 .tool_pending = tool->started};
+                                 .tool_is_error = tool->failed,
+                                 .tool_pending = tool->running};
                 Element plugin_row = RenderLiveWithPlugin(live_row);
                 column.push_back(spy_live(segment.segment_id,
                                           WithGutter(plugin_row ? std::move(plugin_row)
@@ -1095,7 +1106,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                 // Consecutive calls stack as a list, like the settled rows.
                 const bool next_is_tool = i + 1 < snapshot.live_segments.size() &&
                                           snapshot.live_segments[i + 1].kind ==
-                                              LiveTurnSegment::Kind::Tool;
+                                              plugins::ChatLiveSegment::Kind::Tool;
                 if (!next_is_tool) column.push_back(text(" "));
             }
         }
@@ -1136,7 +1147,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     scroll_state_->desired_offset_from_bottom = scroll_from_bottom_lines_;
     {
         const std::size_t live_tail =
-            snapshot.live_segments.empty() ? 0 : snapshot.live_segments.back().Text().size();
+            snapshot.live_segments.empty() ? 0 : snapshot.live_segments.back().text->size();
         const auto signature = std::make_tuple(
             row_keys_.empty() ? RowKey{} : row_keys_.back(), snapshot.live_segments.size(),
             live_tail, snapshot.pending_user_messages.size());
@@ -1418,4 +1429,4 @@ bool ChatView::CancelPendingAt(int screen_y) {
     return false;
 }
 
-}  // namespace minimal::client
+}  // namespace minimal::client::chat_view

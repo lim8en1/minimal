@@ -29,19 +29,21 @@
 #include <utility>
 #include <vector>
 
+#include "chat_scroll_region.hpp"
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/theme.hpp"
-#include "minimal/client/state.hpp"
-#include "minimal/client/ui_config.hpp"
-#include "minimal/client/view/chat_scroll_region.hpp"
 
-namespace minimal::client {
+namespace minimal::client::chat_view {
+
+// The fold-default vocabulary: auto (the kind's own default -- chat_model's
+// CollapsedByDefault), start expanded, start collapsed.
+enum : int { kFoldDefaultAuto, kFoldExpanded, kFoldCollapsed };
 
 // One live TEXT segment's streaming view, owned and fed by TabMaintenance
 // (the event path -- track C4), read by ChatView::Render (which must stay a
 // pure read, like every other render-path consumer here). Keyed by the
-// segment's stable id (LiveTurnSegment::segment_id), NOT its vector index:
+// segment's stable id (ChatLiveSegment::segment_id), NOT its vector index:
 // segments are removed mid-turn (the page apply's retirement, the count-cap
 // trim, the turn-aware clear) and the survivors shift down -- an index-keyed
 // slot's seen-watermark then appended one segment's tail onto another
@@ -79,7 +81,7 @@ public:
     // has no slot -- or whose slot has no view -- renders nothing for THAT
     // text entry -- defensive only; Maintain builds a slot for every live
     // Text segment each pass.
-    ftxui::Element Render(const SessionState::Snapshot& snapshot,
+    ftxui::Element Render(const plugins::ChatFrame& snapshot,
                           const std::vector<LiveTextStreamSlot>& live_text_streams = {});
 
     // Moves the scroll position by `delta_steps` half-viewport steps,
@@ -216,7 +218,7 @@ public:
     bool CancelPendingAt(int screen_y);
 
 private:
-    void RebuildRows(const SessionState::Snapshot& snapshot);
+    void RebuildRows(const plugins::ChatFrame& snapshot);
     // ONE tool's live status row (the transcript's tool rows only reach a
     // page via a fetch, which mid-turn nothing submits) -- "tools as soon
     // as they are executed". Called once per Tool-kind live_segments entry,
@@ -224,7 +226,7 @@ private:
     // A live row drawn by the PLUGIN that claimed its kind (ctx.live set), or
     // null -- core's own live rendering then draws it.
     ftxui::Element RenderLiveWithPlugin(const ChatRow& row) const;
-    ftxui::Element RenderLiveToolRow(const ToolExecutionState& tool) const;
+    ftxui::Element RenderLiveToolRow(const plugins::ToolActivity& tool) const;
     // ONE live thinking segment's body. Replaces the old
     // paragraph(whole_accumulated_text) per changed frame: a long reasoning
     // block re-split into thousands of word Elements up to 20x/s was the
@@ -233,7 +235,7 @@ private:
     // it changed. The rendered tail is capped -- the transcript is
     // authoritative. Mutates thinking_render_cache_; NOT pure, like
     // RebuildRows' caches.
-    ftxui::Element RenderLiveThinking(const LiveTurnSegment& segment);
+    ftxui::Element RenderLiveThinking(const plugins::ChatLiveSegment& segment);
 
     // The row-windowing kill switch: MINIMAL_CHAT_VIRTUALIZATION=0 restores
     // the full-assembly path exactly (the same env-gating convention as the
@@ -465,7 +467,7 @@ private:
     std::function<void(std::uint64_t turn_id)> cancel_pending_;
 
     // The live turn's segments (text / thinking / tool), one persistent box
-    // slot each keyed by LiveTurnSegment::segment_id, so the scroll anchor
+    // slot each keyed by ChatLiveSegment::segment_id, so the scroll anchor
     // can hold a reader parked INSIDE the streaming reply: without them the
     // top line had no anchor candidate and every streamed line slid the
     // view. live_boxes_ is the set the last frame's tree contained.
@@ -477,4 +479,4 @@ private:
     std::chrono::steady_clock::time_point last_wheel_step_{};
 };
 
-}  // namespace minimal::client
+}  // namespace minimal::client::chat_view

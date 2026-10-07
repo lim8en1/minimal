@@ -13,7 +13,7 @@ namespace minimal::client::prompt_editor {
 
 class Factory final : public plugins::PromptEditorFactory {
 public:
-    std::vector<plugins::PromptEditorAction> Actions() const override;
+    std::vector<plugins::DeclaredAction> Actions() const override;
     std::unique_ptr<plugins::PromptEditor> Make(plugins::PromptEditorHost& host,
                                                 const Theme& theme) const override;
 };

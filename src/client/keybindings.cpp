@@ -56,47 +56,6 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"panel.focus.prev", "ctrl+alt+p"},
         {"tab.close", "ctrl+w"},
         {"chat.load_older", "pageup"},
-        // Not ctrl+up/ctrl+down: macOS binds those systemwide by default
-        // (Mission Control / Application Windows), intercepted before the
-        // terminal ever sees them. ctrl+alt+k/j pair with chat.row_up/
-        // chat.row_down's alt+k/alt+j (vim up/down) the same way
-        // ctrl+alt+c/t/o below already pair with alt+c/t/o -- a coarser
-        // variant of an existing alt+letter action.
-        {"chat.scroll_up", "ctrl+alt+k"},
-        {"chat.scroll_down", "ctrl+alt+j"},
-        // Not "end": HandleGlobalKey (keybinding_dispatch.cpp) runs BEFORE the
-        // prompt editor ever sees an event (app.cpp wraps session_view, which
-        // wraps the editor, in the CatchEvent that dispatches these), so
-        // claiming plain End here made it unreachable for the editor's own
-        // cursor-to-end-of-buffer use -- Home worked (nothing claims it),
-        // End silently didn't. ctrl+end/alt+end have no single-candidate
-        // encoding in key_event_parser.cpp's ParseKeySpec (only unmodified
-        // named keys resolve there), so binding either would parse to nothing
-        // and warn at startup rather than actually fixing this. PageDown
-        // pairs naturally with chat.load_older's PageUp instead, and is
-        // already a parseable, unclaimed named key.
-        {"chat.scroll_bottom", "pagedown"},
-        // Not shift+up/down: the key parser's arrow-key branch has no
-        // distinct encoding for shift+arrow (it degrades to plain arrow,
-        // ParseKeySpec's own "ctrl+/alt+/plain only" comment) -- alt+j/k
-        // (vim-style) are actually distinguishable events instead.
-        {"chat.row_up", "alt+k"},
-        {"chat.row_down", "alt+j"},
-        {"chat.toggle_collapse", "alt+c"},
-        // Not alt+shift+c: a modified LETTER only consults `shift` in the
-        // plain case (ParseKeySpec's single-letter branch) -- combined with
-        // alt it silently drops shift and collides with plain alt+c.
-        // ctrl+alt+c is an actually distinct encoding (CtrlAltLetter).
-        {"chat.toggle_collapse_all", "ctrl+alt+c"},
-        // The per-kind fold toggles: ctrl+alt+<letter>, the encoding family
-        // toggle_collapse_all already uses -- CtrlAltLetter is a single
-        // distinct event, and plain alt+t/alt+o stay free for tab-bar /
-        // filter actions. These flip the kind's STARTUP fold default
-        // (ui.json fold_thinking/fold_tools) and persist it back through
-        // SaveFoldDefaults, so the choice survives a restart.
-        {"chat.toggle_thinking_fold", "ctrl+alt+t"},
-        {"chat.toggle_tool_fold", "ctrl+alt+o"},
-        {"chat.toggle_timestamps", "alt+t"},
         {"turn.cancel", "escape"},
         {"app.quit", "ctrl+q"},
     };

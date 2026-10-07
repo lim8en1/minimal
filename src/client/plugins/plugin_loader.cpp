@@ -133,8 +133,9 @@ std::vector<RegistryHook> RegistryHooks(ClientRegistries& r) {
         // No key to collide on (one constant per observer).
         Hook("observers", "minimal_client_plugin_register_observers", r.observers),
         // An exclusive slot's key is the slot: a second claimant collides.
+        // Required: the chat is the TUI's body.
         Hook("chat_surface", "minimal_client_plugin_register_chat_surface", r.chat_surface,
-             "exclusive slot", Policy::kSlot),
+             "exclusive slot", Policy::kSlot, /*required=*/true),
         Hook("markdown_engine", "minimal_client_plugin_register_markdown_engine",
              r.markdown_engine, "exclusive slot", Policy::kSlot),
         // Required: every view draws with it.

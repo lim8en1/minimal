@@ -8,25 +8,23 @@ namespace {
 using minimal::client::Theme;
 namespace plugins = minimal::client::plugins;
 
+class FixturePane final : public plugins::ChatPane {
+public:
+    ftxui::Element Render(const plugins::ChatFrame& frame) override {
+        return ftxui::text("fixture pane " + frame.session_id);
+    }
+    void OnAction(std::string_view) override {}
+    bool OnMouse(const ftxui::Event&) override { return false; }
+    void OnSubmitted() override {}
+};
+
 class FixtureSurface final : public plugins::ChatSurface {
 public:
-    const plugins::ChatSurface::Spec& spec() const override { return spec_; }
-    ftxui::Component component(const std::string&) override {
-        return ftxui::Renderer([] { return ftxui::text("fixture surface"); });
+    std::vector<plugins::DeclaredAction> Actions() const override { return {}; }
+    std::unique_ptr<plugins::ChatPane> Make(plugins::ChatHost&, const std::string&,
+                                            const Theme&) override {
+        return std::make_unique<FixturePane>();
     }
-    void OnEvent(const minimal::v1::ServerEvent& event) override {
-        std::lock_guard<std::mutex> lock(mu_);
-        last_event_session = event.session_id();
-        ++event_count;
-    }
-    void OnTheme(const Theme&) override {}
-
-    std::mutex mu_;
-    std::string last_event_session;
-    int event_count = 0;
-
-private:
-    plugins::ChatSurface::Spec spec_{"fixture.surface", "Fixture Surface"};
 };
 
 class FixtureEngine final : public plugins::MarkdownEngine {

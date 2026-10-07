@@ -5,7 +5,7 @@
 #include <string_view>
 
 #include "minimal/client/keybinding_dispatch.hpp"
-#include "minimal/client/view/chat_view.hpp"
+#include "minimal/client/view/chat_frame.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/logger.hpp"
@@ -165,44 +165,7 @@ ftxui::Element FrameRenderer::Render() {
         if (ui_it == deps_.tab_ui.end()) return emptyElement();
         TabUi& ui = ui_it->second;
 
-        // The tab body: the exclusive chat surface when a plugin claimed
-        // the slot, the core chat view otherwise. The surface's component
-        // is fetched once per tab and cached; the surface's own OnEvent
-        // push carries its data (see DispatchToTab). EffectiveChatSurface
-        // returns null once a surface has thrown -- the core view takes
-        // over and the stale surface_body cache is dropped.
-        plugins::ChatSurface* effective_surface = deps_.app.EffectiveChatSurface();
-        if (effective_surface != nullptr) {
-            if (!ui.surface_body || ui.surface_for != effective_surface) {
-                // component() is plugin code like the Render() below: its
-                // throw used to escape the frame and std::terminate the TUI.
-                // Same containment -- the surface is disabled (the core chat
-                // view takes over next frame), and a body that never arrived
-                // simply skips this frame's body row.
-                try {
-                    ui.surface_body = effective_surface->component(focused);
-                    ui.surface_for = effective_surface;
-                } catch (const std::exception& error) {
-                    deps_.app.DisableChatSurface(error.what());
-                } catch (...) {
-                    deps_.app.DisableChatSurface(nullptr);
-                }
-            }
-            if (ui.surface_body != nullptr && ui.surface_for == effective_surface) {
-                try {
-                    rows.push_back(ui.surface_body->Render() | yframe | vscroll_indicator |
-                                   flex);
-                } catch (const std::exception& error) {
-                    deps_.app.DisableChatSurface(error.what());
-                    rows.push_back(text(" chat surface plugin threw · the core chat view "
-                                        "takes over") | color(deps_.theme.ColorFor("error")));
-                } catch (...) {
-                    deps_.app.DisableChatSurface(nullptr);
-                    rows.push_back(text(" chat surface plugin threw · the core chat view "
-                                        "takes over") | color(deps_.theme.ColorFor("error")));
-                }
-            }
-        } else {
+        {
             // A FRESH session -- nothing persisted, nothing streaming, no
             // earlier pages -- renders the start-view banner in the tab
             // body instead of an empty transcript. has_earlier_messages
@@ -231,35 +194,21 @@ ftxui::Element FrameRenderer::Render() {
             if (!start.empty()) {
                 for (auto& element : start) rows.push_back(std::move(element) | flex);
             } else {
-                // ui.chat is normally built by TabMaintenance::Maintain
-                // (Part 3.2), but Maintain() returns EARLY -- skipping that
-                // -- whenever GetDetails raced a tab that just closed
-                // (snap.session_id empty) or a chat-surface plugin currently
-                // owns the tab; a frame landing here with no start view
-                // registered (so `start` stayed empty) then found it still
-                // null on its very first render. Lazily built here too, so
-                // it is never a null deref regardless of which path built
-                // it. ui.live_text_streams needs no such fallback (track
-                // C4): ChatView::Render defensively skips any live segment
-                // whose stable id has no slot for, so an empty (or short)
-                // vector here just means "nothing live rendered yet" --
-                // exactly right for this same race, not a null-deref risk.
-                if (!ui.chat && deps_.ensure_chat_view) deps_.ensure_chat_view(focused, ui);
-                // ChatView::Render wraps its own ScrollRegion + vscroll_
-                // indicator (explicit line-offset scrolling -- see
-                // chat_scroll_region.hpp); yframe's focus-driven scroll
-                // would fight it. flex is the only outer decoration left.
-                rows.push_back(ui.chat->Render(snap, ui.live_text_streams) | flex);
-                // Scrolled up (or parked on a row) while the turn is still
-                // producing, or after output already landed below the
-                // viewport: nothing else says so. Outside the yframe, so it
-                // stays on screen.
-                const bool new_output_below =
-                    ui.chat->IsScrolledAway() && (turn_busy || ui.chat->HasUnseenBelow());
-                if (new_output_below) {
-                    rows.push_back(text(" ↓ new output below · " + deps_.scroll_bottom_hint +
-                                        " to follow") |
-                                   color(deps_.theme.ColorFor("attention")));
+                // ui.chat is normally built by TabMaintenance::Maintain, but a
+                // frame can reach a tab that pass skipped (it raced a closing
+                // tab, or the tab is sessionless): built here too.
+                if (!ui.chat && deps_.ensure_chat_pane) deps_.ensure_chat_pane(focused, ui);
+                // Plugin code on the frame: a throw shows an error line for
+                // this tab, never ends the TUI.
+                Element body;
+                if (ui.chat != nullptr &&
+                    GuardPluginCall("chat:" + focused, "the chat view",
+                                    [&] { body = ui.chat->Render(ChatFrameFrom(snap)); }) &&
+                    body != nullptr) {
+                    rows.push_back(std::move(body) | flex);
+                } else {
+                    rows.push_back(text(" the chat view failed to draw this tab") |
+                                   color(deps_.theme.ColorFor("error")) | flex);
                 }
             }
         }

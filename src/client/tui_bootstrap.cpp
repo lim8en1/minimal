@@ -66,6 +66,11 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     out.host_widget_kit = plugins::MakeHostWidgetKit(out.registries.widget_kit);
     out.host_highlighter = std::make_unique<plugins::HostCodeHighlighter>();
     out.host_markdown = plugins::MakeHostMarkdownEngine(out.registries.markdown_engine);
+    // Plugins' kept state (HostUi::SaveState), beside the client's own data.
+    try {
+        out.host_focus_provider->SetStateDir(common::DataDir() / "client-plugin-state");
+    } catch (const std::exception&) {   // no $HOME: nothing kept across runs
+    }
     out.host_actions = std::make_unique<plugins::HostActionQueue>(out.host_focus_provider.get());
 
 
@@ -270,6 +275,10 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     for (const auto& action : out.registries.prompt_editor.get()->Actions()) {
         keys.EnsureDefault(action.id, action.default_key);
     }
+    // The chat surface's too ("chat.<name>").
+    for (const auto& action : out.registries.chat_surface.get()->Actions()) {
+        keys.EnsureDefault(action.id, action.default_key);
+    }
 
     // Plugin views: register each id's suggested default keybinding only where
     // nothing binds it yet (the user's file wins), and remember the runtime
@@ -382,10 +391,10 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     plugins::RegisterPlainMarkdownEngine(out.registries.markdown_engine);
     out.engine = out.registries.markdown_engine.get();
 
-    // The exclusive chat surface, when a plugin claimed it.
+    // The chat surface (required: present by now).
     out.chat_surface = out.registries.chat_surface.get();
 
-    // Both pushes below (chat surface + views) live in PushThemeToPlugins so
+    // The views' theme push lives in PushThemeToPlugins so
     // RunTui's /theme swap can re-run the identical sequence after replacing
     // out.theme's contents in place.
     PushThemeToPlugins(out);
@@ -400,36 +409,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
 }
 
 void PushThemeToPlugins(TuiEnvironment& out) {
-    // The exclusive chat surface, when a plugin claimed it. A throwing
-    // surface is disabled, not fatal (catch + disable, track R2): OnTheme
-    // runs before any event flows, so a throw here is the plugin's first
-    // chance to kill the process unguarded.
-    //
-    // Logged, not fprintf'd: this function also runs from RunTui's /theme
-    // SWAP path (app.cpp), while the alt screen is live -- a raw
-    // fprintf(stderr) there garbles the running display. The logger is safe
-    // here too, on the very first (pre-TUI) call: it's the same sink every
-    // other plugin-facing guard in this bootstrap window already uses (e.g.
-    // registries.cpp's GuardedRegistration warnings).
-    if (out.chat_surface != nullptr) {
-        try {
-            out.chat_surface->OnTheme(*out.theme);
-        } catch (const std::exception& error) {
-            common::DefaultLogger().error(
-                "chat surface plugin threw on theme ({}) -- disabled; the core chat view "
-                "takes over",
-                error.what());
-            out.chat_surface = nullptr;
-        } catch (...) {
-            common::DefaultLogger().error(
-                "chat surface plugin threw on theme (non-standard exception) -- disabled; "
-                "the core chat view takes over");
-            out.chat_surface = nullptr;
-        }
-    }
-
-    // Views get the same one-shot theme push ChatSurface does (default
-    // no-op; a view that threw is logged, not disabled -- its component may
+    // Views get a one-shot theme push (default no-op; a view that threw is logged, not disabled -- its component may
     // still be harmless, and panels are contained at render time anyway).
     // StartView needs no push: its Render() takes the theme as a parameter.
     for (const auto& view : out.registries.views.All()) {

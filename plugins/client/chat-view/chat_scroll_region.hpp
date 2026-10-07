@@ -31,7 +31,7 @@
 
 #include <memory>
 
-namespace minimal::client {
+namespace minimal::client::chat_view {
 
 // Shared between ChatView (the input side) and the ScrollRegionNode (the
 // layout side). Both fields the node writes are measurements of the LAST
@@ -76,4 +76,4 @@ struct ScrollState {
 ftxui::Element ScrollRegion(ftxui::Element child,
                             std::shared_ptr<ScrollState> state);
 
-}  // namespace minimal::client
+}  // namespace minimal::client::chat_view

@@ -640,13 +640,13 @@ renames it). Bundled actions (see `bundled/keybindings.json`):
 number the tab bar shows), `group.previous`, `group.next`, `jump.attention`,
 `session.picker`, `agent.picker`, `model.picker`,
 `permission.cycle`, `panel.focus.next`, `panel.focus.prev`,
-`tab.close`, `chat.load_older`,
-`chat.scroll_up`, `chat.scroll_down`, `chat.scroll_bottom`, `chat.row_up`,
-`chat.row_down`, `chat.toggle_collapse`, `chat.toggle_collapse_all`,
-`chat.toggle_thinking_fold`, `chat.toggle_tool_fold`,
-`chat.toggle_timestamps`, `turn.cancel`, `session.pause`, `app.quit`. The
-prompt editor declares its own actions (the bundled one: `prompt.newline`,
-`prompt.undo`, `prompt.redo`, `prompt.clear`), bound the same way.
+`tab.close`, `chat.load_older`, `turn.cancel`, `session.pause`, `app.quit`.
+The prompt editor and the chat view declare their own actions, bound the same
+way -- the bundled editor: `prompt.newline`, `prompt.undo`, `prompt.redo`,
+`prompt.clear`; the bundled chat view: `chat.scroll_up`, `chat.scroll_down`,
+`chat.scroll_bottom`, `chat.row_up`, `chat.row_down`, `chat.toggle_collapse`,
+`chat.toggle_collapse_all`, `chat.toggle_thinking_fold`,
+`chat.toggle_tool_fold`, `chat.toggle_timestamps`.
 
 Modifiers: `ctrl` (or `control`), `alt` (or `option`/`opt`/`meta` — the
 macOS key's spelling), `shift`, joined by `+` in any order. macOS: Apple
@@ -711,14 +711,14 @@ One undo step — `prompt.undo` brings the text back. Prompt editor only.
 | `scrollback_window_max_messages` | int | `0` (= built-in) | must be positive if set |
 | `tool_output_buffer_bytes` | int | `0` | |
 | `panel_height` | int | unset (12) | rows for a panel's content (the tools panel and every plugin panel); minimum 3 |
-| `fold_thinking` | string | `"auto"` | the startup auto-fold default for thinking rows: `auto` (built-in default), `expanded` or `collapsed`; anything else → warning + `auto`. `chat.toggle_thinking_fold` (`ctrl+alt+t`) flips it for every open tab and persists the new value back here |
-| `fold_tools` | string | `"auto"` | same for tool-activity rows; `chat.toggle_tool_fold` (`ctrl+alt+o`). `collapsed` also folds `ask_user` results — the explicit setting outranks the `ask` display kind's built-in "always show answers" default |
 | `theme` | string | `""` (= `"dark"`) | names `themes/<name>.json`; unknown name → terminal defaults + warning |
 
 Unknown keys ignored; the file is never rewritten (it is yours) — the only
-exceptions are the managed writes: `theme` (`/theme`), and `fold_thinking` /
-`fold_tools` (their `ctrl+alt+` toggles), each of which round-trips every
-other key verbatim and refuses to touch a malformed file.
+exception is the managed write of `theme` (`/theme`), which round-trips every
+other key verbatim and refuses to touch a malformed file. (The fold defaults
+are the chat-view plugin's config now: `fold_thinking` / `fold_tools` in its
+`client-plugins.json` entry; the `ctrl+alt+t` / `ctrl+alt+o` toggles are kept
+in the plugin's own state.)
 
 ### themes/&lt;name&gt;.json
 

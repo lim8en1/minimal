@@ -1,4 +1,4 @@
-// Chat scrolling tests: the line-granular ScrollRegion (chat_scroll_region.hpp)
+// Chat scrolling tests: the line-granular minimal::client::chat_view::ScrollRegion (chat_scroll_region.hpp)
 // and ChatView's line offsets. The scheme this replaced -- one focus() marker
 // per render CHUNK under FTXUI's yframe -- had two proven-bad properties this
 // file pins down the fixes for:
@@ -35,8 +35,8 @@
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
-#include "minimal/client/view/chat_scroll_region.hpp"
-#include "minimal/client/view/chat_view.hpp"
+#include "chat_scroll_region.hpp"
+#include "chat_view_fixture.hpp"
 
 using namespace minimal::client;
 using namespace minimal_test;
@@ -139,18 +139,18 @@ struct ChatViewFixture {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// ScrollRegion (the explicit-offset node)
+// minimal::client::chat_view::ScrollRegion (the explicit-offset node)
 // ---------------------------------------------------------------------------
 
 TEST_CASE("scroll region: offset 0 pins to the newest content") {
-    auto state = std::make_shared<ScrollState>();
+    auto state = std::make_shared<minimal::client::chat_view::ScrollState>();
     ftx::Elements lines;
     for (int i = 0; i < 40; ++i) {
         char buf[8];
         std::snprintf(buf, sizeof(buf), "line-%02d", i);
         lines.push_back(ftx::text(buf));
     }
-    auto element = ScrollRegion(ftx::vbox(std::move(lines)), state);
+    auto element = minimal::client::chat_view::ScrollRegion(ftx::vbox(std::move(lines)), state);
 
     ftx::Screen screen(80, 10);
     ftx::Render(screen, element);
@@ -163,14 +163,14 @@ TEST_CASE("scroll region: offset 0 pins to the newest content") {
 }
 
 TEST_CASE("scroll region: the desired offset moves exactly that many lines") {
-    auto state = std::make_shared<ScrollState>();
+    auto state = std::make_shared<minimal::client::chat_view::ScrollState>();
     ftx::Elements lines;
     for (int i = 0; i < 40; ++i) {
         char buf[8];
         std::snprintf(buf, sizeof(buf), "line-%02d", i);
         lines.push_back(ftx::text(buf));
     }
-    auto element = ScrollRegion(ftx::vbox(std::move(lines)), state);
+    auto element = minimal::client::chat_view::ScrollRegion(ftx::vbox(std::move(lines)), state);
 
     state->desired_offset_from_bottom = 5;
     ftx::Screen screen(80, 10);
@@ -182,14 +182,14 @@ TEST_CASE("scroll region: the desired offset moves exactly that many lines") {
 }
 
 TEST_CASE("scroll region: the offset clamps against the real content") {
-    auto state = std::make_shared<ScrollState>();
+    auto state = std::make_shared<minimal::client::chat_view::ScrollState>();
     ftx::Elements lines;
     for (int i = 0; i < 40; ++i) {
         char buf[8];
         std::snprintf(buf, sizeof(buf), "line-%02d", i);
         lines.push_back(ftx::text(buf));
     }
-    auto element = ScrollRegion(ftx::vbox(std::move(lines)), state);
+    auto element = minimal::client::chat_view::ScrollRegion(ftx::vbox(std::move(lines)), state);
 
     state->desired_offset_from_bottom = 1000;
     ftx::Screen screen(80, 10);
@@ -205,7 +205,7 @@ TEST_CASE("scroll region: the offset clamps against the real content") {
         std::snprintf(buf, sizeof(buf), "line-%02d", i);
         few.push_back(ftx::text(buf));
     }
-    auto small = ScrollRegion(ftx::vbox(std::move(few)), state);
+    auto small = minimal::client::chat_view::ScrollRegion(ftx::vbox(std::move(few)), state);
     ftx::Screen screen2(80, 10);
     ftx::Render(screen2, small);
     CHECK(state->applied_offset_from_bottom == 0);
@@ -216,7 +216,7 @@ TEST_CASE("scroll region: the offset clamps against the real content") {
 // (what an unchunked multi-line thinking block renders as) scrolls line by
 // line -- there is no per-element anchor to leap over.
 TEST_CASE("scroll region: a single element taller than the viewport scrolls in lines") {
-    auto state = std::make_shared<ScrollState>();
+    auto state = std::make_shared<minimal::client::chat_view::ScrollState>();
     // One 40-line element -- paragraph() of a blank-line-free block, or a
     // plugin renderer that never opted into chunking.
     std::string body;
@@ -226,7 +226,7 @@ TEST_CASE("scroll region: a single element taller than the viewport scrolls in l
         std::snprintf(buf, sizeof(buf), "line-%02d", i);
         body += buf;
     }
-    auto element = ScrollRegion(ftx::vbox(ftx::paragraph(body)), state);
+    auto element = minimal::client::chat_view::ScrollRegion(ftx::vbox(ftx::paragraph(body)), state);
 
     state->desired_offset_from_bottom = 1;
     ftx::Screen screen(80, 10);
@@ -242,7 +242,7 @@ TEST_CASE("scroll region: a single element taller than the viewport scrolls in l
 
 TEST_CASE("chat view: one wheel tick scrolls exactly kWheelLinesPerTick lines") {
     ChatViewFixture fx;
-    ChatView view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
+    minimal_test::ChatViewHarness view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
     const auto snap = SnapshotWithNumberedLines("s", 1, 60);
 
     const auto pinned = RenderElement(view.Render(snap), 80, 24);
@@ -262,7 +262,7 @@ TEST_CASE("chat view: one wheel tick scrolls exactly kWheelLinesPerTick lines") 
 
 TEST_CASE("chat view: the wheel gate drops ticks inside the gate window") {
     ChatViewFixture fx;
-    ChatView view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
+    minimal_test::ChatViewHarness view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
     const auto snap = SnapshotWithNumberedLines("s", 1, 60);
 
     (void)RenderElement(view.Render(snap), 80, 24);
@@ -277,7 +277,7 @@ TEST_CASE("chat view: the wheel gate drops ticks inside the gate window") {
 
 TEST_CASE("chat view: scrolling clamps at both ends with no overshoot to burn") {
     ChatViewFixture fx;
-    ChatView view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
+    minimal_test::ChatViewHarness view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
     const auto snap = SnapshotWithNumberedLines("s", 1, 60);
 
     (void)RenderElement(view.Render(snap), 80, 24);
@@ -300,7 +300,7 @@ TEST_CASE("chat view: scrolling clamps at both ends with no overshoot to burn") 
 // wheel takes over from exactly where the cursor sat) and keeps scrolling.
 TEST_CASE("chat view: a wheel tick retires the row cursor and takes over scrolling") {
     ChatViewFixture fx;
-    ChatView view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
+    minimal_test::ChatViewHarness view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
     const auto snap = SnapshotWithNumberedLines("s", 1, 60);
 
     const auto pinned = RenderElement(view.Render(snap), 80, 24);
@@ -334,7 +334,7 @@ TEST_CASE("chat view: a wheel tick retires the row cursor and takes over scrolli
 // the bottom -- the exact bug the pty smoke run caught.
 TEST_CASE("chat view: the row cursor reveals rows above and below the viewport") {
     ChatViewFixture fx;
-    ChatView view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
+    minimal_test::ChatViewHarness view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
     // Two 40-line messages: "aa-NN" (oldest) then "bb-NN" (newest).
     // scrollback_page is DESCENDING by seq (newest first), so bb goes in
     // with the higher seq but first position.
@@ -382,7 +382,7 @@ TEST_CASE("chat view: the row cursor reveals rows above and below the viewport")
 
 TEST_CASE("chat view: short content never scrolls and reports pinned") {
     ChatViewFixture fx;
-    ChatView view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
+    minimal_test::ChatViewHarness view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
     const auto snap = SnapshotWithNumberedLines("s", 1, 3);
 
     const auto frame = RenderElement(view.Render(snap), 80, 24);
@@ -397,7 +397,7 @@ TEST_CASE("chat view: short content never scrolls and reports pinned") {
 // reader parked mid-transcript slid along with every line landing below.
 TEST_CASE("chat view: scrolled away, content arriving below does not move the view") {
     ChatViewFixture fx;
-    ChatView view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
+    minimal_test::ChatViewHarness view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
     const auto snap = SnapshotWithNumberedLines("s", 1, 60);
 
     (void)RenderElement(view.Render(snap), 80, 24);
@@ -432,7 +432,7 @@ TEST_CASE("chat view: scrolled away, content arriving below does not move the vi
 // had no anchor and slid up with every streamed line.
 TEST_CASE("chat view: scrolled away inside the live turn, streaming does not move the view") {
     ChatViewFixture fx;
-    ChatView view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
+    minimal_test::ChatViewHarness view(fx.theme, fx.messages, fx.tool_renderers, fx.display_renderers);
     const auto live_snapshot = [](int count) {
         auto snap = SnapshotWithNumberedLines("s", 1, 1);
         std::string text;
@@ -481,7 +481,7 @@ TEST_CASE("chat view: a plugin-claimed kind draws the live streaming row too") {
     messages.Register(ChatRowKind::Thinking, std::make_unique<LiveProbeThinking>());
     messages.ClearAttribution();
     minimal_test::RegisterPlainChatRenderers(messages);   // core fills the rest
-    ChatView view(fx.theme, messages, fx.tool_renderers, fx.display_renderers);
+    minimal_test::ChatViewHarness view(fx.theme, messages, fx.tool_renderers, fx.display_renderers);
 
     auto snap = SnapshotWithNumberedLines("s", 1, 1);
     LiveTurnSegment thinking;

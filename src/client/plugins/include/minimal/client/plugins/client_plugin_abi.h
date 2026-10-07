@@ -187,8 +187,8 @@ void minimal_client_plugin_register_observers(
     minimal::client::plugins::ObserverRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
-// OPTIONAL, EXCLUSIVE: replace the whole chat view. One plugin; two
-// claimants are fatal at startup (EXTENSIBILITY 4.2, slot semantics).
+// REQUIRED, EXCLUSIVE: the chat view (registries.hpp ChatSurface) -- the
+// bundled chat-view plugin's, or a replacement. Two claimants are fatal.
 void minimal_client_plugin_register_chat_surface(
     minimal::client::plugins::ChatSurfaceRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);

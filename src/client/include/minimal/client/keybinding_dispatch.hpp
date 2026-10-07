@@ -205,65 +205,24 @@ struct KeyContext {
     std::function<void()> open_model_picker;
     std::function<void()> request_quit;         // ctrl+q / idle ctrl+c: app.cpp owns the confirm-if-busy logic
     std::function<void(const std::string&)> close_tab;
-    std::function<void(const std::string& tab_id, int delta_rows)> scroll_chat;   // ChatView::ScrollBy, if that tab has one
-    // The MOUSE WHEEL variant: same tab lookup, but routes to
-    // ChatView::ScrollWheelBy, whose time gate absorbs the event flood a
-    // trackpad/terminal momentum emits (one report per scroll tick, dozens
-    // per flick). Keyboard scrolling stays ungated -- key repeat is already
-    // rate-limited by the OS.
-    std::function<void(const std::string& tab_id, int delta_rows)> scroll_chat_wheel;
-    // chat.scroll_bottom (PageDown): ChatView::ScrollToBottom, if that tab has
-    // one. Resets the scroll anchor scrolling up leaves behind -- there was
-    // previously no way back to the newest row except scrolling all the way
-    // down one row at a time, or losing the scroll position on the next
-    // turn.
-    std::function<void(const std::string& tab_id)> scroll_chat_to_bottom;
     // tab.close, when AnyWorkInFlight over `ids`: app.cpp stages its
     // PendingClose and opens the confirmation modal. Not called when nothing
     // is in flight -- HandleGlobalKey closes those tabs directly via close_tab.
     std::function<void(std::vector<std::string> ids)> confirm_close;
 
-    // chat.row_up/chat.row_down: ChatView::MoveRowFocus, if that tab has one.
-    // Same sign convention as scroll_chat (positive = toward older).
-    std::function<void(const std::string& tab_id, int delta)> move_row_focus;
-    // chat.toggle_collapse: ChatView::ToggleCollapseFocused.
-    std::function<void(const std::string& tab_id)> toggle_collapse_focused;
-    // chat.toggle_collapse_all: ChatView::ToggleCollapseAll.
-    std::function<void(const std::string& tab_id)> toggle_collapse_all;
-    // Mouse-click collapse: maps a left-press's screen y onto the focused
-    // tab's ChatView (ToggleCollapseAt). True when a collapsible row was
-    // under the click and its state was flipped -- the event is consumed
-    // ONLY then; a miss (empty space, a non-collapsible row, a sessionless
-    // tab) returns false so the click keeps falling through.
-    std::function<bool(const std::string& tab_id, int screen_y)> toggle_collapse_at;
-    // Mouse-click cancel for a QUEUED message row: maps a left-press's
-    // screen y onto the focused tab's ChatView (CancelPendingAt) and sends
-    // CancelQueuedTurn for the row's turn id. True when the click hit a
-    // cancellable queued row -- consumed BEFORE toggle_collapse_at is
-    // consulted, since a queued row is never collapsible but must not fall
-    // through to selection either.
-    std::function<bool(const std::string& tab_id, int screen_y)> cancel_pending_at;
-    // chat.toggle_timestamps: ChatView::ToggleTimestamps.
-    std::function<void(const std::string& tab_id)> toggle_timestamps;
-    // chat.toggle_thinking_fold / chat.toggle_tool_fold: flip the kind's
-    // fold default on EVERY open tab's ChatView (the toggles are
-    // session-wide preferences) and persist the new state to ui.json.
-    // Unbound keys never reach these -- no null check needed on the call
-    // sites, matching every handler above.
-    std::function<void(const std::string& tab_id)> toggle_thinking_fold;
-    std::function<void(const std::string& tab_id)> toggle_tool_fold;
+    // The chat surface's declared actions (ChatSurface::Actions ids): a key
+    // bound to one goes to the focused tab's pane, which does the rest.
+    std::vector<std::string> chat_actions;
+    std::function<void(const std::string& tab_id, std::string_view action)> chat_action;
+    // A mouse event (wheel, click) for the focused tab's pane: true when it
+    // was over the chat and meant something there; a miss falls through to
+    // the components below (panels, the editor, text selection).
+    std::function<bool(const std::string& tab_id, const ftxui::Event& event)> chat_mouse;
 
     // Whether the focused tab's prompt editor claims `event` ahead of every
     // binding (PromptEditor::Claims: an open suggestion list's keys, a pasted
     // byte that looks like a bound alt+key). Null = it claims nothing.
     std::function<bool(const ftxui::Event&)> editor_claims;
-
-    // Whether screen row `y` lies inside tab `tab_id`'s chat viewport, as
-    // last laid out. The wheel scrolls the chat only when the pointer is
-    // over it -- over the tools panel, a plugin panel or the suggestion list
-    // the event falls through to those components. Null: every wheel event
-    // scrolls the chat (the pre-routing behavior; test fixtures).
-    std::function<bool(const std::string& tab_id, int y)> chat_contains_y;
 
     // The tab whose tab-bar cell is at screen (x, y), "" for none: a left
     // press there focuses it. Null: the tab bar takes no clicks.

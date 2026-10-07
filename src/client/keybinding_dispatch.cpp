@@ -591,29 +591,11 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         }
         return true;
     }
-    // In-view scrollback: moves which already-rendered row is focused (see
-    // ChatView::ScrollBy), distinct from chat.load_older above, which
-    // fetches an OLDER PAGE from the server. ctx.scroll_chat is a no-op if
-    // the tab has no ChatView yet (the very first frame of a freshly opened
-    // tab, before session_view's render lambda lazily builds one).
     if (event.is_mouse()) {
         // Event::mouse() isn't const-qualified upstream, unlike is_mouse();
         // a local mutable copy is cheap and this handler never mutates it.
         Event mouse_event = event;
         const auto& mouse = mouse_event.mouse();
-        if ((mouse.button == Mouse::WheelUp || mouse.button == Mouse::WheelDown) &&
-            (!ctx.chat_contains_y || sid.empty() || ctx.chat_contains_y(sid, mouse.y))) {
-            if (!sid.empty()) {
-                // WheelUp = scroll toward older (positive), matching
-                // conventional scroll-up-reveals-earlier-content. ONE wheel
-                // TICK per event: ChatView converts each accepted tick into
-                // a few scrolled LINES (kWheelLinesPerTick), and the wheel
-                // callback's gate absorbs the momentum flood -- ungated, a
-                // flick walked the whole transcript.
-                ctx.scroll_chat_wheel(sid, mouse.button == Mouse::WheelUp ? 1 : -1);
-            }
-            return true;
-        }
         // Left-press on a tab-bar cell focuses that tab.
         if (mouse.button == Mouse::Left && mouse.motion == Mouse::Pressed && ctx.tab_at) {
             if (const std::string tab = ctx.tab_at(mouse.x, mouse.y); !tab.empty()) {
@@ -621,66 +603,13 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
                 return true;
             }
         }
-        // Left-press on a QUEUED message row cancels that message before it
-        // ever runs (a queued row is never collapsible, but the click must
-        // not fall through to text selection either). Consumed only when a
-        // cancellable queued row is under the click.
-        if (mouse.button == Mouse::Left && mouse.motion == Mouse::Pressed) {
-            if (!sid.empty() && ctx.cancel_pending_at &&
-                ctx.cancel_pending_at(sid, mouse.y)) {
-                return true;
-            }
-        }
-        // Left-press collapse toggle: only consumed when the click actually
-        // landed on a collapsible row (thinking / tool activity / user
-        // attachment). Everything else -- a miss, empty space, the editor --
-        // falls through to the components below, so normal clicking behavior
-        // (text selection, the editor's own mouse handling) is untouched.
-        if (mouse.button == Mouse::Left && mouse.motion == Mouse::Pressed) {
-            if (!sid.empty() && ctx.toggle_collapse_at &&
-                ctx.toggle_collapse_at(sid, mouse.y)) {
-                return true;
-            }
-        }
+        // The chat's own: the wheel over it, a click on a collapsible or a
+        // queued row. Anything else falls through.
+        if (!sid.empty() && ctx.chat_mouse && ctx.chat_mouse(sid, event)) return true;
     }
-    if (ctx.keymap.Matches("chat.scroll_up", event)) {
-        if (!sid.empty()) ctx.scroll_chat(sid, 1);   // toward older
-        return true;
-    }
-    if (ctx.keymap.Matches("chat.scroll_down", event)) {
-        if (!sid.empty()) ctx.scroll_chat(sid, -1);   // toward newest
-        return true;
-    }
-    if (ctx.keymap.Matches("chat.scroll_bottom", event)) {
-        if (!sid.empty()) ctx.scroll_chat_to_bottom(sid);
-        return true;
-    }
-    if (ctx.keymap.Matches("chat.row_up", event)) {
-        if (!sid.empty()) ctx.move_row_focus(sid, 1);   // toward older
-        return true;
-    }
-    if (ctx.keymap.Matches("chat.row_down", event)) {
-        if (!sid.empty()) ctx.move_row_focus(sid, -1);   // toward newest
-        return true;
-    }
-    if (ctx.keymap.Matches("chat.toggle_collapse", event)) {
-        if (!sid.empty()) ctx.toggle_collapse_focused(sid);
-        return true;
-    }
-    if (ctx.keymap.Matches("chat.toggle_collapse_all", event)) {
-        if (!sid.empty()) ctx.toggle_collapse_all(sid);
-        return true;
-    }
-    if (ctx.keymap.Matches("chat.toggle_timestamps", event)) {
-        if (!sid.empty()) ctx.toggle_timestamps(sid);
-        return true;
-    }
-    if (ctx.keymap.Matches("chat.toggle_thinking_fold", event)) {
-        if (!sid.empty()) ctx.toggle_thinking_fold(sid);
-        return true;
-    }
-    if (ctx.keymap.Matches("chat.toggle_tool_fold", event)) {
-        if (!sid.empty()) ctx.toggle_tool_fold(sid);
+    for (const auto& action : ctx.chat_actions) {
+        if (!ctx.keymap.Matches(action, event)) continue;
+        if (!sid.empty() && ctx.chat_action) ctx.chat_action(sid, action);
         return true;
     }
     if (ctx.keymap.Matches("tab.close", event)) {
