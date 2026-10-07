@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <utility>
 
@@ -78,8 +79,21 @@ void minimal_plugin_register_permission_advisor(
         return;
     }
 
+    std::filesystem::path decision_log;
+    if (settings.debug_decision_logging) {
+        if (context.data_dir.empty()) {
+            minimal::common::DefaultLogger().warn(
+                "decision-advisor: debug_decision_logging is on but the host provides no data "
+                "dir; decisions will not be logged");
+        } else {
+            decision_log = context.data_dir / "decisions.jsonl";
+            minimal::common::DefaultLogger().info("decision-advisor: logging decisions to {}",
+                                                  decision_log.string());
+        }
+    }
+
     registry.Register(std::make_shared<minimal::decision_advisor::DecisionAdvisor>(
-        settings, std::move(api_key), minimal::net::HttpClient{}));
+        settings, std::move(api_key), minimal::net::HttpClient{}, std::move(decision_log)));
 }
 
 // One real call, as a tool call would make it, with no retries: the

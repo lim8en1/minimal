@@ -1,5 +1,8 @@
 #include "advisor.hpp"
 
+#include <algorithm>
+#include <chrono>
+#include <fstream>
 #include <string>
 #include <utility>
 
@@ -19,12 +22,32 @@ std::string ModelName(const SystemOneOutcome& outcome) {
 }  // namespace
 
 DecisionAdvisor::DecisionAdvisor(Settings settings, common::SecretHandle api_key,
-                                 net::HttpClient http,
+                                 net::HttpClient http, std::filesystem::path decision_log,
                                  common::Logger logger)
     : settings_(std::move(settings)),
       api_key_(std::move(api_key)),
       http_(std::move(http)),
+      decision_log_(std::move(decision_log)),
       logger_(std::move(logger)) {}
+
+void DecisionAdvisor::LogDecision(nlohmann::json record) {
+    if (decision_log_.empty()) return;
+    record["ts_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+    // One line per call; replace invalid UTF-8 in tool input rather than throw.
+    const std::string line =
+        record.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
+    std::lock_guard<std::mutex> lock(decision_log_mu_);
+    std::ofstream out(decision_log_, std::ios::app | std::ios::binary);
+    out << line;
+    out.flush();
+    if (!out && !decision_log_warned_.exchange(true)) {
+        logger_.warn("decision-advisor: cannot append to decision log {}; decisions are not "
+                     "being logged",
+                     decision_log_.string());
+    }
+}
 
 nlohmann::json DecisionAdvisor::StateOf(const tools::PermissionRequest& request) const {
     // The decision, not the world: what the judge needs to rule on this one
@@ -49,20 +72,52 @@ std::optional<tools::PermissionResponse> DecisionAdvisor::Advise(
                                                            : [] { return false; };
     if (cancelled()) return std::nullopt;
 
+    // The decision log's record: what was asked, under which thresholds.
+    // Every exit below completes and writes it once.
+    nlohmann::json record;
+    if (!decision_log_.empty()) {
+        record = {{"session_id", request.session_id},
+                  {"tool_name", request.tool_name},
+                  {"summary", request.summary},
+                  {"tool_input", request.tool_input},
+                  {"backend", settings_.backend},
+                  {"model", settings_.model},
+                  {"thresholds",
+                   {{"min_probability_allow", settings_.min_probability_allow},
+                    {"min_probability_deny", settings_.min_probability_deny},
+                    {"min_margin", settings_.min_margin}}}};
+    }
+    const auto log_abstain = [&](const std::string& reason) {
+        if (decision_log_.empty()) return;
+        record["outcome"] = "abstained";
+        record["reason"] = reason;
+        LogDecision(std::move(record));
+    };
+
     std::string key;
     try {
         if (api_key_.configured()) key = api_key_.Get().value;
     } catch (const std::exception& error) {
         logger_.warn("decision-advisor: abstained for session {} tool '{}' (api key: {})",
                      request.session_id, request.tool_name, error.what());
+        log_abstain(std::string("api key: ") + error.what());
         return std::nullopt;
     }
     const SystemOneOutcome outcome = AskSystemOne(http_, settings_, key, StateOf(request), cancelled);
+    if (!decision_log_.empty()) {
+        record["answered_model"] = outcome.answered_model;
+        record["attempts"] = outcome.attempts;
+        record["total_ms"] = outcome.total.count();
+        // Verbatim: the action answer's probabilities and confidence, and
+        // every extra_questions answer beside it.
+        if (outcome.ok) record["answers"] = outcome.answer;
+    }
     if (!outcome.ok) {
         logger_.warn("decision-advisor: abstained for session {} tool '{}' ({}; {} attempt(s), "
                      "{}ms)",
                      request.session_id, request.tool_name, outcome.abstain_reason,
                      outcome.attempts, outcome.total.count());
+        log_abstain(outcome.abstain_reason);
         return std::nullopt;
     }
 
@@ -78,6 +133,7 @@ std::optional<tools::PermissionResponse> DecisionAdvisor::Advise(
         logger_.warn("decision-advisor: abstained for session {} tool '{}' (answer shape "
                      "changed)",
                      request.session_id, request.tool_name);
+        log_abstain("answer shape changed");
         return std::nullopt;
     }
 
@@ -90,8 +146,18 @@ std::optional<tools::PermissionResponse> DecisionAdvisor::Advise(
     const double best_other = answer->choice == "allow"   ? std::max(answer->p_deny, answer->p_review)
                               : answer->choice == "deny" ? std::max(answer->p_allow, answer->p_review)
                                                          : std::max(answer->p_allow, answer->p_deny);
+    if (!decision_log_.empty()) {
+        record["choice"] = answer->choice;
+        record["probabilities"] = {
+            {"allow", answer->p_allow}, {"deny", answer->p_deny}, {"review", answer->p_review}};
+        if (decision.action != Action::kAbstain) {
+            record["outcome"] = decision.action == Action::kAllow ? "allowed" : "denied";
+            LogDecision(std::move(record));
+        }
+    }
 
     if (decision.action == Action::kAbstain) {
+        log_abstain(decision.abstain_reason);
         logger_.info(
             "decision-advisor: session {} tool '{}' -> abstained ({}) [model={} choice={} "
             "p1={:.3f} p2={:.3f} attempts={} total_ms={}]",

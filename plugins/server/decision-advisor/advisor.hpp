@@ -1,6 +1,9 @@
 #pragma once
 
+#include <atomic>
+#include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 
 #include "minimal/common/secret_handle.hpp"
@@ -26,7 +29,10 @@ namespace minimal::decision_advisor {
 class DecisionAdvisor : public tools::PermissionAdvisor {
 public:
     // `api_key` is read per Advise call; one that does not resolve abstains.
+    // `decision_log` empty = no decision log (Settings::debug_decision_logging);
+    // otherwise every judged call appends one JSON line there.
     DecisionAdvisor(Settings settings, common::SecretHandle api_key, net::HttpClient http,
+                    std::filesystem::path decision_log = {},
                     common::Logger logger = common::DefaultLogger());
 
     // nullopt = abstain: the human decides. A decisive Allow carries every key
@@ -38,10 +44,17 @@ public:
 
 private:
     nlohmann::json StateOf(const tools::PermissionRequest& request) const;
+    // Appends `record` to decision_log_ (no-op when empty). Advise runs on
+    // concurrent advise threads, abandoned ones included, hence the lock; a
+    // write failure warns once and never touches the decision.
+    void LogDecision(nlohmann::json record);
 
     Settings settings_;
     common::SecretHandle api_key_;
     net::HttpClient http_;
+    std::filesystem::path decision_log_;
+    std::mutex decision_log_mu_;
+    std::atomic<bool> decision_log_warned_{false};
     common::Logger logger_;
 };
 

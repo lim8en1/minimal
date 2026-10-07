@@ -27,6 +27,9 @@
   "//deny_message": "What a denied model reads, after \"auto-denied by decision-advisor (model M): p(deny)=P; \".",
   "deny_message": "the call looks destructive or out of scope -- ask the user before retrying",
 
+  "//debug_decision_logging": "true appends one JSON line per judged call (tool input, model, probabilities, outcome) to <data dir>/plugins/decision-advisor/decisions.jsonl.",
+  "debug_decision_logging": false,
+
   "backends": {
     "typesafe": {
       "endpoint": "https://api.typesafe.ai/v1/systemone",
