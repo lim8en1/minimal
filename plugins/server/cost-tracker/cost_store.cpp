@@ -1,5 +1,6 @@
 #include "cost_store.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -163,6 +164,18 @@ std::optional<FetchedRates> CostStore::GetFetchedRates(const std::string& source
     const auto blob = storage_->Get(kStorageNamespace, FetchedRatesKey(source_name));
     if (!blob) return std::nullopt;
     return FetchedFromJson(*blob);
+}
+
+std::vector<std::string> CostStore::PruneFetchedRates(const std::vector<std::string>& configured) {
+    std::vector<std::string> removed;
+    if (storage_ == nullptr) return removed;
+    for (const auto& key : storage_->Keys(kStorageNamespace, kFetchedRatesKeyPrefix)) {
+        std::string name = key.substr(std::string_view(kFetchedRatesKeyPrefix).size());
+        if (std::find(configured.begin(), configured.end(), name) != configured.end()) continue;
+        if (storage_->Delete(kStorageNamespace, key)) removed.push_back(std::move(name));
+    }
+    std::sort(removed.begin(), removed.end());
+    return removed;
 }
 
 void CostStore::SetFetchedRates(const std::string& source_name, const FetchedRates& rates) {

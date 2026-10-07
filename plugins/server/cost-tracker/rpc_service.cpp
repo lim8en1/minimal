@@ -184,7 +184,7 @@ plugins::PluginRpcHandler::Reply CostRpcService::Handle(const std::string& metho
     }
 
     reply.ok = false;
-    reply.error = "unknown method '" + method + "'";
+    reply.error = "unknown method '" + method + "' (known: totals, list, refresh_rates)";
     return reply;
 }
 
