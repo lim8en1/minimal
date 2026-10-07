@@ -19,8 +19,9 @@ chooser for an enum (its choices) or a model ref (the server's models, an
 "empty" row that unsets it, and any typed `<provider>/<model>` the list does
 not have), or edits a value inline (enter saves, esc cancels; a secret is
 typed masked); `d` resets a field to its default (a set secret asks twice);
-left/backspace goes back to the list; esc closes -- or, in a chooser or the
-editor, goes back to the form.
+left or esc goes back to the list (Backspace does not: a habitual delete
+right after the editor closed used to leave the form); esc on the list
+closes -- and in a chooser or the editor, goes back to the form.
 
 Edits go to core's `plugins` endpoint: the plugin's own parser checks the
 value (a refusal shows in red, nothing is written), the file

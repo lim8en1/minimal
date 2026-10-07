@@ -229,8 +229,7 @@ private:
     std::shared_ptr<ftxui::Component> plugin_modal_child_ = std::make_shared<ftxui::Component>();
     std::shared_ptr<ftxui::Component> quit_confirm_child_ = std::make_shared<ftxui::Component>();
     std::optional<PickerController> picker_controller_;
-    // Reset slots for the two help overlays: they are built once, so without
-    // these the typed filter survived across opens.
+    // The modal host the plugin modals render in (ModalHost over the slot).
     ftxui::Component plugin_modal_host_;
 
     // --- frame ---

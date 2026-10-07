@@ -89,18 +89,15 @@ ftxui::Elements FrameRenderer::RenderStartViews(const std::string& session_id) {
 ftxui::Element FrameRenderer::Render() {
     using namespace ftxui;
 
-    // LIGHT only: the tab bar and the activity-label lookup below need
-    // name/state/tool-name, never buffered tool output. The tools panel
-    // (which DOES need it) gets its own, separately cached, heavy fetch
-    // below -- gated on UiVersion so it isn't redone on every render (FTXUI
-    // renders on every event, including mouse move, not just on a real
-    // state change).
+    // LIGHT only: the tab bar and the status lookups below need
+    // name/state/tool-name, never buffered tool output (a plugin that does --
+    // the tools panel -- reads HostUi::Activity, cached on change).
     const auto tabs = deps_.app.GetAllTabs(/*include_tool_output=*/false);
 
     // The tab bar renders the FILTERED list (state.hpp's TabFilter -- the
     // user's tab.filter_group/tab.filter_agents choice), while `tabs` above
-    // stays the FULL list: the status-bar lookups below, the tools panel's
-    // cache key, and the panel itself are cross-session by design. The
+    // stays the FULL list: the status-bar lookups below are cross-session by
+    // design. The
     // badge (TabBarBadge) surfaces what the filter hides -- most importantly
     // how many hidden tabs carry '!'.
     const TabFilter tab_filter = deps_.app.ActiveTabFilter();
@@ -144,8 +141,8 @@ ftxui::Element FrameRenderer::Render() {
     const std::string& focused = deps_.focused;
     const SessionState::Snapshot& focused_details = deps_.focused_details;
 
-    // The frame's DEEP copy: the FOCUSED tab only. (The tools panel reads
-    // the light TabSnapshot.tools; nothing renders other tabs' heavy data.)
+    // The frame's DEEP copy: the FOCUSED tab only; nothing here renders
+    // other tabs' heavy data.
     if (!focused_details.session_id.empty() || !focused.empty()) {
         const auto& snap = focused_details;
         // find(), not operator[]: Render() is documented side-effect-free, and

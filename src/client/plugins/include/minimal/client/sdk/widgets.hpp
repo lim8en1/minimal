@@ -22,8 +22,8 @@ namespace minimal::client::plugins {
 // (ClientPluginRegistrationContext::widgets) rather than building its own,
 // so replacing the kit -- disable the default, register another -- restyles
 // every view built on it at once. The contracts (rows, specs, callbacks,
-// state) are view/widget_types.hpp; a kit owns only how they look and
-// behave. Core registers its own default into an unclaimed slot.
+// state) are widget_types.hpp; a kit owns only how they look and behave.
+// The slot is required: the bundled ui-kit fills it.
 //
 // The theme comes with every call: plugins load before the theme does.
 class WidgetKit {

@@ -1,7 +1,7 @@
 #pragma once
 
 // The widget contracts: what a view hands the widget kit (WidgetKit,
-// minimal/client/plugins/widget_kit.hpp) and gets back -- rows, specs,
+// minimal/client/sdk/widgets.hpp) and gets back -- rows, specs,
 // callbacks and state, no FTXUI construction. Shared by every widget kit and
 // every view built on one, so a replacement kit renders the same data the
 // same views already produce.

@@ -355,11 +355,12 @@ using ObserverRegistry = AdditiveRegistry<Observer, ObserverKey>;
 // Required: the TUI's body.
 using ChatSurfaceRegistry = ExclusiveSlot<ChatSurface, ChatSurfaceKey>;
 
-// Null get(): the host registers the core md4c default.
+// Null get(): the host registers core's plain-text engine (the bundled md4c
+// engine is a plugin's claim).
 using MarkdownEngineRegistry = ExclusiveSlot<MarkdownEngine, MarkdownEngineKey>;
 
-// Null get() only during registration: the host registers the core default
-// into an unclaimed slot before any view's component() is built.
+// Required: the bundled ui-kit's, or a replacement. Filled before any view's
+// component() is built.
 using WidgetKitRegistry = ExclusiveSlot<WidgetKit, WidgetKitKey>;
 
 // Null get(): no tab bar.
