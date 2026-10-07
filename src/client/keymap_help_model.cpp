@@ -96,7 +96,14 @@ std::string ActionDescription(std::string_view action) {
 KeyActionInfo DescribeKeyAction(std::string_view action, std::optional<std::size_t> rank) {
     const std::string id(action);
     const std::size_t group = GroupOf(id);
-    const std::size_t within = rank.has_value() ? std::min(*rank, kUnknownOrder) : OrderOf(action);
+    // A group a slot declares actions into (chat, prompt) ranks them from 1
+    // in the slot's own order; core's own action there leads it at 0. By
+    // its global table index ("load earlier messages" is 17) it sank below
+    // every declared one, away from the scroll keys it belongs with.
+    const bool slot_group = id.rfind("chat.", 0) == 0 || id.rfind("prompt.", 0) == 0;
+    const std::size_t within = rank.has_value()         ? std::min(*rank, kUnknownOrder)
+                               : slot_group             ? 0
+                                                        : OrderOf(action);
     return {ActionDescription(action),
             group < kGroups.size() ? kGroups[group].name : "views",
             static_cast<int>(group * (kUnknownOrder + 1) + within)};

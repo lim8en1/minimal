@@ -785,9 +785,12 @@ void TuiApp::InsertPrompt(const std::string& text) {
 std::vector<plugins::KeyBindingInfo> TuiApp::KeyBindingsForPlugins() const {
     std::vector<plugins::KeyBindingInfo> out;
     for (const auto& [id, key] : env_.keybindings.all()) {
+        // From 1 within the declaring slot's own list (the editor's, then the
+        // chat surface's -- one vector, split at chat_action_ids_).
         std::optional<std::size_t> rank;
+        const std::size_t chat_start = editor_actions_.size() - chat_action_ids_.size();
         for (std::size_t i = 0; i < editor_actions_.size(); ++i) {
-            if (editor_actions_[i].id == id) rank = i;
+            if (editor_actions_[i].id == id) rank = (i < chat_start ? i : i - chat_start) + 1;
         }
         KeyActionInfo info = DescribeKeyAction(id, rank);
         // A plugin view's toggle: its own title says what it opens.

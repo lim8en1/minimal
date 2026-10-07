@@ -25,7 +25,8 @@ struct KeyActionInfo {
     int order = 0;
 };
 // `rank`: the action's place within its group when its owner declared an
-// order (the prompt editor's actions, in the order it lists them).
+// order (a slot's actions, from 1 in the order it lists them; core's own
+// action in such a group leads it).
 KeyActionInfo DescribeKeyAction(std::string_view action,
                                 std::optional<std::size_t> rank = std::nullopt);
 
