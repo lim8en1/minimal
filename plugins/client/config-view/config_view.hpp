@@ -42,10 +42,13 @@ public:
     void Back();  // to the list
     void Set(const std::string& path, const std::string& text);
     void Unset(const std::string& path);
+    // Turns server plugin `name` on or off in plugins.json (next start).
+    void Toggle(const std::string& name, bool enabled);
 
     struct ListState {
-        nlohmann::json rows;  // the endpoint's `list`, configurable plugins only
+        nlohmann::json rows;  // the endpoint's `list`: every server plugin
         std::string status;   // "" | "loading" | an error
+        std::string outcome;  // what the last toggle did, or why it was refused
         std::uint64_t generation = 0;
     };
     ListState list() const;
@@ -76,7 +79,8 @@ private:
 class ConfigView final : public plugins::View {
 public:
     // `widgets`: the host's kit (non-null; host-owned).
-    ConfigView(plugins::ClientApi* api, const plugins::WidgetKit* widgets, plugins::HostUi* ui);
+    ConfigView(plugins::ClientApi* api, const plugins::WidgetKit* widgets, plugins::HostUi* ui,
+               plugins::HostActions* actions = nullptr);
 
     const plugins::ViewSpec& spec() const override;
     ftxui::Component component() override;
@@ -91,6 +95,7 @@ private:
     plugins::ClientApi* api_;  // the model chooser's list
     const plugins::WidgetKit* widgets_;
     plugins::HostUi* ui_;
+    plugins::HostActions* actions_;  // client plugin toggles; null: not offered
     client::Theme theme_;
 };
 

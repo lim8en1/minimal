@@ -569,8 +569,13 @@ TEST_CASE("host reads answer empty until the TUI attaches them, then through eve
     CHECK(bound->CommandCatalog().empty());
     provider->AttachReads(
         {.key_bindings = [] { return std::vector<KeyBindingInfo>{{"tab.next", "alt+down", "next tab", "tabs", 0}}; },
-         .command_catalog = [] { return std::vector<CommandCatalogEntry>{{.name = "cost"}}; }});
+         .command_catalog = [] { return std::vector<CommandCatalogEntry>{{.name = "cost"}}; },
+         .client_plugins = [] { return std::vector<ClientPluginInfo>{{.id = "x.so", .name = "x"}}; }});
     REQUIRE(bound->KeyBindings().size() == 1);
+    // Every read reaches a plugin through its own bound ui, not just the
+    // provider: a forward missing there answered the interface's empty default.
+    REQUIRE(bound->ClientPlugins().size() == 1);
+    CHECK(bound->ClientPlugins()[0].name == "x");
     CHECK(bound->KeyBindings()[0].key == "alt+down");
     REQUIRE(provider->CommandCatalog().size() == 1);
     CHECK(provider->CommandCatalog()[0].name == "cost");

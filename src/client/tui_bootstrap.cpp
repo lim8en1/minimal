@@ -165,10 +165,13 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             info.loaded = record.ok();
             if (!record.ok() && info.enabled) info.error = record.error;
             for (const auto& [label, names] : record.registered) {
-                if (names.empty()) continue;
-                std::string items;
-                for (const auto& name : names) items += (items.empty() ? "" : ", ") + name;
-                info.provides += (info.provides.empty() ? "" : " · ") + label + ": " + items;
+                auto& distinct = info.provides[label];
+                for (const auto& name : names) {
+                    if (std::find(distinct.begin(), distinct.end(), name) == distinct.end()) {
+                        distinct.push_back(name);
+                    }
+                }
+                if (distinct.empty()) info.provides.erase(label);
             }
             out.client_plugin_provenance[info.id] = record.provenance;
             out.client_plugins.push_back(std::move(info));

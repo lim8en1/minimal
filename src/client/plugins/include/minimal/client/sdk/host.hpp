@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -82,7 +83,8 @@ struct ClientPluginInfo {
     bool enabled_in_file = false;  // client-plugins.json now: the next start's
     bool loaded = false;
     std::string error;             // why it failed to load, when it did
-    std::string provides;          // what it registered, in a line
+    // What it registered, by registry label ("views": ["config"]).
+    std::map<std::string, std::vector<std::string>> provides;
     // Why the TUI cannot start without it ("draws the chat"); "" = optional.
     std::string required;
 };

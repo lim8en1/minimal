@@ -374,6 +374,13 @@ public:
             return rows.dump();
         }
         if (method == "describe") return describe_.dump();
+        if (method == "enable") {
+            const json request = json::parse(payload);
+            if (request.value("name", "") == "provider-only") {
+                return json{{"error", "disabling provider-only would leave no provider"}}.dump();
+            }
+            return json{{"applied", "restart"}, {"enabled", request.value("enabled", true)}}.dump();
+        }
         if (method == "set" && refuse_) return json{{"error", "limit: must be at least 1"}}.dump();
         if (method == "set") return json{{"applied", "live"}, {"changed", {"net.timeout_ms"}}}.dump();
         return std::nullopt;
@@ -432,14 +439,14 @@ bool Eventually(Pred pred) {
 
 }  // namespace
 
-TEST_CASE("config-view's feed: lists configurable plugins, opens one, sets through the endpoint",
+TEST_CASE("config-view's feed: lists every plugin, opens one, sets through the endpoint",
           "[schema_form][config_view]") {
     EndpointApi api;
     config_view::ConfigFeed feed(&api, nullptr);
 
     feed.RefreshList();
     REQUIRE(Eventually([&] { return feed.list().status.empty() && !feed.list().rows.empty(); }));
-    CHECK(feed.list().rows.size() == 1);  // "plain" takes no configuration
+    CHECK(feed.list().rows.size() == 2);  // "plain" takes no configuration, but can be toggled
 
     feed.Open("sample");
     REQUIRE(Eventually([&] { return !feed.form().describe.is_null(); }));
@@ -455,6 +462,20 @@ TEST_CASE("config-view's feed: lists configurable plugins, opens one, sets throu
 
     feed.Back();
     CHECK(feed.open_plugin().empty());
+}
+
+TEST_CASE("config-view's feed: a toggle goes through `enable`, its outcome or refusal kept",
+          "[schema_form][config_view][toggle]") {
+    EndpointApi api;
+    config_view::ConfigFeed feed(&api, nullptr);
+    feed.Toggle("plain", false);
+    REQUIRE(Eventually([&] { return !feed.list().outcome.empty(); }));
+    CHECK(feed.list().outcome == "plain off at the next server start");
+    feed.Toggle("provider-only", false);
+    REQUIRE(Eventually([&] { return feed.list().outcome.find("no provider") != std::string::npos; }));
+    const auto calls = api.WaitFor(4);
+    CHECK(calls[0] == R"(plugins enable {"enabled":false,"name":"plain"})");
+    CHECK(calls[1].rfind("plugins list", 0) == 0);   // the list refreshed after it
 }
 
 TEST_CASE("config-view's feed: busy until an edit's answer lands; a refusal names its field",

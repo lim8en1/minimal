@@ -26,8 +26,8 @@ void minimal_client_plugin_register_views(plugins::ViewRegistry& registry,
                                           const plugins::ClientPluginRegistrationContext& context) {
     // No data path or widget kit offered (a test host): nothing to show.
     if (context.client_api == nullptr || context.widgets == nullptr) return;
-    auto view = std::make_unique<minimal::config_view::ConfigView>(context.client_api,
-                                                                   context.widgets, context.ui);
+    auto view = std::make_unique<minimal::config_view::ConfigView>(
+        context.client_api, context.widgets, context.ui, context.actions);
     g_view = view.get();
     registry.Register(std::move(view));
 }

@@ -8,7 +8,7 @@
 //
 // Methods (payloads and answers are JSON):
 //   list                      [{name, enabled, enabled_in_file, loaded, configurable,
-//                              provides, set, pending}] -- every plugin;
+//                              provides: {label: [names]}, set, pending}] -- every plugin;
 //                              enabled_in_file differs from enabled after a
 //                              toggle, until the restart that applies it
 //   enable {name, enabled}    sets the plugin's plugins.json entry; applied at
@@ -78,7 +78,7 @@ private:
         bool enabled = false;
         bool loaded = false;
         std::vector<std::string> provider_kinds;  // the backends it registered
-        std::string provides;                     // what it registered, in a line
+        nlohmann::json provides;                  // {registry label: [names]}
         PluginConfigSymbols symbols;
         nlohmann::json schema;   // null: the plugin takes no configuration
         nlohmann::json applied;  // the config the plugin is running with

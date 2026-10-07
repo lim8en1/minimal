@@ -1347,7 +1347,7 @@ TEST_CASE("the plugins endpoint toggles plugins.json and refuses to strand provi
     const auto good = row_of(list, "fixture-good");
     REQUIRE(good.is_object());
     CHECK(good.at("enabled_in_file") == true);
-    CHECK(good.at("provides").get<std::string>().find("provider: fixture") != std::string::npos);
+    CHECK(good.at("provides").at("provider") == nlohmann::json::array({"fixture"}));
 
     // The only plugin behind providers.json's backend: refused, saying why.
     auto answer = CallJson(endpoint, "enable", {{"name", "fixture-good"}, {"enabled", false}});

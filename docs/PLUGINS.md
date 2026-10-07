@@ -183,6 +183,17 @@ Enablement is recorded in `<config>/plugins.json` (client:
   the bundled entry in `plugins.json` and drop yours in the user dir (two
   registrations with one name are fatal).
 
+### Turning plugins on and off from the TUI
+
+`/config` lists every plugin, server and TUI, on or off, with what each
+provides; space turns one on or off. The change is written to `plugins.json`
+or `client-plugins.json` and takes effect at the next server or TUI start
+(the row says so until then). Two refusals keep a start possible: disabling
+the plugin that provides the last backend providers.json's models use, and
+disabling a TUI plugin that fills a slot the TUI requires (the chat surface,
+the prompt editor, the widget kit, core's permission and confirmation
+prompts). Editing the files by hand works as before.
+
 ### Configuring from a shell: `minimal plugin`
 
 ```

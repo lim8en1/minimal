@@ -1,6 +1,8 @@
 #include "config_view.hpp"
 
+#include <algorithm>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -44,16 +46,81 @@ std::pair<std::string, bool> Outcome(const std::string& path, const json& answer
     return {path + ": no change", false};
 }
 
-// The list screen's label for one plugin.
-std::string ListLabel(const json& row) {
-    // Only what needs attention: how many keys a file sets is the steady
-    // state, not news (the form's * marks show them per field).
-    std::string label = row.value("name", "");
-    if (!row.value("enabled", false)) label += "  (disabled)";
+// "on", "off", or what a toggle waiting for its restart will make it.
+std::string OnOff(bool running, bool in_file, const char* restart) {
+    if (running == in_file) return running ? "on " : "off";
+    return std::string(in_file ? "on " : "off") + " (" + restart + ")";
+}
+
+// What a plugin registered, in a few words: a kind's names when there are
+// one or two ("provider: openai"), its count past that ("12 commands").
+std::string ProvidesSummary(const std::map<std::string, std::vector<std::string>>& provides) {
+    std::string out;
+    for (const auto& [raw_label, names] : provides) {
+        if (names.empty()) continue;
+        // Registry labels read as words: "client_commands" -> "client commands".
+        std::string label = raw_label;
+        std::replace(label.begin(), label.end(), '_', ' ');
+        std::string part;
+        if (names.size() == 1 && names[0] == raw_label) {
+            part = label;   // an exclusive slot names itself: "chat surface"
+        } else if (names.size() <= 2) {
+            part = label + ": " + names[0] + (names.size() == 2 ? ", " + names[1] : "");
+        } else {
+            const bool plural = !label.empty() && label.back() == 's';
+            part = std::to_string(names.size()) + " " + label + (plural ? "" : "s");
+        }
+        out += (out.empty() ? "" : " · ") + part;
+    }
+    return out;
+}
+
+std::map<std::string, std::vector<std::string>> ProvidesFrom(const json& provides) {
+    std::map<std::string, std::vector<std::string>> out;
+    if (!provides.is_object()) return out;
+    for (const auto& [label, names] : provides.items()) {
+        for (const auto& name : names) {
+            if (name.is_string()) out[label].push_back(name.get<std::string>());
+        }
+    }
+    return out;
+}
+
+// Names padded to one column, so states and summaries line up.
+constexpr std::size_t kNameColumn = 24;  // NOLINT(readability-magic-numbers): the longest bundled name, "compaction-structured", and a gap
+std::string Padded(const std::string& name) {
+    return name.size() >= kNameColumn ? name + " " : name + std::string(kNameColumn - name.size(), ' ');
+}
+
+// The list's row ids: which side a plugin is on.
+constexpr const char* kServerPrefix = "s:";
+constexpr const char* kClientPrefix = "c:";
+
+// The list screen's label for one server plugin. Only what needs attention:
+// how many keys a file sets is the steady state, not news (the form's *
+// marks show them per field).
+std::string ServerLabel(const json& row) {
+    const bool enabled = row.value("enabled", false);
+    std::string label = Padded(row.value("name", "")) +
+                        OnOff(enabled, row.value("enabled_in_file", enabled),
+                              "at server restart");
+    if (enabled && !row.value("loaded", false)) label += "  · failed to load";
     if (const auto pending = row.value("pending", json::array()); !pending.empty()) {
         label += "  · restart pending";
     }
     if (row.contains("error")) label += "  · " + row.value("error", std::string());
+    if (const std::string provides = ProvidesSummary(ProvidesFrom(row.value("provides", json()))); !provides.empty()) {
+        label += "  · " + provides;
+    }
+    return label;
+}
+
+std::string ClientLabel(const plugins::ClientPluginInfo& plugin, bool in_file) {
+    std::string label = Padded(plugin.name) + OnOff(plugin.enabled, in_file, "at TUI restart");
+    if (!plugin.error.empty()) label += "  · failed: " + plugin.error;
+    if (const std::string provides = ProvidesSummary(plugin.provides); !provides.empty()) {
+        label += "  · " + provides;
+    }
     return label;
 }
 
@@ -69,8 +136,13 @@ class ConfigComponent final : public ftxui::ComponentBase, public client::Escape
 public:
     ConfigComponent(std::shared_ptr<ConfigFeed> feed, plugins::ClientApi* api,
                     const plugins::WidgetKit* widgets, const client::Theme* theme,
-                    plugins::HostUi* ui)
-        : feed_(std::move(feed)), api_(api), widgets_(widgets), theme_(theme), ui_(ui) {
+                    plugins::HostUi* ui, plugins::HostActions* actions)
+        : feed_(std::move(feed)),
+          api_(api),
+          widgets_(widgets),
+          theme_(theme),
+          ui_(ui),
+          actions_(actions) {
         form_ = widgets_->SchemaForm(
             [feed = feed_] { return feed->form(); },
             client::SchemaFormCallbacks{
@@ -216,34 +288,77 @@ private:
 
     void RebuildListIfStale() {
         const auto state = feed_->list();
-        if (list_ && state.generation == built_generation_) return;
+        if (list_ && state.generation == built_generation_ &&
+            client_outcome_generation_ == built_client_outcome_) {
+            return;
+        }
         built_generation_ = state.generation;
+        built_client_outcome_ = client_outcome_generation_;
         auto rows = state.rows;
-        auto build_rows = [rows](const std::string& filter) {
+        // Server plugins from the feed; TUI plugins read live from the host
+        // (a toggle lands before the next frame), with the toggles made here
+        // until the host's list shows them.
+        auto build_rows = [rows, ui = ui_, toggled = client_toggled_](const std::string& filter) {
             const std::string lowered = client::ToLower(filter);
             std::vector<client::MenuRow> out;
+            // A section's header only over rows the filter kept.
+            bool header = false;
             for (const auto& row : rows) {
                 const std::string name = row.value("name", "");
                 if (!client::MatchesFilter(lowered, {name})) continue;
-                out.push_back({ListLabel(row), name, /*header=*/false});
+                if (!std::exchange(header, true)) out.push_back({"server plugins", "", /*header=*/true});
+                out.push_back({ServerLabel(row), kServerPrefix + name, /*header=*/false});
+            }
+            const auto client = ui != nullptr ? ui->ClientPlugins()
+                                              : std::vector<plugins::ClientPluginInfo>{};
+            header = false;
+            for (const auto& plugin : client) {
+                if (!client::MatchesFilter(lowered, {plugin.name})) continue;
+                if (!std::exchange(header, true)) out.push_back({"TUI plugins", "", /*header=*/true});
+                const auto it = toggled->find(plugin.id);
+                const bool in_file = it != toggled->end() ? it->second : plugin.enabled_in_file;
+                out.push_back({ClientLabel(plugin, in_file), kClientPrefix + plugin.id,
+                               /*header=*/false});
             }
             return out;
         };
+        std::string outcome = !client_outcome_.empty() && client_outcome_generation_ > 0 &&
+                                      client_outcome_newer_
+                                  ? client_outcome_
+                                  : state.outcome;
         client::FilterableMenuSpec spec{
-            .window_title = "plugin configuration",
-            .hint_line = " enter: open  ·  type to filter  ·  esc: close",
+            .window_title = "plugins",
+            // The last toggle's outcome leads the footer (a paragraph: it wraps).
+            .hint_line = (outcome.empty() ? std::string() : " " + outcome + "  ·  ") +
+                         " enter: configure  ·  space: on/off  ·  type to filter  ·  esc: close",
             .status_suffix = [status = state.status](const std::string&) { return status; },
-            .empty_message = state.status == "loading" ? " (loading...)"
-                                                       : " (no configurable plugins)",
+            .empty_message = state.status == "loading" ? " (loading...)" : " (no plugins)",
         };
+        spec.status.memory = list_memory_;
         client::FilterableMenuCallbacks callbacks{
             .on_select =
-                [feed = feed_](const client::MenuRow& row) {
-                    if (!row.id.empty()) feed->Open(row.id);
+                [feed = feed_, rows](const client::MenuRow& row) {
+                    if (row.id.rfind(kServerPrefix, 0) != 0) return;   // TUI plugins: no config here
+                    const std::string name = row.id.substr(2);
+                    for (const auto& server : rows) {
+                        if (server.value("name", "") == name && server.value("configurable", false)) {
+                            feed->Open(name);
+                        }
+                    }
                 },
             .on_close =
                 [ui = ui_] {
                     if (ui != nullptr) ui->CloseView(kViewId);
+                },
+            .on_extra_key =
+                [this, rows](const ftxui::Event& event, const client::MenuContext& ctx,
+                             const std::function<void()>&) {
+                    if (event != ftxui::Event::Character(' ')) return false;
+                    if (ctx.selected < 0 || ctx.selected >= static_cast<int>(ctx.rows.size())) {
+                        return true;
+                    }
+                    Toggle(ctx.rows[ctx.selected].id, rows);
+                    return true;
                 },
         };
         if (list_) DetachAllChildren();
@@ -251,11 +366,56 @@ private:
         Add(list_);
     }
 
+    // Space on a row: flips the plugin's entry for its next start.
+    void Toggle(const std::string& id, const nlohmann::json& rows) {
+        if (id.rfind(kServerPrefix, 0) == 0) {
+            const std::string name = id.substr(2);
+            for (const auto& row : rows) {
+                if (row.value("name", "") != name) continue;
+                const bool enabled = row.value("enabled_in_file", row.value("enabled", false));
+                client_outcome_newer_ = false;
+                feed_->Toggle(name, !enabled);
+            }
+            return;
+        }
+        if (id.rfind(kClientPrefix, 0) != 0 || ui_ == nullptr) return;
+        const std::string plugin_id = id.substr(2);
+        for (const auto& plugin : ui_->ClientPlugins()) {
+            if (plugin.id != plugin_id) continue;
+            const auto it = client_toggled_->find(plugin.id);
+            const bool in_file = it != client_toggled_->end() ? it->second : plugin.enabled_in_file;
+            if (in_file && !plugin.required.empty()) {
+                client_outcome_ = "cannot turn " + plugin.name + " off: " + plugin.required +
+                                  " -- the TUI would not start without it";
+            } else if (actions_ == nullptr) {
+                client_outcome_ = "this TUI does not offer plugin toggles";
+            } else {
+                actions_->SetClientPluginEnabled(plugin.id, !in_file);
+                (*client_toggled_)[plugin.id] = !in_file;
+                client_outcome_ = plugin.name + (in_file ? " off" : " on") +
+                                  (plugin.enabled == !in_file ? "" : " at the next TUI start");
+            }
+            client_outcome_newer_ = true;
+            ++client_outcome_generation_;
+        }
+    }
+
     std::shared_ptr<ConfigFeed> feed_;
     plugins::ClientApi* api_;
     const plugins::WidgetKit* widgets_;
     const client::Theme* theme_;
     plugins::HostUi* ui_;
+    plugins::HostActions* actions_;
+    // The list's filter and cursor, kept across the rebuild a toggle causes.
+    std::shared_ptr<client::MenuMemory> list_memory_ = std::make_shared<client::MenuMemory>();
+    // TUI plugin toggles made here (id -> on in the file), until the host's
+    // own list shows them; and what the last one did.
+    std::shared_ptr<std::map<std::string, bool>> client_toggled_ =
+        std::make_shared<std::map<std::string, bool>>();
+    std::string client_outcome_;
+    bool client_outcome_newer_ = false;   // newer than the feed's (server) outcome
+    std::uint64_t client_outcome_generation_ = 0;
+    std::uint64_t built_client_outcome_ = 0;
     ftxui::Component form_;
     ftxui::Component list_;
     ftxui::Component chooser_;  // while choosing_, and until the next Sync after
@@ -292,10 +452,7 @@ void ConfigFeed::FetchList() {
     const json answer = Call("list", json::object());
     std::lock_guard<std::mutex> lock(mu_);
     if (answer.is_array()) {
-        list_.rows = json::array();
-        for (const auto& row : answer) {
-            if (row.value("configurable", false)) list_.rows.push_back(row);
-        }
+        list_.rows = answer;   // every plugin: each can be toggled
         list_.status.clear();
     } else {
         // The previous answer is dropped, not kept beside the error: rows
@@ -378,6 +535,24 @@ void ConfigFeed::Edit(const std::string& method, json request) {
     });
 }
 
+void ConfigFeed::Toggle(const std::string& name, bool enabled) {
+    worker_.Post([this, name, enabled] {
+        const json answer = Call("enable", {{"name", name}, {"enabled", enabled}});
+        std::string outcome;
+        if (answer.contains("error")) {
+            outcome = answer.value("error", std::string());
+        } else {
+            outcome = name + (enabled ? " on" : " off") +
+                      (answer.value("applied", "") == "restart" ? " at the next server start" : "");
+        }
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            list_.outcome = std::move(outcome);
+        }
+        FetchList();
+    });
+}
+
 void ConfigFeed::Set(const std::string& path, const std::string& text) {
     Edit("set", {{"key", path}, {"text", text}});
 }
@@ -400,8 +575,12 @@ std::string ConfigFeed::open_plugin() const {
 }
 
 ConfigView::ConfigView(plugins::ClientApi* api, const plugins::WidgetKit* widgets,
-                       plugins::HostUi* ui)
-    : feed_(std::make_shared<ConfigFeed>(api, ui)), api_(api), widgets_(widgets), ui_(ui) {}
+                       plugins::HostUi* ui, plugins::HostActions* actions)
+    : feed_(std::make_shared<ConfigFeed>(api, ui)),
+      api_(api),
+      widgets_(widgets),
+      ui_(ui),
+      actions_(actions) {}
 
 const plugins::ViewSpec& ConfigView::spec() const {
     static const plugins::ViewSpec kSpec{kViewId, "plugin configuration",
@@ -410,7 +589,7 @@ const plugins::ViewSpec& ConfigView::spec() const {
 }
 
 ftxui::Component ConfigView::component() {
-    return ftxui::Make<ConfigComponent>(feed_, api_, widgets_, &theme_, ui_);
+    return ftxui::Make<ConfigComponent>(feed_, api_, widgets_, &theme_, ui_, actions_);
 }
 
 void ConfigView::OnShow() const {

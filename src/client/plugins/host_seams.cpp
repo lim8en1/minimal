@@ -352,6 +352,7 @@ public:
         return host_.CommandCatalog();
     }
     std::vector<std::string> ThemeNames() const override { return host_.ThemeNames(); }
+    std::vector<ClientPluginInfo> ClientPlugins() const override { return host_.ClientPlugins(); }
     std::shared_ptr<const TabActivitySnapshot> Activity() const override {
         return host_.Activity();
     }

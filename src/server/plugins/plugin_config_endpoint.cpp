@@ -1,5 +1,6 @@
 #include "minimal/plugins/plugin_config_endpoint.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "minimal/common/atomic_write.hpp"
@@ -20,14 +21,17 @@ std::string Need(const json& request, const char* key) {
     return request.at(key).get<std::string>();
 }
 
-// What a plugin registered, in one line: "provider: openai · tool: bash".
-std::string ProvidesLine(const PluginRecord& record) {
-    std::string out;
+// What a plugin registered: {label: [distinct names]} ("provider": ["openai"]).
+json ProvidesOf(const PluginRecord& record) {
+    json out = json::object();
     for (const auto& [label, names] : record.registered) {
-        if (names.empty()) continue;
-        std::string items;
-        for (const auto& name : names) items += (items.empty() ? "" : ", ") + name;
-        out += (out.empty() ? "" : " · ") + label + ": " + items;
+        json distinct = json::array();
+        for (const auto& name : names) {
+            if (std::find(distinct.begin(), distinct.end(), name) == distinct.end()) {
+                distinct.push_back(name);
+            }
+        }
+        if (!distinct.empty()) out[label] = std::move(distinct);
     }
     return out;
 }
@@ -45,7 +49,7 @@ PluginConfigEndpoint::PluginConfigEndpoint(std::filesystem::path config_dir,
         entry.file = record.file.filename().string();
         entry.provenance = record.provenance;
         entry.provider_kinds = record.Registered("provider");
-        entry.provides = ProvidesLine(record);
+        entry.provides = ProvidesOf(record);
         entry.enabled = record.status != LoadStatus::Disabled;
         entry.loaded = record.ok();
         entry.symbols = record.config;
