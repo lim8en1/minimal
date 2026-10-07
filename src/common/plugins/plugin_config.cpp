@@ -86,6 +86,13 @@ PluginConfigFile ParsePluginConfigFile(const std::string& json_text,
                     config.plugins.push_back(std::move(entry));
                 } catch (const config::ConfigError& error) {
                     problem(error);
+                    if (item.is_object() && item.contains("file") && item.at("file").is_string()) {
+                        std::optional<bool> enabled;
+                        if (item.contains("enabled") && item.at("enabled").is_boolean()) {
+                            enabled = item.at("enabled").get<bool>();
+                        }
+                        config.broken[item.at("file").get<std::string>()] = enabled;
+                    }
                 }
             }
         }
@@ -231,6 +238,11 @@ std::vector<PluginFileCandidate> DiscoverPluginFiles(const std::filesystem::path
             PluginConfigFile::Entry entry;
             entry.file = item.file;
             entry.provenance = item.provenance;
+            // Its entry is there but broken: what it said, else off -- never
+            // the default, which would re-enable a plugin the user disabled.
+            if (const auto broken = config.broken.find(item.file); broken != config.broken.end()) {
+                entry.enabled = broken->second.value_or(false);
+            }
             config.plugins.push_back(entry);
             existing = std::prev(config.plugins.end());
         }

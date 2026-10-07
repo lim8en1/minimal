@@ -75,6 +75,11 @@ struct PluginConfigFile {
     // disabled must not come back because its entry had a typo. The server
     // treats any as fatal; the client warns.
     std::vector<std::string> problems;
+    // The entries that had a problem but still named their file: basename ->
+    // their "enabled" when that much read as a boolean. Discovery gives such
+    // a file this value -- or DISABLED -- rather than the default: a plugin
+    // the user turned off must not come back because its entry has a typo.
+    std::map<std::string, std::optional<bool>> broken;
 };
 
 // What differs between hosts.

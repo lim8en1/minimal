@@ -521,8 +521,12 @@ public:
     void NewTab() override {}
     void OpenSession(const std::string&, bool) override {}
     void OpenSubagent(const std::string&, const std::string&, bool) override {}
+    void SetClientPluginEnabled(const std::string& id, bool enabled) override {
+        toggles.emplace_back(id, enabled);
+    }
     std::vector<std::string> inserted;
     std::vector<std::string> themes;
+    std::vector<std::pair<std::string, bool>> toggles;
 };
 
 class CountingUi final : public HostUi {
@@ -565,8 +569,13 @@ TEST_CASE("host reads answer empty until the TUI attaches them, then through eve
     CHECK(bound->CommandCatalog().empty());
     provider->AttachReads(
         {.key_bindings = [] { return std::vector<KeyBindingInfo>{{"tab.next", "alt+down", "next tab", "tabs", 0}}; },
-         .command_catalog = [] { return std::vector<CommandCatalogEntry>{{.name = "cost"}}; }});
+         .command_catalog = [] { return std::vector<CommandCatalogEntry>{{.name = "cost"}}; },
+         .client_plugins = [] { return std::vector<ClientPluginInfo>{{.id = "x.so", .name = "x"}}; }});
     REQUIRE(bound->KeyBindings().size() == 1);
+    // Every read reaches a plugin through its own bound ui, not just the
+    // provider: a forward missing there answered the interface's empty default.
+    REQUIRE(bound->ClientPlugins().size() == 1);
+    CHECK(bound->ClientPlugins()[0].name == "x");
     CHECK(bound->KeyBindings()[0].key == "alt+down");
     REQUIRE(provider->CommandCatalog().size() == 1);
     CHECK(provider->CommandCatalog()[0].name == "cost");
@@ -838,6 +847,32 @@ TEST_CASE("client plugin config: a wrong-typed entry is a named problem, never a
     CHECK(parsed.problems[0].find("plugins[0].enabled: must be true or false") != std::string::npos);
     CHECK(parsed.problems[1].find("plugins[1].provenance: must be a string") != std::string::npos);
     CHECK(parsed.problems[2].find("plugins[2].enable: unknown field") != std::string::npos);
+}
+
+TEST_CASE("client plugin discovery: a bundled plugin whose entry is broken never comes back on",
+          "[client_plugins][discovery]") {
+    // The entry is dropped as a problem; discovery used to add a fresh
+    // default entry for the file -- bundled, so ENABLED -- and a plugin the
+    // user had turned off loaded for that run.
+    TempDir dir;
+    std::filesystem::create_directories(dir.path() / "bundled/one");
+    std::ofstream(dir.path() / "bundled/one/off.so") << "stub";
+    std::ofstream(dir.path() / "bundled/one/typo.so") << "stub";
+    std::ofstream(dir.path() / "bundled/one/garbled.so") << "stub";
+    ClientPluginConfig config = ParseClientPluginConfig(R"({"plugins": [
+        {"file": "off.so", "enabled": false, "provenanse": "bundled"},
+        {"file": "typo.so", "enabled": true, "enable": 1},
+        {"file": "garbled.so", "enabled": "no"}
+    ]})");
+    REQUIRE(config.problems.size() == 3);
+    const auto candidates =
+        DiscoverClientPlugins(dir.path() / "bundled", dir.path() / "user", config);
+    REQUIRE(candidates.size() == 3);
+    for (const auto& candidate : candidates) {
+        INFO(candidate.file.filename().string());
+        const bool expect = candidate.file.filename() == "typo.so";   // it said true
+        CHECK(candidate.enabled == expect);
+    }
 }
 
 TEST_CASE("client plugin discovery: a user-dir twin of a bundled basename is its own "

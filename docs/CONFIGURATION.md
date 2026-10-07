@@ -33,7 +33,7 @@ runtime. Copyable example agents, prompts, skills, and commands live in
 | `cost-rates.json` | server | optional | cost-tracker's fallback price table |
 | `decision-advisor.json` | server (`decision-advisor` plugin) | required when the plugin is enabled | every advisor default: backend profiles, retry, thresholds, questions; missing, unknown key or bad value → the plugin does not load (named field) |
 | `plugins/` (dir) | server | optional | user plugins scanned here (docs/PLUGINS.md) |
-| `client-plugins.json` | client | optional | malformed or an invalid entry → warning; that entry is skipped and the file is not rewritten |
+| `client-plugins.json` | client | optional | malformed or an invalid entry → warning; the file is not rewritten, and a plugin whose entry is invalid stays as the entry said (`enabled`, when that much reads) or off -- never back on by default |
 | `client-plugins.d/<name>.json` | client | optional | one per client plugin, the same rules as `plugins.d/` (a bad file → that plugin does not load, with a warning) |
 | `client-plugins/` (dir) | client | optional | user client plugins scanned here |
 | `keybindings.json` | client | optional | missing → built-in defaults; malformed → load fails (named path) |
@@ -1048,14 +1048,14 @@ interrupt demonstrably landed.
 ## Fatal vs warning at startup
 
 **Fatal:** `settings.json` / `providers.json` / `permissions.json` /
-`hooks.json` parse errors; no usable provider; no agent preset or unresolvable
+`hooks.json` parse errors; a malformed `plugins.json` or an invalid entry in it; no usable provider; no agent preset or unresolvable
 `default_agent_preset`; config/data dir missing or unwritable; session DB
 failure; a **bundled** plugin failing to load; service/tool/command name
 collisions; duplicate provider-kind registration; two plugins claiming one
 `tool_config` namespace; two plugins registering one tool source; a plugin
 permission model claiming another plugin's tool.
 
-**Warning (startup continues):** malformed `plugins.json`; anything a loaded
+**Warning (startup continues):** anything a loaded
 plugin reports about its own config (the `mcp` plugin: malformed `mcps.json` /
 `channels.json`, MCP command/url and channel command problems) — printed under
 the plugin's name; unregistered `backend` kind; `default_model` typo; broken

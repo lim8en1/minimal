@@ -4,8 +4,12 @@ Plugin configuration in the TUI: `/config`.
 
 ## What it adds
 
-- **View** `config` (modal): the plugins that take configuration, then one
-  plugin's form — every field with its value (`*` = set in the file, the rest
+- **View** `config` (modal): every plugin, server and TUI, each on or off
+  with what it provides; space turns one on or off for its next start
+  (`plugins.json` / `client-plugins.json`) -- refused, with the reason, for
+  the last provider providers.json's models need, and for what the TUI
+  cannot start without (chat-view, prompt-editor, ui-kit, consent-prompts).
+  Enter on a configurable server plugin opens its form — every field with its value (`*` = set in the file, the rest
   are defaults), whether it applies **live** or on **restart**, and
   **restart pending** where the file differs from what the running plugin
   uses; a field the current mode does not use (memory's http fields under

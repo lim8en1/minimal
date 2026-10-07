@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -73,6 +74,21 @@ struct TabActivitySnapshot {
     std::vector<TabActivity> tabs;
 };
 
+// One client plugin, as the TUI has it (HostUi::ClientPlugins): what
+// /config lists and toggles.
+struct ClientPluginInfo {
+    std::string id;                // its file: what SetClientPluginEnabled names
+    std::string name;              // its own name; the file's stem when it never loaded
+    bool enabled = false;          // on for this run
+    bool enabled_in_file = false;  // client-plugins.json now: the next start's
+    bool loaded = false;
+    std::string error;             // why it failed to load, when it did
+    // What it registered, by registry label ("views": ["config"]).
+    std::map<std::string, std::vector<std::string>> provides;
+    // Why the TUI cannot start without it ("draws the chat"); "" = optional.
+    std::string required;
+};
+
 // The host UI seam. The frame repaints only when the app's own state moved
 // (the pump is event-driven), so a plugin whose data changed on its OWN thread
 // -- a feed landing new totals, a picker's list arriving -- showed nothing
@@ -123,6 +139,8 @@ public:
     // (The defaults: nothing kept.)
     virtual nlohmann::json LoadState() const { return nullptr; }
     virtual void SaveState(const nlohmann::json& state) { (void)state; }
+    // Every client plugin the TUI found, loaded or not. (The default: none.)
+    virtual std::vector<ClientPluginInfo> ClientPlugins() const { return {}; }
     // Every tab and its tool calls. Never null. (The default: no tabs.)
     virtual std::shared_ptr<const TabActivitySnapshot> Activity() const {
         static const auto kNone = std::make_shared<const TabActivitySnapshot>();
@@ -172,6 +190,12 @@ public:
     // attached into its parent's tab group, an ended one opened read-only.
     virtual void OpenSubagent(const std::string& session_id, const std::string& parent_session_id,
                               bool is_live) = 0;
+
+    // Turns client plugin `id` (ClientPluginInfo::id) on or off in
+    // client-plugins.json, for the next TUI start; the focused tab's notice
+    // says what happened. Refused for a plugin the TUI cannot start without
+    // (ClientPluginInfo::required).
+    virtual void SetClientPluginEnabled(const std::string& id, bool enabled) = 0;
 };
 
 // What a plugin may raise or clear. Core event derivation (the Waiting '!') is

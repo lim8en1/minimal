@@ -523,7 +523,30 @@ static int RunServer(int argc, char** argv) {
     // after an edit): core's, because it needs every plugin's record and the
     // config each one registered with. Provided after the plugins, so no
     // plugin can claim the name.
-    minimal::plugins::PluginConfigEndpoint plugin_config_endpoint(config_dir, records, candidates);
+    // A disable must leave providers.json's models a backend: what they use,
+    // re-read when asked (the file may have changed since startup).
+    const auto backends_in_use = [&config_dir, &variant_params, &provider_config_extensions] {
+        std::set<std::string> used;
+        try {
+            const auto providers = minimal::config::LoadProvidersConfig(
+                config_dir / "providers.json", minimal::config::MakeVariantParamsHook(&variant_params),
+                &provider_config_extensions);
+            for (const auto& ref_text : providers.ModelRefs()) {
+                const auto ref = minimal::common::SplitModelRef(ref_text);
+                if (!ref) continue;
+                if (const auto model = providers.Resolve(*ref)) used.insert(model->backend);
+            }
+            for (const auto& [name, entry] : providers.provider_entries()) {
+                if (entry.discover) used.insert(entry.backend);
+            }
+        } catch (const std::exception&) {
+            // Unreadable: nothing to protect that the startup check would not
+            // already refuse.
+        }
+        return used;
+    };
+    minimal::plugins::PluginConfigEndpoint plugin_config_endpoint(config_dir, records, candidates,
+                                                                  backends_in_use);
     services.Provide(minimal::plugins::PluginEndpointServiceName(
                          minimal::plugins::kPluginConfigEndpointName),
                      &plugin_config_endpoint);

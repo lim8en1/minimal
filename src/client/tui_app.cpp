@@ -15,6 +15,8 @@
 #include <ftxui/dom/elements.hpp>
 
 #include "client_entry.hpp"
+#include "minimal/client/config_file_io.hpp"
+#include "minimal/client/plugins/plugin_discovery.hpp"
 #include "minimal/client/sdk/chat_model.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/sdk/theme.hpp"
@@ -222,7 +224,8 @@ void TuiApp::BuildState() {
         {.key_bindings = [this] { return KeyBindingsForPlugins(); },
          .command_catalog = [this] { return CatalogForPlugins(); },
          .theme_names = [this] { return ListThemeNames(); },
-         .activity = [this] { return activity_feed_.Get(*app_); }});
+         .activity = [this] { return activity_feed_.Get(*app_); },
+         .client_plugins = [this] { return env_.client_plugins; }});
     // Memory bounds (track R2): ui.json's values, or the built-in defaults
     // (SetUiBounds treats 0 as "keep the default"). Applied before any tab can
     // open, so every SessionState starts bounded.
@@ -776,6 +779,47 @@ void TuiApp::OpenSession(const std::string& session_id, bool is_live) {
 }
 void TuiApp::OpenSubagent(const std::string& session_id, const std::string& parent, bool is_live) {
     picker_controller_->OpenSubagent(session_id, parent, is_live);
+}
+
+void TuiApp::SetClientPluginEnabled(const std::string& id, bool enabled) {
+    const auto info = std::find_if(env_.client_plugins.begin(), env_.client_plugins.end(),
+                                   [&id](const auto& plugin) { return plugin.id == id; });
+    if (info == env_.client_plugins.end()) {
+        FocusedNotice("no client plugin '" + id + "'");
+        return;
+    }
+    if (!enabled && !info->required.empty()) {
+        FocusedNotice("cannot turn " + info->name + " off: " + info->required +
+                      " -- the TUI would not start without it");
+        return;
+    }
+    // Re-read: the file may have been edited since startup. One that cannot
+    // be used as written is not rewritten over the user's bytes.
+    const auto path = env_.config_dir / "client-plugins.json";
+    std::string contents;
+    (void)TryReadConfigFile(path, &contents);
+    plugins::ClientPluginConfig file = plugins::ParseClientPluginConfig(contents);
+    if (file.malformed || !file.problems.empty()) {
+        FocusedNotice("client-plugins.json cannot be used as written -- fix it first" +
+                      (file.problems.empty() ? std::string() : ": " + file.problems.front()));
+        return;
+    }
+    const auto provenance = env_.client_plugin_provenance.at(id);
+    bool found = false;
+    for (auto& entry : file.plugins) {
+        if (entry.file != id || (entry.provenance && *entry.provenance != provenance)) continue;
+        entry.provenance = provenance;
+        entry.enabled = enabled;
+        found = true;
+    }
+    if (!found) file.plugins.push_back({id, provenance, enabled});
+    if (!WriteConfigFileAtomic(path, plugins::SerializeClientPluginConfig(file))) {
+        FocusedNotice("could not write " + path.string());
+        return;
+    }
+    info->enabled_in_file = enabled;
+    FocusedNotice(info->name + (enabled ? " is on" : " is off") +
+                  (enabled == info->enabled ? "" : " from the next TUI start"));
 }
 
 void TuiApp::InsertPrompt(const std::string& text) {
