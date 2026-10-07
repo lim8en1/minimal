@@ -840,6 +840,32 @@ TEST_CASE("client plugin config: a wrong-typed entry is a named problem, never a
     CHECK(parsed.problems[2].find("plugins[2].enable: unknown field") != std::string::npos);
 }
 
+TEST_CASE("client plugin discovery: a bundled plugin whose entry is broken never comes back on",
+          "[client_plugins][discovery]") {
+    // The entry is dropped as a problem; discovery used to add a fresh
+    // default entry for the file -- bundled, so ENABLED -- and a plugin the
+    // user had turned off loaded for that run.
+    TempDir dir;
+    std::filesystem::create_directories(dir.path() / "bundled/one");
+    std::ofstream(dir.path() / "bundled/one/off.so") << "stub";
+    std::ofstream(dir.path() / "bundled/one/typo.so") << "stub";
+    std::ofstream(dir.path() / "bundled/one/garbled.so") << "stub";
+    ClientPluginConfig config = ParseClientPluginConfig(R"({"plugins": [
+        {"file": "off.so", "enabled": false, "provenanse": "bundled"},
+        {"file": "typo.so", "enabled": true, "enable": 1},
+        {"file": "garbled.so", "enabled": "no"}
+    ]})");
+    REQUIRE(config.problems.size() == 3);
+    const auto candidates =
+        DiscoverClientPlugins(dir.path() / "bundled", dir.path() / "user", config);
+    REQUIRE(candidates.size() == 3);
+    for (const auto& candidate : candidates) {
+        INFO(candidate.file.filename().string());
+        const bool expect = candidate.file.filename() == "typo.so";   // it said true
+        CHECK(candidate.enabled == expect);
+    }
+}
+
 TEST_CASE("client plugin discovery: a user-dir twin of a bundled basename is its own "
           "disabled entry",
           "[client_plugins][discovery]") {
