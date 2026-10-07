@@ -602,7 +602,7 @@ public:
     virtual ftxui::Element ModalRule(const Theme& theme) const = 0;
 
     // A model chooser that fetches the list itself through `spec.fetch`,
-    // on its own worker; ctrl+r refreshes discovery.
+    // on the caller's worker (`spec.post`); ctrl+r refreshes discovery.
     virtual ftxui::Component ModelSelector(ModelSelectorSpec spec,
                                            ModelSelectorCallbacks callbacks,
                                            const Theme& theme) const = 0;

@@ -50,6 +50,8 @@ public:
     client::SchemaFormState form() const;
     // The plugin whose form is showing; "" on the list screen.
     std::string open_plugin() const;
+    // Runs `task` on the feed's worker, after whatever is queued there.
+    void Post(std::function<void()> task) { worker_.Post(std::move(task)); }
 
 private:
     void FetchList();

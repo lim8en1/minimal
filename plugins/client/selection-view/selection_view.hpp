@@ -69,7 +69,8 @@ class ModelsView final : public plugins::View {
 public:
     // `for_subagents`: the subagent-model form -- a "same as parent" row,
     // and a pick sets the session's subagent model.
-    ModelsView(Seams seams, bool for_subagents) : seams_(seams), for_subagents_(for_subagents) {}
+    ModelsView(Seams seams, bool for_subagents);
+    ~ModelsView() override;
     const plugins::ViewSpec& spec() const override;
     ftxui::Component component() override;
     void OnTheme(const client::Theme& theme) override { theme_ = theme; }
@@ -80,6 +81,9 @@ private:
     bool for_subagents_;
     client::Theme theme_;
     std::shared_ptr<std::atomic<bool>> stale_ = std::make_shared<std::atomic<bool>>(true);
+    // The selector's fetches: view-lived, so a selector dropped on reopen
+    // never joins a discovery refresh on the UI thread.
+    std::unique_ptr<plugins::TaskWorker> worker_;  // last: joined first
 };
 
 }  // namespace minimal::selection_view

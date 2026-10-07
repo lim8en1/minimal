@@ -129,6 +129,9 @@ private:
             spec.fetch = [api = api_](bool refresh, std::string& error) {
                 return api->ListModels(refresh, &error);
             };
+            spec.post = [feed = feed_](std::function<void()> task) {
+                feed->Post(std::move(task));
+            };
             spec.redraw = [ui = ui_] {
                 if (ui != nullptr) ui->RequestRedraw();
             };
