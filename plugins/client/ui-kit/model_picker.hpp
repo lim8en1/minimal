@@ -42,6 +42,9 @@ struct ModelPickerCallbacks {
     // ref the catalog does not list (discovery offline, a provider not
     // configured yet) stays choosable. on_select receives the typed text.
     bool allow_custom = false;
+    // The typed text is offered as it is, '/' or not: a model's own name
+    // (ModelSelectorSpec::choose_model_name), not a ref.
+    bool custom_is_name = false;
     // The window's title and the Enter hint ("switch model" / "switch").
     std::string window_title = "switch model";
     std::string select_hint = "switch";

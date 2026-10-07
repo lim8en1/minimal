@@ -20,7 +20,8 @@ ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
             rows.push_back({row.label, row.ref, row.header});
             exact = exact || (!row.header && row.ref == filter);
         }
-        if (callbacks.allow_custom && !exact && filter.find('/') != std::string::npos &&
+        if (callbacks.allow_custom && !exact && !filter.empty() &&
+            (callbacks.custom_is_name || filter.find('/') != std::string::npos) &&
             filter.find(' ') == std::string::npos) {
             rows.push_back({"use '" + filter + "' (not listed)", filter, /*header=*/false});
         }

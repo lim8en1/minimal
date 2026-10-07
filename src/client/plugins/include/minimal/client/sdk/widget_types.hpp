@@ -182,6 +182,10 @@ struct ModelSelectorSpec {
     // Offer the typed `<provider>/<model>` itself when the list does not
     // have it (discovery offline, a provider not configured yet).
     bool allow_custom = false;
+    // Answers a model's own name (ModelSummary::model_name -- what its
+    // provider is sent, and what a per-model setting is keyed by) instead of
+    // its `<provider>/<model>` ref; a typed custom value is taken as a name.
+    bool choose_model_name = false;
 };
 
 struct ModelSelectorCallbacks {

@@ -226,3 +226,37 @@ TEST_CASE("a default row is offered only when the server names a default, and na
         }
     }
 }
+
+TEST_CASE("a model selector asked for names answers the provider's model name, typed names too",
+          "[model_selector]") {
+    const auto theme = TestTheme();
+    client::plugins::TaskWorker worker("test");
+    client::ModelSelectorSpec spec;
+    PostOn(spec, worker);
+    spec.fetch = [](bool, std::string&) {
+        v1::ListModelsResponse response;
+        auto* listed = response.add_models();
+        listed->set_ref("gw/fast");
+        listed->set_model_name("vendor-fast-2025");   // what the provider is sent
+        response.add_models()->set_ref("gw/plain");     // an older server: no name
+        return std::optional<v1::ListModelsResponse>(response);
+    };
+    spec.allow_custom = true;
+    spec.choose_model_name = true;
+    std::vector<std::string> picked;
+    auto selector = client::ui_kit::MakeModelSelector(
+        spec, {.on_select = [&](const std::string& name) { picked.push_back(name); }}, theme);
+    REQUIRE(Eventually([&] {
+        return minimal_test::RenderFrame(selector, 80, 24).find("plain") != std::string::npos;
+    }));
+    minimal_test::SendEvent(selector, ftxui::Event::Return);   // gw/fast
+    minimal_test::SendEvent(selector, ftxui::Event::ArrowDown);
+    (void)minimal_test::RenderFrame(selector, 80, 24);
+    minimal_test::SendEvent(selector, ftxui::Event::Return);   // gw/plain
+    for (const char c : std::string("my-model")) {
+        minimal_test::SendEvent(selector, ftxui::Event::Character(c));
+    }
+    CHECK(minimal_test::RenderFrame(selector, 80, 24).find("use 'my-model'") != std::string::npos);
+    minimal_test::SendEvent(selector, ftxui::Event::Return);
+    CHECK(picked == std::vector<std::string>{"vendor-fast-2025", "plain", "my-model"});
+}
