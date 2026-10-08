@@ -54,6 +54,13 @@ inline constexpr std::size_t kStreamSendQueueCap = 256;
 inline constexpr std::size_t kRpcQueueCapacity = 64;
 inline constexpr std::size_t kStreamCloserQueueCapacity = 1024;
 
+// --- `minimal status-bar` ---------------------------------------------------------
+
+// The width a sample render is measured against when stdout is not a
+// terminal: a common terminal width, wide enough to show every segment of
+// the bundled layout.
+inline constexpr int kStatusBarSampleWidth = 120;
+
 // --- paging -----------------------------------------------------------------------
 
 // Messages per scrollback page, and the pages one refresh job may walk before

@@ -70,11 +70,11 @@ public:
              std::string toggle_collapse_hint = "alt+c",
              std::string load_older_hint = "pageup");
 
-    // The STARTUP fold defaults from ui.json (fold_thinking/fold_tools),
+    // The STARTUP fold defaults from chat-view's config (fold_thinking/fold_tools),
     // kFoldDefaultAuto when unset. Consulted by IsCollapsed's tier below the
     // global collapse choice; never set after the first Render() (the
     // build sites seed it once at construction -- there is no runtime path
-    // that rewrites ui.json behind a live view).
+    // that rewrites the config behind a live view).
     void SetFoldDefaults(int thinking, int tools) {
         fold_thinking_default_ = thinking;
         fold_tool_default_ = tools;
@@ -178,14 +178,19 @@ public:
     // newer, more specific intent wins (the toggle would otherwise be
     // invisible while collapse-all was set). kFoldDefaultAuto is never set
     // in-session: a toggle moves to expanded/collapsed, the "auto" reading
-    // comes back only from ui.json at the next launch. The kind default is
+    // comes back only from the config at the next launch. The kind default is
     // one value per VIEW (per tab) in memory -- every tab shows the same
-    // ui.json startup value, and the returned state is what the caller
+    // configured startup value, and the returned state is what the caller
     // persists through SaveFoldDefaults for ALL tabs (the toggles are
     // session-wide preferences, so app.cpp runs them across every open tab).
     // Returns the new state (kFoldExpanded / kFoldCollapsed).
     int ToggleThinkingFold();
     int ToggleToolFold();
+    // Sets a kind's fold to `fold` (kFoldExpanded / kFoldCollapsed) the way a
+    // toggle does -- overrides and collapse-all cleared -- so every tab can
+    // take the one value the toggled tab arrived at.
+    void SetThinkingFold(int fold);
+    void SetToolFold(int fold);
 
     // Mouse-click collapse: maps a screen y (the click row) to the rendered
     // row under it and flips that row's collapse state, exactly as
@@ -268,7 +273,7 @@ private:
 
     // Four-tier collapse resolution for one row, most specific first: an
     // explicit per-row toggle > the global collapse-all choice > the
-    // ui.json kind default (fold_thinking_default_ / fold_tool_default_, 0 =
+    // configured kind default (fold_thinking_default_ / fold_tool_default_, 0 =
     // unset) > the kind's own built-in default (a display renderer's
     // collapsed_by_default() for the row's display kind, else
     // CollapsedByDefault). The tool tier applies to every ToolActivity row
@@ -371,7 +376,7 @@ private:
     std::optional<RowKey> focused_row_;
     std::map<RowKey, bool> collapse_overrides_;
     std::optional<bool> global_collapse_;
-    // The ui.json fold defaults (SetFoldDefaults), consulted by IsCollapsed
+    // The configured fold defaults (SetFoldDefaults), consulted by IsCollapsed
     // between the global choice and the built-in kind default. 0 = unset.
     int fold_thinking_default_ = kFoldDefaultAuto;
     int fold_tool_default_ = kFoldDefaultAuto;

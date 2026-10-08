@@ -411,15 +411,24 @@ private:
         spec.status.memory = list_memory_;
         client::FilterableMenuCallbacks callbacks{
             .on_select =
-                [feed = feed_, rows](const client::MenuRow& row) {
-                    // TUI plugins: no config here.
+                [this, rows](const client::MenuRow& row) {
+                    // Enter that opens nothing says why, instead of nothing.
+                    const auto say = [this](std::string why) {
+                        client_outcome_ = std::move(why);
+                        client_outcome_newer_ = true;
+                        ++client_outcome_generation_;
+                    };
                     if (row.id.rfind(kServerPrefix, 0) != 0 && row.id.rfind(kCorePrefix, 0) != 0) {
+                        say("TUI plugins have no form here -- space turns one on or off");
                         return;
                     }
                     const std::string name = row.id.substr(2);
                     for (const auto& server : rows) {
-                        if (server.value("name", "") == name && server.value("configurable", false)) {
-                            feed->Open(name);
+                        if (server.value("name", "") != name) continue;
+                        if (server.value("configurable", false)) {
+                            feed_->Open(name);
+                        } else {
+                            say(name + " takes no configuration");
                         }
                     }
                 },

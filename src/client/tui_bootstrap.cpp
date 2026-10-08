@@ -269,12 +269,13 @@ bool LoadClientPluginEnvironment(SessionClient* client, TuiEnvironment& out,
     // or a disabled plugin -- said once, then ignored.
     out.status_bar = ComposeStatusBar(out.registries.status_segments, out.ui.status_segments);
     for (const auto& id : out.status_bar.unknown) {
-        common::DefaultLogger().warn("ui.json: status_segments.{}: no status segment by that name "
-                                     "-- ignored", id);
+        std::fprintf(stderr,
+                     "minimal: warning: ui.json: status_segments.%s: no status segment by that "
+                     "name -- ignored\n",
+                     id.c_str());
     }
-    out.status_format = out.status_bar.format;
     out.status_segment_ids.clear();
-    for (const auto& piece : out.status_format) {
+    for (const auto& piece : out.status_bar.format) {
         if (piece.is_segment && piece.text != kStatusSplitId) out.status_segment_ids.insert(piece.text);
     }
 

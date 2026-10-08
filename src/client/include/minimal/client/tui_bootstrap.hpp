@@ -119,10 +119,9 @@ struct TuiEnvironment {
     Keybindings keybindings;
     ResolvedKeymap keymap;
     // The status bar as composed (status_layout.hpp): where every registered
-    // segment landed, for `minimal status-bar`; status_format is its pieces,
-    // status_segment_ids the ids shown -- the only segments rendered.
+    // segment landed (its `format` the pieces the bar draws); status_segment_ids
+    // the ids shown -- the only segments rendered.
     ComposedStatusBar status_bar;
-    std::vector<StatusSegment> status_format;
     std::set<std::string> status_segment_ids;
 
     // The assembled grammar table (vendored defaults plus plugin additions):

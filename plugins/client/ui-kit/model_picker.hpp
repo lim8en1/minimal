@@ -16,14 +16,6 @@
 
 namespace minimal::client::ui_kit {
 
-// The /subagent-model picker's prepended row. Selection means "clear the
-// session's subagent-model override -- spawned children run the parent's
-// model". Carried as a row id so on_select can tell it from a real model ref.
-inline constexpr const char* kSameAsParentRowId = "same-as-parent";
-// The /model picker's prepended row: back to settings.json default_model (the
-// session's own choice cleared).
-inline constexpr const char* kDefaultModelRowId = "default";
-
 struct ModelPickerCallbacks {
     std::function<void(const std::string& ref)> on_select;
     // ctrl+r: re-fetch the model list with discovery refreshed. The caller

@@ -8,7 +8,7 @@
 namespace minimal::client::plugins {
 
 TaskWorker::TaskWorker(std::string name, std::function<void()> after_each)
-    : name_(std::move(name)), after_each_(std::move(after_each)), thread_([this] { Run(); }) {}
+    : name_(std::move(name)), after_each_(std::move(after_each)) {}
 
 TaskWorker::~TaskWorker() {
     {
@@ -25,6 +25,10 @@ void TaskWorker::Post(std::function<void()> task) {
         std::lock_guard<std::mutex> lock(mtx_);
         if (stop_) return;
         tasks_.push_back(std::move(task));
+        // Started on the first task, not at construction: every view owns a
+        // worker, and most views are never opened -- a thread each, parked
+        // for the life of the process, bought nothing.
+        if (!thread_.joinable()) thread_ = std::thread([this] { Run(); });
     }
     cv_.notify_one();
 }

@@ -1,6 +1,6 @@
 #pragma once
 
-// ui-kit -- the bundled widget kit (registries.hpp WidgetKit): the
+// ui-kit -- the bundled widget kit (widgets.hpp WidgetKit): the
 // filterable menu, the schema form, the model selector and the modal chrome
 // every view builds on. Replace it by disabling this plugin and enabling
 // another that registers a kit; the widget-kit slot is required, so with

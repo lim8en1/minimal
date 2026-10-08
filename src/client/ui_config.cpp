@@ -1,5 +1,6 @@
 #include "minimal/client/ui_config.hpp"
 
+#include <cstdio>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -41,9 +42,12 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
     // keeps its default, through the same strict reader every config uses --
     // so an unknown or misspelled key is named rather than silently ignored.
     // The reader's unknown-key warning already says it is ignored.
+    // stderr, like the bootstrap's other diagnostics (this runs before the
+    // TUI takes the screen): the TUI's logger is file-only, so a typo in a
+    // cosmetic key was ignored with no word but a line in client.log.
     const auto warn = [](const std::string& message) {
         const bool said = message.size() >= 7 && message.compare(message.size() - 7, 7, "ignored") == 0;
-        common::DefaultLogger().warn("{}{}", message, said ? "" : " -- ignored");
+        std::fprintf(stderr, "minimal: warning: %s%s\n", message.c_str(), said ? "" : " -- ignored");
     };
     config::Reader reader(parsed, "ui.json", "", warn);
     const auto lenient = [&warn](const std::function<void()>& read) {

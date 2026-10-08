@@ -49,7 +49,7 @@ struct TabBarWindow {
 TabBarWindow ComputeTabBarWindow(const std::vector<int>& cell_widths, int available_width,
                                  std::size_t focused_index, int marker_width);
 
-// The bundled tab bar (registries.hpp TabBar): numbered cells with the state
+// The bundled tab bar (render.hpp TabBar): numbered cells with the state
 // glyph and color, the '!' attention mark, "↳" for a subagent, the overflow
 // window, and the filter badge at the trailing edge. Hidden for a lone tab
 // unless a filter is on (it would only repeat the status bar).

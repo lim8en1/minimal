@@ -13,8 +13,9 @@
 //   register_chat_surface       -- replace the whole chat view (exclusive)
 //   register_markdown_engine    -- replace the markdown pipeline (exclusive)
 //
-// Config reaches you as context.config: the verbatim "config" object on this
-// plugin's entry in client-plugins.json.
+// Config reaches you as context.config: the plugin's own file,
+// <config dir>/client-plugins.d/<plugin>.json (client_plugin_abi.h lists
+// every hook; the ones above are the common ones).
 
 #include <ctime>
 #include <memory>

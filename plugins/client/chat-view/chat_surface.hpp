@@ -48,6 +48,7 @@ public:
 
 private:
     plugins::HostUi* ui_;
+    SurfaceConfig config_;   // as configured: what a saved toggle was made over
     int fold_thinking_;
     int fold_tools_;
     std::vector<Pane*> panes_;

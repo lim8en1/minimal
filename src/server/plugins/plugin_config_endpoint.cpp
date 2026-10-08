@@ -267,9 +267,21 @@ json PluginConfigEndpoint::SetEnabled(Entry& entry, bool enabled) {
             lost += (lost.empty() ? "" : ", ") + backend;
         }
         if (!usable) {
+            // A plugin enabled since this server started has no known
+            // registrations until it runs: say so, rather than a flat no.
+            bool pending_enable = false;
+            for (const auto& [name, other] : entries_) {
+                const auto it = in_file.find(name);
+                if (!other.loaded && !other.core && it != in_file.end() && it->second) {
+                    pending_enable = true;
+                }
+            }
             return {{"error", "disabling " + entry.name + " would leave no provider for "
                               "providers.json's models (they use: " + lost +
-                              ") -- the server would not start"}};
+                              ") -- the server would not start" +
+                              (pending_enable ? " (a plugin enabled since the server started "
+                                                "counts once it runs: restart first)"
+                                              : "")}};
         }
     }
     bool found = false;
@@ -431,6 +443,7 @@ json PluginConfigEndpoint::Save(Entry& entry, const json& next) {
         return {{"error", failed}};
     }
     json applied = Apply(entry, next);
+    applied["file"] = entry.label;   // as a person names it: "plugins.d/memory.json", "permissions.json"
     StartCheck(entry, next);   // what was saved, against the world
     return applied;
 }

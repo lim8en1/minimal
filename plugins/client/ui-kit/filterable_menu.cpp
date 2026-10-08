@@ -242,17 +242,6 @@ ftxui::Component MakeFilterableMenuModal(
         return false;   // arrow keys go to Menu
     });
 
-    // Exposed to the caller (see FilterableMenuSpec::reset_state): the help
-    // overlays call it on open so a stale filter never survives a close.
-    if (spec.reset_state != nullptr) {
-        *spec.reset_state = [state, rebuild] {
-            state->filter.clear();
-            state->selected = 0;
-            state->direction = 1;
-            rebuild();
-        };
-    }
-
     return Renderer(interactive, [interactive, state, spec, theme_ptr, memory] {
         using namespace ftxui;
         const Theme& theme = *theme_ptr;

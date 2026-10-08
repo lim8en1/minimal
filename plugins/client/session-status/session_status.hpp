@@ -3,7 +3,7 @@
 // session-status -- the status bar's usual segments: {version}, {session},
 // {tokens}, {model}, {agent}, {permission_mode}, {paused}, {activity}. Each
 // renders from the focused tab's state the host hands every segment
-// (plugins::TabStatus); the bar's layout and format string are core's.
+// (plugins::TabStatus); each segment places itself, and ui.json's status_segments may move or hide it.
 
 #include <cstdint>
 #include <memory>

@@ -130,9 +130,7 @@ ftxui::Element RenderStatusBar(const std::vector<StatusSegment>& format,
                                const std::map<std::string, ftxui::Color>& emphasis,
                                const StatusLayout& layout) {
     using namespace ftxui;
-    // One column of padding at each edge, so values never touch the frame.
-    const auto parts =
-        ResolveStatusBar(format, values, max_width > 2 ? max_width - 2 : max_width, layout);
+    const auto parts = ResolveStatusBar(format, values, StatusBarContentWidth(max_width), layout);
     if (parts.empty()) return emptyElement();
     const Color literal_color = MutedColor(theme);
     const Color value_color = theme.ColorFor("assistant_message");

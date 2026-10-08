@@ -484,7 +484,7 @@ void TuiApp::BuildFrame() {
         *app_, theme, tab_maintenance_->Focused(), tab_maintenance_->FocusedDetails(),
         tab_maintenance_->FocusedChatFrame(), tab_ui_,
         registries.start_views, registries.status_segments, registries.tab_bar, panel_height,
-        editor_, env_.status_format, env_.status_segment_ids, env_.plugin_views,
+        editor_, env_.status_bar.format, env_.status_segment_ids, env_.plugin_views,
         // The key the empty state names: the user's keymap decides it.
         env_.keybindings.KeyFor("session.picker", "ctrl+o"),
         [this](const std::string& tab_id, TabUi& ui) {
