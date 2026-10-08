@@ -389,6 +389,17 @@ public:
     };
     GetSessionResult GetSession(const std::string& session_id);
 
+    // A new top-level session forked from `source_session_id`'s current state
+    // (ForkSessionRequest: cut at the clean boundary, source untouched). A
+    // non-empty instruction becomes the fork's first user turn. The returned
+    // session is LIVE server-side -- attach it, don't resume it.
+    struct ForkSessionResult {
+        v1::SessionSummary summary;
+        grpc::Status status;
+    };
+    ForkSessionResult ForkSession(const std::string& source_session_id,
+                                  const std::string& instruction);
+
     // The answering server's build identity (see ServerInfo in the proto).
     // UNIMPLEMENTED means a server older than the RPC -- see CheckServerBuild.
     struct ServerInfoResult {

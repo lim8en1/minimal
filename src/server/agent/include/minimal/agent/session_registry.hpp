@@ -162,13 +162,17 @@ public:
     // seeds the working set: [summary + tail] via a copied compaction
     // checkpoint, occupancy reseeding, and the pre-first-call compact).
     //
+    // The fork point is the source's current state, cut at the clean boundary
+    // (SessionDatabase::ForkSession). A non-empty instruction is submitted as
+    // the fork's first user turn.
+    //
     // agent_preset / model / run_mode override the SOURCE's values when set;
     // unset means the fork runs exactly what the source was running. Refuses a
     // subagent source (the store does, atomically). Throws the same error
     // families as Create; on a throw AFTER the fork transaction committed, the
     // minted child row is deleted so a failed fork leaves nothing behind.
     std::shared_ptr<Session> ForkSession(const std::string& source_session_id,
-                                         std::int64_t target_seq, const std::string& name,
+                                         const std::string& name, const std::string& instruction,
                                          const std::optional<config::ModelRef>& model,
                                          const std::optional<std::string>& agent_preset,
                                          std::optional<tools::PermissionRunMode> run_mode);

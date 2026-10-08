@@ -106,7 +106,7 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
 }
 
 std::shared_ptr<Session> SessionRegistry::ForkSession(
-    const std::string& source_session_id, std::int64_t target_seq, const std::string& name,
+    const std::string& source_session_id, const std::string& name, const std::string& instruction,
     const std::optional<config::ModelRef>& model, const std::optional<std::string>& agent_preset,
     std::optional<tools::PermissionRunMode> run_mode) {
     // The store mints the child row and copies the transcript prefix in one
@@ -114,8 +114,7 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
     // creation path follows. The fork transaction copies the source's
     // persisted model/subagent_model columns verbatim, and the returned row
     // reports them.
-    session::SessionSummary row = db_.ForkSession(source_session_id, target_seq, name,
-                                                  agent_preset);
+    session::SessionSummary row = db_.ForkSession(source_session_id, name, agent_preset);
 
     // The fork's model: an explicit request override wins; otherwise the
     // source's own choice (a /model the user pinned) rides the row -- so a
@@ -140,7 +139,7 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
 
     SessionParams params;
     params.session_id = row.session_id;
-    params.name = name;  // empty rides through: default naming from the first user text
+    params.name = row.name;  // "fork of ..." or empty: default naming from the first user text
     params.agent_preset = row.agent_preset;  // the row already carries the effective one
     params.project_root = row.project_root;
     params.run_mode_override = run_mode;
@@ -165,7 +164,13 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
             // like a failed Create() does.
             db_.UpdateSessionModel(row.session_id, model->str());
         }
-        return Create(std::move(params));
+        std::shared_ptr<Session> session = Create(std::move(params));
+        // The instruction is the fork's first user turn, queued here so the
+        // fork and its divergence are one step -- no attach-then-send race.
+        // A refusal is already answered on the session's own queue
+        // (SubmitTurn's contract); the fork itself stands either way.
+        if (!instruction.empty()) session->SubmitTurn(instruction);
+        return session;
     } catch (...) {
         // The fork transaction committed, but the session could not be built
         // (unresolvable preset/model). A failed fork leaves nothing behind --

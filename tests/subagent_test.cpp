@@ -1863,18 +1863,16 @@ TEST_CASE("a fork borrows the transcript and runs as its own top-level session",
     const auto source_before = fixture.db->GetMessagesPage(parent->info().session_id,
                                                            std::nullopt, 50);
 
-    // Fork the WHOLE transcript onto another model.
-    auto fork = fixture.sessions->ForkSession(parent->info().session_id, /*target_seq=*/-1,
-                                              "try another way",
+    // Fork the WHOLE transcript onto another model; the instruction is the
+    // fork's first turn, run on the borrowed model.
+    other_script->Push(testing::TextResponse("fork answer"));
+    auto fork = fixture.sessions->ForkSession(parent->info().session_id, "try another way",
+                                              /*instruction=*/"do it differently",
                                               config::ModelRef{"childmain", "child-script"},
                                               std::nullopt, std::nullopt);
     REQUIRE(fork != nullptr);
     CHECK(fork->info().parent_session_id.empty());  // a top-level peer, NOT a subagent
     CHECK(fork->preset().model_ref.str() == "childmain/child-script");
-
-    // The fork runs its own turn on the borrowed model.
-    other_script->Push(testing::TextResponse("fork answer"));
-    REQUIRE(fork->SubmitTurn("do it differently"));
     REQUIRE(fork->WaitForIdleForTesting(10s));
     REQUIRE(other_script->requests.size() == 1);
     // The fork's history carried the copied prefix INTO the request.
@@ -1887,6 +1885,13 @@ TEST_CASE("a fork borrows the transcript and runs as its own top-level session",
         }
     }
     CHECK(saw_copied);
+    // ...and ended in the instruction, as the newest user message.
+    const auto& last = other_script->requests[0].messages.back();
+    REQUIRE(last.role == llm::Role::User);
+    REQUIRE_FALSE(last.content.empty());
+    const auto* instruction = std::get_if<llm::TextBlock>(&last.content.back());
+    REQUIRE(instruction != nullptr);
+    CHECK(instruction->text == "do it differently");
 
     // The source is untouched: same rows, no fork on its side.
     const auto source_after = fixture.db->GetMessagesPage(parent->info().session_id,
@@ -1908,7 +1913,7 @@ TEST_CASE("a failed fork leaves nothing behind", "[subagent][fork][invariant]") 
 
     // An unknown preset on the fork: the store fork commits, then the session
     // construction fails -- the registry must roll the minted row back.
-    CHECK_THROWS_AS(fixture.sessions->ForkSession(parent->info().session_id, -1, "doomed",
+    CHECK_THROWS_AS(fixture.sessions->ForkSession(parent->info().session_id, "doomed", "",
                                                   std::nullopt, std::string("no-such-preset"),
                                                   std::nullopt),
                     std::runtime_error);

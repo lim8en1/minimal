@@ -73,8 +73,8 @@ struct LaunchRequest {
 
 struct ForkRequest {
     std::string source_session_id;
-    std::int64_t target_seq = 0;
     std::string name;
+    std::string instruction;    // the fork's first user turn; empty: none
     std::string model;          // raw "<provider>/<model>"; empty: the source's
     std::string agent_preset;   // empty: the source's
     std::optional<tools::PermissionRunMode> run_mode;

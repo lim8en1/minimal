@@ -869,8 +869,8 @@ TEST_CASE("ForkSession persists an explicit model override to the child's row",
 
     const auto override_model = config::SplitModelRef("main/other-model");
     REQUIRE(override_model.has_value());
-    auto child = fixture.registry->ForkSession(source_row.session_id, /*target_seq=*/0,
-                                               /*name=*/"", override_model, std::nullopt,
+    auto child = fixture.registry->ForkSession(source_row.session_id, /*name=*/"",
+                                               /*instruction=*/"", override_model, std::nullopt,
                                                std::nullopt);
     REQUIRE(child != nullptr);
 

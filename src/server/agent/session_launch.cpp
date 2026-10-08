@@ -313,10 +313,11 @@ session::SessionSummary Fork(const LaunchContext& context, const ForkRequest& re
 
     std::shared_ptr<Session> session;
     try {
-        session = context.sessions.ForkSession(request.source_session_id, request.target_seq,
-                                               request.name, model, agent_preset, request.run_mode);
+        session = context.sessions.ForkSession(request.source_session_id, request.name,
+                                               request.instruction, model, agent_preset,
+                                               request.run_mode);
     } catch (const std::exception& e) {
-        // Store refusals (no such top-level session, invalid target) and
+        // Store refusals (no such top-level session) and
         // preset/model resolution failures alike; the registry already rolled
         // a minted row back on the latter.
         context.logger.warn("ForkSession failed: {}", e.what());

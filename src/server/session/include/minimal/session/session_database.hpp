@@ -387,27 +387,25 @@ public:
     // --- Session fork ----------------------------------------------------------
 
     // Creates a NEW top-level session seeded with a verbatim copy of the
-    // source's active transcript below target_seq (seqs carried over as-is --
+    // source's active transcript AS IT STANDS NOW (seqs carried over as-is --
     // seq spaces are per-session, and every read/append path works from
-    // MAX(seq)+1 whatever the starting point). target_seq < 0 means THE WHOLE
-    // active transcript -- the "fork where we are now" shape, which has no
-    // trailing user message to point at. The source is untouched: a fork is
-    // read-only on it, and a fork of a LIVE mid-turn session is safe because
-    // its appends land at MAX(seq)+1 while the copy filters seq < target.
+    // MAX(seq)+1 whatever the starting point), cut at the clean boundary pause
+    // uses: a trailing assistant message whose tool calls have no persisted
+    // results yet (a live mid-round source) is left out, so the fork never
+    // inherits a half-run tool round. The source is untouched: a fork is
+    // read-only on it, and forking a LIVE session is safe because the whole
+    // read runs in one transaction.
     //
-    // One transaction: source validation (exists, NOT a subagent), target
-    // validation (unless forking everything: active, user role, non-empty text
-    // -- the same shape rewind's IsRewindTarget demands, so a fork lands where
-    // a rewind would), the child row, the message copy, and the
-    // compaction-checkpoint copy. The checkpoint rides along only when its
-    // boundary_seq is below the copy's upper bound (the summary then covers
-    // exactly the copied prefix's head); otherwise the child seeds from the
-    // full copied prefix and compacts on demand.
-    // name_source follows `name` exactly like CreateSession.
+    // One transaction: source validation (exists, NOT a subagent), the tail
+    // trim, the child row, the message copy, and the compaction-checkpoint
+    // copy. A checkpoint rides along only when its boundary_seq is below the
+    // copy's upper bound (the summary then covers the copied prefix's head).
+    // A non-empty `name` is explicit, like CreateSession's. An empty one names
+    // the fork "fork of <source name>" (name_source 'default'), or leaves it
+    // unnamed for the default-naming rule when the source has no name.
     // agent_preset_override replaces the inherited source preset in the child's
     // row when set, so the row always describes what the fork will run.
-    SessionSummary ForkSession(const std::string& source_session_id, std::int64_t target_seq,
-                               const std::string& name,
+    SessionSummary ForkSession(const std::string& source_session_id, const std::string& name,
                                const std::optional<std::string>& agent_preset_override);
 
     // --- Compaction checkpoints (see CompactionCheckpoint above) -------------

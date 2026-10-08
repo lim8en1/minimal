@@ -835,6 +835,13 @@ public:
     // caller's probe and this call -- the caller falls back to ResumeTab).
     std::string AttachSessionGroup(const std::string& session_id);
 
+    // /fork: forks `session_id` at its current state (instruction, when
+    // non-empty, is the fork's first user turn) and opens the fork as its own
+    // root tab, focused. Never blocks: the RPC and the attach run on the RPC
+    // worker. A refusal lands as a notice on `source_tab_id`.
+    void ForkSession(const std::string& source_tab_id, const std::string& session_id,
+                     const std::string& instruction);
+
     // Opens a READ-ONLY transcript tab for a STORED session -- a finished
     // subagent, whose resume the server refuses ("its life was one turn of
     // its parent"): no stream is opened and no CreateSession is sent. The
