@@ -96,7 +96,7 @@ int RunStatusBarCommand(const std::vector<std::string>& args) {
 
     // A plain local, never moved: TuiEnvironment's address-stability contract.
     TuiEnvironment env;
-    if (!LoadClientPluginEnvironment(nullptr, env, /*announce_loads=*/false)) {
+    if (!LoadClientPluginEnvironment(nullptr, env, /*announce_loads=*/false, /*write_back=*/false)) {
         return app::kUnavailable;
     }
     const ComposedStatusBar& bar = env.status_bar;
