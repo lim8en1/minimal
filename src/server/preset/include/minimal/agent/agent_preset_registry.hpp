@@ -10,93 +10,13 @@
 #include <vector>
 
 #include "minimal/agent/agent_preset.hpp"
+#include "minimal/agent/preset_extensions.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/project_trust.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/config/settings_config.hpp"
 
 namespace minimal::agent {
-
-// Name + description only, for a picker to list -- see ListAvailable() below.
-struct AgentPresetSummary {
-    std::string name;
-    std::string description;
-    std::string color;  // "#rrggbb" from frontmatter; empty = theme default
-};
-
-// Per-root environment the definition builders read: material that varies by
-// project root but not by preset, memoized once per canonical root and shared
-// by every builder run under it. Plain data, so a builder stays a pure
-// function of (preset, env) and the tools layer never enters the picture.
-struct PresetToolEnv {
-    // Spawnable presets for the root: every parseable, non-disabled
-    // agents/*.md, project shadowing preserved, `hidden` and `mode: subagent`
-    // INCLUDED -- spawnability is independent of picker visibility. Name is
-    // the preset KEY (file stem), what a spawn request's agent_preset accepts.
-    std::vector<AgentPresetSummary> available_agents;
-};
-
-// Everything a definition builder may read. `preset_key` is carried separately
-// from the preset because it is NOT the same string: presets are addressed by
-// their file stem everywhere a spawn or /agent names one, while
-// AgentPreset::name is the frontmatter display value, which need not match
-// (see ListAvailable's stem-keying note).
-// `project_root` is the root the preset resolves for (empty: no project
-// scope). `parent` is the spawning session's preset on the subagent path, null
-// otherwise: an extension that grants something per preset clamps a child to
-// what its parent has (the subagent ceiling, applied at resolve time).
-struct PresetToolContext {
-    const AgentPreset& preset;
-    const std::string& preset_key;
-    const PresetToolEnv& env;
-    const std::filesystem::path& project_root;
-    const AgentPreset* parent = nullptr;
-};
-
-// Returns the definition the named tool advertises TO THIS PRESET: the
-// builder's one shot at a preset-scoped description/schema. Runs once per
-// (preset, root) inside ResolveUncached -- lazily, with the rest of the
-// resolve -- and its result rides AgentPreset::tool_definition_overrides.
-// A definition with an EMPTY name means "this preset does not get the tool"
-// (the skill tool with no skill allowed): the request leaves it out.
-using PresetToolDefinitionBuilder =
-    std::function<llm::ToolDefinition(const PresetToolContext&)>;
-
-// Text appended to a preset's system prompt at resolve time (the skills
-// plugin's preloaded skill bodies). Empty: nothing appended.
-using PresetPromptAppendix = std::function<std::string(const PresetToolContext&)>;
-
-// What plugins add to preset resolution: per-tool definition builders and
-// system-prompt appendices. Filled during plugin load
-// (minimal_plugin_register_preset_extensions), read-only afterwards.
-class PresetExtensionRegistry {
-public:
-    void AddDefinitionBuilder(std::string tool_name, PresetToolDefinitionBuilder builder);
-    void AddPromptAppendix(PresetPromptAppendix appendix);
-
-    struct Builder {
-        std::string plugin;
-        std::string tool_name;
-        PresetToolDefinitionBuilder build;
-    };
-    struct Appendix {
-        std::string plugin;
-        PresetPromptAppendix render;
-    };
-    const std::vector<Builder>& builders() const { return builders_; }
-    const std::vector<Appendix>& appendices() const { return appendices_; }
-
-    // Plugin-loader bookkeeping (registration window and rollback).
-    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
-    void ClearAttribution() { attribution_.clear(); }
-    void RemoveByAttribution(const std::string& plugin_name);
-    std::vector<std::string> OwnedBy(const std::string& plugin_name) const;
-
-private:
-    std::vector<Builder> builders_;
-    std::vector<Appendix> appendices_;
-    std::string attribution_;
-};
 
 // The live ToolRegistry's structural tool-name vocabulary, resolved ONCE
 // (main.cpp, after ToolRegistry::ApplyAliases) and handed down rather than a
@@ -125,7 +45,7 @@ struct ToolPermissionKeys {
 // Loads providers.json/permissions.json/agents/*.md into fully resolved
 // AgentPresets, plus the settings.json handed to it. Config is read once at
 // startup -- there is no hot-reload (see ARCHITECTURE.md's Config section).
-class AgentPresetRegistry {
+class AgentPresetRegistry final : public PresetCatalog {
 public:
     // Loads providers.json and permissions.json from config_dir immediately
     // (throws if either is missing/malformed); settings.json arrives pre-parsed
@@ -213,7 +133,7 @@ public:
     AgentPreset Resolve(
         const std::string& preset_name, const std::filesystem::path& project_root = {},
         const AgentPreset* parent = nullptr,
-        const std::optional<config::ModelRef>& model_override = std::nullopt) const;
+        const std::optional<config::ModelRef>& model_override = std::nullopt) const override;
 
     // A cheap peek at whether agents/<preset_name>.md declares its own
     // `model:` frontmatter field -- just the path search + frontmatter parse,
@@ -243,7 +163,7 @@ public:
     // prompts/<name>.md under the config dir; the frontmatter body is returned.
     // Throws with the reason on an invalid name or a missing file; the caller
     // decides whether that is a command error or something louder.
-    std::string ResolveCompressionPrompt(const std::string& name) const;
+    std::string ResolveCompressionPrompt(const std::string& name) const override;
 
     // Registers the builder that produces `tool_name`'s definition per preset.
     // Startup-only wiring (main.cpp, beside the tool's own registration);
@@ -262,7 +182,7 @@ public:
     void SetProjectTrust(config::ProjectTrust* trust) { trust_ = trust; }
     // The same object, for the /trust-directory commands (which grant and
     // revoke). Null when no gate is configured.
-    config::ProjectTrust* project_trust() const { return trust_; }
+    config::ProjectTrust* project_trust() const override { return trust_; }
 
     void SetDefinitionBuilder(std::string tool_name, PresetToolDefinitionBuilder builder);
 
@@ -284,13 +204,13 @@ public:
     // The model catalog this registry resolves presets against. Exposed
     // rather than re-loaded by callers who need to resolve a model the USER
     // named (--model, /model): two loads would be two sources of truth.
-    const config::ProvidersConfig& providers() const { return providers_; }
+    const config::ProvidersConfig& providers() const override { return providers_; }
     // The model a primary session runs on when none was chosen (`/model
     // default` returns to it): settings.json default_model when it resolves,
     // else the ONLY model configured (static or already discovered; variants
     // of one model count once), else nullopt -- several candidates and no
     // usable setting means the user picks.
-    std::optional<config::ModelRef> DefaultModel() const;
+    std::optional<config::ModelRef> DefaultModel() const override;
     // The same rule for the agent preset of a new session: settings.json
     // default_agent_preset when it names a resolvable preset, else the only
     // picker-visible preset for `project_root`, else nullopt.

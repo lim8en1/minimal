@@ -57,8 +57,8 @@ struct QueuedResume {};
 // never runs (session ended) breaks the promise, which the submitter reads
 // as a denial.
 struct GateJob {
-    tools::ToolExecutor::SubjectCheck check;
-    std::promise<tools::ToolExecutor::SubjectVerdict> answer;
+    tools::SubjectCheck check;
+    std::promise<tools::SubjectVerdict> answer;
 };
 struct QueuedGateCheck {
     std::shared_ptr<GateJob> job;

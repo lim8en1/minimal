@@ -326,8 +326,8 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
     return true;
 }
 
-tools::ToolExecutor::SubjectVerdict Session::CheckPermission(
-    tools::ToolExecutor::SubjectCheck check) {
+tools::SubjectVerdict Session::CheckPermission(
+    tools::SubjectCheck check) {
     if (g_in_tool_execution) {
         return {false, "a permission check cannot run from inside a tool call"};
     }
@@ -348,8 +348,8 @@ tools::ToolExecutor::SubjectVerdict Session::CheckPermission(
     }
 }
 
-tools::ToolExecutor::SubjectVerdict Session::RunGateCheck(
-    const tools::ToolExecutor::SubjectCheck& check) {
+tools::SubjectVerdict Session::RunGateCheck(
+    const tools::SubjectCheck& check) {
     tools::ToolContext ctx{logger_};
     ctx.session_id = params_.session_id;
     ctx.project_root = params_.project_root;

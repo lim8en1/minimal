@@ -55,11 +55,12 @@
 // borrows into node storage that is never mutated after insertion -- copy out
 // what you need (ApplyModel does) rather than holding the pointer across calls.
 
-#include "minimal/config/model_catalog_service.hpp"
 #include "minimal/config/provider_config_extensions.hpp"
 #include "minimal/config/providers_types.hpp"
 
 namespace minimal::config {
+
+class ModelCatalogService;
 
 class ProvidersConfig {
 public:
@@ -67,11 +68,12 @@ public:
     // loads its own copy). Not copyable -- the mutex. Moves happen only during
     // config load, before any thread can see either side; the mutexes are
     // locked anyway so the guarantee does not rest on that.
-    ProvidersConfig(ProvidersConfig&& other) noexcept { *this = std::move(other); }
+    ProvidersConfig(ProvidersConfig&& other) noexcept;
     ProvidersConfig& operator=(ProvidersConfig&& other) noexcept;
     ProvidersConfig(const ProvidersConfig&) = delete;
     ProvidersConfig& operator=(const ProvidersConfig&) = delete;
-    ProvidersConfig() = default;
+    ProvidersConfig();
+    ~ProvidersConfig();
     // A snapshot of the resolved model -- null when the provider or the model
     // within it is unknown. Callers report; this layer does not know whether a
     // miss is a typo in a preset, in settings.json, or in something a user just
@@ -168,8 +170,9 @@ private:
     // which is safe because the service is never moved or copied: a
     // ProvidersConfig move re-points nothing, it moves catalog_'s contents in
     // place and hands the runtime state over (ModelCatalogService::
-    // MoveRuntimeFrom).
-    ModelCatalogService service_{catalog_};
+    // MoveRuntimeFrom). Behind a pointer so this SDK header does not carry the
+    // service's machinery (model_catalog_service.hpp is core's).
+    std::unique_ptr<ModelCatalogService> service_;
 };
 
 // What providers.json actually offers, for a "no such model" error. A miss is

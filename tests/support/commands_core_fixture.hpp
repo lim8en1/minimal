@@ -19,6 +19,9 @@
 
 #include "../../plugins/server/commands-core/core_commands.hpp"
 #include "fakes.hpp"
+#include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/config/permissions_config.hpp"
+#include "minimal/tools/tool_executor.hpp"
 #include "minimal/agent/agent_loop.hpp"
 #include "minimal/commands/command_context.hpp"
 #include "minimal/config/project_trust.hpp"
@@ -160,7 +163,7 @@ public:
         loop_->ClearHistory();
         return dropped;
     }
-    tools::ToolExecutor& executor() override { return *executor_; }
+    tools::PermissionInspector& permissions() override { return *executor_; }
     // Test access to the loop behind the session (not SessionControl).
     agent::AgentLoop& loop() { return *loop_; }
     const agent::AgentPreset& preset() const override { return preset_; }

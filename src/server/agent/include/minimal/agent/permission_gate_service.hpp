@@ -15,7 +15,7 @@
 #include <atomic>
 #include <string>
 
-#include "minimal/tools/tool_executor.hpp"
+#include "minimal/tools/permission_inspector.hpp"
 
 namespace minimal::agent {
 
@@ -24,8 +24,8 @@ inline constexpr const char* kPermissionGateServiceName = "core.permission_gate"
 class PermissionGateService {
 public:
     virtual ~PermissionGateService() = default;
-    virtual tools::ToolExecutor::SubjectVerdict Check(const std::string& session_id,
-                                                      tools::ToolExecutor::SubjectCheck check) = 0;
+    virtual tools::SubjectVerdict Check(const std::string& session_id,
+                                                      tools::SubjectCheck check) = 0;
 };
 
 class SessionRegistry;
@@ -35,8 +35,8 @@ class SessionRegistry;
 class SessionPermissionGate final : public PermissionGateService {
 public:
     void SetRegistry(SessionRegistry* registry) { registry_.store(registry); }
-    tools::ToolExecutor::SubjectVerdict Check(const std::string& session_id,
-                                              tools::ToolExecutor::SubjectCheck check) override;
+    tools::SubjectVerdict Check(const std::string& session_id,
+                                              tools::SubjectCheck check) override;
 
 private:
     std::atomic<SessionRegistry*> registry_{nullptr};

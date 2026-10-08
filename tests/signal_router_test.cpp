@@ -579,7 +579,7 @@ TEST_CASE("Session::CheckPermission is answered by the worker, and refused insid
     BindMcpSignalRules(eve.preset, {{"ci", "deny"}});
     eve.Start("eve-check");
     const auto check = [](const std::string& key) {
-        return tools::ToolExecutor::SubjectCheck{"mcp", tools::PermissionSubject{"signal", key},
+        return tools::SubjectCheck{"mcp", tools::PermissionSubject{"signal", key},
                                                  "signal " + key,
                                                  tools::PermissionMode::AlwaysAllow};
     };

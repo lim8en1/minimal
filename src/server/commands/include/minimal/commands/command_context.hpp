@@ -29,12 +29,12 @@
 #include <string_view>
 
 #include "minimal/agent/agent_preset.hpp"
-#include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/agent/preset_extensions.hpp"
 #include "minimal/commands/confirmation_broker.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/model_ref.hpp"
 #include "minimal/config/providers_config.hpp"
-#include "minimal/tools/tool_executor.hpp"
+#include "minimal/tools/permission_inspector.hpp"
 
 namespace minimal::commands {
 
@@ -69,7 +69,7 @@ public:
     // how many messages the model no longer sees.
     virtual std::size_t ClearHistory() = 0;
     // The permission gate, for commands that inspect or revoke what it allows.
-    virtual tools::ToolExecutor& executor() = 0;
+    virtual tools::PermissionInspector& permissions() = 0;
 
     // The preset this session is actually running: the registry's copy with any
     // model override already applied.
@@ -166,7 +166,7 @@ public:
     // is no session or no project scope. A command that lists or explains
     // other commands (/help) reads it through EffectiveCatalog/FindEffective,
     // so it sees exactly what dispatch runs.
-    CommandContext(SessionControl* session, const agent::AgentPresetRegistry& presets,
+    CommandContext(SessionControl* session, const agent::PresetCatalog& presets,
                    ConfirmationBroker& confirmations, common::Logger& logger,
                    const CommandRegistry* project_commands = nullptr)
         : session_(session),
@@ -184,7 +184,7 @@ public:
     SessionControl* session_if() const { return session_; }
     bool has_session() const { return session_ != nullptr; }
 
-    const agent::AgentPresetRegistry& presets() const { return presets_; }
+    const agent::PresetCatalog& presets() const { return presets_; }
     const config::ProvidersConfig& providers() const { return presets_.providers(); }
     ConfirmationBroker& confirmations() { return confirmations_; }
     common::Logger& logger() { return logger_; }
@@ -192,7 +192,7 @@ public:
 
 private:
     SessionControl* session_;
-    const agent::AgentPresetRegistry& presets_;
+    const agent::PresetCatalog& presets_;
     ConfirmationBroker& confirmations_;
     common::Logger& logger_;
     const CommandRegistry* project_commands_;

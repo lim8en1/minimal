@@ -28,7 +28,7 @@
 #include <string_view>
 #include <vector>
 
-#include "minimal/config/settings_config.hpp"
+#include "minimal/config/project_local_mode.hpp"
 
 namespace minimal::config {
 

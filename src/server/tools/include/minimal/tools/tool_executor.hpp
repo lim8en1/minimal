@@ -14,6 +14,7 @@
 #include "minimal/llm/message.hpp"
 #include "minimal/tools/permission.hpp"
 #include "minimal/tools/permission_checker.hpp"
+#include "minimal/tools/permission_inspector.hpp"
 #include "minimal/tools/permission_model.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -71,7 +72,7 @@ struct PreparedInvocation {
 //
 // Run() composes the two on the calling thread and is the whole contract for
 // callers that dispatch sequentially (width 1, serial-only tools, tests).
-class ToolExecutor {
+class ToolExecutor : public PermissionInspector {
 public:
     // The optional ceilings exist for subagents: a child session may never be
     // more permissive than its parent, but a child preset is resolved from
@@ -124,17 +125,7 @@ public:
     // project: out_of_workdir=ask", "parent session: ...", "run mode
     // allow-only turns ask into deny"). Pure: no prompt, no hook, no grant --
     // which is also what makes it the /permissions dry run.
-    struct Verdict {
-        PermissionMode mode = PermissionMode::Ask;
-        std::string reason;
-        // False when an operator-written `ask` pattern (this policy's or the
-        // ceiling's) matched: that Ask always reaches the checker, grants or not.
-        bool ask_grantable = true;
-        // The confinement classification the out-of-workdir fold used, for
-        // Execute's re-check. checked=false when the fold never ran.
-        bool confinement_checked = false;
-        bool inside_project_root = false;
-    };
+    using Verdict = PermissionVerdict;   // the SDK's name (permission_inspector.hpp)
     Verdict Explain(const Tool& tool, const nlohmann::json& input, const ToolContext& ctx) const;
 
     // Explain by tool name, for the /permissions dry run: nullopt when no such
@@ -143,7 +134,8 @@ public:
     // the same test Prepare runs (disclosure conjunction + ask_grantable).
     // SESSION WORKER ONLY: it reads the grant set Prepare mutates.
     std::optional<Verdict> Explain(const std::string& tool_name, const nlohmann::json& input,
-                                   const ToolContext& ctx, bool* grants_satisfy = nullptr) const;
+                                   const ToolContext& ctx,
+                                   bool* grants_satisfy = nullptr) const override;
 
     // --- Non-tool subjects ----------------------------------------------------
     //
@@ -156,16 +148,8 @@ public:
     // run mode, session grants (key "<owner>:<kind>:<key>"), the
     // permission_prompted hook, and the human prompt. Fail-closed: a model
     // that throws denies. SESSION WORKER ONLY, like Prepare.
-    struct SubjectCheck {
-        std::string owner;
-        PermissionSubject subject;
-        std::string summary;  // the prompt line
-        PermissionMode default_mode = PermissionMode::Ask;
-    };
-    struct SubjectVerdict {
-        bool allowed = false;
-        std::string why;
-    };
+    using SubjectCheck = tools::SubjectCheck;      // permission_inspector.hpp
+    using SubjectVerdict = tools::SubjectVerdict;
     SubjectVerdict CheckSubject(const SubjectCheck& check, ToolContext& ctx);
 
     // Exposed for testing and for surfacing "what would happen" without running.
@@ -223,13 +207,13 @@ public:
     // Session grants are copied into a subagent at spawn -- re-prompting for
     // every binary the parent already approved would make subagents unusable --
     // so the spawning side needs to read them. Sorted for deterministic tests.
-    std::vector<std::string> granted_keys() const;
+    std::vector<std::string> granted_keys() const override;
 
     // /permissions revoke: drops one held grant (true if it was held), or all
     // of them. SESSION WORKER ONLY, like every other grant-set mutation.
     // Children already spawned keep the copy they were seeded with.
-    bool RevokeGrant(const std::string& key) { return session_grants_.erase(key) != 0; }
-    std::size_t RevokeAllGrants() {
+    bool RevokeGrant(const std::string& key) override { return session_grants_.erase(key) != 0; }
+    std::size_t RevokeAllGrants() override {
         const std::size_t count = session_grants_.size();
         session_grants_.clear();
         return count;
@@ -238,12 +222,12 @@ public:
     // The parent's run mode is the ceiling a child's is clamped against
     // (clamp_run_mode), which a spawner cannot do without reading it. Also
     // what the client's {permission_mode} status segment reflects.
-    PermissionRunMode run_mode() const { return run_mode_.load(std::memory_order_relaxed); }
+    PermissionRunMode run_mode() const override { return run_mode_.load(std::memory_order_relaxed); }
 
     // The policies a spawner hands DOWN as its child's ceilings -- the
     // per-category half of "a child is never more permissive than its parent".
-    const PermissionPolicy& policy() const { return policy_; }
-    const PermissionModels& permission_models() const { return models_; }
+    const PermissionPolicy& policy() const override { return policy_; }
+    const PermissionModels& permission_models() const override { return models_; }
 
 
 private:

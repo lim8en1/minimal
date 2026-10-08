@@ -558,7 +558,7 @@ public:
     }
 
     CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
-        auto& executor = context.session().executor();
+        auto& executor = context.session().permissions();
         if (args.positional.empty()) return CommandResult::Ok(Describe(executor));
 
         const std::string& verb = args.positional.front();
@@ -580,7 +580,7 @@ public:
     }
 
 private:
-    static std::string Describe(const minimal::tools::ToolExecutor& executor) {
+    static std::string Describe(const minimal::tools::PermissionInspector& executor) {
         using minimal::tools::mode_name;
         const auto& policy = executor.policy();
         std::ostringstream out;
@@ -634,7 +634,7 @@ private:
         return out.str();
     }
 
-    static CommandResult Check(CommandContext& context, minimal::tools::ToolExecutor& executor,
+    static CommandResult Check(CommandContext& context, minimal::tools::PermissionInspector& executor,
                                const CommandArgs& args) {
         if (args.positional.size() < 2) {
             return CommandResult::Error("usage: /permissions check <tool> <json-input>");
@@ -667,7 +667,7 @@ private:
         ctx.session_id = context.session().session_id();
         ctx.project_root = context.session().project_root();
         bool grants_satisfy = false;
-        std::optional<minimal::tools::ToolExecutor::Verdict> verdict;
+        std::optional<minimal::tools::PermissionVerdict> verdict;
         try {
             verdict = executor.Explain(tool, input, ctx, &grants_satisfy);
         } catch (const std::exception& error) {

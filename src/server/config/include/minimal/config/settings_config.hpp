@@ -6,6 +6,8 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "minimal/config/context_contributor_settings.hpp"
+#include "minimal/config/project_local_mode.hpp"
 #include "minimal/common/units.hpp"
 #include "minimal/common/policy.hpp"
 #include "minimal/config/policy.hpp"
@@ -99,29 +101,12 @@ struct ToolsViewSettings {
     std::int64_t stdout_buffer_lines = kDefaultToolsViewStdoutBufferLines;
 };
 
-// Whether the project's own agents/, skills/ and commands/ directories (found by
-// walking up from the session's project root to its git root) are loaded. They
-// are content a cloned repository ships, so by default they load only for
-// directories the operator has trusted (`/trust-directory`). AGENTS.md /
-// CLAUDE.md is the project-context plugin's, and not governed by this.
-enum class ProjectLocalMode {
-    kTrusted,  // load for trusted directories only (the default)
-    kAll,      // load for every project (the behaviour before the trust gate)
-    kNone,     // never load project-local content
-};
 
 struct ProjectLocalSettings {
     ProjectLocalMode mode = ProjectLocalMode::kTrusted;
 };
 
 // Plugin context contributors (agent/context_contributor.hpp).
-struct ContextContributorSettings {
-    // Plugin names whose contributed sections are skipped -- the operator's off
-    // switch that does not require disabling the whole plugin.
-    std::vector<std::string> disabled;
-    // Per-section body cap in bytes. 0 = uncapped.
-    std::int64_t max_bytes_per_section = kDefaultContextSectionMaxBytes;
-};
 
 struct LoggingSettings {
     std::string level = "info";

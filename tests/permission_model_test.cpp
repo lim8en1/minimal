@@ -408,7 +408,7 @@ TEST_CASE("permissions.json: plugins carries model slices verbatim", "[permissio
 
 namespace {
 
-tools::ToolExecutor::SubjectCheck Thing(std::string key = "x",
+tools::SubjectCheck Thing(std::string key = "x",
                                         PermissionMode fallback = PermissionMode::Ask) {
     return {"fake", tools::PermissionSubject{"thing", std::move(key)}, "thing x", fallback};
 }
