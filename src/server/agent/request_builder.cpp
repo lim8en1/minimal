@@ -119,7 +119,8 @@ llm::ChatRequest RequestBuilder::BuildChatRequest() const {
     // The larger of the fresh estimate and the last backend-reported
     // occupancy: the estimate can undercount, the occupancy lags a round.
     const std::int64_t input_tokens =
-        std::max(cache.fixed_bytes / 4 + working_.estimated_tokens(), tokens_.last_occupancy());
+        std::max(EstimatedTokensFromBytes(cache.fixed_bytes) + working_.estimated_tokens(),
+                 tokens_.last_occupancy());
     request.system = cache.value.system;
     request.tools = cache.value.tools;
     request.messages = working_.messages();
@@ -144,14 +145,16 @@ llm::ChatRequest RequestBuilder::BuildChatRequest() const {
 // estimate_tokens, which is deliberate: the first real response replaces the
 // estimate with the backend's ground truth anyway.
 std::int64_t RequestBuilder::EstimateContextTokens() const {
-    return EnsureCache().fixed_bytes / 4 + working_.estimated_tokens();
+    return EstimatedTokensFromBytes(EnsureCache().fixed_bytes) + working_.estimated_tokens();
 }
 
-std::int64_t RequestBuilder::FixedContextTokens() const { return EnsureCache().fixed_bytes / 4; }
+std::int64_t RequestBuilder::FixedContextTokens() const {
+    return EstimatedTokensFromBytes(EnsureCache().fixed_bytes);
+}
 
 std::int64_t RequestBuilder::EstimateContextTokens(const std::optional<std::string>& system,
                                               const std::vector<llm::ToolDefinition>& tools) const {
-    return FixedBytes(system, tools) / 4 + working_.estimated_tokens();
+    return EstimatedTokensFromBytes(FixedBytes(system, tools)) + working_.estimated_tokens();
 }
 
 std::int64_t RequestBuilder::FixedBytes(const std::optional<std::string>& system,

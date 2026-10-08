@@ -30,6 +30,10 @@ TEST_CASE("FormatTokenUsage is compact but never wrong", "[session_status]") {
     CHECK(FormatTokenUsage(4250, 0) == "4.2k tok");
     CHECK(FormatTokenUsage(2000, 8000) == "2k/8k · 25%");
     CHECK(FormatTokenUsage(1'500'000, 2'000'000) == "1.5M/2M · 75%");
+    // An estimate is marked as one (a compaction's after-figure, a proxy
+    // that reports no usage): bytes/4 is not a measurement.
+    CHECK(FormatTokenUsage(15000, 1'000'000, /*estimated=*/true) == "~15k/1M · 1%");
+    CHECK(FormatTokenUsage(4250, 0, /*estimated=*/true) == "~4.2k tok");
 }
 
 TEST_CASE("PermissionModeSegmentValue shows the queued mode with the pending marker",

@@ -19,7 +19,8 @@ namespace plugins = minimal::client::plugins;
 // "62k/200k · 31%" (window known) or "4.2k tok" (not). Compact on purpose --
 // the exact count was seven digits of noise at a glance -- but never
 // truncated: every figure shown is the real one, rounded.
-std::string FormatTokenUsage(std::int64_t used, std::int64_t max);
+// "62k/200k · 31%"; an estimate (not a backend count) reads "~62k/...".
+std::string FormatTokenUsage(std::int64_t used, std::int64_t max, bool estimated = false);
 
 // The {permission_mode} value. A shift+tab sent but not yet confirmed by the
 // server's metadata event is the tab's DESIRED state: while it differs from

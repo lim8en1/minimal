@@ -123,6 +123,10 @@ public:
         // client plugin rather than duplicated in core state.
         int64_t cache_read_tokens = 0;
         int64_t cache_write_tokens = 0;
+        // The four above are the server's bytes/4 estimate (a proxy that
+        // reports no usage, or the after-figure of a compaction), not a
+        // backend count: shown as such ("~").
+        bool tokens_estimated = false;
 
         // Bumped whenever the persisted transcript changed in a way the chat
         // view should re-fetch (new scrollback page applied, turn completed).
@@ -675,6 +679,7 @@ private:
     int64_t output_tokens_ = 0;
     int64_t cache_read_tokens_ = 0;
     int64_t cache_write_tokens_ = 0;
+    bool tokens_estimated_ = false;
 };
 
 // ============================================================================

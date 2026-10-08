@@ -202,6 +202,7 @@ struct TabStatus {
     std::string display_name;   // "" until the session is named
     bool read_only = false;     // a finished subagent's transcript tab
     std::int64_t tokens_used = 0;      // context occupancy: input + output + cache
+    bool tokens_estimated = false;     // tokens_used is an estimate, not a backend count
     std::int64_t context_window = 0;   // 0 = unknown
     // Effective values (what the session runs with) and desired ones (the
     // user's last choice, staged until the server confirms it; "" = none).

@@ -28,7 +28,7 @@ std::int64_t WorkingHistory::estimated_tokens() const {
     // bypassed the methods here would surface as an assert, not as a quietly
     // wrong compaction trigger.
     assert(history_bytes_ == estimate_bytes(messages_));
-    return history_bytes_ / 4;
+    return EstimatedTokensFromBytes(history_bytes_);
 }
 
 void WorkingHistory::CommitRound(llm::Message assistant, llm::Message results) {

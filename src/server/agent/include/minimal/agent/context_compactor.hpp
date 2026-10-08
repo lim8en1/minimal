@@ -134,8 +134,17 @@ std::optional<CompactionResult> compact_messages(
     std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
     const CompactionRequest& request);
 
-// Rough size of a message range in tokens: serialized bytes /
-// kEstimatedBytesPerToken. The fallback
+// THE estimate seam: serialized bytes to estimated tokens. Every token
+// ESTIMATE in the tree (the request's context size, the working history's,
+// the compactor's fallback, the trigger) converts through this one function
+// -- a heuristic, never a measurement (the UI marks it "~"), and the single
+// place a real tokenizer would replace.
+inline std::int64_t EstimatedTokensFromBytes(std::int64_t bytes) {
+    return bytes / kEstimatedBytesPerToken;
+}
+
+// Rough size of a message range in tokens: EstimatedTokensFromBytes of its
+// serialized bytes. The fallback
 // for context_tokens_before when the backend reported no usage -- an estimate
 // that says so on its sleeve beats a precise number computed from nothing.
 // Exposed beyond the compactor because resume has the same problem: it seeds

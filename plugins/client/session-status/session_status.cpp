@@ -64,10 +64,12 @@ std::string Staged(const plugins::TabStatus& tab, const std::string& effective,
 
 }  // namespace
 
-std::string FormatTokenUsage(std::int64_t used, std::int64_t max) {
+std::string FormatTokenUsage(std::int64_t used, std::int64_t max, bool estimated) {
     if (used < 0) used = 0;
-    if (max <= 0) return common::CompactCount(used) + " tok";
-    return common::CompactCount(used) + "/" + common::CompactCount(max) + " · " +
+    // An estimate says so: it is bytes/4, which dense output undercounts.
+    const std::string count = (estimated ? "~" : "") + common::CompactCount(used);
+    if (max <= 0) return count + " tok";
+    return count + "/" + common::CompactCount(max) + " · " +
            std::to_string(common::AsPercent(used, max)) + "%";
 }
 
@@ -123,7 +125,8 @@ std::vector<std::unique_ptr<plugins::StatusSegment>> MakeSegments() {
                 role = "attention";
             }
         }
-        return StatusValue{FormatTokenUsage(tab.tokens_used, tab.context_window), role};
+        return StatusValue{
+            FormatTokenUsage(tab.tokens_used, tab.context_window, tab.tokens_estimated), role};
     });
 
     add("model", Right(kModelOrder), kModelPriority, 0, [](const TabStatus& tab) {

@@ -119,7 +119,10 @@ void CompactionController::EmitCompactionNotice(std::string_view trigger, std::s
     event.trigger = std::string(trigger);
     event.skipped = true;
     event.warning = std::move(warning);
-    event.tokens_before = working_.tokens().last_occupancy();
+    // The estimate, like a compaction that ran (Compact's tokens_before): one
+    // column, one basis -- a skipped row used to store the reported
+    // occupancy beside successful rows' estimates.
+    event.tokens_before = request_.EstimateContextTokens();
     event.tokens_after = event.tokens_before;
     event.created_at_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::system_clock::now().time_since_epoch())
