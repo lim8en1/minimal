@@ -36,6 +36,7 @@ plugins::TabStatus FocusedTabStatus(const std::string& focused,
     // compaction trigger (llm::context_occupancy) counts too.
     status.tokens_used = details.input_tokens + details.output_tokens +
                          details.cache_read_tokens + details.cache_write_tokens;
+    status.tokens_estimated = details.tokens_estimated;
     status.context_window = details.context_window_tokens;
     status.model = details.model;
     status.desired_model = details.desired_model;

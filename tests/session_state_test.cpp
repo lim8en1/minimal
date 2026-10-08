@@ -2334,3 +2334,27 @@ TEST_CASE("an unanswered /-command makes the tab interruptible until its result 
     state.OnError("stream closed");
     CHECK_FALSE(state.TakeSnapshot().turn_in_flight);
 }
+
+TEST_CASE("token occupancy says when it is an estimate", "[session_state]") {
+    // A compaction's after-figure and a proxy's missing usage are the
+    // server's bytes/4 estimate; the bar marks them ("~") instead of
+    // presenting them as a measurement. A backend report clears the mark.
+    SessionState state("s-1");
+    v1::TurnCompletedEvent estimated;
+    estimated.mutable_usage()->set_input_tokens(1000);
+    estimated.set_usage_estimated(true);
+    state.OnTurnCompleted(estimated);
+    CHECK(state.TakeSnapshot().tokens_estimated);
+
+    v1::UsageEvent reported;
+    reported.mutable_usage()->set_input_tokens(1200);
+    state.OnUsage(reported);
+    CHECK_FALSE(state.TakeSnapshot().tokens_estimated);
+
+    v1::CompactionEvent compacted;
+    compacted.set_tokens_after(300);
+    state.OnCompaction(compacted);
+    const auto snap = state.TakeSnapshot();
+    CHECK(snap.tokens_estimated);
+    CHECK(snap.input_tokens == 300);
+}

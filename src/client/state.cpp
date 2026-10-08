@@ -55,6 +55,7 @@ void SessionState::FillCommonLocked(Snapshot& s) const {
     s.output_tokens = output_tokens_;
     s.cache_read_tokens = cache_read_tokens_;
     s.cache_write_tokens = cache_write_tokens_;
+    s.tokens_estimated = tokens_estimated_;
     s.cancel_requested = cancel_requested_;
     s.turn_in_flight = turn_in_flight_ || !commands_in_flight_.empty();
     s.turns_started = turns_started_;
@@ -358,6 +359,7 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     output_tokens_ = evt.usage().output_tokens();
     cache_read_tokens_ = evt.usage().cache_read_input_tokens();
     cache_write_tokens_ = evt.usage().cache_creation_input_tokens();
+    tokens_estimated_ = evt.usage_estimated();
     // Turn completion is bookkeeping, not a state transition: `Done` means the
     // SESSION ended (see OnSessionEnded), not that a turn finished -- the
     // preceding message_stop already resolved state_ (normally to Idle). An
@@ -411,6 +413,7 @@ void SessionState::OnUsage(const v1::UsageEvent& evt) {
     output_tokens_ = evt.usage().output_tokens();
     cache_read_tokens_ = evt.usage().cache_read_input_tokens();
     cache_write_tokens_ = evt.usage().cache_creation_input_tokens();
+    tokens_estimated_ = false;   // the backend's own report
 }
 
 void SessionState::OnCommandResult(const v1::CommandResult& evt) {
@@ -736,6 +739,7 @@ void SessionState::OnCompaction(const v1::CompactionEvent& evt) {
     output_tokens_ = 0;
     cache_read_tokens_ = 0;
     cache_write_tokens_ = 0;
+    tokens_estimated_ = true;   // the server's estimate until the next report
     ++transcript_version_;
     ++fetch_generation_;
 }

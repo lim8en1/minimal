@@ -41,7 +41,7 @@ std::int64_t JsonSizeEstimate(const nlohmann::json& value) {
 }
 
 std::int64_t estimate_tokens(std::span<const llm::Message> messages) {
-    return estimate_bytes(messages) / kEstimatedBytesPerToken;
+    return EstimatedTokensFromBytes(estimate_bytes(messages));
 }
 
 std::int64_t estimate_bytes(std::span<const llm::Message> messages) {
