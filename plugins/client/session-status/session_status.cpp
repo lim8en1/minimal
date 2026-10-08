@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "minimal/client/sdk/policy.hpp"
+#include "minimal/client/sdk/tool_status.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/count_format.hpp"
 #include "minimal/common/units.hpp"
@@ -158,10 +159,15 @@ std::vector<std::unique_ptr<plugins::StatusSegment>> MakeSegments() {
     add("activity", Left(kActivityOrder), kActivityPriority, 0, [](const TabStatus& tab) {
         if (!tab.focused) return StatusValue{};
         StatusValue value;
+        // Busy states lead with the tab bar's spinner: with one tab open the
+        // bar is hidden, and a static "thinking…" alone cannot say the turn
+        // is still alive.
         if (tab.state == "thinking") {
-            value = {"thinking…", "thinking"};
+            value = {client::SpinnerFrame() + " thinking…", "thinking"};
         } else if (tab.state == "working") {
-            value = {tab.running_tool.empty() ? "working…" : "running " + tab.running_tool + "…",
+            value = {client::SpinnerFrame() + " " +
+                         (tab.running_tool.empty() ? "working…"
+                                                   : "running " + tab.running_tool + "…"),
                      "working"};
         } else if (tab.state == "waiting") {
             value = {"waiting", "attention"};

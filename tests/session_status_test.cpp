@@ -108,7 +108,11 @@ TEST_CASE("the segments render the focused tab, staged choices pending, tinted b
 
     tab.state = "working";
     tab.running_tool = "bash";
-    CHECK(Render(tab).at("activity").text == "running bash…");
+    // Led by an animated spinner frame (one glyph and a space), so only the
+    // tail is stable.
+    const std::string working = Render(tab).at("activity").text;
+    CHECK(working.size() > std::string(" running bash…").size());
+    CHECK(working.ends_with(" running bash…"));
     CHECK(Render(tab).at("activity").role == "working");
     tab.cancel_requested = true;
     tab.live_view_truncated = true;

@@ -10,7 +10,7 @@ every segment (`plugins::TabStatus`):
 | id | shows | gives way |
 |---|---|---|
 | `{permission_mode}` | the run mode; a staged change as `→ mode`; red for bypass | last |
-| `{activity}` | thinking / running `<tool>` / waiting / error / cancelling, tinted by state | |
+| `{activity}` | thinking / running `<tool>` (with a spinner) / waiting / error / cancelling, tinted by state | |
 | `{model}`, `{agent}` | what the session runs with; a staged choice as `→ value` | |
 | `{tokens}` | context use, `62k/200k · 31%`, tinted as the window fills | |
 | `{paused}` | `paused`, when the agent is suspended | |
