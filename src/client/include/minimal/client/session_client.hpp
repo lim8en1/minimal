@@ -390,7 +390,8 @@ public:
     GetSessionResult GetSession(const std::string& session_id);
 
     // A new top-level session forked from `source_session_id`'s current state
-    // (ForkSessionRequest: cut at the clean boundary, source untouched). A
+    // (ForkSessionRequest: the active transcript as it stands, source
+    // untouched). A
     // non-empty instruction becomes the fork's first user turn. The returned
     // session is LIVE server-side -- attach it, don't resume it.
     struct ForkSessionResult {

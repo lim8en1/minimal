@@ -162,7 +162,7 @@ public:
     // seeds the working set: [summary + tail] via a copied compaction
     // checkpoint, occupancy reseeding, and the pre-first-call compact).
     //
-    // The fork point is the source's current state, cut at the clean boundary
+    // The fork point is the source's active transcript as it stands
     // (SessionDatabase::ForkSession). A non-empty instruction is submitted as
     // the fork's first user turn.
     //

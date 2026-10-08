@@ -853,9 +853,8 @@ message CreateSessionResponse {
 }
 
 // SESSION FORK: a new top-level session seeded with the source's active
-// transcript as it stands now, cut at the clean boundary pause uses -- a tool
-// round still in flight (assistant tool calls without persisted results) is
-// left out, a finished one is kept. The source is untouched -- the
+// transcript as it stands now (a tool round is stored as one unit, so there
+// is never a half-run round to copy). The source is untouched -- the
 // "try it on another model/plan" shape: fork with a model override and/or an
 // instruction, experiment there, keep whichever line you like. Forking a
 // live mid-turn session is safe; forking a SUBAGENT session is refused.

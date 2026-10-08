@@ -93,9 +93,8 @@ void TuiApp::RegisterClientCommands() {
         }
         return true;
     }});
-    // A fork of the focused session AS IT STANDS (cut at the clean boundary
-    // pause uses), opened as its own tab; the raw argument, when given, is
-    // the fork's first user message.
+    // A fork of the focused session AS IT STANDS, opened as its own tab; the
+    // raw argument, when given, is the fork's first user message.
     router.Add({"fork", "fork this session here, optionally with a new instruction", false, true,
                 [this](const CommandInvocationText& parsed) {
         const std::string sid = app_->FocusedSessionId();

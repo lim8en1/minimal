@@ -5,10 +5,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <cerrno>
 #include <chrono>
-#include <limits>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -1632,9 +1630,6 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
     // nullopt = the source row's column is NULL (no override), and the fork
     // row gets NULL too rather than an empty string.
     std::optional<std::string> source_model, source_subagent_model;
-    // The copy's exclusive upper bound: everything active, unless the tail is
-    // a tool round still in flight (set below).
-    std::int64_t copy_upper = std::numeric_limits<std::int64_t>::max();
 
     ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin fork");
     try {
@@ -1676,28 +1671,6 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
                 reinterpret_cast<const char*>(sqlite3_column_text(source.stmt, 3));
         }
 
-        // THE CLEAN BOUNDARY, the one pause stops at: an assistant message is
-        // persisted BEFORE its tools run and their results land as the next
-        // message, so a live mid-round source ends in tool_use blocks with no
-        // results. Copying that would make the fork's resume synthesize error
-        // results for calls it never ran -- instead the fork stops before the
-        // tool-call start. A finished round (results persisted), a final
-        // assistant reply, or a user message is copied as-is.
-        Stmt last(db_, "SELECT seq, role, content_json FROM messages"
-                       " WHERE session_id = ?1 AND discarded = 0 ORDER BY seq DESC LIMIT 1;",
-                  "failed to read the fork tail");
-        sqlite3_bind_text(last.stmt, 1, source_session_id.c_str(), -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(last.stmt) == SQLITE_ROW) {
-            const llm::Message message = JsonToMessage(nlohmann::json::parse(
-                reinterpret_cast<const char*>(sqlite3_column_text(last.stmt, 2))));
-            if (message.role == llm::Role::Assistant &&
-                std::ranges::any_of(message.content, [](const auto& block) {
-                    return std::holds_alternative<llm::ToolUseBlock>(block);
-                })) {
-                copy_upper = sqlite3_column_int64(last.stmt, 0);
-            }
-        }
-
         // Mint the child row: a top-level session with fork provenance. The
         // source's project_root/agent_preset and any persisted model overrides
         // carry over (the registry's CreateSession params can still override
@@ -1732,47 +1705,43 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
             ThrowSqliteError(db_, "failed to create forked session");
         }
 
-        // The copy: active rows below the bound, SEQS VERBATIM. Seq spaces
-        // are per-session (UNIQUE(session_id, seq)), reads are keyset-paged
-        // within one session, and appends continue from MAX(seq)+1 -- nothing
-        // requires a child's seq space to start at zero, and keeping the
-        // source's numbers means a copied checkpoint needs no renumbering.
+        // The copy: every active row, SEQS VERBATIM. No tail needs trimming:
+        // the store never holds a half-finished tool round (AppendRound
+        // commits the call and its results together), so the active
+        // transcript is always a clean copy. Seq spaces are per-session
+        // (UNIQUE(session_id, seq)), reads are keyset-paged within one
+        // session, and appends continue from MAX(seq)+1 -- nothing requires a
+        // child's seq space to start at zero, and keeping the source's
+        // numbers means a copied checkpoint needs no renumbering.
         Stmt copy(db_, "INSERT INTO messages (session_id, seq, role, content_json,"
                        " token_count, created_at, agent_preset, model)"
                        " SELECT ?1, seq, role, content_json, token_count, created_at,"
                        " agent_preset, model"
-                       " FROM messages WHERE session_id = ?2 AND discarded = 0 AND seq < ?3;",
+                       " FROM messages WHERE session_id = ?2 AND discarded = 0;",
                   "failed to copy messages into the fork");
         sqlite3_bind_text(copy.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(copy.stmt, 2, source_session_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(copy.stmt, 3, copy_upper);
         if (sqlite3_step(copy.stmt) != SQLITE_DONE) {
             ThrowSqliteError(db_, "failed to copy messages into the fork");
         }
         copied = sqlite3_changes(db_);
 
-        // Compaction records ride along when their summary covers only part
-        // of the copied prefix (boundary_seq < the copy bound); the others
-        // summarize history the child does not have. A record that ran past
-        // the bound is re-positioned to the child's last copied seq -- its
-        // summary still describes that prefix. `active` is copied too: a
-        // record the source had deactivated (/clear) must not become the
-        // child's checkpoint.
+        // Compaction records ride along verbatim -- the seqs they point at
+        // were copied verbatim too, so no renumbering. `active` is copied as
+        // well: a record the source had deactivated (/clear) must not become
+        // the child's checkpoint.
         Stmt copy_compactions(db_, "INSERT INTO compactions (session_id, boundary_seq, at_seq,"
                                    " summary_content_json, folded_messages, tokens_before,"
                                    " tokens_after, trigger_kind, warning, skipped, active,"
                                    " created_at)"
-                                   " SELECT ?1, boundary_seq, MIN(at_seq, ?3 - 1),"
-                                   " summary_content_json,"
+                                   " SELECT ?1, boundary_seq, at_seq, summary_content_json,"
                                    " folded_messages, tokens_before, tokens_after, trigger_kind,"
                                    " warning, skipped, active, created_at"
-                                   " FROM compactions WHERE session_id = ?2 AND boundary_seq < ?3"
-                                   " ORDER BY id;",
+                                   " FROM compactions WHERE session_id = ?2 ORDER BY id;",
                               "failed to copy the compaction records");
         sqlite3_bind_text(copy_compactions.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(copy_compactions.stmt, 2, source_session_id.c_str(), -1,
                           SQLITE_TRANSIENT);
-        sqlite3_bind_int64(copy_compactions.stmt, 3, copy_upper);
         if (sqlite3_step(copy_compactions.stmt) != SQLITE_DONE) {
             ThrowSqliteError(db_, "failed to copy the compaction records");
         }

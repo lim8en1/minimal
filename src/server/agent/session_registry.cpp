@@ -151,6 +151,7 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
     // pre-first-call compact all come for free.
     params.resume = true;
 
+    std::shared_ptr<Session> session;
     try {
         if (model) {
             // Persist the EXPLICIT override durably: db_.ForkSession only ever
@@ -164,13 +165,7 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
             // like a failed Create() does.
             db_.UpdateSessionModel(row.session_id, model->str());
         }
-        std::shared_ptr<Session> session = Create(std::move(params));
-        // The instruction is the fork's first user turn, queued here so the
-        // fork and its divergence are one step -- no attach-then-send race.
-        // A refusal is already answered on the session's own queue
-        // (SubmitTurn's contract); the fork itself stands either way.
-        if (!instruction.empty()) session->SubmitTurn(instruction);
-        return session;
+        session = Create(std::move(params));
     } catch (...) {
         // The fork transaction committed, but the session could not be built
         // (unresolvable preset/model). A failed fork leaves nothing behind --
@@ -185,6 +180,13 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
         }
         throw;
     }
+    // The instruction is the fork's first user turn, queued here so the fork
+    // and its divergence are one step -- no attach-then-send race. Outside the
+    // rollback: the session is published and live by now. A refusal is
+    // already answered on the session's own queue (SubmitTurn's contract);
+    // the fork itself stands either way.
+    if (!instruction.empty()) session->SubmitTurn(instruction);
+    return session;
 }
 
 std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,

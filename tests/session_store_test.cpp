@@ -1977,17 +1977,6 @@ struct ForkFixture {
     }
 };
 
-llm::Message ToolCall(const std::string& id) {
-    return llm::Message{llm::Role::Assistant,
-                        {llm::TextBlock{"let me look"},
-                         llm::ToolUseBlock{id, "read", nlohmann::json::object()}}};
-}
-
-llm::Message ToolResult(const std::string& id) {
-    return llm::Message{llm::Role::User,
-                        {llm::ToolResultBlock{id, {llm::TextBlock{"file contents"}}}}};
-}
-
 }  // namespace
 
 TEST_CASE("ForkSession carries message attribution into the fork", "[session][fork]") {
@@ -2047,36 +2036,6 @@ TEST_CASE("ForkSession skips discarded rows", "[session][fork]") {
     const auto child = fx.All(row.session_id);
     REQUIRE(child.size() == 2);
     CHECK(child[1].seq == 1);
-}
-
-TEST_CASE("ForkSession cuts a tool round still in flight at the tool-call start",
-          "[session][fork][invariant]") {
-    // An assistant message is persisted BEFORE its tools run; a fork taken in
-    // that window must not inherit the unanswered calls (its resume would
-    // synthesize error results for tools it never ran).
-    ForkFixture fx;
-    fx.db.AppendMessage(fx.source, ToolCall("tu1"));   // seq 3, results pending
-
-    const auto row = fx.db.ForkSession(fx.source, "", std::nullopt);
-    CHECK(row.message_count == 3);
-    const auto child = fx.All(row.session_id);
-    REQUIRE(child.size() == 3);
-    CHECK(MessagesEqual(child.back().message, UserMsg("second")));
-    // The source keeps its in-flight round.
-    CHECK(fx.All(fx.source).size() == 4);
-}
-
-TEST_CASE("ForkSession keeps a completed tool round", "[session][fork]") {
-    // The pause boundary: the tool call has RETURNED and its results are
-    // persisted -- the fork carries both and the model sees the results next.
-    ForkFixture fx;
-    fx.db.AppendMessage(fx.source, ToolCall("tu1"));
-    fx.db.AppendMessage(fx.source, ToolResult("tu1"));
-
-    const auto row = fx.db.ForkSession(fx.source, "", std::nullopt);
-    const auto child = fx.All(row.session_id);
-    REQUIRE(child.size() == 5);
-    CHECK(MessagesEqual(child.back().message, ToolResult("tu1")));
 }
 
 TEST_CASE("ForkSession of an empty session forks an empty transcript", "[session][fork]") {
@@ -2159,30 +2118,18 @@ TEST_CASE("ForkSession refuses a subagent source", "[session][fork][invariant]")
     CHECK_THROWS_AS(fx.db.ForkSession(child, "", std::nullopt), std::runtime_error);
 }
 
-TEST_CASE("ForkSession copies the compaction checkpoint only when it covers the copy",
-          "[session][fork]") {
+TEST_CASE("ForkSession carries the compaction checkpoint", "[session][fork]") {
     ForkFixture fx;
     const llm::Message summary =
         llm::Message{llm::Role::User, {llm::TextBlock{"[summary of everything before seq 2]"}}};
     fx.db.SaveCompactionCheckpoint(fx.source, /*boundary_seq=*/1, summary);
 
-    // Whole-transcript fork: the checkpoint covers the copied head -- ride it
-    // along verbatim.
-    const auto covering = fx.db.ForkSession(fx.source, "", std::nullopt);
-    const auto covering_checkpoint = fx.db.LoadCompactionCheckpoint(covering.session_id);
-    REQUIRE(covering_checkpoint.has_value());
-    CHECK(covering_checkpoint->boundary_seq == 1);
-    CHECK(MessagesEqual(covering_checkpoint->summary, summary));
-
-    // A tool round in flight cuts the copy at seq 3; a checkpoint whose
-    // boundary is the cut message itself over-covers and stays behind, and the
-    // earlier record is the child's checkpoint.
-    fx.db.AppendMessage(fx.source, ToolCall("tu1"));   // seq 3
-    fx.db.SaveCompactionCheckpoint(fx.source, /*boundary_seq=*/3, summary);
-    const auto cut = fx.db.ForkSession(fx.source, "", std::nullopt);
-    const auto cut_checkpoint = fx.db.LoadCompactionCheckpoint(cut.session_id);
-    REQUIRE(cut_checkpoint.has_value());
-    CHECK(cut_checkpoint->boundary_seq == 1);
+    // The checkpoint rides along verbatim: its seqs were copied verbatim too.
+    const auto fork = fx.db.ForkSession(fx.source, "", std::nullopt);
+    const auto checkpoint = fx.db.LoadCompactionCheckpoint(fork.session_id);
+    REQUIRE(checkpoint.has_value());
+    CHECK(checkpoint->boundary_seq == 1);
+    CHECK(MessagesEqual(checkpoint->summary, summary));
 }
 
 TEST_CASE("a forked session's discard state is its own: rewind in the fork leaves the "

@@ -389,17 +389,15 @@ public:
     // Creates a NEW top-level session seeded with a verbatim copy of the
     // source's active transcript AS IT STANDS NOW (seqs carried over as-is --
     // seq spaces are per-session, and every read/append path works from
-    // MAX(seq)+1 whatever the starting point), cut at the clean boundary pause
-    // uses: a trailing assistant message whose tool calls have no persisted
-    // results yet (a live mid-round source) is left out, so the fork never
-    // inherits a half-run tool round. The source is untouched: a fork is
+    // MAX(seq)+1 whatever the starting point). No tail is trimmed: the store
+    // never holds a half-finished tool round (AppendRound commits the call
+    // and its results together). The source is untouched: a fork is
     // read-only on it, and forking a LIVE session is safe because the whole
     // read runs in one transaction.
     //
-    // One transaction: source validation (exists, NOT a subagent), the tail
-    // trim, the child row, the message copy, and the compaction-checkpoint
-    // copy. A checkpoint rides along only when its boundary_seq is below the
-    // copy's upper bound (the summary then covers the copied prefix's head).
+    // One transaction: source validation (exists, NOT a subagent), the child
+    // row, the message copy, and the compaction-record copy (verbatim -- the
+    // seqs they point at were copied verbatim too).
     // A non-empty `name` is explicit, like CreateSession's. An empty one names
     // the fork "fork of <source name>" (name_source 'default'), or leaves it
     // unnamed for the default-naming rule when the source has no name.

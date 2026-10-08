@@ -1170,11 +1170,6 @@ std::string AppState::ResumeTab(const std::string& session_id) {
     return registered;
 }
 
-// The startup --resume path for a LIVE session (see the header): root tab
-// first, then its live subagent children as members of the same group. The
-// child scan runs AFTER the root attaches, both because the children need the
-// root's ordinal to group under and because a probe-then-attach caller can
-// only get fresher is_live data this way.
 void AppState::ForkSession(const std::string& source_tab_id, const std::string& session_id,
                            const std::string& instruction) {
     RunOnRpcQueue([this, source_tab_id, session_id, instruction] {
@@ -1192,6 +1187,11 @@ void AppState::ForkSession(const std::string& source_tab_id, const std::string& 
     });
 }
 
+// The startup --resume path for a LIVE session (see the header): root tab
+// first, then its live subagent children as members of the same group. The
+// child scan runs AFTER the root attaches, both because the children need the
+// root's ordinal to group under and because a probe-then-attach caller can
+// only get fresher is_live data this way.
 std::string AppState::AttachSessionGroup(const std::string& session_id) {
     const std::string root_tab = AttachTab(session_id);
     if (root_tab.empty()) return "";
