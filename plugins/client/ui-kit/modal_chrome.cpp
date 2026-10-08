@@ -34,8 +34,7 @@ ftxui::Element Body(const Theme& theme, ftxui::Element content) {
 
 int ModalInnerHeight(int preferred) {
     const int dimy = ftxui::Terminal::Size().dimy;
-    constexpr int kBorderRows = 2;
-    const int fits = dimy - kBorderRows - kModalOverlaySlackRows;
+    const int fits = dimy - kModalBorderRows - kModalOverlaySlackRows;
     return std::max(std::min(preferred, fits), kMinModalBodyRows + kModalFrameRows);
 }
 
