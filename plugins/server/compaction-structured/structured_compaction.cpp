@@ -295,6 +295,8 @@ std::optional<CompactionResult> compact_messages_structured(
         logger.warn("{}compaction failed (will retry next turn): {}", where, error.what());
         return std::nullopt;
     }
+    // Billed now, whatever the summary turns out to be (CompactionRequest::on_usage).
+    if (params.on_usage) params.on_usage(response.usage);
 
     if (response.stop_reason == llm::StopReason::Cancelled) return std::nullopt;
 

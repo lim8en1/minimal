@@ -50,6 +50,32 @@ void CostSessionObserver::OnTurnCompleted(const agent::SessionInfo& info,
     Changed(info);
 }
 
+void CostSessionObserver::OnBilledCall(const agent::SessionInfo& info,
+                                       const agent::BilledCall& call) {
+    TurnRecord record;
+    record.model = call.model;
+    record.at_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    record.usage.input_tokens = call.usage.input_tokens;
+    record.usage.output_tokens = call.usage.output_tokens;
+    record.usage.cache_read_tokens = call.usage.cache_read_input_tokens;
+    record.usage.cache_write_tokens = call.usage.cache_creation_input_tokens;
+    // The honesty rule: an estimated count is "unknown", never a price.
+    record.usage.usage_reported =
+        !call.usage_estimated &&
+        (call.usage.input_tokens > 0 || call.usage.output_tokens > 0 ||
+         call.usage.cache_read_input_tokens > 0 || call.usage.cache_creation_input_tokens > 0);
+    // first_seq/last_seq stay -1: no transcript range, so a rewind keeps it.
+    try {
+        store_.AppendTurn(info.session_id, info.parent_session_id, record);
+    } catch (const std::exception& error) {
+        common::DefaultLogger().warn("cost-tracker: recording a {} call for session {} failed: {}",
+                                     call.purpose, info.session_id, error.what());
+    }
+    Changed(info);
+}
+
 void CostSessionObserver::OnProviderRound(const agent::SessionInfo& info,
                                           const agent::RoundUsage& round) {
     // No throw here to catch: the in-flight tracker's RecordRound allocates a

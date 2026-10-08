@@ -164,6 +164,9 @@ Session::Session(SessionParams params, AgentPreset preset,
     loop_config.on_provider_round = [this](agent::RoundUsage round) {
         observers_.NotifyProviderRound(InfoSnapshot(), std::move(round));
     };
+    loop_config.on_billed_call = [this](agent::BilledCall call) {
+        observers_.NotifyBilledCall(InfoSnapshot(), std::move(call));
+    };
     loop_ = std::make_unique<AgentLoop>(
         *provider_, executor_, registry, *store_, preset_, loop_config, std::move(context),
         [this] { return IsCancelled(); }, [this] { return paused(); },

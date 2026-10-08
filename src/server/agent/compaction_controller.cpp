@@ -418,6 +418,14 @@ std::optional<std::size_t> CompactionController::Compact(std::string_view trigge
     params.logger = &session_.logger;
     params.session_label = session_.session_id;
     params.is_cancelled = is_cancelled_;
+    // Billed whatever becomes of the summary. model_name is final below
+    // (small_model's when one serves), so the hook reads it at call time.
+    if (config_.on_billed_call) {
+        params.on_usage = [this, &params](const llm::Usage& usage) {
+            config_.on_billed_call(BilledCall{std::string(params.model_name), usage,
+                                              !llm::ReportedUsage(usage), "compaction"});
+        };
+    }
 
     // small_model, when configured: the summarizer ALONE runs on the alternate
     // provider -- its model name, parameters and cap; the session's own model

@@ -76,6 +76,22 @@ struct RoundUsage {
     bool usage_estimated = false;
 };
 
+// A provider call made OUTSIDE a turn's rounds and billed all the same: the
+// compaction summarizer (auto, on overflow, or /compact between turns) --
+// often the largest request a session makes. `purpose` names it
+// ("compaction"); the channel is generic so another internal call can report
+// itself the same way.
+struct BilledCall {
+    // The request's model: the small_model when one served the call, so a
+    // per-model rate prices it right.
+    std::string model;
+    llm::Usage usage;
+    // As RoundUsage::usage_estimated: an estimated count is not a reported
+    // one -- record that the call happened, never price its tokens.
+    bool usage_estimated = false;
+    std::string purpose;
+};
+
 struct ToolInvocation {
     std::string tool_use_id;
     std::string tool_name;
@@ -116,6 +132,9 @@ public:
     // the snapshot at the cut when notified. Core never restores files.
     virtual void OnSessionRewound(const SessionInfo&, std::int64_t /*truncated_to_seq*/) {}
     virtual void OnSessionEnded(const SessionInfo&) {}
+    // A billed provider call outside the turn rounds (see BilledCall). Same
+    // ordered dispatch; may arrive between turns (a /compact).
+    virtual void OnBilledCall(const SessionInfo&, const BilledCall&) {}
 };
 
 }  // namespace minimal::agent

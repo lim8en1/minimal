@@ -2,11 +2,15 @@
 
 Per-session token usage and estimated cost. COST IS DERIVED, NOT REQUESTED —
 nothing in the agent loop or the provider changes; a SessionObserver records
-every completed turn (the only writer).
+every completed turn, and every billed call outside a turn's rounds (the
+only writer).
 
 ## What it adds
 
-- **SessionObserver**: records every completed turn (model, usage) per session.
+- **SessionObserver**: records every completed turn (model, usage) per session,
+  and each compaction's summarizer call as its own record (`OnBilledCall`) at
+  its model's rate -- the small_model's when one serves compaction. A rewind
+  keeps compaction records: the call happened.
 - **Command**: `/cost [session-id|all]` — renders a session's (or every
   session's) totals as text. Read-only.
 - **Startup auto-refresh**: when any cached pricing snapshot is older than

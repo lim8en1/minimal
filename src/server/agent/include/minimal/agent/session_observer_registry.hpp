@@ -101,6 +101,7 @@ public:
     void NotifyToolExecuted(SessionInfo info, ToolInvocation invocation);
     void NotifySessionRewound(SessionInfo info, std::int64_t truncated_to_seq);
     void NotifySessionEnded(SessionInfo info);
+    void NotifyBilledCall(SessionInfo info, BilledCall call);
 
     std::size_t observer_count() const;
 

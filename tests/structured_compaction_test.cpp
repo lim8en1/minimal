@@ -136,6 +136,24 @@ TEST_CASE("RenderStructuredSummary: a missing current_task renders the visible m
     CHECK(rendered.find("## Done") != std::string::npos);
 }
 
+TEST_CASE("compact_messages_structured reports the summarizer's usage", "[structured][billing]") {
+    FakeLlmProvider provider;
+    auto response = SummaryResponse(nlohmann::json{{"current_task", "the task"}});
+    response.usage.input_tokens = 1200;
+    response.usage.output_tokens = 80;
+    provider.PushResponse(response);
+    auto params = Params(1234);
+    int calls = 0;
+    std::int64_t input = 0;
+    params.on_usage = [&](const llm::Usage& usage) {
+        ++calls;
+        input = usage.input_tokens;
+    };
+    REQUIRE(compact_messages_structured(MixedHistory(), provider, params, kInstruction).has_value());
+    CHECK(calls == 1);
+    CHECK(input == 1200);
+}
+
 TEST_CASE("compact_messages_structured sends the session prefix plus an instruction, with "
           "record_summary offered but not forced",
           "[structured]") {
