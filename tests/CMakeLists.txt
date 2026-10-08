@@ -415,12 +415,18 @@ add_executable(minimal_tests EXCLUDE_FROM_ALL
     "${CMAKE_SOURCE_DIR}/plugins/client/markdown-md4c/streaming_markdown_view.cpp"
     task_worker_test.cpp
     model_selector_test.cpp
-    mcp_view_test.cpp)
+    mcp_view_test.cpp
+    # session-export: its renderer, paged read and path resolution.
+    "${CMAKE_SOURCE_DIR}/plugins/client/session-export/export_render.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/session-export/export_view.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/session-export/transcript_fetch.cpp"
+    session_export_test.cpp)
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/mcp/include"
     "${CMAKE_SOURCE_DIR}/plugins/server/mcp"
     "${CMAKE_SOURCE_DIR}/plugins/client/mcp-view"
+    "${CMAKE_SOURCE_DIR}/plugins/client/session-export"
     "${CMAKE_SOURCE_DIR}/plugins/client/config-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/help-view"
     "${CMAKE_SOURCE_DIR}/plugins/client/theme-view"

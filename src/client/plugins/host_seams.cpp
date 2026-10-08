@@ -61,6 +61,9 @@ public:
             page.messages.push_back(stored);
         }
         page.has_more = response.has_more();
+        for (const auto& compaction : response.compactions()) {
+            page.compactions.push_back(compaction);
+        }
         return page;
     }
 
