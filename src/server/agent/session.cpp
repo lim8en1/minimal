@@ -256,6 +256,7 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
             // attached status bar refreshes from -- goes out after the lock.
             if (pause_.paused() && params_.pause_auto_resume_on_submit) {
                 pause_.ClearPaused();
+                ++pause_epoch_;
                 auto_resumed = true;
             }
             // REAL-TIME STEERING: a plain text turn arriving while the AGENT is
@@ -409,7 +410,7 @@ bool Session::SubmitCompaction(QueuedCommand command) {
             // Pause and push in ONE critical section: the worker cannot pop
             // a held turn between the two and run it ahead of the command.
             if (busy) raised = pause_.SetPaused(true);
-            command.resume_after = raised;
+            if (raised) command.resume_if_pause_epoch = pause_epoch_;
             work_.TryPush(std::move(command));
         }
     }
@@ -594,16 +595,19 @@ void Session::RunOneCommand(const QueuedCommand& command) {
     } else {
         ExecuteCommand(command, /*busy=*/false);
     }
-    if (!command.resume_after) return;
+    if (!command.resume_if_pause_epoch) return;
     // Lift the pause SubmitCompaction raised, whatever the command's
-    // outcome. If the user already resumed by hand there is nothing to lift.
-    // No explicit kick: the turn that ended paused left continuation_pending
-    // set, and the worker's wake predicate turns that into the continuation
-    // once the queue drains (WorkerShouldProceed's last line).
+    // outcome -- but only while it is still the compaction's pause: once
+    // anyone paused (even redundantly), resumed or cancelled, the epoch moved
+    // and the pause is theirs to keep or already gone. No explicit kick: the
+    // turn that ended paused left continuation_pending set, and the worker's
+    // wake predicate turns that into the continuation once the queue drains
+    // (WorkerShouldProceed's last line).
     bool lifted = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminated_.load(std::memory_order_acquire)) return;
+        if (pause_epoch_ != *command.resume_if_pause_epoch) return;
         lifted = pause_.SetPaused(false);
     }
     if (!lifted) return;
@@ -794,6 +798,7 @@ void Session::Cancel() {
         std::lock_guard<std::mutex> lock(mutex_);
         was_paused = pause_.paused();
         pause_.ClearPaused();
+        ++pause_epoch_;
     }
     if (was_paused) {
         // Clients show "paused" from the metadata event, and the worker may be
@@ -807,6 +812,9 @@ void Session::SetPaused(bool paused) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminated_.load(std::memory_order_acquire)) return;
+        // Before the no-op return: a redundant pause is still the user's
+        // say, and a pending /compact must not lift it (RunOneCommand).
+        ++pause_epoch_;
         if (!pause_.SetPaused(paused)) return;
         // EXPLICIT RESUME KICK. Only when the unpause has something to
         // continue into: the last turn actually ended paused

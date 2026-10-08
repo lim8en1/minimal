@@ -327,8 +327,11 @@ public:
     // flight stops at its next tool-call return -- BEFORE the loop's own
     // auto-compaction check -- and the command runs at that boundary against
     // the context as it stands. A pause this call raised is lifted once the
-    // command has run (the paused turn continues); a pause the user already
-    // held is left alone.
+    // command has run (the paused turn continues) unless someone paused,
+    // resumed or cancelled meanwhile; a pause the user already held is left
+    // alone. A steering message auto-resumes the pause like any other (the
+    // user's intent): the turn then runs on, and the command waits for the
+    // next boundary the worker reaches.
     bool SubmitCompaction(QueuedCommand command);
 
     // Answers a command with an error CommandResult without running it. Used
@@ -862,6 +865,11 @@ private:
     // A SubmitCompaction command is queued or running: the next one is
     // refused until RunOneCommand clears this. Guarded by mutex_.
     bool compaction_pending_ = false;
+    // Bumped by every pause change made by anyone but SubmitCompaction
+    // (SetPaused, even a no-op one; the submit auto-resume; Cancel). A
+    // queued /compact lifts the pause it raised only while this is unchanged.
+    // Guarded by mutex_.
+    std::uint64_t pause_epoch_ = 0;
 
     std::thread worker_;
     std::once_flag join_once_;

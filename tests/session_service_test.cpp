@@ -3362,6 +3362,74 @@ TEST_CASE("an LLM command mid-turn leaves a pause the user already held",
     (void)DrainAndFinish(stream);
 }
 
+TEST_CASE("an LLM command mid-turn leaves a pause the user re-asserted while it waited",
+          "[session_service][commands]") {
+    // The command raised the pause, but the operator then paused too (a no-op
+    // on the flag, and the user's say all the same): lifting it at the
+    // boundary would resume the turn against the operator's latest choice.
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<testing::RecordingLlmCommand>());
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran"));
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "make"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "build it")));
+
+    v1::ServerEvent event;
+    std::string permission_id;
+    while (stream->Read(&event)) {
+        if (event.has_permission_request()) {
+            permission_id = event.permission_request().request_id();
+            break;
+        }
+    }
+    REQUIRE_FALSE(permission_id.empty());
+
+    auto session = fixture.sessions->Find(session_id);
+    REQUIRE(session != nullptr);
+
+    v1::ClientEvent invocation;
+    invocation.set_session_id(session_id);
+    invocation.mutable_command()->set_request_id("cmd-llm");
+    invocation.mutable_command()->set_name("llmrecord");
+    REQUIRE(stream->Write(invocation));
+
+    // The command's own pause landing proves it was accepted; only then is
+    // the user's pause a re-assertion rather than a pause the command found.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!session->paused() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(session->paused());
+    session->SetPaused(true);
+
+    v1::ClientEvent answer;
+    answer.set_session_id(session_id);
+    answer.mutable_permission_response()->set_request_id(permission_id);
+    answer.mutable_permission_response()->set_decision(v1::PERMISSION_DECISION_ALLOW);
+    REQUIRE(stream->Write(answer));
+
+    std::optional<v1::CommandResult> llm_result;
+    while (stream->Read(&event)) {
+        if (event.has_command_result() && event.command_result().request_id() == "cmd-llm") {
+            llm_result = event.command_result();
+            break;
+        }
+    }
+    REQUIRE(llm_result.has_value());
+    CHECK(llm_result->status() == v1::COMMAND_STATUS_OK);
+    CHECK(session->paused());
+
+    session->SetPaused(false);  // let the continuation finish for teardown
+    (void)DrainAndFinish(stream);
+}
+
 TEST_CASE("an unknown command is answered immediately, not after the turn",
           "[session_service][commands]") {
     // It used to be queued behind the running turn purely to be told "unknown

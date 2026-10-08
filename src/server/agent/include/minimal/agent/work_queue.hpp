@@ -23,9 +23,11 @@ struct QueuedCommand {
     std::string request_id;  // echoed on CommandResult
     std::string name;
     commands::CommandArgs args;
-    // Set by Session::SubmitCompaction when IT raised the pause: the worker
-    // lifts that pause once the command has run (see there).
-    bool resume_after = false;
+    // Set by Session::SubmitCompaction when IT raised the pause: the
+    // session's pause epoch at that moment. The worker lifts the pause once
+    // the command has run -- only if the epoch is unchanged, i.e. nobody
+    // paused, resumed or cancelled since (see there).
+    std::optional<std::uint64_t> resume_if_pause_epoch;
     // Set by Session::SubmitCompaction: the session's compaction count when
     // the command was accepted. A different count at the boundary means
     // another compaction (auto, overflow) already folded the history, and
