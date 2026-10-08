@@ -4,10 +4,11 @@
 #include <optional>
 #include <string>
 
-#include "minimal/session/session_database.hpp"
 #include "minimal/session/stored_message.hpp"
 
 namespace minimal::session {
+
+class SessionDatabase;
 
 // Read-only history access, the same path GetMessages will use. Plugins receive
 // this through the ABI utilities half instead of touching SQLite directly; it is

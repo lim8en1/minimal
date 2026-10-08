@@ -374,7 +374,7 @@ public:
     // running turn finishes first). Refused from inside a tool call (the
     // worker is waiting for that tool), when the backlog is full, or when the
     // session ends before it runs. Any thread.
-    tools::ToolExecutor::SubjectVerdict CheckPermission(tools::ToolExecutor::SubjectCheck check);
+    tools::SubjectVerdict CheckPermission(tools::SubjectCheck check);
 
     // Reader thread. Interrupts the in-flight turn, leaving the session alive
     // and able to accept the next one.
@@ -423,7 +423,7 @@ public:
     // reads. The empty critical section closes the lost-wakeup window: the
     // worker either saw the change before parking, or has not parked yet and
     // must take mutex_ to do so.
-    tools::ToolExecutor::SubjectVerdict RunGateCheck(const tools::ToolExecutor::SubjectCheck& check);
+    tools::SubjectVerdict RunGateCheck(const tools::SubjectCheck& check);
 
     void WakeWorker() {
         { std::lock_guard<std::mutex> lock(mutex_); }
@@ -492,7 +492,7 @@ public:
         loop_->ClearHistory();
         return dropped;
     }
-    tools::ToolExecutor& executor() override { return executor_; }
+    tools::PermissionInspector& permissions() override { return executor_; }
     // Core's own handle on the loop (subagent spawning, tests); not part of
     // SessionControl, so commands cannot reach it.
     AgentLoop& loop() { return *loop_; }

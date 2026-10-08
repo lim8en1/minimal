@@ -112,9 +112,7 @@ def check_plugins(root):
     for side, manifest in (("server", "sdk_headers.txt"), ("client", "client_sdk_headers.txt")):
         sdk = set(read_list(os.path.join(root, "scripts", manifest)))
         failed |= check_plugin_tree(root, os.path.join(root, "plugins", side), sdk)
-        # The client SDK is held to it; the server SDK's closure still leaks
-        # core headers (listed as warnings until that is untangled).
-        failed |= check_sdk_closure(root, sdk, headers, manifest, strict=(side == "client"))
+        failed |= check_sdk_closure(root, sdk, headers, manifest, strict=True)
     return 1 if failed else 0
 
 

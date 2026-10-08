@@ -3,7 +3,7 @@
 // The skills plugin's preset-resolution extensions (registered through
 // minimal_plugin_register_preset_extensions): what each resolved preset gets.
 
-#include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/agent/preset_extensions.hpp"
 #include "skill_access.hpp"
 #include "skill_registry.hpp"
 

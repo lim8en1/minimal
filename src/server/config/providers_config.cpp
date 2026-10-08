@@ -1,4 +1,6 @@
 #include "minimal/config/providers_config.hpp"
+
+#include "minimal/config/model_catalog_service.hpp"
 #include "minimal/config/providers_internal.hpp"
 
 #include <algorithm>
@@ -319,11 +321,19 @@ ResolvedModel BuildDiscoveredModel(const ProviderEntry& entry,
     return resolved;
 }
 
+ProvidersConfig::ProvidersConfig() : service_(std::make_unique<ModelCatalogService>(catalog_)) {}
+
+ProvidersConfig::~ProvidersConfig() = default;
+
+ProvidersConfig::ProvidersConfig(ProvidersConfig&& other) noexcept : ProvidersConfig() {
+    *this = std::move(other);
+}
+
 ProvidersConfig& ProvidersConfig::operator=(ProvidersConfig&& other) noexcept {
     if (this == &other) return *this;  // MoveFrom would lock the same mutex twice
     catalog_.models_ = std::move(other.catalog_.models_);
     catalog_.providers_ = std::move(other.catalog_.providers_);
-    service_.MoveRuntimeFrom(std::move(other.service_));
+    service_->MoveRuntimeFrom(std::move(*other.service_));
     return *this;
 }
 
@@ -339,31 +349,31 @@ void ProvidersConfig::AddProvider(ProviderEntry entry) {
 // --- runtime API: thin delegators to the ModelCatalogService --------------------
 
 std::vector<std::string> ProvidersConfig::VariantsOf(const ModelRef& ref) const {
-    return service_.VariantsOf(ref);
+    return service_->VariantsOf(ref);
 }
 void ProvidersConfig::SetDiscoveryHook(DiscoveryHook hook) {
-    service_.SetDiscoveryHook(std::move(hook));
+    service_->SetDiscoveryHook(std::move(hook));
 }
 void ProvidersConfig::SetDiscoveryRetryBackoff(std::chrono::milliseconds backoff) {
-    service_.SetDiscoveryRetryBackoff(backoff);
+    service_->SetDiscoveryRetryBackoff(backoff);
 }
 void ProvidersConfig::SetMetadataHook(MetadataHook hook) {
-    service_.SetMetadataHook(std::move(hook));
+    service_->SetMetadataHook(std::move(hook));
 }
 void ProvidersConfig::SetVariantParamsHook(VariantParamsHook hook) {
-    service_.SetVariantParamsHook(std::move(hook));
+    service_->SetVariantParamsHook(std::move(hook));
 }
 
-void ProvidersConfig::SetEffortsHook(EffortsHook hook) { service_.SetEffortsHook(std::move(hook)); }
+void ProvidersConfig::SetEffortsHook(EffortsHook hook) { service_->SetEffortsHook(std::move(hook)); }
 std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& ref) const {
-    return service_.Resolve(ref);
+    return service_->Resolve(ref);
 }
-std::vector<std::string> ProvidersConfig::ModelRefs() const { return service_.ModelRefs(); }
+std::vector<std::string> ProvidersConfig::ModelRefs() const { return service_->ModelRefs(); }
 DiscoveryStatus ProvidersConfig::discovery_status(const std::string& provider_name) const {
-    return service_.discovery_status(provider_name);
+    return service_->discovery_status(provider_name);
 }
 std::vector<DiscoveryRefreshOutcome> ProvidersConfig::RefreshDiscovery() const {
-    return service_.RefreshDiscovery();
+    return service_->RefreshDiscovery();
 }
 
 std::string DescribeModels(const ProvidersConfig& providers) {

@@ -35,7 +35,7 @@
 #include <vector>
 
 #include "minimal/common/logger.hpp"
-#include "minimal/config/settings_config.hpp"
+#include "minimal/config/context_contributor_settings.hpp"
 #include "minimal/agent/policy.hpp"
 
 namespace minimal::agent {

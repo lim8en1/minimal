@@ -3,10 +3,14 @@
 # Everything else under src/server/*/include is core-internal: a plugin that
 # needs it has found either a missing extension point (add one, list it here)
 # or code on the wrong side of the boundary. scripts/check_module_deps.py
-# --plugins enforces this list over plugins/server/ (ctest: plugin_conformance).
+# --plugins enforces this list over plugins/server/, and over what every
+# header listed here includes in turn -- an SDK header pulling in a core one
+# hands it to every plugin (ctest: plugin_conformance).
 #
 # The ABI and every type its registration hooks take.
-minimal/agent/agent_preset_registry.hpp
+minimal/agent/preset_extensions.hpp   # preset builders/appendices, PresetCatalog
+minimal/agent/agent_preset.hpp        # the resolved preset plugins read
+minimal/agent/agent_preset_frontmatter.hpp
 minimal/agent/compaction_boundary.hpp
 minimal/agent/compaction_strategy.hpp
 minimal/agent/context_compactor.hpp
@@ -72,6 +76,7 @@ minimal/llm/message.hpp
 minimal/llm/stream_event.hpp
 minimal/tools/cancel_token.hpp
 minimal/tools/permission.hpp
+minimal/tools/permission_inspector.hpp   # CommandContext::permissions(): the gate's read/revoke side
 
 # Shared utilities (no policy; safe for any plugin to build on).
 minimal/common/clock.hpp
@@ -99,3 +104,16 @@ minimal/sidecar/task_registry.hpp
 minimal/store/file_lock.hpp
 minimal/store/sqlite_util.hpp
 minimal/tools/pattern_match.hpp
+
+# Reached by the SDK headers above, and contracts in their own right (each
+# includes only SDK headers).
+minimal/plugins/attributed_registry.hpp   # the base of every registry a hook fills
+minimal/common/serial_executor.hpp        # the observer/hook dispatch's ordered executor
+minimal/tools/background_task_event.hpp   # ToolContext::emit_task_event's payload
+minimal/tools/prompt.hpp                  # ToolContext's prompt types
+minimal/tools/permission_checker.hpp      # PermissionAdvisor's input
+minimal/session/stored_message.hpp        # SessionReader's rows
+minimal/config/providers_types.hpp        # ResolvedModel & co., CommandContext::providers()
+minimal/config/hooks_config.hpp           # HookDispatcher::Configure's input (plain data)
+minimal/config/project_local_mode.hpp     # ProjectTrust's mode
+minimal/config/context_contributor_settings.hpp   # ContextContributor's settings

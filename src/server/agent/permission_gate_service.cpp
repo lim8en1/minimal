@@ -7,8 +7,8 @@
 
 namespace minimal::agent {
 
-tools::ToolExecutor::SubjectVerdict SessionPermissionGate::Check(
-    const std::string& session_id, tools::ToolExecutor::SubjectCheck check) {
+tools::SubjectVerdict SessionPermissionGate::Check(
+    const std::string& session_id, tools::SubjectCheck check) {
     SessionRegistry* registry = registry_.load();
     if (registry == nullptr) return {false, "the server is not serving sessions yet"};
     const std::shared_ptr<Session> session = registry->Find(session_id);

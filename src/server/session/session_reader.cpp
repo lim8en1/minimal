@@ -1,5 +1,7 @@
 #include "minimal/session/session_reader.hpp"
 
+#include "minimal/session/session_database.hpp"
+
 #include <algorithm>
 
 namespace minimal::session {

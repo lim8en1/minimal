@@ -37,7 +37,7 @@
 #include "minimal/common/config_paths.hpp"
 
 // --- Half 2: utilities plugins consume -------------------------------------
-#include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/agent/preset_extensions.hpp"
 #include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/agent/context_contributor.hpp"
 #include "minimal/agent/mention_resolver.hpp"
