@@ -88,7 +88,7 @@ TEST_CASE("session-export: thinking and tool calls follow their checkboxes",
 
     options.thinking = false;
     options.tool_calls = true;
-    std::string doc = Render(transcript, options);
+    std::string doc = Render(transcript, options).document;
     CHECK(Contains(doc, "# Session abc"));
     CHECK(Contains(doc, "first answer"));
     CHECK_FALSE(Contains(doc, "pondering"));
@@ -100,12 +100,13 @@ TEST_CASE("session-export: thinking and tool calls follow their checkboxes",
 
     options.thinking = true;
     options.tool_calls = false;
-    doc = Render(transcript, options);
+    const Rendered filtered = Render(transcript, options);
+    doc = filtered.document;
     CHECK(Contains(doc, "pondering first answer"));
     CHECK_FALSE(Contains(doc, "Tool call"));
     CHECK_FALSE(Contains(doc, "file-a"));
     // The tool-result-only user turns had nothing else: gone, heading and all.
-    CHECK(CountExported(transcript, options) == 4);
+    CHECK(filtered.messages == 4);
 }
 
 TEST_CASE("session-export: a compaction start writes its summary, then what followed it",
@@ -113,14 +114,15 @@ TEST_CASE("session-export: a compaction start writes its summary, then what foll
     const Transcript transcript = Sample();
     ExportOptions options;
     options.compaction = 1;  // the real one; boundary_seq 2
-    const std::string doc = Render(transcript, options);
+    const Rendered rendered = Render(transcript, options);
+    const std::string& doc = rendered.document;
     CHECK(Contains(doc, "Summary (compacted"));
     CHECK(Contains(doc, "the first exchange, folded"));
     CHECK_FALSE(Contains(doc, "first question"));
     CHECK_FALSE(Contains(doc, "file-a"));
     CHECK(Contains(doc, "second question"));
     CHECK(doc.find("the first exchange") < doc.find("second question"));
-    CHECK(CountExported(transcript, options) == 3);
+    CHECK(rendered.messages == 3);
 }
 
 TEST_CASE("session-export: start points skip compactions that folded nothing",
@@ -143,7 +145,7 @@ TEST_CASE("session-export: .txt is plain text with the same content", "[session_
     options.thinking = true;
     options.plain_text = true;
     options.session_id = "abc";
-    const std::string doc = Render(Sample(), options);
+    const std::string doc = Render(Sample(), options).document;
     CHECK(Contains(doc, "=== User"));
     CHECK(Contains(doc, "[thinking]"));
     CHECK(Contains(doc, "[Tool call: bash]"));
@@ -160,7 +162,7 @@ TEST_CASE("session-export: .txt is plain text with the same content", "[session_
 TEST_CASE("session-export: a fence outgrows the backticks inside it", "[session_export]") {
     Transcript transcript;
     transcript.messages = {ToolResult(1, "has ``` inside and ```` too")};
-    const std::string doc = Render(transcript, ExportOptions{});
+    const std::string doc = Render(transcript, ExportOptions{}).document;
     CHECK(Contains(doc, "`````\nhas ``` inside"));
 }
 

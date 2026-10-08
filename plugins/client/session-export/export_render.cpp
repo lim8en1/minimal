@@ -5,6 +5,7 @@
 #include <ctime>
 #include <limits>
 #include <sstream>
+#include <utility>
 
 #include "minimal/client/sdk/utf8.hpp"
 #include "minimal/common/clock.hpp"
@@ -190,8 +191,9 @@ std::vector<StartPoint> BuildStartPoints(const Transcript& transcript) {
     return points;
 }
 
-std::string Render(const Transcript& transcript, const ExportOptions& options) {
+Rendered Render(const Transcript& transcript, const ExportOptions& options) {
     const bool plain = options.plain_text;
+    std::size_t messages = 0;
     std::string out = plain ? "Session " + options.session_id + "\n"
                             : "# Session " + options.session_id + "\n";
 
@@ -213,17 +215,9 @@ std::string Render(const Transcript& transcript, const ExportOptions& options) {
         if (parts.empty()) continue;
         out += "\n" + Heading(stored, plain);
         for (const auto& part : parts) out += "\n" + part;
+        ++messages;
     }
-    return out;
-}
-
-std::size_t CountExported(const Transcript& transcript, const ExportOptions& options) {
-    const std::int64_t first_seq = FirstSeq(transcript, options);
-    std::size_t count = 0;
-    for (const auto& stored : transcript.messages) {
-        if (stored.seq() >= first_seq && !RenderBlocks(stored.message(), options).empty()) ++count;
-    }
-    return count;
+    return {std::move(out), messages};
 }
 
 std::filesystem::path DefaultPath(const std::filesystem::path& dir, const std::string& session_id,

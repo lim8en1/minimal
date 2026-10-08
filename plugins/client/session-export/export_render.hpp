@@ -40,10 +40,15 @@ struct ExportOptions {
 // there is nothing to start from.
 std::vector<StartPoint> BuildStartPoints(const Transcript& transcript);
 
+struct Rendered {
+    std::string document;
+    std::size_t messages = 0;  // emitted after filtering -- what the modal reports
+};
+
 // The document. A message left with nothing to show once thinking or tool
 // calls are filtered out (a tool-results-only user turn) is dropped whole,
 // heading included.
-std::string Render(const Transcript& transcript, const ExportOptions& options);
+Rendered Render(const Transcript& transcript, const ExportOptions& options);
 
 // "<dir>/minimal-<session id>-<YYYYmmdd-HHMMSS>.md", local time.
 std::filesystem::path DefaultPath(const std::filesystem::path& dir, const std::string& session_id,
@@ -51,9 +56,5 @@ std::filesystem::path DefaultPath(const std::filesystem::path& dir, const std::s
 
 // Whether `path` asks for plain text (a .txt extension, any case).
 bool IsPlainText(const std::filesystem::path& path);
-
-// How many messages Render() would emit from `options.compaction` on, after
-// the same filtering -- what the modal reports once the file is written.
-std::size_t CountExported(const Transcript& transcript, const ExportOptions& options);
 
 }  // namespace minimal::session_export

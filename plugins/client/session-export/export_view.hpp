@@ -47,7 +47,9 @@ public:
     // discarded when it lands. An empty id (a tab with no session yet)
     // clears the transcript and says so.
     void Load(const std::string& session_id);
-    // Renders `options` over the loaded transcript and writes `path`.
+    // Renders `options` over the loaded transcript and writes `path`. The
+    // outcome line is dropped if a Load ran meanwhile (the modal reopened);
+    // the file is written regardless.
     void Export(std::filesystem::path path, ExportOptions options);
     // An outcome decided on the UI thread (a bad path, an armed overwrite).
     void SetStatus(std::string status, bool error);
@@ -71,6 +73,7 @@ private:
 struct ExportForm {
     std::string session_id;
     std::string path;
+    int path_cursor = 0;  // outlives the Input, which a transcript landing rebuilds
     bool thinking = false;
     bool tool_calls = true;
     int start = 0;

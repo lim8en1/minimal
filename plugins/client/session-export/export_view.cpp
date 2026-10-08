@@ -106,6 +106,7 @@ private:
         using namespace ftxui;
         InputOption input_option;
         input_option.multiline = false;
+        input_option.cursor_position = &form.path_cursor;
         auto input = Input(&form.path, "file path", input_option);
         auto thinking = Checkbox("export thinking", &form.thinking);
         auto tools = Checkbox("export tool calls (and their results)", &form.tool_calls);
@@ -258,20 +259,27 @@ void ExportFeed::Load(const std::string& session_id) {
 }
 
 void ExportFeed::Export(std::filesystem::path path, ExportOptions options) {
-    auto transcript = this->transcript();
+    std::shared_ptr<const Transcript> transcript;
+    std::uint64_t id = 0;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        transcript = transcript_;
+        id = load_id_;
+    }
     if (!transcript) return;
     worker_.Post([this, path = std::move(path), options = std::move(options),
-                  transcript = std::move(transcript)] {
-        const std::string document = Render(*transcript, options);
-        const auto outcome = common::write_file(path, document);
-        std::string status;
+                  transcript = std::move(transcript), id] {
+        const Rendered rendered = Render(*transcript, options);
+        const auto outcome = common::write_file(path, rendered.document);
+        std::lock_guard<std::mutex> lock(mu_);
+        if (id != load_id_) return;  // reopened meanwhile: that open owns the status line
         if (outcome.ok) {
-            status = "exported " + std::to_string(CountExported(*transcript, options)) +
-                     " messages to " + path.string();
+            status_ = "exported " + std::to_string(rendered.messages) + " messages to " +
+                      path.string();
         } else {
-            status = "export failed: " + outcome.error;
+            status_ = "export failed: " + outcome.error;
         }
-        SetStatus(std::move(status), !outcome.ok);
+        status_error_ = !outcome.ok;
     });
 }
 
@@ -320,6 +328,8 @@ void ExportView::OnShow() const {
     stale_->store(true);
     if (!form.session_id.empty()) {
         form.path = DefaultPath(start_dir_, form.session_id, NowUnixMs()).string();
+        // At the end: an edit to the default name starts there.
+        form.path_cursor = static_cast<int>(form.path.size());
     }
     feed_->Load(form.session_id);
 }
