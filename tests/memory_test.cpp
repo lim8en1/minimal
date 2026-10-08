@@ -32,6 +32,9 @@
 
 #include "fakes.hpp"
 
+#include "minimal/agent/preset_extensions.hpp"
+#include "minimal/commands/command_context.hpp"
+#include "minimal/commands/confirmation_broker.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/sidecar/process.hpp"
 #include "minimal/tools/tool.hpp"
@@ -1066,4 +1069,64 @@ TEST_CASE("memory runtime: a store that cannot open degrades instead of throwing
     CHECK(stub->Name() == "memory");
     std::error_code ec;
     fs::remove_all(dir, ec);
+}
+
+namespace {
+
+// The sessionless context's required members, none of which /memory touches.
+class UnusedCatalog final : public minimal::agent::PresetCatalog {
+public:
+    minimal::agent::AgentPreset Resolve(const std::string&, const std::filesystem::path&,
+                                        const minimal::agent::AgentPreset*,
+                                        const std::optional<minimal::config::ModelRef>&)
+        const override {
+        throw std::logic_error("unused");
+    }
+    std::string ResolveCompressionPrompt(const std::string&) const override {
+        throw std::logic_error("unused");
+    }
+    std::optional<minimal::config::ModelRef> DefaultModel() const override { return std::nullopt; }
+    minimal::config::ProjectTrust* project_trust() const override { return nullptr; }
+    const minimal::config::ProvidersConfig& providers() const override {
+        throw std::logic_error("unused");
+    }
+};
+
+class UnusedBroker final : public minimal::commands::ConfirmationBroker {
+    minimal::commands::ConfirmationResponse RequestConfirmation(
+        const minimal::commands::ConfirmationRequest&) override {
+        return {};
+    }
+};
+
+}  // namespace
+
+TEST_CASE("/memory tags suggest-merges waits for the turn boundary and needs a session",
+          "[memory]") {
+    // The one subcommand that calls the model: it must not run on the command
+    // pool beside a turn nor inline on a sessionless handler thread.
+    RuntimeFixture f("suggest-merges");
+    const auto command = MakeMemoryCommand(f.rt);
+    CHECK(command->ReadOnly());
+    minimal::commands::CommandArgs args;
+    args.positional = {"tags", "suggest-merges"};
+    CHECK_FALSE(command->ReadOnlyFor(args));
+    args.positional = {"tags", "suggest-merges", "global"};
+    CHECK_FALSE(command->ReadOnlyFor(args));
+    args.positional = {"tags"};
+    CHECK(command->ReadOnlyFor(args));
+    args.positional = {};
+    CHECK(command->ReadOnlyFor(args));
+
+    UnusedCatalog catalog;
+    UnusedBroker broker;
+    minimal::commands::CommandContext context(nullptr, catalog, broker,
+                                              minimal::common::DefaultLogger());
+    args.positional = {"tags", "suggest-merges", "global"};
+    const auto refused = command->Execute(context, args);
+    CHECK(refused.status == minimal::commands::CommandResult::Status::kError);
+    CHECK_THAT(refused.message, ContainsSubstring("needs a session"));
+    // The rest of /memory still answers sessionless.
+    args.positional = {"tags", "global"};
+    CHECK(command->Execute(context, args).status == minimal::commands::CommandResult::Status::kOk);
 }

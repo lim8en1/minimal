@@ -16,7 +16,11 @@
 // Sessionless AND ReadOnly, the /mcp precedent: the store is process-global
 // and guards itself, so nothing here touches session state -- the meaning
 // ReadOnly() carries, not "mutates nothing". It answers beside a live turn
-// instead of queueing behind it.
+// instead of queueing behind it -- except `tags suggest-merges`, the one
+// subcommand that calls the model: a blocking provider call belongs on the
+// session worker at the turn boundary (ReadOnlyFor), never on the bounded
+// command pool or a sessionless handler thread, so without a session it is
+// refused.
 
 #include <filesystem>
 #include <sstream>
@@ -39,6 +43,9 @@ public:
                "purge <path|group-id> | reindex]";
     }
     bool ReadOnly() const override { return true; }
+    bool ReadOnlyFor(const commands::CommandArgs& args) const override {
+        return !IsSuggestMerges(args.positional);
+    }
 
     commands::CommandResult Execute(commands::CommandContext& context,
                                     const commands::CommandArgs& args) override {
@@ -49,6 +56,10 @@ public:
         try {
             if (p.empty()) return Status(session_root);
             if (p[0] == "index") return commands::CommandResult::Ok(RenderMemoryIndex(*runtime_, session_root));
+            if (IsSuggestMerges(p) && !context.has_session()) {
+                return commands::CommandResult::Error(
+                    "suggest-merges asks the model; it needs a session");
+            }
             if (p[0] == "tags") return Tags(session_root, p);
             if (p[0] == "purge") return Purge(session_root, p);
             if (p[0] == "reindex") {
@@ -64,6 +75,10 @@ public:
     }
 
 private:
+    static bool IsSuggestMerges(const std::vector<std::string>& p) {
+        return p.size() >= 2 && p[0] == "tags" && p[1] == "suggest-merges";
+    }
+
     commands::CommandResult Status(const std::filesystem::path& session_root) {
         auto& rt = *runtime_;
         const ScopeFilter filter = VisibleFrom(session_root);
