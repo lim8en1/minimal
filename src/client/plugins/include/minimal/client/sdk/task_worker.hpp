@@ -46,7 +46,7 @@ private:
     std::condition_variable cv_;
     std::deque<std::function<void()>> tasks_;
     bool stop_ = false;
-    std::thread thread_;  // last: starts after every member above exists
+    std::thread thread_;  // started by the first Post (under mtx_), joined by the destructor
 };
 
 }  // namespace minimal::client::plugins

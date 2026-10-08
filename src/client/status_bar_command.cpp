@@ -135,7 +135,7 @@ int RunStatusBarCommand(const std::vector<std::string>& args) {
     std::printf("layout   %s\n", ids.empty() ? "(no segment is placed)" : ids.c_str());
 
     for (const int width : widths) {
-        const auto parts = ResolveStatusBar(bar.format, values, width, layout);
+        const auto parts = ResolveStatusBar(bar.format, values, StatusBarContentWidth(width), layout);
         std::string dropped;
         for (const auto& id : env.status_segment_ids) {
             bool kept = false;

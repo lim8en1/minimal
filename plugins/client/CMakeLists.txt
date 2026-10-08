@@ -12,12 +12,12 @@
 
 add_subdirectory(logo)
 
-# cost-view: a `{cost}` status-bar segment over the server-side cost-tracker
+# cost-view: a `cost` status-bar segment over the server-side cost-tracker
 # plugin's PluginCall endpoint.
 
 add_subdirectory(cost-view)
 
-# checklist-view: a `{todo}` status-bar segment over the server-side
+# checklist-view: a `todo` status-bar segment over the server-side
 # checklist plugin, on the cost-view shape (background poll, tab-switch
 # refresh, unfilled-segment degradation).
 
@@ -61,9 +61,9 @@ add_subdirectory(selection-view)
 
 add_subdirectory(session-view)
 
-# session-status is the status bar's usual segments ({version}, {session},
-# {tokens}, {model}, {agent}, {permission_mode}, {paused}, {activity}), over
-# the focused tab's state the host hands every segment.
+# session-status is the status bar's usual segments (version, session,
+# tokens, model, agent, permission_mode, paused, activity), each placing
+# itself, over the focused tab's state the host hands every segment.
 
 add_subdirectory(session-status)
 

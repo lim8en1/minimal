@@ -10,7 +10,7 @@ aliased `ask_user` keeps them):
   question with its answer, or the reason there is none (dismissed, timed
   out, cancelled, no client could answer). It starts expanded because it is
   the user's only record of what they answered once the modal closes.
-  `ui.json` `fold_tools: "collapsed"` still collapses it.
+  chat-view's `fold_tools: "collapsed"` (its `client-plugins.d/chat-view.json`) still collapses it.
 
 ## Keys
 

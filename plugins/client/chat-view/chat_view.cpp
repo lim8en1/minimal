@@ -132,7 +132,7 @@ bool ChatView::IsCollapsed(const RowKey& key, const ChatRow& row) const {
         return it->second;
     }
     if (global_collapse_.has_value()) return *global_collapse_;
-    // The ui.json kind defaults sit BELOW the global choice (an explicit
+    // The configured kind defaults sit BELOW the global choice (an explicit
     // collapse-all outranks them) and ABOVE the built-in kind defaults.
     if (row.kind == ChatRowKind::Thinking && fold_thinking_default_ != kFoldDefaultAuto) {
         return fold_thinking_default_ == kFoldCollapsed;
@@ -310,9 +310,18 @@ void ChatView::RebuildRows(const plugins::ChatFrame& snapshot) {
         } else {
             const auto* renderer = message_renderers_.Find(row.kind);
             // No renderer for the kind (chat-renderers disabled, nothing else
-            // claims it): the row's own text, plainly -- never a blank.
-            if (renderer == nullptr && !row.text.empty()) {
-                parts = {ftxui::paragraph(row.text) | color(theme_.ColorFor("system_message"))};
+            // claims it): the row's own text, plainly -- never a blank. A
+            // row whose data is not text (a tool call, a switch) reads as
+            // its kind and tool, muted, rather than vanishing.
+            if (renderer == nullptr) {
+                std::string text = row.text;
+                if (text.empty()) {
+                    text = "[" + std::string(ToString(row.kind)) + "]";
+                    if (!row.tool_name.empty()) {
+                        text += " " + row.tool_name + " " + SummarizeToolInput(row.tool_input);
+                    }
+                }
+                parts = {ftxui::paragraph(text) | color(theme_.ColorFor("system_message"))};
             }
             if (renderer != nullptr) {
                 try {
@@ -1331,11 +1340,11 @@ namespace {
 // Shared body of ToggleThinkingFold/ToggleToolFold: the kind's default flips
 // to the OPPOSITE concrete state of what the kind currently SHOWS as -- the
 // global collapse choice when one is set (otherwise the toggle would be
-// invisible under it), else the kind's default tier: the ui.json value when
+// invisible under it), else the kind's default tier: the configured value when
 // set, else the built-in kind default (Thinking collapsed; ToolActivity
 // whatever CollapsedByDefault says). Per-row overrides are not consulted --
 // they vary per row and are cleared right after anyway. kFoldDefaultAuto is
-// never assigned in-session: "auto" is a ui.json-only reading, restored at
+// never assigned in-session: "auto" is a config-only reading, restored at
 // the next launch.
 bool KindShowsCollapsed(const std::optional<bool>& global_collapse, int kind_default,
                         bool builtin_collapsed) {
@@ -1369,6 +1378,20 @@ int ChatView::ToggleToolFold() {
     global_collapse_.reset();
     ++collapse_epoch_;
     return next;
+}
+
+void ChatView::SetThinkingFold(int fold) {
+    fold_thinking_default_ = fold;
+    collapse_overrides_.clear();
+    global_collapse_.reset();
+    ++collapse_epoch_;
+}
+
+void ChatView::SetToolFold(int fold) {
+    fold_tool_default_ = fold;
+    collapse_overrides_.clear();
+    global_collapse_.reset();
+    ++collapse_epoch_;
 }
 
 bool ChatView::ToggleCollapseAt(int screen_y) {

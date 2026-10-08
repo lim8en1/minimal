@@ -95,8 +95,10 @@ std::optional<int> EditThroughServer(const std::vector<std::string>& args) {
         std::fprintf(stderr, "minimal: %s\n", error.c_str());
         return 1;
     }
+    // The server names the file (a core file is not under plugins.d/).
     const std::string label =
-        common::PluginConfigLabel(common::kPluginConfigDirName, args[1]) + ": " + args[2];
+        answer->value("file", common::PluginConfigLabel(common::kPluginConfigDirName, args[1])) +
+        ": " + args[2];
     const std::string what = label + (set ? " set" : " back to its default");
     const std::string applied = answer->value("applied", "");
     if (applied == "live") {

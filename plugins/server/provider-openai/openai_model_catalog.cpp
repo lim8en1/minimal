@@ -1,5 +1,7 @@
 #include "openai_model_catalog.hpp"
 
+#include "minimal/common/logger.hpp"
+
 #include <limits>
 #include <string_view>
 #include <stdexcept>
@@ -186,6 +188,12 @@ std::size_t MergeModelInfo(std::vector<llm::DiscoveredModel>& models,
     for (auto& model : models) {
         const auto it = info.find(model.id);
         if (it == info.end()) continue;  // the listing's row stands alone
+        // The listing's numbers stand; where it left a gap, /model/info's
+        // fill it (the same spellings ContextWindow/MaxCompletionTokens read:
+        // max_input_tokens, max_output_tokens) -- else compaction stayed off
+        // for a model whose window had been fetched.
+        if (!model.context_window_tokens) model.context_window_tokens = ContextWindow(it->second);
+        if (!model.max_tokens) model.max_tokens = MaxCompletionTokens(it->second);
         model.metadata["model_info"] = std::move(it->second);
         ++enriched;
     }
@@ -202,7 +210,13 @@ std::vector<llm::DiscoveredModel> OpenAiModelCatalog::List(const llm::ProviderCo
     // as "the backend serves nothing".
     try {
         MergeModelInfo(models, ParseModelInfo(Get(http_, config, "model/info")));
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
+        // Degrades, but says so: an opted-in route that fails (a 401 on it, a
+        // wrong base path) left no @effort variants and no trace why.
+        common::DefaultLogger().warn("provider-openai: model_info is on, but {}model/info failed: "
+                                     "{} -- listing without it",
+                                     config.base_url.empty() ? "" : config.base_url + "/",
+                                     error.what());
     }
     return models;
 }

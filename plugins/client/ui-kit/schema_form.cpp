@@ -663,14 +663,19 @@ private:
             if (row->add_item) return true;
             const std::string key = row->path + "#" + std::to_string(row->item) + "#" + row->item_key;
             const bool entry = row->item >= 0 || !row->item_key.empty();
-            const bool asks = entry || (row->field.value("secret", false) && row->overridden);
+            // A whole list or map is every entry at once: as deliberate as one.
+            const bool whole =
+                (row->type == "object_list" || row->type == "object_map") && row->overridden;
+            const bool asks =
+                entry || whole || (row->field.value("secret", false) && row->overridden);
             if (asks && unset_armed_ != key) {
                 unset_armed_ = key;
                 armed_message_ =
                     entry ? "d again to delete " + row->path + " " +
                                 (row->item >= 0 ? "#" + std::to_string(row->item + 1) : row->item_key)
-                          : "d again to reset " + row->path +
-                                " to its default -- the configured key is erased";
+                : whole ? "d again to reset " + row->path + " to its default -- every entry is erased"
+                        : "d again to reset " + row->path +
+                              " to its default -- the configured key is erased";
                 return true;
             }
             unset_armed_.clear();

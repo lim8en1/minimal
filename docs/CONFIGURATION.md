@@ -761,7 +761,7 @@ ascending by order, ties by id:
 
 An empty segment takes its separator with it; when the bar overflows, whole
 segments drop lowest-priority first (`version`, `session` … `permission_mode`
-last) — a value is never clipped. To see the bar without starting a session:
+last); a segment with a column cap (`session`) is cut with an ellipsis, any other value is never clipped. To see the bar without starting a session:
 
 ```sh
 minimal status-bar --width 120 --width 80
@@ -776,8 +776,10 @@ Unknown keys ignored; the file is never rewritten (it is yours) — the only
 exception is the managed write of `theme` (`/theme`), which round-trips every
 other key verbatim and refuses to touch a malformed file. (The fold defaults
 are the chat-view plugin's config now: `fold_thinking` / `fold_tools` in its
-`client-plugins.json` entry; the `ctrl+alt+t` / `ctrl+alt+o` toggles are kept
-in the plugin's own state.)
+`client-plugins.d/chat-view.json`; the `ctrl+alt+t` / `ctrl+alt+o` toggles are kept
+in the plugin's own state until that setting changes. The tools panel's buffer
+moved the same way: the old `tools_panel_stdout_buffer_lines` is tools-panel's
+`output_lines`.)
 
 ### themes/&lt;name&gt;.json
 

@@ -169,9 +169,17 @@ std::optional<FetchedRates> CostStore::GetFetchedRates(const std::string& source
 std::vector<std::string> CostStore::PruneFetchedRates(const std::vector<std::string>& configured) {
     std::vector<std::string> removed;
     if (storage_ == nullptr) return removed;
-    for (const auto& key : storage_->Keys(kStorageNamespace, kFetchedRatesKeyPrefix)) {
-        std::string name = key.substr(std::string_view(kFetchedRatesKeyPrefix).size());
-        if (std::find(configured.begin(), configured.end(), name) != configured.end()) continue;
+    // The prefix WITHOUT its slash: the snapshots stored before rate_sources
+    // ("rates/fetched", "rates/fetched_openrouter" -- one the full LiteLLM
+    // catalog) are no source's key, and went unread and undeleted forever.
+    const std::string_view prefix(kFetchedRatesKeyPrefix);
+    for (const auto& key :
+         storage_->Keys(kStorageNamespace, std::string(prefix.substr(0, prefix.size() - 1)))) {
+        const bool current = key.rfind(prefix, 0) == 0;
+        std::string name = current ? key.substr(prefix.size()) : key;
+        if (current && std::find(configured.begin(), configured.end(), name) != configured.end()) {
+            continue;
+        }
         if (storage_->Delete(kStorageNamespace, key)) removed.push_back(std::move(name));
     }
     std::sort(removed.begin(), removed.end());

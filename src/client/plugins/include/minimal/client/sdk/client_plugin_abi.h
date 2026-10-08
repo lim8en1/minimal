@@ -16,7 +16,7 @@
 //      optional name and calls it only if found, so there is no manifest to
 //      drift out of sync with the code.
 //
-//   2. UTILITIES a plugin consumes -- the interfaces in registries.hpp
+//   2. UTILITIES a plugin consumes -- the interfaces in host.hpp and widgets.hpp
 //      (AttentionSink, ClientApi) plus the render types.
 //
 // EVERY registration symbol takes (Registry&, const ClientPluginRegistrationContext&)
@@ -48,29 +48,29 @@ struct ClientPluginRegistrationContext {
     // the same RPC core uses. Null on the same terms as `attention`.
     ClientApi* client_api = nullptr;
 
-    // Which tab/session the user is looking at (registries.hpp FocusProvider):
+    // Which tab/session the user is looking at (host.hpp FocusProvider):
     // the route a session-aware panel view takes besides the status segments'
     // per-render argument. Null on the same terms as `attention` -- a plugin
     // degrades to focus-blind content, never an error.
     FocusProvider* focus = nullptr;
 
-    // Ask the host to repaint (registries.hpp HostUi) after the plugin's own
+    // Ask the host to repaint (host.hpp HostUi) after the plugin's own
     // data changed off the UI thread. Null on the same terms as `attention`.
     HostUi* ui = nullptr;
 
-    // The widget kit (registries.hpp WidgetKit) every view builds on --
+    // The widget kit (widgets.hpp WidgetKit) every view builds on --
     // whichever implementation holds the slot, resolved per call, so it may
     // be used from component() and later even when the kit's own plugin
     // loads after this one. Not during registration: the slot is filled
     // after every plugin has registered. Null on the same terms as `ui`.
     WidgetKit* widgets = nullptr;
 
-    // What the plugin asks the TUI to do (registries.hpp HostActions):
+    // What the plugin asks the TUI to do (host.hpp HostActions):
     // queued from any thread, applied on the UI thread. Null on the same
     // terms as `ui`.
     HostActions* actions = nullptr;
 
-    // The host's code highlighter (render/syntax_highlighter.hpp), over every
+    // The host's code highlighter (highlighter.hpp CodeHighlighter), over every
     // registered grammar -- what a markdown engine colors fenced code with.
     // Usable from the first render (it is built after the plugins load).
     // Null on the same terms as `ui`.
@@ -126,7 +126,7 @@ void minimal_client_plugin_register_start_views(
     minimal::client::plugins::StartViewRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
-// OPTIONAL, additive: client-side /-commands (registries.hpp ClientCommand),
+// OPTIONAL, additive: client-side /-commands (views.hpp ClientCommand),
 // run in the TUI without a server round trip. The client's own commands win a
 // name collision (the plugin's is ignored with a warning).
 void minimal_client_plugin_register_client_commands(
@@ -162,8 +162,9 @@ void minimal_client_plugin_register_message_renderers(
     minimal::client::plugins::MessageRendererRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
-// OPTIONAL, additive: status-bar segments, keyed by segment id; the format
-// string orders and selects.
+// OPTIONAL, additive: status-bar segments, keyed by segment id; each places
+// itself (StatusSegment::placement), ui.json's status_segments moving or
+// hiding it.
 void minimal_client_plugin_register_status_segments(
     minimal::client::plugins::StatusSegmentRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);

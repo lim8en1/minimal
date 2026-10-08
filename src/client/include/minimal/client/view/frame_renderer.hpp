@@ -68,8 +68,8 @@ public:
         int panel_height;   // rows for a plugin panel's content (ui.json panel_height)
         ftxui::Component editor;   // shared_ptr: cheap to copy, same ComponentBase as RunTui's own
 
-        const std::vector<StatusSegment>& status_format;
-        // The segment ids status_format names: the only segments rendered.
+        const std::vector<StatusSegment>& status_format;   // the composed bar's pieces
+        // The segment ids it names: the only segments rendered.
         const std::set<std::string>& status_ids_in_format;
         std::vector<plugins::PluginViewEntry>& plugin_views;
 

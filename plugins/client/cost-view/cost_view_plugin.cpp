@@ -8,7 +8,7 @@
 // token sums (the formatters decide; see cost_view_format.hpp).
 //
 // StatusSegment::Render() runs on the render thread at ~20 Hz with a "cheap,
-// never block" contract (registries.hpp), so the segments only ever read the
+// never block" contract (render.hpp), so the segments only ever read the
 // per-session cache TotalsFeed keeps (totals_feed.hpp) -- one stream and
 // one cache behind both segments.
 

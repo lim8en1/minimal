@@ -17,6 +17,8 @@ namespace {
 
 constexpr const char* kFoldThinkingKey = "fold_thinking";
 constexpr const char* kFoldToolsKey = "fold_tools";
+// Saved beside each toggle: the configured value it was made over.
+constexpr const char* kConfiguredSuffix = ".configured";
 
 const char* FoldName(int fold) {
     return fold == kFoldCollapsed ? "collapsed" : fold == kFoldExpanded ? "expanded" : "auto";
@@ -49,13 +51,21 @@ SurfaceConfig ParseSurfaceConfig(const nlohmann::json& config) {
 // --- Surface --------------------------------------------------------------------
 
 Surface::Surface(SurfaceConfig config, plugins::HostUi* ui)
-    : ui_(ui), fold_thinking_(config.fold_thinking), fold_tools_(config.fold_tools) {
-    // A toggle saved last session wins over the configured start.
+    : ui_(ui), config_(config), fold_thinking_(config.fold_thinking), fold_tools_(config.fold_tools) {
+    // A toggle saved last session wins over the configured start -- while
+    // the configuration is still the one it was made over. A config edited
+    // since (here or in /config) wins: two sources of truth, and the newer
+    // one decides, instead of a state file nobody knows of overriding the
+    // config forever.
     const nlohmann::json state = ui_ != nullptr ? ui_->LoadState() : nlohmann::json();
-    if (state.is_object()) {
-        if (const auto fold = FoldFrom(state.value(kFoldThinkingKey, ""))) fold_thinking_ = *fold;
-        if (const auto fold = FoldFrom(state.value(kFoldToolsKey, ""))) fold_tools_ = *fold;
-    }
+    if (!state.is_object()) return;
+    const auto restore = [&state](const char* key, int configured, int& fold) {
+        const std::string over = state.value(std::string(key) + kConfiguredSuffix, "");
+        if (over != FoldName(configured)) return;
+        if (const auto saved = FoldFrom(state.value(key, ""))) fold = *saved;
+    };
+    restore(kFoldThinkingKey, config_.fold_thinking, fold_thinking_);
+    restore(kFoldToolsKey, config_.fold_tools, fold_tools_);
 }
 
 std::vector<plugins::DeclaredAction> Surface::Actions() const {
@@ -90,16 +100,30 @@ void Surface::Attach(Pane* pane) { panes_.push_back(pane); }
 void Surface::Detach(Pane* pane) { std::erase(panes_, pane); }
 
 void Surface::ToggleFold(Pane& origin, bool thinking) {
-    // A preference for every tab: each one flips (they agree), tabs opened
-    // later start from it, and it is kept for the next launch.
-    int next = thinking ? fold_thinking_ : fold_tools_;
+    // A preference for every tab: the toggled tab decides the value (from
+    // what IT shows), every other tab takes that value, tabs opened later
+    // start from it, and it is kept for the next launch. Each tab flipping
+    // on its own disagreed whenever their collapse-all differed -- and the
+    // last tab's answer was the one saved and announced.
+    const int next =
+        thinking ? origin.view().ToggleThinkingFold() : origin.view().ToggleToolFold();
     for (Pane* pane : panes_) {
-        next = thinking ? pane->view().ToggleThinkingFold() : pane->view().ToggleToolFold();
+        if (pane == &origin) continue;
+        if (thinking) {
+            pane->view().SetThinkingFold(next);
+        } else {
+            pane->view().SetToolFold(next);
+        }
     }
     (thinking ? fold_thinking_ : fold_tools_) = next;
     const bool saved = ui_ != nullptr &&
-                       ui_->SaveState({{kFoldThinkingKey, FoldName(fold_thinking_)},
-                                       {kFoldToolsKey, FoldName(fold_tools_)}});
+                       ui_->SaveState(
+                           {{kFoldThinkingKey, FoldName(fold_thinking_)},
+                            {std::string(kFoldThinkingKey) + kConfiguredSuffix,
+                             FoldName(config_.fold_thinking)},
+                            {kFoldToolsKey, FoldName(fold_tools_)},
+                            {std::string(kFoldToolsKey) + kConfiguredSuffix,
+                             FoldName(config_.fold_tools)}});
     origin.Notice(std::string(thinking ? "thinking rows: " : "tool rows: ") +
                   (next == kFoldCollapsed ? "collapsed" : "expanded") +
                   (saved ? " (saved)" : " -- NOT saved for the next start"));

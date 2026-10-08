@@ -60,6 +60,14 @@ std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& fo
 // `emphasis` colors individual segment values by id (each segment's
 // StatusValue::role, resolved); unlisted values use the body color, literals
 // the muted one.
+// The columns a bar resolves within on a terminal `terminal_width` wide: one
+// column of padding at each edge, so values never touch the frame. The TUI
+// and `minimal status-bar` both resolve at this, so the sample's drops are
+// the TUI's.
+inline int StatusBarContentWidth(int terminal_width) {
+    return terminal_width > 2 ? terminal_width - 2 : terminal_width;
+}
+
 ftxui::Element RenderStatusBar(const std::vector<StatusSegment>& format,
                                const std::map<std::string, std::string>& values,
                                const Theme& theme, int max_width,
