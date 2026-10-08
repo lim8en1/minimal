@@ -18,6 +18,7 @@
 #include "minimal/client/config_file_io.hpp"
 #include "minimal/client/plugins/plugin_discovery.hpp"
 #include "minimal/client/sdk/chat_model.hpp"
+#include "minimal/client/sdk/policy.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/sdk/theme.hpp"
 #include "minimal/client/ui_config.hpp"
@@ -624,7 +625,8 @@ void TuiApp::StartBackground() {
 // markdown engine's debounce: a burst of deltas that PAUSES wakes this pump
 // once for the last delta, and nothing bumps the version when the debounce
 // window closes), a quiet running tool's
-// elapsed counter, and a due scrollback retry.
+// elapsed counter, a busy tab's spinner through a silent stretch, and a due
+// scrollback retry.
 void TuiApp::RunPump() {
     uint64_t last_version = app_->UiVersion();
     // Running-tool forced redraws are bucketed to whatever FormatDuration can
@@ -634,6 +636,10 @@ void TuiApp::RunPump() {
     // for ticks the display couldn't show. Sentinel far in the past so the
     // very first running tick fires immediately.
     auto last_running_redraw = std::chrono::steady_clock::now() - std::chrono::hours(1);
+    // When a frame last went out, for any reason. The spinner heartbeat only
+    // fills SILENT gaps: streaming deltas and running-tool redraws already
+    // repaint, and each repaint pushes this forward.
+    auto last_post = std::chrono::steady_clock::now();
     while (running_.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(kUiTick);
         const uint64_t version = app_->UiVersion();
@@ -655,10 +661,19 @@ void TuiApp::RunPump() {
                 last_running_redraw = now_steady;
             }
         }
+        // A thinking model streams nothing through its prefill, so nothing
+        // bumps UiVersion and the spinner (status line, tab bar) would freeze
+        // exactly when "still alive?" is the question. One frame per spinner
+        // step, and only once nothing else repainted for that long -- the time
+        // check first, so the tab scan runs only when a frame is due.
+        const bool spinner_redraw_due =
+            std::chrono::steady_clock::now() - last_post >= client::kSpinnerFrameInterval &&
+            app_->AnyTabBusy();
         const bool debounce_pending =
             prompt_editors_.WantsFrames(app_->FocusedTabId()) ||
             env_.host_focus_provider->TakeRedrawDue() ||
-            running_tool_redraw_due || tab_maintenance_->RefreshRetryDue();
+            running_tool_redraw_due || spinner_redraw_due ||
+            tab_maintenance_->RefreshRetryDue();
         if (version != last_version || debounce_pending) {
             // Coalesce: skip the post while the previous Custom is still
             // unconsumed. last_version moves ONLY on a successful post, so a
@@ -667,6 +682,7 @@ void TuiApp::RunPump() {
             // frame.
             if (!custom_event_in_flight_.exchange(true, std::memory_order_acq_rel)) {
                 last_version = version;
+                last_post = std::chrono::steady_clock::now();
                 screen_.PostEvent(ftxui::Event::Custom);
             }
         }

@@ -411,6 +411,12 @@ public:
     // is the seam that gives the pump a heartbeat while that is true.
     bool HasRunningTool() const;
 
+    // True while the session is thinking or working -- the states that draw
+    // a spinner. Same cheap locked read as HasRunningTool; the render pump
+    // polls it to keep that spinner moving through a silent stretch (a
+    // model prefill streams nothing).
+    bool IsBusy() const;
+
     // Elapsed time of whichever running tool started most recently (the one
     // whose live clock is in the finest-grained FormatDuration bucket), or
     // nullopt if nothing is running. Same cheap scan as HasRunningTool -- the
@@ -1159,6 +1165,11 @@ public:
     // FocusedTabHasRunningTool's elapsed-time counterpart -- see
     // SessionState::FastestRunningToolElapsedMs.
     std::optional<std::chrono::milliseconds> FocusedTabFastestRunningToolElapsedMs() const;
+
+    // True while ANY tab is busy (SessionState::IsBusy): the tab bar draws a
+    // spinner for every busy tab, not only the focused one. Polled by the
+    // render pump only when a spinner frame is actually due.
+    bool AnyTabBusy() const;
 
     // Closes (drops) every tab's stream. The ~AppState safety net, not a user
     // verb -- ctrl+w closes ONE tab (CloseTab), quit detaches (DetachAllTabs),

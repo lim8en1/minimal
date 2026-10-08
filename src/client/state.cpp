@@ -454,6 +454,11 @@ bool SessionState::HasRunningTool() const {
     return tools_.AnyRunning();
 }
 
+bool SessionState::IsBusy() const {
+    std::lock_guard lk(mtx_);
+    return state_ == SessionStateKind::Thinking || state_ == SessionStateKind::Working;
+}
+
 std::optional<std::chrono::milliseconds> SessionState::FastestRunningToolElapsedMs() const {
     std::lock_guard lk(mtx_);
     return tools_.FastestRunningElapsed();
@@ -2544,6 +2549,22 @@ std::optional<std::chrono::milliseconds> AppState::FocusedTabFastestRunningToolE
     const auto state = GetStateByTab(tab_id);
     if (!state) return std::nullopt;
     return state->FastestRunningToolElapsedMs();
+}
+
+bool AppState::AnyTabBusy() const {
+    // Copy the state pointers under mtx_, query them after releasing it: the
+    // same ordering FocusedTabHasRunningTool keeps (never SessionState's lock
+    // under the app lock).
+    std::vector<std::shared_ptr<SessionState>> states;
+    {
+        std::lock_guard lk(mtx_);
+        states.reserve(tabs_.size());
+        for (const auto& tab : tabs_) states.push_back(tab.info.state);
+    }
+    for (const auto& state : states) {
+        if (state && state->IsBusy()) return true;
+    }
+    return false;
 }
 
 void AppState::CloseAllTabs() {
