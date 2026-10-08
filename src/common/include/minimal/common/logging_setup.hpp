@@ -30,6 +30,10 @@ struct LoggingOptions {
     // it owns the terminal -- an out-of-band write desyncs the TUI's alternate
     // screen, and headless stdout carries JSONL -- so its logs are file-only.
     bool console = true;
+    // The console sink writes to stderr instead of stdout: for a command
+    // whose stdout is its output (`minimal status-bar`), so a warning is
+    // seen without ending up in what is piped or pasted.
+    bool console_stderr = false;
 };
 
 // Returns a human-readable problem, or empty on success. Never throws and never

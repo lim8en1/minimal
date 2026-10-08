@@ -1,6 +1,8 @@
 #include <unistd.h>
 
+#include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <string>
 
@@ -49,4 +51,43 @@ TEST_CASE("ConfigureLogging's swap is visible through DefaultLogger", "[logging]
     // yet, so there was no file for it to go to.
     CHECK(contents.find("before the swap") == std::string::npos);
     fs::remove(log, ec);
+}
+
+namespace {
+
+// What `write` sends to file descriptor `fd` while it runs.
+std::string CaptureFd(int fd, const std::function<void()>& write) {
+    std::fflush(nullptr);
+    int pipe_fds[2];
+    REQUIRE(::pipe(pipe_fds) == 0);
+    const int saved = ::dup(fd);
+    ::dup2(pipe_fds[1], fd);
+    write();
+    std::fflush(nullptr);
+    ::dup2(saved, fd);
+    ::close(saved);
+    ::close(pipe_fds[1]);
+    std::string out;
+    char buffer[4096];
+    for (ssize_t n; (n = ::read(pipe_fds[0], buffer, sizeof(buffer))) > 0;) out.append(buffer, n);
+    ::close(pipe_fds[0]);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("console_stderr keeps log lines off stdout", "[logging]") {
+    // `minimal status-bar` prints its result on stdout: a warning logged
+    // there landed inside the block meant for pasting.
+    std::string out;
+    const std::string err = CaptureFd(STDERR_FILENO, [&out] {
+        out = CaptureFd(STDOUT_FILENO, [] {
+            REQUIRE(minimal::common::ConfigureLogging({.console_stderr = true}).empty());
+            minimal::common::DefaultLogger().warn("console-stderr-probe");
+            spdlog::default_logger()->flush();
+        });
+    });
+    CHECK(out.find("console-stderr-probe") == std::string::npos);
+    CHECK(err.find("console-stderr-probe") != std::string::npos);
+    REQUIRE(minimal::common::ConfigureLogging({}).empty());   // back to the default
 }

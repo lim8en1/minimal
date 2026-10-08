@@ -162,9 +162,11 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out);
 // only this, with `client` null: every ClientApi call then answers nothing,
 // and plugins still register what they would (cost-view's segments
 // included). `announce_loads` false keeps the per-plugin "loaded" lines off
-// stderr; failures still print. Same false-is-fatal contract.
+// stderr; failures still print. `write_back` false leaves client-plugins.json
+// (and the config dir) untouched -- a command that only prints must not
+// rewrite the user's file. Same false-is-fatal contract.
 bool LoadClientPluginEnvironment(SessionClient* client, TuiEnvironment& out,
-                                 bool announce_loads);
+                                 bool announce_loads, bool write_back = true);
 
 // Re-delivers the current theme to the view plugins (View::OnTheme; the
 // chat surface gets the theme with each pane it makes). Called once by

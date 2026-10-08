@@ -135,6 +135,35 @@ TEST_CASE("the TUI starts only with every required plugin: kit, prompts, editor,
     }
 }
 
+TEST_CASE("loading for a print command leaves client-plugins.json as it is",
+          "[tui_bootstrap]") {
+    // `minimal status-bar` loads the plugins to compose the bar; it rewrote
+    // the user's client-plugins.json (discovery's normalized form) as a side
+    // effect of printing.
+    SessionClient client("unix:///nonexistent/minimal-tui-bootstrap-test.sock");
+    minimal::testing::TempDir config_dir;
+    SeedRequiredPlugins(config_dir.path());
+    const auto path = config_dir.path() / "client-plugins.json";
+    std::ifstream before_in(path);
+    const std::string before((std::istreambuf_iterator<char>(before_in)), std::istreambuf_iterator<char>());
+    ScopedEnv config_override("MINIMAL_CONFIG_DIR", config_dir.path().c_str());
+    {
+        TuiEnvironment env;
+        REQUIRE(LoadClientPluginEnvironment(&client, env, false, /*write_back=*/false));
+    }
+    std::ifstream after_in(path);
+    const std::string after((std::istreambuf_iterator<char>(after_in)), std::istreambuf_iterator<char>());
+    CHECK(after == before);
+    {
+        TuiEnvironment env;   // the TUI's own load still normalizes it
+        REQUIRE(LoadClientPluginEnvironment(&client, env, false));
+    }
+    std::ifstream normalized_in(path);
+    const std::string normalized((std::istreambuf_iterator<char>(normalized_in)),
+                                 std::istreambuf_iterator<char>());
+    CHECK(normalized != before);
+}
+
 TEST_CASE("the TUI lists its client plugins, marking the ones it cannot start without",
           "[tui_bootstrap][toggle]") {
     SessionClient client("unix:///nonexistent/minimal-tui-bootstrap-test.sock");

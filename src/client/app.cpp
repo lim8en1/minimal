@@ -32,14 +32,28 @@ int main(int argc, char** argv) {
     // goes where it can.
     std::signal(SIGPIPE, SIG_IGN);
 
-    // `minimal plugin ...`: a subcommand, not a flag -- plugin configuration
-    // from a shell (plugin_command.hpp). Nothing else here applies to it.
-    if (argc >= 2 && std::strcmp(argv[1], "plugin") == 0) {
-        return minimal::client::RunPluginCommand({argv + 2, argv + argc});
-    }
-    // `minimal status-bar`: the composed status bar, printed (status_bar_command.hpp).
-    if (argc >= 2 && std::strcmp(argv[1], "status-bar") == 0) {
-        return minimal::client::RunStatusBarCommand({argv + 2, argv + argc});
+    // `minimal plugin ...` / `minimal status-bar`: subcommands, not flags
+    // (plugin_command.hpp, status_bar_command.hpp). Their stdout is their
+    // output, so logging goes to the client log and stderr -- configured
+    // first, like everything else, and inside the same safety net: a throw
+    // (no $HOME, a broken file) is a message and an exit code, not SIGABRT.
+    const bool plugin_command = argc >= 2 && std::strcmp(argv[1], "plugin") == 0;
+    const bool status_bar_command = argc >= 2 && std::strcmp(argv[1], "status-bar") == 0;
+    if (plugin_command || status_bar_command) {
+        try {
+            minimal::common::LoggingOptions logging;
+            logging.path = (minimal::common::DataDir() / "log" / "client.log").string();
+            logging.console_stderr = true;
+            const auto logging_error = minimal::common::ConfigureLogging(logging);
+            if (!logging_error.empty()) {
+                minimal::common::DefaultLogger().warn("logging: {}", logging_error);
+            }
+            return plugin_command ? minimal::client::RunPluginCommand({argv + 2, argv + argc})
+                                  : minimal::client::RunStatusBarCommand({argv + 2, argv + argc});
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "minimal: internal error: %s\n", error.what());
+            return kInternalError;
+        }
     }
 
     const auto parsed = minimal::client::ParseArgs(argc, argv);

@@ -24,7 +24,7 @@
 namespace minimal::client {
 
 bool LoadClientPluginEnvironment(SessionClient* client, TuiEnvironment& out,
-                                 bool announce_loads) {
+                                 bool announce_loads, bool write_back) {
     namespace plugins = minimal::client::plugins;
 
     // --- config + client plugins --------------------------------------------
@@ -116,7 +116,7 @@ bool LoadClientPluginEnvironment(SessionClient* client, TuiEnvironment& out,
             std::fprintf(stderr, "minimal: warning: %s (the file was not rewritten)\n",
                          problem.c_str());
         }
-        if (!plugin_config.malformed && plugin_config.problems.empty()) {
+        if (write_back && !plugin_config.malformed && plugin_config.problems.empty()) {
             // Same discipline as the server's WriteConfigIfChanged: create the
             // parent dir, skip the write when nothing changed, report errors.
             std::filesystem::create_directories(out.config_dir, ec);

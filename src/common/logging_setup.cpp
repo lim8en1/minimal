@@ -42,7 +42,9 @@ std::string ConfigureLogging(const LoggingOptions& options) {
     // The console sink stays by default: a server started in a terminal should
     // keep printing there; the file is an addition, not a replacement. The
     // client opts out (see LoggingOptions::console).
-    if (options.console) {
+    if (options.console && options.console_stderr) {
+        sinks.push_back(std::make_shared<spdlog::sinks::stderr_color_sink_mt>());
+    } else if (options.console) {
         sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
     }
 
