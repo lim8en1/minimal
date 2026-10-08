@@ -1,5 +1,7 @@
 #include "minimal/client/status_bar_command.hpp"
 
+#include "minimal/client/policy.hpp"
+
 #include <unistd.h>
 
 #include <cstdio>
@@ -19,9 +21,6 @@ namespace {
 
 using Side = plugins::StatusPlacement::Side;
 
-// What a width line is measured against when stdout is not a terminal.
-constexpr int kDefaultWidth = 120;
-
 constexpr const char* kUsage =
     "usage: minimal status-bar [--width N]...\n"
     "\n"
@@ -34,8 +33,8 @@ plugins::TabStatus SampleTab() {
     plugins::TabStatus tab;
     tab.focused = true;
     tab.display_name = "sample session";
-    tab.tokens_used = 12345;
-    tab.context_window = 200000;
+    tab.tokens_used = 12345;       // NOLINT(readability-magic-numbers): sample data
+    tab.context_window = 200000;   // NOLINT(readability-magic-numbers): sample data
     tab.model = "provider/model";
     tab.agent_preset = "build";
     tab.permission_mode = "normal";
@@ -92,7 +91,7 @@ int RunStatusBarCommand(const std::vector<std::string>& args) {
         return app::kUsage;
     }
     if (widths.empty()) {
-        widths.push_back(isatty(STDOUT_FILENO) ? ftxui::Terminal::Size().dimx : kDefaultWidth);
+        widths.push_back(isatty(STDOUT_FILENO) ? ftxui::Terminal::Size().dimx : kStatusBarSampleWidth);
     }
 
     // A plain local, never moved: TuiEnvironment's address-stability contract.
