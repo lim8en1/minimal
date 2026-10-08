@@ -116,3 +116,18 @@ TEST_CASE("bundled/keybindings.json has an entry for every core action",
         CHECK(bundled.KeyFor(action) == key);
     }
 }
+
+TEST_CASE("a plugin default on a key something else holds names the clash", "[keybindings]") {
+    // Regression: slot defaults (chat.*, prompt.*) were folded in without the
+    // collision warning core defaults get, so a user binding on the same key
+    // silently killed one of the two.
+    auto keys = client::Keybindings::Parse(R"({"tab.filter_agents": "alt+t"})");
+    std::string clash;
+    CHECK(keys.EnsureDefault("chat.toggle_timestamps", "alt+t", &clash));
+    CHECK(clash == "tab.filter_agents");
+    clash.clear();
+    CHECK(keys.EnsureDefault("chat.other", "alt+q", &clash));
+    CHECK(clash.empty());
+    // Already bound: not a default, not a clash.
+    CHECK_FALSE(keys.EnsureDefault("chat.other", "alt+w", &clash));
+}

@@ -212,10 +212,20 @@ std::string Keybindings::KeyFor(std::string_view action, std::string_view fallba
     return std::string(fallback);
 }
 
-bool Keybindings::EnsureDefault(std::string_view action, std::string_view key) {
+bool Keybindings::EnsureDefault(std::string_view action, std::string_view key,
+                                std::string* collides_with) {
     if (key.empty()) return false;
     const std::string name(action);
     if (bindings_.find(name) != bindings_.end()) return false;
+    if (collides_with != nullptr) {
+        const std::string identity = NormalizeKeySpec(std::string(key));
+        for (const auto& [existing_action, existing_key] : bindings_) {
+            if (NormalizeKeySpec(existing_key) == identity) {
+                *collides_with = existing_action;
+                break;
+            }
+        }
+    }
     bindings_.emplace(name, std::string(key));
     return true;
 }

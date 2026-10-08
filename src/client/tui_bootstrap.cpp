@@ -339,7 +339,15 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                                      const auto& actions_fn) {
         try {
             for (const auto& action : actions_fn()) {
-                keys.EnsureDefault(action.id, action.default_key);
+                // A slot's default on a key something else already holds:
+                // only one fires (ApplyDefaults warns the same for core's).
+                std::string clash;
+                if (keys.EnsureDefault(action.id, action.default_key, &clash) && !clash.empty()) {
+                    std::fprintf(stderr,
+                                 "minimal: warning: the %s's default '%s' for '%s' is also bound "
+                                 "to '%s' -- only one can fire; rebind one in keybindings.json\n",
+                                 slot, action.default_key.c_str(), action.id.c_str(), clash.c_str());
+                }
                 slot_actions.insert(action.id);
             }
             return true;

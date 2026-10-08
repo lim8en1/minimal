@@ -47,7 +47,11 @@ public:
     // binds it -- the runtime-default half of the plugin view flow (E5): a
     // plugin registers its view id with a suggested key, and the user's file
     // (or an earlier plugin) always wins. Returns whether it took effect.
-    bool EnsureDefault(std::string_view action, std::string_view key);
+    // `collides_with` (optional): set to an action already bound to the same
+    // physical key, when the default took effect beside one -- only one of
+    // the two can fire, so the caller says so.
+    bool EnsureDefault(std::string_view action, std::string_view key,
+                       std::string* collides_with = nullptr);
 
     // The file's own names, including ones nothing in this build binds. What an
     // E5 plugin registry consults before registering its runtime defaults.

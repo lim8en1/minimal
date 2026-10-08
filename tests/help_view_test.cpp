@@ -184,6 +184,7 @@ TEST_CASE("/help opens the commands overlay only bare; /help <command> stays the
     CHECK(host.shown.empty());
     CHECK(help.Run({}, ""));
     help_view::KeymapCommand keymap(&host);
+    CHECK(keymap.read_only());   // offered on a subagent tab too, like /theme
     CHECK(keymap.Run({"ignored"}, "ignored"));
     CHECK(host.shown == std::vector<std::string>{"help.commands", "help.overlay"});
 }

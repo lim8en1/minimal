@@ -84,6 +84,8 @@ public:
     explicit KeymapCommand(plugins::HostUi* ui) : ui_(ui) {}
     std::string_view name() const override { return "keymap"; }
     std::string_view summary() const override { return "show all configured key bindings"; }
+    // Reading the keys changes nothing: offered on a subagent tab too.
+    bool read_only() const override { return true; }
     bool Run(const std::vector<std::string>&, const std::string&) override;
 
 private:
