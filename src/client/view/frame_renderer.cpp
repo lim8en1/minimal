@@ -286,7 +286,10 @@ ftxui::Element FrameRenderer::Render() {
                 continue;
             }
 
-            Element framed = std::move(body) | yframe |
+            // vscroll_indicator: every scrollable yframe region shows where
+            // it is (the built-in tools panel had one; panels moved to plugins
+            // lost it).
+            Element framed = std::move(body) | yframe | vscroll_indicator |
                              size(HEIGHT, LESS_THAN, deps_.panel_height);
             // EVERY panel gets the same chrome -- a title strip inside a
             // border -- so focusing one never shifts the layout (the border

@@ -468,8 +468,12 @@ void TuiApp::BuildFrame() {
             picker_controller_->Poll();
             for (auto& action : env_.host_actions->Take()) action(*this);
             for (const auto& request : env_.host_focus_provider->TakeViewRequests()) {
+                const bool was_modal = show_plugin_modal_;
                 ApplyViewRequest(env_.plugin_views, request, *plugin_modal_child_,
                                  show_plugin_modal_);
+                // An overlay opening sets no notice of its own: a stale one
+                // (the last command's) must not sit under it and after it.
+                if (show_plugin_modal_ && !was_modal) ClearFocusedNotice();
             }
             picker_controller_->WatchPendingView(ShownPluginModalRole());
             observer_pump_->Run();

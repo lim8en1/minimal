@@ -93,11 +93,14 @@ const plugins::ViewSpec& CommandsView::spec() const {
 
 ftxui::Component CommandsView::component() {
     return ftxui::Make<client::RebuildingComponent>(stale_, [seams = seams_, theme = &theme_] {
-        auto entries = seams.ui->CommandCatalog();
         const auto close = [ui = seams.ui] { ui->CloseView(kCommandsViewId); };
         return seams.widgets->FilterableMenuModal(
-            [entries = std::move(entries)](const std::string& filter) {
-                return BuildCommandRows(entries, filter);
+            // The catalog read per build of the rows, not once per open: a
+            // fetch that lands after the overlay opened (a fresh project,
+            // a just-switched session) shows at the next keystroke instead
+            // of "(no commands match)" until reopened.
+            [ui = seams.ui](const std::string& filter) {
+                return BuildCommandRows(ui->CommandCatalog(), filter);
             },
             {.window_title = "commands",
              .hint_line = " enter: insert into the prompt  ·  /help <command>: detail  ·  "
