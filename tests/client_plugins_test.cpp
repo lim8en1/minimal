@@ -1223,9 +1223,8 @@ TEST_CASE("the bundled session-view plugin registers the sessions and subagents 
 #endif
 
 // session-status places its segments itself: composed with nothing
-// overriding, the bar is activity and tokens on the left, the session's
-// model, agent, mode and pause state on the right; version and session
-// place nowhere but are registered, for ui.json to place.
+// overriding, the bar is version, session, activity and tokens on the left,
+// the session's model, agent, mode and pause state on the right.
 TEST_CASE("the bundled session-status plugin places its own segments",
           "[client_plugins][session_status]") {
     const auto fixtures = LoadedFixtures::Load({PluginCandidate{
@@ -1236,13 +1235,15 @@ TEST_CASE("the bundled session-status plugin places its own segments",
     const auto bar = minimal::client::ComposeStatusBar(fixtures->registries.status_segments, {});
     std::string shape;
     for (const auto& piece : bar.format) shape += piece.is_segment ? "{" + piece.text + "}" : piece.text;
-    CHECK(shape == "{activity} · {tokens}{>}{model} · {agent} · {permission_mode} · {paused}");
-    for (const char* id : {"session", "version"}) {
-        INFO(id);
-        CHECK(fixtures->registries.status_segments.Find(id) != nullptr);
+    // version and session lead, as the old default format had them (the
+    // bar's identity; a read-only tab says so in session).
+    CHECK(shape ==
+          "{version} · {session} · {activity} · {tokens}{>}{model} · {agent} · {permission_mode} · "
+          "{paused}");
+    for (const auto& segment : bar.segments) {
+        INFO(segment.id);
+        CHECK(segment.placement.has_value());   // every bundled segment places itself
     }
-    CHECK(bar.segments.back().id == "version");
-    CHECK_FALSE(bar.segments.back().placement.has_value());
 }
 
 TEST_CASE("the highlighter plugins get: plain until the host's is built, then the host's",

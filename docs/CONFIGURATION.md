@@ -748,6 +748,8 @@ ascending by order, ties by id:
 
 | side | order | segment | plugin |
 |---|---|---|---|
+| left | 2 | `version` | session-status |
+| left | 4 | `session` | session-status |
 | left | 10 | `activity` | session-status |
 | left | 20 | `tokens` | session-status |
 | left | 30 | `cost` | cost-view |
@@ -757,7 +759,6 @@ ascending by order, ties by id:
 | right | 20 | `agent` | session-status |
 | right | 30 | `permission_mode` | session-status |
 | right | 40 | `paused` | session-status |
-| — | — | `session`, `version` | session-status (place them yourself) |
 
 An empty segment takes its separator with it; when the bar overflows, whole
 segments drop lowest-priority first (`version`, `session` … `permission_mode`
