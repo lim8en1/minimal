@@ -1,5 +1,7 @@
 #include "minimal/agent/provider_resolver.hpp"
 
+#include <algorithm>
+
 #include <stdexcept>
 #include <utility>
 
@@ -58,6 +60,21 @@ std::optional<ResolvedLlm> ProviderResolver::ResolveLlm(std::string_view provide
         return std::nullopt;
     }
     return ResolvedLlm{std::move(provider), std::move(model)};
+}
+
+std::string ProviderResolver::ModelRefProblem(std::string_view provider_model) const {
+    const auto ref = common::SplitModelRef(provider_model);
+    if (!ref) return "'" + std::string(provider_model) + "' is not a <provider>/<model> reference";
+    const auto model = catalog_.Resolve(*ref);
+    if (model == nullptr) {
+        return "'" + std::string(provider_model) + "' resolves to nothing in providers.json";
+    }
+    const auto kinds = factories_.kinds();
+    if (std::find(kinds.begin(), kinds.end(), model->backend) == kinds.end()) {
+        return "'" + std::string(provider_model) + "' needs backend '" + model->backend +
+               "', which no loaded plugin registers";
+    }
+    return {};
 }
 
 bool ProviderResolver::SameConnection(const AgentPreset& a, const AgentPreset& b) {

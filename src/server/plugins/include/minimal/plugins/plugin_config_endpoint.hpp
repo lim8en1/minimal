@@ -26,9 +26,7 @@
 //   set {name, key, value}    or {name, key, text} (text parsed by the field's
 //                             type); validated by the plugin, written, applied
 //   unset {name, key}
-//   apply {name}              re-read the file (after an edit elsewhere -- the
-//                             CLI) and apply it
-// set/unset/apply answer {applied: "live" | "restart" | "none", changed: [...]}
+// set/unset answer {applied: "live" | "restart" | "none", changed: [...]}
 // -- "live" when every changed field is live and the plugin took it
 // (minimal_plugin_reconfigure); "restart" when the change waits for one;
 // "none" when nothing the plugin uses changed (with "unused": {path: why}
@@ -42,7 +40,7 @@
 //
 // Core files (CoreConfigFile: permissions.json) are entries too, named by
 // their file name -- which no plugin stem can be. Their rows carry
-// kind: "core" (plugins: "plugin"); describe/set/unset/apply work as for a
+// kind: "core" (plugins: "plugin"); describe/set/unset work as for a
 // plugin, every change waits for a restart, and enable refuses them. A core
 // field whose values are plugin names (permissions.json's advisor) is
 // described as an enum over the plugins that registered under its label,

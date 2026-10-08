@@ -1345,23 +1345,15 @@ TEST_CASE("the plugins endpoint: a plugin that is not running has nothing pendin
     CHECK(answer.at("reason") == "the plugin is disabled");
 }
 
-TEST_CASE("the plugins endpoint applies an edit made elsewhere (the CLI)",
+TEST_CASE("the plugins endpoint names an unknown plugin or method as an error",
           "[plugin_loader][config_endpoint]") {
     TempDir config_dir;
     Harness h;
     const std::vector<PluginCandidate> candidates = {Enabled("fixture-config")};
     const auto records = h.loader.LoadAll(candidates);
     plugins::PluginConfigEndpoint endpoint(config_dir.path(), records, candidates);
-
-    std::filesystem::create_directories(config_dir.path() / "plugins.d");
-    std::ofstream(config_dir.path() / "plugins.d" / "fixture-config.json") << R"({"limit": 42})";
-    CHECK(CallJson(endpoint, "apply", {{"name", "fixture-config"}}).at("applied") == "live");
-    tools::ToolContext ctx(common::DefaultLogger());
-    CHECK(h.tool_registry.Find("fixture_config_values")->execute({}, ctx).content_text ==
-          "42 fast");
-    // Nothing new: nothing to do.
-    CHECK(CallJson(endpoint, "apply", {{"name", "fixture-config"}}).at("applied") == "none");
     CHECK(CallJson(endpoint, "describe", {{"name", "nosuch"}}).contains("error"));
+    CHECK(CallJson(endpoint, "apply", {{"name", "fixture-config"}}).contains("error"));
 }
 
 TEST_CASE("the plugins endpoint toggles plugins.json and refuses to strand providers.json",
