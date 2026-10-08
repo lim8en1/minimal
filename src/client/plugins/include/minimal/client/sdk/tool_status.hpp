@@ -16,7 +16,7 @@
 
 #include "minimal/client/sdk/registries.hpp"
 #include "minimal/client/sdk/theme.hpp"
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
 
 namespace minimal::client {
 

@@ -77,7 +77,7 @@ std::string InputSummary(const nlohmann::json& input) {
     try {
         std::string summary = input.dump();
         if (summary.size() > kToolInputSummaryBytes) {
-            summary = TruncateUtf8(summary, kToolInputSummaryBytes) + "…";
+            summary = common::TruncateUtf8Bytes(summary, kToolInputSummaryBytes) + "…";
         }
         return summary;
     } catch (const std::exception&) {
@@ -107,7 +107,7 @@ std::string OneLineSummary(std::string summary) {
         summary = std::move(joined);
     }
     if (summary.size() > kLiveToolSummaryBytes) {
-        summary = TruncateUtf8(summary, kLiveToolSummaryBytes) + "…";
+        summary = common::TruncateUtf8Bytes(summary, kLiveToolSummaryBytes) + "…";
     }
     return summary;
 }

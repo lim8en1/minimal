@@ -2,6 +2,7 @@
 
 #include <utility>
 
+#include "minimal/client/sdk/picker_model.hpp"
 #include "minimal/client/sdk/utf8.hpp"
 #include "minimal/client/sdk/rebuilding.hpp"
 
@@ -13,7 +14,7 @@ std::vector<client::MenuRow> BuildThemeRows(const std::vector<std::string>& name
     const std::string needle = client::ToLower(filter);
     std::vector<client::MenuRow> rows;
     for (const auto& name : names) {
-        if (!needle.empty() && client::ToLower(name).find(needle) == std::string::npos) continue;
+        if (!client::MatchesFilter(needle, {name})) continue;
         // The id stays the bare name: SetTheme takes it verbatim.
         rows.push_back({(name == current ? "● " : "  ") + name, name, /*header=*/false});
     }

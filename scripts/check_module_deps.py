@@ -108,10 +108,48 @@ def check_plugins(root):
     """Server plugins against sdk_headers.txt, client plugins against
     client_sdk_headers.txt."""
     failed = False
+    headers = project_headers(root)
     for side, manifest in (("server", "sdk_headers.txt"), ("client", "client_sdk_headers.txt")):
         sdk = set(read_list(os.path.join(root, "scripts", manifest)))
         failed |= check_plugin_tree(root, os.path.join(root, "plugins", side), sdk)
+        # The client SDK is held to it; the server SDK's closure still leaks
+        # core headers (listed as warnings until that is untangled).
+        failed |= check_sdk_closure(root, sdk, headers, manifest, strict=(side == "client"))
     return 1 if failed else 0
+
+
+def project_headers(root):
+    """Every project header by its include path ("minimal/..."), from each
+    `include` directory under src/."""
+    found = {}
+    for dirpath, dirnames, files in os.walk(os.path.join(root, "src")):
+        if os.path.basename(dirpath) != "include":
+            continue
+        for inner, _, names in os.walk(dirpath):
+            for name in names:
+                if name.endswith((".hpp", ".h")):
+                    path = os.path.join(inner, name)
+                    found[os.path.relpath(path, dirpath)] = path
+        dirnames[:] = []
+    return found
+
+
+def check_sdk_closure(root, sdk, headers, manifest, strict):
+    """An SDK header may include only SDK headers: one that pulls in a core
+    header hands every plugin that header too, and the plugin-side check
+    above (a plugin's own includes) never sees it."""
+    failed = False
+    for header, path in sorted(headers.items()):
+        if not in_sdk(header, sdk):
+            continue
+        with open(path, errors="ignore") as handle:
+            for line in handle:
+                match = INCLUDE.search(line)
+                if match and not in_sdk(match.group(1), sdk):
+                    failed |= strict
+                    print(f"{'' if strict else 'warning: '}SDK header includes a non-SDK header "
+                          f"({manifest}): {os.path.relpath(path, root)}: {match.group(1)}")
+    return failed
 
 
 def in_sdk(header, sdk):

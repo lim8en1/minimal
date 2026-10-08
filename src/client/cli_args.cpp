@@ -181,7 +181,7 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
             // not a client-side message pointing at the prompt. Repaired the
             // same way invalid UTF-8 is already handled server-side
             // (BuildRequestBody's replace-on-dump), just earlier.
-            const std::string sanitized = SanitizeUtf8(*value);
+            const std::string sanitized = common::ScrubUtf8(*value);
             parsed.headless.prompt = sanitized;
             // A prompt beginning with '/' IS a command -- that is how a user
             // types one, and the alternative was a second flag saying the same

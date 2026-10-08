@@ -1,4 +1,4 @@
-#include "minimal/client/render/color_downsample.hpp"
+#include "minimal/client/sdk/color_downsample.hpp"
 
 #include <algorithm>
 #include <iterator>

@@ -194,7 +194,7 @@ Elements RenderUserAttachmentBlocks(const ChatRow& row, const Theme& theme,
         std::string body = row.text;
         bool truncated = false;
         if (body.size() > kAttachmentExpandedRenderCapChars) {
-            body = TruncateUtf8(body, kAttachmentExpandedRenderCapChars);
+            body = common::TruncateUtf8Bytes(body, kAttachmentExpandedRenderCapChars);
             truncated = true;
         }
         for (auto& chunk : SplitTextBlocks(body)) {

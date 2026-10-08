@@ -93,11 +93,6 @@ inline constexpr std::size_t kAttachmentCollapseThresholdChars = 2000;
 // `minimal -l`'s name column.
 inline constexpr std::size_t kSessionListNameColumnChars = 48;
 
-// Transient notices: cleared after this many ticks of UI activity, and never
-// before they have been visible this long (a streaming background tab is
-// activity too). Picked by feel.
-inline constexpr int kNoticeTicksDefault = 20;
-inline constexpr std::chrono::milliseconds kNoticeMinVisible = std::chrono::seconds(4);
 
 // Slot ids for compaction rows start here, far past any real message index,
 // so the two id spaces never meet.
@@ -119,9 +114,6 @@ inline constexpr std::chrono::milliseconds kHeadlessCancelPoll{5};
 // scrollback.
 inline constexpr std::size_t kHighlightCacheCap = 64;
 
-// A running tool's spinner advances one frame per interval: visibly alive,
-// calm enough not to distract.
-inline constexpr std::chrono::milliseconds kSpinnerFrameInterval{120};
 
 // --- prompt editor -------------------------------------------------------------------
 

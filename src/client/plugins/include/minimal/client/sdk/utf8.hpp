@@ -32,11 +32,9 @@ inline std::string ToLower(std::string_view text) {
     return out;
 }
 
-// Byte-cut helpers live in common (shared with server and plugins); these are
-// the client's historical names for them.
-inline std::string TruncateUtf8(const std::string& text, std::size_t max_bytes) {
-    return common::TruncateUtf8Bytes(text, max_bytes);
-}
+// Byte cuts and repair live in common (shared with server and plugins):
+// common::TruncateUtf8Bytes, common::ScrubUtf8 (valid UTF-8 for a proto
+// string field, per Unicode Table 3-7).
 using common::Utf8CeilToBoundary;
 using common::Utf8Decode;
 
@@ -78,26 +76,6 @@ inline std::string StripControlChars(std::string_view text) {
         const char32_t cp = Utf8Decode(text, i);
         if (IsControlCodePoint(cp)) continue;
         out.append(text.substr(start, i - start));
-    }
-    return out;
-}
-
-// Repairs invalid UTF-8 byte-for-byte: each malformed sequence common::Utf8Decode
-// would report as U+FFFD is re-encoded as the real U+FFFD replacement
-// character (valid input, including a genuine pre-existing U+FFFD, passes
-// through byte-identical). Used at the one place outside a JSON/proto
-// serializer that takes a raw OS string (argv) and must guarantee valid
-// UTF-8 before it reaches a proto string field -- unlike nlohmann::json's
-// own dump()-time replace mode (used server-side), there is no serializer in
-// the way here to do it implicitly.
-inline std::string SanitizeUtf8(std::string_view text) {
-    std::string out;
-    out.reserve(text.size());
-    std::size_t i = 0;
-    while (i < text.size()) {
-        const std::size_t start = i;
-        const char32_t cp = Utf8Decode(text, i);
-        out.append(cp == U'\uFFFD' ? common::kUtf8Replacement : text.substr(start, i - start));
     }
     return out;
 }

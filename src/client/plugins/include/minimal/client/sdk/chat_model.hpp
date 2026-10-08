@@ -23,7 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/v1/session_service.pb.h"
-#include "minimal/client/policy.hpp"
+#include "minimal/client/sdk/policy.hpp"
 
 namespace minimal::client {
 

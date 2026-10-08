@@ -33,9 +33,9 @@
 #include <unordered_set>
 #include <vector>
 
-namespace minimal::plugins {
+#include "minimal/plugins/stable_identity.hpp"
 
-std::string StableIdentity(std::string_view plugin_name, std::string_view original_name);
+namespace minimal::plugins {
 
 class NameTable {
 public:

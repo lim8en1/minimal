@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "minimal/client/sdk/policy.hpp"
+#include "minimal/client/sdk/picker_model.hpp"
 #include "minimal/client/sdk/utf8.hpp"
 #include "minimal/client/sdk/rebuilding.hpp"
 #include "policy.hpp"
@@ -15,9 +16,7 @@ std::vector<client::MenuRow> BuildKeymapRows(std::vector<plugins::KeyBindingInfo
                                              const std::string& filter) {
     const std::string needle = client::ToLower(filter);
     std::erase_if(bindings, [&](const plugins::KeyBindingInfo& binding) {
-        return !needle.empty() && client::ToLower(binding.id).find(needle) == std::string::npos &&
-               client::ToLower(binding.key).find(needle) == std::string::npos &&
-               client::ToLower(binding.description).find(needle) == std::string::npos;
+        return !client::MatchesFilter(needle, {binding.id, binding.key, binding.description});
     });
     std::sort(bindings.begin(), bindings.end(), [](const auto& a, const auto& b) {
         return std::tie(a.order, a.id) < std::tie(b.order, b.id);
@@ -51,7 +50,7 @@ std::vector<client::MenuRow> BuildCommandRows(const std::vector<client::CommandC
         std::string label = "/" + entry.name + "  " + entry.summary;
         if (entry.submits_prompt) label += "  (submits a prompt as your turn)";
         if (entry.read_only) label += "  (read-only)";
-        if (!needle.empty() && client::ToLower(label).find(needle) == std::string::npos) continue;
+        if (!client::MatchesFilter(needle, {label})) continue;
         rows.push_back({std::move(label), entry.name, /*header=*/false});
     }
     return rows;

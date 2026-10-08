@@ -12,7 +12,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
 
-#include "minimal/client/render/color_downsample.hpp"
+#include "minimal/client/sdk/color_downsample.hpp"
 
 namespace minimal::client {
 
