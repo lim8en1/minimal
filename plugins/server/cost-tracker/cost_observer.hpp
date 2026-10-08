@@ -45,6 +45,10 @@ public:
     // provisional in-flight total.
     void OnProviderRound(const agent::SessionInfo& info,
                          const agent::RoundUsage& round) override;
+    // A billed call outside the rounds (the compaction summarizer): its own
+    // record, priced at its model's rate -- never part of in_flight_, so the
+    // totals count it once. Kept across a rewind: the call happened.
+    void OnBilledCall(const agent::SessionInfo& info, const agent::BilledCall& call) override;
 
     // Drops the records the rewind discarded, so a retried turn is not counted
     // twice. Redo (truncated_to_seq < 0) is a no-op: which records the restored

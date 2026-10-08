@@ -117,6 +117,12 @@ struct CompactionRequest {
     std::string_view session_label;
 
     std::function<bool()> is_cancelled;
+
+    // The summarizer call's usage, reported by EVERY compactor (core's and a
+    // strategy plugin's) right after the provider answers -- before it
+    // decides whether the summary is usable: a truncated or unparsable
+    // summary was billed all the same. Unset: nobody is counting.
+    std::function<void(const llm::Usage&)> on_usage;
 };
 
 // The production free-text compactor: summarizes `messages_to_compact` (the

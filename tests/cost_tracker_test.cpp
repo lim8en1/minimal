@@ -1617,3 +1617,33 @@ TEST_CASE("cost-tracker refuses a bad configured price, naming the entry; a part
         ParseCostSettings(nlohmann::json::parse(R"({"rates": {"gpt-x": {"inptu": 1}}})")),
         Catch::Matchers::ContainsSubstring("rates.gpt-x.inptu"));
 }
+
+TEST_CASE("a billed compaction call is its own record, priced once, kept on rewind",
+          "[cost_tracker][billing]") {
+    // The summarizer's call was never billed. It lands as its own record at
+    // its own model's rate -- never in the in-flight rounds, so the totals
+    // count it once -- and a rewind keeps it: the call happened.
+    Harness harness;
+    CostSessionObserver observer(harness.store, harness.in_flight);
+    agent::SessionInfo info;
+    info.session_id = "s1";
+
+    observer.OnBilledCall(info, agent::BilledCall{"small-model", llm::Usage{5000, 300, 0, 0},
+                                                  false, "compaction"});
+    auto history = harness.store.Load("s1");
+    REQUIRE(history.turns.size() == 1);
+    CHECK(history.turns[0].model == "small-model");
+    CHECK(history.turns[0].usage.input_tokens == 5000);
+    CHECK(history.turns[0].usage.usage_reported);
+    CHECK(harness.in_flight.Records("s1").empty());
+
+    // Estimated: recorded as having happened, never priced.
+    observer.OnBilledCall(info, agent::BilledCall{"small-model", llm::Usage{4000, 0, 0, 0},
+                                                  true, "compaction"});
+    history = harness.store.Load("s1");
+    REQUIRE(history.turns.size() == 2);
+    CHECK_FALSE(history.turns[1].usage.usage_reported);
+
+    observer.OnSessionRewound(info, 0);
+    CHECK(harness.store.Load("s1").turns.size() == 2);
+}

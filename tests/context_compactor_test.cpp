@@ -187,6 +187,24 @@ TEST_CASE("a truncated summary is refused", "[compactor][invariant]") {
     CHECK_FALSE(agent::compact_messages(MixedHistory(), provider, Params(10)).has_value());
 }
 
+TEST_CASE("the summarizer's usage is reported even when its summary is refused",
+          "[compactor][billing]") {
+    // The backend billed the call whether or not the summary is usable.
+    FakeLlmProvider provider;
+    auto truncated = TextResponse("The user asked me to refac", llm::StopReason::MaxTokens);
+    truncated.usage.input_tokens = 300000;
+    truncated.usage.output_tokens = 4096;
+    provider.PushResponse(truncated);
+
+    auto params = Params(10);
+    std::vector<llm::Usage> reported;
+    params.on_usage = [&reported](const llm::Usage& usage) { reported.push_back(usage); };
+    CHECK_FALSE(agent::compact_messages(MixedHistory(), provider, params).has_value());
+    REQUIRE(reported.size() == 1);
+    CHECK(reported[0].input_tokens == 300000);
+    CHECK(reported[0].output_tokens == 4096);
+}
+
 TEST_CASE("the summarization call carries the preset's sampling settings", "[compactor]") {
     // Without these the summarization call runs with different generation
     // settings than the conversation it summarizes -- and because the OpenAI

@@ -1171,6 +1171,36 @@ TEST_CASE("compaction trigger sees input the last usage report predates",
     CHECK(compactions >= 1);
 }
 
+TEST_CASE("a compaction's summarizer call is billed, between turns too", "[agent_loop][billing]") {
+    // The summarizer's request -- often the largest a session makes -- was
+    // never priced: its usage stayed in the compactor. /compact runs outside
+    // any turn, so it reports through its own channel.
+    Harness h;
+    h.provider.PushResponse(TextResponse("one"));
+    h.provider.PushResponse(TextResponse("two"));
+    auto compactor = [](std::span<const llm::Message>, llm::LlmProvider&,
+                        const agent::CompactionRequest& params) {
+        llm::Usage usage;
+        usage.input_tokens = 5000;
+        usage.output_tokens = 300;
+        if (params.on_usage) params.on_usage(usage);   // what every compactor does
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    std::vector<agent::BilledCall> billed;
+    agent::LoopConfig config;
+    config.on_billed_call = [&billed](agent::BilledCall call) { billed.push_back(std::move(call)); };
+    h.Build({}, config, compactor);
+    h.loop->RunTurn(UserText("a"));
+    h.loop->RunTurn(UserText("b"));
+
+    REQUIRE(h.loop->CompactNow().has_value());
+    REQUIRE(billed.size() == 1);
+    CHECK(billed[0].purpose == "compaction");
+    CHECK(billed[0].model == "test-model");
+    CHECK(billed[0].usage.input_tokens == 5000);
+    CHECK_FALSE(billed[0].usage_estimated);
+}
+
 TEST_CASE("a context-overflow refusal compacts and retries once", "[agent_loop][compaction]") {
     Harness h;
     h.provider.PushResponse(TextResponse("one"));

@@ -166,6 +166,10 @@ struct LoopConfig {
     // worker thread inside the turn; the callback must not block (the same
     // fire-and-forget dispatch contract every observer notification has).
     std::function<void(RoundUsage)> on_provider_round;
+    // A billed provider call outside the turn rounds -- the compaction
+    // summarizer, auto or /compact (BilledCall). Same contract as above;
+    // may run between turns.
+    std::function<void(BilledCall)> on_billed_call;
 
     // The producer-resolved summarizer. The settings-level strategy rides
     // `compaction_strategy` above (resolved once in main.cpp); an AGENT

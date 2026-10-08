@@ -124,6 +124,12 @@ void SessionObserverRegistry::NotifyProviderRound(SessionInfo info, RoundUsage r
     });
 }
 
+void SessionObserverRegistry::NotifyBilledCall(SessionInfo info, BilledCall call) {
+    Dispatch([info = std::move(info), call = std::move(call)](SessionObserver& observer) {
+        observer.OnBilledCall(info, call);
+    });
+}
+
 void SessionObserverRegistry::NotifyTurnCompleted(SessionInfo info, TurnSummary summary) {
     Dispatch([info = std::move(info), summary = std::move(summary)](SessionObserver& observer) {
         observer.OnTurnCompleted(info, summary);
