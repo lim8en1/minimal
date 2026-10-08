@@ -801,8 +801,13 @@ void TuiApp::SetClientPluginEnabled(const std::string& id, bool enabled,
         return;
     }
     if (!enabled && !info->required.empty()) {
+        // Swapping in a replacement is one file edit, both entries at once:
+        // two claimants of a required slot refuse the next start, and no
+        // claimant does too, so neither half can go through here alone.
         refuse("cannot turn " + info->name + " off: " + info->required +
-               " -- the TUI would not start without it");
+               " -- the TUI would not start without it. To replace it, in client-plugins.json "
+               "set \"enabled\": false for \"" + id +
+               "\" and true for your replacement, then restart");
         return;
     }
     // Re-read: the file may have been edited since startup. One that cannot

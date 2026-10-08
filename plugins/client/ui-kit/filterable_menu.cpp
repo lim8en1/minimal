@@ -1,4 +1,5 @@
 #include "filterable_menu.hpp"
+#include "modal_chrome.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -333,7 +334,7 @@ ftxui::Component MakeFilterableMenuModal(
         // hierarchy left).
         return window(text(" " + spec.window_title + " ") | bold,
                       vbox(std::move(rows)) | color(theme.ColorFor("assistant_message")) |
-                          size(HEIGHT, LESS_THAN, kMenuMaxHeight)) |
+                          size(HEIGHT, LESS_THAN, ModalInnerHeight(kMenuMaxHeight))) |
                color(theme.ColorFor("border_focused"));
     });
 }

@@ -68,8 +68,8 @@ std::optional<SessionLlm> SessionSupport::ResolveModelRef(const std::string& pro
 
 std::string SessionSupport::ModelRefProblem(const std::string& provider_model) {
     if (sessions_ == nullptr) return "the server has no sessions to resolve it with";
-    std::string error;
-    return sessions_->resolver().ResolveLlm(provider_model, error) ? std::string() : error;
+    // Resolve-only: a config check must not build and cache a provider.
+    return sessions_->resolver().ModelRefProblem(provider_model);
 }
 
 std::shared_ptr<const session::SessionReader> SessionSupport::HistoryFor(

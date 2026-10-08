@@ -478,7 +478,9 @@ private:
             const bool in_file = it != client_toggled_->end() ? it->second : plugin.enabled_in_file;
             if (in_file && !plugin.required.empty()) {
                 client_outcome_ = "cannot turn " + plugin.name + " off: " + plugin.required +
-                                  " -- the TUI would not start without it";
+                                  " -- the TUI would not start without it. To replace it, "
+                                  "in client-plugins.json set \"enabled\": false for \"" +
+                                  plugin.id + "\" and true for your replacement, then restart";
             } else if (actions_ == nullptr) {
                 client_outcome_ = "this TUI does not offer plugin toggles";
             } else {

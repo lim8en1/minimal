@@ -19,6 +19,12 @@ namespace minimal::client::ui_kit {
 // A divider between sections of a modal's body.
 ftxui::Element ModalRule(const Theme& theme);
 
+// The inside height a modal window may take, at most `preferred`: what the
+// terminal shows minus the window's border and the overlay's slack, so a
+// short terminal shrinks the window's flexible part instead of clipping its
+// last row (the key hints).
+int ModalInnerHeight(int preferred);
+
 // `rows` scroll within the screen's height; `pinned` (when not empty) stays
 // visible below them, at most kModalPinnedMaxRows rows; `footer` (the key
 // hints, when not empty) is pinned last, wrapped rather than clipped.

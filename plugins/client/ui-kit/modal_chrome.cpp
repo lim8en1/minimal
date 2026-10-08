@@ -32,6 +32,13 @@ ftxui::Element Body(const Theme& theme, ftxui::Element content) {
 
 }  // namespace
 
+int ModalInnerHeight(int preferred) {
+    const int dimy = ftxui::Terminal::Size().dimy;
+    constexpr int kBorderRows = 2;
+    const int fits = dimy - kBorderRows - kModalOverlaySlackRows;
+    return std::max(std::min(preferred, fits), kMinModalBodyRows + kModalFrameRows);
+}
+
 ftxui::Element ModalRule(const Theme& theme) {
     // Structure, not a call to act: the hairline role.
     return ftxui::separator() | ftxui::color(theme.ColorFor("border_unfocused"));

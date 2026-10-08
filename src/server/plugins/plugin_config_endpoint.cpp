@@ -524,13 +524,6 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
             }
             return Save(entry, next).dump();
         }
-        if (method == "apply") {
-            Entry& entry = Require(request);
-            const json file = ReadFile(entry);
-            json applied = Apply(entry, file);
-            StartCheck(entry, file);
-            return applied.dump();
-        }
         if (method == "check") {
             Entry& entry = Require(request);
             if (entry.symbols.check == nullptr) {
@@ -540,7 +533,7 @@ std::string PluginConfigEndpoint::Call(const std::string& method, const std::str
             return json{{"started", true}}.dump();
         }
         return json{{"error", "unknown method '" + method +
-                                  "' (known: list, describe, set, unset, apply, check, enable)"}}
+                                  "' (known: list, describe, set, unset, check, enable)"}}
             .dump();
     } catch (const std::exception& error) {
         return json{{"error", error.what()}}.dump();

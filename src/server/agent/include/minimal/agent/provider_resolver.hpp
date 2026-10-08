@@ -51,6 +51,12 @@ public:
     // or a construction failure; callers add their own context when logging.
     std::optional<ResolvedLlm> ResolveLlm(std::string_view provider_model, std::string& error);
 
+    // Why `provider_model` would not resolve ("" when it would), WITHOUT
+    // constructing or caching a provider: the shape, the catalog, and a
+    // loaded plugin for its backend kind. What a config check asks -- a
+    // check has no side effects beyond its probes.
+    std::string ModelRefProblem(std::string_view provider_model) const;
+
     // Whether two presets are served by the same instance: same entry, kind,
     // endpoint and key. The entry name matters on its own -- each entry's
     // instance carries that entry's resolved config.

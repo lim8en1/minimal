@@ -75,10 +75,11 @@ public:
 
     // `ref` as configured; `destination_url` is where the value will be sent
     // ("" when the consumer has no URL to check). Throws std::runtime_error
-    // for a reference that can never resolve: malformed syntax, an unset env
-    // variable. A stored secret that is merely absent right now binds fine
-    // and fails at Get, naming the /secret set that fixes it. An empty `ref`
-    // binds the unconfigured handle.
+    // for a reference that can never resolve: malformed syntax. An unset env
+    // variable and a stored secret that is absent right now both bind fine
+    // and fail at Get, naming what fixes them -- so validating a config never
+    // depends on the validating process's environment (the offline CLI). An
+    // empty `ref` binds the unconfigured handle.
     common::SecretHandle Bind(const std::string& ref, const std::string& destination_url) const;
 
     const std::filesystem::path& store_path() const { return store_path_; }

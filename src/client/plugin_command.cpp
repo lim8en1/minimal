@@ -65,13 +65,21 @@ std::optional<nlohmann::json> CallRunningServer(const std::string& method,
         return std::nullopt;
     }
     const auto result = client.PluginCall("plugins", method, request.dump());
+    // Every fallback says why, and that the running server was not told.
     if (!result.status.ok()) {
-        std::fprintf(stderr, "minimal: running server: %s -- editing the file directly\n",
+        std::fprintf(stderr,
+                     "minimal: the running server did not take the edit (%s) -- editing the file "
+                     "directly; restart the server to apply it\n",
                      result.status.error_message().c_str());
         return std::nullopt;
     }
     auto answer = nlohmann::json::parse(result.json_payload, nullptr, /*allow_exceptions=*/false);
-    if (!answer.is_object()) return std::nullopt;
+    if (!answer.is_object()) {
+        std::fprintf(stderr,
+                     "minimal: the running server answered something unreadable -- editing the "
+                     "file directly; restart the server to apply it\n");
+        return std::nullopt;
+    }
     return answer;
 }
 
@@ -91,7 +99,15 @@ std::optional<int> EditThroughServer(const std::vector<std::string>& args) {
     if (!answer) return std::nullopt;
     if (answer->contains("error")) {
         const std::string error = answer->value("error", std::string());
-        if (error.rfind("no plugin '", 0) == 0) return std::nullopt;
+        if (error.rfind("no plugin '", 0) == 0) {
+            // A disabled-at-start plugin is still listed; this one the
+            // running server never saw (installed since it started).
+            std::fprintf(stderr,
+                         "minimal: the running server has no plugin '%s' (installed since it "
+                         "started?) -- editing the file directly; it applies at the next start\n",
+                         args[1].c_str());
+            return std::nullopt;
+        }
         std::fprintf(stderr, "minimal: %s\n", error.c_str());
         return 1;
     }
