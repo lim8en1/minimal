@@ -21,6 +21,9 @@ inline constexpr int kMenuMaxHeight = 20;
 inline constexpr int kModalMaxWidth = 82;
 inline constexpr int kModalFrameRows = 3;
 inline constexpr int kModalOverlaySlackRows = 3;
+// A window()'s top and bottom border: what a modal's inside height leaves
+// out of the terminal's (ModalInnerHeight).
+inline constexpr int kModalBorderRows = 2;
 inline constexpr int kMinModalBodyRows = 2;
 // A modal's pinned rows (ModalFrame's `pinned`: a selected row's details, the
 // last outcome) take at most this many rows.
