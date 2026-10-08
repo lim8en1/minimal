@@ -101,11 +101,11 @@ std::vector<std::unique_ptr<plugins::StatusSegment>> MakeSegments() {
         out.push_back(std::make_unique<Segment>(id, placement, priority, cap, std::move(fn)));
     };
 
-    add("version", std::nullopt, kVersionPriority, 0,
+    add("version", Left(kVersionOrder), kVersionPriority, 0,
         [](const TabStatus&) { return StatusValue{std::string(common::Version()), ""}; });
 
     // A name, not a figure: the one segment the bar may cut short.
-    add("session", std::nullopt, kSessionPriority, client::kStatusSessionColumnCap, [](const TabStatus& tab) {
+    add("session", Left(kSessionOrder), kSessionPriority, client::kStatusSessionColumnCap, [](const TabStatus& tab) {
         if (!tab.focused) return StatusValue{};
         std::string name = tab.display_name.empty() ? "new session" : tab.display_name;
         // A read-only transcript says so where the user looks before typing.
