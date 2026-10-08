@@ -93,6 +93,18 @@ void TuiApp::RegisterClientCommands() {
         }
         return true;
     }});
+    // A fork of the focused session AS IT STANDS, opened as its own tab; the
+    // raw argument, when given, is the fork's first user message.
+    router.Add({"fork", "fork this session here, optionally with a new instruction", false, true,
+                [this](const CommandInvocationText& parsed) {
+        const std::string sid = app_->FocusedSessionId();
+        if (sid.empty()) {
+            FocusedNotice("/fork needs a session; send a message to start one first");
+            return true;
+        }
+        app_->ForkSession(app_->FocusedTabId(), sid, parsed.raw);
+        return true;
+    }});
     // Always a NEW sessionless tab -- a sibling workspace, not a reuse of the
     // focused one. Nothing is created server-side until its first message.
     router.Add({"new", "start a new session", false, false, [this](const CommandInvocationText&) {

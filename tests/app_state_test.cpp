@@ -1267,6 +1267,74 @@ TEST_CASE("ResumeTab revives a stored session and its tab sends again",
     CHECK(page.response.messages(0).message().content(0).text().text() == "second reply");
 }
 
+TEST_CASE("ForkSession opens the fork as a focused tab and runs the instruction there",
+          "[app_state][fork]") {
+    ClientFixture fixture;
+    fixture.ScriptTwo("first reply", "fork reply");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("fork-me"));
+    app.SubmitChatTurn(tab, "first message");
+    REQUIRE(WaitForSession(app, tab));
+    const auto sid = SessionIdOf(app, tab);
+    const auto wait_messages = [&fixture](const std::string& session, int n) {
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto page = fixture.client->GetMessages(session, std::nullopt, 10);
+            if (page.status.ok() && page.response.messages_size() >= n) return true;
+            std::this_thread::sleep_for(50ms);
+        }
+        return false;
+    };
+    REQUIRE(wait_messages(sid, 2));
+
+    app.ForkSession(tab, sid, "do it differently");
+
+    // The fork lands as a second, focused tab on a NEW session.
+    std::string fork_tab, fork_sid;
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (fork_tab.empty() && std::chrono::steady_clock::now() < deadline) {
+        for (const auto& info : app.GetAllTabs()) {
+            if (info.tab_id != tab && info.is_focused && !info.session_id.empty()) {
+                fork_tab = info.tab_id;
+                fork_sid = info.session_id;
+            }
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE_FALSE(fork_tab.empty());
+    CHECK(fork_sid != sid);
+    // Named after its source ("fork-me"), not after the instruction.
+    const auto fork_row = fixture.client->GetSession(fork_sid);
+    REQUIRE(fork_row.status.ok());
+    CHECK(fork_row.summary.name() == "fork of fork-me");
+
+    // The fork carries the copied turn plus the instruction's own turn; the
+    // source is untouched.
+    REQUIRE(wait_messages(fork_sid, 4));
+    const auto page = fixture.client->GetMessages(fork_sid, std::nullopt, 10);
+    REQUIRE(page.response.messages_size() == 4);
+    CHECK(page.response.messages(1).message().content(0).text().text() == "do it differently");
+    CHECK(page.response.messages(0).message().content(0).text().text() == "fork reply");
+    CHECK(fixture.client->GetMessages(sid, std::nullopt, 10).response.messages_size() == 2);
+}
+
+TEST_CASE("ForkSession of an unknown session notices on the source tab", "[app_state][fork]") {
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("source"));
+    app.ForkSession(tab, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "");
+    CHECK(WaitForDetails(app, tab, [](const SessionState::Snapshot& s) {
+        return s.latest_notice.has_value() &&
+               s.latest_notice->message.find("/fork failed") != std::string::npos;
+    }));
+    CHECK(app.GetAllTabs().size() == 1);
+}
+
 TEST_CASE("ResumeTab of an unknown session registers a visible error tab",
           "[app_state][resume]") {
     ClientFixture fixture;

@@ -168,6 +168,21 @@ SessionClient::GetSessionResult SessionClient::GetSession(const std::string& ses
     return result;
 }
 
+SessionClient::ForkSessionResult SessionClient::ForkSession(const std::string& source_session_id,
+                                                           const std::string& instruction) {
+    grpc::ClientContext context;
+    context.set_deadline(In(kUnaryDeadline));
+    v1::ForkSessionRequest request;
+    request.set_source_session_id(source_session_id);
+    request.set_instruction(instruction);
+
+    v1::ForkSessionResponse response;
+    ForkSessionResult result;
+    result.status = stub_->ForkSession(&context, request, &response);
+    if (result.status.ok()) result.summary = std::move(*response.mutable_session());
+    return result;
+}
+
 SessionClient::ServerInfoResult SessionClient::GetServerInfo() {
     grpc::ClientContext context;
     context.set_deadline(In(kUnaryDeadline));

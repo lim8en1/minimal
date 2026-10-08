@@ -1986,9 +1986,8 @@ TEST_CASE("ForkSession carries message attribution into the fork", "[session][fo
     db.AppendMessage(source, UserMsg("first"));
     db.AppendMessage(source, llm::Message{llm::Role::Assistant, {llm::TextBlock{"reply"}}}, 5,
                      {.agent_preset = "build", .model = "anthropic/sonnet-4-5"});
-    db.AppendMessage(source, UserMsg("second"));
 
-    const auto row = db.ForkSession(source, /*target_seq=*/2, "the fork", std::nullopt);
+    const auto row = db.ForkSession(source, "the fork", std::nullopt);
     const auto child = db.LoadMessagesFrom(row.session_id, /*after_seq=*/-1);
     REQUIRE(child.size() == 2);
     CHECK(child[0].attribution.agent_preset.empty());
@@ -1996,48 +1995,83 @@ TEST_CASE("ForkSession carries message attribution into the fork", "[session][fo
     CHECK(child[1].attribution.model == "anthropic/sonnet-4-5");
 }
 
-TEST_CASE("ForkSession copies the active prefix verbatim and leaves the source untouched",
+TEST_CASE("ForkSession copies the whole active transcript verbatim and leaves the source "
+          "untouched",
           "[session][fork]") {
     ForkFixture fx;
-    const auto row = fx.db.ForkSession(fx.source, /*target_seq=*/2, "the fork", std::nullopt);
+    const auto row = fx.db.ForkSession(fx.source, "the fork", std::nullopt);
 
     CHECK(row.forked_from_session_id == fx.source);
     CHECK(row.agent_preset == "build");
     CHECK(row.project_root == "/work/proj");
-    CHECK(row.message_count == 2);  // seqs 0 and 1
+    CHECK(row.message_count == 3);
 
     const auto child = fx.All(row.session_id);
-    REQUIRE(child.size() == 2);
+    REQUIRE(child.size() == 3);
     // SEQS VERBATIM: the child's transcript starts at the source's numbering.
     CHECK(child[0].seq == 0);
-    CHECK(child[1].seq == 1);
+    CHECK(child[2].seq == 2);
     CHECK(MessagesEqual(child[0].message, UserMsg("first")));
     CHECK(MessagesEqual(child[1].message,
                         llm::Message{llm::Role::Assistant, {llm::TextBlock{"reply 1"}}}));
+    CHECK(MessagesEqual(child[2].message, UserMsg("second")));
 
     // The source is read-only under a fork: every row still there, count same.
-    const auto original = fx.All(fx.source);
-    REQUIRE(original.size() == 3);
+    CHECK(fx.All(fx.source).size() == 3);
     CHECK(fx.db.GetSession(fx.source)->message_count == 3);
 
-    // Appending to the child continues its own MAX(seq)+1 (seq 2, which is
-    // "second" in the source -- a genuinely diverging line).
+    // Appending to the child continues its own MAX(seq)+1 -- a diverging line
+    // the source never sees.
     fx.db.AppendMessage(row.session_id, UserMsg("diverged"));
     const auto after = fx.All(row.session_id);
-    REQUIRE(after.size() == 3);
-    CHECK(after[2].seq == 2);
-    CHECK(MessagesEqual(after[2].message, UserMsg("diverged")));
+    REQUIRE(after.size() == 4);
+    CHECK(after[3].seq == 3);
+    CHECK(fx.All(fx.source).size() == 3);
+}
+
+TEST_CASE("ForkSession skips discarded rows", "[session][fork]") {
+    ForkFixture fx;
+    fx.db.SetDiscardedAfter(fx.source, 2);   // rewind "second" away
+    const auto row = fx.db.ForkSession(fx.source, "", std::nullopt);
+    const auto child = fx.All(row.session_id);
+    REQUIRE(child.size() == 2);
+    CHECK(child[1].seq == 1);
+}
+
+TEST_CASE("ForkSession of an empty session forks an empty transcript", "[session][fork]") {
+    testing::TempDir dir;
+    SessionDatabase db{dir.path() / "sessions.db"};
+    const auto source = db.CreateSession("", std::nullopt, "/work/proj", "build").session_id;
+    const auto row = db.ForkSession(source, "", std::nullopt);
+    CHECK(row.message_count == 0);
+    CHECK(db.LoadMessagesFrom(row.session_id, -1).empty());
 }
 
 TEST_CASE("ForkSession inherits the source's name_source rules", "[session][fork]") {
     ForkFixture fx;
-    const auto named = fx.db.ForkSession(fx.source, 0, "chosen name", std::nullopt);
+    const auto named = fx.db.ForkSession(fx.source, "chosen name", std::nullopt);
     CHECK(named.name == "chosen name");
     CHECK(named.name_source == "explicit");
 
-    const auto unnamed = fx.db.ForkSession(fx.source, 0, "", std::nullopt);
+    // An unnamed source: the fork is unnamed too, and the free default-naming
+    // rule owns it later.
+    const auto unnamed = fx.db.ForkSession(fx.source, "", std::nullopt);
     CHECK(unnamed.name.empty());
-    CHECK(unnamed.name_source == "");  // the free default-naming rule owns it later
+    CHECK(unnamed.name_source == "");
+
+    // A named source: the fork is "fork of <name>", as a DEFAULT name -- not
+    // explicit, so the titler and /rename still own it.
+    REQUIRE(fx.db.UpdateSessionName(fx.source, "auth refactor", "explicit"));
+    const auto derived = fx.db.ForkSession(fx.source, "", std::nullopt);
+    CHECK(derived.name == "fork of auth refactor");
+    CHECK(derived.name_source == "default");
+    const auto reread = fx.db.GetSession(derived.session_id);
+    REQUIRE(reread.has_value());
+    CHECK(reread->name == "fork of auth refactor");
+    CHECK(reread->name_source == "default");
+
+    // An explicit fork name still wins over the derived one.
+    CHECK(fx.db.ForkSession(fx.source, "mine", std::nullopt).name == "mine");
 }
 
 TEST_CASE("ForkSession carries the source's persisted model overrides", "[session][fork]") {
@@ -2050,7 +2084,7 @@ TEST_CASE("ForkSession carries the source's persisted model overrides", "[sessio
     fx.db.UpdateSessionModel(fx.source, "main/big");
     fx.db.UpdateSessionSubagentModel(fx.source, "main/fast");
 
-    const auto row = fx.db.ForkSession(fx.source, 0, "the fork", std::nullopt);
+    const auto row = fx.db.ForkSession(fx.source, "the fork", std::nullopt);
     REQUIRE(row.model.has_value());
     CHECK(*row.model == "main/big");
     REQUIRE(row.subagent_model.has_value());
@@ -2065,20 +2099,14 @@ TEST_CASE("ForkSession carries the source's persisted model overrides", "[sessio
 
     // A source with no overrides forks without them -- NULL, not "".
     ForkFixture plain;
-    const auto bare = plain.db.ForkSession(plain.source, 0, "bare", std::nullopt);
+    const auto bare = plain.db.ForkSession(plain.source, "bare", std::nullopt);
     CHECK_FALSE(bare.model.has_value());
     CHECK_FALSE(bare.subagent_model.has_value());
 }
 
-TEST_CASE("ForkSession validates the target like a rewind would", "[session][fork]") {
+TEST_CASE("ForkSession refuses an unknown source", "[session][fork]") {
     ForkFixture fx;
-
-    // Not a message at all.
-    CHECK_THROWS_AS(fx.db.ForkSession(fx.source, 99, "", std::nullopt), std::runtime_error);
-    // An assistant message is not a fork point.
-    CHECK_THROWS_AS(fx.db.ForkSession(fx.source, 1, "", std::nullopt), std::runtime_error);
-    // A seq that does not exist.
-    CHECK_THROWS_AS(fx.db.ForkSession("no-such-session", 0, "", std::nullopt), std::runtime_error);
+    CHECK_THROWS_AS(fx.db.ForkSession("no-such-session", "", std::nullopt), std::runtime_error);
 }
 
 TEST_CASE("ForkSession refuses a subagent source", "[session][fork][invariant]") {
@@ -2087,62 +2115,35 @@ TEST_CASE("ForkSession refuses a subagent source", "[session][fork][invariant]")
         fx.db.CreateSession("", std::optional<std::string>(fx.source), "/work/proj", "build")
             .session_id;
     fx.db.AppendMessage(child, UserMsg("child task"));
-    CHECK_THROWS_AS(fx.db.ForkSession(child, 0, "", std::nullopt), std::runtime_error);
+    CHECK_THROWS_AS(fx.db.ForkSession(child, "", std::nullopt), std::runtime_error);
 }
 
-TEST_CASE("ForkSession copies the compaction checkpoint only when it covers the prefix",
-          "[session][fork]") {
+TEST_CASE("ForkSession carries the compaction checkpoint", "[session][fork]") {
     ForkFixture fx;
     const llm::Message summary =
         llm::Message{llm::Role::User, {llm::TextBlock{"[summary of everything before seq 2]"}}};
     fx.db.SaveCompactionCheckpoint(fx.source, /*boundary_seq=*/1, summary);
 
-    // boundary (1) < target (2): the checkpoint covers the copied prefix's
-    // head and the tail rows (boundary, target) -- ride it along verbatim.
-    const auto covering = fx.db.ForkSession(fx.source, 2, "", std::nullopt);
-    const auto covering_checkpoint = fx.db.LoadCompactionCheckpoint(covering.session_id);
-    REQUIRE(covering_checkpoint.has_value());
-    CHECK(covering_checkpoint->boundary_seq == 1);
-    CHECK(MessagesEqual(covering_checkpoint->summary, summary));
-
-    // boundary (2) >= target (2): that summary over-covers -- it stays behind,
-    // and the earlier record (boundary 1) is the child's checkpoint.
-    fx.db.SaveCompactionCheckpoint(fx.source, /*boundary_seq=*/2, summary);
-    const auto over = fx.db.ForkSession(fx.source, 2, "", std::nullopt);
-    const auto over_checkpoint = fx.db.LoadCompactionCheckpoint(over.session_id);
-    REQUIRE(over_checkpoint.has_value());
-    CHECK(over_checkpoint->boundary_seq == 1);
-
-    // A fork below every record's boundary carries none.
-    const auto under = fx.db.ForkSession(fx.source, 0, "", std::nullopt);
-    CHECK_FALSE(fx.db.LoadCompactionCheckpoint(under.session_id).has_value());
+    // The checkpoint rides along verbatim: its seqs were copied verbatim too.
+    const auto fork = fx.db.ForkSession(fx.source, "", std::nullopt);
+    const auto checkpoint = fx.db.LoadCompactionCheckpoint(fork.session_id);
+    REQUIRE(checkpoint.has_value());
+    CHECK(checkpoint->boundary_seq == 1);
+    CHECK(MessagesEqual(checkpoint->summary, summary));
 }
 
 TEST_CASE("a forked session's discard state is its own: rewind in the fork leaves the "
           "source alone",
           "[session][fork][invariant]") {
     ForkFixture fx;
-    const auto fork = fx.db.ForkSession(fx.source, 2, "", std::nullopt);
+    const auto fork = fx.db.ForkSession(fx.source, "", std::nullopt);
     fx.db.AppendMessage(fork.session_id, UserMsg("diverged"));
-    fx.db.AppendMessage(fork.session_id, UserMsg("more"));
     fx.db.SetDiscardedAfter(fork.session_id, 2);
 
     // The fork rewound to seq 1; the source still holds all three rows active.
     CHECK(fx.db.LastMessageSeq(fork.session_id) == 1);
     CHECK(fx.db.LastMessageSeq(fx.source) == 2);
     CHECK(fx.All(fx.source).size() == 3);
-}
-
-TEST_CASE("ForkSession with a negative target copies the whole active transcript",
-          "[session][fork]") {
-    ForkFixture fx;
-    const auto row = fx.db.ForkSession(fx.source, /*target_seq=*/-1, "whole thing", std::nullopt);
-    CHECK(row.message_count == 3);
-
-    const auto child = fx.All(row.session_id);
-    REQUIRE(child.size() == 3);
-    CHECK(child[2].seq == 2);
-    CHECK(MessagesEqual(child[2].message, UserMsg("second")));
 }
 
 TEST_CASE("every compaction is a scrollback record positioned at its last message",

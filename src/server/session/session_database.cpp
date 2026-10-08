@@ -7,7 +7,6 @@
 
 #include <cerrno>
 #include <chrono>
-#include <limits>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -1613,25 +1612,24 @@ std::int64_t SessionDatabase::UnmarkDiscarded(const std::string& session_id) {
 }
 
 SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id,
-                                            std::int64_t target_seq, const std::string& name,
+                                            const std::string& name,
                                             const std::optional<std::string>& agent_preset_override) {
     std::lock_guard lock(mu_);
     const std::int64_t now = NextTimestamp();
     const std::string id = GenerateUlid();
-    const char* name_source = name.empty() ? "" : "explicit";
+    // An explicit name wins; otherwise the fork is named after its source
+    // ("fork of <name>", set inside the transaction once the source row is
+    // read) as a 'default' name -- default naming leaves it alone, the titler
+    // may still retitle it, a /rename overrides it. An unnamed source leaves
+    // the fork to the free default-naming rule.
+    std::string fork_name = name;
+    std::string name_source = name.empty() ? "" : "explicit";
     int copied = 0;
     std::string project_root, agent_preset;
     // The source's persisted model overrides, read in the transaction below.
     // nullopt = the source row's column is NULL (no override), and the fork
     // row gets NULL too rather than an empty string.
     std::optional<std::string> source_model, source_subagent_model;
-    // target_seq < 0: fork the WHOLE active transcript. The upper bound and
-    // the checkpoint condition both open up -- "copy everything" has no
-    // trailing user message to point at, and any existing checkpoint covers
-    // part of what was copied by definition.
-    const bool fork_all = target_seq < 0;
-    const std::int64_t copy_upper =
-        fork_all ? std::numeric_limits<std::int64_t>::max() : target_seq;
 
     ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin fork");
     try {
@@ -1639,8 +1637,8 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
         // be a subagent. Subagent transcripts are one task-scoped turn, hidden
         // from the picker and refused rewind/resume -- forking one would hand a
         // top-level session a transcript the whole UI model refuses to show.
-        Stmt source(db_, "SELECT project_root, agent_preset, model, subagent_model FROM sessions"
-                         " WHERE id = ?1 AND parent_session_id IS NULL;",
+        Stmt source(db_, "SELECT project_root, agent_preset, model, subagent_model, name"
+                         " FROM sessions WHERE id = ?1 AND parent_session_id IS NULL;",
                     "failed to read the source session");
         sqlite3_bind_text(source.stmt, 1, source_session_id.c_str(), -1, SQLITE_TRANSIENT);
         if (sqlite3_step(source.stmt) != SQLITE_ROW) {
@@ -1649,6 +1647,14 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
         }
         project_root = reinterpret_cast<const char*>(sqlite3_column_text(source.stmt, 0));
         agent_preset = reinterpret_cast<const char*>(sqlite3_column_text(source.stmt, 1));
+        if (fork_name.empty()) {
+            const std::string source_name =
+                reinterpret_cast<const char*>(sqlite3_column_text(source.stmt, 4));
+            if (!source_name.empty()) {
+                fork_name = "fork of " + source_name;
+                name_source = "default";
+            }
+        }
         // The persisted model overrides ride along: a fork's whole point is
         // "try it on another model from HERE", and "here" includes the model
         // the user pinned with /model (v8) and /subagent-model (v10). Dropping
@@ -1665,39 +1671,6 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
                 reinterpret_cast<const char*>(sqlite3_column_text(source.stmt, 3));
         }
 
-        // Target validation, same shape as rewind's IsRewindTarget: the fork
-        // point must be an ACTIVE user message with non-empty text, so a fork
-        // lands exactly where a rewind would and never splits a tool-call pair.
-        // Skipped when forking everything.
-        if (!fork_all) {
-        Stmt target(db_, "SELECT role, content_json FROM messages"
-                         " WHERE session_id = ?1 AND seq = ?2 AND discarded = 0;",
-                   "failed to read the fork target");
-        sqlite3_bind_text(target.stmt, 1, source_session_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(target.stmt, 2, target_seq);
-        if (sqlite3_step(target.stmt) != SQLITE_ROW) {
-            throw std::runtime_error("fork target seq " + std::to_string(target_seq) +
-                                     " is not an active message of '" + source_session_id + "'");
-        }
-        const std::string role = reinterpret_cast<const char*>(sqlite3_column_text(target.stmt, 0));
-        const std::string content_json =
-            reinterpret_cast<const char*>(sqlite3_column_text(target.stmt, 1));
-        const llm::Message message =
-            JsonToMessage(nlohmann::json::parse(content_json));  // throws on corruption
-        bool text_bearing = false;
-        if (message.role == llm::Role::User) {
-            for (const auto& block : message.content) {
-                if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
-                    if (!text->text.empty()) text_bearing = true;
-                }
-            }
-        }
-        if (!text_bearing) {
-            throw std::runtime_error("fork target seq " + std::to_string(target_seq) +
-                                     " is not a text-bearing user message");
-        }
-        }
-
         // Mint the child row: a top-level session with fork provenance. The
         // source's project_root/agent_preset and any persisted model overrides
         // carry over (the registry's CreateSession params can still override
@@ -1708,8 +1681,8 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
                          " VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                     "failed to create forked session");
         sqlite3_bind_text(insert.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(insert.stmt, 2, name.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(insert.stmt, 3, name_source, -1, SQLITE_STATIC);
+        sqlite3_bind_text(insert.stmt, 2, fork_name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(insert.stmt, 3, name_source.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(insert.stmt, 4, project_root.c_str(), -1, SQLITE_TRANSIENT);
         const std::string& effective_preset = agent_preset_override ? *agent_preset_override
                                                                     : agent_preset;
@@ -1732,47 +1705,43 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
             ThrowSqliteError(db_, "failed to create forked session");
         }
 
-        // The copy: active rows below the target, SEQS VERBATIM. Seq spaces
-        // are per-session (UNIQUE(session_id, seq)), reads are keyset-paged
-        // within one session, and appends continue from MAX(seq)+1 -- nothing
-        // requires a child's seq space to start at zero, and keeping the
-        // source's numbers means a copied checkpoint needs no renumbering.
+        // The copy: every active row, SEQS VERBATIM. No tail needs trimming:
+        // the store never holds a half-finished tool round (AppendRound
+        // commits the call and its results together), so the active
+        // transcript is always a clean copy. Seq spaces are per-session
+        // (UNIQUE(session_id, seq)), reads are keyset-paged within one
+        // session, and appends continue from MAX(seq)+1 -- nothing requires a
+        // child's seq space to start at zero, and keeping the source's
+        // numbers means a copied checkpoint needs no renumbering.
         Stmt copy(db_, "INSERT INTO messages (session_id, seq, role, content_json,"
                        " token_count, created_at, agent_preset, model)"
                        " SELECT ?1, seq, role, content_json, token_count, created_at,"
                        " agent_preset, model"
-                       " FROM messages WHERE session_id = ?2 AND discarded = 0 AND seq < ?3;",
+                       " FROM messages WHERE session_id = ?2 AND discarded = 0;",
                   "failed to copy messages into the fork");
         sqlite3_bind_text(copy.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(copy.stmt, 2, source_session_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(copy.stmt, 3, copy_upper);
         if (sqlite3_step(copy.stmt) != SQLITE_DONE) {
             ThrowSqliteError(db_, "failed to copy messages into the fork");
         }
         copied = sqlite3_changes(db_);
 
-        // Compaction records ride along when their summary covers only part
-        // of the copied prefix (boundary_seq < the copy bound); the others
-        // summarize history the child does not have. A record that ran past
-        // the bound is re-positioned to the child's last copied seq -- its
-        // summary still describes that prefix. `active` is copied too: a
-        // record the source had deactivated (/clear) must not become the
-        // child's checkpoint.
+        // Compaction records ride along verbatim -- the seqs they point at
+        // were copied verbatim too, so no renumbering. `active` is copied as
+        // well: a record the source had deactivated (/clear) must not become
+        // the child's checkpoint.
         Stmt copy_compactions(db_, "INSERT INTO compactions (session_id, boundary_seq, at_seq,"
                                    " summary_content_json, folded_messages, tokens_before,"
                                    " tokens_after, trigger_kind, warning, skipped, active,"
                                    " created_at)"
-                                   " SELECT ?1, boundary_seq, MIN(at_seq, ?3 - 1),"
-                                   " summary_content_json,"
+                                   " SELECT ?1, boundary_seq, at_seq, summary_content_json,"
                                    " folded_messages, tokens_before, tokens_after, trigger_kind,"
                                    " warning, skipped, active, created_at"
-                                   " FROM compactions WHERE session_id = ?2 AND boundary_seq < ?3"
-                                   " ORDER BY id;",
+                                   " FROM compactions WHERE session_id = ?2 ORDER BY id;",
                               "failed to copy the compaction records");
         sqlite3_bind_text(copy_compactions.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(copy_compactions.stmt, 2, source_session_id.c_str(), -1,
                           SQLITE_TRANSIENT);
-        sqlite3_bind_int64(copy_compactions.stmt, 3, copy_upper);
         if (sqlite3_step(copy_compactions.stmt) != SQLITE_DONE) {
             ThrowSqliteError(db_, "failed to copy the compaction records");
         }
@@ -1797,8 +1766,8 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
 
     SessionSummary summary;
     summary.session_id = id;
-    summary.name = name;
-    summary.name_source = name_source;
+    summary.name = std::move(fork_name);
+    summary.name_source = std::move(name_source);
     summary.project_root = std::move(project_root);
     // The EFFECTIVE preset -- the override when one was given -- so the row and
     // the summary always describe what this fork will actually run.

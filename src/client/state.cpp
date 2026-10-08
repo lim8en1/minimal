@@ -1170,6 +1170,23 @@ std::string AppState::ResumeTab(const std::string& session_id) {
     return registered;
 }
 
+void AppState::ForkSession(const std::string& source_tab_id, const std::string& session_id,
+                           const std::string& instruction) {
+    RunOnRpcQueue([this, source_tab_id, session_id, instruction] {
+        const auto forked = client_->ForkSession(session_id, instruction);
+        if (!forked.status.ok()) {
+            TabNotice(source_tab_id, "/fork failed: " + forked.status.error_message());
+            return;
+        }
+        // The fork is born live server-side: attach it. Resume is the
+        // fallback for a fork that already ended (the picker's same rule).
+        const std::string& fork_id = forked.summary.session_id();
+        std::string tab = AttachTab(fork_id);
+        if (tab.empty()) tab = ResumeTab(fork_id);
+        SetFocusedTab(tab);
+    });
+}
+
 // The startup --resume path for a LIVE session (see the header): root tab
 // first, then its live subagent children as members of the same group. The
 // child scan runs AFTER the root attaches, both because the children need the

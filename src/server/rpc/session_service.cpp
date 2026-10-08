@@ -220,8 +220,8 @@ grpc::Status SessionServiceImpl::ForkSession(grpc::ServerContext* context,
     if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
     agent::ForkRequest fork;
     fork.source_session_id = request->source_session_id();
-    fork.target_seq = request->target_seq();
     fork.name = request->name();
+    fork.instruction = request->instruction();
     fork.model = request->model();
     fork.agent_preset = request->agent_preset();
     fork.run_mode = FromProto(request->run_mode());

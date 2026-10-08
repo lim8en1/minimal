@@ -853,15 +853,13 @@ message CreateSessionResponse {
 }
 
 // SESSION FORK: a new top-level session seeded with the source's active
-// transcript below target_seq. The source is untouched -- the interesting
-// "try it on another model/plan" shape: fork at the current point with a
-// model override, experiment there, keep whichever line you like. Forking a
+// transcript as it stands now (a tool round is stored as one unit, so there
+// is never a half-run round to copy). The source is untouched -- the
+// "try it on another model/plan" shape: fork with a model override and/or an
+// instruction, experiment there, keep whichever line you like. Forking a
 // live mid-turn session is safe; forking a SUBAGENT session is refused.
 message ForkSessionRequest {
   string source_session_id = 1;
-  // The fork point: everything strictly below it is copied. Must be an
-  // active, text-bearing user message -- the same shape a rewind demands.
-  int64 target_seq = 2;
   string name = 3;         // empty = the free default-naming rule
   // "<provider>/<model>", empty = the source's own model -- including a
   // model the user pinned there via /model (persisted on the session row),
@@ -871,6 +869,8 @@ message ForkSessionRequest {
   string agent_preset = 5; // empty = the source's preset
   // UNSPECIFIED = the source's run mode.
   PermissionRunMode run_mode = 6;
+  // Non-empty: submitted as the fork's first user turn.
+  string instruction = 7;
 }
 
 message ForkSessionResponse {
