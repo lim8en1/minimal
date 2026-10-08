@@ -12,7 +12,9 @@
 // provider in place, so the references see the current values. Worker-thread
 // only.
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -75,6 +77,11 @@ public:
     // auto_compact and the configured strategy are all beside the point.
     std::optional<std::size_t> CompactNow(std::string_view prompt_override = {});
 
+    // Successful folds so far, any trigger. The one member read off the
+    // worker: a /compact queued mid-turn records it on the reader, and is
+    // skipped at its boundary if another compaction folded meanwhile.
+    std::uint64_t folds() const { return folds_.load(std::memory_order_acquire); }
+
 private:
     // Compact's phases, split out so each reads on its own.
     Compactor ResolveSummarizer();
@@ -104,6 +111,7 @@ private:
     // turn, resending half the context to the provider each time. The trigger
     // stays armed for the next turn, where the flag resets.
     bool compaction_failed_this_turn_ = false;
+    std::atomic<std::uint64_t> folds_{0};
     // Warn-once latches: MaybeCompact runs on every tool cycle, and each
     // situation is one actionable line per session, not noise per cycle.
     bool compaction_trigger_warned_ = false;   // window-relative trigger, no window

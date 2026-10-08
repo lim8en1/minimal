@@ -148,6 +148,9 @@ public:
     // Returns how many messages were folded away, or nullopt if nothing was.
     std::optional<std::size_t> CompactNow(std::string_view prompt_override = {});
 
+    // Successful compactions so far, any trigger. Safe from any thread.
+    std::uint64_t CompactionCount() const { return compaction_.folds(); }
+
     // /clear. Drops the in-memory working set; the STORE keeps the full record,
     // the same rule compaction follows. Scrollback is unaffected.
     void ClearHistory();

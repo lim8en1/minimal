@@ -638,6 +638,7 @@ std::optional<std::size_t> CompactionController::Compact(std::string_view trigge
     // touched. The store keeps the full uncompacted record, so scrollback is
     // unaffected no matter how many times this runs.
     failure_guard.succeeded = true;
+    folds_.fetch_add(1, std::memory_order_release);
     return cut;
 }
 

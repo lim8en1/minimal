@@ -23,6 +23,14 @@ struct QueuedCommand {
     std::string request_id;  // echoed on CommandResult
     std::string name;
     commands::CommandArgs args;
+    // Set by Session::SubmitCompaction when IT raised the pause: the worker
+    // lifts that pause once the command has run (see there).
+    bool resume_after = false;
+    // Set by Session::SubmitCompaction: the session's compaction count when
+    // the command was accepted. A different count at the boundary means
+    // another compaction (auto, overflow) already folded the history, and
+    // the command is answered without running.
+    std::optional<std::uint64_t> compactions_at_submit;
 };
 
 // One traversal request for the session worker. A rewind cuts the ACTIVE

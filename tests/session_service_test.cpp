@@ -3146,67 +3146,220 @@ TEST_CASE("a client-supplied page limit is clamped, not trusted",
     CHECK(listed.sessions_size() <= 1000);  // one session here; the clamp is the same call
 }
 
-TEST_CASE("an LLM command is refused mid-turn while a mutating one still queues",
+TEST_CASE("an LLM command mid-turn pauses the turn, runs at the boundary, then resumes",
           "[session_service][commands][invariant]") {
-    // THE GUARD THAT NOTHING EVER TRIGGERED. Dispatch() takes a `busy` flag
-    // whose whole purpose is this refusal, and both production callers passed
-    // `false` unconditionally -- so only the unit tests exercised it, and
-    // /compact typed during a long turn was quietly queued instead. That is
-    // verbatim what command_dispatcher.hpp says must not happen: "queueing
-    // would make /compact silently run minutes later against a context that had
-    // moved on."
-    //
-    // The pair is the point. An LLMCommand is refused; a mutating
-    // HarnessCommand still QUEUES and lands at the turn boundary, because the
-    // shared work queue exists to serve exactly that. Refusing on !ReadOnly()
-    // would have taken both.
+    // /compact typed during a long turn used to be refused ("cancel it
+    // first"), and before that silently queued to run minutes later against a
+    // context that had moved on. Now the reader pauses the turn: it stops at
+    // its next tool-call return, the command runs there, and the pause the
+    // command raised is lifted so the model continues from the tool result.
     ServiceFixture fixture;
     fixture.commands.Register(std::make_unique<testing::RecordingLlmCommand>());
-    fixture.commands.Register(std::make_unique<testing::RecordingCommand>());
     fixture.tools.Register(
-        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "contents"));
-    fixture.Script(testing::ToolUseResponse("call-1", "read", {{"path", "a.txt"}}));
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran"));
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "make"}}));
     fixture.Script(testing::TextResponse("done"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
     fixture.Start();
 
     const std::string session_id = fixture.CreateSession();
     grpc::ClientContext context;
     auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "build it")));
 
-    // All three written before any read, so both commands are dispatched while
-    // the turn is still queued or running -- idle() is false the moment
-    // SubmitTurn lands, and the reader dispatches these in order.
-    REQUIRE(stream->Write(ChatTurn(session_id, "read it")));
-    v1::ClientEvent llm_invocation;
-    llm_invocation.set_session_id(session_id);
-    llm_invocation.mutable_command()->set_request_id("cmd-llm");
-    llm_invocation.mutable_command()->set_name("llmrecord");
-    REQUIRE(stream->Write(llm_invocation));
-    v1::ClientEvent harness_invocation;
-    harness_invocation.set_session_id(session_id);
-    harness_invocation.mutable_command()->set_request_id("cmd-harness");
-    harness_invocation.mutable_command()->set_name("record");
-    REQUIRE(stream->Write(harness_invocation));
-
-    std::optional<v1::CommandResult> llm_result;
-    std::optional<v1::CommandResult> harness_result;
+    // Park the turn on a permission prompt, so "in flight" is a fact rather
+    // than a race.
     v1::ServerEvent event;
+    std::string permission_id;
     while (stream->Read(&event)) {
-        if (!event.has_command_result()) continue;
-        if (event.command_result().request_id() == "cmd-llm") llm_result = event.command_result();
-        if (event.command_result().request_id() == "cmd-harness") {
-            harness_result = event.command_result();
+        if (event.has_permission_request()) {
+            permission_id = event.permission_request().request_id();
+            break;
         }
-        if (llm_result && harness_result) break;
+    }
+    REQUIRE_FALSE(permission_id.empty());
+
+    v1::ClientEvent invocation;
+    invocation.set_session_id(session_id);
+    invocation.mutable_command()->set_request_id("cmd-llm");
+    invocation.mutable_command()->set_name("llmrecord");
+    REQUIRE(stream->Write(invocation));
+
+    v1::ClientEvent answer;
+    answer.set_session_id(session_id);
+    answer.mutable_permission_response()->set_request_id(permission_id);
+    answer.mutable_permission_response()->set_decision(v1::PERMISSION_DECISION_ALLOW);
+    REQUIRE(stream->Write(answer));
+
+    // The order is the contract: the first turn ends PAUSED, the command
+    // answers, and the continuation turn then completes on its own.
+    std::vector<std::string> order;
+    std::optional<v1::CommandResult> llm_result;
+    while (stream->Read(&event)) {
+        if (event.has_command_result() && event.command_result().request_id() == "cmd-llm") {
+            llm_result = event.command_result();
+            order.push_back("command");
+        }
+        if (event.has_turn_completed()) {
+            order.push_back(event.turn_completed().stop_reason() == v1::STOP_REASON_PAUSED
+                                ? "paused"
+                                : "completed");
+            if (order.back() == "completed") break;
+        }
     }
     (void)DrainAndFinish(stream);
 
     REQUIRE(llm_result.has_value());
-    CHECK(llm_result->status() == v1::COMMAND_STATUS_ERROR);
-    CHECK(llm_result->message().find("in flight") != std::string::npos);
+    CHECK(llm_result->status() == v1::COMMAND_STATUS_OK);
+    CHECK(order == std::vector<std::string>{"paused", "command", "completed"});
+    auto session = fixture.sessions->Find(session_id);
+    REQUIRE(session != nullptr);
+    CHECK_FALSE(session->paused());
+}
 
-    REQUIRE(harness_result.has_value());
-    CHECK(harness_result->status() == v1::COMMAND_STATUS_OK);
+TEST_CASE("a second LLM command is refused while the first is still pending",
+          "[session_service][commands][invariant]") {
+    // Compaction is exclusive: two /compact typed during one turn would
+    // summarize the fresh summary a second time.
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<testing::RecordingLlmCommand>());
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran"));
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "make"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "build it")));
+
+    v1::ServerEvent event;
+    std::string permission_id;
+    while (stream->Read(&event)) {
+        if (event.has_permission_request()) {
+            permission_id = event.permission_request().request_id();
+            break;
+        }
+    }
+    REQUIRE_FALSE(permission_id.empty());
+
+    for (const char* id : {"cmd-1", "cmd-2"}) {
+        v1::ClientEvent invocation;
+        invocation.set_session_id(session_id);
+        invocation.mutable_command()->set_request_id(id);
+        invocation.mutable_command()->set_name("llmrecord");
+        REQUIRE(stream->Write(invocation));
+    }
+
+    // The refusal is answered from the reader, while the turn is still
+    // parked on the prompt -- the first command cannot have run yet.
+    std::optional<v1::CommandResult> second;
+    while (stream->Read(&event)) {
+        if (event.has_command_result() && event.command_result().request_id() == "cmd-2") {
+            second = event.command_result();
+            break;
+        }
+    }
+    REQUIRE(second.has_value());
+    CHECK(second->status() == v1::COMMAND_STATUS_ERROR);
+    CHECK(second->message().find("already scheduled") != std::string::npos);
+
+    v1::ClientEvent answer;
+    answer.set_session_id(session_id);
+    answer.mutable_permission_response()->set_request_id(permission_id);
+    answer.mutable_permission_response()->set_decision(v1::PERMISSION_DECISION_ALLOW);
+    REQUIRE(stream->Write(answer));
+
+    std::optional<v1::CommandResult> first;
+    while (stream->Read(&event)) {
+        if (event.has_command_result() && event.command_result().request_id() == "cmd-1") {
+            first = event.command_result();
+        }
+        if (event.has_turn_completed() &&
+            event.turn_completed().stop_reason() != v1::STOP_REASON_PAUSED) {
+            break;
+        }
+    }
+    REQUIRE(first.has_value());
+    CHECK(first->status() == v1::COMMAND_STATUS_OK);
+
+    // The latch is released once the first has run: a later one is accepted.
+    v1::ClientEvent again;
+    again.set_session_id(session_id);
+    again.mutable_command()->set_request_id("cmd-3");
+    again.mutable_command()->set_name("llmrecord");
+    REQUIRE(stream->Write(again));
+    std::optional<v1::CommandResult> third;
+    while (stream->Read(&event)) {
+        if (event.has_command_result() && event.command_result().request_id() == "cmd-3") {
+            third = event.command_result();
+            break;
+        }
+    }
+    (void)DrainAndFinish(stream);
+    REQUIRE(third.has_value());
+    CHECK(third->status() == v1::COMMAND_STATUS_OK);
+}
+
+TEST_CASE("an LLM command mid-turn leaves a pause the user already held",
+          "[session_service][commands]") {
+    // Only a pause the command itself raised is lifted: an operator who had
+    // paused to reconfigure must not find the turn resumed under them.
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<testing::RecordingLlmCommand>());
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran"));
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "make"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "build it")));
+
+    v1::ServerEvent event;
+    std::string permission_id;
+    while (stream->Read(&event)) {
+        if (event.has_permission_request()) {
+            permission_id = event.permission_request().request_id();
+            break;
+        }
+    }
+    REQUIRE_FALSE(permission_id.empty());
+
+    auto session = fixture.sessions->Find(session_id);
+    REQUIRE(session != nullptr);
+    session->SetPaused(true);
+
+    v1::ClientEvent invocation;
+    invocation.set_session_id(session_id);
+    invocation.mutable_command()->set_request_id("cmd-llm");
+    invocation.mutable_command()->set_name("llmrecord");
+    REQUIRE(stream->Write(invocation));
+
+    v1::ClientEvent answer;
+    answer.set_session_id(session_id);
+    answer.mutable_permission_response()->set_request_id(permission_id);
+    answer.mutable_permission_response()->set_decision(v1::PERMISSION_DECISION_ALLOW);
+    REQUIRE(stream->Write(answer));
+
+    std::optional<v1::CommandResult> llm_result;
+    while (stream->Read(&event)) {
+        if (event.has_command_result() && event.command_result().request_id() == "cmd-llm") {
+            llm_result = event.command_result();
+            break;
+        }
+    }
+    REQUIRE(llm_result.has_value());
+    CHECK(llm_result->status() == v1::COMMAND_STATUS_OK);
+    CHECK(session->paused());
+
+    session->SetPaused(false);  // let the continuation finish for teardown
+    (void)DrainAndFinish(stream);
 }
 
 TEST_CASE("an unknown command is answered immediately, not after the turn",

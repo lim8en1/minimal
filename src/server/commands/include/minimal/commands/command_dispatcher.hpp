@@ -18,9 +18,10 @@
 namespace minimal::commands {
 
 // `busy` is "a turn is in flight". An LLMCommand needs the provider and the
-// history to itself, so it is refused rather than queued behind the turn --
-// queueing would make /compact silently run minutes later against a context that
-// had moved on.
+// history to itself, so it is refused here. Production never reaches that:
+// the reader (SessionServiceImpl::DispatchCommand) pauses the turn and queues
+// the command for the boundary (Session::SubmitCompaction), so the worker
+// always dispatches with busy == false.
 //
 // `project_registry`, when given, is consulted BEFORE `registry` -- see
 // FindEffective. Defaulted so every caller with no project scope of its own
@@ -39,7 +40,7 @@ CommandResult DispatchSessionless(const CommandRegistry& registry, const std::st
                                   const CommandArgs& args, CommandContext& context);
 
 // The two refusal messages Dispatch() and the reader-thread pre-check
-// (SessionServiceImpl::DispatchCommand, which must answer an unknown/busy
+// (SessionServiceImpl::DispatchCommand, which must answer an unknown
 // command before it is ever queued) both produce verbatim -- shared so the
 // wording cannot drift between the two call graphs, which otherwise differ
 // entirely (order of checks, extra read-only and no-registry cases on the

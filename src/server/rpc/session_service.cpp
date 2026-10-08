@@ -512,26 +512,20 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
         return;
     }
 
-    // THE BUSY CHECK, which until now nothing ever performed: both callers of
-    // Dispatch() passed `busy = false` unconditionally, so only the tests ever
-    // exercised the refusal and `/compact` typed mid-turn was quietly queued --
-    // exactly what command_dispatcher.hpp says must not happen ("queueing would
-    // make /compact silently run minutes later against a context that had moved
-    // on").
+    // AN LLMCommand (/compact) IS EXCLUSIVE, and mid-turn it PAUSES THE TURN
+    // rather than queueing behind it or being refused. Plain queueing would
+    // run /compact minutes later against a context that had moved on;
+    // refusing made the user pause, wait and resume by hand.
+    // SubmitCompaction does exactly that sequence -- the turn stops at its
+    // next tool-call return, the command runs at that boundary, the pause it
+    // raised is lifted so the turn continues -- and refuses a second one
+    // while the first is still pending.
     //
-    // AN LLMCommand, not merely a non-read-only one. The two are different
-    // rules and both are real: a mutating HarnessCommand (`/agent`, `/model`)
-    // SHOULD queue and run at the turn boundary -- that is what the shared work
-    // queue is for -- while an LLMCommand needs the provider and the history to
-    // itself and has nothing useful to do afterwards. The type exists precisely
-    // to carry this distinction ("a type cannot be forgotten the way a flag
-    // can"), so it is the type that is asked.
-    //
-    // Answered here rather than by passing `busy` down, because the answer has
-    // to reach the client from the READER: queueing it for the worker is the
-    // very thing being refused.
-    if (!session.idle() && dynamic_cast<const commands::LLMCommand*>(command) != nullptr) {
-        session.RejectCommand(queued, commands::BusyRefusalMessage(queued.name));
+    // AN LLMCommand, not merely a non-read-only one: a mutating
+    // HarnessCommand (`/agent`, `/model`) queues for the next boundary with
+    // the turn left running -- that is what the shared work queue is for.
+    if (dynamic_cast<const commands::LLMCommand*>(command) != nullptr) {
+        session.SubmitCompaction(std::move(queued));
         return;
     }
     // An unknown command is answered now too. Queueing it to be told "unknown

@@ -389,6 +389,39 @@ bool Session::SubmitCommand(QueuedCommand command) {
     return true;
 }
 
+bool Session::SubmitCompaction(QueuedCommand command) {
+    std::optional<std::string> refusal;
+    bool raised = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (terminated_.load(std::memory_order_acquire)) {
+            refusal = "session already terminated";
+        } else if (compaction_pending_) {
+            refusal = "/" + command.name + " is already scheduled";
+        } else if (work_.full()) {
+            refusal = "session backlog is full";
+        } else {
+            compaction_pending_ = true;
+            command.compactions_at_submit = loop_->CompactionCount();
+            // Only a busy session is paused: an idle one runs the command
+            // next anyway, and has no turn to stop.
+            const bool busy = !work_.empty() || worker_activity_ != WorkerActivity::kIdle;
+            // Pause and push in ONE critical section: the worker cannot pop
+            // a held turn between the two and run it ahead of the command.
+            if (busy) raised = pause_.SetPaused(true);
+            command.resume_after = raised;
+            work_.TryPush(std::move(command));
+        }
+    }
+    if (refusal) {
+        RejectCommand(QueuedCommand{std::move(command)}, *refusal);
+        return false;
+    }
+    if (raised) EmitMetadataChanged();
+    turn_cv_.notify_all();
+    return true;
+}
+
 void Session::EmitOrWarn(const SessionEvent& event, std::string_view what) {
     if (!EmitEvent(event)) {
         logger_.warn("session {}: {} dropped (queue full or closed); the client will not see it",
@@ -536,7 +569,46 @@ void Session::RunOneCommand(const QueuedCommand& command) {
     // Reached only from the worker, and only between turns -- so `busy` is
     // false by construction here too. The parameter exists for the reader-side
     // refusal path, which checks before queueing.
-    ExecuteCommand(command, /*busy=*/false);
+    //
+    // The exclusivity latch is released on EVERY exit, a throw included --
+    // a stuck one would refuse /compact for the rest of the session.
+    struct CompactionLatch {
+        Session* session;
+        bool held;
+        ~CompactionLatch() {
+            if (!held) return;
+            std::lock_guard<std::mutex> lock(session->mutex_);
+            session->compaction_pending_ = false;
+        }
+    } latch{this, command.compactions_at_submit.has_value()};
+    if (command.compactions_at_submit &&
+        loop_->CompactionCount() != *command.compactions_at_submit) {
+        // Another compaction folded the history while this one waited for
+        // its boundary (an auto-compaction already in progress when it was
+        // typed, an overflow recovery): a second summarization of the fresh
+        // summary would only spend tokens.
+        EmitCommandResult(commands::CommandResult::Ok(
+                              "/" + command.name +
+                                  " skipped: the context was already compacted while it waited"),
+                          command);
+    } else {
+        ExecuteCommand(command, /*busy=*/false);
+    }
+    if (!command.resume_after) return;
+    // Lift the pause SubmitCompaction raised, whatever the command's
+    // outcome. If the user already resumed by hand there is nothing to lift.
+    // No explicit kick: the turn that ended paused left continuation_pending
+    // set, and the worker's wake predicate turns that into the continuation
+    // once the queue drains (WorkerShouldProceed's last line).
+    bool lifted = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (terminated_.load(std::memory_order_acquire)) return;
+        lifted = pause_.SetPaused(false);
+    }
+    if (!lifted) return;
+    EmitMetadataChanged();
+    turn_cv_.notify_all();
 }
 
 bool Session::SubmitRewind(QueuedRewind request) {

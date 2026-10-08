@@ -319,6 +319,18 @@ public:
     // as SubmitTurn.
     bool SubmitCommand(QueuedCommand command);
 
+    // Reader thread. SubmitCommand for an LLMCommand -- /compact, the only
+    // one -- which is EXCLUSIVE: while one is queued or running a second is
+    // refused, and one whose turn boundary arrives after another compaction
+    // (auto, overflow) already folded the history is answered without
+    // running. Typed mid-turn, it pauses the session first, so the turn in
+    // flight stops at its next tool-call return -- BEFORE the loop's own
+    // auto-compaction check -- and the command runs at that boundary against
+    // the context as it stands. A pause this call raised is lifted once the
+    // command has run (the paused turn continues); a pause the user already
+    // held is left alone.
+    bool SubmitCompaction(QueuedCommand command);
+
     // Answers a command with an error CommandResult without running it. Used
     // when the command pool is saturated -- the caller holds a request_id a
     // client is waiting on, so refusal must still produce an answer.
@@ -847,6 +859,9 @@ private:
     // announced by TurnQueuedEvent at submit time and addressed by
     // CancelQueuedTurn / TurnCanceledEvent. Guarded by mutex_ with the queue.
     std::uint64_t next_turn_id_ = 1;
+    // A SubmitCompaction command is queued or running: the next one is
+    // refused until RunOneCommand clears this. Guarded by mutex_.
+    bool compaction_pending_ = false;
 
     std::thread worker_;
     std::once_flag join_once_;
