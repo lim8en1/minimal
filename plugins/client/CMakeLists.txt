@@ -28,6 +28,12 @@ add_subdirectory(checklist-view)
 
 add_subdirectory(mcp-view)
 
+# session-export: `/export`, the focused session's transcript to a .md/.txt
+# file through a modal (filters, start point). Client-only: it reads over
+# GetMessages and writes where the user is.
+
+add_subdirectory(session-export)
+
 # ask-view is the client half of the tool-ask plugin pair: the "ask" prompt
 # renderer (the modal ask_user parks on) and the "ask" display renderer (its
 # transcript row). Core has no ask UI.

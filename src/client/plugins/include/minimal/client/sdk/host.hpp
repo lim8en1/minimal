@@ -232,6 +232,9 @@ public:
     struct MessagePage {
         std::vector<v1::StoredMessage> messages;  // descending by seq
         bool has_more = false;
+        // The compactions that ran at one of this page's seqs, ascending by
+        // at_seq (GetMessagesResponse.compactions, verbatim).
+        std::vector<v1::CompactionEvent> compactions;
     };
 
     // Keyset page over the session transcript -- the same call, cursor
