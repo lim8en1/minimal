@@ -15,14 +15,22 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 
+#include "minimal/client/sdk/widget_types.hpp"
+
 namespace minimal::client {
 
-class RebuildingComponent final : public ftxui::ComponentBase {
+class RebuildingComponent final : public ftxui::ComponentBase, public EscapeAware {
 public:
     // `stale` starts true in the usual case: the first frame builds.
+    // `wants_escape` (optional): claims Escape while it says so -- a nested
+    // step's "cancel" (a confirmation), which would otherwise close the whole
+    // view (the host owns Escape for a plugin modal).
     RebuildingComponent(std::shared_ptr<std::atomic<bool>> stale,
-                        std::function<ftxui::Component()> build)
-        : stale_(std::move(stale)), build_(std::move(build)) {}
+                        std::function<ftxui::Component()> build,
+                        std::function<bool()> wants_escape = {})
+        : stale_(std::move(stale)), build_(std::move(build)), wants_escape_(std::move(wants_escape)) {}
+
+    bool WantsEscape() const override { return wants_escape_ && wants_escape_(); }
 
 private:
     void Sync() {
@@ -46,6 +54,7 @@ private:
 
     std::shared_ptr<std::atomic<bool>> stale_;
     std::function<ftxui::Component()> build_;
+    std::function<bool()> wants_escape_;
     ftxui::Component child_;
 };
 

@@ -23,7 +23,7 @@ void AppendFlatCapped(std::string& buffer, bool& truncated, std::string_view tex
     if (truncated) return;
     buffer.append(text);
     if (buffer.size() > kLiveTextCapBytes) {
-        buffer = TruncateUtf8(buffer, kLiveTextCapBytes);
+        buffer = common::TruncateUtf8Bytes(buffer, kLiveTextCapBytes);
         buffer.append(kStreamingTruncationMarker);
         truncated = true;
     }
@@ -60,7 +60,7 @@ std::string PublishToolOutput(const ToolExecutionState& row, std::size_t cap) {
         Utf8CeilToBoundary(tail, tail.size() > budget.tail ? tail.size() - budget.tail : 0);
     std::string out;
     if (budget.marker) {
-        out = TruncateUtf8(row.output_head, budget.head);
+        out = common::TruncateUtf8Bytes(row.output_head, budget.head);
         out += kToolOutputTrimMarker;
     }
     out.append(tail, start, std::string::npos);
@@ -616,7 +616,7 @@ void LiveTurnBuffer::AppendCapped(LiveTurnSegment& segment, std::string_view tex
     if (segment.text_truncated) return;
     segment.text.append(text);
     if (segment.text.size() > kLiveTextCapBytes) {
-        segment.text = TruncateUtf8(segment.text, kLiveTextCapBytes);
+        segment.text = common::TruncateUtf8Bytes(segment.text, kLiveTextCapBytes);
         segment.text.append(kStreamingTruncationMarker);
         segment.text_truncated = true;
     }

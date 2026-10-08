@@ -50,7 +50,6 @@ namespace minimal::client::app {
 namespace {
 
 using minimal::client::HeadlessOptions;
-using minimal::client::TruncateUtf8;
 
 // ONE WRITE, UNDER ONE LOCK. This was fputs(dump) followed by fputc('\n') --
 // two separate stdio calls, each taking stdout's own lock independently -- and
@@ -597,7 +596,7 @@ int RunListSessions(const minimal::client::HeadlessOptions& options) {
             row.name().empty() ? "(unnamed)" : minimal::client::StripControlChars(row.name());
         if (name.empty()) name = "(unnamed)";   // a name that was ONLY control chars
         if (name.size() > kSessionListNameColumnChars) {
-            name = TruncateUtf8(name, kSessionListNameColumnChars - 1) + "…";
+            name = common::TruncateUtf8Bytes(name, kSessionListNameColumnChars - 1) + "…";
         }
         std::printf("%-26s  %6d  %s  %s  %s\n", row.session_id().c_str(),
                     row.message_count(), human_time(row.updated_at_unix_ms()).c_str(),

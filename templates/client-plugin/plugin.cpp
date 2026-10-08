@@ -3,7 +3,7 @@
 // The three required symbols below are the capability floor; every
 // minimal_client_plugin_register_* hook is OPTIONAL (dlsym'd, called only
 // when present). This scaffold registers one status-bar segment; the other
-// hooks (see src/client/plugins/include/minimal/client/plugins/
+// hooks (see src/client/plugins/include/minimal/client/sdk/
 // client_plugin_abi.h):
 //   register_views              -- self-contained panels/modals
 //   register_start_views        -- the initial view (logo is the example)
@@ -17,6 +17,7 @@
 // plugin's entry in client-plugins.json.
 
 #include <ctime>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -58,9 +59,10 @@ public:
 
 extern "C" {
 
-const char* minimal_client_plugin_abi_tag() { return minimal::common::AbiTag(); }
-const char* minimal_client_plugin_name() { return "@PLUGIN_NAME@"; }
-const char* minimal_client_plugin_version() { return minimal::common::Version(); }
+// The tag and version baked into THIS .so at compile time -- not
+// common::AbiTag(), which binds to the running host's copy at dlopen and
+// would always match it, letting a stale plugin load.
+MINIMAL_CLIENT_PLUGIN_ABI_SYMBOLS("@PLUGIN_NAME@")
 
 void minimal_client_plugin_register_status_segments(
     plugins::StatusSegmentRegistry& registry,

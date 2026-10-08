@@ -36,7 +36,7 @@
 #include "minimal/client/sdk/render.hpp"
 #include "minimal/client/sdk/views.hpp"
 #include "minimal/client/sdk/widgets.hpp"
-#include "minimal/plugins/name_table.hpp"
+#include "minimal/plugins/stable_identity.hpp"
 
 namespace minimal::client::plugins {
 

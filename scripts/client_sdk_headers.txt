@@ -22,3 +22,4 @@ minimal/common/plugin_config_schema.hpp
 minimal/common/policy.hpp
 minimal/common/utf8.hpp
 minimal/common/units.hpp
+minimal/plugins/stable_identity.hpp   # the alias key an SDK registry renames by

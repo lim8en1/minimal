@@ -662,7 +662,7 @@ TEST_CASE("truncating a name at a byte limit never splits a UTF-8 character",
     std::string prompt;
     for (int i = 0; i < 20; ++i) prompt += emoji;  // 80 bytes, no ASCII
 
-    const auto truncated = minimal::client::TruncateUtf8(prompt, 60);
+    const auto truncated = minimal::common::TruncateUtf8Bytes(prompt, 60);
     CHECK(truncated.size() == 60);  // 15 whole emoji
     // Every byte accounted for as a complete sequence: re-scanning finds no
     // truncated lead byte at the end.
@@ -675,8 +675,8 @@ TEST_CASE("truncating a name at a byte limit never splits a UTF-8 character",
     }
 
     // A limit that lands mid-character drops that character rather than half of it.
-    CHECK(minimal::client::TruncateUtf8(emoji + emoji, 6).size() == 4);
-    CHECK(minimal::client::TruncateUtf8("ascii", 60) == "ascii");
+    CHECK(minimal::common::TruncateUtf8Bytes(emoji + emoji, 6).size() == 4);
+    CHECK(minimal::common::TruncateUtf8Bytes("ascii", 60) == "ascii");
 }
 
 TEST_CASE("a client-side cancel ends the turn with STOP_REASON_CANCELLED",

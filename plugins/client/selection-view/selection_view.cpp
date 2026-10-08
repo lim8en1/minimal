@@ -3,6 +3,7 @@
 #include <mutex>
 #include <utility>
 
+#include "minimal/client/sdk/picker_model.hpp"
 #include "minimal/client/sdk/utf8.hpp"
 #include "minimal/client/sdk/rebuilding.hpp"
 
@@ -20,10 +21,7 @@ std::vector<client::MenuRow> BuildAgentRows(const std::vector<v1::AgentPresetSum
     const std::string needle = client::ToLower(filter);
     std::vector<client::MenuRow> rows;
     for (const auto& preset : presets) {
-        if (!needle.empty() && client::ToLower(preset.name()).find(needle) == std::string::npos &&
-            client::ToLower(preset.description()).find(needle) == std::string::npos) {
-            continue;
-        }
+        if (!client::MatchesFilter(needle, {preset.name(), preset.description()})) continue;
         std::string label = preset.name();
         if (!preset.description().empty()) label += "  ·  " + preset.description();
         rows.push_back({std::move(label), preset.name(), /*header=*/false, preset.color()});

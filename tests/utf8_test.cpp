@@ -10,7 +10,6 @@
 
 #include "minimal/client/sdk/utf8.hpp"
 
-using minimal::client::SanitizeUtf8;
 using minimal::client::StripControlChars;
 using minimal::client::TruncateUtf8Columns;
 using minimal::client::Utf8ColumnWidth;
@@ -104,15 +103,21 @@ TEST_CASE("StripControlChars drops C0/C1 controls and DEL, keeps everything else
 // A raw Latin-1 paste (or any other byte-broken prompt) must degrade to the
 // replacement character client-side instead of aborting the turn with a
 // confusing server-side INTERNAL error over invalid UTF-8.
-TEST_CASE("SanitizeUtf8 repairs malformed sequences, leaves valid input untouched",
+TEST_CASE("an argv prompt is scrubbed to valid UTF-8, overlongs and surrogates included",
           "[utf8]") {
-    CHECK(SanitizeUtf8("hello") == "hello");
+    using minimal::common::ScrubUtf8;
+    CHECK(ScrubUtf8("hello") == "hello");
     // 0xE9 alone ('é' in Latin-1) is not a valid UTF-8 lead byte for a
     // 1-byte sequence and has no continuation byte following -- malformed.
-    CHECK(SanitizeUtf8("caf\xE9") == "caf\xEF\xBF\xBD");
+    CHECK(ScrubUtf8("caf\xE9") == "caf\xEF\xBF\xBD");
     // Already-valid multi-byte text passes through byte-identical.
     const std::string valid = "\xE6\x97\xA5\xE6\x9C\xAC";
-    CHECK(SanitizeUtf8(valid) == valid);
+    CHECK(ScrubUtf8(valid) == valid);
+    // Regression: the client's own SanitizeUtf8 used the lenient decoder and
+    // passed an encoded surrogate and an overlong NUL through, which the
+    // server's proto parser then refused.
+    CHECK(ScrubUtf8("\xED\xA0\x80").find("\xED\xA0\x80") == std::string::npos);
+    CHECK(ScrubUtf8("\xC0\x80").find("\xC0\x80") == std::string::npos);
 }
 
 TEST_CASE("Utf8CharColumnWidth follows the renderer's table, emoji planes included",

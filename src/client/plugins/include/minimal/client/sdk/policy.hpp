@@ -25,6 +25,16 @@ inline constexpr std::size_t kToolInputSummaryBytes = 120;
 // Picker columns: a session/preset name.
 inline constexpr std::size_t kNameColumnCap = 40;
 
+// Transient notices: cleared after this many ticks of UI activity, and never
+// before they have been visible this long (a streaming background tab is
+// activity too). The SDK's chat model applies them, so they are a contract.
+inline constexpr int kNoticeTicksDefault = 20;
+inline constexpr std::chrono::milliseconds kNoticeMinVisible = std::chrono::seconds(4);
+
+// A running tool's spinner advances one frame per interval: visibly alive,
+// calm enough not to distract. Every tool-status renderer shares it.
+inline constexpr std::chrono::milliseconds kSpinnerFrameInterval{120};
+
 // The status bar's session-name column.
 inline constexpr std::size_t kStatusSessionColumnCap = 24;
 

@@ -237,7 +237,7 @@ public:
         const bool multiline = newline != std::string::npos;
         if (multiline) command.resize(newline);
         if (command.size() > kToolInputSummaryBytes) {
-            command = TruncateUtf8(command, kToolInputSummaryBytes) + "…";
+            command = common::TruncateUtf8Bytes(command, kToolInputSummaryBytes) + "…";
         } else if (multiline) {
             command += " …";
         }

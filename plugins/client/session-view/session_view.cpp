@@ -19,45 +19,6 @@ namespace minimal::session_view {
 
 namespace {
 
-// A view root rebuilt from the view's state whenever it is marked stale
-// (client::RebuildingComponent's rule: at the start of a render or an event,
-// never mid-frame), which also claims Escape while `wants_escape` says so --
-// the delete confirmation's "cancel", which would otherwise close the whole
-// view (the host owns Escape for a plugin modal).
-class StateView final : public ftxui::ComponentBase, public client::EscapeAware {
-public:
-    StateView(std::shared_ptr<std::atomic<bool>> stale, std::function<ftxui::Component()> build,
-              std::function<bool()> wants_escape)
-        : stale_(std::move(stale)), build_(std::move(build)), wants_escape_(std::move(wants_escape)) {}
-
-    bool WantsEscape() const override { return wants_escape_ && wants_escape_(); }
-
-private:
-    void Sync() {
-        if (child_ && !stale_->exchange(false)) return;
-        stale_->store(false);
-        if (child_) DetachAllChildren();
-        child_ = build_();
-        Add(child_);
-    }
-    ftxui::Element OnRender() override {
-        Sync();
-        return child_->Render();
-    }
-    bool OnEvent(ftxui::Event event) override {
-        Sync();
-        const ftxui::Component target = child_;  // a callback may mark it stale
-        return target->OnEvent(std::move(event));
-    }
-    bool Focusable() const override { return true; }
-    ftxui::Component ActiveChild() override { return child_; }
-
-    std::shared_ptr<std::atomic<bool>> stale_;
-    std::function<ftxui::Component()> build_;
-    std::function<bool()> wants_escape_;
-    ftxui::Component child_;
-};
-
 // The delete confirmation: the kit's modal chrome over a yes/no answered by
 // key. Not a filterable menu -- a "type to filter" line over two fixed rows
 // read as a picker, and Enter on whichever row the cursor rested on was one
@@ -337,7 +298,7 @@ ftxui::Component SessionsView::component() {
                  }},
             *theme);
     };
-    return ftxui::Make<StateView>(state_->stale, std::move(build), [state = state_] {
+    return ftxui::Make<client::RebuildingComponent>(state_->stale, std::move(build), [state = state_] {
         std::lock_guard<std::mutex> lock(state->mtx);
         return !state->confirm_delete.empty();
     });

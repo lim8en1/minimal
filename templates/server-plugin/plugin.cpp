@@ -64,9 +64,10 @@ private:
 
 extern "C" {
 
-const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
-const char* minimal_plugin_name() { return "@PLUGIN_NAME@"; }
-const char* minimal_plugin_version() { return minimal::common::Version(); }
+// The tag and version baked into THIS .so at compile time -- not
+// common::AbiTag(), which binds to the running host's copy at dlopen and
+// would always match it, letting a stale plugin load.
+MINIMAL_PLUGIN_ABI_SYMBOLS("@PLUGIN_NAME@")
 
 void minimal_plugin_register_tools(
     minimal::tools::ToolRegistry& registry,
