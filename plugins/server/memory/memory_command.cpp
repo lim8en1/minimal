@@ -12,6 +12,11 @@
 //   /memory reindex                       re-queue entries that failed to embed
 //
 // Tag commands act on this project's vocabulary unless "global" is given.
+//
+// Sessionless AND ReadOnly, the /mcp precedent: the store is process-global
+// and guards itself, so nothing here touches session state -- the meaning
+// ReadOnly() carries, not "mutates nothing". It answers beside a live turn
+// instead of queueing behind it.
 
 #include <filesystem>
 #include <sstream>
@@ -23,7 +28,7 @@
 namespace minimal::memory {
 namespace {
 
-class MemoryCommand final : public commands::Command {
+class MemoryCommand final : public commands::Sessionless<commands::HarnessCommand> {
 public:
     explicit MemoryCommand(std::shared_ptr<MemoryRuntime> runtime) : runtime_(std::move(runtime)) {}
 
@@ -33,8 +38,7 @@ public:
         return "/memory [index | tags [merge|rename <from> <to> | suggest-merges] [global] | "
                "purge <path|group-id> | reindex]";
     }
-    bool RequiresSession() const override { return false; }
-    bool ReadOnly() const override { return false; }  // tags/purge/reindex write
+    bool ReadOnly() const override { return true; }
 
     commands::CommandResult Execute(commands::CommandContext& context,
                                     const commands::CommandArgs& args) override {
@@ -165,13 +169,12 @@ private:
     std::shared_ptr<MemoryRuntime> runtime_;
 };
 
-class MemoryUnavailableCommand final : public commands::Command {
+class MemoryUnavailableCommand final : public commands::Sessionless<commands::HarnessCommand> {
 public:
     explicit MemoryUnavailableCommand(std::string reason) : reason_(std::move(reason)) {}
     std::string_view Name() const override { return "memory"; }
     std::string_view Summary() const override { return "memory is unavailable (see reason)"; }
     std::string_view Usage() const override { return "/memory"; }
-    bool RequiresSession() const override { return false; }
     bool ReadOnly() const override { return true; }
     commands::CommandResult Execute(commands::CommandContext&, const commands::CommandArgs&) override {
         return commands::CommandResult::Error("memory is unavailable: " + reason_);
