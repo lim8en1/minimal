@@ -20,15 +20,19 @@ struct ToolSourceFailure {
 };
 
 struct ToolSourceActivation {
-    std::vector<std::string> groups;       // registry groups, in preset order
-    std::vector<ToolSourceFailure> failures;  // members left out, in preset order
+    // Registry groups of every member whose source is loaded, in preset
+    // order -- including the members that failed: their groups stay active
+    // (empty) so the tools appear when the member comes up later.
+    std::vector<std::string> groups;
+    std::vector<ToolSourceFailure> failures;  // members not up now, in preset order
 };
 
 // A fresh reappraisal every call, not a sticky blocklist. Members activate in
 // PARALLEL under one shared `budget`, so one hung server costs at most the
 // budget, not its full connect + tools/list timeouts. A member past the
-// deadline is left out (reported as a failure); its detached activation thread
-// owns everything it touches, so nothing dangles when it finishes later.
+// deadline is reported as a failure but its group stays active; its detached
+// activation thread owns everything it touches, so nothing dangles when it
+// finishes later -- and its tools then appear in the session.
 // `sources` may be null: every named member then fails as "not available".
 ToolSourceActivation ActivateToolSources(
     const std::map<std::string, std::vector<std::string>>& tool_sources,

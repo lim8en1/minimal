@@ -926,9 +926,8 @@ class FixedToolSource final : public tools::ToolSource {
 public:
     explicit FixedToolSource(std::vector<std::string> members) : members_(std::move(members)) {}
     std::vector<std::string> Members() const override { return members_; }
-    std::optional<std::string> Activate(const std::string&, std::string&) override {
-        return std::nullopt;
-    }
+    std::string GroupOf(const std::string& member) const override { return member; }
+    bool Activate(const std::string&, std::string&) override { return false; }
 
 private:
     std::vector<std::string> members_;

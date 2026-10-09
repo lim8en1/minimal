@@ -284,28 +284,46 @@ TEST_CASE("CancelTurn wakes a blocked MCP tool call", "[session_mcp]") {
     REQUIRE(fixture.session->WaitForIdleForTesting(std::chrono::seconds(6)));
 }
 
-TEST_CASE("a preset's disabled-but-configured server stays disabled and the session starts",
+TEST_CASE("a preset's disabled server starts the session quietly; enabling it adds its tools live",
           "[session_mcp]") {
     nlohmann::json disabled = StdioEntry("fake", "normal");
     disabled["enabled"] = false;
     Fixture fixture(nlohmann::json::array({disabled}), {"fake"});
     fixture.Script(TextResponse("done"));
+    fixture.Script(TextResponse("done again"));
     fixture.Start();
 
     REQUIRE(fixture.session->SubmitTurn("go"));
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 
-    // Never auto-enabled, never spawned; its tools are absent.
+    // Never auto-enabled, never spawned; its tools are absent -- and that is
+    // the operator's choice, not an error.
     CHECK_FALSE(fixture.manager->StatusOf("fake").enabled);
     CHECK_FALSE(fixture.manager->StatusOf("fake").alive);
-    const auto& requests = fixture.provider->requests();
-    REQUIRE_FALSE(requests.empty());
-    for (const auto& def : requests[0].tools) {
-        CHECK(def.name != "mcp__fake__echo");
+    for (const auto& event : fixture.DrainQueue()) CHECK_FALSE(event.has_error());
+    {
+        const auto& requests = fixture.provider->requests();
+        REQUIRE_FALSE(requests.empty());
+        for (const auto& def : requests[0].tools) CHECK(def.name != "mcp__fake__echo");
     }
+
+    // /mcp fake enable (connects). Same session: no restart, no /agent switch.
+    std::string error;
+    REQUIRE(fixture.manager->SetEnabled("fake", true, error));
+    REQUIRE(fixture.session->SubmitTurn("go again"));
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    const auto& requests = fixture.provider->requests();
+    REQUIRE(requests.size() == 2);
+    bool saw_echo = false;
+    for (const auto& def : requests[1].tools) {
+        if (def.name == "mcp__fake__echo") saw_echo = true;
+    }
+    CHECK(saw_echo);
 }
 
-TEST_CASE("a subagent whose preset requires a dead server does not start", "[session_mcp]") {
+TEST_CASE("a subagent whose preset requires a dead server does not start; a disabled one does",
+          "[session_mcp]") {
     namespace fs = std::filesystem;
     testing::TempDir dir;
     fs::create_directories(dir.path() / "agents");
@@ -345,7 +363,17 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
                                 .observers = &observers},
         db, agent::LoopConfig{}, minimal::common::DefaultLogger(), 60s);
 
-    const std::string broken_config = WriteMcpsConfig(nlohmann::json::array({StdioEntry("broken", "garbage")}));
+    // "broken" never answers initialize. A dead server refuses the spawn; the
+    // same server disabled by the operator does not -- the child starts
+    // without its tools.
+    nlohmann::json entry = StdioEntry("broken", "garbage");
+    bool expect_spawn = false;
+    SECTION("dead") {}
+    SECTION("disabled") {
+        entry["enabled"] = false;
+        expect_spawn = true;
+    }
+    const std::string broken_config = WriteMcpsConfig(nlohmann::json::array({entry}));
     mcp::McpClientManager manager(
         minimal::config::LoadMcpsConfig(broken_config), tools,
         mcp::McpLimits{std::chrono::seconds(2), std::chrono::seconds(2)},
@@ -375,9 +403,15 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
     tools::ToolContext ctx{minimal::common::DefaultLogger()};
     ctx.session_id = parent->info().session_id;
     const agent::SubagentOutcome outcome = subagents.Spawn(request, ctx);
-    REQUIRE(outcome.kind == agent::SubagentOutcome::Kind::kError);
-    CHECK(outcome.error.find("unavailable") != std::string::npos);
-    CHECK(outcome.child_session_id.empty());
+    if (expect_spawn) {
+        INFO(outcome.error);
+        CHECK(outcome.kind != agent::SubagentOutcome::Kind::kError);
+        CHECK_FALSE(outcome.child_session_id.empty());
+    } else {
+        REQUIRE(outcome.kind == agent::SubagentOutcome::Kind::kError);
+        CHECK(outcome.error.find("unavailable") != std::string::npos);
+        CHECK(outcome.child_session_id.empty());
+    }
 
     std::remove(broken_config.c_str());
 }

@@ -521,9 +521,9 @@ public:
     void ApplyPreset(AgentPreset preset) override;
 
     // Session-start and /agent activation of the preset's tool_sources: every
-    // member is Activate()d through its source; a failure drops the member
-    // FOR THIS CALL (surfaced as an ErrorEvent) and the session proceeds
-    // without it. Sets the loop's active group list. Runs where blocking is
+    // member is Activate()d through its source; a failure is surfaced as an
+    // ErrorEvent and the session proceeds with that member's group empty
+    // until the member comes up. Sets the loop's active group list. Runs where blocking is
     // allowed -- session construction and the worker at a preset-switch
     // boundary -- never the RPC reader.
     void RefreshToolSources();

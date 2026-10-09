@@ -1,11 +1,11 @@
 #pragma once
 
-#include <optional>
 #include <string>
 #include <vector>
 
 #include "minimal/common/logger.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
+#include "minimal/mcp/naming.hpp"
 #include "minimal/tools/tool_source.hpp"
 
 namespace minimal::mcp {
@@ -22,9 +22,13 @@ public:
 
     std::vector<std::string> Members() const override { return manager_.ToolServerNames(); }
 
-    std::optional<std::string> Activate(const std::string& member, std::string& error) override;
+    std::string GroupOf(const std::string& member) const override { return McpGroup(member); }
 
-    std::string ReconnectHint() const override { return "reconnect it with /mcp to add them"; }
+    bool Activate(const std::string& member, std::string& error) override;
+
+    std::string ReconnectHint(const std::string& member) const override {
+        return "retry it with /mcp " + member + " enable";
+    }
 
 private:
     McpClientManager& manager_;

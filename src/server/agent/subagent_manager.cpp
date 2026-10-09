@@ -272,7 +272,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
                 error = "no loaded plugin provides tool source '" + source_name + "'";
             } else {
                 try {
-                    up = source->Activate(member, error).has_value();
+                    up = source->Activate(member, error);
                 } catch (const std::exception& e) {
                     error = e.what();
                 } catch (...) {

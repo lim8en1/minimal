@@ -456,35 +456,40 @@ bool McpClientManager::EnsureAlive(const std::string& server_name, std::string& 
     // retired) before this check runs, and a disable that arrives after this
     // check waits behind whatever StartHandle this call is about to do.
     std::lock_guard<std::mutex> start_lock(handle->start_mu);
+    return EnsureAliveHeld(*handle, /*honor_cooldown=*/true, error);
+}
 
+bool McpClientManager::EnsureAliveHeld(ServerHandle& handle, bool honor_cooldown,
+                                       std::string& error) {
+    const std::string& server_name = handle.entry.name;
     const auto now = std::chrono::steady_clock::now();
     {
-        std::lock_guard<std::mutex> lock(handle->mu);
-        if (!handle->enabled) {
+        std::lock_guard<std::mutex> lock(handle.mu);
+        if (!handle.enabled) {
             error = "MCP server '" + server_name + "' is disabled";
             return false;
         }
-        if (handle->alive && handle->connection && now - handle->verified < kVerifiedTtl) {
+        if (handle.alive && handle.connection && now - handle.verified < kVerifiedTtl) {
             // The liveness check the architecture asks for at session start,
             // answered from the recent verdict rather than the wire.
             return true;
         }
     }
 
-    // Snapshot alive+connection together under handle->mu before pinging:
+    // Snapshot alive+connection together under handle.mu before pinging:
     // reading them unguarded here raced HandleInvoker::CallTool's failure
-    // path, which flips handle->alive under handle->mu alone (UB under the
+    // path, which flips handle.alive under handle.mu alone (UB under the
     // memory model, not merely a stale read).
     std::shared_ptr<McpConnection> connection;
     {
-        std::lock_guard<std::mutex> lock(handle->mu);
-        if (handle->alive) connection = handle->connection;
+        std::lock_guard<std::mutex> lock(handle.mu);
+        if (handle.alive) connection = handle.connection;
     }
     if (connection) {
         McpConnection::Failure ping_error;
         if (connection->Ping(nullptr, ping_error)) {
-            std::lock_guard<std::mutex> lock(handle->mu);
-            handle->verified = std::chrono::steady_clock::now();
+            std::lock_guard<std::mutex> lock(handle.mu);
+            handle.verified = std::chrono::steady_clock::now();
             return true;
         }
         logger_.warn("MCP server '{}' liveness check failed ({}); restarting", server_name,
@@ -497,22 +502,24 @@ bool McpClientManager::EnsureAlive(const std::string& server_name, std::string& 
     // loop against a down server pays a full spawn+initialize+discovery
     // attempt per spawn, at spawn rate -- exactly the storm CallTool's new
     // respawn-on-call path (W9.2a) would otherwise invite.
-    {
-        std::lock_guard<std::mutex> lock(handle->mu);
-        const auto since_failure = std::chrono::steady_clock::now() - handle->last_failure;
-        if (handle->last_failure != std::chrono::steady_clock::time_point{} &&
+    // An explicit enable is the user asking for exactly one attempt now, so
+    // it skips the cooldown (it cannot loop: one attempt per command).
+    if (honor_cooldown) {
+        std::lock_guard<std::mutex> lock(handle.mu);
+        const auto since_failure = std::chrono::steady_clock::now() - handle.last_failure;
+        if (handle.last_failure != std::chrono::steady_clock::time_point{} &&
             since_failure < limits_.restart_cooldown) {
             error = "MCP server '" + server_name + "' is in restart cooldown after a recent failure";
             return false;
         }
     }
 
-    if (StartHandle(handle->entry, *handle, error)) return true;
+    if (StartHandle(handle.entry, handle, error)) return true;
     {
-        std::lock_guard<std::mutex> lock(handle->mu);
-        handle->alive = false;
-        handle->error = error;
-        handle->last_failure = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(handle.mu);
+        handle.alive = false;
+        handle.error = error;
+        handle.last_failure = std::chrono::steady_clock::now();
     }
     logger_.error("MCP server '{}' unavailable: {}", server_name, error);
     return false;
@@ -553,12 +560,27 @@ bool McpClientManager::SetEnabled(const std::string& server_name, bool enabled, 
     if (!enabled) {
         RetireConnection(*handle);
         registry_.ReplaceGroupTools(McpGroup(server_name), {});
+        std::lock_guard<std::mutex> lock(handle->mu);
+        handle->enabled = false;
+        return true;
     }
+
+    bool was_enabled;
     {
         std::lock_guard<std::mutex> lock(handle->mu);
-        handle->enabled = enabled;
+        was_enabled = handle->enabled;
+        handle->enabled = true;
     }
-    return true;
+    if (EnsureAliveHeld(*handle, /*honor_cooldown=*/false, error)) return true;
+    // A failed enable leaves the server as it found it: a disabled one goes
+    // back to disabled, so enabling again is the retry. An already-enabled
+    // one stays enabled -- other sessions' respawn-on-use still depends on it.
+    if (!was_enabled) {
+        std::lock_guard<std::mutex> lock(handle->mu);
+        handle->enabled = false;
+        error += "; left disabled";
+    }
+    return false;
 }
 
 std::vector<std::string> McpClientManager::ServerNames() const {

@@ -100,9 +100,12 @@ public:
     // the .cpp) is reused without a wire round trip.
     bool EnsureAlive(const std::string& server_name, std::string& error);
 
-    // Live toggle, no restart. Enabling only flips the flag -- the existing
-    // lazy-connect contract (EnsureAlive on next use) covers the rest.
-    // Disabling flips the flag, retires any live connection through the same
+    // Live toggle, no restart. Enabling CONNECTS (bypassing the restart
+    // cooldown -- an explicit user retry), since a session already past
+    // activation would otherwise never bring the server up; false with
+    // `error` set when it cannot, and a server that was disabled goes back
+    // to disabled, so enabling again is the retry. On an already-enabled
+    // server it is the reconnect. Disabling flips the flag, retires any live connection through the same
     // graveyard path StartHandle uses on restart (never destroys it inline
     // under a lock a concurrent CallTool needs), and retires the server's
     // tools from the registry immediately. Serialized against EnsureAlive via
@@ -143,6 +146,10 @@ private:
     // Returns false with `error` set. Caller holds the handle's start_mu.
     bool StartHandle(const config::McpServerEntry& entry, ServerHandle& handle,
                      std::string& error);
+
+    // EnsureAlive's body for a looked-up handle; caller holds its start_mu.
+    // `honor_cooldown` false is SetEnabled's explicit attempt.
+    bool EnsureAliveHeld(ServerHandle& handle, bool honor_cooldown, std::string& error);
 
     // Moves any live connection out of `handle` and into the graveyard for
     // off-thread teardown, marking the handle not-alive. Shared by

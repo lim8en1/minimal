@@ -124,10 +124,20 @@ TEST_CASE("mcp.endpoint: list and set_enabled over the manager", "[mcp_plugin]")
     CHECK(list["servers"][0]["transport"] == "http");
     CHECK(list["servers"][1]["enabled"] == false);
 
+    // Enabling connects: /bin/echo is no MCP server, so the answer carries
+    // the connect failure and the server stays disabled (toggling again is
+    // the retry).
     auto toggled =
         nlohmann::json::parse(endpoint.Call("set_enabled", R"({"name":"zeta","enabled":true})"));
-    CHECK(toggled["ok"] == true);
-    CHECK(manager.StatusOf("zeta").enabled);
+    CHECK(toggled["ok"] == false);
+    CHECK_FALSE(toggled["error"].get<std::string>().empty());
+    CHECK_FALSE(manager.StatusOf("zeta").enabled);
+    CHECK_FALSE(manager.StatusOf("zeta").alive);
+
+    auto disabled =
+        nlohmann::json::parse(endpoint.Call("set_enabled", R"({"name":"zeta","enabled":false})"));
+    CHECK(disabled["ok"] == true);
+    CHECK_FALSE(manager.StatusOf("zeta").enabled);
 
     auto unknown =
         nlohmann::json::parse(endpoint.Call("set_enabled", R"({"name":"ghost","enabled":true})"));

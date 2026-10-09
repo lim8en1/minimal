@@ -20,15 +20,16 @@ public:
     enum class Mode { kOk, kFail, kThrow, kHang };
     explicit FakeSource(Mode mode, std::string hint = {}) : mode_(mode), hint_(std::move(hint)) {}
     std::vector<std::string> Members() const override { return {}; }
-    std::string ReconnectHint() const override { return hint_; }
-    std::optional<std::string> Activate(const std::string& member, std::string& error) override {
+    std::string ReconnectHint(const std::string&) const override { return hint_; }
+    std::string GroupOf(const std::string& member) const override { return "group-" + member; }
+    bool Activate(const std::string& member, std::string& error) override {
         switch (mode_) {
-            case Mode::kOk: return "group-" + member;
-            case Mode::kFail: error = "refused " + member; return std::nullopt;
+            case Mode::kOk: return true;
+            case Mode::kFail: error = "refused " + member; return false;
             case Mode::kThrow: throw std::runtime_error("boom");
-            case Mode::kHang: std::this_thread::sleep_for(400ms); return "late-" + member;
+            case Mode::kHang: std::this_thread::sleep_for(400ms); return true;
         }
-        return std::nullopt;
+        return false;
     }
 
 private:
@@ -52,7 +53,10 @@ TEST_CASE("ActivateToolSources reports groups and failures per member", "[sessio
 
     const auto activation = ActivateToolSources(wanted, &registry, 2s);
 
-    REQUIRE(activation.groups == std::vector<std::string>{"group-a1", "group-a2"});
+    // A failed member's group stays active (it fills when the member comes
+    // up); only a member with no loaded source has no group at all.
+    REQUIRE(activation.groups ==
+            std::vector<std::string>{"group-b", "group-a1", "group-a2", "group-t"});
     REQUIRE(activation.failures.size() == 3);
     CHECK(activation.failures[0].source_name == "bad");
     CHECK(activation.failures[0].message == "refused b");
@@ -61,7 +65,7 @@ TEST_CASE("ActivateToolSources reports groups and failures per member", "[sessio
     CHECK(activation.failures[2].message == "boom");
 }
 
-TEST_CASE("ActivateToolSources leaves out a member that misses the deadline",
+TEST_CASE("ActivateToolSources reports a member that misses the deadline, keeping its group",
           "[session][tool_sources]") {
     ToolSourceRegistry registry;
     Add(registry, "ok", FakeSource::Mode::kOk);
@@ -72,7 +76,7 @@ TEST_CASE("ActivateToolSources leaves out a member that misses the deadline",
     const auto activation = ActivateToolSources(wanted, &registry, 100ms);
 
     CHECK(std::chrono::steady_clock::now() - started < 380ms);
-    REQUIRE(activation.groups == std::vector<std::string>{"group-a"});
+    REQUIRE(activation.groups == std::vector<std::string>{"group-a", "group-s"});
     REQUIRE(activation.failures.size() == 1);
     CHECK(activation.failures[0].member == "s");
     CHECK(activation.failures[0].message.find("did not become ready") != std::string::npos);
@@ -80,14 +84,18 @@ TEST_CASE("ActivateToolSources leaves out a member that misses the deadline",
     CHECK(activation.failures[0].message.find("(") == std::string::npos);
 }
 
-TEST_CASE("a timed-out member's message carries its source's reconnect hint",
+TEST_CASE("a failed member's message carries its source's reconnect hint",
           "[session][tool_sources]") {
     ToolSourceRegistry registry;
     registry.Register("slow", std::make_shared<FakeSource>(FakeSource::Mode::kHang,
                                                            "reconnect it with /fake"));
-    const auto activation = ActivateToolSources({{"slow", {"s"}}}, &registry, 50ms);
-    REQUIRE(activation.failures.size() == 1);
-    CHECK(activation.failures[0].message.find("(reconnect it with /fake)") != std::string::npos);
+    registry.Register("bad", std::make_shared<FakeSource>(FakeSource::Mode::kFail,
+                                                          "reconnect it with /fake"));
+    const auto activation =
+        ActivateToolSources({{"bad", {"b"}}, {"slow", {"s"}}}, &registry, 50ms);
+    REQUIRE(activation.failures.size() == 2);
+    CHECK(activation.failures[0].message == "refused b (reconnect it with /fake)");
+    CHECK(activation.failures[1].message.find("(reconnect it with /fake)") != std::string::npos);
 }
 
 TEST_CASE("ActivateToolSources with no registry fails every named member",

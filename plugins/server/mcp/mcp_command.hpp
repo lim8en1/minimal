@@ -9,6 +9,9 @@ namespace minimal::mcp {
 // the mcp-view client plugin's view, which reads the server list through this
 // plugin's endpoint). "/mcp <name> enable|disable" toggles LIVE via
 // McpClientManager::SetEnabled -- no server restart, unlike editing mcps.json.
+// Enable also connects (blocking for the connect budget), so the tools reach
+// every session that allows the server on its next request; a failed enable
+// leaves a disabled server disabled, and on an enabled one it is the retry.
 //
 // Sessionless AND ReadOnly: an MCP server's enabled state is process-global,
 // not session state, so it never touches the conversation path -- the exact

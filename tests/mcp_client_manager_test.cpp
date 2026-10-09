@@ -245,6 +245,33 @@ TEST_CASE("McpClientManager: SetEnabled toggles a server live, no restart", "[mc
     CHECK(error.find("disabled") != std::string::npos);
 }
 
+TEST_CASE("McpClientManager: a failed enable restores the prior state and can be retried at once",
+          "[mcp_manager]") {
+    nlohmann::json off = StdioEntry("off", "garbage");
+    off["enabled"] = false;
+    Fixture fixture(nlohmann::json::array({off, StdioEntry("on", "garbage")}),
+                    {std::chrono::seconds(1), std::chrono::seconds(1)});
+    std::string error;
+
+    // Disabled before: back to disabled, so enabling again is the retry.
+    CHECK_FALSE(fixture.manager->SetEnabled("off", true, error));
+    CHECK(error.find("left disabled") != std::string::npos);
+    CHECK_FALSE(fixture.manager->StatusOf("off").enabled);
+
+    // The retry is a real attempt, not refused by the restart cooldown the
+    // failure above just started (default 30 s).
+    error.clear();
+    CHECK_FALSE(fixture.manager->SetEnabled("off", true, error));
+    CHECK(error.find("cooldown") == std::string::npos);
+    CHECK(error.find("left disabled") != std::string::npos);
+
+    // Enabled before: stays enabled (respawn-on-use still applies).
+    error.clear();
+    CHECK_FALSE(fixture.manager->SetEnabled("on", true, error));
+    CHECK(error.find("left disabled") == std::string::npos);
+    CHECK(fixture.manager->StatusOf("on").enabled);
+}
+
 TEST_CASE("McpClientManager: SetEnabled on an unknown server fails", "[mcp_manager]") {
     Fixture fixture(nlohmann::json::array({StdioEntry("on", "normal")}));
     std::string error;
