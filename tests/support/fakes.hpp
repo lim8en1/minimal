@@ -391,14 +391,18 @@ public:
     }
     // Checkpoint tracking mirrors the real store, so compaction tests can
     // assert what a resume would consume.
-    void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary,
-                                  const session::CompactionMeta& meta) override {
+    session::CompactionStamp SaveCompactionCheckpoint(
+        std::int64_t boundary_seq, const llm::Message& summary,
+        const session::CompactionMeta& meta) override {
         std::lock_guard<std::mutex> lock(mu_);
         checkpoint_meta = meta;
-        if (meta.skipped) return;   // a guard's notice, never a checkpoint (as in SQLite)
+        const session::CompactionStamp stamp{static_cast<std::int64_t>(messages.size()) - 1,
+                                             ++checkpoint_stamp_ms};
+        if (meta.skipped) return stamp;   // a guard's notice, never a checkpoint (as in SQLite)
         checkpoint_boundary = boundary_seq;
         checkpoint_summary = summary;
         checkpoint_cleared = false;
+        return stamp;
     }
     void ClearCompactionCheckpoint() override {
         std::lock_guard<std::mutex> lock(mu_);
@@ -421,6 +425,7 @@ public:
     llm::Message checkpoint_summary;
     session::CompactionMeta checkpoint_meta;
     bool checkpoint_cleared = false;
+    std::int64_t checkpoint_stamp_ms = 0;   // the fake's created_at clock: strictly increasing
     mutable std::mutex mu_;
 };
 

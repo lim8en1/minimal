@@ -2154,15 +2154,24 @@ TEST_CASE("every compaction is a scrollback record positioned at its last messag
     for (const char* text : {"m0", "m1", "m2"}) db.AppendMessage(id, UserMsg(text));
 
     const llm::Message first{llm::Role::User, {llm::TextBlock{"first summary"}}};
-    db.SaveCompactionCheckpoint(id, 1, first,
-                                CompactionMeta{.folded_messages = 2, .tokens_before = 700000,
-                                               .tokens_after = 150000, .trigger = "auto"});
+    const auto first_stamp =
+        db.SaveCompactionCheckpoint(id, 1, first,
+                                    CompactionMeta{.folded_messages = 2, .tokens_before = 700000,
+                                                   .tokens_after = 150000, .trigger = "auto"});
     db.AppendMessage(id, UserMsg("m3"));
     const llm::Message second{llm::Role::User, {llm::TextBlock{"second summary"}}};
-    db.SaveCompactionCheckpoint(id, 2, second, CompactionMeta{.trigger = "manual"});
+    const auto second_stamp =
+        db.SaveCompactionCheckpoint(id, 2, second, CompactionMeta{.trigger = "manual"});
 
     const auto records = db.LoadCompactionRecords(id, 0, 100);
     REQUIRE(records.size() == 2);
+    // The returned stamp IS the record's: the live event reuses it, and a
+    // client merges live and paged by (at_seq, created_at) -- any drift
+    // renders the compaction twice.
+    CHECK(first_stamp.at_seq == records[0].at_seq);
+    CHECK(first_stamp.created_at_unix_ms == records[0].created_at_unix_ms);
+    CHECK(second_stamp.at_seq == records[1].at_seq);
+    CHECK(second_stamp.created_at_unix_ms == records[1].created_at_unix_ms);
     // at_seq: the last active message when each ran.
     CHECK(records[0].at_seq == 2);
     CHECK(records[0].boundary_seq == 1);

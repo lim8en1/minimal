@@ -70,8 +70,9 @@ public:
 
     // Appends a compaction record; the one with the highest boundary_seq among
     // the active records is the checkpoint a resume seeds from. Every record
-    // stays visible to scrollback (see CompactionRecord).
-    virtual void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary,
+    // stays visible to scrollback (see CompactionRecord). Returns the record's
+    // stamp, which the live CompactionEvent must reuse.
+    virtual CompactionStamp SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary,
                                           const CompactionMeta& meta) = 0;
     // Deactivates the checkpoint (resume goes back to the full transcript);
     // the records stay for scrollback -- the compactions did happen.

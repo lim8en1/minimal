@@ -1324,10 +1324,10 @@ std::int64_t SessionDatabase::LastMessageSeq(const std::string& session_id) cons
     return sqlite3_column_int64(query.stmt, 0);
 }
 
-void SessionDatabase::SaveCompactionCheckpoint(const std::string& session_id,
-                                               std::int64_t boundary_seq,
-                                               const llm::Message& summary,
-                                               const CompactionMeta& meta) {
+CompactionStamp SessionDatabase::SaveCompactionCheckpoint(const std::string& session_id,
+                                                          std::int64_t boundary_seq,
+                                                          const llm::Message& summary,
+                                                          const CompactionMeta& meta) {
     // Encode outside the mutex, same ruling as AppendMessage: the summary is
     // model output and dump() throws type_error.316 on invalid UTF-8, so the
     // replace handler is required -- but the DOM plus dump need not run while
@@ -1345,7 +1345,8 @@ void SessionDatabase::SaveCompactionCheckpoint(const std::string& session_id,
                       " VALUES (?1, ?2,"
                       " COALESCE((SELECT MAX(seq) FROM messages"
                       "           WHERE session_id = ?1 AND discarded = 0), ?2),"
-                      " ?3, ?4, ?5, ?6, ?7, ?9, ?10, ?11, ?8);",
+                      " ?3, ?4, ?5, ?6, ?7, ?9, ?10, ?11, ?8)"
+                      " RETURNING at_seq, created_at;",
                       "failed to save compaction checkpoint");
     sqlite3_bind_text(insert.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(insert.stmt, 2, boundary_seq);
@@ -1362,9 +1363,15 @@ void SessionDatabase::SaveCompactionCheckpoint(const std::string& session_id,
     sqlite3_bind_int(insert.stmt, 10, meta.skipped ? 1 : 0);
     // A skipped record is a notice, never a checkpoint.
     sqlite3_bind_int(insert.stmt, 11, meta.skipped ? 0 : 1);
+    if (sqlite3_step(insert.stmt) != SQLITE_ROW) {
+        ThrowSqliteError(db_, "failed to save compaction checkpoint");
+    }
+    const CompactionStamp stamp{sqlite3_column_int64(insert.stmt, 0),
+                                sqlite3_column_int64(insert.stmt, 1)};
     if (sqlite3_step(insert.stmt) != SQLITE_DONE) {
         ThrowSqliteError(db_, "failed to save compaction checkpoint");
     }
+    return stamp;
 }
 
 void SessionDatabase::ClearCompactionCheckpoint(const std::string& session_id) {

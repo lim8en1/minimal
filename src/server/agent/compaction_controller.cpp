@@ -132,10 +132,15 @@ void CompactionController::EmitCompactionNotice(std::string_view trigger, std::s
         try {
             // A notice record: boundary -1, never the checkpoint (skipped rows
             // are stored inactive), but scrollback renders it where it happened.
-            store_.SaveCompactionCheckpoint(
+            const auto stamp = store_.SaveCompactionCheckpoint(
                 -1, llm::Message{llm::Role::User, {}},
                 session::CompactionMeta{0, event.tokens_before, event.tokens_after, event.trigger,
                                         event.warning, true});
+            // The record's own stamp: the client merges this event with the
+            // paged record by (at_seq, created_at), so a clock read of ours
+            // that lands a millisecond off renders the notice twice.
+            event.at_seq = stamp.at_seq;
+            event.created_at_unix_ms = stamp.created_at_unix_ms;
         } catch (const std::exception& error) {
             session_.logger.warn("session {}: failed to record compaction notice: {}",
                                  session_.session_id, error.what());
@@ -587,10 +592,15 @@ std::optional<std::size_t> CompactionController::Compact(std::string_view trigge
         event.boundary_seq = *boundary_seq;
         event.at_seq = store_.last_appended_seq();
         try {
-            store_.SaveCompactionCheckpoint(
+            const auto stamp = store_.SaveCompactionCheckpoint(
                 *boundary_seq, result->summary_message,
                 session::CompactionMeta{event.folded_messages, event.tokens_before,
                                         event.tokens_after, event.trigger, event.warning});
+            // The record's own stamp (see EmitCompactionNotice): the fold above
+            // can take milliseconds, so our earlier clock read and the store's
+            // differ, and the client would render the summary twice.
+            event.at_seq = stamp.at_seq;
+            event.created_at_unix_ms = stamp.created_at_unix_ms;
         } catch (const std::exception& error) {
             // Resume falls back to the full-transcript load: today's behavior,
             // degraded only in cost, never in correctness.

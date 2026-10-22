@@ -31,10 +31,10 @@ void SqliteHistoryStore::AppendRound(const llm::Message& assistant,
     last_seq_.store(db_.AppendMessages(session_id_, entries), std::memory_order_release);
 }
 
-void SqliteHistoryStore::SaveCompactionCheckpoint(std::int64_t boundary_seq,
-                                                  const llm::Message& summary,
-                                                  const CompactionMeta& meta) {
-    db_.SaveCompactionCheckpoint(session_id_, boundary_seq, summary, meta);
+CompactionStamp SqliteHistoryStore::SaveCompactionCheckpoint(std::int64_t boundary_seq,
+                                                             const llm::Message& summary,
+                                                             const CompactionMeta& meta) {
+    return db_.SaveCompactionCheckpoint(session_id_, boundary_seq, summary, meta);
 }
 
 void SqliteHistoryStore::ClearCompactionCheckpoint() {

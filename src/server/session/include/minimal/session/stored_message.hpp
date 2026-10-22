@@ -41,6 +41,14 @@ struct CompactionMeta {
     bool skipped = false;
 };
 
+// What the store stamped on a new compaction record. The live event carries
+// these same values: (at_seq, created_at_unix_ms) is the key a client merges a
+// live event with the paged record by, so the two must agree exactly.
+struct CompactionStamp {
+    std::int64_t at_seq = -1;
+    std::int64_t created_at_unix_ms = 0;
+};
+
 // One compaction, as scrollback shows it. at_seq is the last ACTIVE message
 // seq when it ran -- the row renders right after that message; boundary_seq
 // is the last seq its summary replaced.

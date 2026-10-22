@@ -32,7 +32,7 @@ public:
         return last_seq_.load(std::memory_order_acquire);
     }
 
-    void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary,
+    CompactionStamp SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary,
                                   const CompactionMeta& meta) override;
     void ClearCompactionCheckpoint() override;
 

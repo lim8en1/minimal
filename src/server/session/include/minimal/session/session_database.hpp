@@ -411,9 +411,12 @@ public:
     // Appends a record; at_seq is the session's last ACTIVE message seq at
     // insert time. Throws on I/O failure -- the CALLER (AgentLoop::Compact)
     // treats that as an optimization miss and carries on, because the
-    // transcript itself is unaffected either way.
-    void SaveCompactionCheckpoint(const std::string& session_id, std::int64_t boundary_seq,
-                                  const llm::Message& summary, const CompactionMeta& meta = {});
+    // transcript itself is unaffected either way. Returns the stored
+    // (at_seq, created_at) so the live event matches the paged record.
+    CompactionStamp SaveCompactionCheckpoint(const std::string& session_id,
+                                             std::int64_t boundary_seq,
+                                             const llm::Message& summary,
+                                             const CompactionMeta& meta = {});
 
     // /clear drops the working set; a checkpoint surviving it would resurrect
     // a summary of a conversation the user deliberately wiped from view. The
