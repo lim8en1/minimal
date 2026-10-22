@@ -9,13 +9,18 @@ minimal/client/sdk/
 # The wire types the ABI already hands over (ClientApi answers, events).
 minimal/v1/session_service.pb.h
 
+# The JSON <-> Struct conversion for the Struct fields those types carry.
+minimal/proto/struct_json.hpp
+
 # Shared utilities.
 minimal/common/abi_tag.hpp
+minimal/common/atomic_write.hpp
 minimal/common/config_reader.hpp
 minimal/common/clock.hpp
 minimal/common/count_format.hpp
 minimal/common/env.hpp
 minimal/common/model_ref.hpp
+minimal/common/numeric.hpp            # struct_json.hpp includes it
 minimal/common/logger.hpp
 minimal/common/plugin_config_label.hpp
 minimal/common/plugin_config_schema.hpp

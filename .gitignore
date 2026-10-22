@@ -67,3 +67,7 @@ Thumbs.db
 *.sqlite-wal
 *.sqlite-shm
 *.log
+
+# Python bytecode (scripts/)
+__pycache__/
+*.pyc

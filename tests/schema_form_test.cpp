@@ -626,7 +626,7 @@ TEST_CASE("config-view survives random navigation, keys and mouse", "[schema_for
     SUCCEED("no crash");
 }
 
-// --- config-view polish (CONFIG_VIEW_PLAN.md F1-F7, §1.3) ----------------------
+// --- config-view polish (F1-F7) ------------------------------------------------
 
 TEST_CASE("the form: Backspace stays, Escape and left step back", "[schema_form][polish]") {
     // F1/F2: Backspace is a habitual delete, often pressed right after the
@@ -677,7 +677,7 @@ TEST_CASE("the form: only live fields are tagged; the hints follow the row",
 
 TEST_CASE("the form: a cut value is shown whole below; widths count columns",
           "[schema_form][polish]") {
-    // F4 and §1.3.
+    // F4: a cut value shows in full below; widths are display columns.
     json describe = kDescribe;
     describe["schema"]["fields"].push_back({{"path", "net.endpoint_url_that_is_long"},
                                             {"type", "string"},

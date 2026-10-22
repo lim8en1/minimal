@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <utility>
@@ -20,8 +21,9 @@ std::string FormatLocal(std::int64_t unix_ms, const char* format) {
     const std::time_t stamp = common::UnixMillisToTimeT(unix_ms);
     std::tm local{};
     localtime_r(&stamp, &local);
-    char buffer[64];
-    return std::strftime(buffer, sizeof(buffer), format, &local) > 0 ? buffer : "";
+    std::ostringstream out;
+    out << std::put_time(&local, format);
+    return out.str();
 }
 
 std::string Stamp(std::int64_t unix_ms) {

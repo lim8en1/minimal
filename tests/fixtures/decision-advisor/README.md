@@ -2,8 +2,8 @@
 
 Captured live against OpenRouter `POST /api/alpha/decisions` with
 `~typesafe/jev-latest` (answered as `typesafe/jev-1.13-20260917`), 2026-01-14.
-The request bodies that produced them are recorded in
-.minimal/plans/typesafe-advisor.md (Backends).
+The requests were the plugin's own request shape (see
+plugins/server/decision-advisor/README.md) for the tool calls below.
 
 - allow-response.json  -- `make test`: allow 0.91 / deny 0 / review 0.09
 - deny-response.json   -- `rm -rf ~/Library`: deny 1.0
