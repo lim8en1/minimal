@@ -1,0 +1,75 @@
+# Build and test on macOS and Linux: ./configure (vcpkg pinned to vcpkg.json's
+# builtin-baseline), build with the test binaries, ctest. The vcpkg binary
+# cache is kept across runs; a cold one rebuilds grpc and friends, which takes
+# most of an hour.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    env:
+      # Runner images ship their own vcpkg; ./configure bootstraps .vcpkg/ at
+      # the pinned baseline instead.
+      VCPKG_ROOT: ""
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-cache
+      VCPKG_DISABLE_METRICS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # clang-tidy enables the policy_constants test.
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build pkg-config zip unzip tar curl clang-tidy
+
+      - name: Install tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja pkg-config autoconf automake libtool
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .vcpkg-cache
+          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/**') }}
+          restore-keys: vcpkg-${{ matrix.os }}-
+
+      - name: Configure
+        run: |
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          ./configure
+
+      # Saved even when the build below fails: the dependency builds are the
+      # expensive part and stay valid.
+      - name: Save vcpkg binary cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .vcpkg-cache
+          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**', 'cmake/triplets/**') }}
+
+      - name: Build
+        run: cmake --build --preset default --target all minimal_test_binaries
+
+      - name: Test
+        run: ctest --preset default

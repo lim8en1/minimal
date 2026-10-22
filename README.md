@@ -115,7 +115,7 @@ Everything interesting ships as a plugin: `tools-fs`, `tools-search`,
 `decision-advisor` (server), and `logo`, `cost-view`, `checklist-view`
 (client). `session-titler` and `decision-advisor` ship disabled;
 `decision-advisor` sends tool input to a decision-model endpoint to auto-answer
-permission prompts, so enabling it takes two deliberate edits (see its
+permission prompts, so enabling it takes three deliberate edits (see its
 [README](plugins/server/decision-advisor/README.md)). Drop your own
 into `<config>/plugins/`, enable/disable any plugin in `plugins.json`,
 configure it in `plugins.d/<name>.json`, and rename tools/commands via
