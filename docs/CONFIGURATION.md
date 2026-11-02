@@ -183,6 +183,7 @@ always compact instead of being stuck past its window.
 | `max_background_tasks` | int | `4` — per-session cap on live background tasks |
 | `max_output_bytes` | int | `65536` (64 KiB) — bounds the persisted result (start and end kept; the whole output is spilled) |
 | `max_file_size_bytes` | int | `1073741824` (1 GiB) — RLIMIT_FSIZE backstop |
+| `memory_max_percent` | int | `50` — per-command memory ceiling, percent of RAM: each command runs in a transient `systemd-run --user --scope` with `MemoryMax`, so a runaway is OOM-killed alone instead of oomd killing the server's whole cgroup (terminal/tmux scope). Linux with a user systemd manager only; elsewhere ignored. `0` = off |
 | `shell` | string | `"/bin/sh"` |
 | `inherit_env` | string | `"allowlist"` — or `"all"` |
 
@@ -201,6 +202,7 @@ always compact instead of being stuck past its window.
 | `max_capture_bytes` | int | `1048576` (1 MiB) — driver-side per-stream stdout/stderr capture cap |
 | `stream_head_bytes` / `stream_tail_bytes` | int | `262144` / `786432` — head/tail windows kept of a long stream |
 | `max_file_size_bytes` | int | `1073741824` (1 GiB) — RLIMIT_FSIZE backstop |
+| `memory_max_percent` | int | `50` — interpreter memory ceiling, percent of RAM (transient systemd scope, as for `tools-bash`); applies to the next interpreter spawned. Linux only; `0` = off |
 
 **`tools-search`** — `{"grep": {...}, "glob": {...}}`, every field a positive integer:
 `grep.default_head_limit` (250), `grep.max_results` (1000), `grep.max_file_bytes`

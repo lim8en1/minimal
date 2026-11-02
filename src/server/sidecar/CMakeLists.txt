@@ -4,5 +4,6 @@ minimal_server_module(sidecar
         process.cpp
         capped_buffer.cpp
         drain.cpp
+        memory_scope.cpp
         task_registry.cpp
 )

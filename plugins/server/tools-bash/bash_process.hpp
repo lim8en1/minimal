@@ -21,6 +21,7 @@
 
 #include "minimal/sidecar/capped_buffer.hpp"
 #include "minimal/sidecar/process.hpp"
+#include "minimal/common/logger.hpp"
 #include "minimal/common/units.hpp"
 
 #include "bash_settings.hpp"
@@ -75,8 +76,13 @@ ShellState ParseStatePayload(const std::string& payload);
 // pipes, rlimit backstops) is identical, so this is the ONE place that shape
 // is expressed -- any future rlimit or state-fd change is made here, not
 // twice.
+//
+// With `settings.memory_max_percent` set and a usable systemd user manager
+// (memory_scope.hpp), argv runs the shell inside a transient MemoryMax scope;
+// `logger` reports the one-time probe.
 minimal::sidecar::LaunchSpec BuildLaunchSpec(const std::string& wrapped, const SessionShellState& state,
-                                             const BashSettings& settings, std::int64_t timeout_ms);
+                                             const BashSettings& settings, std::int64_t timeout_ms,
+                                             common::Logger& logger);
 
 // fork + execve of the configured shell with `wrapped`, over the sidecar
 // core's pipe-plan launcher. The child setsid()s, so pgid == pid and
@@ -88,7 +94,14 @@ minimal::sidecar::LaunchSpec BuildLaunchSpec(const std::string& wrapped, const S
 // ScopedFds and re-wrap fresh ones just to call DrainAndReap, a window where
 // a throw between the two would leak both fds and the child.
 minimal::sidecar::Launched LaunchProcess(const std::string& wrapped, const SessionShellState& state,
-                                         const BashSettings& settings, std::int64_t timeout_ms);
+                                         const BashSettings& settings, std::int64_t timeout_ms,
+                                         common::Logger& logger);
+
+// "[terminated by signal N]", plus a hint when the command ran under a memory
+// ceiling and died of SIGKILL -- what the kernel's OOM kill inside the scope
+// looks like (a deadline or cancellation is reported before this is reached).
+// Shared by the sync and background result paths.
+std::string SignalFooter(int sig, const BashSettings& settings, common::Logger& logger);
 
 // Group kill / pgid tracking: the sidecar core's one implementation (and one
 // sweep, shared with every other spawning plugin).

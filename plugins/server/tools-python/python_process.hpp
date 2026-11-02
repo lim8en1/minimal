@@ -23,6 +23,7 @@
 
 #include <unistd.h>
 
+#include "minimal/common/logger.hpp"
 #include "minimal/sidecar/process.hpp"
 
 namespace minimal::tools_python {
@@ -50,6 +51,9 @@ struct LaunchedInterpreter {
     // Non-empty when Launch() had to clamp an rlimit backstop to the host's
     // hard cap (see ClampRlimit); log it -- the child runs degraded, not dead.
     std::string warnings;
+    // The interpreter runs under a MemoryMax scope (sidecar/memory_scope.hpp):
+    // a SIGKILL death is then likely the ceiling, and says so.
+    bool memory_scoped = false;
 };
 
 // fork + execve of `argv` with `cwd` as the working directory, over the
@@ -70,7 +74,8 @@ constexpr int kUserStdinFd = kStreamFd + 1;
 LaunchedInterpreter LaunchInterpreter(const std::vector<std::string>& argv,
                                       const std::filesystem::path& cwd,
                                       const std::map<std::string, std::string>& env,
-                                      std::int64_t cpu_seconds, std::int64_t file_size_bytes);
+                                      std::int64_t cpu_seconds, std::int64_t file_size_bytes,
+                                      int memory_max_percent, common::Logger& logger);
 
 // One short-lived helper command (venv creation, package install): runs argv
 // to completion with merged output captured (head+tail capped), the whole

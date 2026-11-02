@@ -43,6 +43,10 @@ struct BashSettings {
     std::int64_t max_output_bytes = kDefaultMaxOutputBytes;
     // RLIMIT_FSIZE backstop, reachable now that redirection works (`cmd > big`).
     std::int64_t max_file_size_bytes = sidecar::kFileSizeBackstopBytes;
+    // MemoryMax of the transient systemd scope each command runs in, percent
+    // of physical RAM; 0 = no scope. Linux with a reachable user manager only
+    // (see memory_scope.hpp); elsewhere commands run unscoped regardless.
+    int memory_max_percent = kDefaultMemoryMaxPercent;
     // Operator-swappable, like everything else here: a different POSIX shell, or
     // a wrapper that enters a container, needs no code change.
     std::string shell = "/bin/sh";

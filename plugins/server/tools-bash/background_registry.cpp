@@ -133,8 +133,8 @@ void WatchBackgroundTask(TaskRegistry::TaskState& task,
             if (outcome.reap_error) {
                 text = with_output("[could not determine exit status (process already reaped)]");
             } else if (WIFSIGNALED(outcome.wait_status)) {
-                text = with_output("[terminated by signal " +
-                                   std::to_string(WTERMSIG(outcome.wait_status)) + "]");
+                text = with_output(
+                    SignalFooter(WTERMSIG(outcome.wait_status), settings, logger));
             } else if (outcome.io_error) {
                 text = "[background task " + task.id + " failed reading output]";
             } else {
@@ -185,7 +185,9 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
     // by the time it reports, so the state channel is drained and discarded
     // here rather than parsed, but it is still the identical spec otherwise.
     auto launched =
-        minimal::sidecar::Launch(BuildLaunchSpec(WrapCommand(command), state, settings, timeout_ms));
+        minimal::sidecar::Launch(BuildLaunchSpec(
+            WrapCommand(command), state, settings, timeout_ms,
+            handles.logger ? *handles.logger : common::DefaultLogger()));
     if (!launched.ok) {
         *error = "failed to start shell: " + launched.spawn_error;
         return std::nullopt;

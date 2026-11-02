@@ -27,6 +27,8 @@
 #include "bash_settings.hpp"
 #include "bash_tool.hpp"
 #include "command_scanner.hpp"
+#include "bash_process.hpp"
+#include "minimal/sidecar/memory_scope.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
@@ -669,6 +671,29 @@ TEST_CASE("bash settings: defaults, seconds-keyed overrides, and named refusals"
     // did not ask for a timeout: the configuration contradicting itself.
     CHECK_THROWS_WITH(tools_bash::ParseBashSettings({{"timeout_s", 90}, {"max_timeout_s", 1}}),
                       ContainsSubstring("max_timeout_s: must not be below timeout_s"));
+}
+
+TEST_CASE("bash memory scope: setting bounds and the systemd-run argv",
+          "[tools_bash][settings]") {
+    using Catch::Matchers::ContainsSubstring;
+    CHECK(tools_bash::ParseBashSettings(nlohmann::json::object()).memory_max_percent == 50);
+    CHECK(tools_bash::ParseBashSettings({{"memory_max_percent", 0}}).memory_max_percent == 0);
+    CHECK_THROWS_WITH(tools_bash::ParseBashSettings({{"memory_max_percent", 101}}),
+                      ContainsSubstring("memory_max_percent"));
+
+    // The command follows `--` verbatim: systemd-run execs it in place, so
+    // the shell's argv is exactly the unscoped one.
+    const sidecar::MemoryScope scope{"/usr/bin/systemd-run", "/run/user/1000"};
+    CHECK(sidecar::ScopedArgv(scope, 25, {"/bin/sh", "-c", "echo hi"}) ==
+          std::vector<std::string>{"/usr/bin/systemd-run", "--user", "--scope", "--quiet",
+                                   "--collect", "-p", "MemoryMax=25%", "--", "/bin/sh", "-c",
+                                   "echo hi"});
+
+    // No ceiling configured: a SIGKILL is just a SIGKILL.
+    tools_bash::BashSettings unscoped;
+    unscoped.memory_max_percent = 0;
+    CHECK(tools_bash::SignalFooter(9, unscoped, common::DefaultLogger()) ==
+          "[terminated by signal 9]");
 }
 
 // --- execution: the capability this rework exists for -------------------------------

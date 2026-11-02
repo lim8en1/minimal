@@ -54,4 +54,14 @@ inline constexpr std::int64_t kFileSizeBackstopBytes = common::kGiB;
 // go first.
 inline constexpr std::size_t kMaxFinishedTaskRecordsPerSession = 32;
 
+// The one-time `systemd-run --user --scope true` probe (memory_scope.hpp): a
+// reachable user manager answers in tens of milliseconds; a wedged bus must
+// not stall the first spawn for long.
+inline constexpr std::chrono::milliseconds kMemoryScopeProbeTimeout{5000};
+// The ceiling the probe asks for: any valid MemoryMax proves the property is
+// accepted; 100% cannot constrain /bin/true.
+inline constexpr int kMemoryScopeProbePercent = 100;
+// Room for systemd-run's one-line refusal, logged when the probe fails.
+inline constexpr std::int64_t kMemoryScopeProbeOutputBytes = 4 * static_cast<std::int64_t>(common::kKiB);
+
 }  // namespace minimal::sidecar

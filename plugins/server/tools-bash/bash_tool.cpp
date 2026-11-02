@@ -527,7 +527,7 @@ public:
         timeout_ms = std::min(timeout_ms, settings->max_timeout_ms);
         const auto state = store_.Snapshot(ctx.session_id, ctx.project_root);
 
-        auto proc = LaunchProcess(WrapCommand(command), state, *settings, timeout_ms);
+        auto proc = LaunchProcess(WrapCommand(command), state, *settings, timeout_ms, ctx.logger);
         if (!proc.ok) {
             const auto duration_ms = ElapsedMs(started);
             ctx.logger.warn("bash[{}] spawn failed: {} ({} ms)", ctx.session_id, proc.spawn_error,
@@ -636,7 +636,7 @@ public:
             ctx.logger.warn("bash[{}] '{}' terminated by signal {} ({} ms)", ctx.session_id,
                             command, sig, duration_ms);
             return WithDisplay(
-                Error(with_notes("[terminated by signal " + std::to_string(sig) + "]")),
+                Error(with_notes(SignalFooter(sig, *settings, ctx.logger))),
                 display({{"signal", sig}}));
         }
 

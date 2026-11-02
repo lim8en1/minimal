@@ -25,6 +25,8 @@ PythonSettings ParsePythonSettings(const nlohmann::json& config) {
     reader.Describe("max_output_bytes", {"Bounds the persisted result text per request."});
     reader.Describe("max_capture_bytes", {"Per-field capture cap (stdout, stderr, result, ...)."});
     reader.Describe("max_file_size_bytes", {"RLIMIT_FSIZE backstop for files the code writes."});
+    reader.Describe("memory_max_percent",
+                    {"Interpreter memory ceiling, percent of RAM (Linux systemd scope); 0 = none."});
     reader.Describe("stream_head_bytes", {"Live-output ring: the first bytes kept."});
     reader.Describe("stream_tail_bytes", {"Live-output ring: the last bytes kept."});
     settings.python = reader.String("python", settings.python, /*allow_empty=*/false);
@@ -44,6 +46,8 @@ PythonSettings ParsePythonSettings(const nlohmann::json& config) {
     settings.max_capture_bytes = reader.Int("max_capture_bytes", settings.max_capture_bytes, 1);
     settings.max_file_size_bytes =
         reader.Int("max_file_size_bytes", settings.max_file_size_bytes, 1);
+    settings.memory_max_percent = static_cast<int>(
+        reader.Int("memory_max_percent", settings.memory_max_percent, 0, 100));
     settings.stream_head_bytes = reader.Int("stream_head_bytes", settings.stream_head_bytes, 1);
     settings.stream_tail_bytes = reader.Int("stream_tail_bytes", settings.stream_tail_bytes, 1);
     reader.Finish();

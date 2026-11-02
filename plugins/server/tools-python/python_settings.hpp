@@ -55,6 +55,11 @@ struct PythonSettings {
     std::int64_t rlimit_cpu_seconds = 0;
     // RLIMIT_FSIZE backstop for files the executed code writes.
     std::int64_t max_file_size_bytes = sidecar::kFileSizeBackstopBytes;
+    // MemoryMax of the transient systemd scope the interpreter runs in,
+    // percent of physical RAM; 0 = no scope. Linux with a reachable user
+    // manager only (sidecar/memory_scope.hpp). Read at spawn: a change
+    // reaches the next interpreter, not a running one.
+    int memory_max_percent = kDefaultMemoryMaxPercent;
     // The live-output ring for python_output polling (head+tail windows over
     // the running request's stdout stream; see stream_ring.hpp). The ring
     // exists only while a request is running and is discarded on completion.

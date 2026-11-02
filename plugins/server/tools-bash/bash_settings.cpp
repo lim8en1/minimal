@@ -27,6 +27,10 @@ BashSettings ParseBashSettings(const nlohmann::json& config) {
     reader.Describe("max_output_bytes", {"Bounds the persisted result the model sees.", kLive});
     reader.Describe("max_file_size_bytes",
                     {"RLIMIT_FSIZE backstop for files a command writes.", kLive});
+    reader.Describe("memory_max_percent",
+                    {"Per-command memory ceiling, percent of RAM (Linux systemd scope); "
+                     "0 = none.",
+                     kLive});
     reader.Describe("shell", {"The POSIX shell (or a wrapper entering a container)."});
     reader.Describe("inherit_env", {"How the session environment is seeded: \"allowlist\" "
                                     "($HOME, $PATH, ...) or \"all\" (includes API keys)."});
@@ -46,6 +50,8 @@ BashSettings ParseBashSettings(const nlohmann::json& config) {
     settings.max_background_tasks = static_cast<int>(
         reader.Int("max_background_tasks", settings.max_background_tasks, 1,
                    std::numeric_limits<int>::max()));
+    settings.memory_max_percent = static_cast<int>(
+        reader.Int("memory_max_percent", settings.memory_max_percent, 0, 100));
     settings.shell = reader.String("shell", settings.shell, /*allow_empty=*/false);
     // A typo'd mode must not silently mean "allowlist" (or worse, "all").
     settings.inherit_env = reader.Enum("inherit_env", settings.inherit_env, {"allowlist", "all"});

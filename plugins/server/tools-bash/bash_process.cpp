@@ -1,6 +1,10 @@
 #include "bash_process.hpp"
 
+#include <csignal>
+
 #include <unistd.h>
+
+#include "minimal/sidecar/memory_scope.hpp"
 
 namespace minimal::tools_bash {
 
@@ -73,7 +77,8 @@ ShellState ParseStatePayload(const std::string& payload) {
 // --- Launch ------------------------------------------------------------------------
 
 minimal::sidecar::LaunchSpec BuildLaunchSpec(const std::string& wrapped, const SessionShellState& state,
-                                             const BashSettings& settings, std::int64_t timeout_ms) {
+                                             const BashSettings& settings, std::int64_t timeout_ms,
+                                             common::Logger& logger) {
     // The launch shape, expressed over the sidecar core's generic launcher:
     // pipe 0 is merged stdout+stderr (one write end dup2'd onto both, so the
     // streams interleave in order), pipe 1 is the fd-9 state channel -- a
@@ -92,12 +97,25 @@ minimal::sidecar::LaunchSpec BuildLaunchSpec(const std::string& wrapped, const S
     };
     spec.cpu_seconds = minimal::sidecar::CpuBackstopSeconds(std::chrono::milliseconds(timeout_ms));
     spec.file_size_bytes = settings.max_file_size_bytes;
+    minimal::sidecar::ApplyMemoryScope(spec, settings.memory_max_percent, logger);
     return spec;
 }
 
 minimal::sidecar::Launched LaunchProcess(const std::string& wrapped, const SessionShellState& state,
-                                         const BashSettings& settings, std::int64_t timeout_ms) {
-    return minimal::sidecar::Launch(BuildLaunchSpec(wrapped, state, settings, timeout_ms));
+                                         const BashSettings& settings, std::int64_t timeout_ms,
+                                         common::Logger& logger) {
+    return minimal::sidecar::Launch(BuildLaunchSpec(wrapped, state, settings, timeout_ms, logger));
+}
+
+std::string SignalFooter(int sig, const BashSettings& settings, common::Logger& logger) {
+    std::string footer = "[terminated by signal " + std::to_string(sig);
+    // The probe ran at launch; this only reads its cached outcome.
+    if (sig == SIGKILL && settings.memory_max_percent > 0 &&
+        minimal::sidecar::ProbeMemoryScope(logger) != nullptr) {
+        footer += " -- possibly the memory ceiling (" +
+                  std::to_string(settings.memory_max_percent) + "% of RAM)";
+    }
+    return footer + "]";
 }
 
 }  // namespace minimal::tools_bash

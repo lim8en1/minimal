@@ -168,6 +168,9 @@ TEST_CASE("python settings: defaults, seconds-suffixed keys, and named refusals"
     CHECK(defaults.background_max_runtime == 0);
     CHECK(defaults.stream_head_bytes == 256 * 1024);
     CHECK(defaults.stream_tail_bytes == 768 * 1024);
+    CHECK(defaults.memory_max_percent == 50);
+    CHECK(ParsePythonSettings(nlohmann::json{{"memory_max_percent", 0}}).memory_max_percent == 0);
+    CHECK_THROWS(ParsePythonSettings(nlohmann::json{{"memory_max_percent", 101}}));
 
     const auto configured = ParsePythonSettings(nlohmann::json{
         {"python", "python3.12"}, {"sync_wait_ceiling_s", 5}, {"startup_timeout_s", 2},

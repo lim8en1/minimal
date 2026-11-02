@@ -87,6 +87,7 @@ Interpreter::Interpreter(LaunchedInterpreter proc, InterpreterConfig config,
       diag_fd_(proc.diag_fd),
       stream_fd_(proc.stream_fd),
       user_in_fd_(proc.user_in_fd),
+      memory_scoped_(proc.memory_scoped),
       max_line_bytes_(MaxLineBytes(settings.max_capture_bytes)),
       declared_(config_.declared) {
     // Every channel is non-blocking: the reader drains stream/diag to EAGAIN
@@ -118,7 +119,7 @@ std::shared_ptr<Interpreter> Interpreter::Spawn(const InterpreterConfig& config,
     std::vector<std::string> argv{config.python_path, "-I", "-c", kDriverSource};
     LaunchedInterpreter proc =
         LaunchInterpreter(argv, config.cwd, config.env, settings.rlimit_cpu_seconds,
-                          settings.max_file_size_bytes);
+                          settings.max_file_size_bytes, settings.memory_max_percent, logger);
     if (!proc.ok) {
         *error = "failed to start " + config.python_path + ": " + proc.spawn_error;
         return nullptr;
@@ -432,11 +433,26 @@ void Interpreter::ReaderLoop() {
                     std::lock_guard<std::mutex> lock(mu_);
                     tail = diag_tail_;
                 }
-                HardKill("interpreter exited" + (tail.empty() ? "" : ": " + tail));
+                HardKill("interpreter exited" + MemoryCeilingHint() +
+                         (tail.empty() ? "" : ": " + tail));
                 return;
             }
         }
     }
+}
+
+std::string Interpreter::MemoryCeilingHint() const {
+    if (!memory_scoped_) return "";
+    // Peek, never reap (WNOWAIT): HardKill owns the reap, through child_. A
+    // child whose pipes closed but which has not exited yet reads as "no
+    // hint" -- the plain report.
+    siginfo_t info{};
+    if (::waitid(P_PID, static_cast<id_t>(pid_), &info, WEXITED | WNOHANG | WNOWAIT) != 0 ||
+        info.si_pid != pid_ || info.si_code != CLD_KILLED || info.si_status != SIGKILL) {
+        return "";
+    }
+    return " (SIGKILL -- possibly the memory ceiling, " +
+           std::to_string(settings_.memory_max_percent) + "% of RAM)";
 }
 
 bool Interpreter::DrainLine(std::string_view line) {

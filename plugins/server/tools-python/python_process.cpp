@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "minimal/sidecar/drain.hpp"
+#include "minimal/sidecar/memory_scope.hpp"
 #include "minimal/common/units.hpp"
 #include "minimal/common/clock.hpp"
 
@@ -13,7 +14,8 @@ namespace minimal::tools_python {
 LaunchedInterpreter LaunchInterpreter(const std::vector<std::string>& argv,
                                       const std::filesystem::path& cwd,
                                       const std::map<std::string, std::string>& env,
-                                      std::int64_t cpu_seconds, std::int64_t file_size_bytes) {
+                                      std::int64_t cpu_seconds, std::int64_t file_size_bytes,
+                                      int memory_max_percent, common::Logger& logger) {
     // The launch shape, over the sidecar core's generic launcher. Five pipes:
     // the protocol stdin (parent keeps the write end), the diagnostics pipe
     // (the child's REAL stdout+stderr -- executed code writing to fd 1/2 lands
@@ -40,6 +42,11 @@ LaunchedInterpreter LaunchInterpreter(const std::vector<std::string>& argv,
     };
     spec.cpu_seconds = cpu_seconds;
     spec.file_size_bytes = file_size_bytes;
+    // The interpreter is long-lived and holds whatever the code loads (a
+    // `data = f.read()` of a 4 GiB file stays resident until `del`): the
+    // ceiling keeps that from taking the server's cgroup down with it.
+    const bool memory_scoped =
+        minimal::sidecar::ApplyMemoryScope(spec, memory_max_percent, logger);
 
     const std::size_t pipe_count = spec.pipes.size();
     auto launched = minimal::sidecar::Launch(spec);
@@ -48,6 +55,7 @@ LaunchedInterpreter LaunchInterpreter(const std::vector<std::string>& argv,
     proc.spawn_error = std::move(launched.spawn_error);
     proc.pid = launched.pid;
     proc.warnings = std::move(launched.warnings);
+    proc.memory_scoped = memory_scoped;
     if (launched.ok && launched.parent_fds.size() == pipe_count) {
         proc.in_fd = launched.parent_fds[0].release();
         proc.diag_fd = launched.parent_fds[1].release();

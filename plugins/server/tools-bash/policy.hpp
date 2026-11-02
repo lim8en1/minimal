@@ -32,6 +32,11 @@ inline constexpr int kDefaultMaxBackgroundTasks = 4;
 // runs 1-2 bytes per token, so this is ~16-32k tokens. Past it the start and
 // the end are kept and the whole output spills to a file the model can read.
 inline constexpr std::int64_t kDefaultMaxOutputBytes = 64 * static_cast<std::int64_t>(common::kKiB);
+// A command's memory ceiling, percent of physical RAM (Linux, systemd user
+// scope). Half leaves the desktop, the server and the client room to survive
+// a runaway build or script; a legitimate job that needs more is the
+// operator's call to raise.
+inline constexpr int kDefaultMemoryMaxPercent = 50;
 
 // --- the shell wrapper ------------------------------------------------------------
 

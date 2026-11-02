@@ -28,6 +28,11 @@ inline constexpr std::int64_t kDefaultInstallTimeoutSeconds = 300;
 // read), and the per-stream capture inside the interpreter (which also sizes
 // the protocol line, and bounds what a spill can hold).
 inline constexpr std::int64_t kDefaultMaxOutputBytes = 64 * static_cast<std::int64_t>(common::kKiB);
+// The interpreter's memory ceiling, percent of physical RAM (Linux, systemd
+// user scope): the same half tools-bash leaves the desktop, the server and
+// the client. Persistent state makes it matter more here -- whatever the code
+// loads stays resident across calls.
+inline constexpr int kDefaultMemoryMaxPercent = 50;
 inline constexpr std::int64_t kDefaultMaxCaptureBytes = static_cast<std::int64_t>(common::kMiB);
 // The live-output ring python_output polls: a head to see how it started, a
 // longer tail to see where it is.

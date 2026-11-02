@@ -267,6 +267,9 @@ private:
                          std::uint64_t streamed);
     // False when the line was fatal (the interpreter is dead).
     bool DrainLine(std::string_view line);
+    // " (SIGKILL -- possibly the memory ceiling ...)" for a scoped child the
+    // kernel SIGKILLed, else empty. Peeks the exit status without reaping.
+    std::string MemoryCeilingHint() const;
     void InjectAsync(const Pending& p);
     void EmitEvent(const RequestHandles& handles, const std::string& id,
                    tools::BackgroundTaskEvent::State state) const;
@@ -339,6 +342,8 @@ private:
     ScopedFd wake_w_;
     // Protocol-line ceiling, derived from max_capture_bytes (every free-text
     // field the driver sends is capped at that many characters).
+    // Launched under a MemoryMax scope: a SIGKILL death names the ceiling.
+    bool memory_scoped_ = false;
     std::size_t max_line_bytes_ = 0;
 
     mutable std::mutex mu_;
